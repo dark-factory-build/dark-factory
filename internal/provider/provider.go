@@ -16,13 +16,15 @@ import (
 )
 
 const (
-	shellPath       = "/bin/sh"
-	claudeTool      = "claude"
-	codexTool       = "codex"
-	maxPathBytes    = 4096
-	maxNativePrompt = 8 << 10
-	codexConfigDir  = ".codex"
-	nativeTaskLead  = "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
+	shellPath            = "/bin/sh"
+	claudeTool           = "claude"
+	codexTool            = "codex"
+	maxPathBytes         = 4096
+	maxClaudePrompt      = 8 << 10
+	maxCodexTask         = 8 << 10
+	codexConfigDir       = ".codex"
+	claudeTaskLead       = "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
+	codexBootstrapPrompt = "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail."
 )
 
 var (
@@ -108,20 +110,22 @@ func (RuntimePaths) String() string   { return "provider runtime paths (private)
 func (RuntimePaths) GoString() string { return "provider.RuntimePaths{private}" }
 
 type Request struct {
-	provider        kernel.Provider
-	installation    Installation
-	model           string
-	reasoningEffort string
-	runtime         RuntimePaths
+	provider         kernel.Provider
+	installation     Installation
+	model            string
+	reasoningEffort  string
+	runtime          RuntimePaths
+	workingDirectory string
 }
 
-func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths) (Request, error) {
-	if kernel.ValidateProviderLaunchControls(kind, model, reasoningEffort) != nil || installation.provider != kind || installation.executable.Path() == "" || !runtime.valid() {
+func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths, workingDirectory string) (Request, error) {
+	if kernel.ValidateProviderLaunchControls(kind, model, reasoningEffort) != nil || installation.provider != kind || installation.executable.Path() == "" || !runtime.valid() ||
+		kind == kernel.ProviderCodex && (!validAbsolute(workingDirectory, maxPathBytes) || len(codexUntrustedProjectConfig(workingDirectory)) > runner.MaxArgumentBytes) {
 		return Request{}, ErrInvalid
 	}
 	return Request{
 		provider: kind, installation: installation,
-		model: model, reasoningEffort: reasoningEffort, runtime: runtime,
+		model: model, reasoningEffort: reasoningEffort, runtime: runtime, workingDirectory: workingDirectory,
 	}, nil
 }
 
@@ -146,14 +150,15 @@ func (Launch) String() string   { return "provider launch (private)" }
 func (Launch) GoString() string { return "provider.Launch{private}" }
 
 // TaskDelivery is the one task-input channel selected with a provider launch.
-// Shell reads its program from the inherited sealed descriptor. Native tools
-// receive their prompt once through the PTY after provider exec is proven and
-// before that terminal is exposed to an operator.
+// Shell reads its program from the inherited sealed descriptor. Claude receives
+// its prompt once through the PTY. Codex starts from a fixed positional prompt
+// and reads the exact task through its attempt-scoped local API capability.
 type TaskDelivery uint8
 
 const (
 	TaskDeliveryFD11 TaskDelivery = iota + 1
 	TaskDeliveryStartupTerminal
+	TaskDeliveryAttemptAPI
 )
 
 // Build is the one closed provider-selection switch.
@@ -173,35 +178,61 @@ func Build(request Request) (Launch, error) {
 			environment:  request.runtime.environment(request.provider),
 			taskDelivery: TaskDeliveryFD11,
 		}, nil
-	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		var argv []string
-		if request.provider == kernel.ProviderClaudeCode {
-			argv = []string{path, "--dangerously-skip-permissions"}
-		} else {
-			argv = []string{path, "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"}
-		}
+	case kernel.ProviderClaudeCode:
+		argv := []string{path, "--dangerously-skip-permissions"}
 		if request.model != "" {
 			argv = append(argv, "--model", request.model)
 		}
 		if request.reasoningEffort != "" {
-			if request.provider == kernel.ProviderClaudeCode {
-				argv = append(argv, "--effort", request.reasoningEffort)
-			} else {
-				argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
-			}
+			argv = append(argv, "--effort", request.reasoningEffort)
 		}
 		return Launch{
 			executable: request.installation.executable, argv: argv,
 			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryStartupTerminal,
+		}, nil
+	case kernel.ProviderCodex:
+		argv := []string{path, "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory)}
+		if request.model != "" {
+			argv = append(argv, "--model", request.model)
+		}
+		if request.reasoningEffort != "" {
+			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
+		}
+		argv = append(argv, codexBootstrapPrompt)
+		return Launch{
+			executable: request.installation.executable, argv: argv,
+			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryAttemptAPI,
 		}, nil
 	default:
 		return Launch{}, ErrInvalid
 	}
 }
 
+func codexUntrustedProjectConfig(path string) string {
+	return "projects={" + tomlBasicString(path) + "={trust_level=\"untrusted\"}}"
+}
+
+func tomlBasicString(value string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		// Strings cannot make json.Marshal fail; the path has already passed
+		// validValue, which also excludes invalid UTF-8.
+		panic("provider: failed to encode valid TOML path")
+	}
+	// TOML basic strings exclude C0 controls, DEL, and C1 controls. JSON
+	// escapes C0 but permits the latter two ranges literally.
+	encodedString := string(encoded)
+	for character := rune(0x7f); character <= 0x9f; character++ {
+		encodedString = strings.ReplaceAll(encodedString, string(character), fmt.Sprintf(`\u%04x`, character))
+	}
+	return encodedString
+}
+
 // PrepareTask is also available before executable selection so the daemon can
-// freeze native startup input into the runner configuration. Build returns the
-// same closed delivery value, which the Change worker must compare before exec.
+// freeze descriptor or terminal input where required. Codex task bytes remain
+// in the daemon and are retrieved through the attempt-scoped API. Build returns
+// the same closed delivery value, which the Change worker must compare before
+// exec.
 func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error) {
 	if len(task) == 0 || len(task) > runner.MaxProviderTaskBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
 		return 0, nil, ErrInvalid
@@ -209,12 +240,20 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 	switch kind {
 	case kernel.ProviderShell:
 		return TaskDeliveryFD11, bytes.Clone(task), nil
-	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		encoded, err := nativeTaskInput(task)
+	case kernel.ProviderClaudeCode:
+		encoded, err := claudeTaskInput(task)
 		if err != nil {
 			return 0, nil, ErrInvalid
 		}
 		return TaskDeliveryStartupTerminal, encoded, nil
+	case kernel.ProviderCodex:
+		// Codex reads this value through a shell-tool result. Keep the exact task
+		// comfortably below the model-visible result bound even after JSON turns
+		// every DEL/C1 code point into a six-byte escape.
+		if len(task) > maxCodexTask {
+			return 0, nil, ErrInvalid
+		}
+		return TaskDeliveryAttemptAPI, nil, nil
 	default:
 		return 0, nil, ErrInvalid
 	}
@@ -224,16 +263,16 @@ func unavailable(kind kernel.Provider) error {
 	return fmt.Errorf("%w: %s", ErrUnavailable, kind.String())
 }
 
-func nativeTaskInput(task []byte) ([]byte, error) {
+func claudeTaskInput(task []byte) ([]byte, error) {
 	quoted, err := json.Marshal(string(task))
 	if err != nil {
 		return nil, ErrInvalid
 	}
-	payload := make([]byte, 0, len(nativeTaskLead)+len(quoted)+1)
-	payload = append(payload, nativeTaskLead...)
+	payload := make([]byte, 0, len(claudeTaskLead)+len(quoted)+1)
+	payload = append(payload, claudeTaskLead...)
 	payload = appendTerminalSafeJSON(payload, quoted)
 	payload = append(payload, '\r')
-	if len(payload) > maxNativePrompt {
+	if len(payload) > maxClaudePrompt {
 		return nil, ErrInvalid
 	}
 	return payload, nil

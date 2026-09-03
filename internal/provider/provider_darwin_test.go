@@ -67,7 +67,7 @@ func nativeFixture(t *testing.T, kind kernel.Provider) (Installation, RuntimePat
 
 func requestFor(t *testing.T, kind kernel.Provider, installation Installation, runtime RuntimePaths, model, effort string) Request {
 	t.Helper()
-	request, err := NewRequest(kind, installation, model, effort, runtime)
+	request, err := NewRequest(kind, installation, model, effort, runtime, filepath.Join(t.TempDir(), "change"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,32 +187,40 @@ func TestResolveInstallationFailsClosedAtInvalidExistingCandidate(t *testing.T) 
 
 func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) {
 	tests := []struct {
-		kind     kernel.Provider
-		model    string
-		effort   string
-		wantArgv []string
+		kind         kernel.Provider
+		model        string
+		effort       string
+		wantDelivery TaskDelivery
+		wantArgv     []string
 	}{
 		{
-			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max",
+			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryStartupTerminal,
 			wantArgv: []string{"/usr/bin/true", "--dangerously-skip-permissions", "--model", "claude-model", "--effort", "max"},
 		},
 		{
-			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh",
-			wantArgv: []string{"/usr/bin/true", "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`},
+			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
+			wantArgv: []string{"/usr/bin/true", "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail."},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.kind.String(), func(t *testing.T) {
+			const privateTaskSentinel = "PRIVATE_TASK_SENTINEL"
+			task := []byte(privateTaskSentinel + "\nline 1\n\"quoted\"\x1b café 😀\u007f\u0085")
 			installation, runtime, _ := nativeFixture(t, test.kind)
-			launch, err := Build(requestFor(t, test.kind, installation, runtime, test.model, test.effort))
+			request := requestFor(t, test.kind, installation, runtime, test.model, test.effort)
+			launch, err := Build(request)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if launch.TaskDelivery() != TaskDeliveryStartupTerminal {
-				t.Fatalf("task delivery=%d, want startup terminal", launch.TaskDelivery())
+			if launch.TaskDelivery() != test.wantDelivery {
+				t.Fatalf("task delivery=%d, want %d", launch.TaskDelivery(), test.wantDelivery)
 			}
-			if got := launch.Argv(); !slices.Equal(got, test.wantArgv) {
-				t.Fatalf("argv=%q, want %q", got, test.wantArgv)
+			wantArgv := test.wantArgv
+			if test.kind == kernel.ProviderCodex {
+				wantArgv = slices.Replace(wantArgv, 8, 9, codexUntrustedProjectConfig(request.workingDirectory))
+			}
+			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
+				t.Fatalf("argv=%q, want %q", got, wantArgv)
 			}
 			wantHome := runtime.home
 			if test.kind == kernel.ProviderClaudeCode {
@@ -236,7 +244,11 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				}
 			}
 
-			task := []byte("line 1\n\"quoted\"\x1b café 😀\u007f\u0085")
+			for _, value := range append(launch.Argv(), launch.Environment()...) {
+				if strings.Contains(value, privateTaskSentinel) {
+					t.Fatalf("private task reached provider argv or environment: %q", value)
+				}
+			}
 			delivery, payload, err := PrepareTask(test.kind, task)
 			if err != nil {
 				t.Fatal(err)
@@ -244,18 +256,36 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			if delivery != launch.TaskDelivery() {
 				t.Fatalf("prepared delivery=%d, want %d", delivery, launch.TaskDelivery())
 			}
-			want := nativeTaskLead + `"line 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
-			if string(payload) != want {
-				t.Fatalf("startup payload=%q, want %q", payload, want)
-			}
-			if payload[len(payload)-1] != '\r' || bytes.IndexByte(payload[:len(payload)-1], '\r') >= 0 || bytes.IndexByte(payload, '\n') >= 0 || bytes.IndexByte(payload, 0x1b) >= 0 || bytes.IndexByte(payload, 0x7f) >= 0 {
-				t.Fatalf("startup payload contains raw terminal control: %q", payload)
-			}
-			var decoded string
-			if err := json.Unmarshal(payload[len(nativeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
-				t.Fatalf("JSON task decoded as %q: %v", decoded, err)
+			if test.kind == kernel.ProviderCodex {
+				if payload != nil {
+					t.Fatalf("Codex task bytes escaped attempt API delivery: %q", payload)
+				}
+			} else {
+				want := claudeTaskLead + `"PRIVATE_TASK_SENTINEL\nline 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
+				if string(payload) != want {
+					t.Fatalf("startup payload=%q, want %q", payload, want)
+				}
+				if payload[len(payload)-1] != '\r' || bytes.IndexByte(payload[:len(payload)-1], '\r') >= 0 || bytes.IndexByte(payload, '\n') >= 0 || bytes.IndexByte(payload, 0x1b) >= 0 || bytes.IndexByte(payload, 0x7f) >= 0 {
+					t.Fatalf("startup payload contains raw terminal control: %q", payload)
+				}
+				var decoded string
+				if err := json.Unmarshal(payload[len(claudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
+					t.Fatalf("JSON task decoded as %q: %v", decoded, err)
+				}
 			}
 		})
+	}
+}
+
+func TestCodexProjectTrustOverrideUsesExactTomlEncoding(t *testing.T) {
+	path := "/private/change.with dots/quote\"slash\\\b\t\n\f\r\x01\x1f\x7f\u0080é/working"
+	want := `"/private/change.with dots/quote\"slash\\\b\t\n\f\r\u0001\u001f\u007f\u0080é/working"`
+	if got := tomlBasicString(path); got != want {
+		t.Fatalf("TOML path=%q, want %q", got, want)
+	}
+	wantConfig := `projects={"/private/change.with dots/quote\"slash\\\b\t\n\f\r\u0001\u001f\u007f\u0080é/working"={trust_level="untrusted"}}`
+	if got := codexUntrustedProjectConfig(path); got != wantConfig {
+		t.Fatalf("Codex project config=%q", got)
 	}
 }
 
@@ -266,27 +296,39 @@ func TestNewRequestRejectsMismatchedProviderAndControls(t *testing.T) {
 		{effort: "high"},
 		{model: "model-sentinel", effort: "high"},
 	} {
-		if _, err := NewRequest(kernel.ProviderShell, shell, controls.model, controls.effort, shellRuntime); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderShell, shell, controls.model, controls.effort, shellRuntime, "/private/change"); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Shell controls %+v error=%v, want ErrInvalid", controls, err)
 		}
 	}
-	if _, err := NewRequest(kernel.ProviderCodex, shell, "", "", shellRuntime); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRequest(kernel.ProviderCodex, shell, "", "", shellRuntime, "/private/change"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("mismatched installation error=%v, want ErrInvalid", err)
 	}
 	claude, claudeRuntime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
 	for _, effort := range []string{"ultra", "speculative"} {
-		if _, err := NewRequest(kernel.ProviderClaudeCode, claude, "", effort, claudeRuntime); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderClaudeCode, claude, "", effort, claudeRuntime, "/private/change"); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Claude effort %q error=%v, want ErrInvalid", effort, err)
 		}
 	}
 	codex, codexRuntime, _ := nativeFixture(t, kernel.ProviderCodex)
-	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "ultra", codexRuntime); err != nil {
+	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "ultra", codexRuntime, "/private/change"); err != nil {
 		t.Fatalf("Codex durable ultra effort rejected: %v", err)
 	}
 	for _, model := range []string{string([]byte{0xff}), "model\x00suffix"} {
-		if _, err := NewRequest(kernel.ProviderCodex, codex, model, "", codexRuntime); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderCodex, codex, model, "", codexRuntime, "/private/change"); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("model %x error=%v, want ErrInvalid", []byte(model), err)
 		}
+	}
+	for _, workingDirectory := range []string{"", "relative/change", "/", "/private/../change", "/private/change\x00suffix", string([]byte{0xff})} {
+		if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, workingDirectory); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("working directory %q error=%v, want ErrInvalid", workingDirectory, err)
+		}
+	}
+	tooLarge := "/" + strings.Repeat("\x7f", maxPathBytes-1)
+	if len(codexUntrustedProjectConfig(tooLarge)) <= runner.MaxArgumentBytes {
+		t.Fatalf("expanded project config=%d, want larger than argv bound", len(codexUntrustedProjectConfig(tooLarge)))
+	}
+	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, tooLarge); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized encoded working directory error=%v, want ErrInvalid", err)
 	}
 }
 
@@ -356,12 +398,19 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 	if _, _, err := PrepareTask(kernel.ProviderShell, append(shellMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Shell over-limit task error=%v, want ErrInvalid", err)
 	}
-	nativeMaximum := bytes.Repeat([]byte{'x'}, maxNativePrompt-len(nativeTaskLead)-3)
-	if delivery, _, err := PrepareTask(kernel.ProviderCodex, nativeMaximum); err != nil || delivery != TaskDeliveryStartupTerminal {
-		t.Fatalf("native exact startup bound rejected: %v", err)
+	claudeMaximum := bytes.Repeat([]byte{'x'}, maxClaudePrompt-len(claudeTaskLead)-3)
+	if delivery, _, err := PrepareTask(kernel.ProviderClaudeCode, claudeMaximum); err != nil || delivery != TaskDeliveryStartupTerminal {
+		t.Fatalf("Claude exact startup bound rejected: %v", err)
 	}
-	if _, _, err := PrepareTask(kernel.ProviderCodex, append(nativeMaximum, 'x')); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("native over-limit task error=%v, want ErrInvalid", err)
+	if _, _, err := PrepareTask(kernel.ProviderClaudeCode, append(claudeMaximum, 'x')); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Claude over-limit task error=%v, want ErrInvalid", err)
+	}
+	codexMaximum := bytes.Repeat([]byte{'x'}, maxCodexTask)
+	if delivery, payload, err := PrepareTask(kernel.ProviderCodex, codexMaximum); err != nil || delivery != TaskDeliveryAttemptAPI || payload != nil {
+		t.Fatalf("Codex maximum API task delivery=(%d, %d bytes), error=%v", delivery, len(payload), err)
+	}
+	if _, _, err := PrepareTask(kernel.ProviderCodex, append(codexMaximum, 'x')); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Codex over-limit task error=%v, want ErrInvalid", err)
 	}
 	if _, _, err := PrepareTask(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
