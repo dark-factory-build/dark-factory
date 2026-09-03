@@ -31,6 +31,13 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if filepath.Base(os.Args[0]) == "codex" {
+		if err := runSupervisorCodexFixture(); err != nil {
+			fmt.Fprintln(os.Stderr, "supervisor Codex fixture failed")
+			os.Exit(70)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 {
 		var err error
 		switch os.Args[1] {
@@ -115,6 +122,30 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func runSupervisorCodexFixture() error {
+	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	task, err := client.Task(ctx)
+	if err != nil {
+		return err
+	}
+	for _, value := range append(append([]string(nil), os.Args[1:]...), os.Environ()...) {
+		if strings.Contains(value, task.Task) {
+			return errors.New("private task crossed the Codex argv/environment boundary")
+		}
+	}
+	size, err := unix.IoctlGetWinsize(0, unix.TIOCGWINSZ)
+	if err != nil {
+		return err
+	}
+	_, err = client.Succeed(ctx, fmt.Sprintf("%s\nPTY=%dx%d", task.Task, size.Col, size.Row))
+	return err
+}
+
 func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
@@ -137,6 +168,35 @@ func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	if err != nil || !found || changeState.Selection == nil || fmt.Sprintf("%x", changeState.Selection.Commit().Bytes()) != fixture.base {
 		t.Fatalf("Change exact base = %+v, found=%v, err=%v", changeState.Selection, found, err)
 	}
+}
+
+func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
+	const privateTask = "exact private Codex task"
+	fixture := newSupervisorFixture(t, "unused shell task")
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET title = ?, body = ? WHERE id = ?`, "fallback must not win", privateTask, fixture.taskID.Bytes())
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, executable, filepath.Join(tools, "codex"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
+	if run.Proposal == nil || run.Proposal.Result() != privateTask+"\nPTY=120x40" {
+		t.Fatalf("Codex task/PTY receipt = %q", run.Proposal.Result())
+	}
+	fixture.assertReleased(t, run)
 }
 
 func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) {
@@ -1392,6 +1452,7 @@ type supervisorFixture struct {
 	base, changeParent, runtimeParentPath        string
 	storePath                                    string
 	agentID                                      kernel.AgentID
+	taskID                                       kernel.TaskID
 	daemon                                       *Daemon
 	store                                        *kernel.Store
 	runtimeParent                                *RuntimeParent
@@ -1488,6 +1549,7 @@ func newSupervisorFixture(t *testing.T, program string) *supervisorFixture {
 	agentID := supervisorAgentID(t, 2)
 	fixture.agentID = agentID
 	taskID := supervisorTaskID(t, 3)
+	fixture.taskID = taskID
 	project, err := store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "project", Root: repository, VerificationPolicy: kernel.VerificationNone}, supervisorTime())
 	if err != nil {
 		t.Fatal(err)
