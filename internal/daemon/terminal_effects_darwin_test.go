@@ -1022,6 +1022,9 @@ func TestCancelHumanRequestWithoutLiveBindingIsDefinitiveSuccess(t *testing.T) {
 	if err != nil || updatedRun.Phase != kernel.RunFinalizing || resolved.Status != kernel.HumanRequestResolved {
 		t.Fatalf("cancel without binding = run %+v, request %+v, err=%v", updatedRun, resolved, err)
 	}
+	if terminate := readTerminalEffectWire(t, fixture.peer); terminate.Kind != "terminate" {
+		t.Fatalf("post-cancel lifecycle command = %+v", terminate)
+	}
 	expectNoTerminalEffectWire(t, fixture.peer)
 }
 
