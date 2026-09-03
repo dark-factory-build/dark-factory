@@ -46,8 +46,8 @@ factoryctl agent create --project PROJECT_ID --name worker --provider shell --to
 factoryctl agent create --project PROJECT_ID --name worker --provider claude_code --reasoning-effort medium --tool-budget 100
 ```
 
-The managed daemon finds native tools on its fixed path and points them at the
-operator's existing `~/.claude` or `~/.codex` configuration without copying a
+The managed daemon finds native tools on its fixed path and reuses the
+operator's existing signed-in Claude or Codex account without copying a
 credential into the Dark Factory home. See the [provider
 contract](providers.md) for discovery, model, effort, and task-delivery details.
 

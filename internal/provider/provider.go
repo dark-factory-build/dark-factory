@@ -21,7 +21,6 @@ const (
 	codexTool       = "codex"
 	maxPathBytes    = 4096
 	maxNativePrompt = 8 << 10
-	claudeConfigDir = ".claude"
 	codexConfigDir  = ".codex"
 	nativeTaskLead  = "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
 )
@@ -263,22 +262,24 @@ func (runtime RuntimePaths) valid() bool {
 	}
 	return len(runtime.socket) <= install.MaxSocketPathBytes && runtime.home != runtime.temp &&
 		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath) &&
-		validAbsolute(runtime.accountHome, maxPathBytes-len("/"+claudeConfigDir)) &&
+		validAbsolute(runtime.accountHome, maxPathBytes-len("/"+codexConfigDir)) &&
 		runtime.accountHome != runtime.home && runtime.accountHome != runtime.temp
 }
 
 func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
+	home := runtime.home
+	if kind == kernel.ProviderClaudeCode {
+		home = runtime.accountHome
+	}
 	environment := []string{
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
-		"HOME=" + runtime.home,
+		"HOME=" + home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
 	}
 	switch kind {
-	case kernel.ProviderClaudeCode:
-		environment = append(environment, "CLAUDE_CONFIG_DIR="+filepath.Join(runtime.accountHome, claudeConfigDir))
 	case kernel.ProviderCodex:
 		environment = append(environment, "CODEX_HOME="+filepath.Join(runtime.accountHome, codexConfigDir))
 	}

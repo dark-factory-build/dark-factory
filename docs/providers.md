@@ -57,12 +57,12 @@ codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen [--model MODEL]
 ```
 
 Install and sign in to the chosen CLI through its normal local workflow before
-dispatching work. The provider still receives a private runtime `HOME` and
-`TMPDIR`; Dark Factory points only that provider at its existing account
-configuration:
+dispatching work. Both providers receive a private runtime `TMPDIR`. Claude
+uses the operator's normal `HOME`, which is where its CLI keeps the signed-in
+account; Codex keeps a private runtime `HOME` and receives its existing account
+configuration explicitly:
 
 ```text
-CLAUDE_CONFIG_DIR=<account-home>/.claude
 CODEX_HOME=<account-home>/.codex
 ```
 
