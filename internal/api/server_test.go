@@ -136,7 +136,10 @@ func exchangeRaw(socketPath string, request []byte, closeWrite bool) ([]byte, er
 	}
 	outcome := rawOutcomeRequest(request)
 	if closeWrite && !outcome {
-		if err := connection.CloseWrite(); err != nil {
+		// The server may reject and close before this half-close reaches it.
+		// The response read below is the proof for this helper; preserve errors
+		// other than the expected BSD peer-close race.
+		if err := connection.CloseWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) {
 			return nil, err
 		}
 	}
