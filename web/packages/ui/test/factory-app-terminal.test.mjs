@@ -820,6 +820,33 @@ test("selected-agent revision drift cannot escalate an explicit detach to sessio
   assert.equal(context.latest().error, undefined, "the explicit close intent wins over concurrent revision drift");
 });
 
+test("a pending same-agent rebind follows the latest canonical revision", async () => {
+  const detachGate = deferred();
+  const context = terminalHarness({ detachImpl: () => detachGate.promise });
+  context.controller.start();
+  context.ready();
+  await openTerminal(context, agent);
+
+  const firstRevision = { ...agent, paused: true, revision: agent.revision + 1n };
+  const firstAgents = new Map(fixtureState.agents);
+  firstAgents.set(agent.id, firstRevision);
+  context.clientOptions().onState(stateAt(43, { agents: firstAgents }));
+  assert.equal(context.latest().terminal.phase, "closing");
+
+  const latestRevision = { ...agent, paused: false, revision: agent.revision + 2n };
+  const latestAgents = new Map(fixtureState.agents);
+  latestAgents.set(agent.id, latestRevision);
+  context.clientOptions().onState(stateAt(44, { agents: latestAgents }));
+
+  detachGate.resolve();
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().selectedAgent.revision, latestRevision.revision);
+  assert.equal(context.latest().terminal.paused, false);
+  assert.equal(context.latest().error, undefined);
+  assert.equal(context.sessionCloses(), 0);
+});
+
 test("output failure during replacement closes the session and never installs the queued agent", async () => {
   const detachGate = deferred();
   const context = terminalHarness({ detachImpl: () => detachGate.promise, fail: "surface" });

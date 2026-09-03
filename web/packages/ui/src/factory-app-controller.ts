@@ -505,7 +505,12 @@ export class FactoryAppController {
     if (!this.#current(generation)) return;
     this.#state = state;
     const selectedAgent = this.#selectedAgent;
-    if (selectedAgent !== undefined && this.#terminalReplacement === undefined) {
+    if (selectedAgent !== undefined && this.#terminalReplacement?.agentId === selectedAgent.agent.id) {
+      const currentAgent = state.agents.get(selectedAgent.agent.id);
+      this.#terminalReplacement = currentAgent === undefined
+        ? { error: new SessionError("stale") }
+        : { agentId: currentAgent.id, agentRevision: currentAgent.revision };
+    } else if (selectedAgent !== undefined && this.#terminalReplacement === undefined) {
       const currentAgent = state.agents.get(selectedAgent.agent.id);
       if (currentAgent === undefined) {
         this.#replaceTerminal({ error: new SessionError("stale") });
