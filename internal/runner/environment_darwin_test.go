@@ -14,10 +14,12 @@ import (
 	"time"
 )
 
-var shellEnvironmentNames = []string{
+var providerEnvironmentNames = []string{
 	"DARK_FACTORY_SOCKET",
 	"DARK_FACTORY_ATTEMPT_TOKEN_FILE",
 	"DARK_FACTORY_FACTORYCTL",
+	"CLAUDE_CONFIG_DIR",
+	"CODEX_HOME",
 	"HOME",
 	"TMPDIR",
 	"PATH",
@@ -34,8 +36,8 @@ var shellEnvironmentNames = []string{
 	"GH_CONFIG_DIR",
 }
 
-func TestPrepareExecSpecAcceptsOnlyClosedShellEnvironmentNames(t *testing.T) {
-	for _, name := range append(append([]string{}, shellEnvironmentNames...), "LC_CTYPE", "SHELL", "USER", "LOGNAME") {
+func TestPrepareExecSpecAcceptsOnlyClosedProviderEnvironmentNames(t *testing.T) {
+	for _, name := range append(append([]string{}, providerEnvironmentNames...), "LC_CTYPE", "SHELL", "USER", "LOGNAME") {
 		if !allowedEnv(name) {
 			t.Errorf("required environment name %q rejected", name)
 		}

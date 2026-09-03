@@ -4,7 +4,10 @@ package provider
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -14,25 +17,52 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
-func providerFixture(t *testing.T) (Installation, RuntimePaths) {
+func runtimeFixture(t *testing.T, toolPath, accountHome string) RuntimePaths {
 	t.Helper()
-	executable, err := runner.CommitExecutableLocator(shellPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	installation, err := NewShellInstallation(executable)
-	if err != nil {
-		t.Fatal(err)
-	}
 	root := t.TempDir()
 	runtime, err := NewRuntimePaths(
 		root+"/home", root+"/tmp", "/private/tmp/df-provider-test.sock", root+"/attempt.token",
-		"/usr/local/bin/factoryctl", root+"/changes", "/opt/homebrew/bin:/usr/bin:/bin",
+		"/usr/local/bin/factoryctl", root+"/changes", toolPath, accountHome,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return installation, runtime
+	return runtime
+}
+
+func providerFixture(t *testing.T) (Installation, RuntimePaths) {
+	t.Helper()
+	toolPath := "/opt/homebrew/bin:/usr/bin:/bin"
+	installation, err := ResolveInstallation(kernel.ProviderShell, toolPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return installation, runtimeFixture(t, toolPath, filepath.Join(t.TempDir(), "account"))
+}
+
+func nativeFixture(t *testing.T, kind kernel.Provider) (Installation, RuntimePaths, string) {
+	t.Helper()
+	missing := t.TempDir()
+	tools := t.TempDir()
+	var tool string
+	if kind == kernel.ProviderClaudeCode {
+		tool = claudeTool
+	} else if kind == kernel.ProviderCodex {
+		tool = codexTool
+	} else {
+		t.Fatalf("provider %s is not native", kind)
+	}
+	locator := filepath.Join(tools, tool)
+	if err := os.Symlink("/usr/bin/true", locator); err != nil {
+		t.Fatal(err)
+	}
+	toolPath := strings.Join([]string{missing, tools, "/usr/bin", "/bin"}, string(filepath.ListSeparator))
+	installation, err := ResolveInstallation(kind, toolPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome := filepath.Join(t.TempDir(), "account")
+	return installation, runtimeFixture(t, toolPath, accountHome), locator
 }
 
 func requestFor(t *testing.T, kind kernel.Provider, installation Installation, runtime RuntimePaths, model, effort string) Request {
@@ -44,7 +74,7 @@ func requestFor(t *testing.T, kind kernel.Provider, installation Installation, r
 	return request
 }
 
-func TestBuildShellReturnsExactImmutableLaunch(t *testing.T) {
+func TestBuildShellReturnsExactImmutableLaunchAndTask(t *testing.T) {
 	installation, runtime := providerFixture(t)
 	t.Setenv("ANTHROPIC_API_KEY", "AMBIENT_SENTINEL")
 	t.Setenv("HTTP_PROXY", "AMBIENT_SENTINEL")
@@ -54,6 +84,9 @@ func TestBuildShellReturnsExactImmutableLaunch(t *testing.T) {
 	}
 	if launch.Executable().Path() != shellPath || launch.Executable() != installation.executable {
 		t.Fatal("launch did not retain the exact Shell executable commitment")
+	}
+	if launch.TaskDelivery() != TaskDeliveryFD11 {
+		t.Fatalf("task delivery=%d, want fd 11", launch.TaskDelivery())
 	}
 	wantArgv := []string{"/bin/sh", runner.ProviderTaskPath}
 	if got := launch.Argv(); !slices.Equal(got, wantArgv) {
@@ -87,83 +120,186 @@ func TestBuildShellReturnsExactImmutableLaunch(t *testing.T) {
 	if !slices.Equal(launch.Argv(), wantArgv) || !slices.Equal(launch.Environment(), wantEnvironment) {
 		t.Fatal("Launch accessors exposed mutable authoritative slices")
 	}
+	task := []byte("echo TASK_SENTINEL\n")
+	wantTask := bytes.Clone(task)
+	delivery, prepared, err := PrepareTask(kernel.ProviderShell, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delivery != launch.TaskDelivery() {
+		t.Fatalf("prepared delivery=%d, want %d", delivery, launch.TaskDelivery())
+	}
+	task[0] = 'X'
+	if !bytes.Equal(prepared, wantTask) {
+		t.Fatalf("prepared task=%q, want exact program %q", prepared, wantTask)
+	}
 	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("runner refused exact provider launch: %v", err)
 	}
 }
 
-func TestBuildRejectsProviderInstallationMismatch(t *testing.T) {
-	installation, runtime := providerFixture(t)
-	installation.provider = kernel.ProviderCodex
-	request := requestFor(t, kernel.ProviderShell, installation, runtime, "", "")
-	if _, err := Build(request); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("mismatched provider error=%v, want ErrInvalid", err)
-	}
-}
-
-func TestBuildShellRejectsModelAndReasoningEffortIndependently(t *testing.T) {
-	installation, runtime := providerFixture(t)
-	for _, test := range []struct{ name, model, effort string }{
-		{name: "model", model: "model-sentinel"},
-		{name: "effort", effort: "high"},
-		{name: "both", model: "model-sentinel", effort: "high"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if _, err := NewRequest(kernel.ProviderShell, installation, test.model, test.effort, runtime); !errors.Is(err, ErrInvalid) {
-				t.Fatalf("NewRequest error=%v, want ErrInvalid", err)
+func TestResolveNativeInstallationCommitsResolvedDirectTargetOnce(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, locator := nativeFixture(t, kind)
+			if installation.provider != kind || installation.executable.Path() != "/usr/bin/true" {
+				t.Fatalf("installation provider=%s path=%q", installation.provider, installation.executable.Path())
+			}
+			if err := os.Remove(locator); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Build(requestFor(t, kind, installation, runtime, "", "")); err != nil {
+				t.Fatalf("resolved commitment depended on removed symlink: %v", err)
 			}
 		})
 	}
 }
 
-func TestNewRequestRejectsUnknownDurableReasoningEffort(t *testing.T) {
-	installation, runtime := providerFixture(t)
-	if _, err := NewRequest(kernel.ProviderCodex, installation, "", "speculative", runtime); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("NewRequest error=%v, want ErrInvalid", err)
+func TestResolveInstallationFailsClosedAtInvalidExistingCandidate(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	if err := os.WriteFile(filepath.Join(first, codexTool), []byte("#!/bin/sh\nexit 0\n"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/true", filepath.Join(second, codexTool)); err != nil {
+		t.Fatal(err)
+	}
+	toolPath := first + string(filepath.ListSeparator) + second
+	if _, err := ResolveInstallation(kernel.ProviderCodex, toolPath); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("invalid first candidate error=%v, want ErrUnavailable", err)
+	}
+	if err := os.Remove(filepath.Join(first, codexTool)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(first, "missing-target"), filepath.Join(first, codexTool)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveInstallation(kernel.ProviderCodex, toolPath); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("broken first symlink error=%v, want ErrUnavailable", err)
+	}
+	if _, err := ResolveInstallation(kernel.ProviderCodex, "relative:/bin"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid tool path error=%v, want ErrInvalid", err)
+	}
+	if _, err := ResolveInstallation(kernel.Provider(255), "/usr/bin:/bin"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
 	}
 }
 
-func TestNewRequestRejectsInvalidDurableModelText(t *testing.T) {
-	installation, runtime := providerFixture(t)
+func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) {
+	tests := []struct {
+		kind        kernel.Provider
+		model       string
+		effort      string
+		wantArgv    []string
+		configKey   string
+		configChild string
+	}{
+		{
+			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max",
+			wantArgv:  []string{"/usr/bin/true", "--dangerously-skip-permissions", "--model", "claude-model", "--effort", "max"},
+			configKey: "CLAUDE_CONFIG_DIR=", configChild: claudeConfigDir,
+		},
+		{
+			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh",
+			wantArgv:  []string{"/usr/bin/true", "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`},
+			configKey: "CODEX_HOME=", configChild: codexConfigDir,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.kind.String(), func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, test.kind)
+			launch, err := Build(requestFor(t, test.kind, installation, runtime, test.model, test.effort))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if launch.TaskDelivery() != TaskDeliveryStartupTerminal {
+				t.Fatalf("task delivery=%d, want startup terminal", launch.TaskDelivery())
+			}
+			if got := launch.Argv(); !slices.Equal(got, test.wantArgv) {
+				t.Fatalf("argv=%q, want %q", got, test.wantArgv)
+			}
+			wantConfig := test.configKey + filepath.Join(runtime.accountHome, test.configChild)
+			if !slices.Contains(launch.Environment(), wantConfig) {
+				t.Fatalf("environment lacks exact config root %q: %q", wantConfig, launch.Environment())
+			}
+			for _, entry := range launch.Environment() {
+				if strings.HasPrefix(entry, "HOME=") && entry != "HOME="+runtime.home {
+					t.Fatalf("native provider received non-private HOME: %q", entry)
+				}
+				if test.kind == kernel.ProviderClaudeCode && strings.HasPrefix(entry, "CODEX_HOME=") ||
+					test.kind == kernel.ProviderCodex && strings.HasPrefix(entry, "CLAUDE_CONFIG_DIR=") {
+					t.Fatalf("provider received another provider's config root: %q", entry)
+				}
+			}
+
+			task := []byte("line 1\n\"quoted\"\x1b café 😀\u007f\u0085")
+			delivery, payload, err := PrepareTask(test.kind, task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if delivery != launch.TaskDelivery() {
+				t.Fatalf("prepared delivery=%d, want %d", delivery, launch.TaskDelivery())
+			}
+			want := nativeTaskLead + `"line 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
+			if string(payload) != want {
+				t.Fatalf("startup payload=%q, want %q", payload, want)
+			}
+			if payload[len(payload)-1] != '\r' || bytes.IndexByte(payload[:len(payload)-1], '\r') >= 0 || bytes.IndexByte(payload, '\n') >= 0 || bytes.IndexByte(payload, 0x1b) >= 0 || bytes.IndexByte(payload, 0x7f) >= 0 {
+				t.Fatalf("startup payload contains raw terminal control: %q", payload)
+			}
+			var decoded string
+			if err := json.Unmarshal(payload[len(nativeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
+				t.Fatalf("JSON task decoded as %q: %v", decoded, err)
+			}
+		})
+	}
+}
+
+func TestNewRequestRejectsMismatchedProviderAndControls(t *testing.T) {
+	shell, shellRuntime := providerFixture(t)
+	for _, controls := range []struct{ model, effort string }{
+		{model: "model-sentinel"},
+		{effort: "high"},
+		{model: "model-sentinel", effort: "high"},
+	} {
+		if _, err := NewRequest(kernel.ProviderShell, shell, controls.model, controls.effort, shellRuntime); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Shell controls %+v error=%v, want ErrInvalid", controls, err)
+		}
+	}
+	if _, err := NewRequest(kernel.ProviderCodex, shell, "", "", shellRuntime); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("mismatched installation error=%v, want ErrInvalid", err)
+	}
+	claude, claudeRuntime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	for _, effort := range []string{"ultra", "speculative"} {
+		if _, err := NewRequest(kernel.ProviderClaudeCode, claude, "", effort, claudeRuntime); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Claude effort %q error=%v, want ErrInvalid", effort, err)
+		}
+	}
+	codex, codexRuntime, _ := nativeFixture(t, kernel.ProviderCodex)
+	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "ultra", codexRuntime); err != nil {
+		t.Fatalf("Codex durable ultra effort rejected: %v", err)
+	}
 	for _, model := range []string{string([]byte{0xff}), "model\x00suffix"} {
-		if _, err := NewRequest(kernel.ProviderCodex, installation, model, "", runtime); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderCodex, codex, model, "", codexRuntime); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("model %x error=%v, want ErrInvalid", []byte(model), err)
 		}
 	}
 }
 
-func TestBuildFailsClosedForUnknownAndUnimplementedProviders(t *testing.T) {
-	installation, runtime := providerFixture(t)
-	if _, err := NewRequest(kernel.Provider(255), installation, "", "", runtime); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
-	}
-	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
-		t.Run(kind.String(), func(t *testing.T) {
-			request := requestFor(t, kind, Installation{}, runtime, "", "")
-			if _, err := Build(request); !errors.Is(err, ErrUnavailable) {
-				t.Fatalf("Build error=%v, want ErrUnavailable", err)
-			}
-			if _, err := Task(kind, []byte("task")); !errors.Is(err, ErrUnavailable) {
-				t.Fatalf("Task error=%v, want ErrUnavailable", err)
-			}
-		})
-	}
-}
-
-func TestNewRuntimePathsRejectsMissingAndMalformedSealedValues(t *testing.T) {
+func TestNewRuntimePathsRejectsMissingAndMalformedValues(t *testing.T) {
 	root := t.TempDir()
-	valid := []string{root + "/home", root + "/tmp", "/private/tmp/df-provider-path-test.sock", root + "/token", "/usr/local/bin/factoryctl", root + "/changes", "/usr/bin:/bin"}
+	valid := []string{root + "/home", root + "/tmp", "/private/tmp/df-provider-path-test.sock", root + "/token", "/usr/local/bin/factoryctl", root + "/changes", "/usr/bin:/bin", root + "/account"}
 	for index := range valid {
 		t.Run(string(rune('a'+index)), func(t *testing.T) {
 			values := append([]string(nil), valid...)
 			values[index] = ""
-			if _, err := NewRuntimePaths(values[0], values[1], values[2], values[3], values[4], values[5], values[6]); !errors.Is(err, ErrInvalid) {
+			if _, err := NewRuntimePaths(values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7]); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("missing index %d error=%v, want ErrInvalid", index, err)
 			}
 		})
 	}
 	for _, toolPath := range []string{"relative:/bin", "/usr/bin::/bin", "/usr/bin:/usr/bin"} {
-		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], toolPath); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], toolPath, valid[7]); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("tool path %q error=%v, want ErrInvalid", toolPath, err)
 		}
 	}
@@ -178,85 +314,64 @@ func TestNewRuntimePathsRejectsMissingAndMalformedSealedValues(t *testing.T) {
 	if err := ValidateToolPath(exact + "b"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("ToolPath wider than PATH environment error=%v, want ErrInvalid", err)
 	}
+
 	invalid := append([]string(nil), valid...)
 	invalid[0] = "relative/home"
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6]); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("relative home error=%v, want ErrInvalid", err)
 	}
 	invalid = append([]string(nil), valid...)
 	invalid[2] = "/" + strings.Repeat("s", install.MaxSocketPathBytes)
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6]); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized socket error=%v, want ErrInvalid", err)
 	}
 	invalid = append([]string(nil), valid...)
 	invalid[5] = valid[5] + ":/private/other-ceiling"
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6]); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7]); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("multi-ceiling git path error=%v, want ErrInvalid", err)
 	}
-}
-
-func TestTaskCapturesOneExactProgram(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		task []byte
-	}{
-		{name: "append", task: []byte("echo TASK_SENTINEL")},
-		{name: "retained", task: []byte("echo TASK_SENTINEL\n")},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			want := bytes.Clone(test.task)
-			program, err := Task(kernel.ProviderShell, test.task)
-			if err != nil {
-				t.Fatal(err)
-			}
-			test.task[0] = 'X'
-			if !bytes.Equal(program, want) {
-				t.Fatalf("program=%q, want exact task %q", program, want)
-			}
-		})
-	}
-}
-
-func TestTaskRejectsInvalidBytes(t *testing.T) {
-	invalid := [][]byte{
-		nil,
-		{},
-		[]byte("bad\x00task"),
-		{0xff},
-		bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes+1),
-	}
-	for _, task := range invalid {
-		if _, err := Task(kernel.ProviderShell, task); !errors.Is(err, ErrInvalid) {
-			t.Fatalf("invalid task len=%d error=%v, want ErrInvalid", len(task), err)
+	for _, accountHome := range []string{"relative", "/", valid[0], valid[1]} {
+		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], valid[6], accountHome); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("account home %q error=%v, want ErrInvalid", accountHome, err)
 		}
 	}
-	if _, err := Task(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
+}
+
+func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderShell, kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		for _, task := range [][]byte{nil, {}, []byte("bad\x00task"), {0xff}} {
+			if _, _, err := PrepareTask(kind, task); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("provider=%s invalid task len=%d error=%v, want ErrInvalid", kind, len(task), err)
+			}
+		}
+	}
+	shellMaximum := bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes)
+	if delivery, program, err := PrepareTask(kernel.ProviderShell, shellMaximum); err != nil || delivery != TaskDeliveryFD11 || !bytes.Equal(program, shellMaximum) {
+		t.Fatalf("Shell maximum task error=%v", err)
+	}
+	if _, _, err := PrepareTask(kernel.ProviderShell, append(shellMaximum, 'x')); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Shell over-limit task error=%v, want ErrInvalid", err)
+	}
+	nativeMaximum := bytes.Repeat([]byte{'x'}, maxNativePrompt-len(nativeTaskLead)-3)
+	if delivery, _, err := PrepareTask(kernel.ProviderCodex, nativeMaximum); err != nil || delivery != TaskDeliveryStartupTerminal {
+		t.Fatalf("native exact startup bound rejected: %v", err)
+	}
+	if _, _, err := PrepareTask(kernel.ProviderCodex, append(nativeMaximum, 'x')); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("native over-limit task error=%v, want ErrInvalid", err)
+	}
+	if _, _, err := PrepareTask(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
 	}
 }
 
-func TestTaskAcceptsExactMaximumAndRejectsOneByteOver(t *testing.T) {
-	task := bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes)
-	program, err := Task(kernel.ProviderShell, task)
-	if err != nil {
-		t.Fatalf("maximum task body rejected: %v", err)
-	}
-	if !bytes.Equal(program, task) {
-		t.Fatal("maximum task bytes changed")
-	}
-	if _, err := Task(kernel.ProviderShell, bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes+1)); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("one-byte-over task body error=%v, want ErrInvalid", err)
-	}
-}
-
 func TestLaunchFormattingDoesNotRevealRuntimeOrExecutable(t *testing.T) {
-	installation, runtime := providerFixture(t)
-	launch, err := Build(requestFor(t, kernel.ProviderShell, installation, runtime, "", ""))
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	launch, err := Build(requestFor(t, kernel.ProviderCodex, installation, runtime, "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, formatted := range []string{launch.String(), launch.GoString(), installation.String(), runtime.String()} {
-		for _, secret := range []string{runtime.home, runtime.socket, shellPath} {
+		for _, secret := range []string{runtime.home, runtime.socket, runtime.accountHome, installation.executable.Path()} {
 			if strings.Contains(formatted, secret) {
 				t.Fatalf("formatting exposed %q in %q", secret, formatted)
 			}

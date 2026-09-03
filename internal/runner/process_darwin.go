@@ -188,21 +188,21 @@ func (c *OwnedChild) WritePTY(input []byte) (int, error) {
 	if c.exitObserved {
 		return 0, ErrState
 	}
-	return c.writePTYOwned(input)
+	return c.writePTYOwned(input, 250*time.Millisecond)
 }
 
 // writePTYOwned is for the synchronous owner loop, which already consumes
 // the child's EVFILT_PROC event. Calling refreshExit from that loop could
 // consume a readiness event belonging to the loop and lose the only exit
 // notification.
-func (c *OwnedChild) writePTYOwned(input []byte) (int, error) {
+func (c *OwnedChild) writePTYOwned(input []byte, timeout time.Duration) (int, error) {
 	if c == nil || c.ptyMaster == nil || c.state != stateActivated || c.exitObserved {
 		return 0, ErrState
 	}
-	if len(input) == 0 || len(input) > maxInputBytes {
+	if len(input) == 0 || len(input) > maxInputBytes || timeout <= 0 {
 		return 0, ErrState
 	}
-	deadline := time.Now().Add(250 * time.Millisecond)
+	deadline := time.Now().Add(timeout)
 	written := 0
 	for written < len(input) {
 		remaining := time.Until(deadline)

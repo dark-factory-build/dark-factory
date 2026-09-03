@@ -12,6 +12,8 @@ type launchctlResult struct{}
 
 func runLaunchctl(context.Context, ...string) launchctlResult { return launchctlResult{} }
 
+func AccountHome() (string, error) { return "", ErrUnsupported }
+
 func inspectServiceForAccount(context.Context, string, ServiceConfig, launchctlRun) (ServiceStatus, error) {
 	return ServiceStatus{}, ErrUnsupported
 }

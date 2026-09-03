@@ -2,8 +2,10 @@ package provider
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -14,9 +16,14 @@ import (
 )
 
 const (
-	shellPath    = "/bin/sh"
-	shellVersion = "darwin-system-sh-v1"
-	maxPathBytes = 4096
+	shellPath       = "/bin/sh"
+	claudeTool      = "claude"
+	codexTool       = "codex"
+	maxPathBytes    = 4096
+	maxNativePrompt = 8 << 10
+	claudeConfigDir = ".claude"
+	codexConfigDir  = ".codex"
+	nativeTaskLead  = "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
 )
 
 var (
@@ -25,19 +32,54 @@ var (
 )
 
 // Installation binds one provider kind to one exact executable commitment.
-// There is intentionally only a Shell constructor until the native Claude and
-// Codex metadata and interactive-input contracts have causal witnesses.
 type Installation struct {
 	provider   kernel.Provider
 	executable runner.ExecutableCommitment
-	version    string
 }
 
-func NewShellInstallation(executable runner.ExecutableCommitment) (Installation, error) {
-	if executable.Path() != shellPath || executable.Verify() != nil {
-		return Installation{}, ErrUnavailable
+// ResolveInstallation selects one executable from the daemon's fixed tool
+// path. Native tool locators may be symlinks, but the returned commitment is
+// always to the resolved direct Mach-O target; no symlink is trusted again at
+// exec. An invalid existing candidate fails closed instead of falling through
+// to a different executable with the same name.
+func ResolveInstallation(kind kernel.Provider, toolPath string) (Installation, error) {
+	if !validToolPath(toolPath) {
+		return Installation{}, ErrInvalid
 	}
-	return Installation{provider: kernel.ProviderShell, executable: executable, version: shellVersion}, nil
+	if kind == kernel.ProviderShell {
+		executable, err := runner.CommitExecutableLocator(shellPath)
+		if err != nil {
+			return Installation{}, unavailable(kind)
+		}
+		return Installation{provider: kind, executable: executable}, nil
+	}
+	var tool string
+	switch kind {
+	case kernel.ProviderClaudeCode:
+		tool = claudeTool
+	case kernel.ProviderCodex:
+		tool = codexTool
+	default:
+		return Installation{}, ErrInvalid
+	}
+	for _, directory := range filepath.SplitList(toolPath) {
+		candidate := filepath.Join(directory, tool)
+		if _, err := os.Lstat(candidate); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return Installation{}, unavailable(kind)
+		}
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil || !validAbsolute(resolved, maxPathBytes) {
+			return Installation{}, unavailable(kind)
+		}
+		executable, err := runner.CommitExecutableLocator(resolved)
+		if err != nil {
+			return Installation{}, unavailable(kind)
+		}
+		return Installation{provider: kind, executable: executable}, nil
+	}
+	return Installation{}, unavailable(kind)
 }
 
 func (Installation) String() string   { return "provider installation (private)" }
@@ -49,13 +91,13 @@ func (Installation) GoString() string { return "provider.Installation{private}" 
 // capabilities that make these paths true immediately around Build and exec.
 // This value is never authority by itself.
 type RuntimePaths struct {
-	home, temp, socket, token, factoryctl, gitCeiling, toolPath string
+	home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome string
 }
 
-func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath string) (RuntimePaths, error) {
+func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome string) (RuntimePaths, error) {
 	runtime := RuntimePaths{
 		home: home, temp: temp, socket: socket, token: token,
-		factoryctl: factoryctl, gitCeiling: gitCeiling, toolPath: toolPath,
+		factoryctl: factoryctl, gitCeiling: gitCeiling, toolPath: toolPath, accountHome: accountHome,
 	}
 	if !runtime.valid() {
 		return RuntimePaths{}, ErrInvalid
@@ -75,7 +117,7 @@ type Request struct {
 }
 
 func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths) (Request, error) {
-	if kernel.ValidateProviderLaunchControls(kind, model, reasoningEffort) != nil || !runtime.valid() {
+	if kernel.ValidateProviderLaunchControls(kind, model, reasoningEffort) != nil || installation.provider != kind || installation.executable.Path() == "" || !runtime.valid() {
 		return Request{}, ErrInvalid
 	}
 	return Request{
@@ -90,80 +132,127 @@ func (Request) GoString() string { return "provider.Request{private}" }
 // Launch is the entire provider-owned result. It deliberately has no cwd,
 // task input, descriptors, callbacks, process controls, or output decoder.
 type Launch struct {
-	executable  runner.ExecutableCommitment
-	argv        []string
-	environment []string
+	executable   runner.ExecutableCommitment
+	argv         []string
+	environment  []string
+	taskDelivery TaskDelivery
 }
 
 func (launch Launch) Executable() runner.ExecutableCommitment { return launch.executable }
 func (launch Launch) Argv() []string                          { return append([]string(nil), launch.argv...) }
 func (launch Launch) Environment() []string                   { return append([]string(nil), launch.environment...) }
+func (launch Launch) TaskDelivery() TaskDelivery              { return launch.taskDelivery }
 
 func (Launch) String() string   { return "provider launch (private)" }
 func (Launch) GoString() string { return "provider.Launch{private}" }
 
-// Build is the one closed provider-selection switch. Claude and Codex remain
-// explicit unavailable cases rather than speculative launch descriptions.
+// TaskDelivery is the one task-input channel selected with a provider launch.
+// Shell reads its program from the inherited sealed descriptor. Native tools
+// receive their prompt once through the PTY after provider exec is proven and
+// before that terminal is exposed to an operator.
+type TaskDelivery uint8
+
+const (
+	TaskDeliveryFD11 TaskDelivery = iota + 1
+	TaskDeliveryStartupTerminal
+)
+
+// Build is the one closed provider-selection switch.
 func Build(request Request) (Launch, error) {
-	if !request.runtime.valid() {
-		return Launch{}, ErrInvalid
+	if err := request.installation.executable.Verify(); err != nil {
+		return Launch{}, errors.Join(ErrUnavailable, err)
 	}
+	path := request.installation.executable.Path()
 	switch request.provider {
 	case kernel.ProviderShell:
-		if request.installation.provider != request.provider {
+		if request.model != "" || request.reasoningEffort != "" || path != shellPath {
 			return Launch{}, ErrInvalid
-		}
-		if request.model != "" || request.reasoningEffort != "" {
-			return Launch{}, ErrInvalid
-		}
-		if request.installation.version != shellVersion || request.installation.executable.Path() != shellPath {
-			return Launch{}, ErrInvalid
-		}
-		if err := request.installation.executable.Verify(); err != nil {
-			return Launch{}, errors.Join(ErrUnavailable, err)
 		}
 		return Launch{
-			executable:  request.installation.executable,
-			argv:        []string{shellPath, runner.ProviderTaskPath},
-			environment: request.runtime.environment(),
+			executable:   request.installation.executable,
+			argv:         []string{shellPath, runner.ProviderTaskPath},
+			environment:  request.runtime.environment(request.provider),
+			taskDelivery: TaskDeliveryFD11,
 		}, nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		return Launch{}, unavailableError{provider: request.provider}
+		var argv []string
+		if request.provider == kernel.ProviderClaudeCode {
+			argv = []string{path, "--dangerously-skip-permissions"}
+		} else {
+			argv = []string{path, "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen"}
+		}
+		if request.model != "" {
+			argv = append(argv, "--model", request.model)
+		}
+		if request.reasoningEffort != "" {
+			if request.provider == kernel.ProviderClaudeCode {
+				argv = append(argv, "--effort", request.reasoningEffort)
+			} else {
+				argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
+			}
+		}
+		return Launch{
+			executable: request.installation.executable, argv: argv,
+			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryStartupTerminal,
+		}, nil
 	default:
 		return Launch{}, ErrInvalid
 	}
 }
 
-// Task validates and copies the exact provider task selected at admission.
-// The Change worker seals these bytes in an unlinked descriptor; the PTY is
-// reserved exclusively for later interactive terminal traffic.
-func Task(kind kernel.Provider, task []byte) ([]byte, error) {
-	if err := ValidateTask(kind, task); err != nil {
-		return nil, err
+// PrepareTask is also available before executable selection so the daemon can
+// freeze native startup input into the runner configuration. Build returns the
+// same closed delivery value, which the Change worker must compare before exec.
+func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error) {
+	if len(task) == 0 || len(task) > runner.MaxProviderTaskBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
+		return 0, nil, ErrInvalid
 	}
-	return bytes.Clone(task), nil
-}
-
-func ValidateTask(kind kernel.Provider, task []byte) error {
 	switch kind {
 	case kernel.ProviderShell:
-		if len(task) == 0 || len(task) > runner.MaxProviderTaskBytes || !utf8.Valid(task) || bytes.IndexByte(task, 0) >= 0 {
-			return ErrInvalid
-		}
-		return nil
+		return TaskDeliveryFD11, bytes.Clone(task), nil
 	case kernel.ProviderClaudeCode, kernel.ProviderCodex:
-		return unavailableError{provider: kind}
+		encoded, err := nativeTaskInput(task)
+		if err != nil {
+			return 0, nil, ErrInvalid
+		}
+		return TaskDeliveryStartupTerminal, encoded, nil
 	default:
-		return ErrInvalid
+		return 0, nil, ErrInvalid
 	}
 }
 
-type unavailableError struct{ provider kernel.Provider }
-
-func (err unavailableError) Error() string {
-	return fmt.Sprintf("provider: %s unavailable", err.provider.String())
+func unavailable(kind kernel.Provider) error {
+	return fmt.Errorf("%w: %s", ErrUnavailable, kind.String())
 }
-func (unavailableError) Unwrap() error { return ErrUnavailable }
+
+func nativeTaskInput(task []byte) ([]byte, error) {
+	quoted, err := json.Marshal(string(task))
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	payload := make([]byte, 0, len(nativeTaskLead)+len(quoted)+1)
+	payload = append(payload, nativeTaskLead...)
+	payload = appendTerminalSafeJSON(payload, quoted)
+	payload = append(payload, '\r')
+	if len(payload) > maxNativePrompt {
+		return nil, ErrInvalid
+	}
+	return payload, nil
+}
+
+func appendTerminalSafeJSON(dst, quoted []byte) []byte {
+	const hex = "0123456789abcdef"
+	for len(quoted) > 0 {
+		value, width := utf8.DecodeRune(quoted)
+		if value >= 0x7f && value <= 0x9f {
+			dst = append(dst, '\\', 'u', '0', '0', hex[value>>4], hex[value&0xf])
+		} else {
+			dst = append(dst, quoted[:width]...)
+		}
+		quoted = quoted[width:]
+	}
+	return dst
+}
 
 func (runtime RuntimePaths) valid() bool {
 	paths := []string{runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl}
@@ -173,22 +262,32 @@ func (runtime RuntimePaths) valid() bool {
 		}
 	}
 	return len(runtime.socket) <= install.MaxSocketPathBytes && runtime.home != runtime.temp &&
-		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath)
+		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath) &&
+		validAbsolute(runtime.accountHome, maxPathBytes-len("/"+claudeConfigDir)) &&
+		runtime.accountHome != runtime.home && runtime.accountHome != runtime.temp
 }
 
-func (runtime RuntimePaths) environment() []string {
-	return []string{
+func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
+	environment := []string{
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
 		"HOME=" + runtime.home,
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
+	}
+	switch kind {
+	case kernel.ProviderClaudeCode:
+		environment = append(environment, "CLAUDE_CONFIG_DIR="+filepath.Join(runtime.accountHome, claudeConfigDir))
+	case kernel.ProviderCodex:
+		environment = append(environment, "CODEX_HOME="+filepath.Join(runtime.accountHome, codexConfigDir))
+	}
+	return append(environment,
 		"LANG=C",
 		"LC_ALL=C",
 		"TERM=xterm-256color",
 		"SHELL=/bin/sh",
-		"GIT_CEILING_DIRECTORIES=" + runtime.gitCeiling,
+		"GIT_CEILING_DIRECTORIES="+runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
@@ -196,7 +295,7 @@ func (runtime RuntimePaths) environment() []string {
 		"GIT_ASKPASS=/usr/bin/false",
 		"GIT_SSH_COMMAND=/usr/bin/false",
 		"GH_CONFIG_DIR=/dev/null",
-	}
+	)
 }
 
 func validAbsolute(value string, limit int) bool {

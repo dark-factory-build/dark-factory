@@ -470,7 +470,7 @@ func scanAgentSummary(scanner rowScanner) (AgentSummary, error) {
 	id, idErr := AgentIDFromBytes(rawID)
 	projectID, projectErr := ProjectIDFromBytes(rawProjectID)
 	role, roleErr := parseAgentRole(rawRole)
-	provider, providerErr := parseProvider(rawProvider)
+	provider, providerErr := ParseProvider(rawProvider)
 	revision, revisionErr := NewRevision(rawRevision)
 	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || revisionErr != nil ||
 		byteLen(name) < 1 || byteLen(name) > 128 || paused != 0 && paused != 1 {

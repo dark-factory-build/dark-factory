@@ -94,11 +94,11 @@ func scanAgent(scanner rowScanner) (Agent, bool, error) {
 	id, idErr := AgentIDFromBytes(rawID)
 	projectID, projectErr := ProjectIDFromBytes(rawProjectID)
 	role, roleErr := parseAgentRole(rawRole)
-	provider, providerErr := parseProvider(rawProvider)
+	provider, providerErr := ParseProvider(rawProvider)
 	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || (paused != 0 && paused != 1) || budget < 1 || budget > 1_000_000_000 || used < 0 || used > budget || updatedAt < createdAt {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent row", ErrCorruptState)
 	}
-	if model.Valid && model.String == "" || effort.Valid && effort.String == "" || ValidateProviderLaunchControls(provider, nullStringValue(model), nullStringValue(effort)) != nil {
+	if model.Valid && model.String == "" || effort.Valid && effort.String == "" || validateStoredProviderControls(provider, nullStringValue(model), nullStringValue(effort)) != nil {
 		return Agent{}, false, fmt.Errorf("%w: invalid agent controls", ErrCorruptState)
 	}
 	rev, revisionErr := NewRevision(revision)

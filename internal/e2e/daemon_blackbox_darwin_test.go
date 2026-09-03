@@ -72,7 +72,7 @@ func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	daemonA, outputA := fixture.startFactoryd(t)
 	client := fixture.waitClient(t)
 	projectID := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "project", "create", "--name", "black-box", "--root", fixture.repo))
-	agentID := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", projectID, "--name", "builder", "--tool-budget", "4"))
+	agentID := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", projectID, "--name", "builder", "--provider", "shell", "--tool-budget", "4"))
 	firstTask := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", projectID, "--agent", agentID, "--title", "prove the happy path", "--body", happyPathBody))
 	if status := fixture.taskStatus(t, client, firstTask); status != "queued" {
 		t.Fatalf("task before dispatch = %q", status)

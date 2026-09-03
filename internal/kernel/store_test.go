@@ -164,6 +164,12 @@ func TestProviderLaunchControlsAtAgentCreation(t *testing.T) {
 			seed++
 		}
 	}
+	if _, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 229), ProjectID: project.ID, Name: "unsupported-claude-effort", Role: RoleOrchestrator,
+		Provider: ProviderClaudeCode, ReasoningEffort: "ultra", ToolBudgetLimit: 1,
+	}, mustTime(t, 229)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("Claude ultra effort error = %v", err)
+	}
 	for index, model := range []string{string([]byte{0xff}), "model\x00suffix"} {
 		if _, err := store.CreateAgent(ctx, NewAgent{
 			ID: agentID(t, byte(230+index)), ProjectID: project.ID, Name: "invalid-model", Role: RoleOrchestrator,
@@ -171,6 +177,30 @@ func TestProviderLaunchControlsAtAgentCreation(t *testing.T) {
 		}, mustTime(t, int64(230+index))); !errors.Is(err, ErrInvalidValue) {
 			t.Fatalf("invalid model %x error = %v", []byte(model), err)
 		}
+	}
+}
+
+func TestLegacyClaudeUltraAgentRemainsReadable(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 233), Name: "p", Root: "/legacy-provider-controls"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 234), ProjectID: project.ID, Name: "legacy-claude", Role: RoleWorker,
+		Provider: ProviderClaudeCode, ReasoningEffort: "max", ToolBudgetLimit: 1,
+	}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`UPDATE agents SET reasoning_effort = 'ultra' WHERE id = ?`, agent.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := store.Agent(ctx, agent.ID)
+	if err != nil || !found || got.Provider != ProviderClaudeCode || got.ReasoningEffort != "ultra" {
+		t.Fatalf("legacy Claude agent = %+v, found=%v, err=%v", got, found, err)
 	}
 }
 

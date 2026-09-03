@@ -113,7 +113,7 @@ func inspectServiceForAccount(ctx context.Context, home string, config ServiceCo
 	if ctx == nil || launchctl == nil {
 		return ServiceStatus{}, fmt.Errorf("%w: invalid status request", ErrServiceAmbiguous)
 	}
-	userHome, err := accountHome()
+	userHome, err := AccountHome()
 	if err != nil {
 		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
 	}
@@ -351,7 +351,9 @@ func (capability *serviceHomeCapability) close() error {
 	return result
 }
 
-func accountHome() (string, error) {
+// AccountHome returns the current UID's exact account-record home without
+// trusting the caller's environment.
+func AccountHome() (string, error) {
 	account, err := user.Current()
 	if err != nil || account == nil || account.HomeDir == "" || account.Uid != strconv.Itoa(os.Geteuid()) || !validServicePath(account.HomeDir) {
 		return "", errors.New("current account home is not exact")

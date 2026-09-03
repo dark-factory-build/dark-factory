@@ -321,8 +321,18 @@ func validReasoningEffort(value string) bool {
 // cross Store, private worker and provider boundaries. Wire and launch code
 // must not accept a wider set than durable state.
 func ValidateProviderLaunchControls(provider Provider, model, effort string) error {
-	if !provider.valid() || byteLen(model) > 128 || !utf8.ValidString(model) || strings.ContainsRune(model, 0) || !validReasoningEffort(effort) || provider == ProviderShell && (model != "" || effort != "") {
+	if validateStoredProviderControls(provider, model, effort) != nil || provider == ProviderClaudeCode && effort == "ultra" {
 		return fmt.Errorf("%w: invalid provider launch controls", ErrInvalidValue)
+	}
+	return nil
+}
+
+// Stored v1 rows permit Claude ultra. New launches reject it because the
+// current Claude CLI does not, but upgrading must not corrupt an old image.
+func validateStoredProviderControls(provider Provider, model, effort string) error {
+	if !provider.valid() || byteLen(model) > 128 || !utf8.ValidString(model) || strings.ContainsRune(model, 0) || !validReasoningEffort(effort) ||
+		provider == ProviderShell && (model != "" || effort != "") {
+		return fmt.Errorf("%w: invalid stored provider controls", ErrInvalidValue)
 	}
 	return nil
 }

@@ -184,7 +184,7 @@ func digestServiceProgram(home string) (string, error) {
 }
 
 func serviceInstall(ctx context.Context, home string, config ServiceConfig, sourceDir string) (ServiceStatus, error) {
-	userHome, err := accountHome()
+	userHome, err := AccountHome()
 	if err != nil {
 		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
 	}
@@ -262,7 +262,7 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 }
 
 func serviceStart(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
-	userHome, err := accountHome()
+	userHome, err := AccountHome()
 	if err != nil {
 		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
 	}
@@ -308,7 +308,7 @@ func serviceStartLockedAt(ctx context.Context, home, userHome string, config Ser
 }
 
 func serviceStop(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
-	userHome, err := accountHome()
+	userHome, err := AccountHome()
 	if err != nil {
 		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
 	}
@@ -343,7 +343,7 @@ func serviceStopLockedAt(ctx context.Context, home, userHome string, config Serv
 }
 
 func serviceUninstall(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
-	userHome, err := accountHome()
+	userHome, err := AccountHome()
 	if err != nil {
 		return ServiceStatus{}, errors.Join(ErrServiceAmbiguous, err)
 	}
