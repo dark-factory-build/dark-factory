@@ -32,6 +32,7 @@ const (
 	maxHomeArgumentBytes  = 4096
 
 	usage = `usage:
+  factoryctl attempt task
   factoryctl attempt succeed [--result TEXT]
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
@@ -63,6 +64,7 @@ const (
 	commandBlock
 	commandFail
 	commandRequestHuman
+	commandAttemptTask
 	commandWebStatus
 	commandWebOpen
 	commandWebListClients
@@ -168,6 +170,14 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 
 	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
 	defer cancel()
+	if command.kind == commandAttemptTask {
+		result, taskErr := client.Task(callContext)
+		if taskErr != nil {
+			writeFailure(stderr, command.kind, taskErr)
+			return exitFailure
+		}
+		return writeJSON(stdout, result)
+	}
 	var result api.MutationResult
 	switch command.kind {
 	case commandSucceed:
@@ -223,7 +233,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) == 3 && helpFlag(args[2]) {
 		switch args[1] {
-		case "succeed", "block", "fail", "request-human":
+		case "task", "succeed", "block", "fail", "request-human":
 			return attemptCommand{}, true, true
 		case "status", "open", "list-clients", "revoke":
 			if args[0] == "web" {
@@ -238,6 +248,10 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		return parseWeb(args)
 	}
 	switch args[1] {
+	case "task":
+		if len(args) == 2 {
+			return attemptCommand{kind: commandAttemptTask}, false, true
+		}
 	case "succeed":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandSucceed}, false, true
@@ -624,7 +638,9 @@ func validQuestion(value string) bool {
 
 func writeFailure(stderr io.Writer, kind commandKind, err error) {
 	subject, input := "outcome request", "attempt input"
-	if kind == commandRequestHuman {
+	if kind == commandAttemptTask {
+		subject = "task request"
+	} else if kind == commandRequestHuman {
 		subject, input = "human request", "human request input"
 	}
 	message := "factoryctl: " + subject + " failed\n"
