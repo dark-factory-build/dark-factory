@@ -23,7 +23,7 @@ const (
 	serviceBootoutPatience = 5 * time.Second
 )
 
-var serviceBinaryNames = [3]string{serviceProgramName, "factoryctl", "factory-runner"}
+var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
 
 // withServiceMutation serializes every lifecycle mutation on the exact home
 // directory. factoryd's lifetime flock is on the separate factory.lock inode,
@@ -151,7 +151,7 @@ func receiptMatchesInstallation(receipt serviceReceipt, home string, config Serv
 	if receipt.PlistDigest != hex.EncodeToString(digest[:]) {
 		return fmt.Errorf("%w: receipt plist digest", ErrServiceForeign)
 	}
-	programDigest, err := digestServiceProgram(home)
+	programDigest, err := digestServiceProgram(serviceProgramPath(home))
 	if err != nil {
 		return err
 	}
@@ -161,48 +161,28 @@ func receiptMatchesInstallation(receipt serviceReceipt, home string, config Serv
 	return nil
 }
 
-func digestServiceProgram(home string) (string, error) {
-	return digestServiceBinary(serviceProgramPath(home), "installed program")
-}
-
-// digestServiceBinary digests one binary under the exact authority rules the
-// installer applies to everything it publishes: a plain file this account
-// owns, executable, writable by nobody else, and byte-stable across the read.
-func digestServiceBinary(path, subject string) (string, error) {
+// digestServiceProgram digests one factoryd — the installed one the receipt
+// names, or the invoking one an install would put in its place.
+func digestServiceProgram(path string) (string, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return "", fmt.Errorf("%w: open %s", ErrServiceAmbiguous, subject)
+		return "", fmt.Errorf("%w: open program", ErrServiceReceipt)
 	}
-	file := os.NewFile(uintptr(fd), filepath.Base(path))
+	file := os.NewFile(uintptr(fd), "factoryd")
 	defer func() { _ = file.Close() }()
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0o022 != 0 || stat.Mode&0o100 == 0 || stat.Size <= 0 || stat.Size > serviceBinaryMaxBytes {
-		return "", fmt.Errorf("%w: %s metadata", ErrServiceForeign, subject)
+		return "", fmt.Errorf("%w: program metadata", ErrServiceReceipt)
 	}
 	digest := sha256.New()
 	if _, err := io.Copy(digest, file); err != nil {
-		return "", fmt.Errorf("%w: read %s", ErrServiceAmbiguous, subject)
+		return "", fmt.Errorf("%w: read program", ErrServiceReceipt)
 	}
 	var after unix.Stat_t
 	if err := unix.Fstat(fd, &after); err != nil || !sameServiceStat(stat, after) {
-		return "", fmt.Errorf("%w: %s changed", ErrServiceForeign, subject)
+		return "", fmt.Errorf("%w: program changed", ErrServiceReceipt)
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
-}
-
-// serviceSiblingDigests digests the three sibling binaries of one directory in
-// serviceBinaryNames order. Comparing two of these decides whether an install
-// over an existing installation is the recognized repeat or an upgrade.
-func serviceSiblingDigests(directory string) ([len(serviceBinaryNames)]string, error) {
-	var digests [len(serviceBinaryNames)]string
-	for index, name := range serviceBinaryNames {
-		digest, err := digestServiceBinary(filepath.Join(directory, name), name)
-		if err != nil {
-			return digests, err
-		}
-		digests[index] = digest
-	}
-	return digests, nil
 }
 
 func serviceInstall(ctx context.Context, home string, config ServiceConfig, sourceDir string) (ServiceStatus, error) {
@@ -226,21 +206,29 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, capability)
 	status := inspection.status
 	if err == nil && (status.State == ServiceInstalled || status.State == ServiceRunning) {
-		// The receipt, plist, and label already prove this home's installation:
-		// the only remaining question is which build it holds.
-		return serviceUpgradeLockedAt(ctx, home, userHome, config, sourceDir, launchctl, inspection)
-	}
-	if err != nil && !errors.Is(err, ErrServiceResidue) {
+		// The receipt, plist, and label already prove this home's installation.
+		// The receipt names the installed factoryd, so comparing it with the
+		// invoking one decides between the recognized repeat and an upgrade.
+		receipt, _, receiptErr := readServiceReceipt(home)
+		invoking, digestErr := digestServiceProgram(filepath.Join(sourceDir, "factoryd"))
+		if joined := errors.Join(receiptErr, digestErr); joined != nil {
+			return status, joined
+		}
+		if receipt.ProgramDigest == invoking {
+			return status, nil
+		}
+		// A different build: remove exactly this installation's artifacts and
+		// install the invoking build below, both through the verbs that already
+		// do it and under the one mutation lock this call holds. The data home
+		// is not a service artifact, so nothing here touches it.
+		if _, err := serviceUninstallLockedAt(ctx, home, userHome, config, launchctl); err != nil {
+			return ServiceStatus{State: ServiceAmbiguous}, err
+		}
+	} else if err != nil {
+		if errors.Is(err, ErrServiceResidue) {
+			return ServiceStatus{State: ServiceAmbiguous}, err
+		}
 		return status, err
-	}
-	if errors.Is(err, ErrServiceResidue) {
-		return ServiceStatus{State: ServiceAmbiguous}, err
-	}
-	// Prove the invoking sibling set before creating the first directory, so an
-	// incomplete or unowned set leaves no artifact behind. The copies below read
-	// and digest each binary again; nothing measured here is trusted later.
-	if _, err := serviceSiblingDigests(sourceDir); err != nil {
-		return ServiceStatus{}, err
 	}
 	plistDirectory, plistPath := servicePlistLocation(userHome, config)
 	if err := ensureOwnedDirectory(plistDirectory); err != nil {
@@ -252,9 +240,15 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 			return ServiceStatus{}, err
 		}
 	}
-	programDigest, err := publishServiceBinaries(sourceDir, filepath.Join(serviceDir, "bin", "current"))
-	if err != nil {
-		return ServiceStatus{}, err
+	var programDigest string
+	for _, name := range serviceBinaryNames {
+		digest, err := copyServiceBinary(filepath.Join(sourceDir, name), filepath.Join(serviceDir, "bin", "current"), name)
+		if err != nil {
+			return ServiceStatus{}, err
+		}
+		if name == "factoryd" {
+			programDigest = digest
+		}
 	}
 	plistBytes, plistDigest, err := ServicePlist(home, config.Label)
 	if err != nil {
@@ -274,114 +268,8 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	if err := writeExactFile(serviceDir, serviceReceiptName, body, 0o600); err != nil {
 		return ServiceStatus{}, err
 	}
-	return bootstrapService(ctx, home, userHome, config, launchctl)
-}
-
-// serviceUpgradeLockedAt runs the install verb against an installation this
-// home already proves is its own. The invoking factoryctl's sibling set is the
-// authority: an identical set is the recognized repeat, a different one is
-// moved into place — boot the loaded job out, publish the three binaries
-// through the same stage-then-rename path a fresh install uses, rewrite the
-// receipt's program digest, and bootstrap the new program. The plist and label
-// are unchanged, so the home, its socket, database, and operator token are
-// never touched.
-//
-// The order is what a failure leaves behind. A refused bootout replaces
-// nothing. A sibling that fails to copy leaves factoryd, which is published
-// last, still agreeing with the receipt, so service start recovers the
-// installation. A failed bootstrap follows a receipt that already names the
-// new binaries, so status stays an honest "installed" that service start
-// resolves. The receipt rewrite is the one remaining window: an interruption
-// between the new factoryd and the new receipt leaves the two disagreeing,
-// which is the residue service uninstall exists to resolve.
-func serviceUpgradeLockedAt(ctx context.Context, home, userHome string, config ServiceConfig, sourceDir string, launchctl launchctlRun, inspection serviceInspection) (ServiceStatus, error) {
-	serviceDir := ServiceDirectoryPath(home)
-	current := filepath.Join(serviceDir, "bin", "current")
-	source, err := serviceSiblingDigests(sourceDir)
-	if err != nil {
-		// The request is unusable; the installation is exactly as observed.
-		return inspection.status, err
-	}
-	installed, err := serviceSiblingDigests(current)
-	if err != nil {
-		// The installed set cannot be read, so no present state is provable.
-		return ServiceStatus{State: ServiceAmbiguous}, err
-	}
-	if source == installed {
-		return inspection.status, nil
-	}
-	receipt, present, err := readServiceReceipt(home)
-	if err != nil || !present {
-		return ServiceStatus{State: ServiceAmbiguous}, errors.Join(ErrServiceAmbiguous, ErrServiceResidue, err)
-	}
-	previous, err := encodeServiceReceipt(receipt)
-	if err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, err
-	}
-	if err := clearServiceStageResidue(serviceDir, current); err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, err
-	}
-	if inspection.observation.present {
-		if err := bootoutService(ctx, config, launchctl); err != nil {
-			return ServiceStatus{State: ServiceAmbiguous}, err
-		}
-	}
-	programDigest, err := publishServiceBinaries(sourceDir, current)
-	if err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, err
-	}
-	receipt.ProgramDigest = programDigest
-	body, err := encodeServiceReceipt(receipt)
-	if err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, err
-	}
-	if err := replaceExactFile(serviceDir, serviceReceiptName, previous, body, 0o600); err != nil {
-		return ServiceStatus{State: ServiceAmbiguous}, err
-	}
-	return bootstrapService(ctx, home, userHome, config, launchctl)
-}
-
-// clearServiceStageResidue removes exactly the staging names this engine
-// writes, before an upgrade publishes over them. They are this installation's
-// own crash residue, and uninstall already resolves them by these same names
-// and the same ownership rule — a stage that is not an owned regular file is
-// somebody else's and refuses instead. Doing it here keeps an interrupted
-// upgrade from steering the operator at uninstall for a state service start
-// recovers.
-func clearServiceStageResidue(serviceDir, current string) error {
-	for _, name := range serviceBinaryNames {
-		if err := removeOwnedFile(current, "."+name+".stage"); err != nil {
-			return err
-		}
-	}
-	return removeOwnedFile(serviceDir, "."+serviceReceiptName+".stage")
-}
-
-// publishServiceBinaries copies the three sibling binaries into the service
-// directory and returns factoryd's digest, which is the receipt's program
-// identity.
-//
-// factoryd is published last on purpose. The receipt names factoryd alone, so
-// a sibling that fails to copy leaves the program and the receipt still
-// agreeing: the installation is intact and service start recovers it. Only the
-// receipt rewrite that follows can make the two disagree.
-func publishServiceBinaries(sourceDir, destinationDir string) (string, error) {
-	for _, name := range serviceBinaryNames {
-		if name == serviceProgramName {
-			continue
-		}
-		if _, err := copyServiceBinary(filepath.Join(sourceDir, name), destinationDir, name); err != nil {
-			return "", err
-		}
-	}
-	return copyServiceBinary(filepath.Join(sourceDir, serviceProgramName), destinationDir, serviceProgramName)
-}
-
-// bootstrapService loads the retained plist and confirms the result. Install,
-// upgrade, and start all reach launchd through exactly this one path.
-func bootstrapService(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun) (ServiceStatus, error) {
-	_, plistPath := servicePlistLocation(userHome, config)
-	result := launchctl(ctx, "bootstrap", "gui/"+strconv.Itoa(os.Geteuid()), plistPath)
+	uid := strconv.Itoa(os.Geteuid())
+	result := launchctl(ctx, "bootstrap", "gui/"+uid, plistPath)
 	if result.err != nil || result.status != 0 {
 		return ServiceStatus{State: ServiceInstalled}, fmt.Errorf("%w: bootstrap status %d: %v", ErrServiceLaunchctl, result.status, result.err)
 	}
@@ -425,7 +313,13 @@ func serviceStartLockedAt(ctx context.Context, home, userHome string, config Ser
 	default:
 		return status, fmt.Errorf("%w: start requires an installed service", ErrServiceAmbiguous)
 	}
-	return bootstrapService(ctx, home, userHome, config, launchctl)
+	_, plistPath := servicePlistLocation(userHome, config)
+	uid := strconv.Itoa(os.Geteuid())
+	result := launchctl(ctx, "bootstrap", "gui/"+uid, plistPath)
+	if result.err != nil || result.status != 0 {
+		return ServiceStatus{State: ServiceInstalled}, fmt.Errorf("%w: bootstrap status %d: %v", ErrServiceLaunchctl, result.status, result.err)
+	}
+	return confirmServiceLoaded(ctx, home, config, plistPath, launchctl)
 }
 
 func serviceStop(ctx context.Context, home string, config ServiceConfig) (ServiceStatus, error) {
@@ -707,69 +601,24 @@ func copyServiceBinary(sourcePath, destinationDir, name string) (string, error) 
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
-// writeExactFile publishes durable bytes that must not already exist as
-// anything else: a file already holding exactly these bytes is the recognized
-// repeat, and any other existing bytes are foreign and refuse.
 func writeExactFile(directory, name string, contents []byte, mode os.FileMode) error {
-	existing, present, err := readExistingFile(directory, name, int64(len(contents))+1)
-	if err != nil {
-		return err
-	}
-	if present {
+	path := filepath.Join(directory, name)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err == nil {
+		file := os.NewFile(uintptr(fd), name)
+		existing, readErr := io.ReadAll(io.LimitReader(file, int64(len(contents))+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
+			return fmt.Errorf("%w: read existing %s", ErrServiceAmbiguous, name)
+		}
 		if bytes.Equal(existing, contents) {
 			return nil
 		}
 		return fmt.Errorf("%w: %s exists with different bytes", ErrServiceForeign, name)
 	}
-	return publishStagedFile(directory, name, contents, mode)
-}
-
-// replaceExactFile rewrites one durable file this installation already owns.
-// The bytes on disk must be exactly previous — the proof the file is this
-// installation's property — and the replacement lands through the same
-// stage-then-rename publication, so an interruption leaves either the old file
-// or the new one and never a partial write.
-func replaceExactFile(directory, name string, previous, contents []byte, mode os.FileMode) error {
-	limit := int64(len(previous))
-	if int64(len(contents)) > limit {
-		limit = int64(len(contents))
+	if !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("%w: probe %s", ErrServiceAmbiguous, name)
 	}
-	existing, present, err := readExistingFile(directory, name, limit+1)
-	if err != nil {
-		return err
-	}
-	if !present {
-		return fmt.Errorf("%w: %s is missing; run factoryctl service uninstall", ErrServiceResidue, name)
-	}
-	if bytes.Equal(existing, contents) {
-		return nil
-	}
-	if !bytes.Equal(existing, previous) {
-		return fmt.Errorf("%w: %s holds different bytes", ErrServiceForeign, name)
-	}
-	return publishStagedFile(directory, name, contents, mode)
-}
-
-// readExistingFile reads a member's bytes up to limit. Absence is an ordinary
-// result, never an error.
-func readExistingFile(directory, name string, limit int64) ([]byte, bool, error) {
-	fd, err := unix.Open(filepath.Join(directory, name), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if errors.Is(err, unix.ENOENT) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("%w: probe %s", ErrServiceAmbiguous, name)
-	}
-	file := os.NewFile(uintptr(fd), name)
-	existing, readErr := io.ReadAll(io.LimitReader(file, limit))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil {
-		return nil, false, fmt.Errorf("%w: read existing %s", ErrServiceAmbiguous, name)
-	}
-	return existing, true, nil
-}
-
-func publishStagedFile(directory, name string, contents []byte, mode os.FileMode) error {
 	stagePath := filepath.Join(directory, "."+name+".stage")
 	file, err := os.OpenFile(stagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if errors.Is(err, os.ErrExist) {
@@ -785,7 +634,7 @@ func publishStagedFile(directory, name string, contents []byte, mode os.FileMode
 		_ = os.Remove(stagePath)
 		return fmt.Errorf("%w: write %s", ErrServiceAmbiguous, name)
 	}
-	if err := os.Rename(stagePath, filepath.Join(directory, name)); err != nil {
+	if err := os.Rename(stagePath, path); err != nil {
 		_ = os.Remove(stagePath)
 		return fmt.Errorf("%w: publish %s", ErrServiceAmbiguous, name)
 	}

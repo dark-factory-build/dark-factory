@@ -786,9 +786,9 @@ func TestServiceDirectoryRecheckToleratesAncestorChurnAndStaysFailClosed(t *test
 	}
 }
 
-// An install that upgrades a running installation boots the daemon out and
-// bootstraps the new one inside one mutation, so the SQLite sidecars are
-// deleted and recreated as fresh inodes while the home capability is held.
+// An install that replaces a running build boots the daemon out and bootstraps
+// its successor inside one mutation, so the SQLite sidecars are deleted and
+// recreated as fresh inodes while the home capability is held.
 func TestServiceHomeSnapshotsTolerateSidecarRecreation(t *testing.T) {
 	root := serviceTestRoot(t)
 	home := filepath.Join(root, "factory")

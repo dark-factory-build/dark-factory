@@ -535,10 +535,10 @@ func sameServiceHomeImage(left, right serviceHomeImage) error {
 		actual, inRight := right.files[name]
 		if name == databaseName+"-wal" || name == databaseName+"-shm" {
 			// The SQLite sidecars are derived state one daemon deletes on exit
-			// and the next recreates as fresh inodes, so an upgrade's restart
-			// legitimately changes both their presence and their identity. Each
-			// snapshot still bounds them; only the database itself, which the
-			// restart does not replace, must hold its census position.
+			// and the next recreates as fresh inodes, which an install that
+			// replaces a running build does inside one mutation. Each snapshot
+			// still bounds them; every durable member must hold its census
+			// position and identity.
 			continue
 		}
 		if !inLeft || !inRight {

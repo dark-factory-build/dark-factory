@@ -27,39 +27,9 @@ factoryctl service install --home "$HOME/.dark-factory"
 factoryctl service status --home "$HOME/.dark-factory"
 ```
 
-## Upgrade an installation
-
-Running the same command from a newer build upgrades that installation in
-place, with no uninstall step:
-
-```sh
-factoryctl service install --home "$HOME/.dark-factory"
-```
-
-The command compares the invoking `factoryd`, `factory-runner`, and
-`factoryctl` with the installed ones. All three must be in the invoking
-binary's own directory, owned by you and writable by nobody else; an
-incomplete or unowned set refuses before anything is created or replaced. An
-identical set is recognized and changes nothing. A different set boots the job
-out, replaces the three binaries, records them in the receipt, and bootstraps
-the new program. The home, its socket, database, and operator token are
-untouched, and an installation that is not this home's own is refused rather
-than replaced.
-
-Two conditions bound the upgrade, and `service install` cannot repair either.
-It keeps the installed launchd plist, so it applies only while that plist is
-still byte-identical to the one the invoking build renders; a build that
-renders a different plist makes `factoryctl service status` report `ambiguous`
-and every verb refuse. And it replaces all three installed binaries, so it
-refuses a `bin/current` that is missing one. The receipt names `factoryd`
-alone, so that second case is quieter: `service status` still reports the
-installation as `installed` or `running` and `service start` still works — only
-`service install` refuses. Both cases resolve the same way:
-
-```sh
-factoryctl service uninstall --home "$HOME/.dark-factory"
-factoryctl service install --home "$HOME/.dark-factory"
-```
+Running the same install command from a different build replaces that
+installation in place, leaving the home and its data alone; `service uninstall`
+is for removal.
 
 Point the operator client at that home and open the paired hosted console:
 
@@ -93,7 +63,5 @@ contract](providers.md) for discovery, model, effort, and task-delivery details.
 `factoryctl service stop` stops the managed daemon without removing the
 installation; restart it with `factoryctl service start --home
 "$HOME/.dark-factory"`. `factoryctl service uninstall` is the evidence-first
-removal path for that exact home and label; it is for removal, for crash
-residue, and for the ambiguous installations an in-place upgrade cannot repair,
-never a routine step before an upgrade. Homebrew does not own the running
+removal path for that exact home and label. Homebrew does not own the running
 service; do not use `brew services` for Dark Factory.
