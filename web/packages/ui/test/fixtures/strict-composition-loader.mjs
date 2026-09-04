@@ -1,12 +1,19 @@
 const clientModule = `
 const counters = globalThis.__darkFactoryStrictProbe ??= { clients: 0, states: 0, sessionCloses: 0, resolves: 0, opens: 0, attaches: 0, acquires: 0, detaches: 0, terminals: 0, disposes: 0 };
 export class SessionError extends Error { constructor(code) { super(code); this.name = "SessionError"; this.code = code; this.retryable = false; } }
+export class RemoteDaemonMismatchError extends SessionError { constructor(nodeId) { super("unauthorized"); this.name = "RemoteDaemonMismatchError"; this.nodeId = nodeId; } }
 export class ProtocolError extends Error { constructor(code) { super(code); this.name = "ProtocolError"; this.code = code; } }
 export const MAX_TERMINAL_PAYLOAD = 4096;
 export const MAX_TERMINAL_ROWS = 4096;
 export const MAX_TERMINAL_COLS = 4096;
 export const MAX_TASK_INSTRUCTION_BYTES = 32768;
 export function consumePairingChallenge() { return null; }
+// The public barrel also carries the remote console. This probe never mounts
+// it, so these exist only so the module graph resolves.
+export function consumeInvitation() { return null; }
+export function parseInvitation() { throw new SessionError("invalid_request"); }
+export function createRemoteStore() { return { list: async () => [], get: async () => null, put: async () => {}, forgetBinding: async () => {}, forgetDevice: async () => {} }; }
+export function createRemoteManager() { return { start: async () => {}, factories: () => [], selected: () => undefined, select: () => {}, client: () => undefined, needsYou: () => [], pair: async () => {}, forget: async () => {}, forgetDevice: async () => {}, close: () => {} }; }
 const agent = { id: "21".repeat(16), project_id: "11".repeat(16), name: "Strict Agent", role: "worker", paused: false, revision: 1n };
 const task = { id: "31".repeat(16), project_id: agent.project_id, assigned_agent_id: agent.id, title: "Strict task", status: "running", priority: 0, revision: 1n };
 const state = { head: 1n, factory: { dispatch_enabled: true, capacity: 1, active_runs: 1, revision: 1n }, projects: new Map([[agent.project_id, { id: agent.project_id, name: "Strict Project", revision: 1n }]]), agents: new Map([[agent.id, agent]]), tasks: new Map([[task.id, task]]), humanRequests: new Map() };

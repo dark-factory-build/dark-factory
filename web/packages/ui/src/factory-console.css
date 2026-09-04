@@ -516,3 +516,228 @@
 @media (max-width: 960px) {
   .dfConsoleStrip { flex-direction: column; align-items: flex-start; }
 }
+
+/* remote ------------------------------------------------------------------
+   The phone console. One column by default because the smallest screen is the
+   real one; two columns only once there is room. Legibility over density: no
+   label below 0.85rem and no tap target below 44px, both of which the desktop
+   console's 0.7rem micro-labels are too small for.
+   ------------------------------------------------------------------------ */
+
+.dfRemote {
+  display: block;
+  min-height: 100%;
+}
+
+.dfRemote__main {
+  padding: clamp(0.75rem, 3vw, 2.5rem);
+  font-size: 0.9rem;
+}
+
+.dfRemote .dfFactoryConsole__eyebrow,
+.dfRemote .dfFactoryConsole__sectionHeading,
+.dfRemote .dfFactoryConsole__card p,
+.dfRemote .dfFactoryConsole__card small,
+.dfRemote button,
+.dfRemote label {
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+}
+
+.dfRemote .dfFactoryConsole__empty,
+.dfRemote .dfConsoleStrip__agent,
+.dfRemote .dfConsoleStrip__agentPhase,
+.dfRemote .dfConsoleStrip__counter,
+.dfRemote .dfConsoleStrip__empty,
+.dfRemote .dfConsoleRow,
+.dfRemote .dfConsoleRow__title,
+.dfRemote .dfConsoleRow__agent,
+.dfRemote .dfFactoryConsole__cardTitle span {
+  font-size: 0.85rem;
+}
+
+.dfRemote h1 { font-size: clamp(1.4rem, 6vw, 2.25rem); }
+.dfRemote h2 { font-size: 0.9rem; letter-spacing: 0.1em; }
+
+/* Every control is a thumb target first. */
+.dfRemote button,
+.dfRemote .dfConsoleStrip__counter {
+  min-height: 44px;
+  padding: 0.7rem 0.9rem;
+}
+
+.dfRemote__banner {
+  max-width: 90rem;
+  margin: 0 auto 1rem;
+  padding: 0.85rem 1rem;
+  text-align: center;
+  letter-spacing: 0.1em;
+  border: 1px solid var(--df-console-warning);
+  color: var(--df-console-warning);
+  background: #171207;
+}
+
+.dfRemote__banner--revoked,
+.dfRemote__banner--mismatch,
+.dfRemote__banner--expired,
+.dfRemote__banner--error,
+.dfRemote__banner--device {
+  border-color: var(--df-console-alert);
+  color: var(--df-console-alert);
+  background: #1a0c0c;
+}
+
+.dfRemote__pairing { color: var(--df-console-accent); }
+.dfRemote__pairError,
+.dfRemote__notice { color: var(--df-console-alert); }
+
+.dfRemote__pairing,
+.dfRemote__pairError,
+.dfRemote__notice {
+  margin: 0 0 0.9rem;
+  line-height: 1.5;
+  letter-spacing: 0.06em;
+  overflow-wrap: anywhere;
+}
+
+.dfRemote__prose {
+  margin: 0 0 0.75rem;
+  color: var(--df-console-text);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.dfRemote__prose code {
+  padding: 0.1rem 0.35rem;
+  color: var(--df-console-accent);
+  background: var(--df-console-background);
+  border: 1px solid var(--df-console-rule);
+}
+
+.dfRemote__paste,
+.dfRemote__reply,
+.dfRemote__cancel {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.dfRemote__link,
+.dfRemote__replyText,
+.dfRemote__cancelText {
+  width: 100%;
+  padding: 0.75rem;
+  color: var(--df-console-text);
+  background: var(--df-console-background);
+  border: 1px solid var(--df-console-rule);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.dfRemote__link,
+.dfRemote__replyText { min-height: 6rem; resize: vertical; }
+.dfRemote__cancelText { min-height: 44px; }
+
+.dfRemote__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.dfRemote__switcher {
+  max-width: 90rem;
+  margin: 0 auto 1.25rem;
+}
+
+.dfRemote__factories {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dfRemote__factory {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1.5rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.2rem 0.65rem;
+  text-align: left;
+  text-transform: none;
+  background: var(--df-console-surface);
+}
+
+.dfRemote__factoryGlyph { grid-row: span 2; color: var(--df-console-accent); font-size: 1.1rem; }
+.dfRemote__factoryLabel { overflow-wrap: anywhere; letter-spacing: 0.02em; }
+.dfRemote__factoryStatus,
+.dfRemote__factoryCount { color: var(--df-console-muted); font-size: 0.85rem; letter-spacing: 0.04em; }
+.dfRemote__factory--ready .dfRemote__factoryStatus { color: var(--df-console-accent); }
+.dfRemote__factory--revoked .dfRemote__factoryGlyph,
+.dfRemote__factory--mismatch .dfRemote__factoryGlyph,
+.dfRemote__factory--expired .dfRemote__factoryGlyph,
+.dfRemote__factory--error .dfRemote__factoryGlyph,
+.dfRemote__factory--revoked .dfRemote__factoryStatus,
+.dfRemote__factory--mismatch .dfRemote__factoryStatus,
+.dfRemote__factory--expired .dfRemote__factoryStatus,
+.dfRemote__factory--error .dfRemote__factoryStatus { color: var(--df-console-alert); }
+.dfRemote__factory--offline .dfRemote__factoryGlyph { color: var(--df-console-muted); }
+.dfRemote__factory--waiting { border-color: var(--df-console-warning); }
+.dfRemote__factory--waiting .dfRemote__factoryCount { color: var(--df-console-warning); }
+.dfRemote__factory[aria-pressed="true"] { border-color: var(--df-console-accent); }
+
+.dfRemote__tag {
+  color: var(--df-console-accent);
+  letter-spacing: 0.06em;
+  overflow-wrap: anywhere;
+}
+
+.dfRemote__detail { border-color: var(--df-console-accent); }
+
+.dfRemote__questionText {
+  margin: 0 0 1rem;
+  color: var(--df-console-text);
+  font-size: 1rem;
+  line-height: 1.6;
+  text-transform: none;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.dfRemote__cancelOpen,
+.dfRemote .dfRemote__cancelAction { border-color: var(--df-console-alert); color: var(--df-console-alert); }
+.dfRemote .dfRemote__forgetFactory--confirm,
+.dfRemote .dfRemote__forgetDevice--confirm { border-color: var(--df-console-alert); color: var(--df-console-alert); }
+
+.dfRemote__cancel,
+.dfRemote__close { margin-top: 1rem; }
+
+.dfRemote__projectList {
+  display: grid;
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dfRemote__projectHeading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.dfRemote__projectHeading strong { overflow-wrap: anywhere; font-weight: 500; }
+.dfRemote__projectHeading span { color: var(--df-console-muted); font-size: 0.85rem; }
+
+.dfRemote__factoryFooter {
+  max-width: 90rem;
+  margin: 0 auto 1.5rem;
+}
+
+.dfRemote .dfConsoleStrip { flex-direction: column; align-items: flex-start; }
+
+@media (min-width: 721px) {
+  .dfRemote__factories { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dfRemote .dfConsoleStrip { flex-direction: row; align-items: center; }
+}
