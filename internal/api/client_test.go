@@ -22,11 +22,10 @@ import (
 )
 
 const (
-	wireGeneration      byte = 3
 	wireOperatorDomain  byte = 1
 	wireAttemptDomain   byte = 2
 	wireCredentialBytes      = 32
-	wireRequestPrelude       = 2 + wireCredentialBytes
+	wireRequestPrelude       = 1 + wireCredentialBytes
 	wireMaxFrameBytes        = 1 << 20
 )
 
@@ -147,8 +146,8 @@ func readTestFrame(reader io.Reader) ([]byte, error) {
 	return payload, nil
 }
 
-func writeTestResponse(connection net.Conn, generation, domain byte, body string) error {
-	payload := append([]byte{generation, domain}, []byte(body)...)
+func writeTestResponse(connection net.Conn, domain byte, body string) error {
+	payload := append([]byte{domain}, []byte(body)...)
 	return writeTestPayload(connection, payload, nil)
 }
 
@@ -181,8 +180,8 @@ func wireOutcomeRequest(request []byte) bool {
 		bytes.Contains(encoded, []byte(`"method":"fail"`))
 }
 
-func writeTestOutcomeResponse(connection net.Conn, generation, domain byte, body string) error {
-	if err := writeTestResponse(connection, generation, domain, body); err != nil {
+func writeTestOutcomeResponse(connection net.Conn, domain byte, body string) error {
+	if err := writeTestResponse(connection, domain, body); err != nil {
 		return err
 	}
 	receipt := bytes.Repeat([]byte{'R'}, outcomeReceiptBytes)
@@ -207,8 +206,8 @@ func writeTestOutcomeResponse(connection net.Conn, generation, domain byte, body
 	return nil
 }
 
-func writeTestUnacknowledgedOutcomeResponse(connection net.Conn, generation, domain byte, body string) error {
-	if err := writeTestResponse(connection, generation, domain, body); err != nil {
+func writeTestUnacknowledgedOutcomeResponse(connection net.Conn, domain byte, body string) error {
+	if err := writeTestResponse(connection, domain, body); err != nil {
 		return err
 	}
 	receipt := bytes.Repeat([]byte{'R'}, outcomeReceiptBytes)
@@ -229,7 +228,7 @@ func writeTestUnacknowledgedOutcomeResponse(connection net.Conn, generation, dom
 func TestMutationResultUsesCanonicalHeadAndAllowsZero(t *testing.T) {
 	bearer := testCredential('H')
 	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"head":0,"revision":1}`))
+		return writeTestResponse(connection, wireOperatorDomain, successResponse(`{"head":0,"revision":1}`))
 	})
 	client, err := NewOperatorClient(fixture.socket, fixture.token)
 	if err != nil {
@@ -258,10 +257,10 @@ func requestJSON(t testing.TB, payload []byte, domain byte, bearer credential) s
 	if len(payload) < wireRequestPrelude {
 		t.Fatalf("request payload length = %d", len(payload))
 	}
-	if payload[0] != wireGeneration || payload[1] != domain {
-		t.Fatalf("request prelude = generation %d domain %d", payload[0], payload[1])
+	if payload[0] != domain {
+		t.Fatalf("request prelude domain = %d", payload[0])
 	}
-	if !bytes.Equal(payload[2:wireRequestPrelude], bearer[:]) {
+	if !bytes.Equal(payload[1:wireRequestPrelude], bearer[:]) {
 		t.Fatal("request bearer differs")
 	}
 	encoded := string(payload[wireRequestPrelude:])
@@ -316,7 +315,7 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-				return writeTestResponse(connection, wireGeneration, wireOperatorDomain, test.response)
+				return writeTestResponse(connection, wireOperatorDomain, test.response)
 			})
 			client, err := NewOperatorClient(fixture.socket, fixture.token)
 			if err != nil {
@@ -367,9 +366,9 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newWireFixture(t, attemptBearer, func(connection net.Conn, request []byte) error {
 				if wireOutcomeRequest(request) {
-					return writeTestOutcomeResponse(connection, wireGeneration, wireAttemptDomain, mutationResponse())
+					return writeTestOutcomeResponse(connection, wireAttemptDomain, mutationResponse())
 				}
-				return writeTestResponse(connection, wireGeneration, wireAttemptDomain, mutationResponse())
+				return writeTestResponse(connection, wireAttemptDomain, mutationResponse())
 			})
 			operatorPath := filepath.Join(fixture.directory, "operator.token")
 			writeTestToken(t, operatorPath, operatorBearer)
@@ -409,7 +408,7 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 func TestAttemptClientReadsExactTask(t *testing.T) {
 	bearer := testCredential('T')
 	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-		return writeTestResponse(connection, wireGeneration, wireAttemptDomain, successResponse(`{"task":"private-task-sentinel"}`))
+		return writeTestResponse(connection, wireAttemptDomain, successResponse(`{"task":"private-task-sentinel"}`))
 	})
 	t.Setenv(attemptTokenFileEnv, fixture.token)
 	client, err := NewAttemptClientFromEnvironment(fixture.socket)
@@ -432,7 +431,7 @@ func TestAttemptClientReadsExactTask(t *testing.T) {
 func TestAttemptClientRejectsInvalidTaskResponse(t *testing.T) {
 	bearer := testCredential('V')
 	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-		return writeTestResponse(connection, wireGeneration, wireAttemptDomain, successResponse(`{"task":"bad\u0000task"}`))
+		return writeTestResponse(connection, wireAttemptDomain, successResponse(`{"task":"bad\u0000task"}`))
 	})
 	t.Setenv(attemptTokenFileEnv, fixture.token)
 	client, err := NewAttemptClientFromEnvironment(fixture.socket)
@@ -452,7 +451,7 @@ func TestAttemptOutcomeAcknowledgesErrorResponse(t *testing.T) {
 		if !wireOutcomeRequest(request) {
 			return fmt.Errorf("expected outcome request")
 		}
-		return writeTestOutcomeResponse(connection, wireGeneration, wireAttemptDomain, `{"ok":false,"error":"unavailable"}`)
+		return writeTestOutcomeResponse(connection, wireAttemptDomain, `{"ok":false,"error":"unavailable"}`)
 	})
 	t.Setenv(attemptTokenFileEnv, fixture.token)
 	client, err := NewAttemptClientFromEnvironment(fixture.socket)
@@ -484,7 +483,7 @@ func TestAttemptOutcomeDoesNotAcknowledgeInvalidResponse(t *testing.T) {
 				if !wireOutcomeRequest(request) {
 					return fmt.Errorf("expected outcome request")
 				}
-				return writeTestUnacknowledgedOutcomeResponse(connection, wireGeneration, wireAttemptDomain, test.body)
+				return writeTestUnacknowledgedOutcomeResponse(connection, wireAttemptDomain, test.body)
 			})
 			t.Setenv(attemptTokenFileEnv, fixture.token)
 			client, err := NewAttemptClientFromEnvironment(fixture.socket)
@@ -508,11 +507,8 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 		want   error
 		remote RemoteErrorCode
 	}{
-		{name: "wrong generation", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration-1, wireOperatorDomain, valid)
-		}, want: ErrProtocol},
 		{name: "wrong domain", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireAttemptDomain, valid)
+			return writeTestResponse(connection, wireAttemptDomain, valid)
 		}, want: ErrProtocol},
 		{name: "zero frame", write: func(connection net.Conn) error { return writeTestBytes(connection, []byte{0, 0, 0, 0}) }, want: ErrProtocol},
 		{name: "oversized frame", write: func(connection net.Conn) error {
@@ -522,76 +518,76 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 		}, want: ErrProtocol},
 		{name: "truncated header", write: func(connection net.Conn) error { return writeTestBytes(connection, []byte{0, 0}) }, want: ErrTransport},
 		{name: "truncated payload", write: func(connection net.Conn) error {
-			return writeTestBytes(connection, []byte{0, 0, 0, 10, 1, wireOperatorDomain, '{'})
+			return writeTestBytes(connection, []byte{0, 0, 0, 10, wireOperatorDomain, '{'})
 		}, want: ErrTransport},
 		{name: "extra JSON", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, valid+`{}`)
+			return writeTestResponse(connection, wireOperatorDomain, valid+`{}`)
 		}, want: ErrProtocol},
 		{name: "duplicate envelope ok", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"ok":true,"data":{"ready":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":false,"ok":true,"data":{"ready":true}}`)
 		}, want: ErrProtocol},
 		{name: "duplicate envelope data", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":false},"data":{"ready":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":true,"data":{"ready":false},"data":{"ready":true}}`)
 		}, want: ErrProtocol},
 		{name: "duplicate envelope error", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"error":"forbidden","error":"unauthorized"}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":false,"error":"forbidden","error":"unauthorized"}`)
 		}, want: ErrProtocol},
 		{name: "lowercase then uppercase ok alias", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"OK":true,"data":{"ready":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":false,"OK":true,"data":{"ready":true}}`)
 		}, want: ErrProtocol},
 		{name: "uppercase then lowercase ok alias", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"OK":false,"ok":true,"data":{"ready":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"OK":false,"ok":true,"data":{"ready":true}}`)
 		}, want: ErrProtocol},
 		{name: "nested uppercase ready alias", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":false,"READY":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":true,"data":{"ready":false,"READY":true}}`)
 		}, want: ErrProtocol},
 		{name: "unicode fold ok alias", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"o\u212a":true,"data":{"ready":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"o\u212a":true,"data":{"ready":true}}`)
 		}, want: ErrProtocol},
 		{name: "escaped uppercase ok alias", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"\u004fK":true,"data":{"ready":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"\u004fK":true,"data":{"ready":true}}`)
 		}, want: ErrProtocol},
 		{name: "standalone noncanonical ok", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"Ok":true,"data":{"ready":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"Ok":true,"data":{"ready":true}}`)
 		}, want: ErrProtocol},
 		{name: "punctuated member name", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"bad-key":1}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"bad-key":1}`)
 		}, want: ErrProtocol},
 		{name: "whitespace member name", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"bad key":1}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"bad key":1}`)
 		}, want: ErrProtocol},
 		{name: "control member name", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"\u0001":1}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"\u0001":1}`)
 		}, want: ErrProtocol},
 		{name: "escaped canonical lowercase names", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"\u006f\u006b":true,"data":{"\u0072eady":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"\u006f\u006b":true,"data":{"\u0072eady":true}}`)
 		}},
 		{name: "invalid UTF-8 error", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, "{\"ok\":false,\"error\":\"\xff\"}")
+			return writeTestResponse(connection, wireOperatorDomain, "{\"ok\":false,\"error\":\"\xff\"}")
 		}, want: ErrProtocol},
 		// Tolerance is additive: a member this build does not know is ignored
 		// in the envelope and in the data, and the answer is still served.
 		{name: "unknown envelope member", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"future":"added"}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"future":"added"}`)
 		}},
 		{name: "unknown data member", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true,"future":"added"}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":true,"data":{"ready":true,"future":"added"}}`)
 		}},
 		{name: "missing ok", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"data":{"ready":true}}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"data":{"ready":true}}`)
 		}, want: ErrProtocol},
 		{name: "trailing wire byte", write: func(connection net.Conn) error {
-			payload := append([]byte{wireGeneration, wireOperatorDomain}, []byte(valid)...)
+			payload := append([]byte{wireOperatorDomain}, []byte(valid)...)
 			return writeTestPayload(connection, payload, []byte{'x'})
 		}, want: ErrProtocol},
 		{name: "unknown fixed error", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"error":"private-sentinel"}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":false,"error":"private-sentinel"}`)
 		}, want: ErrProtocol},
 		{name: "fixed remote error", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"error":"unauthorized"}`)
+			return writeTestResponse(connection, wireOperatorDomain, `{"ok":false,"error":"unauthorized"}`)
 		}, remote: RemoteUnauthorized},
 		{name: "maximum exact frame", write: func(connection net.Conn) error {
-			payload := append([]byte{wireGeneration, wireOperatorDomain}, []byte(valid)...)
+			payload := append([]byte{wireOperatorDomain}, []byte(valid)...)
 			payload = append(payload, bytes.Repeat([]byte{' '}, wireMaxFrameBytes-len(payload))...)
 			return writeTestPayload(connection, payload, nil)
 		}},
@@ -680,7 +676,7 @@ func TestSnapshotJSONRejectsDuplicateNestedNamesAndInvalidUTF8(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-				return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(test.body))
+				return writeTestResponse(connection, wireOperatorDomain, successResponse(test.body))
 			})
 			client, err := NewOperatorClient(fixture.socket, fixture.token)
 			if err != nil {
@@ -709,7 +705,7 @@ func TestSnapshotJSONAcceptsPairedSurrogateAndLiteralReplacement(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			body := `{"head":1,"factory":{"dispatch_enabled":true,"capacity":1,"active_runs":0,"revision":1},"projects":[{"id":"` + id('1') + `","name":"` + test.wire + `","revision":1}],"agents":[],"tasks":[]}`
 			fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-				return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(body))
+				return writeTestResponse(connection, wireOperatorDomain, successResponse(body))
 			})
 			client, err := NewOperatorClient(fixture.socket, fixture.token)
 			if err != nil {
@@ -741,7 +737,7 @@ func TestDeadlineClosesOneShotConnectionPromptly(t *testing.T) {
 	release := make(chan struct{})
 	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
 		<-release
-		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"ready":true}`))
+		return writeTestResponse(connection, wireOperatorDomain, successResponse(`{"ready":true}`))
 	})
 	client, err := NewOperatorClient(fixture.socket, fixture.token)
 	if err != nil {
@@ -769,7 +765,7 @@ func TestDeadlineClosesOneShotConnectionPromptly(t *testing.T) {
 func TestClientFormattingAndErrorsNeverExposeBearerOrPaths(t *testing.T) {
 	bearer := testCredential('S')
 	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":false,"error":"unauthorized"}`)
+		return writeTestResponse(connection, wireOperatorDomain, `{"ok":false,"error":"unauthorized"}`)
 	})
 	client, err := NewOperatorClient(fixture.socket, fixture.token)
 	if err != nil {
@@ -1008,7 +1004,7 @@ func TestWebOpenPreservesDecodedLaunchOnProtocolError(t *testing.T) {
 		// A complete but invalid launch: the URL is not https, so the client
 		// refuses it after decoding every bounded field.
 		body := `{"launch_url":"http://app.darkfactory.build/#df_pair=` + challenge + `","expires_at_ms":1234,"challenge_digest":"` + digest + `","outcome":"ready"}`
-		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(body))
+		return writeTestResponse(connection, wireOperatorDomain, successResponse(body))
 	})
 	client, err := NewOperatorClient(fixture.socket, fixture.token)
 	if err != nil {
@@ -1029,7 +1025,7 @@ func TestWebAbandonOpenUsesUnambiguousEmptyAcknowledgement(t *testing.T) {
 	bearer := testCredential('A')
 	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
 	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{}`))
+		return writeTestResponse(connection, wireOperatorDomain, successResponse(`{}`))
 	})
 	client, err := NewOperatorClient(fixture.socket, fixture.token)
 	if err != nil {
@@ -1046,7 +1042,7 @@ func TestWebAbandonOpenUsesUnambiguousEmptyAcknowledgement(t *testing.T) {
 	// The deleted `abandoned` result member cannot come back as authority: it
 	// reaches no field, so the acknowledgement stays the empty one above.
 	fixture = newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"abandoned":false}`))
+		return writeTestResponse(connection, wireOperatorDomain, successResponse(`{"abandoned":false}`))
 	})
 	client, err = NewOperatorClient(fixture.socket, fixture.token)
 	if err != nil {
@@ -1095,7 +1091,7 @@ func TestSocketParentSwapAfterDialIsRejected(t *testing.T) {
 			done <- err
 			return
 		}
-		done <- writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"ready":true}`))
+		done <- writeTestResponse(connection, wireOperatorDomain, successResponse(`{"ready":true}`))
 	}()
 	client, err := NewOperatorClient(socket, token)
 	if err != nil {
@@ -1199,7 +1195,7 @@ func TestFocusedClientCallsDoNotRetainGoroutinesOrFDs(t *testing.T) {
 	for range 20 {
 		bearer := testCredential('C')
 		fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"ready":true}`))
+			return writeTestResponse(connection, wireOperatorDomain, successResponse(`{"ready":true}`))
 		})
 		client, err := NewOperatorClient(fixture.socket, fixture.token)
 		if err != nil {

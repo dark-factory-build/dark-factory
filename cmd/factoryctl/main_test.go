@@ -496,7 +496,6 @@ func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 	question := "private-human-question-sentinel"
 	tests := []api.RemoteErrorCode{
 		api.RemoteInvalidRequest,
-		api.RemoteUnsupportedProtocol,
 		api.RemoteUnauthorized,
 		api.RemoteForbidden,
 		api.RemoteNotFound,
