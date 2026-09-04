@@ -60,8 +60,8 @@ Access policy, or App configuration is live.
   reviews, and GitHub refuses a self-review that takes a side, `APPROVE` and
   `REQUEST_CHANGES` alike -- so every one of them is posted as `COMMENT`
   carrying a `Dark-Factory-Review:` line the App renders and refuses in caller
-  text. The `review` status check reads that line to enforce AGENTS.md rule 2;
-  see `docs/development/WORKFLOW.md`. Each write's operation UUID is accepted
+  text. The `review` status check reads that line to enforce its exact-head
+  verdict contract. Each write's operation UUID is accepted
   in either case and canonicalized to lowercase, so one UUID is one replay
   identity however the caller's `uuidgen` spelled it. Merge queue enqueue and
   direct merge are separate typed operations, never fallback attempts. Direct
@@ -248,11 +248,9 @@ documentation.
 [binding]: https://developers.cloudflare.com/workers/runtime-apis/bindings/
 [secret]: https://developers.cloudflare.com/workers/configuration/secrets/
 
-`wrangler secret put` immediately creates and deploys a Worker version. It is
-therefore not an acceptable staging command for this bootstrap. The reviewed
-live runbook must use the versions API or another no-traffic staging mechanism,
-prove the exact draft, and add a route only after the independent deployment
-gate. Do not improvise the first live sequence from generic Wrangler examples.
+`wrangler secret put` immediately creates and deploys a Worker version. The
+activation sequence uses the versions API or another no-traffic staging
+mechanism, proves the exact draft, and adds a route after the deployment gate.
 Routine production deployment is the deliberate non-local exception: the fixed
 Maintainer-App workflow receives its Cloudflare API token only from the
 environment-scoped GitHub Actions secret. It does not use the local `.env.txt`,
@@ -296,8 +294,8 @@ and deploys nothing.
 
 ## Activation gates
 
-No live action is implied by merging this code. Activation requires a separate
-operator-authorized run in this order:
+No live action is implied by merging this code. Production activation follows
+this order:
 
 1. local CI, release bundle, Wrangler dry-run, and independent adversarial
    `ALLOW` on one exact commit;
@@ -319,7 +317,8 @@ operator-authorized run in this order:
    typed tools for the next PR under the normal independent-review rule.
 
 Cloudflare account credentials, GitHub App credentials, route changes, and
-deployments remain operator authority. Tests and review never exercise them.
+deployments remain outside provider and task authority. Tests and review do not
+exercise them.
 
 ## Future integrations
 

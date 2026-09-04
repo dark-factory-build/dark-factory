@@ -215,7 +215,7 @@ jobs:
         if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
         run: echo "every selected combined-tree gate passed"
 
-      # AGENTS.md rule 2, made a merge condition rather than a convention.
+      # Exact-head review is a merge condition rather than a convention.
       #
       # In the queue only `success` passes. Everywhere else `skipped` passes
       # too, because `review` runs only on `merge_group`: recording a verdict

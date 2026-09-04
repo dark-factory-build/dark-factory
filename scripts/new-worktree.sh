@@ -57,6 +57,5 @@ Next steps:
   cd $target
   go build ./...
   ./scripts/local-ci.sh
-  Publish $branch and open a PR through an authorized host credential broker
-  or App-backed tool surface.
+  Publish $branch and open a PR.
 EOF

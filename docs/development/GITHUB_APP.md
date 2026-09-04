@@ -105,12 +105,11 @@ silently claim a public ingress. All eight production authority settings are
 required Cloudflare secrets. There is no database URL, owner integration,
 runtime role, provider API key, or ambient authentication fallback.
 
-`wrangler secret put` deploys immediately and is not an acceptable staging
-step. The [deployment and local-credential runbook](WORKFLOW.md#cloudflare-credentials)
-must stage an exact version and its secrets
-without traffic, verify names and bindings without reading values, and add the
-route only after independent adversarial `ALLOW`. This is operator deployment
-authority, not provider or task authority. Product webhook intake and
+`wrangler secret put` deploys immediately. The
+[control-plane activation sequence](../../control-plane/README.md#activation-gates)
+stages an exact version and its secrets without traffic, verifies names and
+bindings without reading values, and adds the route after independent review.
+This is deployment authority, not provider or task authority. Product webhook intake and
 operator/PWA projections keep separate routes, configuration, storage
 namespaces, and authentication even if they later share hardened HTTP or
 signature primitives.
@@ -201,12 +200,9 @@ operation token receives only its subset. That all-or-nothing check prevents
 `maintainer_status` from reporting v5 for a repository where direct merge is
 unusable; it does not copy Administration into any other operation token.
 
-A workflow change is therefore a separate human-authored and human-published
-pull request. It is never smuggled through the maintainer broker, and broker
-refusal never authorizes the coordinating agent to fall back to a personal
-token or credential helper. The ordinary non-workflow stack may resume through
-the broker only after that workflow pull request has passed its own review and
-merged.
+Workflow and CODEOWNERS publication is outside the maintainer broker's typed
+surface. It can proceed through another repository authority without widening
+the broker.
 
 When the maintainer App also authored the PR — which is every PR it reviews —
 GitHub refuses a self-review that takes a side, `APPROVE` and `REQUEST_CHANGES`
@@ -214,9 +210,8 @@ alike. So the formal review is always submitted as a `COMMENT` and carries its
 bounded findings plus one App-written verdict line, which is what the required
 `review` check reads; the GitHub review state never carries the verdict. The
 review is not an independent GitHub approval and cannot satisfy a
-distinct-reviewer requirement. The cold review must still be performed by a
-separate agent or person, and repository policy may require a separate GitHub
-actor to approve before the typed merge.
+distinct-reviewer requirement. The status check consumes a cold review from a
+separate agent or person.
 
 The two typed merge operations are mutually exclusive; neither silently falls
 back to the other. Before queue enqueue, the broker re-reads the PR and requires
@@ -437,7 +432,7 @@ operation UUID journalled under v2 cannot be replayed under v3. Rotate the
 build; a build promoted against the old value fails its own authority check,
 readiness reports not-ready, and the deploy gate rolls it back.
 
-The separately approved `maintainer-operations-v2` revision added only Actions
+The `maintainer-operations-v2` revision added only Actions
 read/write, Contents read/write, Issues read/write, Pull requests read/write,
 Checks read, Merge queues read/write, and Metadata read. Each credential minted
 from it is downscoped again to one typed operation. Pull requests write covers

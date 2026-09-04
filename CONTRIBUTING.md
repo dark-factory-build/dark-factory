@@ -1,13 +1,11 @@
 # Contributing
 
-See [AGENTS.md](AGENTS.md) for the full workflow (one development worktree per change,
-mandatory adversarial PR review, simplification over patch) — this
-file is just the shortest path to a useful first change.
+Repository context is in [AGENTS.md](AGENTS.md).
 
 Development fixtures use isolated temporary homes, explicit sockets, and
-deterministic providers; never use the operator's installation.
+deterministic providers.
 
-## Before you send a change
+## Local development
 
 ```sh
 ./scripts/new-worktree.sh <slug>
@@ -15,7 +13,7 @@ cd .worktrees/<slug>
 go build ./...
 ```
 
-Run the complete gate:
+The complete local gate is:
 
 ```sh
 ./scripts/local-ci.sh
@@ -26,13 +24,11 @@ suites, one TypeScript client proof, and the real browser, daemon and
 service end-to-end lifecycles, followed by
 `git diff --check`. It additionally checks release-source, publisher, and
 package fixtures. The daemon is Darwin-only today, so the gate is macOS-only;
-Linux support is #120/#141-144. CI requires the runtime gate and the
-control-plane gate through the aggregate `required` context, so run the gate
-before opening a PR. Also run affected-package tests and focused `-race`
-checks when the change touches concurrency or ownership; do not impose broad
-stress suites on unrelated changes.
+Linux support is #120/#141-144. Affected-package tests and focused `-race`
+checks cover concurrency or ownership changes without imposing broad stress on
+unrelated changes.
 
-A few repository-wide rules the gate enforces, worth knowing up front:
+The gate checks:
 
 - `gofmt` and `go vet` are clean. Any affected focused `-race` check treats a
   race report as a failure, not a warning.
@@ -40,10 +36,6 @@ A few repository-wide rules the gate enforces, worth knowing up front:
   `internal/kernel/schema.go`. There is deliberately no migration directory
   and no upcaster: the Go home and schema are new, so a schema change is an
   edit to that set plus the causal tests that pin it.
-- Never touch a real `$DARK_FACTORY_HOME` (default `~/.dark-factory`) or
-  `launchd` from a test or a manual check — see
-  [docs/development/WORKFLOW.md](docs/development/WORKFLOW.md) for a
-  throwaway daemon on a temp directory instead.
 
 ## Where to start
 
@@ -57,8 +49,7 @@ A few repository-wide rules the gate enforces, worth knowing up front:
 - **A new provider**: see [docs/providers.md](docs/providers.md) — the whole
   closed contract is `internal/provider/provider.go`: executable resolution,
   launch construction, and one selected task-delivery mode per launch. Extend
-  its deterministic fake-provider proofs before requesting a separately
-  approved real run.
+  its deterministic fake-provider proofs before a real run.
 - **The web console**: `web/packages/ui/src` is the operator surface, built on
   the framework-neutral client in `web/packages/client`. It renders only
   bounded canonical state and finite errors, never constructs run or session
@@ -68,6 +59,3 @@ A few repository-wide rules the gate enforces, worth knowing up front:
   [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY.md](SECURITY.md). Process
   fixtures must register exact resources before use and include an independent
   post-test verifier; provider/test-process cleanup is not proof.
-
-Every change updates docs in the same PR when it changes behavior — see
-`AGENTS.md`'s "docs are load-bearing" rule.

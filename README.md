@@ -31,17 +31,13 @@ remain clients of the same local API; neither owns lifecycle or policy.
 
 ## Installation
 
-Install a published release, not the development branch. The [installation
-guide](docs/install.md) covers the three binaries, managed service, and paired
-browser console.
+The [installation guide](docs/install.md) covers the three binaries, managed
+service, and paired browser console.
 
 ## Development
 
-Use an isolated worktree, a temporary `DARK_FACTORY_HOME`, and an explicit
-private socket for source development. The
-[development workflow](docs/development/WORKFLOW.md) has the checked command
-sequence and deterministic shell-provider fixtures. Run
-`./scripts/local-ci.sh` before sending a change.
+The [development workflow](docs/development/WORKFLOW.md) documents worktree,
+temporary-home, test, and deterministic shell-provider helpers.
 
 ## Learn more
 

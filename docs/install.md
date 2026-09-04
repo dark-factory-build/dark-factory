@@ -1,9 +1,8 @@
 # Installation
 
-Install a published macOS release rather than a source checkout. Development
-and tests use a temporary `DARK_FACTORY_HOME` and explicit socket as described
-in the [development workflow](development/WORKFLOW.md); they never replace the
-operator's binaries or launchd job.
+The same three sibling binaries can come from a published macOS release or a
+source build. The [development workflow](development/WORKFLOW.md) documents a
+temporary `DARK_FACTORY_HOME` and explicit socket for isolated checks.
 
 ## Install a release
 
