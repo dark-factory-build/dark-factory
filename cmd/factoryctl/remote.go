@@ -139,8 +139,16 @@ func exactInvitationDigest(invitation api.RemoteInvitation) (string, bool) {
 	return encoded, true
 }
 
-// renderQR draws one QR code as text, two module rows per line, using only the
-// half-block characters and the space. Ink is a dark module.
+// renderQR draws one QR code as text, two module rows per line, using only
+// the half-block characters and the space. A terminal cell is roughly twice
+// as tall as wide, so one module per column and two per row keeps modules
+// square; packing two modules per column as well (quadrant glyphs) squashes
+// the symbol horizontally and finder-pattern cross-checks reject it. Ink is a
+// LIGHT module (and the quiet zone); terminals are overwhelmingly
+// dark-background, so a dark module is left blank instead — the `qrencode
+// -t ANSIUTF8` convention. Drawn the other way around, a code is its own
+// negative on the terminals developers actually use, and many scanners
+// refuse it.
 func renderQR(text string) (string, error) {
 	code, err := qr.Encode(text, qr.L)
 	if err != nil {
@@ -154,15 +162,16 @@ func renderQR(text string) (string, error) {
 	for row := 0; row < span; row += 2 {
 		for column := 0; column < span; column++ {
 			// Black reports false outside the code, so the quiet zone needs no
-			// special case: it is simply the region no module covers.
-			upper := code.Black(column-qrQuietModules, row-qrQuietModules)
-			lower := code.Black(column-qrQuietModules, row+1-qrQuietModules)
+			// special case: it is simply the region no module covers, and
+			// reads as light.
+			upperLight := !code.Black(column-qrQuietModules, row-qrQuietModules)
+			lowerLight := !code.Black(column-qrQuietModules, row+1-qrQuietModules)
 			switch {
-			case upper && lower:
+			case upperLight && lowerLight:
 				builder.WriteRune('█')
-			case upper:
+			case upperLight:
 				builder.WriteRune('▀')
-			case lower:
+			case lowerLight:
 				builder.WriteRune('▄')
 			default:
 				builder.WriteRune(' ')
