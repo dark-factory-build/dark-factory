@@ -1574,3 +1574,50 @@ func TestBrowserLeaseCorruptionFailsClosedOnReadAndOpen(t *testing.T) {
 		store.Close()
 	})
 }
+
+func TestTerminalLeaseHolderSupersedesItsOwnUnexpiredLease(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	session := terminalSessionForRunTest(t, store, run.ID)
+	boot := browserTestBoot(t, 130)
+	writer := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 130, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 130), browserKey(t), 31)
+	other := pairBrowserClient(t, store, mintBrowserChallenge(t, store, 131, boot, 30, 100, BrowserCapabilityObserve|BrowserCapabilityTerminalInput), boot, browserTestID(t, 131), browserKey(t), 31)
+	first, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, writer.ID, run.Revision, session.Revision, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReserveTerminalInputSequence(ctx, run.ID, session.ID, writer.ID, first.Generation, 1, run.Revision, session.Revision, mustTime(t, 32)); err != nil {
+		t.Fatal(err)
+	}
+	// The same paired browser reconnecting before expiry gets a fresh
+	// generation with a fresh sequence, exactly like an expiry replacement.
+	second, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, writer.ID, run.Revision, session.Revision, mustTime(t, 33))
+	if err != nil {
+		t.Fatalf("holder reacquire error = %v", err)
+	}
+	if second.Generation != first.Generation+1 || second.LastInputSequence != 0 || second.ExpiresAt.Int64() != 33+BrowserTerminalLeaseTTL || second.ClientID != writer.ID {
+		t.Fatalf("holder reacquire = %+v", second)
+	}
+	// The superseded generation is fenced for every effect.
+	if _, err := store.CheckTerminalLease(ctx, run.ID, session.ID, writer.ID, first.Generation, run.Revision, session.Revision, mustTime(t, 34)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("superseded check error = %v", err)
+	}
+	if _, err := store.RenewTerminalLease(ctx, run.ID, session.ID, writer.ID, first.Generation, run.Revision, session.Revision, mustTime(t, 34)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("superseded renewal error = %v", err)
+	}
+	if _, err := store.ReserveTerminalInputSequence(ctx, run.ID, session.ID, writer.ID, first.Generation, 2, run.Revision, session.Revision, mustTime(t, 34)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("superseded input error = %v", err)
+	}
+	if _, err := store.CheckTerminalLease(ctx, run.ID, session.ID, writer.ID, second.Generation, run.Revision, session.Revision, mustTime(t, 34)); err != nil {
+		t.Fatalf("current generation check error = %v", err)
+	}
+	// A different client still waits for expiry.
+	if _, err := store.AcquireTerminalLease(ctx, run.ID, session.ID, other.ID, run.Revision, session.Revision, mustTime(t, 34)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("other client while held error = %v", err)
+	}
+	afterSession := terminalSessionForRunTest(t, store, run.ID)
+	if afterSession.LeaseClientID == nil || *afterSession.LeaseClientID != writer.ID || afterSession.LeaseGeneration != second.Generation || afterSession.LastInputSequence != 0 || afterSession.Revision != session.Revision {
+		t.Fatalf("session after holder reacquire = %+v", afterSession)
+	}
+}
