@@ -109,6 +109,26 @@ verbatim), or a controller sending more than 120 messages in a burst or 60 per
 second sustained ends the offending socket (4003 for limits, 4004 for protocol)
 and, for a host, every controller with 4001.
 
+## Transport frames
+
+The relay never interprets any of this. On a controller session the factory
+forwards every daemon frame untouched, and additionally sends one text frame
+`{"type":"RELAY_TICKET","ticket":"<control ticket>"}` right after
+`PAIR_RESULT` or `AUTH_RESULT`. The controller's relay transport consumes that
+frame and never hands it to the session, so no session decoder has to tolerate
+a member it does not own.
+
+A pairing invitation is a link the factory prints and the controller scans:
+
+```text
+https://app.darkfactory.build/remote#df_remote&node=…&daemon=…&challenge=…&ticket=…&expires=…
+```
+
+The fragment is plain query pairs (`URLSearchParams`). `relay` and `host` are
+optional and omitted at their defaults, `wss://relay.darkfactory.build` and
+`127.0.0.1:43123`; `ticket` is a `pair` ticket and `challenge` is the daemon's
+own pairing challenge, which is what actually authorizes the pairing.
+
 ## Storage and logging
 
 The object persists exactly one record: `host` (`key`, `generation`,

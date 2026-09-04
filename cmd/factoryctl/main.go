@@ -45,6 +45,8 @@ const (
   factoryctl web open
   factoryctl web list-clients [--after CLIENT_ID]
   factoryctl web revoke CLIENT_ID --revision REVISION
+  factoryctl remote pair
+  factoryctl remote status
   factoryctl init --home ABSOLUTE
   factoryctl doctor --home ABSOLUTE
   factoryctl service status --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
@@ -69,6 +71,8 @@ const (
 	commandWebOpen
 	commandWebListClients
 	commandWebRevoke
+	commandRemotePair
+	commandRemoteStatus
 	commandInit
 	commandDoctor
 	commandServiceStatus
@@ -153,6 +157,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandWebStatus || command.kind == commandWebOpen || command.kind == commandWebListClients || command.kind == commandWebRevoke {
 		return runWeb(ctx, command, getenv, stdout, stderr, opener)
 	}
+	if command.kind == commandRemotePair || command.kind == commandRemoteStatus {
+		return runRemote(ctx, command, getenv, stdout, stderr)
+	}
 	if command.kind == commandProjectCreate || command.kind == commandAgentCreate || command.kind == commandTaskAdd || command.kind == commandDispatch {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
@@ -224,6 +231,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 1 && (args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch") {
 		return parseOperator(args)
+	}
+	if len(args) >= 1 && args[0] == "remote" {
+		return parseRemote(args)
 	}
 	if len(args) < 2 || args[0] != "attempt" && args[0] != "web" {
 		return attemptCommand{}, false, false

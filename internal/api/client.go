@@ -169,6 +169,31 @@ func (client *OperatorClient) WebRevokeClient(ctx context.Context, id string, ex
 	return result, nil
 }
 
+// RemotePair mints one remote pairing invitation. The returned link carries a
+// pairing challenge and a relay ticket, so the caller must treat it exactly
+// like the web launch URL: prove it, hand it to the operator, never log it.
+func (client *OperatorClient) RemotePair(ctx context.Context) (RemoteInvitation, error) {
+	var result RemoteInvitation
+	if err := client.client.call(ctx, "remote_pair", struct{}{}, &result); err != nil {
+		return RemoteInvitation{}, err
+	}
+	if !validRemoteInvitation(result) {
+		return RemoteInvitation{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) RemoteStatus(ctx context.Context) (RemoteStatus, error) {
+	var result RemoteStatus
+	if err := client.client.call(ctx, "remote_status", struct{}{}, &result); err != nil {
+		return RemoteStatus{}, err
+	}
+	if !validRemoteStatus(result) {
+		return RemoteStatus{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	var result DashboardSnapshot
 	if err := client.client.call(ctx, "snapshot", struct{}{}, &result); err != nil {
@@ -726,6 +751,40 @@ func validWebLaunch(launch WebLaunch) bool {
 		return false
 	}
 	return validText(launch.LaunchURL, 1, 4096) && strings.HasPrefix(launch.LaunchURL, "https://") && launch.ExpiresAtMs > 0 && validDigest(launch.ChallengeDigest)
+}
+
+func validRemoteInvitation(invitation RemoteInvitation) bool {
+	return validText(invitation.Link, 1, 8192) && strings.HasPrefix(invitation.Link, "https://") &&
+		!strings.ContainsAny(invitation.Link, " \t\r\n") && validNodeID(invitation.NodeID) &&
+		invitation.Expires > 0 && validDigest(invitation.ChallengeDigest)
+}
+
+func validRemoteStatus(status RemoteStatus) bool {
+	if !validNodeID(status.NodeID) || !validText(status.RelayOrigin, 1, 4096) || strings.ContainsAny(status.RelayOrigin, " \t\r\n*") {
+		return false
+	}
+	if !strings.HasPrefix(status.RelayOrigin, "wss://") && !strings.HasPrefix(status.RelayOrigin, "ws://") {
+		return false
+	}
+	// A lost host connection closes every relayed session under one lock, so a
+	// disconnected connector reporting live sessions is not a state the daemon
+	// can occupy.
+	return status.Sessions >= 0 && (status.Connected || status.Sessions == 0)
+}
+
+// validNodeID is the relay's self-certifying node id: exactly 32 characters of
+// lowercase RFC 4648 base32 without padding.
+func validNodeID(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= '2' && character <= '7' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validDigest(value string) bool {

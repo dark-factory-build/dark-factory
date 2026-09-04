@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	defaultBrowserAddress = "127.0.0.1:43123"
+	defaultBrowserAddress = daemon.DefaultBrowserAddress
 	defaultBrowserOrigin  = "https://app.darkfactory.build"
 	defaultGitExecutable  = change.TrustedGitExecutable
 	defaultToolPath       = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"

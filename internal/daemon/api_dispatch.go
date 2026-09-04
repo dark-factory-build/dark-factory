@@ -182,6 +182,26 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(api.RemoteInternal)
 		}
 		return reply
+	case api.CallRemotePair:
+		invitation, err := daemon.RemotePair(ctx)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		reply, err := api.NewRemoteInvitationReply(invitation)
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return reply
+	case api.CallRemoteStatus:
+		status, err := daemon.RemoteStatus()
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		reply, err := api.NewRemoteStatusReply(status)
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return reply
 	case api.CallWebRevokeClient:
 		input, ok := call.WebClientRevocationInput()
 		if !ok {
