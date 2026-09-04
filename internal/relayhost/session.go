@@ -56,12 +56,13 @@ type session struct {
 	connection uint32
 	inbound    chan Record
 
-	// queued is the session's unwritten outbound budget, and draining says
-	// the relay removed this session from the connector map. Both are owned
-	// by the connector, not by mu: queued by outboundQueue.mu and draining by
-	// Connector.mu.
-	queued   int
-	draining bool
+	// queued and queuedBytes are the session's unwritten outbound budget, and
+	// draining says the relay removed this session from the connector map.
+	// All are owned by the connector, not by mu: the budget by
+	// outboundQueue.mu and draining by Connector.mu.
+	queued      int
+	queuedBytes int
+	draining    bool
 
 	inboundBytes int
 

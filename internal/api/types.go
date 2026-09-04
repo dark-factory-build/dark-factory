@@ -126,6 +126,26 @@ type WebRevokeResult struct {
 	Revision uint64 `json:"revision"`
 }
 
+// RemoteInvitation is the one-shot remote pairing invitation. Link carries the
+// pairing challenge and the relay ticket in its fragment, so it is a secret:
+// the daemon returns it only in this reply and never logs it. ChallengeDigest
+// lets factoryctl prove the link's own challenge before printing it.
+type RemoteInvitation struct {
+	Link            string `json:"link"`
+	NodeID          string `json:"node_id"`
+	Expires         int64  `json:"expires"`
+	ChallengeDigest string `json:"challenge_digest"`
+}
+
+// RemoteStatus is the bounded, non-secret operator view of the outbound relay
+// connector. It carries no ticket, key, challenge or controller identity.
+type RemoteStatus struct {
+	NodeID      string `json:"node_id"`
+	RelayOrigin string `json:"relay_origin"`
+	Connected   bool   `json:"connected"`
+	Sessions    int    `json:"sessions"`
+}
+
 type MutationResult struct {
 	Head     uint64 `json:"head"`
 	Revision uint64 `json:"revision"`

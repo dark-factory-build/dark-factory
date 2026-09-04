@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/ncruces/go-sqlite3 v0.35.3
 	golang.org/x/sys v0.47.0
+	rsc.io/qr v0.2.0
 )
 
 require (

@@ -35,6 +35,8 @@ const (
 	CallWebAbandonOpen
 	CallWebListClients
 	CallWebRevokeClient
+	CallRemotePair
+	CallRemoteStatus
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -133,6 +135,8 @@ const (
 	replyWebAbandon
 	replyWebClients
 	replyWebRevoke
+	replyRemoteInvitation
+	replyRemoteStatus
 	replyError
 )
 
@@ -148,6 +152,8 @@ type Reply struct {
 	webAbandon  WebAbandonOpenResult
 	webClients  WebClientPage
 	webRevoke   WebRevokeResult
+	invitation  RemoteInvitation
+	remote      RemoteStatus
 	code        RemoteErrorCode
 }
 
@@ -224,6 +230,20 @@ func NewWebRevokeReply(result WebRevokeResult) (Reply, error) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyWebRevoke, webRevoke: result}, nil
+}
+
+func NewRemoteInvitationReply(invitation RemoteInvitation) (Reply, error) {
+	if !validRemoteInvitation(invitation) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyRemoteInvitation, invitation: invitation}, nil
+}
+
+func NewRemoteStatusReply(status RemoteStatus) (Reply, error) {
+	if !validRemoteStatus(status) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyRemoteStatus, remote: status}, nil
 }
 
 func NewErrorReply(code RemoteErrorCode) (Reply, error) {
@@ -446,7 +466,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		call.digest = digestAttemptCredential(bearer)
 	}
 	switch kind {
-	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallWebOpen:
+	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallWebOpen, CallRemotePair, CallRemoteStatus:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -564,6 +584,10 @@ func methodKind(method string) (CallKind, byte) {
 		return CallWebListClients, operatorDomain
 	case "web_revoke_client":
 		return CallWebRevokeClient, operatorDomain
+	case "remote_pair":
+		return CallRemotePair, operatorDomain
+	case "remote_status":
+		return CallRemoteStatus, operatorDomain
 	default:
 		return 0, 0
 	}
@@ -642,6 +666,10 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebClients
 	case CallWebRevokeClient:
 		return reply == replyWebRevoke
+	case CallRemotePair:
+		return reply == replyRemoteInvitation
+	case CallRemoteStatus:
+		return reply == replyRemoteStatus
 	default:
 		return false
 	}
@@ -682,6 +710,10 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.webClients)
 	case replyWebRevoke:
 		data, err = json.Marshal(reply.webRevoke)
+	case replyRemoteInvitation:
+		data, err = json.Marshal(reply.invitation)
+	case replyRemoteStatus:
+		data, err = json.Marshal(reply.remote)
 	case replyError:
 	default:
 		return ErrProtocol

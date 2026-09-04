@@ -18,10 +18,22 @@ import (
 type RelayRuntime struct {
 	daemon    *Daemon
 	connector *relayhost.Connector
+	// identity, relayOrigin and browserAddress are the facts an invitation
+	// needs that the connector does not project: the node key that signs a
+	// pairing ticket, the origin a paired browser dials, and the loopback
+	// address the relay itself pipes sessions into.
+	identity       relayhost.Identity
+	relayOrigin    string
+	browserAddress string
 
 	closeOnce sync.Once
 	closeErr  error
 }
+
+// DefaultBrowserAddress is the loopback endpoint factoryd listens on unless
+// the operator names another. A remote invitation omits the address when it is
+// this one, which is most of the time and several QR modules.
+const DefaultBrowserAddress = "127.0.0.1:43123"
 
 // DialRelay starts the outbound relay connector for one already-listening
 // browser runtime. It returns before the relay is reachable; an unreachable
@@ -57,7 +69,7 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 	if err != nil {
 		return nil, err
 	}
-	runtime := &RelayRuntime{daemon: daemon, connector: connector}
+	runtime := &RelayRuntime{daemon: daemon, connector: connector, identity: identity, relayOrigin: relayOrigin, browserAddress: browserAddress}
 	daemon.browserMu.Lock()
 	if daemon.browserClosing || daemon.relay != nil {
 		daemon.browserMu.Unlock()
@@ -67,6 +79,14 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 	daemon.relay = runtime
 	daemon.browserMu.Unlock()
 	return runtime, nil
+}
+
+// Status reports what the connector currently observes.
+func (runtime *RelayRuntime) Status() relayhost.Status {
+	if runtime == nil {
+		return relayhost.Status{}
+	}
+	return runtime.connector.Status()
 }
 
 func (runtime *RelayRuntime) Close() error {

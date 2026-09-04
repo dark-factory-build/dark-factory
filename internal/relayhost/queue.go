@@ -6,6 +6,10 @@ const (
 	// maxSessionQueued bounds one session's unwritten records. A controller
 	// the relay cannot drain fast enough loses only its own session.
 	maxSessionQueued = 64
+	// maxSessionQueuedBytes bounds the same queue by size, mirroring the
+	// inbound bound: 64 records of 1 MiB would otherwise pin far more memory
+	// per stalled session than the record count alone suggests.
+	maxSessionQueuedBytes = maxSessionInboundBytes
 	// maxCoalescedBytes bounds one coalesced host message. A record larger
 	// than this is never split; it travels alone.
 	maxCoalescedBytes = 256 << 10
@@ -32,9 +36,10 @@ func newOutboundQueue() *outboundQueue {
 }
 
 // push enqueues one record. A session-attributed push is refused once that
-// session already holds maxSessionQueued unwritten records; a nil session is
-// a connection-level record (CLOSE for a finished session, REVOKE) and is
-// never rate limited by one controller.
+// session already holds maxSessionQueued unwritten records or
+// maxSessionQueuedBytes of payload; a nil session is a connection-level record
+// (CLOSE for a finished session, REVOKE) and is never rate limited by one
+// controller.
 func (queue *outboundQueue) push(owner *session, record Record) bool {
 	queue.mu.Lock()
 	if queue.closed {
@@ -42,11 +47,12 @@ func (queue *outboundQueue) push(owner *session, record Record) bool {
 		return false
 	}
 	if owner != nil {
-		if owner.queued >= maxSessionQueued {
+		if owner.queued >= maxSessionQueued || owner.queuedBytes+len(record.Payload) > maxSessionQueuedBytes {
 			queue.mu.Unlock()
 			return false
 		}
 		owner.queued++
+		owner.queuedBytes += len(record.Payload)
 	}
 	queue.records = append(queue.records, queued{record: record, session: owner})
 	queue.mu.Unlock()
@@ -66,6 +72,7 @@ func (queue *outboundQueue) drain() []Record {
 	for _, item := range pending {
 		if item.session != nil {
 			item.session.queued--
+			item.session.queuedBytes -= len(item.record.Payload)
 		}
 		records = append(records, item.record)
 	}

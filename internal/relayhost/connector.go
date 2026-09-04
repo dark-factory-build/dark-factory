@@ -42,6 +42,10 @@ const (
 // trusted to have framed the others correctly.
 var ErrRelayProtocol = errors.New("relayhost: relay protocol violation")
 
+// DefaultRelayOrigin is the production relay. A remote invitation omits the
+// relay member when the factory dials this one.
+const DefaultRelayOrigin = "wss://relay.darkfactory.build"
+
 // ErrConfig is a refusal to start a connector at all.
 var ErrConfig = errors.New("relayhost: invalid relay connector configuration")
 
@@ -58,7 +62,7 @@ type Config struct {
 	// Identity is the node identity this connector presents.
 	Identity Identity
 	// BrowserURL is the daemon's own loopback browser endpoint, for example
-	// ws://127.0.0.1:43123/browser/v2.
+	// ws://127.0.0.1:43123/browser.
 	BrowserURL string
 	// DeviceKey resolves one client id to its device public key. It reports
 	// ok=false for a missing or revoked client, which suppresses ticket
