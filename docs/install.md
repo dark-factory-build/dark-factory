@@ -28,8 +28,10 @@ factoryctl service status --home "$HOME/.dark-factory"
 ```
 
 Running the same install command from a different build replaces that
-installation in place, leaving the home and its data alone; `service uninstall`
-is for removal.
+installation in place, leaving the home and its data alone, as long as the
+installed launchd plist is still the one that build renders; when it is not,
+`service uninstall` then `service install` is the route. `service uninstall` is
+otherwise for removal.
 
 Point the operator client at that home and open the paired hosted console:
 

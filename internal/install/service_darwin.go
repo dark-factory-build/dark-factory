@@ -383,7 +383,10 @@ func toServiceIdentity(stat unix.Stat_t) serviceIdentity {
 
 // volatileServiceMember names the members a LIVE daemon legitimately rewrites
 // while a status observation runs. Their bytes and times are not part of the
-// service-status invariant; their filesystem identity and bounds are.
+// service-status invariant; their bounds are, and so is the database's
+// filesystem identity. The two sidecars keep neither: sameServiceHomeImage
+// skips them entirely, so their recorded identity goes unread — the shared
+// recording below stays because the database's is compared.
 func volatileServiceMember(name string) bool {
 	return name == databaseName || name == databaseName+"-wal" || name == databaseName+"-shm"
 }
@@ -536,9 +539,10 @@ func sameServiceHomeImage(left, right serviceHomeImage) error {
 		if name == databaseName+"-wal" || name == databaseName+"-shm" {
 			// The SQLite sidecars are derived state one daemon deletes on exit
 			// and the next recreates as fresh inodes, which an install that
-			// replaces a running build does inside one mutation. Each snapshot
-			// still bounds them; every durable member must hold its census
-			// position and identity.
+			// replaces a running build does inside one held capability. They
+			// are skipped in every comparison, not only that one: each snapshot
+			// still bounds them, and every durable member — the database
+			// included — must hold its census position and identity.
 			continue
 		}
 		if !inLeft || !inRight {

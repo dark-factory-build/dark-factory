@@ -33,7 +33,8 @@ remain clients of the same local API; neither owns lifecycle or policy.
 
 The [installation guide](docs/install.md) covers the three binaries, managed
 service, and paired browser console. The same install command replaces a
-running installation with the invoking build.
+running installation with the invoking build, while the installed plist is
+still the one that build renders.
 
 ## Development
 

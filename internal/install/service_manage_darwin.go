@@ -209,10 +209,22 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 		// The receipt, plist, and label already prove this home's installation.
 		// The receipt names the installed factoryd, so comparing it with the
 		// invoking one decides between the recognized repeat and an upgrade.
-		receipt, _, receiptErr := readServiceReceipt(home)
-		invoking, digestErr := digestServiceProgram(filepath.Join(sourceDir, "factoryd"))
-		if joined := errors.Join(receiptErr, digestErr); joined != nil {
-			return status, joined
+		receipt, present, receiptErr := readServiceReceipt(home)
+		if receiptErr != nil || !present {
+			return status, errors.Join(ErrServiceAmbiguous, receiptErr)
+		}
+		var invoking string
+		for _, name := range serviceBinaryNames {
+			// Every sibling faces copyServiceBinary's checks here, because the
+			// uninstall below destroys a working installation and an unusable
+			// build directory must refuse while that installation is intact.
+			digest, err := digestServiceProgram(filepath.Join(sourceDir, name))
+			if err != nil {
+				return status, err
+			}
+			if name == "factoryd" {
+				invoking = digest
+			}
 		}
 		if receipt.ProgramDigest == invoking {
 			return status, nil

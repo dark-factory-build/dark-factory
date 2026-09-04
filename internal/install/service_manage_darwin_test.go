@@ -323,6 +323,29 @@ func TestServiceInstallReplacesADifferentBuildInPlace(t *testing.T) {
 	}
 }
 
+// The replacement uninstalls before it installs, so an invoking set that
+// cannot be copied has to refuse while the installation is still running.
+func TestServiceInstallRefusesAnUnusableInvokingSetBeforeUninstalling(t *testing.T) {
+	fixture := newManageFixture(t)
+	fixture.writeSourceBuild(t, "first")
+	first := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(400))}
+	fixture.install(t, first.run)
+
+	fixture.writeSourceBuild(t, "second")
+	if err := os.Remove(filepath.Join(fixture.sourceDir, "factory-runner")); err != nil {
+		t.Fatal(err)
+	}
+	refuse := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(400)}}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, refuse.run)
+	if err == nil || status != (ServiceStatus{State: ServiceRunning, PID: 400}) {
+		t.Fatalf("install with a missing sibling = %+v, %v", status, err)
+	}
+	if len(refuse.calls) != 1 || refuse.calls[0][0] != "print" {
+		t.Fatalf("install with a missing sibling verbs = %q", refuse.calls)
+	}
+	fixture.assertInstalledBuild(t, "first")
+}
+
 func TestServiceInstallRefusesToReplaceBehindAForeignReceipt(t *testing.T) {
 	fixture := newManageFixture(t)
 	fixture.writeSourceBuild(t, "first")

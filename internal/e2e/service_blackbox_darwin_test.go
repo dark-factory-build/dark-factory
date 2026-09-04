@@ -3,6 +3,7 @@
 package e2e_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +66,23 @@ func TestBlackBoxServiceLifecycle(t *testing.T) {
 	if state.State != "running" || state.PID <= 1 {
 		t.Fatalf("running status = %+v", state)
 	}
+
+	// The same install command run from a different build replaces the running
+	// installation with the invoking one, through the real launchd.
+	next := requiredExecutable(t, "DARK_FACTORY_E2E_NEXT_FACTORYCTL")
+	previous := fixture.factoryctl
+	fixture.factoryctl = next
+	state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("install")...))
+	fixture.factoryctl = previous
+	if state.State != "running" || state.PID <= 1 {
+		t.Fatalf("replacing install state = %+v", state)
+	}
+	wantProgram, wantErr := os.ReadFile(filepath.Join(filepath.Dir(next), "factoryd"))
+	installed, installedErr := os.ReadFile(filepath.Join(install.ServiceDirectoryPath(fixture.home), "bin", "current", "factoryd"))
+	if wantErr != nil || installedErr != nil || !bytes.Equal(wantProgram, installed) {
+		t.Fatalf("the installed program is not the invoking build: %v, %v", wantErr, installedErr)
+	}
+	client = fixture.waitClient(t)
 
 	// Stop unloads the job, the daemon exits, and the socket dies.
 	state = serviceState(t, fixture.runFactoryctl(t, 0, serviceArgs("stop")...))
