@@ -316,12 +316,13 @@ func TestCaseVariantOfAKnownMemberIsRefused(t *testing.T) {
 		t.Fatalf("baseline daemon_id = %q", frame.Body.(Hello).DaemonID)
 	}
 	for name, mutated := range map[string]string{
-		"upper":       strings.Replace(valid, `"boot_id"`, `"DAEMON_ID":"`+shadow+`","boot_id"`, 1),
-		"mixed":       strings.Replace(valid, `"boot_id"`, `"Daemon_Id":"`+shadow+`","boot_id"`, 1),
-		"before":      strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID":"`+shadow+`","daemon_id"`, 1),
-		"no exact":    strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID"`, 1),
-		"envelope":    strings.Replace(valid, `{"type"`, `{"Type":"NOPE","type"`, 1),
-		"nested item": strings.Replace(valid, `"boot_id"`, `"Connection_Nonce":"`+strings.Repeat("33", 32)+`","boot_id"`, 1),
+		"upper":        strings.Replace(valid, `"boot_id"`, `"DAEMON_ID":"`+shadow+`","boot_id"`, 1),
+		"mixed":        strings.Replace(valid, `"boot_id"`, `"Daemon_Id":"`+shadow+`","boot_id"`, 1),
+		"before":       strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID":"`+shadow+`","daemon_id"`, 1),
+		"no exact":     strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID"`, 1),
+		"envelope":     strings.Replace(valid, `{"type"`, `{"Type":"NOPE","type"`, 1),
+		"nested item":  strings.Replace(valid, `"boot_id"`, `"Connection_Nonce":"`+strings.Repeat("33", 32)+`","boot_id"`, 1),
+		"unicode fold": strings.Replace(valid, `"boot_id"`, `"daemon_id\u017f":"`+shadow+`","boot_id"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeServerControl([]byte(mutated)); err != ErrMalformed {

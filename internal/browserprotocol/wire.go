@@ -592,8 +592,15 @@ func validateJSONShape(data []byte, target reflect.Type) error {
 				// the decoder: ignoring it here would let `DAEMON_ID` silently
 				// overwrite the `daemon_id` this function validated, and the
 				// TypeScript decoder -- whose object keys are exact -- would
-				// disagree about the same frame. Only a name that is unknown
-				// under every case is ignored.
+				// disagree about the same frame. That fallback folds Unicode
+				// (a long s matches `s`), so a non-ASCII name is refused outright
+				// and ASCII names compare by lower case; only an ASCII name that
+				// is unknown under every case is ignored.
+				for _, r := range name {
+					if r >= utf8.RuneSelf {
+						return fmt.Errorf("%w: non-ASCII object field name", ErrMalformed)
+					}
+				}
 				if _, collides := folded[strings.ToLower(name)]; collides {
 					return fmt.Errorf("%w: object field case collision", ErrMalformed)
 				}

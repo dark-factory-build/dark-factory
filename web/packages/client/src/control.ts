@@ -382,7 +382,8 @@ function requireKeys(value: Record<string, unknown>, required: string[], wire = 
   const present = Object.keys(value).filter((key) => !known.includes(key));
   if (!wire) { if (present.length !== 0) malformed(); return; }
   const folded = new Set(known.map((key) => key.toLowerCase()));
-  if (present.some((key) => folded.has(key.toLowerCase()))) malformed();
+  // Go's decoder folds Unicode, so a non-ASCII name is refused on both sides.
+  if (present.some((key) => /[^\x00-\x7f]/.test(key) || folded.has(key.toLowerCase()))) malformed();
 }
 
 // JSON.parse permits duplicate names and unsafe integers. This structural scan

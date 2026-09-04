@@ -336,6 +336,7 @@ test("a case variant of a known member is refused, an unknown name is ignored", 
     hello.replace('"daemon_id"', '"DAEMON_ID"'),
     hello.replace('{"type"', '{"Type":"NOPE","type"'),
     hello.replace('"body"', '"BODY":{},"body"'),
+    hello.replace('"boot_id"', `"daemon_id\u017f":"${shadow}","boot_id"`),
   ]) expectMalformed(() => decodeServerControl(mutated));
   expectIgnoredMember(hello, hello.replace('"boot_id"', `"FUTURE_ID":"${shadow}","boot_id"`), "server");
   // An optional envelope member is a known name too.
