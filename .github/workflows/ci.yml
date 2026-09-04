@@ -41,9 +41,10 @@ jobs:
           git diff --check "$BASE_SHA" "$GITHUB_SHA"
 
   # This classifier lives in the CODEOWNED workflow, not in a PR-publishable
-  # script. Unknown paths run everything. The diff is the queue's whole
-  # combined tree, so entries ahead of this one cannot escape its selected
-  # gates.
+  # script. The two root files consumed by both source trees run both gates;
+  # unclassified paths fail closed through Darwin. The diff is the queue's
+  # whole combined tree, so entries ahead of this one cannot escape its
+  # selected gates.
   scope:
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
@@ -93,6 +94,9 @@ jobs:
                 control_plane=true
                 ;;
               .github/workflows/ci.yml)
+                macos=true; control_plane=true
+                ;;
+              .gitignore|scripts/bootstrap-maintainer-v2.sh)
                 macos=true; control_plane=true
                 ;;
               *)

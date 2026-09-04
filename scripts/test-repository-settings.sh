@@ -227,6 +227,8 @@ scope_case false true .github/workflows/deploy-control-plane.yml
 scope_case true false internal/kernel/store.go
 scope_case true true control-plane/src/lib.rs internal/kernel/store.go
 scope_case true true .github/workflows/ci.yml
+scope_case true true .gitignore
+scope_case true true scripts/bootstrap-maintainer-v2.sh
 scope_case true false unclassified-boundary
 run_scope workflow_dispatch '' false
 [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
