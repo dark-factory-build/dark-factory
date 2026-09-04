@@ -27,6 +27,11 @@ factoryctl service install --home "$HOME/.dark-factory"
 factoryctl service status --home "$HOME/.dark-factory"
 ```
 
+To upgrade a running installation to a new build, run `factoryctl service
+uninstall --home "$HOME/.dark-factory"` with the new `factoryctl`, then
+`factoryctl service install --home "$HOME/.dark-factory"`. Only the service's
+binaries, plist, and receipt are replaced; the data home is untouched.
+
 Point the operator client at that home and open the paired hosted console:
 
 ```sh
