@@ -1461,8 +1461,13 @@ func TestHolderReconnectSupersedesUnexpiredLeaseBeforeExpiry(t *testing.T) {
 	replaced := <-done
 	// The fixture clock is frozen, so a fresh full TTL expires exactly when the
 	// first lease would have.
-	if replaced.err != nil || replaced.lease.Generation != first.Generation+1 || replaced.lease.ExpiresAt != first.ExpiresAt || replaced.lease.LastInputSequence != 0 {
+	if replaced.err != nil || replaced.lease.Generation != first.Generation+1 || replaced.lease.ExpiresAt != first.ExpiresAt {
 		t.Fatalf("reconnect lease = %+v, %v", replaced.lease, replaced.err)
+	}
+	// The durable row, not the returned lease, carries the restarted sequence.
+	session, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || session.LeaseClientID == nil || *session.LeaseClientID != fixture.adapter.client.ID || session.LeaseGeneration != replaced.lease.Generation || session.LastInputSequence != 0 {
+		t.Fatalf("durable lease after reconnect = %+v, found=%v, err=%v", session, found, err)
 	}
 	if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, first.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("stale")); !errors.Is(err, ErrTerminalEffectRejected) {
 		t.Fatalf("superseded connection resumed = %v", err)

@@ -197,7 +197,8 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   const observer = terminalObserver(signals);
   const first = await openTerminal(client, config.agentId, signals, observer);
   await signals.until(() => observer.text.includes("E2E_READY"), "initial PTY output");
-  await first.handle.acquireInput();
+  const firstLease = await first.handle.acquireInput();
+  assert.equal(firstLease.generation, 1n, "fresh run did not start at the first lease generation");
   accepted(await first.handle.sendInput(new TextEncoder().encode("input-one\n")), "first terminal input");
   await signals.until(() => observer.text.includes("E2E_INPUT:input-one"), "provider input response");
   const resized = await first.handle.resize(37, 111);
@@ -222,7 +223,10 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   assert.notEqual(secondSession, firstSession, "reconnect reused the closed BrowserSession generation");
   assert.ok(secondSocket !== undefined && secondSocket !== firstSocket, "reconnect reused the closed WebSocket");
   assert.equal(sockets.length, 2, "reconnect created more than one replacement WebSocket");
-  await second.handle.acquireInput();
+  // Generation 2 proves the reacquire superseded the still-held lease rather
+  // than taking a lease that had already expired during the reconnect.
+  const secondLease = await second.handle.acquireInput();
+  assert.equal(secondLease.generation, firstLease.generation + 1n, "reacquire did not supersede the unexpired lease");
   accepted(await second.handle.sendInput(new TextEncoder().encode("proceed\n")), "post-reconnect terminal input");
   const request = await waitForHumanRequest(client, signals);
   assertHumanRequestProjection(client, request, config);
