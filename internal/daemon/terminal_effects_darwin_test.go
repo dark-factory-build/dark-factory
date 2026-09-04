@@ -1459,7 +1459,9 @@ func TestHolderReconnectSupersedesUnexpiredLeaseBeforeExpiry(t *testing.T) {
 	}
 	replyTerminalEffect(t, fixture.peer, install, runner.TerminalResultOK, 0)
 	replaced := <-done
-	if replaced.err != nil || replaced.lease.Generation != first.Generation+1 || replaced.lease.ExpiresAt.Int64() <= first.ExpiresAt.Int64()-kernel.BrowserTerminalLeaseTTL {
+	// The fixture clock is frozen, so a fresh full TTL expires exactly when the
+	// first lease would have.
+	if replaced.err != nil || replaced.lease.Generation != first.Generation+1 || replaced.lease.ExpiresAt != first.ExpiresAt || replaced.lease.LastInputSequence != 0 {
 		t.Fatalf("reconnect lease = %+v, %v", replaced.lease, replaced.err)
 	}
 	if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, first.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("stale")); !errors.Is(err, ErrTerminalEffectRejected) {

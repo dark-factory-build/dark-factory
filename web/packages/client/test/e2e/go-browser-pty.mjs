@@ -206,8 +206,9 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   accepted(await first.handle.sendInput(new TextEncoder().encode("measure\n")), "terminal resize witness input");
   await signals.until(() => observer.text.includes("E2E_SIZE:37:111"), "provider-visible PTY resize");
 
-  await first.handle.releaseInput();
-  assert.equal(first.handle.writable, false);
+  // The connection dies while still holding the lease, as a page reload
+  // does; the same paired client must reacquire before that lease expires.
+  assert.equal(first.handle.writable, true);
   const firstSession = client.session;
   const firstSocket = sockets.at(-1);
   assert.ok(firstSocket !== undefined);
