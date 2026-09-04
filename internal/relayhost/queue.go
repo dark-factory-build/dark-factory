@@ -90,7 +90,7 @@ func coalesce(records []Record) [][]byte {
 	var messages [][]byte
 	var current []byte
 	for _, record := range records {
-		size := RecordHeaderBytes + len(record.Payload)
+		size := recordHeaderBytes + len(record.Payload)
 		if len(current) > 0 && len(current)+size > maxCoalescedBytes {
 			messages = append(messages, current)
 			current = nil

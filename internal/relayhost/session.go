@@ -27,8 +27,7 @@ const (
 	minPassthroughCloseCode = 3000
 	maxPassthroughCloseCode = 4999
 	// maxResultFrameBytes bounds the frames worth scanning for a ticket
-	// injection point. A pairing or authentication result is tiny; a
-	// snapshot must never pay for the scan.
+	// injection point: a pairing or authentication result is tiny.
 	maxResultFrameBytes = 4 << 10
 )
 
@@ -141,16 +140,6 @@ func loopbackCloseCode(err error) int {
 	return relayCloseUnavailable
 }
 
-// relayCloseStatus maps a relay CLOSE record onto the loopback socket. The
-// daemon does not interpret controller close codes, so anything outside the
-// verbatim range becomes a normal closure rather than an invented failure.
-func relayCloseStatus(code int) websocket.StatusCode {
-	if code >= minPassthroughCloseCode && code <= maxPassthroughCloseCode {
-		return websocket.StatusCode(code)
-	}
-	return websocket.StatusNormalClosure
-}
-
 // injectTicket adds a relay control ticket to a pairing or authentication
 // result so the controller can reconnect through the relay without another
 // terminal-side pairing. Every other frame, and every frame whose client id
@@ -158,7 +147,10 @@ func relayCloseStatus(code int) websocket.StatusCode {
 // logged and never decoded with a protocol decoder: this side must not become
 // a second interpreter of daemon messages.
 func (connector *Connector) injectTicket(ctx context.Context, frame []byte) []byte {
-	if connector.config.DeviceKey == nil || !carriesResult(frame) {
+	// Almost every frame is neither result, and a snapshot must not pay for
+	// the scan.
+	if connector.config.DeviceKey == nil || len(frame) > maxResultFrameBytes ||
+		!bytes.Contains(frame, []byte(`"PAIR_RESULT"`)) && !bytes.Contains(frame, []byte(`"AUTH_RESULT"`)) {
 		return frame
 	}
 	var envelope map[string]json.RawMessage
@@ -206,13 +198,4 @@ func (connector *Connector) injectTicket(ctx context.Context, frame []byte) []by
 		return frame
 	}
 	return rewritten
-}
-
-// carriesResult is the cheap pre-filter: almost every frame is neither a
-// pairing nor an authentication result, and those must not pay for a decode.
-func carriesResult(frame []byte) bool {
-	if len(frame) > maxResultFrameBytes {
-		return false
-	}
-	return bytes.Contains(frame, []byte(`"PAIR_RESULT"`)) || bytes.Contains(frame, []byte(`"AUTH_RESULT"`))
 }

@@ -39,7 +39,7 @@ func TestHostTokenRoundTripsThroughEd25519(t *testing.T) {
 	}
 }
 
-func TestTicketsRoundTripAndCarryTheirBoundMembers(t *testing.T) {
+func TestControlTicketsRoundTripAndCarryTheirBoundMembers(t *testing.T) {
 	identity := testIdentity(t)
 	controller := [ControllerIDSize]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 	var device [DeviceKeySize]byte
@@ -49,26 +49,22 @@ func TestTicketsRoundTripAndCarryTheirBoundMembers(t *testing.T) {
 	}
 	expires := time.Unix(1_800_100_000, 0)
 
-	pair, err := VerifyTicket(identity.PublicKey(), PairTicket(identity, controller, expires))
-	if err != nil {
-		t.Fatalf("pair ticket: %v", err)
-	}
-	if pair.Purpose != PurposePair || pair.Device != "" || pair.Expires != expires.Unix() {
-		t.Fatalf("pair payload = %+v", pair)
-	}
-	if raw, err := DecodeFixedField(pair.Controller, ControllerIDSize); err != nil || !bytes.Equal(raw, controller[:]) {
-		t.Fatalf("pair controller = %q, %v", pair.Controller, err)
-	}
-
-	control, err := VerifyTicket(identity.PublicKey(), ControlTicket(identity, controller, device, expires))
+	first, err := VerifyTicket(identity.PublicKey(), ControlTicket(identity, controller, device, expires))
 	if err != nil {
 		t.Fatalf("control ticket: %v", err)
 	}
-	if control.Purpose != PurposeControl || control.Ticket == pair.Ticket {
-		t.Fatalf("control payload = %+v (ticket ids must differ)", control)
+	if first.Purpose != PurposeControl || first.Expires != expires.Unix() {
+		t.Fatalf("control payload = %+v", first)
 	}
-	if raw, err := DecodeFixedField(control.Device, DeviceKeySize); err != nil || !bytes.Equal(raw, device[:]) {
-		t.Fatalf("control device = %q, %v", control.Device, err)
+	if raw, err := base64.RawURLEncoding.DecodeString(first.Controller); err != nil || !bytes.Equal(raw, controller[:]) {
+		t.Fatalf("control controller = %q, %v", first.Controller, err)
+	}
+	if raw, err := base64.RawURLEncoding.DecodeString(first.Device); err != nil || !bytes.Equal(raw, device[:]) {
+		t.Fatalf("control device = %q, %v", first.Device, err)
+	}
+	second, err := VerifyTicket(identity.PublicKey(), ControlTicket(identity, controller, device, expires))
+	if err != nil || second.Ticket == first.Ticket {
+		t.Fatalf("two tickets shared one id: %v", err)
 	}
 }
 

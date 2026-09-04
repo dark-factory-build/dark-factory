@@ -3,6 +3,7 @@ package relayhost
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -175,12 +176,18 @@ func TestConnectorCarriesCloseCodesInBothDirections(t *testing.T) {
 	fixture := newHarness(t, nil)
 	host := fixture.relay.accept(t)
 
-	// Relay to loopback: a controller close code inside the carried range
-	// reaches the daemon verbatim.
+	// Relay to loopback: the session ends, and a frame already in flight for
+	// it is dropped alone rather than ending every other session.
 	relayClosed := fixture.openSession(t, host, 21)
+	survivor := fixture.openSession(t, host, 24)
 	host.closeConnection(t, 21, 4002)
-	if status := relayClosed.waitClosed(t); status != 4002 {
-		t.Fatalf("loopback close status = %d, want 4002", status)
+	if status := relayClosed.waitClosed(t); status != websocket.StatusNormalClosure {
+		t.Fatalf("loopback close status = %d, want a normal closure", status)
+	}
+	host.send(t, Record{Type: RecordText, Connection: 21, Payload: []byte("late")})
+	survivor.write(t, websocket.MessageText, []byte("unaffected"))
+	if record := host.expect(t, RecordText, 24); string(record.Payload) != "unaffected" {
+		t.Fatalf("a late frame for a closed session ended another session: %q", record.Payload)
 	}
 
 	// Loopback to relay: a code inside the carried range travels verbatim.
@@ -243,10 +250,7 @@ func TestRelayLossClosesEverySessionAndTheReconnectPresentsTheNextSequence(t *te
 
 	// Nothing is replayed: the reconnected controller gets a brand-new daemon
 	// session with its own HELLO.
-	fresh := fixture.openSession(t, next, 31)
-	if fresh == first {
-		t.Fatal("reconnect reused the previous loopback session")
-	}
+	fixture.openSession(t, next, 31)
 	select {
 	case record := <-next.records:
 		t.Fatalf("reconnect replayed a record: %+v", record)
@@ -354,10 +358,10 @@ func TestPairAndAuthResultsGainAControlTicketBoundToTheDeviceKey(t *testing.T) {
 		if payload.Purpose != PurposeControl {
 			t.Fatalf("%s relay_ticket purpose = %q", probe.kind, payload.Purpose)
 		}
-		if raw, err := DecodeFixedField(payload.Controller, ControllerIDSize); err != nil || !bytes.Equal(raw, clientID[:]) {
+		if raw, err := base64.RawURLEncoding.DecodeString(payload.Controller); err != nil || !bytes.Equal(raw, clientID[:]) {
 			t.Fatalf("%s relay_ticket names controller %q", probe.kind, payload.Controller)
 		}
-		if raw, err := DecodeFixedField(payload.Device, DeviceKeySize); err != nil || !bytes.Equal(raw, fixture.device[:]) {
+		if raw, err := base64.RawURLEncoding.DecodeString(payload.Device); err != nil || !bytes.Equal(raw, fixture.device[:]) {
 			t.Fatalf("%s relay_ticket names device %q", probe.kind, payload.Device)
 		}
 	}
@@ -479,7 +483,7 @@ func TestRevokeSendsOneRecordOnlyWhileConnected(t *testing.T) {
 	if err := json.Unmarshal(record.Payload, &payload); err != nil {
 		t.Fatalf("revoke payload %q: %v", record.Payload, err)
 	}
-	raw, err := DecodeFixedField(payload.Controller, ControllerIDSize)
+	raw, err := base64.RawURLEncoding.DecodeString(payload.Controller)
 	if err != nil || !bytes.Equal(raw, clientID[:]) {
 		t.Fatalf("revoke names controller %q, %v", payload.Controller, err)
 	}

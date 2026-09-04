@@ -26,11 +26,11 @@ const (
 const (
 	// MaxHostMessageBytes bounds one whole binary message on the host socket.
 	MaxHostMessageBytes = 4 << 20
-	// MaxRecordPayloadBytes bounds one record payload: the 1 MiB snapshot
+	// maxRecordPayloadBytes bounds one record payload: the 1 MiB snapshot
 	// bound plus the envelope slack the relay contract allows.
-	MaxRecordPayloadBytes = (1 << 20) + 64
-	// RecordHeaderBytes is type(u8) connection(u32 BE) length(u32 BE).
-	RecordHeaderBytes = 9
+	maxRecordPayloadBytes = (1 << 20) + 64
+	// recordHeaderBytes is type(u8) connection(u32 BE) length(u32 BE).
+	recordHeaderBytes = 9
 )
 
 var (
@@ -74,7 +74,7 @@ func DecodeRecords(message []byte) ([]Record, error) {
 	}
 	var records []Record
 	for offset := 0; offset < len(message); {
-		if len(message)-offset < RecordHeaderBytes {
+		if len(message)-offset < recordHeaderBytes {
 			return nil, fmt.Errorf("%w: header at offset %d", ErrRecordTruncated, offset)
 		}
 		kind := RecordType(message[offset])
@@ -82,11 +82,11 @@ func DecodeRecords(message []byte) ([]Record, error) {
 			return nil, fmt.Errorf("%w: 0x%02x at offset %d", ErrRecordType, message[offset], offset)
 		}
 		connection := binary.BigEndian.Uint32(message[offset+1 : offset+5])
-		length := binary.BigEndian.Uint32(message[offset+5 : offset+RecordHeaderBytes])
-		if length > MaxRecordPayloadBytes {
+		length := binary.BigEndian.Uint32(message[offset+5 : offset+recordHeaderBytes])
+		if length > maxRecordPayloadBytes {
 			return nil, fmt.Errorf("%w: payload is %d bytes", ErrRecordOversized, length)
 		}
-		start := offset + RecordHeaderBytes
+		start := offset + recordHeaderBytes
 		if uint64(len(message)-start) < uint64(length) {
 			return nil, fmt.Errorf("%w: payload at offset %d", ErrRecordTruncated, offset)
 		}

@@ -69,14 +69,6 @@ func (daemon *Daemon) DialRelay(ctx context.Context, relayOrigin, home string, b
 	return runtime, nil
 }
 
-// Status reports what the connector currently observes.
-func (runtime *RelayRuntime) Status() relayhost.Status {
-	if runtime == nil {
-		return relayhost.Status{}
-	}
-	return runtime.connector.Status()
-}
-
 func (runtime *RelayRuntime) Close() error {
 	if runtime == nil {
 		return nil

@@ -18,7 +18,8 @@ const (
 	hostDomain   = "dark-factory-relay/host\n"
 	ticketDomain = "dark-factory-relay/ticket\n"
 
-	// PurposePair names a single-use ticket that carries no device proof.
+	// PurposePair names a single-use pairing session. The relay opens one
+	// when a controller presents a pair ticket; nothing here mints one yet.
 	PurposePair = "pair"
 	// PurposeControl names a ticket bound to one device public key.
 	PurposeControl = "control"
@@ -72,20 +73,6 @@ func HostToken(identity Identity, sequence uint64, now time.Time) string {
 		Generation: identity.generation,
 		Sequence:   sequence,
 		Issued:     now.Unix(),
-	})
-}
-
-// PairTicket mints a single-use pairing credential for one controller id.
-func PairTicket(identity Identity, controller [ControllerIDSize]byte, expires time.Time) string {
-	if !identity.valid() {
-		return ""
-	}
-	return sign(identity, ticketDomain, TicketPayload{
-		Node:       identity.nodeID,
-		Controller: base64.RawURLEncoding.EncodeToString(controller[:]),
-		Purpose:    PurposePair,
-		Ticket:     newTicketID(),
-		Expires:    expires.Unix(),
 	})
 }
 
@@ -143,28 +130,17 @@ func VerifyTicket(key ed25519.PublicKey, token string) (TicketPayload, error) {
 	if _, err := decodeFixed(payload.Ticket, TicketIDSize); err != nil {
 		return TicketPayload{}, err
 	}
-	switch payload.Purpose {
-	case PurposePair:
-		if payload.Device != "" {
-			return TicketPayload{}, fmt.Errorf("%w: a pair ticket carries no device", ErrToken)
-		}
-	case PurposeControl:
-		if _, err := decodeFixed(payload.Device, DeviceKeySize); err != nil {
-			return TicketPayload{}, err
-		}
-	default:
+	if payload.Purpose != PurposeControl {
 		return TicketPayload{}, fmt.Errorf("%w: unknown purpose %q", ErrToken, payload.Purpose)
+	}
+	if _, err := decodeFixed(payload.Device, DeviceKeySize); err != nil {
+		return TicketPayload{}, err
 	}
 	if payload.Expires <= 0 {
 		return TicketPayload{}, fmt.Errorf("%w: missing expiry", ErrToken)
 	}
 	return payload, nil
 }
-
-// DecodeFixedField decodes one base64url token member of an exact byte
-// length. Callers use it to read a controller id or device key back out of a
-// verified payload.
-func DecodeFixedField(value string, size int) ([]byte, error) { return decodeFixed(value, size) }
 
 func sign[Payload any](identity Identity, domain string, payload Payload) string {
 	encoded, err := json.Marshal(payload)

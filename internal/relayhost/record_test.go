@@ -53,8 +53,8 @@ func TestRecordCodecFailsClosedOnEveryBound(t *testing.T) {
 	}
 	// The largest legal payload must still decode, so the bound is exact
 	// rather than merely conservative.
-	largest := AppendRecord(nil, Record{Type: RecordBinary, Connection: 1, Payload: make([]byte, MaxRecordPayloadBytes)})
-	if records, err := DecodeRecords(largest); err != nil || len(records) != 1 || len(records[0].Payload) != MaxRecordPayloadBytes {
+	largest := AppendRecord(nil, Record{Type: RecordBinary, Connection: 1, Payload: make([]byte, maxRecordPayloadBytes)})
+	if records, err := DecodeRecords(largest); err != nil || len(records) != 1 || len(records[0].Payload) != maxRecordPayloadBytes {
 		t.Fatalf("largest legal record = %d records, %v", len(records), err)
 	}
 }
@@ -66,10 +66,10 @@ func TestCoalesceNeverSplitsARecordAndSendsALargeOneAlone(t *testing.T) {
 	if len(messages) != 3 {
 		t.Fatalf("coalesced into %d messages, want 3", len(messages))
 	}
-	if got := len(messages[0]); got != 2*(RecordHeaderBytes+1024) {
+	if got := len(messages[0]); got != 2*(recordHeaderBytes+1024) {
 		t.Fatalf("first message = %d bytes, want the two small records", got)
 	}
-	if got := len(messages[1]); got != RecordHeaderBytes+(1<<20) {
+	if got := len(messages[1]); got != recordHeaderBytes+(1<<20) {
 		t.Fatalf("second message = %d bytes, want the large record alone", got)
 	}
 	for index, message := range messages {

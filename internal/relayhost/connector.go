@@ -28,15 +28,6 @@ const (
 	relayDialTimeout    = 15 * time.Second
 	loopbackDialTimeout = 5 * time.Second
 	relayWriteTimeout   = 10 * time.Second
-
-	// maxSessions bounds live controller sessions. The relay already caps a
-	// factory at 32 controller sockets; this side refuses beyond its own
-	// bound instead of trusting that cap.
-	maxSessions = 64
-	// maxTombstones bounds the recently-closed connection ids this side
-	// tolerates late records for. Without it, a controller closing normally
-	// would look like a broken relay and drop every other session.
-	maxTombstones = 256
 )
 
 // ErrRelayProtocol means the relay sent something this side cannot account
@@ -103,13 +94,13 @@ type Connector struct {
 
 	closeOnce sync.Once
 
-	mu         sync.Mutex
-	connected  bool
-	lastErr    error
-	sequence   uint64
-	sessions   map[uint32]*session
-	tombstones []uint32
-	queue      *outboundQueue
+	mu        sync.Mutex
+	connected bool
+	failing   bool
+	lastErr   error
+	sequence  uint64
+	sessions  map[uint32]*session
+	queue     *outboundQueue
 
 	sessionGroup sync.WaitGroup
 }
@@ -158,10 +149,7 @@ func (config Config) withDefaults() Config {
 		config.BaseBackoff = defaultBaseBackoff
 	}
 	if config.MaxBackoff < config.BaseBackoff {
-		config.MaxBackoff = defaultMaxBackoff
-	}
-	if config.MaxBackoff < config.BaseBackoff {
-		config.MaxBackoff = config.BaseBackoff
+		config.MaxBackoff = max(defaultMaxBackoff, config.BaseBackoff)
 	}
 	if config.PingInterval <= 0 {
 		config.PingInterval = defaultPingInterval
@@ -286,6 +274,9 @@ func jitter(backoff time.Duration) time.Duration {
 // connection until it fails. It reports whether the connection was accepted
 // and whether the relay refused it with HTTP 403.
 func (connector *Connector) connect(sequence uint64) (accepted bool, forbidden bool) {
+	connector.mu.Lock()
+	connector.failing = false
+	connector.mu.Unlock()
 	token := HostToken(connector.config.Identity, sequence, connector.now())
 	if token == "" {
 		connector.fail(fmt.Errorf("%w: host token could not be minted", ErrConfig))
@@ -343,7 +334,6 @@ func (connector *Connector) serve(relay *websocket.Conn) {
 		sessions = append(sessions, current)
 	}
 	connector.sessions = make(map[uint32]*session)
-	connector.tombstones = nil
 	connector.mu.Unlock()
 
 	var shutdown sync.WaitGroup
@@ -457,15 +447,13 @@ func (connector *Connector) apply(ctx context.Context, record Record, queue *out
 		if record.Connection == 0 {
 			return fmt.Errorf("%w: frame on connection 0", ErrRelayProtocol)
 		}
-		if len(record.Payload) > MaxRecordPayloadBytes {
-			return fmt.Errorf("%w: frame payload", ErrRecordOversized)
-		}
-		current, known := connector.lookup(record.Connection)
+		current := connector.sessionFor(record.Connection)
 		if current == nil {
-			if known {
-				return nil
-			}
-			return fmt.Errorf("%w: frame for unknown connection", ErrRelayProtocol)
+			// A frame can already be in flight when a session ends, so an
+			// unroutable frame is dropped alone. The violations that mean a
+			// broken relay - an unknown type, a malformed payload, a reused
+			// connection id - still end the whole connection below.
+			return nil
 		}
 		if !current.deliver(record) {
 			connector.dropSession(current, queue, relayCloseSlow, "session not draining")
@@ -502,12 +490,8 @@ func (connector *Connector) open(ctx context.Context, record Record, queue *outb
 		connector.mu.Unlock()
 		return fmt.Errorf("%w: OPEN reuses a live connection id", ErrRelayProtocol)
 	}
-	connector.forgetLocked(record.Connection)
-	if len(connector.sessions) >= maxSessions {
-		connector.mu.Unlock()
-		queue.push(nil, closeRecord(record.Connection, relayCloseSlow, "session capacity"))
-		return nil
-	}
+	// Session capacity is the loopback listener's own bound: it refuses
+	// beyond its connection slots and that refusal becomes a CLOSE below.
 	current := newSession(record.Connection)
 	connector.sessions[record.Connection] = current
 	connector.mu.Unlock()
@@ -524,29 +508,35 @@ func (connector *Connector) closeSession(record Record) error {
 	if record.Connection == 0 {
 		return fmt.Errorf("%w: CLOSE on connection 0", ErrRelayProtocol)
 	}
-	code := 0
 	if len(record.Payload) > 0 {
 		var payload closePayload
 		if err := json.Unmarshal(record.Payload, &payload); err != nil {
 			return fmt.Errorf("%w: CLOSE payload is not an object", ErrRelayProtocol)
 		}
-		code = payload.Code
 	}
 	connector.mu.Lock()
 	current := connector.sessions[record.Connection]
-	if current != nil {
-		delete(connector.sessions, record.Connection)
-		connector.rememberLocked(record.Connection)
-	} else {
-		connector.forgetLocked(record.Connection)
-	}
+	delete(connector.sessions, record.Connection)
 	connector.mu.Unlock()
 	if current == nil {
 		return nil
 	}
 	current.markRelayClosed()
-	go current.shutdown(relayCloseStatus(code))
+	// The daemon does not interpret controller close codes, so the loopback
+	// socket gets a normal closure. Detached because the close handshake must
+	// not stall the relay read loop; joined by serve through sessionGroup.
+	connector.shutdownAsync(current, websocket.StatusNormalClosure)
 	return nil
+}
+
+// shutdownAsync closes one loopback socket off the read loop while keeping it
+// inside the group Close joins.
+func (connector *Connector) shutdownAsync(current *session, status websocket.StatusCode) {
+	connector.sessionGroup.Add(1)
+	go func() {
+		defer connector.sessionGroup.Done()
+		current.shutdown(status)
+	}()
 }
 
 // runSession dials the daemon's own loopback listener as an ordinary browser
@@ -567,7 +557,7 @@ func (connector *Connector) runSession(ctx context.Context, current *session, or
 		connector.finishSession(current, queue, relayCloseUnavailable, "loopback unavailable")
 		return
 	}
-	loopback.SetReadLimit(MaxRecordPayloadBytes)
+	loopback.SetReadLimit(maxRecordPayloadBytes)
 	current.setLoopback(loopback)
 
 	var pump sync.WaitGroup
@@ -589,10 +579,6 @@ func (connector *Connector) runSession(ctx context.Context, current *session, or
 			recordType = RecordText
 			frame = connector.injectTicket(sessionContext, frame)
 		}
-		if len(frame) > MaxRecordPayloadBytes {
-			code = relayCloseUnavailable
-			break
-		}
 		if !queue.push(current, Record{Type: recordType, Connection: current.connection, Payload: frame}) {
 			code = relayCloseSlow
 			break
@@ -611,72 +597,47 @@ func (connector *Connector) runSession(ctx context.Context, current *session, or
 
 // dropSession ends one session without touching the relay connection.
 func (connector *Connector) dropSession(current *session, queue *outboundQueue, code int, reason string) {
-	connector.mu.Lock()
-	if connector.sessions[current.connection] == current {
-		delete(connector.sessions, current.connection)
-		connector.rememberLocked(current.connection)
-	}
-	connector.mu.Unlock()
+	connector.forget(current)
 	current.markRelayClosed()
 	queue.push(nil, closeRecord(current.connection, code, reason))
-	go current.shutdown(websocket.StatusPolicyViolation)
+	connector.shutdownAsync(current, websocket.StatusPolicyViolation)
 }
 
 func (connector *Connector) finishSession(current *session, queue *outboundQueue, code int, reason string) {
-	connector.mu.Lock()
-	if connector.sessions[current.connection] == current {
-		delete(connector.sessions, current.connection)
-		connector.rememberLocked(current.connection)
-	}
-	connector.mu.Unlock()
+	connector.forget(current)
 	if code == 0 {
 		return
 	}
 	queue.push(nil, closeRecord(current.connection, code, reason))
 }
 
-// lookup reports the live session for a connection id, and whether the id was
-// one this side recently closed. A late frame for a recently-closed session is
-// ordinary; treating it as a broken relay would drop every other session.
-func (connector *Connector) lookup(connection uint32) (*session, bool) {
+func (connector *Connector) sessionFor(connection uint32) *session {
 	connector.mu.Lock()
 	defer connector.mu.Unlock()
-	if current := connector.sessions[connection]; current != nil {
-		return current, true
-	}
-	for _, id := range connector.tombstones {
-		if id == connection {
-			return nil, true
-		}
-	}
-	return nil, false
+	return connector.sessions[connection]
 }
 
-func (connector *Connector) rememberLocked(connection uint32) {
-	connector.forgetLocked(connection)
-	if len(connector.tombstones) == maxTombstones {
-		connector.tombstones = connector.tombstones[1:]
+func (connector *Connector) forget(current *session) {
+	connector.mu.Lock()
+	if connector.sessions[current.connection] == current {
+		delete(connector.sessions, current.connection)
 	}
-	connector.tombstones = append(connector.tombstones, connection)
+	connector.mu.Unlock()
 }
 
-func (connector *Connector) forgetLocked(connection uint32) {
-	for index, id := range connector.tombstones {
-		if id == connection {
-			connector.tombstones = append(connector.tombstones[:index], connector.tombstones[index+1:]...)
-			return
-		}
-	}
-}
-
-// fail retains one bounded failure for Status. A failure caused by this
-// connector's own Close is not a relay failure and is not retained.
+// fail retains the first failure of the current dial. Later errors are the
+// consequences of that one - a write onto a connection already being torn
+// down - and would hide the cause. A failure caused by this connector's own
+// Close is not a relay failure and is not retained.
 func (connector *Connector) fail(err error) {
 	if err == nil || connector.ctx.Err() != nil {
 		return
 	}
 	connector.mu.Lock()
-	connector.lastErr = err
+	if !connector.failing {
+		connector.failing = true
+		connector.lastErr = err
+	}
 	connector.mu.Unlock()
 }
 

@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -215,7 +216,7 @@ func (controller *relayController) frame(t *testing.T) (browserprotocol.ControlF
 	if record.Type != relayhost.RecordText {
 		t.Fatalf("relayed record type = 0x%02x, want TEXT", byte(record.Type))
 	}
-	cleaned, ticket := liftRelayTicket(t, record.Payload)
+	cleaned, ticket := captureRelayTicketAsTheTransportDoes(t, record.Payload)
 	frame, err := browserprotocol.DecodeServerControl(cleaned)
 	if err != nil {
 		t.Fatalf("decode relayed frame %q: %v", cleaned, err)
@@ -232,7 +233,15 @@ func (controller *relayController) quiet(t *testing.T) {
 	}
 }
 
-func liftRelayTicket(t *testing.T, payload []byte) ([]byte, string) {
+// captureRelayTicketAsTheTransportDoes performs, in the test, exactly what the
+// PWA's relay socket wrapper performs in production: it takes the transport
+// level relay_ticket member out of a PAIR_RESULT or AUTH_RESULT body before
+// anything decodes the frame as a session message. See
+// web/packages/client/src/remote/relay-socket.ts, whose #captureTicket lifts
+// the member and forwards the rest untouched. The member is addressed to the
+// relay transport and is never seen by a protocol decoder on either side, so
+// neither decoder tolerates it - which the test below proves both ways.
+func captureRelayTicketAsTheTransportDoes(t *testing.T, payload []byte) ([]byte, string) {
 	t.Helper()
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &envelope); err != nil {
@@ -407,11 +416,40 @@ func (controller *relayController) resolveClient(t *testing.T, fixture *adapterF
 	if payload.Purpose != relayhost.PurposeControl {
 		t.Fatalf("relay ticket purpose = %q", payload.Purpose)
 	}
-	if named, err := relayhost.DecodeFixedField(payload.Controller, relayhost.ControllerIDSize); err != nil || !bytes.Equal(named, raw) {
+	if named, err := base64.RawURLEncoding.DecodeString(payload.Controller); err != nil || !bytes.Equal(named, raw) {
 		t.Fatalf("relay ticket names controller %q, want %x", payload.Controller, raw)
 	}
-	if device, err := relayhost.DecodeFixedField(payload.Device, relayhost.DeviceKeySize); err != nil || !bytes.Equal(device, client.PublicKey) {
+	if device, err := base64.RawURLEncoding.DecodeString(payload.Device); err != nil || !bytes.Equal(device, client.PublicKey) {
 		t.Fatalf("relay ticket names a device key that is not the durable one")
+	}
+}
+
+// The relay ticket rides on the pairing and authentication results because a
+// separate frame would need the same interception in the client wrapper plus a
+// message type on both sides. What keeps that free of protocol debt is that no
+// decoder ever tolerates the member: the transport consumes it first.
+func TestTheRelayTicketIsConsumedByTheTransportAndRefusedByTheSessionDecoder(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	relay, _, _ := dialRelayFixture(t, fixture)
+	host := relay.accept(t)
+	challenge := relayChallenge(t, fixture, 0x49, kernel.BrowserCapabilityObserve)
+	controller := host.open(t, 131, relayKey(t))
+	controller.proveePair(t, fixture, controller.hello(t), challenge)
+
+	carried := controller.next(t).Payload
+	stripped, ticket := captureRelayTicketAsTheTransportDoes(t, carried)
+	if ticket == "" {
+		t.Fatalf("the daemon sent no relay ticket on %q", carried)
+	}
+	if _, err := browserprotocol.DecodeServerControl(carried); !errors.Is(err, browserprotocol.ErrMalformed) {
+		t.Fatalf("the session decoder accepted a frame still carrying relay_ticket: %v", err)
+	}
+	frame, err := browserprotocol.DecodeServerControl(stripped)
+	if err != nil {
+		t.Fatalf("the transport stripped frame does not decode: %v", err)
+	}
+	if frame.Type != browserprotocol.TypePairResult {
+		t.Fatalf("stripped frame = %+v, want PAIR_RESULT", frame)
 	}
 }
 
@@ -506,7 +544,7 @@ func TestRelayRevocationEndsOnlyTheRevokedControllerSessions(t *testing.T) {
 		if err := json.Unmarshal(record.Payload, &payload); err != nil {
 			t.Fatalf("revoke payload %q: %v", record.Payload, err)
 		}
-		named, err := relayhost.DecodeFixedField(payload.Controller, relayhost.ControllerIDSize)
+		named, err := base64.RawURLEncoding.DecodeString(payload.Controller)
 		if err != nil || !bytes.Equal(named, revoked.client.ID.Bytes()) {
 			t.Fatalf("REVOKE names %q, want %s", payload.Controller, revoked.client.ID)
 		}

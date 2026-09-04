@@ -8,16 +8,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestLoadOrCreateWritesOwnerOnlyFilesAndAdvancesGenerationMonotonically(t *testing.T) {
+func TestLoadOrCreateWritesAnOwnerOnlyKeyAndABootOrderedGeneration(t *testing.T) {
 	home := t.TempDir()
-	first, err := LoadOrCreate(home)
+	boot := time.Unix(1_800_000_000, 0)
+	first, err := loadOrCreateAt(home, boot)
 	if err != nil {
 		t.Fatalf("first LoadOrCreate: %v", err)
 	}
-	if first.Generation() != 1 {
-		t.Fatalf("first generation = %d, want 1", first.Generation())
+	if first.Generation() != uint64(boot.Unix()) {
+		t.Fatalf("first generation = %d, want the boot instant %d", first.Generation(), boot.Unix())
 	}
 	if length := len(first.NodeID()); length != 32 {
 		t.Fatalf("node id %q is %d characters, want 32", first.NodeID(), length)
@@ -37,32 +39,28 @@ func TestLoadOrCreateWritesOwnerOnlyFilesAndAdvancesGenerationMonotonically(t *t
 	if info.Mode().Perm() != 0o700 {
 		t.Fatalf("relay directory mode = %v, want 0700", info.Mode().Perm())
 	}
-	for _, name := range []string{"node.key", "generation"} {
-		fileInfo, err := os.Lstat(filepath.Join(directory, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if fileInfo.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode = %v, want 0600", name, fileInfo.Mode().Perm())
-		}
-	}
-
-	second, err := LoadOrCreate(home)
-	if err != nil {
-		t.Fatalf("second LoadOrCreate: %v", err)
-	}
-	if second.Generation() != 2 {
-		t.Fatalf("second generation = %d, want 2", second.Generation())
-	}
-	if second.NodeID() != first.NodeID() || !bytes.Equal(second.PublicKey(), first.PublicKey()) {
-		t.Fatal("reload produced a different node identity")
-	}
-	recorded, err := os.ReadFile(filepath.Join(directory, "generation"))
+	fileInfo, err := os.Lstat(filepath.Join(directory, "node.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(recorded)) != "2" {
-		t.Fatalf("durable generation = %q, want 2", strings.TrimSpace(string(recorded)))
+	if fileInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("node.key mode = %v, want 0600", fileInfo.Mode().Perm())
+	}
+	if names, err := os.ReadDir(directory); err != nil || len(names) != 1 {
+		t.Fatalf("relay directory holds %v (%v), want only the node key", names, err)
+	}
+
+	// A later boot outranks the earlier one with nothing persisted between
+	// them, so a home restored from backup is not locked out of the relay.
+	second, err := loadOrCreateAt(home, boot.Add(time.Second))
+	if err != nil {
+		t.Fatalf("second LoadOrCreate: %v", err)
+	}
+	if second.Generation() <= first.Generation() {
+		t.Fatalf("second generation = %d, want more than %d", second.Generation(), first.Generation())
+	}
+	if second.NodeID() != first.NodeID() || !bytes.Equal(second.PublicKey(), first.PublicKey()) {
+		t.Fatal("reload produced a different node identity")
 	}
 }
 
@@ -100,18 +98,5 @@ func TestLoadOrCreateRefusesASymlinkedKey(t *testing.T) {
 	}
 	if _, err := LoadOrCreate(home); !errors.Is(err, ErrIdentity) {
 		t.Fatalf("symlinked key = %v, want ErrIdentity", err)
-	}
-}
-
-func TestLoadOrCreateRefusesACorruptGenerationCounter(t *testing.T) {
-	home := t.TempDir()
-	if _, err := LoadOrCreate(home); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(home, "relay", "generation"), []byte("not a number\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadOrCreate(home); !errors.Is(err, ErrIdentity) {
-		t.Fatalf("corrupt counter = %v, want ErrIdentity", err)
 	}
 }

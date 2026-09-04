@@ -74,7 +74,7 @@ func (loopback *fakeLoopback) handle(writer http.ResponseWriter, request *http.R
 	if err != nil {
 		return
 	}
-	connection.SetReadLimit(MaxRecordPayloadBytes)
+	connection.SetReadLimit(maxRecordPayloadBytes)
 	session := &loopbackSession{conn: connection, frames: make(chan loopbackFrame, 1024), closed: make(chan struct{}), observedHost: request.Host}
 	loopback.opened <- session
 	ctx := context.Background()

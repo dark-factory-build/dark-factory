@@ -17,18 +17,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	relayDirectoryName = "relay"
 	nodeKeyFileName    = "node.key"
-	generationFileName = "generation"
 	maxIdentityFile    = 1 << 12
-	// maxGeneration keeps the durable boot counter inside a signed 64-bit
-	// JSON-safe range so a corrupt file can never wrap the monotonic claim.
-	maxGeneration = uint64(1) << 53
 )
 
 // ErrIdentity is every refusal to load or create the node identity. The
@@ -43,11 +39,19 @@ type Identity struct {
 	generation uint64
 }
 
-// LoadOrCreate opens (or creates) the node key under <home>/relay and
-// durably increments the boot counter before returning. Every returned
-// Identity therefore names a strictly newer boot than any Identity a previous
-// process observed, which is exactly what the relay's host admission requires.
-func LoadOrCreate(home string) (Identity, error) {
+// LoadOrCreate opens (or creates) the node key under <home>/relay. The boot
+// generation the relay orders hosts by is simply the wall clock in seconds,
+// so nothing about it has to survive a restart: a home restored from backup or
+// reinstalled with the same key still presents a newer boot than the one the
+// relay last accepted.
+//
+// The cost is that a clock stepping backwards past the last accepted boot
+// locks this node out of the relay until the clock passes that instant again.
+// The escape hatch is a fresh node key: a new key is a new node id, which the
+// relay routes to a Durable Object with no accepted host at all.
+func LoadOrCreate(home string) (Identity, error) { return loadOrCreateAt(home, time.Now()) }
+
+func loadOrCreateAt(home string, now time.Time) (Identity, error) {
 	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home {
 		return Identity{}, fmt.Errorf("%w: home must be an absolute clean path", ErrIdentity)
 	}
@@ -59,12 +63,12 @@ func LoadOrCreate(home string) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	generation, err := advanceGeneration(directory)
-	if err != nil {
-		return Identity{}, err
+	generation := now.Unix()
+	if generation <= 0 {
+		return Identity{}, fmt.Errorf("%w: the clock is before the epoch", ErrIdentity)
 	}
 	private := ed25519.NewKeyFromSeed(seed)
-	return Identity{private: private, nodeID: NodeIDFromPublicKey(private.Public().(ed25519.PublicKey)), generation: generation}, nil
+	return Identity{private: private, nodeID: NodeIDFromPublicKey(private.Public().(ed25519.PublicKey)), generation: uint64(generation)}, nil
 }
 
 // NodeID is the relay's Durable Object name for this factory.
@@ -135,30 +139,6 @@ func loadOrCreateSeed(path string) ([]byte, error) {
 		return nil, err
 	}
 	return seed, nil
-}
-
-// advanceGeneration reads, increments and durably commits the boot counter
-// before the caller can sign anything with it. A crash after the rename
-// wastes one generation; a crash before it repeats one, which the relay
-// refuses rather than silently accepting.
-func advanceGeneration(directory string) (uint64, error) {
-	path := filepath.Join(directory, generationFileName)
-	text, found, err := readPrivateFile(path)
-	if err != nil {
-		return 0, err
-	}
-	previous := uint64(0)
-	if found {
-		previous, err = strconv.ParseUint(strings.TrimSpace(text), 10, 64)
-		if err != nil || previous >= maxGeneration {
-			return 0, fmt.Errorf("%w: %s is not a decimal boot counter", ErrIdentity, path)
-		}
-	}
-	next := previous + 1
-	if err := writeDurable(path, []byte(strconv.FormatUint(next, 10)+"\n")); err != nil {
-		return 0, err
-	}
-	return next, nil
 }
 
 // readPrivateFile refuses a symlink, a non-regular file, or any file another
