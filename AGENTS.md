@@ -79,10 +79,11 @@ is not.
    `.github` itself, `.github/workflows/**`, the three CODEOWNERS locations and
    `.github/dependabot.{yml,yaml}`, since an agent that could rewrite the CI
    gating its own work would be escalating its authority. The rest of `.github`
-   — issue and PR templates — is publishable, though CODEOWNERS owns the whole
-   tree, so such a change still needs the owner's review to merge; it needs no
-   authorization to *write*. Changes to the refused paths need the owner to make
-   them at all. Re-read the exact remote state after each authorized effect.
+   — issue and PR templates — is publishable. Native CODEOWNER approval is
+   limited to the few files that can rewrite the merge authority; ordinary
+   changes use the exact-head Maintainer ALLOW as their repository review.
+   Changes to refused paths need the owner to make them at all. Re-read the
+   exact remote state after each authorized effect.
 
    Absent that authorization everything else is closed, **reads included**: no
    `git fetch`, `pull`, `push`, `clone`, no `gh`, no direct GitHub REST or

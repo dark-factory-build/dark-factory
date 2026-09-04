@@ -1,12 +1,5 @@
 #!/bin/sh
-# Static regression for the repository-settings publisher and the workflow's
-# adversarial-review gate. Nothing here mutates anything live: the publisher
-# records what an operator intends to apply, the live rules are the only
-# record of what is applied, and the workflow's inline chokepoint asserts
-# five live facts on every run -- the merge_queue rule, ALLGREEN grouping,
-# the required_status_checks rule, the required context, and that context's
-# binding to GitHub Actions (#375). The publisher pin below records the
-# intent; the chokepoint is what observes it.
+# Contract for the repository rules and the event-selective CI gate.
 set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -14,171 +7,239 @@ workflow="$repository_root/.github/workflows/ci.yml"
 publisher="$repository_root/scripts/github-repo-settings.sh"
 issue_importer="$repository_root/scripts/import-issues.sh"
 
-grep -Fq '  required:' "$workflow"
-# Extracted, not grepped. The free-floating `grep -Fq '    if: always()'` this
-# replaces was satisfied by a DIFFERENT `if: always()` -- the one on the
-# `checks` job's summary step, at a deeper indent -- so the aggregate's own
-# `if:` could be `false`, the gate never running on any event, with this test
-# still green (#376). Same arming and job bound as the step extractions below.
-# Every match in the window is printed rather than the first, so a second
-# `if:` appended after the real one cannot hide behind it.
-job_if=$(awk '
-    /^  required:$/ { job = 1; next }
-    # The same job-key bound explained on the extraction below.
-    job && /^  [^ #]/ { exit }
-    # Job keys are four-space indented and every step key is deeper, so this
-    # cannot match inside `steps:` however the steps are laid out.
-    job && /^    if: / { sub(/^    if: /, ""); print }
-' "$workflow")
-if [ "$job_if" != "always()" ]; then
-    echo "the required job does not run on every event" >&2
-    exit 1
-fi
-grep -Fq '    needs: [checks, control-plane, review]' "$workflow"
-# The condition is extracted from the step, not grepped from the file. A
-# free-floating `grep` is satisfied by the string appearing in a comment, so it
-# passes while the step's real `if:` has been changed to `false` -- a gate that
-# is present, correctly named, body intact, and never fires.
-# Bounded to the `required` job, not just to the step name. Unbounded, a decoy
-# step carrying this exact name in a job that never runs satisfies both
-# extractions while the real gate is neutered -- or deleted outright, which a
-# uniqueness check would not catch either, since then the decoy is the only
-# match.
-verdict_if=$(awk '
-    /^  required:$/ { job = 1; next }
-    # The scan ends at the next two-space-indented line that is not a
-    # comment. Every job key is such a line -- a job id may start with a
-    # letter of either case or `_`, so the old `[a-z]` bound let a `_shim`
-    # or `Zshim` decoy job sit past it -- and so, in principle, are exotic
-    # legal continuations, which would stop the scan early: a spurious red,
-    # never a silent pass. `#` is excluded because a comment line is never a
-    # job key, and this file writes two-space comment blocks directly above
-    # job keys (one sits right above `required:` itself), so one drifting
-    # into the scanned window would otherwise red this test for no reason.
-    # None is inside the window at this commit.
-    job && /^  [^ #]/ { exit }
-    job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
-    step && /^      - name: / { exit }
-    step && /^        if: / { sub(/^        if: /, ""); print; exit }
-' "$workflow")
-# In the queue only `success` passes; elsewhere `skipped` passes too, because
-# `review` runs on merge_group alone. Without the second arm the aggregate
-# fails every pull request.
-expected_if="needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')"
-if [ "$verdict_if" != "$expected_if" ]; then
-    echo "the adversarial-review step does not carry the reviewed condition" >&2
-    exit 1
-fi
-
-# Pinning the strings is not enough, and claiming otherwise was wrong: the
-# condition can be present and correct while the step it guards has been
-# changed to `exit 0`, or deleted with the `if:` left behind in a comment.
-# Either leaves a gate that runs, prints its diagnostic, and passes. So the
-# step body is extracted and checked for the exit that makes it a gate.
-verdict_step=$(awk '
-    /^  required:$/ { job = 1; next }
-    # Same job-key bound as the first extraction above.
-    job && /^  [^ #]/ { exit }
-    job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
-    # Bounded to this step. Without this, a step whose `run:` is not a block
-    # scalar leaves the scan running until the NEXT step`s `run: |` and
-    # asserts against that body instead -- which passes, because the step
-    # beside it also ends in `exit 1`. Found by mutating this file.
-    step && !body && /^      - name: / { exit }
-    step && /^        run: \|$/ { body = 1; next }
-    body && /^          / { sub(/^          /, ""); print; next }
-    body && /^ *$/ { print ""; next }
-    body { exit }
-' "$workflow")
-# `grep -qx`, not a substring test. A substring is satisfied by `# exit 1`, by
-# an `exit 1` nested under `if false; then`, and by `echo "exit 1"` -- each a
-# step that runs, prints its diagnostic, and passes. Since awk has already
-# stripped the body indent, requiring a whole line equal to `exit 1` also
-# forces it to be unconditional at the top level.
-printf '%s\n' "$verdict_step" | grep -qx 'exit 1' || {
-    echo "the adversarial-review step does not fail the job" >&2
-    exit 1
+require() {
+    grep -Fq "$1" "$2" || {
+        echo "missing repository contract: $1" >&2
+        exit 1
+    }
 }
 
-# Both extractions above read the step's `if:` and `run:`, and a key BESIDE
-# them neuters the body without changing a byte of either: `shell: cat {0}`
-# prints the gate instead of running it, so the `exit 1` is never executed,
-# and `continue-on-error: true` lets the step fail red while the job stays
-# green (#376). Asserting the whole key set rather than naming those two says
-# the rule they are members of -- a key the assertions do not read is
-# unchecked by definition -- and does not have to be extended the next time
-# Actions grows another step attribute. Sorted, so writing the two keys in
-# either order passes, while a second copy of either -- YAML takes the last --
-# still fails.
-verdict_step_keys=$(awk '
-    /^  required:$/ { job = 1; next }
-    # Same job-key bound as the extractions above.
-    job && /^  [^ #]/ { exit }
-    job && /^      - name: Require a recorded adversarial review verdict$/ { step = 1; next }
-    # The step ends at the next six-space line that is NOT a comment: the
-    # following `- name:`. The same rule as the job bounds, for the same
-    # reason -- a comment is never a key -- and load-bearing here. Stopping
-    # on a comment hides every key written after one, and YAML comment
-    # indentation is structurally irrelevant, so `# regrouping the step` on
-    # its own line above `shell: cat {0}` still leaves the key on THIS step:
-    # bypasses 2 and 3 straight back. Found by review of this change.
-    # A block scalar body is indented past its own key, so it is never read
-    # as one.
-    step && /^      [^ #]/ { exit }
-    step && /^        [^ #]/ { sub(/:.*/, ""); sub(/^ */, ""); print }
-' "$workflow" | sort)
-if [ "$verdict_step_keys" != "$(printf '%s\n' if run)" ]; then
-    echo "the adversarial-review step's keys are not exactly 'if' and 'run'" >&2
-    # The set, not just the rule: this assertion fires on a benign addition by
-    # design, and the collected keys say at a glance which case it is.
-    echo "  found: $(printf '%s' "${verdict_step_keys:-(none)}" | tr '\n' ' ')" >&2
+job_block() {
+    awk -v key="$1" '
+        $0 == "  " key ":" { found = 1 }
+        found && $0 ~ /^  [^ #]/ && $0 != "  " key ":" { exit }
+        found { print }
+    ' "$workflow"
+}
+
+job_field() {
+    job_block "$1" | awk -v field="$2" '
+        $0 ~ "^    " field ": " { sub("^    " field ": ", ""); print }
+    '
+}
+
+step_field() {
+    job_block "$1" | awk -v label="$2" -v field="$3" '
+        $0 == "      - name: " label { step = 1; next }
+        step && /^      - name: / { exit }
+        step && $0 ~ "^        " field ": " {
+            sub("^        " field ": ", "")
+            print
+        }
+    '
+}
+
+step_keys() {
+    job_block "$1" | awk -v label="$2" '
+        $0 == "      - name: " label { step = 1; print "name"; next }
+        step && /^      - name: / { exit }
+        step && /^        [^ ]/ {
+            key = $0
+            sub(/^        /, "", key)
+            sub(/:.*/, "", key)
+            print key
+        }
+    '
+}
+
+assert_job_field() {
+    actual=$(job_field "$1" "$2")
+    [ "$actual" = "$3" ] || {
+        echo "wrong $2 for workflow job $1: ${actual:-(missing)}" >&2
+        exit 1
+    }
+}
+
+require_job() {
+    job_block "$1" | grep -Fq "$2" || {
+        echo "workflow job $1 is missing: $2" >&2
+        exit 1
+    }
+}
+
+# A pull request does only the cheap admission check. The exact combined tree
+# receives the full gates and exact-head review once, in the merge queue.
+assert_job_field eligibility if "github.event_name == 'pull_request'"
+require_job eligibility 'git diff --check "$BASE_SHA" "$GITHUB_SHA"'
+full_events="github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'"
+assert_job_field checks if "$full_events"
+assert_job_field control-plane if "$full_events"
+assert_job_field review if "github.event_name == 'merge_group'"
+assert_job_field required if "always()"
+assert_job_field required needs "[eligibility, checks, control-plane, review]"
+diagnostic_events="github.event_name == 'pull_request' || github.event_name == 'merge_group'"
+[ "$(step_field required 'Confirm the live merge rules' if)" = "$diagnostic_events" ] || {
+    echo "live merge-rule diagnostic is not bound to PR and queue events" >&2
+    exit 1
+}
+expected_diagnostic_keys=$(printf '%s\n' name if env run)
+[ "$(step_keys required 'Confirm the live merge rules')" = "$expected_diagnostic_keys" ] || {
+    echo "live merge-rule diagnostic has unexpected step controls" >&2
+    exit 1
+}
+source_condition="if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.checks.result != 'success' || needs.control-plane.result != 'success'))"
+require_job required "$source_condition"
+require_job required "needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')"
+require_job required 'rules/branches/${BASE_BRANCH}'
+for fact in rule:merge_queue grouping:ALLGREEN rule:required_status_checks \
+    context:required integration:15368:required; do
+    require_job required "$fact"
+done
+
+# One no-bypass ruleset carries every main-branch rule. The queue has no
+# artificial settling delay and its exact combined tree is the only full gate.
+require 'apply_ruleset main-protect' "$publisher"
+require 'delete_ruleset main-review' "$publisher"
+require '"bypass_actors": []' "$publisher"
+require '"type": "merge_queue"' "$publisher"
+require '"grouping_strategy": "ALLGREEN"' "$publisher"
+require '"min_entries_to_merge_wait_minutes": 0' "$publisher"
+require '"context": "required", "integration_id": 15368' "$publisher"
+require '"type": "pull_request"' "$publisher"
+require '"required_approving_review_count": 0' "$publisher"
+require '"require_code_owner_review": true' "$publisher"
+require '"required_review_thread_resolution": true' "$publisher"
+
+if grep -Fq '"min_entries_to_merge_wait_minutes": 5' "$publisher"; then
+    echo "repository settings retain superseded merge ceremony" >&2
     exit 1
 fi
-grep -Fq "if: needs.checks.result != 'success' || needs.control-plane.result != 'success'" "$workflow"
-grep -Fq '"context": "required"' "$publisher"
-# Bound to GitHub Actions (integration 15368): without the binding, any
-# installed integration could post a green `required` status and satisfy the
-# ruleset.
-grep -Fq '"integration_id": 15368' "$publisher"
-grep -Fq 'area:console|1D76DB|loopback web console, browser protocol, client, and UI' "$publisher"
-grep -Fq '"TUI") echo "area:console"' "$issue_importer"
+
+require '/.github/workflows/' "$repository_root/.github/CODEOWNERS"
+require '/.github/CODEOWNERS' "$repository_root/.github/CODEOWNERS"
+require '/AGENTS.md' "$repository_root/.github/CODEOWNERS"
+require '/scripts/github-repo-settings.sh' "$repository_root/.github/CODEOWNERS"
+require '/scripts/verify-adversarial-review.sh' "$repository_root/.github/CODEOWNERS"
+if grep -Eq '^/(ARCHITECTURE|SECURITY|CLAUDE)\.md|^/\.github/[[:space:]]' "$repository_root/.github/CODEOWNERS"; then
+    echo "CODEOWNERS still blocks ordinary documentation or all of .github" >&2
+    exit 1
+fi
+
+require 'area:console|1D76DB|loopback web console, browser protocol, client, and UI' "$publisher"
+require '"TUI") echo "area:console"' "$issue_importer"
 if grep -Eq 'area:tui|factory-tui' "$publisher" "$issue_importer"; then
     echo "repository label surfaces still name the retired TUI" >&2
     exit 1
 fi
-# The review gate runs only on `merge_group`, so these two are load-bearing for
-# rule 2's enforcement and not merely for CI cost: without the queue the gate
-# never runs, and under `HEADGREEN` only the last entry of a group is required,
-# so unreviewed entries ahead of it would merge unchecked.
-grep -Fq '"type": "merge_queue"' "$publisher"
-grep -Fq '"grouping_strategy": "ALLGREEN"' "$publisher"
-# The chokepoint assertion lives inline in the workflow on purpose: a helper
-# under scripts/ is App-publishable, so it would be the weaker-protected file
-# guarding the stronger-protected one. Assert all five facts are required.
-# The binding fact names its context: a bare `integration:15368` would be
-# satisfied by any bound entry, including one that is not `required`.
-for fact in rule:merge_queue grouping:ALLGREEN rule:required_status_checks \
-    context:required integration:15368:required; do
-    grep -Fq "require $fact" "$workflow" || {
-        echo "the workflow does not require '$fact' to be live" >&2
+
+# The settings migration must distinguish an absent legacy ruleset from an API
+# failure. A failed list read may never be reported as successful cleanup.
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-settings.XXXXXX")
+trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+mkdir "$temporary/bin"
+settings_log="$temporary/calls"
+cat >"$temporary/bin/gh" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >>"$DF_SETTINGS_STUB_LOG"
+if [ -n "${DF_MERGE_RULE_JSON-}" ]; then
+    [ "${DF_MERGE_RULE_API_FAIL-}" != 1 ] || exit 1
+    jq -r "$4" "$DF_MERGE_RULE_JSON"
+elif [ "$1" = repo ] && [ "$2" = view ]; then
+    printf '%s\n' dark-factory-build/dark-factory
+elif [ "$1" = api ] && [ "$2" = repos/dark-factory-build/dark-factory/rulesets ] && [ "${3-}" = --jq ]; then
+    [ "${DF_SETTINGS_STUB_LIST_FAIL-}" != 1 ] || exit 1
+    if [ "${DF_SETTINGS_STUB_EXISTING-}" = 1 ]; then
+        case "$*" in
+            *main-protect*) printf '%s\n' 11 ;;
+            *main-review*) printf '%s\n' 22 ;;
+        esac
+    fi
+elif [ "$1" = api ] && [ "${2-}" = -X ] && { [ "${3-}" = PUT ] || [ "${3-}" = POST ]; }; then
+    [ "${DF_SETTINGS_STUB_APPLY_FAIL-}" != 1 ] || exit 1
+fi
+STUB
+chmod 755 "$temporary/bin/gh"
+
+# Execute the actual inline merge-rule step, including its jq projection, from
+# raw ruleset JSON. Every missing or misbound fact and an API failure must stop.
+awk '
+    /^      - name: Confirm the live merge rules$/ { step = 1; next }
+    step && /^        run: \|$/ { body = 1; next }
+    body && /^          / { sub(/^          /, ""); print; next }
+    body && /^ *$/ { print ""; next }
+    body { exit }
+' "$workflow" >"$temporary/merge-rule-step.sh"
+merge_rules_base="$temporary/merge-rules-base.json"
+merge_rules="$temporary/merge-rules.json"
+cat >"$merge_rules_base" <<'RULES'
+[
+  {"type":"merge_queue","parameters":{"grouping_strategy":"ALLGREEN"}},
+  {"type":"required_status_checks","parameters":{"required_status_checks":[
+    {"context":"required","integration_id":15368}
+  ]}},
+  {"type":"pull_request","parameters":{}}
+]
+RULES
+run_merge_rule_step() (
+    export DF_MERGE_RULE_JSON="$merge_rules"
+    export DF_SETTINGS_STUB_LOG="$settings_log"
+    export GITHUB_REPOSITORY=dark-factory-build/dark-factory
+    export BASE_BRANCH=main
+    export RUNNER_TEMP="$temporary"
+    PATH="$temporary/bin:$PATH" bash "$temporary/merge-rule-step.sh" \
+        >"$temporary/merge.out" 2>"$temporary/merge.err"
+)
+cp "$merge_rules_base" "$merge_rules"
+run_merge_rule_step
+expect_rule_failure() {
+    label=$1
+    filter=$2
+    jq "$filter" "$merge_rules_base" >"$merge_rules"
+    if run_merge_rule_step; then
+        echo "invalid live merge rules passed: $label" >&2
         exit 1
-    }
-done
-# The binding fact has to be READ from the rule, not written into the string.
-# The fixtures in test-inline-chokepoint.sh are projection output -- the stubbed
-# `gh` never runs the `--jq` program -- so a projection that emits
-# `("integration:15368:" + .context)` fabricates the fact for every entry,
-# satisfies `require integration:15368:required` unconditionally, and leaves
-# both test scripts green. The live run does not catch it either: a fabricated
-# fact agrees with the require line everywhere, so it fails OPEN rather than
-# closed. Pinning the token that does the reading is what separates the shipped
-# projection from that mutant. The general gap -- the stub not honouring
-# `--jq`, which would make the projection executable by a test -- is #383.
-grep -Fq '(.integration_id|tostring)' "$workflow"
-grep -Fq 'rules/branches/${BASE_BRANCH}' "$workflow"
-if grep -Fq '"context": "checks"' "$publisher"; then
-    echo "repository settings still require the macOS-only checks context" >&2
+    fi
+}
+expect_rule_failure no-queue 'map(select(.type != "merge_queue"))'
+expect_rule_failure wrong-grouping 'map(if .type == "merge_queue" then .parameters.grouping_strategy = "HEADGREEN" else . end)'
+expect_rule_failure no-required-rule 'map(select(.type != "required_status_checks"))'
+expect_rule_failure wrong-context 'map(if .type == "required_status_checks" then .parameters.required_status_checks[0].context = "other" else . end)'
+expect_rule_failure wrong-integration 'map(if .type == "required_status_checks" then .parameters.required_status_checks[0].integration_id = 42 else . end)'
+expect_rule_failure misbound-integration 'map(if .type == "required_status_checks" then .parameters.required_status_checks = [{"context":"required","integration_id":null},{"context":"other","integration_id":15368}] else . end)'
+cp "$merge_rules_base" "$merge_rules"
+if (DF_MERGE_RULE_API_FAIL=1; export DF_MERGE_RULE_API_FAIL; run_merge_rule_step); then
+    echo "merge-rule API failure passed" >&2
     exit 1
 fi
 
-echo "repository settings publisher and gate passed static checks"
+DF_SETTINGS_STUB_LOG="$settings_log" PATH="$temporary/bin:$PATH" \
+    "$publisher" >"$temporary/ok.out" 2>"$temporary/ok.err"
+grep -Fq -- '-X POST repos/dark-factory-build/dark-factory/rulesets' "$settings_log"
+
+: >"$settings_log"
+DF_SETTINGS_STUB_EXISTING=1 DF_SETTINGS_STUB_LOG="$settings_log" \
+    PATH="$temporary/bin:$PATH" "$publisher" >"$temporary/update.out" 2>"$temporary/update.err"
+grep -Fq -- '-X PUT repos/dark-factory-build/dark-factory/rulesets/11' "$settings_log"
+grep -Fq -- '-X DELETE repos/dark-factory-build/dark-factory/rulesets/22' "$settings_log"
+
+if DF_SETTINGS_STUB_LIST_FAIL=1 DF_SETTINGS_STUB_LOG="$settings_log" \
+    PATH="$temporary/bin:$PATH" "$publisher" >"$temporary/fail.out" 2>"$temporary/fail.err"; then
+    echo "ruleset-list failure was reported as successful" >&2
+    exit 1
+fi
+grep -Fq 'FAILED: cannot list rulesets' "$temporary/fail.err"
+
+: >"$settings_log"
+if DF_SETTINGS_STUB_EXISTING=1 DF_SETTINGS_STUB_APPLY_FAIL=1 \
+    DF_SETTINGS_STUB_LOG="$settings_log" PATH="$temporary/bin:$PATH" \
+    "$publisher" >"$temporary/apply-fail.out" 2>"$temporary/apply-fail.err"; then
+    echo "ruleset update failure was reported as successful" >&2
+    exit 1
+fi
+if grep -Fq -- '-X DELETE repos/dark-factory-build/dark-factory/rulesets/22' "$settings_log"; then
+    echo "legacy pull-request rule was deleted after replacement failed" >&2
+    exit 1
+fi
+grep -Fq 'SKIPPED: obsolete main-review remains' "$temporary/apply-fail.err"
+
+echo "repository settings and event-selective CI contract passed"

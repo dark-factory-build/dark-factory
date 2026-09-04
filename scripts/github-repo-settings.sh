@@ -12,7 +12,14 @@ failed=0
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 step() { printf '\n== %s\n' "$1"; }
-try() { if "$@"; then :; else echo "   FAILED: $*" >&2; failed=1; fi; }
+try() {
+    if "$@"; then
+        return 0
+    fi
+    echo "   FAILED: $*" >&2
+    failed=1
+    return 1
+}
 
 step "labels"
 while IFS='|' read -r name color description; do
@@ -41,25 +48,44 @@ step "merge settings (linear history: squash or rebase only; delete merged branc
 try gh repo edit "$repository" --enable-squash-merge --enable-rebase-merge \
     --enable-merge-commit=false --delete-branch-on-merge
 
-# Two rulesets on main, because a bypass applies to every rule in ITS
-# ruleset: "main-protect" (no bypass for anyone, not even the admin) makes
-# the aggregate `required` run (hosted macOS + Ubuntu), linear history, and no
-# force-push/deletion
-# unconditional; "main-review" carries the pull-request rule with a
-# Repository-admin (id 5) bypass in pull-request mode, since GitHub never
-# lets an author approve their own PR and this repository has one
-# maintainer. Everyone else needs the PR, an owner approval on any owned path,
-# resolved threads, and a green `required` aggregate from GitHub Actions
-# (integration 15368). Currency is the merge queue's job, not a strict
-# up-to-date check. Nobody pushes to main.
+# One ruleset protects main with no bypass. Every change needs a pull request,
+# resolved threads, the merge queue, and the `required` aggregate from GitHub
+# Actions (integration 15368). The Maintainer's exact-head ALLOW is the review
+# gate for ordinary changes. Native CODEOWNER review is reserved for the few
+# paths that can rewrite that gate; the App cannot approve its own pull request.
+# Currency is the queue's job, not a strict up-to-date check. Nobody pushes to
+# main.
+ruleset_id() {
+    ruleset_ids=$(gh api "repos/$repository/rulesets" --jq ".[] | select(.name==\"$1\") | .id" 2>/dev/null) || {
+        echo "   FAILED: cannot list rulesets" >&2
+        return 1
+    }
+    ruleset_count=$(printf '%s\n' "$ruleset_ids" | awk 'NF { count++ } END { print count + 0 }')
+    [ "$ruleset_count" -le 1 ] || {
+        echo "   FAILED: duplicate ruleset name: $1" >&2
+        return 1
+    }
+    case "$ruleset_ids" in
+        '') ;;
+        *[!0-9]*) echo "   FAILED: invalid ruleset id for $1" >&2; return 1 ;;
+    esac
+    printf '%s' "$ruleset_ids"
+}
+
 apply_ruleset() {
     printf '%s' "$2" > "$tmp"
-    existing=$(gh api "repos/$repository/rulesets" --jq ".[] | select(.name==\"$1\") | .id" 2>/dev/null | head -1)
-    case "$existing" in *[!0-9]*) existing="" ;; esac   # an error body is not an id
+    existing=$(ruleset_id "$1") || { failed=1; return; }
     if [ -n "$existing" ]; then
         try gh api -X PUT "repos/$repository/rulesets/$existing" --input "$tmp" >/dev/null
     else
         try gh api -X POST "repos/$repository/rulesets" --input "$tmp" >/dev/null
+    fi
+}
+
+delete_ruleset() {
+    existing=$(ruleset_id "$1") || { failed=1; return; }
+    if [ -n "$existing" ]; then
+        try gh api -X DELETE "repos/$repository/rulesets/$existing" >/dev/null
     fi
 }
 
@@ -83,8 +109,8 @@ apply_ruleset() {
 # main + everything ahead in the queue + this entry, and merges only that exact
 # combination — so strict would add a per-merge re-run for a property the queue
 # already establishes. GitHub also expects strict off when a queue is enabled.
-step "ruleset: main-protect (required aggregate + linear history + merge queue + no force-push/delete; no bypass)"
-apply_ruleset main-protect '{
+step "ruleset: main-protect (pull request + required aggregate + merge queue + immutable linear history; no bypass)"
+if apply_ruleset main-protect '{
   "name": "main-protect",
   "target": "branch",
   "enforcement": "active",
@@ -100,39 +126,11 @@ apply_ruleset main-protect '{
         "max_entries_to_build": 5,
         "max_entries_to_merge": 5,
         "min_entries_to_merge": 1,
-        "min_entries_to_merge_wait_minutes": 5,
+        "min_entries_to_merge_wait_minutes": 0,
         "check_response_timeout_minutes": 60 } },
     { "type": "required_status_checks", "parameters": {
         "strict_required_status_checks_policy": false,
-        "required_status_checks": [ { "context": "required", "integration_id": 15368 } ] } }
-  ]
-}'
-
-# `required_approving_review_count` is 0 and `require_code_owner_review` is
-# true, which is not "no review". It moves the requirement from "every pull
-# request needs an approval" to "every pull request touching an owned path
-# needs the owner's approval", and `.github/CODEOWNERS` decides which paths
-# those are: the authority surface only -- `.github/`, the agent rule and
-# boundary documents, and the four named scripts (this one among them) that
-# publish the ruleset, verify the review verdict, or causally test those two.
-# Everything else, executable or not, merges on the `required` aggregate,
-# whose `review` check demands an exact-head adversarial-review verdict.
-#
-# The reason to spend the count this way is that the owner is also the author
-# of most pull requests here, and GitHub never lets an author approve their
-# own. A blanket count of 1 therefore made every owner-authored change merge
-# by admin bypass — a gate satisfied by circumventing it rather than by
-# meeting it. Scoping by path means the approvals that do happen are real.
-step "ruleset: main-review (owner approval on owned paths; admin may bypass via a PR)"
-apply_ruleset main-review '{
-  "name": "main-review",
-  "target": "branch",
-  "enforcement": "active",
-  "bypass_actors": [
-    { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request" }
-  ],
-  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
-  "rules": [
+        "required_status_checks": [ { "context": "required", "integration_id": 15368 } ] } },
     { "type": "pull_request", "parameters": {
         "required_approving_review_count": 0,
         "dismiss_stale_reviews_on_push": true,
@@ -140,7 +138,17 @@ apply_ruleset main-review '{
         "require_last_push_approval": false,
         "required_review_thread_resolution": true } }
   ]
-}'
+}'; then
+    # Delete only after the replacement rule is live. Otherwise an API failure
+    # could remove the repository's sole pull-request rule.
+    step "ruleset: remove obsolete main-review"
+    delete_ruleset main-review
+else
+    echo "   SKIPPED: obsolete main-review remains until main-protect succeeds" >&2
+fi
+
+# `main-review` existed only to carry an admin bypass around GitHub's native
+# approval rule. The unified no-bypass ruleset supersedes it.
 
 step "security: private vulnerability reporting, dependabot alerts, secret scanning + push protection"
 try gh api -X PUT "repos/$repository/private-vulnerability-reporting" >/dev/null
