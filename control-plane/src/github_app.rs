@@ -276,9 +276,9 @@ pub(crate) struct SubmitPullRequestReview {
 /// What the reviewer concluded, which is not the same thing as which GitHub
 /// review state carries it.
 ///
-/// Rule 2 has three outcomes -- the reviewer is satisfied, the reviewer found
-/// a blocking defect, or the reviewer left a note that decides nothing -- and
-/// GitHub offers this App exactly one state to say all three in.
+/// The review contract has three outcomes -- the reviewer is satisfied, the
+/// reviewer found a blocking defect, or the reviewer left a note that decides
+/// nothing -- and GitHub offers this App exactly one state to say all three in.
 ///
 /// The constraint is one constraint, and it applies to both ends. This App
 /// opens the pull requests it reviews, and GitHub refuses a self-review that
@@ -3232,8 +3232,8 @@ fn free_of_operation_marker(value: &str) -> Result<(), OperationError> {
     (!forged).then_some(()).ok_or(OperationError::InvalidInput)
 }
 
-/// The line the required `review` check reads to decide whether rule 2 is
-/// satisfied at an exact head. `ReviewEvent::verdict` renders it; review
+/// The line the required `review` check reads to decide whether its exact-head
+/// contract is satisfied. `ReviewEvent::verdict` renders it; review
 /// bodies are refused if they carry the prefix, for the same reason the
 /// operation marker is refused: a caller that could write this line could
 /// state a verdict it never asked the App to record, and the check would
@@ -3787,9 +3787,8 @@ impl Authority {
         }
         valid_sha(&reference.object.sha)?;
         Ok(RepositoryResult {
-            // GitHub's canonical spelling, not the caller's. Both AGENTS files
-            // require an agent to fail closed unless status returns the
-            // repository it asked for, and the id already comes from the grant.
+            // GitHub's canonical spelling, not the caller's. The id already
+            // comes from the installation grant.
             repository: metadata.full_name,
             repository_id: token.repository_id,
             default_branch: metadata.default_branch,

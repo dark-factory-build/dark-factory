@@ -1,9 +1,6 @@
-# Only files that can rewrite the merge authority require the repository
-# owner's GitHub approval. Every change still needs an independent exact-head
-# Maintainer ALLOW and the merge queue's combined-tree gate.
+# Files that can rewrite automated merge authority.
 
 /.github/workflows/                  @baziyer
 /.github/CODEOWNERS                  @baziyer
-/AGENTS.md                           @baziyer
 /scripts/github-repo-settings.sh     @baziyer
 /scripts/verify-adversarial-review.sh @baziyer

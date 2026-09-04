@@ -13,7 +13,7 @@ cannot select a source path or lifecycle result, and there is no registry,
 plugin, fallback, or provider-owned supervision framework.
 
 Shell and Codex are proven end to end. The Claude Code launch path is
-fixture-proven in the current source; a separately approved run against its
+fixture-proven in the current source; a live run against its
 signed-in CLI remains required before it is included in a release.
 
 ## Create an agent

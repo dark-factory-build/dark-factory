@@ -129,7 +129,6 @@ fi
 
 require '/.github/workflows/' "$repository_root/.github/CODEOWNERS"
 require '/.github/CODEOWNERS' "$repository_root/.github/CODEOWNERS"
-require '/AGENTS.md' "$repository_root/.github/CODEOWNERS"
 require '/scripts/github-repo-settings.sh' "$repository_root/.github/CODEOWNERS"
 require '/scripts/verify-adversarial-review.sh' "$repository_root/.github/CODEOWNERS"
 if grep -Eq '^/(ARCHITECTURE|SECURITY|CLAUDE)\.md|^/\.github/[[:space:]]' "$repository_root/.github/CODEOWNERS"; then

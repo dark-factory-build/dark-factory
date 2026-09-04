@@ -1,5 +1,5 @@
 #!/bin/sh
-# Decide whether AGENTS.md rule 2 is satisfied at one exact pull request head.
+# Verify the Maintainer review contract at one exact pull request head.
 #
 # The review itself happens elsewhere: an agent that did not write the change
 # reads the diff and records its verdict through the maintainer App, which
@@ -187,7 +187,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     } >>"$findings"
 done <"$reviews"
 
-summary '### Adversarial review (AGENTS.md rule 2)'
+summary '### Adversarial review'
 summary ''
 summary "- Head: <code>$(bounded_html "$head_sha")</code>"
 summary "- Verdicts at this head: <code>$considered</code>"
