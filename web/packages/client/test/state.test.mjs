@@ -303,6 +303,12 @@ test("the client tolerates added members but nothing else", () => {
   // An unknown member is still a member: the object bound is unchanged.
   const crowded = Array.from({ length: 32 }, (_, index) => `"future${index}":0`).join(",");
   expectMalformed(() => decodeClientControl(watch.replace('"after_head":"1"', `"after_head":"1",${crowded}`)));
+  // A tolerated member is not an unmeasured hole: the array and depth bounds
+  // apply inside it exactly as they do to a known member.
+  const wide = Array.from({ length: 33 }, () => "0").join(",");
+  expectMalformed(() => decodeClientControl(watch.replace('"after_head":"1"', `"after_head":"1","future":[${wide}]`)));
+  const deep = "[".repeat(18) + "0" + "]".repeat(18);
+  expectMalformed(() => decodeClientControl(watch.replace('"after_head":"1"', `"after_head":"1","future":${deep}`)));
   // Only members are tolerated: an unknown type and a wrong direction remain
   // finite refusals.
   expectMalformed(() => decodeServerControl(snapshot.replace('"STATE_SNAPSHOT"', '"STATE_FUTURE"')));

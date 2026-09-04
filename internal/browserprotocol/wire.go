@@ -550,8 +550,8 @@ func unmarshalArray(data []byte, target any) error {
 }
 
 // validateJSONShape checks the type of every member this build knows and
-// requires every non-optional one. A member this build does not know is
-// ignored, so the peer may add one without a coordinated release. Size,
+// requires every non-optional one. A member that is not a known name under any
+// case is ignored, so the peer may add one without a coordinated release. Size,
 // depth, array and object-member bounds still apply to the whole frame.
 func validateJSONShape(data []byte, target reflect.Type) error {
 	for target.Kind() == reflect.Pointer {
@@ -568,6 +568,7 @@ func validateJSONShape(data []byte, target reflect.Type) error {
 		}
 		fields := make(map[string]reflect.Type, target.NumField())
 		required := make(map[string]bool, target.NumField())
+		folded := make(map[string]struct{}, target.NumField())
 		for index := 0; index < target.NumField(); index++ {
 			field := target.Field(index)
 			tag := field.Tag.Get("json")
@@ -580,10 +581,21 @@ func validateJSONShape(data []byte, target reflect.Type) error {
 			}
 			fields[name] = field.Type
 			required[name] = options != "omitempty"
+			folded[strings.ToLower(name)] = struct{}{}
 		}
 		for name, raw := range object {
 			fieldType, ok := fields[name]
 			if !ok {
+				// encoding/json falls back to a case-insensitive match, so a
+				// member that case-folds onto a known name is not unknown to
+				// the decoder: ignoring it here would let `DAEMON_ID` silently
+				// overwrite the `daemon_id` this function validated, and the
+				// TypeScript decoder -- whose object keys are exact -- would
+				// disagree about the same frame. Only a name that is unknown
+				// under every case is ignored.
+				if _, collides := folded[strings.ToLower(name)]; collides {
+					return fmt.Errorf("%w: object field case collision", ErrMalformed)
+				}
 				continue
 			}
 			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) && fieldType.Kind() == reflect.Pointer {

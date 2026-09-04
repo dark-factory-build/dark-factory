@@ -208,7 +208,7 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
   let value: unknown;
   try { value = JSON.parse(text) as unknown; } catch { malformed(); }
   if (!isObject(value)) malformed();
-  requireKeys(value, ["type", "body"]);
+  requireKeys(value, ["type", "body"], true, ["id"]);
   if (!isControlType(value.type)) malformed();
   if (encodedLength > controlLimit(value.type)) malformed();
   const hasID = Object.prototype.hasOwnProperty.call(value, "id");
@@ -365,15 +365,24 @@ function isControlType(value: unknown): value is ControlType { return typeof val
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 /**
  * Every required member must be present and every member this build knows is
- * validated below. Decoding a wire frame ignores a member it does not know, so
- * a newer daemon may add one without a coordinated release; it reaches no
- * field of the decoded frame. Byte, depth, array and object-member bounds
- * still apply. A locally constructed frame stays exact, so a caller cannot
- * quietly hand this encoder a field it will drop.
+ * validated below. Decoding a wire frame ignores a member that is not a known
+ * name under any case, so a newer daemon may add one without a coordinated
+ * release; it reaches no field of the decoded frame. Byte, depth, array and
+ * object-member bounds still apply. A locally constructed frame stays exact,
+ * so a caller cannot quietly hand this encoder a field it will drop.
+ *
+ * A member differing from a known one only in case is refused rather than
+ * ignored. Go's decoder matches struct fields case-insensitively, so there it
+ * would overwrite the exact member; refusing it on both sides keeps the two
+ * decoders reading the same frame the same way.
  */
 function requireKeys(value: Record<string, unknown>, required: string[], wire = true, optional: string[] = []): void {
   if (required.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) malformed();
-  if (!wire && Object.keys(value).some((key) => !required.includes(key) && !optional.includes(key))) malformed();
+  const known = [...required, ...optional];
+  const present = Object.keys(value).filter((key) => !known.includes(key));
+  if (!wire) { if (present.length !== 0) malformed(); return; }
+  const folded = new Set(known.map((key) => key.toLowerCase()));
+  if (present.some((key) => folded.has(key.toLowerCase()))) malformed();
 }
 
 // JSON.parse permits duplicate names and unsafe integers. This structural scan

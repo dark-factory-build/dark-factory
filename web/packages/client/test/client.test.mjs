@@ -320,6 +320,29 @@ test("all public malformed boundaries return the finite ProtocolError", async ()
   expectMalformed(() => hexBytes({}));
 });
 
+// Go's decoder matches struct fields case-insensitively, so a member differing
+// from a known one only in case is not unknown to it: left tolerated it would
+// overwrite the exact member Go validated, while this decoder -- whose object
+// keys are exact -- would keep reading the exact one. Both sides refuse it, so
+// the two read the same frame the same way. A name unknown under every case is
+// still ignored.
+test("a case variant of a known member is refused, an unknown name is ignored", () => {
+  const hello = fixture("hello.json");
+  const shadow = "ff".repeat(16);
+  for (const mutated of [
+    hello.replace('"boot_id"', `"DAEMON_ID":"${shadow}","boot_id"`),
+    hello.replace('"boot_id"', `"Daemon_Id":"${shadow}","boot_id"`),
+    hello.replace('"daemon_id"', `"DAEMON_ID":"${shadow}","daemon_id"`),
+    hello.replace('"daemon_id"', '"DAEMON_ID"'),
+    hello.replace('{"type"', '{"Type":"NOPE","type"'),
+    hello.replace('"body"', '"BODY":{},"body"'),
+  ]) expectMalformed(() => decodeServerControl(mutated));
+  expectIgnoredMember(hello, hello.replace('"boot_id"', `"FUTURE_ID":"${shadow}","boot_id"`), "server");
+  // An optional envelope member is a known name too.
+  const detail = fixture("human_request_detail.json");
+  expectMalformed(() => decodeServerControl(detail.replace('"id"', '"ID":"x","id"')));
+});
+
 test("manifest has exactly one public mapping for every stable entry", () => {
   const source = json("../manifest.json");
   assert.deepEqual(Object.keys(BROWSER_MANIFEST.capabilities), source.capabilities.map((x) => x.name));

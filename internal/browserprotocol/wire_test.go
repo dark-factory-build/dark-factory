@@ -197,6 +197,9 @@ func TestControlMalformed(t *testing.T) {
 		{"bad id", strings.Replace(valid, `"type":"HELLO"`, `"type":"HELLO","id":"bad id"`, 1)},
 		{"hello id", strings.Replace(valid, `"type":"HELLO"`, `"type":"HELLO","id":"x"`, 1)},
 		{"error missing retryable", `{"type":"ERROR","body":{"code":"unauthorized"}}`},
+		// encoding/json would match these onto the exact member they shadow.
+		{"envelope case collision", strings.Replace(valid, `{"type"`, `{"TYPE":"NOPE","type"`, 1)},
+		{"body case collision", strings.Replace(valid, `,"boot_id"`, `,"DAEMON_ID":"`+strings.Repeat("ff", 16)+`","boot_id"`, 1)},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -282,6 +285,53 @@ func TestControlIgnoresUnknownMembers(t *testing.T) {
 	if _, err := DecodeClientControl([]byte(crowded)); err != ErrMalformed {
 		t.Fatalf("object-bound tolerant frame error = %v, want ErrMalformed", err)
 	}
+	// And the array bound: a tolerated member is not an unmeasured hole. A
+	// client frame keeps the small array bound wherever the array appears.
+	wide := strings.Replace(watch, `}}`, `,"future":[`+strings.TrimSuffix(strings.Repeat("0,", MaxJSONArray+1), ",")+`]}}`, 1)
+	if _, err := DecodeClientControl([]byte(wide)); err != ErrMalformed {
+		t.Fatalf("array-bound tolerant frame error = %v, want ErrMalformed", err)
+	}
+	// And the depth bound.
+	nested := strings.Replace(watch, `}}`, `,"future":`+strings.Repeat("[", MaxJSONDepth+2)+"0"+strings.Repeat("]", MaxJSONDepth+2)+`}}`, 1)
+	if _, err := DecodeClientControl([]byte(nested)); err != ErrMalformed {
+		t.Fatalf("depth-bound tolerant frame error = %v, want ErrMalformed", err)
+	}
+}
+
+// encoding/json matches a struct field case-insensitively when no exact name
+// matches, so a member differing only in case from a known one is not unknown
+// to the decoder even though the shape check would skip it. Left alone, that
+// member would overwrite the exact member this package validated, and the
+// TypeScript decoder -- whose keys are exact -- would read the frame
+// differently. Both sides refuse it instead.
+func TestCaseVariantOfAKnownMemberIsRefused(t *testing.T) {
+	exact := strings.Repeat("00", 16)
+	shadow := strings.Repeat("ff", 16)
+	valid := `{"type":"HELLO","body":{"daemon_id":"` + exact + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `"}}`
+	frame, err := DecodeServerControl([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Body.(Hello).DaemonID != exact {
+		t.Fatalf("baseline daemon_id = %q", frame.Body.(Hello).DaemonID)
+	}
+	for name, mutated := range map[string]string{
+		"upper":       strings.Replace(valid, `"boot_id"`, `"DAEMON_ID":"`+shadow+`","boot_id"`, 1),
+		"mixed":       strings.Replace(valid, `"boot_id"`, `"Daemon_Id":"`+shadow+`","boot_id"`, 1),
+		"before":      strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID":"`+shadow+`","daemon_id"`, 1),
+		"no exact":    strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID"`, 1),
+		"envelope":    strings.Replace(valid, `{"type"`, `{"Type":"NOPE","type"`, 1),
+		"nested item": strings.Replace(valid, `"boot_id"`, `"Connection_Nonce":"`+strings.Repeat("33", 32)+`","boot_id"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeServerControl([]byte(mutated)); err != ErrMalformed {
+				t.Fatalf("case variant accepted: %v", err)
+			}
+		})
+	}
+	// A name that is unknown under every case is still ignored.
+	tolerated := strings.Replace(valid, `"boot_id"`, `"FUTURE_ID":"`+shadow+`","boot_id"`, 1)
+	assertIgnoredMember(t, valid, tolerated, true)
 }
 
 // An unknown frame type and a frame sent in the wrong direction stay finite
