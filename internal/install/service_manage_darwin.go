@@ -23,7 +23,7 @@ const (
 	serviceBootoutPatience = 5 * time.Second
 )
 
-var serviceBinaryNames = [3]string{"factoryd", "factoryctl", "factory-runner"}
+var serviceBinaryNames = [3]string{serviceProgramName, "factoryctl", "factory-runner"}
 
 // withServiceMutation serializes every lifecycle mutation on the exact home
 // directory. factoryd's lifetime flock is on the separate factory.lock inode,
@@ -231,9 +231,6 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 		return serviceUpgradeLockedAt(ctx, home, userHome, config, sourceDir, launchctl, inspection)
 	}
 	if err != nil && !errors.Is(err, ErrServiceResidue) {
-		if status.State == ServiceAmbiguous {
-			return status, err
-		}
 		return status, err
 	}
 	if errors.Is(err, ErrServiceResidue) {
@@ -284,11 +281,13 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 // never touched.
 //
 // The order is what a failure leaves behind. A refused bootout replaces
-// nothing. A failed bootstrap follows a receipt that already names the new
-// binaries, so status stays an honest "installed" that service start resolves.
-// Only a crash between the first binary and the receipt leaves the receipt
-// disagreeing with the program, which is the residue service uninstall exists
-// to resolve.
+// nothing. A sibling that fails to copy leaves factoryd, which is published
+// last, still agreeing with the receipt, so service start recovers the
+// installation. A failed bootstrap follows a receipt that already names the
+// new binaries, so status stays an honest "installed" that service start
+// resolves. The receipt rewrite is the one remaining window: an interruption
+// between the new factoryd and the new receipt leaves the two disagreeing,
+// which is the residue service uninstall exists to resolve.
 func serviceUpgradeLockedAt(ctx context.Context, home, userHome string, config ServiceConfig, sourceDir string, launchctl launchctlRun, inspection serviceInspection) (ServiceStatus, error) {
 	serviceDir := ServiceDirectoryPath(home)
 	current := filepath.Join(serviceDir, "bin", "current")
@@ -336,18 +335,21 @@ func serviceUpgradeLockedAt(ctx context.Context, home, userHome string, config S
 // publishServiceBinaries copies the three sibling binaries into the service
 // directory and returns factoryd's digest, which is the receipt's program
 // identity.
+//
+// factoryd is published last on purpose. The receipt names factoryd alone, so
+// a sibling that fails to copy leaves the program and the receipt still
+// agreeing: the installation is intact and service start recovers it. Only the
+// receipt rewrite that follows can make the two disagree.
 func publishServiceBinaries(sourceDir, destinationDir string) (string, error) {
-	var programDigest string
 	for _, name := range serviceBinaryNames {
-		digest, err := copyServiceBinary(filepath.Join(sourceDir, name), destinationDir, name)
-		if err != nil {
+		if name == serviceProgramName {
+			continue
+		}
+		if _, err := copyServiceBinary(filepath.Join(sourceDir, name), destinationDir, name); err != nil {
 			return "", err
 		}
-		if name == "factoryd" {
-			programDigest = digest
-		}
 	}
-	return programDigest, nil
+	return copyServiceBinary(filepath.Join(sourceDir, serviceProgramName), destinationDir, serviceProgramName)
 }
 
 // bootstrapService loads the retained plist and confirms the result. Install,

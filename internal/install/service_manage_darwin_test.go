@@ -3,6 +3,7 @@
 package install
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -80,43 +81,37 @@ func (fixture *manageFixture) printAbsent() []launchctlResult {
 	return []launchctlResult{{status: launchctlNotFound}, {status: 0, stdout: []byte(launchctlNotFoundText + "\n")}}
 }
 
+func manageBinaryBody(name, build string) []byte {
+	return []byte("#!binary " + name + " " + build + "\n")
+}
+
 // writeSourceBinaries makes the fixture's sibling set a distinct build, so the
 // next install is an upgrade instead of the recognized repeat.
 func (fixture *manageFixture) writeSourceBinaries(t *testing.T, build string) {
 	t.Helper()
 	for _, name := range serviceBinaryNames {
-		if err := os.WriteFile(filepath.Join(fixture.sourceDir, name), []byte("#!binary "+name+" "+build+"\n"), 0o700); err != nil {
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, name), manageBinaryBody(name, build), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
-// assertInstalledMatchesSource proves every installed binary is byte-identical
-// to the invoking sibling set and that the receipt names that factoryd.
-func (fixture *manageFixture) assertInstalledMatchesSource(t *testing.T) {
+// assertInstalledBuild proves every installed binary is that build's and that
+// the receipt names that build's factoryd — the agreement every service verb
+// depends on.
+func (fixture *manageFixture) assertInstalledBuild(t *testing.T, build string) {
 	t.Helper()
 	current := filepath.Join(ServiceDirectoryPath(fixture.home), "bin", "current")
 	for _, name := range serviceBinaryNames {
-		want, err := os.ReadFile(filepath.Join(fixture.sourceDir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
 		got, err := os.ReadFile(filepath.Join(current, name))
-		if err != nil || string(got) != string(want) {
-			t.Fatalf("installed %s = %q, want %q (%v)", name, got, want, err)
+		if err != nil || !bytes.Equal(got, manageBinaryBody(name, build)) {
+			t.Fatalf("installed %s = %q, want build %q (%v)", name, got, build, err)
 		}
 	}
-	source, err := os.ReadFile(filepath.Join(fixture.sourceDir, "factoryd"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := sha256.Sum256(source)
+	program := sha256.Sum256(manageBinaryBody(serviceProgramName, build))
 	receipt, present, err := readServiceReceipt(fixture.home)
-	if err != nil || !present {
-		t.Fatalf("receipt present=%t err=%v", present, err)
-	}
-	if receipt.ProgramDigest != hex.EncodeToString(want[:]) {
-		t.Fatal("receipt program digest is not the invoking factoryd's digest")
+	if err != nil || !present || receipt.ProgramDigest != hex.EncodeToString(program[:]) {
+		t.Fatalf("receipt = %+v present=%t err=%v, want the %q program digest", receipt, present, err, build)
 	}
 }
 
@@ -285,7 +280,7 @@ func TestServiceInstallUpgradesADifferentBuildInPlace(t *testing.T) {
 	if status := fixture.install(t, first.run); status != (ServiceStatus{State: ServiceRunning, PID: 100}) {
 		t.Fatalf("install status = %+v", status)
 	}
-	fixture.assertInstalledMatchesSource(t)
+	fixture.assertInstalledBuild(t, "first")
 	homeBefore := snapshotServiceTrees(t, fixture.home)
 
 	// Same sibling set: the install is recognized, launchd is only observed.
@@ -297,7 +292,7 @@ func TestServiceInstallUpgradesADifferentBuildInPlace(t *testing.T) {
 	if len(repeat.calls) != 1 || repeat.calls[0][0] != "print" {
 		t.Fatalf("repeat install verbs = %q", repeat.calls)
 	}
-	fixture.assertInstalledMatchesSource(t)
+	fixture.assertInstalledBuild(t, "first")
 
 	// A different sibling set is moved into place: bootout, then bootstrap.
 	fixture.writeSourceBinaries(t, "second")
@@ -320,7 +315,7 @@ func TestServiceInstallUpgradesADifferentBuildInPlace(t *testing.T) {
 	if got := upgrade.calls[3]; len(got) != 3 || got[1] != fmt.Sprintf("gui/%d", os.Geteuid()) || got[2] != fixture.plistPath() {
 		t.Fatalf("upgrade bootstrap call = %q", got)
 	}
-	fixture.assertInstalledMatchesSource(t)
+	fixture.assertInstalledBuild(t, "second")
 
 	// The upgrade is a service-directory operation only: the data home, its
 	// database, socket directory, and operator token are untouched.
@@ -416,7 +411,7 @@ func TestServiceInstallLeavesAnUpgradeStartableWhenBootstrapFails(t *testing.T) 
 
 	// The receipt already names the new binaries, so the refusal leaves an
 	// installation status reports truthfully instead of residue.
-	fixture.assertInstalledMatchesSource(t)
+	fixture.assertInstalledBuild(t, "second")
 	unloaded := &recordedLaunchctl{results: fixture.printAbsent()}
 	status, err = inspectServiceAtHome(context.Background(), fixture.home, fixture.userHome, fixture.config, unloaded.run)
 	if err != nil || status != (ServiceStatus{State: ServiceInstalled}) {
@@ -428,7 +423,239 @@ func TestServiceInstallLeavesAnUpgradeStartableWhenBootstrapFails(t *testing.T) 
 	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 401}) {
 		t.Fatalf("start after failed bootstrap = %+v, %v", status, err)
 	}
-	fixture.assertInstalledMatchesSource(t)
+	fixture.assertInstalledBuild(t, "second")
+}
+
+// factoryd is published last, so a sibling that fails to copy after the bootout
+// leaves the program and the receipt still agreeing: the installation survives
+// as an installation, and one more command — not an uninstall — recovers it.
+func TestServiceInstallLeavesAnUpgradeRecoverableWhenASiblingCopyFails(t *testing.T) {
+	fixture := newManageFixture(t)
+	fixture.writeSourceBinaries(t, "first")
+	first := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(600))}
+	fixture.install(t, first.run)
+
+	// Crash residue from an earlier staged write collides with the second
+	// binary this upgrade publishes, after the job has already been booted out.
+	current := filepath.Join(ServiceDirectoryPath(fixture.home), "bin", "current")
+	stage := filepath.Join(current, ".factory-runner.stage")
+	if err := os.WriteFile(stage, []byte("crash residue"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeSourceBinaries(t, "second")
+	blocked := &recordedLaunchctl{results: []launchctlResult{
+		fixture.printRunning(600),
+		{status: 0}, {status: launchctlNotFound},
+	}}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, blocked.run)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceResidue) {
+		t.Fatalf("blocked upgrade = %+v, %v", status, err)
+	}
+	if len(blocked.calls) != 3 || blocked.calls[1][0] != "bootout" {
+		t.Fatalf("blocked upgrade verbs = %q", blocked.calls)
+	}
+	program, err := os.ReadFile(filepath.Join(current, serviceProgramName))
+	if err != nil || !bytes.Equal(program, manageBinaryBody(serviceProgramName, "first")) {
+		t.Fatalf("factoryd was published before its siblings: %q, %v", program, err)
+	}
+	receipt, present, err := readServiceReceipt(fixture.home)
+	if err != nil || !present {
+		t.Fatalf("receipt present=%t err=%v", present, err)
+	}
+	digest := sha256.Sum256(manageBinaryBody(serviceProgramName, "first"))
+	if receipt.ProgramDigest != hex.EncodeToString(digest[:]) {
+		t.Fatal("the receipt no longer names the installed program")
+	}
+
+	// Status is an honest installation and start brings the daemon back, so
+	// the failure never needs an uninstall.
+	unloaded := &recordedLaunchctl{results: fixture.printAbsent()}
+	status, err = inspectServiceAtHome(context.Background(), fixture.home, fixture.userHome, fixture.config, unloaded.run)
+	if err != nil || status != (ServiceStatus{State: ServiceInstalled}) {
+		t.Fatalf("status after the blocked upgrade = %+v, %v", status, err)
+	}
+	start := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(601))}
+	status, err = serviceStartAt(context.Background(), fixture.home, fixture.userHome, fixture.config, start.run)
+	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 601}) {
+		t.Fatalf("start after the blocked upgrade = %+v, %v", status, err)
+	}
+
+	// The sibling set is mixed — the copy that ran published the new factoryctl
+	// — but the program launchd runs and the receipt that proves it agree, and
+	// that is everything any verb needs. With the residue resolved the same
+	// install command completes the upgrade.
+	if err := os.Remove(stage); err != nil {
+		t.Fatal(err)
+	}
+	retry := &recordedLaunchctl{results: []launchctlResult{
+		fixture.printRunning(601),
+		{status: 0}, {status: launchctlNotFound},
+		{status: 0}, fixture.printRunning(602),
+	}}
+	status, err = serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, retry.run)
+	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 602}) {
+		t.Fatalf("retried upgrade = %+v, %v", status, err)
+	}
+	fixture.assertInstalledBuild(t, "second")
+}
+
+func TestServiceInstallRefusesAnIncompleteSiblingSet(t *testing.T) {
+	fixture := newManageFixture(t)
+	fixture.writeSourceBinaries(t, "first")
+	first := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(700))}
+	fixture.install(t, first.run)
+
+	// An invoking directory missing a sibling refuses before any mutation; the
+	// running installation is exactly as it was observed.
+	fixture.writeSourceBinaries(t, "second")
+	if err := os.Remove(filepath.Join(fixture.sourceDir, "factory-runner")); err != nil {
+		t.Fatal(err)
+	}
+	partial := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(700)}}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, partial.run)
+	if !errors.Is(err, ErrServiceAmbiguous) || status != (ServiceStatus{State: ServiceRunning, PID: 700}) {
+		t.Fatalf("incomplete invoking set = %+v, %v", status, err)
+	}
+	if len(partial.calls) != 1 || partial.calls[0][0] != "print" {
+		t.Fatalf("incomplete invoking set verbs = %q", partial.calls)
+	}
+	fixture.assertInstalledBuild(t, "first")
+
+	// A source this account does not exclusively own refuses the same way.
+	fixture.writeSourceBinaries(t, "second")
+	if err := os.Chmod(filepath.Join(fixture.sourceDir, "factory-runner"), 0o770); err != nil {
+		t.Fatal(err)
+	}
+	unowned := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(700)}}
+	status, err = serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, unowned.run)
+	if !errors.Is(err, ErrServiceForeign) || status != (ServiceStatus{State: ServiceRunning, PID: 700}) {
+		t.Fatalf("group-writable invoking set = %+v, %v", status, err)
+	}
+	fixture.assertInstalledBuild(t, "first")
+	if err := os.Chmod(filepath.Join(fixture.sourceDir, "factory-runner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// An installation missing a sibling is ambiguous: install cannot repair it
+	// because it cannot prove what the incomplete tree is.
+	if err := os.Remove(filepath.Join(ServiceDirectoryPath(fixture.home), "bin", "current", "factoryctl")); err != nil {
+		t.Fatal(err)
+	}
+	incomplete := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(700)}}
+	status, err = serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, incomplete.run)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceAmbiguous) {
+		t.Fatalf("incomplete installation = %+v, %v", status, err)
+	}
+	if len(incomplete.calls) != 1 || incomplete.calls[0][0] != "print" {
+		t.Fatalf("incomplete installation verbs = %q", incomplete.calls)
+	}
+
+	// Uninstall is the route back, and the same command installs again.
+	remove := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(700), {status: 0}, {status: launchctlNotFound}}}
+	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, remove.run)
+	if err != nil || status.State != ServiceAbsent {
+		t.Fatalf("uninstall of the incomplete installation = %+v, %v", status, err)
+	}
+	again := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(701))}
+	if status := fixture.install(t, again.run); status.State != ServiceRunning {
+		t.Fatalf("install after uninstall = %+v", status)
+	}
+	fixture.assertInstalledBuild(t, "second")
+}
+
+func TestReplaceExactFileRewritesOnlyThisInstallationsBytes(t *testing.T) {
+	root := serviceTestRoot(t)
+	directory := filepath.Join(root, "durable")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "receipt")
+	previous, contents := []byte("previous\n"), []byte("contents\n")
+
+	// Nothing to replace: the caller proved a file it can no longer find.
+	if err := replaceExactFile(directory, "receipt", previous, contents, 0o600); !errors.Is(err, ErrServiceResidue) {
+		t.Fatalf("missing file = %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the refusal created the file")
+	}
+
+	// Different bytes: something replaced the file after it was read.
+	foreign := []byte("someone else's bytes\n")
+	if err := os.WriteFile(path, foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceExactFile(directory, "receipt", previous, contents, 0o600); !errors.Is(err, ErrServiceForeign) {
+		t.Fatalf("foreign bytes = %v", err)
+	}
+	if body, err := os.ReadFile(path); err != nil || !bytes.Equal(body, foreign) {
+		t.Fatalf("foreign bytes mutated: %q, %v", body, err)
+	}
+
+	// The exact bytes are rewritten, and a repeat is the recognized no-op.
+	if err := os.WriteFile(path, previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, pass := range []string{"replace", "repeat"} {
+		if err := replaceExactFile(directory, "receipt", previous, contents, 0o600); err != nil {
+			t.Fatalf("%s = %v", pass, err)
+		}
+		if body, err := os.ReadFile(path); err != nil || !bytes.Equal(body, contents) {
+			t.Fatalf("%s left %q, %v", pass, body, err)
+		}
+	}
+}
+
+// The receipt is read before the bootout and rewritten after three copies, so
+// the window is real: a receipt replaced inside it must refuse rather than be
+// overwritten with a program digest that was never proved against it.
+func TestServiceUpgradeRefusesAReceiptReplacedInsideItsOwnWindow(t *testing.T) {
+	fixture := newManageFixture(t)
+	fixture.writeSourceBinaries(t, "first")
+	first := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(800))}
+	fixture.install(t, first.run)
+	receiptPath := filepath.Join(ServiceDirectoryPath(fixture.home), serviceReceiptName)
+	receipt, present, err := readServiceReceipt(fixture.home)
+	if err != nil || !present {
+		t.Fatalf("receipt present=%t err=%v", present, err)
+	}
+	foreign := receipt
+	foreign.Label = manageTestLabel + ".other"
+	foreign.PlistPath = filepath.Join(fixture.plistDir, foreign.Label+".plist")
+	foreignBody, err := encodeServiceReceipt(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.writeSourceBinaries(t, "second")
+	booted := true
+	swap := func(_ context.Context, arguments ...string) launchctlResult {
+		switch arguments[0] {
+		case "print":
+			if booted {
+				return fixture.printRunning(800)
+			}
+			return launchctlResult{status: launchctlNotFound}
+		case "bootout":
+			// Inside the upgrade's own window, between the receipt read and the
+			// receipt rewrite.
+			booted = false
+			if err := os.WriteFile(receiptPath, foreignBody, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return launchctlResult{status: 0}
+		default:
+			return launchctlResult{status: -1, err: fmt.Errorf("unexpected verb %q", arguments[0])}
+		}
+	}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, swap)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceForeign) {
+		t.Fatalf("swapped receipt upgrade = %+v, %v", status, err)
+	}
+	body, readErr := os.ReadFile(receiptPath)
+	if readErr != nil || !bytes.Equal(body, foreignBody) {
+		t.Fatalf("the swapped receipt was rewritten: %q, %v", body, readErr)
+	}
 }
 
 func TestServiceInstallRefusesForeignPlistAndResidue(t *testing.T) {
