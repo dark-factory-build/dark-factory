@@ -63,6 +63,13 @@ attempt and rejected if outside its allowlist; it never falls back to
 The current daemon supports worker runs only. Operator and attempt roles confer
 no cross-agent authority; task and run ancestry never grant agent authority.
 
+Public browser state is one bounded snapshot built from a positive allowlist of
+public columns. Project roots and verification policy, agent model, reasoning
+effort and budgets, task bodies, results and blocked reasons, and HumanRequest
+question, reply and run identity are not selected at all, so they cannot reach
+a projection. The snapshot has an exact entity bound and an exact encoded-byte
+bound, and exceeding either is a finite refusal rather than a trimmed answer.
+
 Paired browser clients have one durable, revocable capability mask. Public
 observation, private HumanRequest detail, HumanRequest effects, and terminal
 input are separate bits and are reloaded for every operation while an exact
