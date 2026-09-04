@@ -25,6 +25,11 @@ const (
 	defaultPingInterval   = 25 * time.Second
 	defaultPongTimeout    = 10 * time.Second
 
+	// maxSessions is the loopback listener's own connection slot count. A
+	// relay opening beyond it would only collect 503 handshakes, so this side
+	// refuses first and never spawns the session.
+	maxSessions = 32
+
 	relayDialTimeout    = 15 * time.Second
 	loopbackDialTimeout = 5 * time.Second
 	relayWriteTimeout   = 10 * time.Second
@@ -490,8 +495,11 @@ func (connector *Connector) open(ctx context.Context, record Record, queue *outb
 		connector.mu.Unlock()
 		return fmt.Errorf("%w: OPEN reuses a live connection id", ErrRelayProtocol)
 	}
-	// Session capacity is the loopback listener's own bound: it refuses
-	// beyond its connection slots and that refusal becomes a CLOSE below.
+	if len(connector.sessions) >= maxSessions {
+		connector.mu.Unlock()
+		queue.push(nil, closeRecord(record.Connection, relayCloseSlow, "session capacity"))
+		return nil
+	}
 	current := newSession(record.Connection)
 	connector.sessions[record.Connection] = current
 	connector.mu.Unlock()
@@ -508,6 +516,9 @@ func (connector *Connector) closeSession(record Record) error {
 	if record.Connection == 0 {
 		return fmt.Errorf("%w: CLOSE on connection 0", ErrRelayProtocol)
 	}
+	// The code in a relay CLOSE is validated and then discarded by design:
+	// the daemon has no use for a controller's close code, so the loopback
+	// socket gets a normal closure either way.
 	if len(record.Payload) > 0 {
 		var payload closePayload
 		if err := json.Unmarshal(record.Payload, &payload); err != nil {
@@ -522,9 +533,8 @@ func (connector *Connector) closeSession(record Record) error {
 		return nil
 	}
 	current.markRelayClosed()
-	// The daemon does not interpret controller close codes, so the loopback
-	// socket gets a normal closure. Detached because the close handshake must
-	// not stall the relay read loop; joined by serve through sessionGroup.
+	// Detached because the close handshake must not stall the relay read
+	// loop; joined by serve through sessionGroup.
 	connector.shutdownAsync(current, websocket.StatusNormalClosure)
 	return nil
 }
@@ -577,9 +587,18 @@ func (connector *Connector) runSession(ctx context.Context, current *session, or
 		recordType := RecordBinary
 		if kind == websocket.MessageText {
 			recordType = RecordText
-			frame = connector.injectTicket(sessionContext, frame)
 		}
 		if !queue.push(current, Record{Type: recordType, Connection: current.connection, Payload: frame}) {
+			code = relayCloseSlow
+			break
+		}
+		// The daemon's bytes go first and unaltered; the relay ticket follows
+		// as its own frame on the same session, in order.
+		var ticket []byte
+		if recordType == RecordText {
+			ticket = connector.ticketFrame(sessionContext, frame)
+		}
+		if ticket != nil && !queue.push(current, Record{Type: RecordText, Connection: current.connection, Payload: ticket}) {
 			code = relayCloseSlow
 			break
 		}

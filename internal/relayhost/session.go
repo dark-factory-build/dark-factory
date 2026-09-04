@@ -140,62 +140,49 @@ func loopbackCloseCode(err error) int {
 	return relayCloseUnavailable
 }
 
-// injectTicket adds a relay control ticket to a pairing or authentication
-// result so the controller can reconnect through the relay without another
-// terminal-side pairing. Every other frame, and every frame whose client id
-// has no usable device key, is forwarded byte for byte. Frames are never
-// logged and never decoded with a protocol decoder: this side must not become
-// a second interpreter of daemon messages.
-func (connector *Connector) injectTicket(ctx context.Context, frame []byte) []byte {
+// ticketFrame returns the transport frame that follows a pairing or
+// authentication result, or nil. The ticket travels as its own frame rather
+// than as a member added to the result, so the daemon's bytes reach the
+// session decoder untouched: neither protocol decoder tolerates an unknown
+// member, and the client's relay socket wrapper consumes this frame instead
+// of forwarding it. Frames are never logged and never decoded with a protocol
+// decoder: this side must not become a second interpreter of daemon messages.
+func (connector *Connector) ticketFrame(ctx context.Context, frame []byte) []byte {
 	// Almost every frame is neither result, and a snapshot must not pay for
 	// the scan.
 	if connector.config.DeviceKey == nil || len(frame) > maxResultFrameBytes ||
 		!bytes.Contains(frame, []byte(`"PAIR_RESULT"`)) && !bytes.Contains(frame, []byte(`"AUTH_RESULT"`)) {
-		return frame
+		return nil
 	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(frame, &envelope); err != nil {
-		return frame
+	var result struct {
+		Type string `json:"type"`
+		Body struct {
+			ClientID string `json:"client_id"`
+		} `json:"body"`
 	}
-	var kind string
-	if err := json.Unmarshal(envelope["type"], &kind); err != nil || kind != "PAIR_RESULT" && kind != "AUTH_RESULT" {
-		return frame
+	if err := json.Unmarshal(frame, &result); err != nil || result.Type != "PAIR_RESULT" && result.Type != "AUTH_RESULT" {
+		return nil
 	}
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(envelope["body"], &body); err != nil {
-		return frame
-	}
-	var encoded string
-	if err := json.Unmarshal(body["client_id"], &encoded); err != nil || len(encoded) != 2*ControllerIDSize {
-		return frame
-	}
-	raw, err := hex.DecodeString(encoded)
+	raw, err := hex.DecodeString(result.Body.ClientID)
 	if err != nil || len(raw) != ControllerIDSize {
-		return frame
+		return nil
 	}
 	var clientID [ControllerIDSize]byte
 	copy(clientID[:], raw)
 	deviceKey, ok, err := connector.config.DeviceKey(ctx, clientID)
 	if err != nil || !ok {
-		return frame
+		return nil
 	}
 	ticket := ControlTicket(connector.config.Identity, clientID, deviceKey, connector.now().Add(connector.config.TicketLifetime))
 	if ticket == "" {
-		return frame
+		return nil
 	}
-	encodedTicket, err := json.Marshal(ticket)
+	payload, err := json.Marshal(struct {
+		Type   string `json:"type"`
+		Ticket string `json:"ticket"`
+	}{Type: "RELAY_TICKET", Ticket: ticket})
 	if err != nil {
-		return frame
+		return nil
 	}
-	body["relay_ticket"] = encodedTicket
-	encodedBody, err := json.Marshal(body)
-	if err != nil {
-		return frame
-	}
-	envelope["body"] = encodedBody
-	rewritten, err := json.Marshal(envelope)
-	if err != nil {
-		return frame
-	}
-	return rewritten
+	return payload
 }

@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -168,7 +167,6 @@ type relayController struct {
 	records    chan relayhost.Record
 	key        *ecdsa.PrivateKey
 	client     kernel.BrowserClient
-	ticket     string
 }
 
 func (host *relayHost) open(t *testing.T, connection uint32, key *ecdsa.PrivateKey) *relayController {
@@ -209,19 +207,19 @@ func (controller *relayController) next(t *testing.T) relayhost.Record {
 }
 
 // frame reads the next relayed application frame and decodes it with the real
-// server decoder, after lifting out the relay's added ticket member.
-func (controller *relayController) frame(t *testing.T) (browserprotocol.ControlFrame, string) {
+// server decoder. Nothing is stripped first: the relay forwards daemon bytes
+// verbatim, so a frame that does not decode is a real contract break.
+func (controller *relayController) frame(t *testing.T) browserprotocol.ControlFrame {
 	t.Helper()
 	record := controller.next(t)
 	if record.Type != relayhost.RecordText {
 		t.Fatalf("relayed record type = 0x%02x, want TEXT", byte(record.Type))
 	}
-	cleaned, ticket := captureRelayTicketAsTheTransportDoes(t, record.Payload)
-	frame, err := browserprotocol.DecodeServerControl(cleaned)
+	frame, err := browserprotocol.DecodeServerControl(record.Payload)
 	if err != nil {
-		t.Fatalf("decode relayed frame %q: %v", cleaned, err)
+		t.Fatalf("decode relayed frame %q: %v", record.Payload, err)
 	}
-	return frame, ticket
+	return frame
 }
 
 func (controller *relayController) quiet(t *testing.T) {
@@ -233,56 +231,31 @@ func (controller *relayController) quiet(t *testing.T) {
 	}
 }
 
-// captureRelayTicketAsTheTransportDoes performs, in the test, exactly what the
-// PWA's relay socket wrapper performs in production: it takes the transport
-// level relay_ticket member out of a PAIR_RESULT or AUTH_RESULT body before
-// anything decodes the frame as a session message. See
-// web/packages/client/src/remote/relay-socket.ts, whose #captureTicket lifts
-// the member and forwards the rest untouched. The member is addressed to the
-// relay transport and is never seen by a protocol decoder on either side, so
-// neither decoder tolerates it - which the test below proves both ways.
-func captureRelayTicketAsTheTransportDoes(t *testing.T, payload []byte) ([]byte, string) {
+// ticket reads the transport frame the connector sends immediately after a
+// pairing or authentication result. It is a frame of its own, not a member
+// added to the result, so no protocol decoder on either side has to tolerate
+// it; the PWA's relay socket wrapper consumes it the same way. See
+// web/packages/client/src/remote/relay-socket.ts.
+func (controller *relayController) ticket(t *testing.T) string {
 	t.Helper()
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &envelope); err != nil {
-		t.Fatalf("relayed frame %q: %v", payload, err)
+	record := controller.next(t)
+	var frame struct {
+		Type   string `json:"type"`
+		Ticket string `json:"ticket"`
 	}
-	body, present := envelope["body"]
-	if !present {
-		return payload, ""
+	if err := json.Unmarshal(record.Payload, &frame); err != nil || frame.Type != "RELAY_TICKET" || frame.Ticket == "" {
+		t.Fatalf("relay ticket frame = %q, %v", record.Payload, err)
 	}
-	var members map[string]json.RawMessage
-	if err := json.Unmarshal(body, &members); err != nil {
-		return payload, ""
-	}
-	raw, present := members["relay_ticket"]
-	if !present {
-		return payload, ""
-	}
-	var ticket string
-	if err := json.Unmarshal(raw, &ticket); err != nil {
-		t.Fatalf("relay_ticket %q is not a string", raw)
-	}
-	delete(members, "relay_ticket")
-	encodedBody, err := json.Marshal(members)
-	if err != nil {
-		t.Fatal(err)
-	}
-	envelope["body"] = encodedBody
-	cleaned, err := json.Marshal(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cleaned, ticket
+	return frame.Ticket
 }
 
 // hello consumes the daemon's opening HELLO for a relayed session.
 func (controller *relayController) hello(t *testing.T) browserprotocol.Hello {
 	t.Helper()
-	frame, ticket := controller.frame(t)
+	frame := controller.frame(t)
 	hello, ok := frame.Body.(browserprotocol.Hello)
-	if !ok || ticket != "" {
-		t.Fatalf("first relayed frame = %+v (ticket %q), want HELLO", frame, ticket)
+	if !ok {
+		t.Fatalf("first relayed frame = %+v, want HELLO", frame)
 	}
 	return hello
 }
@@ -331,7 +304,7 @@ func (controller *relayController) snapshot(t *testing.T, id string) browserprot
 		t.Fatal(err)
 	}
 	controller.send(t, payload)
-	frame, _ := controller.frame(t)
+	frame := controller.frame(t)
 	if frame.Type != browserprotocol.TypeStateSnapshot || frame.ID != id {
 		t.Fatalf("relayed snapshot = %+v, want STATE_SNAPSHOT for %q", frame, id)
 	}
@@ -408,7 +381,6 @@ func (controller *relayController) resolveClient(t *testing.T, fixture *adapterF
 		t.Fatalf("durable client = %+v found=%v err=%v", client, found, err)
 	}
 	controller.client = client
-	controller.ticket = ticket
 	payload, err := relayhost.VerifyTicket(identity.PublicKey(), ticket)
 	if err != nil {
 		t.Fatalf("relay ticket does not verify against the node key: %v", err)
@@ -424,33 +396,26 @@ func (controller *relayController) resolveClient(t *testing.T, fixture *adapterF
 	}
 }
 
-// The relay ticket rides on the pairing and authentication results because a
-// separate frame would need the same interception in the client wrapper plus a
-// message type on both sides. What keeps that free of protocol debt is that no
-// decoder ever tolerates the member: the transport consumes it first.
-func TestTheRelayTicketIsConsumedByTheTransportAndRefusedByTheSessionDecoder(t *testing.T) {
+// The relay ticket is a frame of its own so the daemon's result bytes reach
+// the session decoder untouched. Both decoders reject unknown members, so a
+// member added to the result body would have made the relay path depend on
+// decoder tolerance neither side offers.
+func TestTheRelayTicketArrivesAsItsOwnFrameAfterAnUnalteredResult(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	relay, _, _ := dialRelayFixture(t, fixture)
+	relay, _, identity := dialRelayFixture(t, fixture)
 	host := relay.accept(t)
 	challenge := relayChallenge(t, fixture, 0x49, kernel.BrowserCapabilityObserve)
 	controller := host.open(t, 131, relayKey(t))
 	controller.proveePair(t, fixture, controller.hello(t), challenge)
 
-	carried := controller.next(t).Payload
-	stripped, ticket := captureRelayTicketAsTheTransportDoes(t, carried)
-	if ticket == "" {
-		t.Fatalf("the daemon sent no relay ticket on %q", carried)
-	}
-	if _, err := browserprotocol.DecodeServerControl(carried); !errors.Is(err, browserprotocol.ErrMalformed) {
-		t.Fatalf("the session decoder accepted a frame still carrying relay_ticket: %v", err)
-	}
-	frame, err := browserprotocol.DecodeServerControl(stripped)
-	if err != nil {
-		t.Fatalf("the transport stripped frame does not decode: %v", err)
-	}
+	// frame decodes with the real server decoder and no stripping, so this
+	// fails if the connector ever mutates a result again.
+	frame := controller.frame(t)
 	if frame.Type != browserprotocol.TypePairResult {
-		t.Fatalf("stripped frame = %+v, want PAIR_RESULT", frame)
+		t.Fatalf("relayed result = %+v, want PAIR_RESULT", frame)
 	}
+	controller.resolveClient(t, fixture, identity, frame.Body.(browserprotocol.PairResult), controller.ticket(t))
+	controller.quiet(t)
 }
 
 func TestRelayCarriesTwoConcurrentControllersToTheirOwnDaemonSessions(t *testing.T) {
@@ -473,8 +438,8 @@ func TestRelayCarriesTwoConcurrentControllersToTheirOwnDaemonSessions(t *testing
 	first.proveePair(t, fixture, firstHello, firstChallenge)
 	second.proveePair(t, fixture, secondHello, secondChallenge)
 
-	firstFrame, firstTicket := first.frame(t)
-	secondFrame, secondTicket := second.frame(t)
+	firstFrame, secondFrame := first.frame(t), second.frame(t)
+	firstTicket, secondTicket := first.ticket(t), second.ticket(t)
 	if firstFrame.Type != browserprotocol.TypePairResult || secondFrame.Type != browserprotocol.TypePairResult {
 		t.Fatalf("pair results = %+v, %+v", firstFrame, secondFrame)
 	}
@@ -515,8 +480,8 @@ func TestRelayRevocationEndsOnlyTheRevokedControllerSessions(t *testing.T) {
 	revokedHello, survivorHello := revoked.hello(t), survivor.hello(t)
 	revoked.proveePair(t, fixture, revokedHello, revokedChallenge)
 	survivor.proveePair(t, fixture, survivorHello, survivorChallenge)
-	revokedFrame, revokedTicket := revoked.frame(t)
-	survivorFrame, survivorTicket := survivor.frame(t)
+	revokedFrame, survivorFrame := revoked.frame(t), survivor.frame(t)
+	revokedTicket, survivorTicket := revoked.ticket(t), survivor.ticket(t)
 	revoked.resolveClient(t, fixture, identity, revokedFrame.Body.(browserprotocol.PairResult), revokedTicket)
 	survivor.resolveClient(t, fixture, identity, survivorFrame.Body.(browserprotocol.PairResult), survivorTicket)
 	revoked.snapshot(t, "before-revocation")
@@ -570,7 +535,8 @@ func TestRelayDropForcesAFreshSessionWithNoReplayedFrames(t *testing.T) {
 	controller := host.open(t, 121, relayKey(t))
 	hello := controller.hello(t)
 	controller.proveePair(t, fixture, hello, challenge)
-	frame, ticket := controller.frame(t)
+	frame := controller.frame(t)
+	ticket := controller.ticket(t)
 	controller.resolveClient(t, fixture, identity, frame.Body.(browserprotocol.PairResult), ticket)
 	before := controller.snapshot(t, "before-drop")
 
@@ -594,10 +560,11 @@ func TestRelayDropForcesAFreshSessionWithNoReplayedFrames(t *testing.T) {
 	}
 	resumed.quiet(t)
 	resumed.proveAuth(t, fixture, resumedHello)
-	authFrame, authTicket := resumed.frame(t)
+	authFrame := resumed.frame(t)
 	if authFrame.Type != browserprotocol.TypeAuthResult {
 		t.Fatalf("reconnected auth result = %+v", authFrame)
 	}
+	authTicket := resumed.ticket(t)
 	if authTicket == "" || authTicket == ticket {
 		t.Fatal("the reconnected session did not receive its own relay ticket")
 	}

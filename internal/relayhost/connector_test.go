@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -315,66 +314,72 @@ func cannedResult(t *testing.T, kind string, clientID [ControllerIDSize]byte) []
 	return payload
 }
 
-func TestPairAndAuthResultsGainAControlTicketBoundToTheDeviceKey(t *testing.T) {
+func TestAResultFrameIsForwardedVerbatimAndFollowedByItsOwnTicketFrame(t *testing.T) {
 	fixture := newHarness(t, nil)
 	clientID := controllerID(0xabcd)
 	fixture.loopback.mu.Lock()
 	fixture.loopback.pairBody = cannedResult(t, "PAIR_RESULT", clientID)
 	fixture.loopback.authBody = cannedResult(t, "AUTH_RESULT", clientID)
+	canned := map[string][]byte{"PAIR_RESULT": fixture.loopback.pairBody, "AUTH_RESULT": fixture.loopback.authBody}
 	fixture.loopback.mu.Unlock()
 
 	host := fixture.relay.accept(t)
 	session := fixture.openSession(t, host, 51)
 
-	for _, probe := range []struct {
-		request string
-		kind    string
-	}{{request: `{"v":1,"type":"PAIR_PROVE","id":"request-1","body":{}}`, kind: "PAIR_RESULT"},
-		{request: `{"v":1,"type":"AUTH_PROVE","id":"request-1","body":{}}`, kind: "AUTH_RESULT"}} {
+	seen := make(map[string]struct{})
+	for _, probe := range []struct{ request, kind string }{
+		{request: `{"v":1,"type":"PAIR_PROVE","id":"request-1","body":{}}`, kind: "PAIR_RESULT"},
+		{request: `{"v":1,"type":"AUTH_PROVE","id":"request-1","body":{}}`, kind: "AUTH_RESULT"},
+	} {
 		host.send(t, Record{Type: RecordText, Connection: 51, Payload: []byte(probe.request)})
-		record := host.expect(t, RecordText, 51)
-		var envelope map[string]json.RawMessage
-		if err := json.Unmarshal(record.Payload, &envelope); err != nil {
-			t.Fatalf("%s envelope %q: %v", probe.kind, record.Payload, err)
+		if result := host.expect(t, RecordText, 51); !bytes.Equal(result.Payload, canned[probe.kind]) {
+			t.Fatalf("%s was rewritten in flight:\n got %q\nwant %q", probe.kind, result.Payload, canned[probe.kind])
 		}
-		if string(envelope["v"]) != "1" || string(envelope["id"]) != `"request-1"` {
-			t.Fatalf("%s lost an envelope member: %q", probe.kind, record.Payload)
+		payload := verifyTicketFrame(t, fixture, host.expect(t, RecordText, 51).Payload)
+		if _, duplicate := seen[payload.Ticket]; duplicate {
+			t.Fatalf("%s reused a ticket id", probe.kind)
 		}
-		var body map[string]json.RawMessage
-		if err := json.Unmarshal(envelope["body"], &body); err != nil {
-			t.Fatal(err)
-		}
-		if string(body["capabilities"]) != "5" || string(body["client_id"]) != fmt.Sprintf("%q", hex.EncodeToString(clientID[:])) {
-			t.Fatalf("%s lost a body member: %q", probe.kind, envelope["body"])
-		}
-		var ticket string
-		if err := json.Unmarshal(body["relay_ticket"], &ticket); err != nil {
-			t.Fatalf("%s carried no relay_ticket: %q", probe.kind, envelope["body"])
-		}
-		payload, err := VerifyTicket(fixture.identity.PublicKey(), ticket)
-		if err != nil {
-			t.Fatalf("%s relay_ticket does not verify against the node key: %v", probe.kind, err)
-		}
-		if payload.Purpose != PurposeControl {
-			t.Fatalf("%s relay_ticket purpose = %q", probe.kind, payload.Purpose)
-		}
+		seen[payload.Ticket] = struct{}{}
 		if raw, err := base64.RawURLEncoding.DecodeString(payload.Controller); err != nil || !bytes.Equal(raw, clientID[:]) {
-			t.Fatalf("%s relay_ticket names controller %q", probe.kind, payload.Controller)
+			t.Fatalf("%s ticket names controller %q", probe.kind, payload.Controller)
 		}
 		if raw, err := base64.RawURLEncoding.DecodeString(payload.Device); err != nil || !bytes.Equal(raw, fixture.device[:]) {
-			t.Fatalf("%s relay_ticket names device %q", probe.kind, payload.Device)
+			t.Fatalf("%s ticket names device %q", probe.kind, payload.Device)
 		}
 	}
 
-	// Any other frame is forwarded byte for byte.
+	// Any other frame travels alone.
 	other := []byte(`{"v":1,"type":"STATE_CHANGED","body":{"head":"1"}}`)
 	session.write(t, websocket.MessageText, other)
 	if record := host.expect(t, RecordText, 51); !bytes.Equal(record.Payload, other) {
 		t.Fatalf("unrelated frame was rewritten: %q", record.Payload)
 	}
+	session.write(t, websocket.MessageText, []byte(`{"v":1,"type":"STATE_CHANGED","body":{"head":"2"}}`))
+	if record := host.expect(t, RecordText, 51); bytes.Contains(record.Payload, []byte("RELAY_TICKET")) {
+		t.Fatalf("an unrelated frame produced a ticket frame: %q", record.Payload)
+	}
 }
 
-func TestResultFramesAreForwardedUnchangedWhenTheDeviceKeyIsGone(t *testing.T) {
+func verifyTicketFrame(t *testing.T, fixture *harness, payload []byte) TicketPayload {
+	t.Helper()
+	var frame struct {
+		Type   string `json:"type"`
+		Ticket string `json:"ticket"`
+	}
+	if err := json.Unmarshal(payload, &frame); err != nil || frame.Type != "RELAY_TICKET" {
+		t.Fatalf("ticket frame = %q, %v", payload, err)
+	}
+	if want := `{"type":"RELAY_TICKET","ticket":"` + frame.Ticket + `"}`; string(payload) != want {
+		t.Fatalf("ticket frame = %q, want exactly %q", payload, want)
+	}
+	verified, err := VerifyTicket(fixture.identity.PublicKey(), frame.Ticket)
+	if err != nil {
+		t.Fatalf("ticket does not verify against the node key: %v", err)
+	}
+	return verified
+}
+
+func TestNoTicketFrameFollowsWhenTheDeviceKeyIsGone(t *testing.T) {
 	clientID := controllerID(0xbeef)
 	fixture := newHarness(t, func(config *Config) {
 		config.DeviceKey = func(context.Context, [ControllerIDSize]byte) ([DeviceKeySize]byte, bool, error) {
@@ -386,10 +391,45 @@ func TestResultFramesAreForwardedUnchangedWhenTheDeviceKeyIsGone(t *testing.T) {
 	fixture.loopback.authBody = canned
 	fixture.loopback.mu.Unlock()
 	host := fixture.relay.accept(t)
-	fixture.openSession(t, host, 52)
+	session := fixture.openSession(t, host, 52)
 	host.send(t, Record{Type: RecordText, Connection: 52, Payload: []byte(`{"v":1,"type":"AUTH_PROVE","id":"request-1","body":{}}`)})
 	if record := host.expect(t, RecordText, 52); !bytes.Equal(record.Payload, canned) {
 		t.Fatalf("revoked client frame = %q, want the original bytes", record.Payload)
+	}
+	// The next frame is the following application frame, not a ticket.
+	session.write(t, websocket.MessageText, []byte("sentinel"))
+	if record := host.expect(t, RecordText, 52); string(record.Payload) != "sentinel" {
+		t.Fatalf("a ticket frame followed a result with no device key: %q", record.Payload)
+	}
+}
+
+func TestOpensBeyondTheLoopbackSlotCountAreRefusedWithoutASession(t *testing.T) {
+	fixture := newHarness(t, nil)
+	host := fixture.relay.accept(t)
+	records := make([]Record, 0, maxSessions+1)
+	for index := 0; index <= maxSessions; index++ {
+		controller := controllerID(uint32(200 + index))
+		payload, err := json.Marshal(openPayload{Controller: base64.RawURLEncoding.EncodeToString(controller[:]), Purpose: PurposeControl, Origin: loopbackOrigin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, Record{Type: RecordOpen, Connection: uint32(200 + index), Payload: payload})
+	}
+	host.send(t, records...)
+
+	if code := expectCloseCode(t, host, uint32(200+maxSessions)); code != relayCloseSlow {
+		t.Fatalf("overflow OPEN close code = %d, want %d", code, relayCloseSlow)
+	}
+	for index := 0; index < maxSessions; index++ {
+		fixture.loopback.accept(t)
+	}
+	if sessions := fixture.connector.Status().Sessions; sessions != maxSessions {
+		t.Fatalf("sessions = %d, want the loopback slot count %d", sessions, maxSessions)
+	}
+	select {
+	case session := <-fixture.loopback.opened:
+		t.Fatalf("the refused OPEN still dialled the loopback listener: %q", session.observedHost)
+	default:
 	}
 }
 

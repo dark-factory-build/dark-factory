@@ -48,7 +48,7 @@ type loopbackFrame struct {
 
 func newFakeLoopback(t *testing.T) *fakeLoopback {
 	t.Helper()
-	loopback := &fakeLoopback{origin: loopbackOrigin, opened: make(chan *loopbackSession, 16)}
+	loopback := &fakeLoopback{origin: loopbackOrigin, opened: make(chan *loopbackSession, 64)}
 	loopback.server = httptest.NewServer(http.HandlerFunc(loopback.handle))
 	t.Cleanup(loopback.server.Close)
 	return loopback
