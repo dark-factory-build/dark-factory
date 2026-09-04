@@ -138,13 +138,16 @@ func (daemon *Daemon) closeBrowsers() error {
 	daemon.browserLifecycleMu.Lock()
 	daemon.browserMu.Lock()
 	daemon.browserClosing = true
+	relay := daemon.relay
 	runtimes := make([]*BrowserRuntime, 0, len(daemon.browsers))
 	for runtime := range daemon.browsers {
 		runtimes = append(runtimes, runtime)
 	}
 	daemon.browserMu.Unlock()
 	daemon.browserLifecycleMu.Unlock()
-	var closeErrors []error
+	// The relay is a client of these listeners, so it closes first and here
+	// rather than relying on a caller to order the two.
+	closeErrors := []error{relay.Close()}
 	for _, runtime := range runtimes {
 		closeErrors = append(closeErrors, runtime.Close())
 	}

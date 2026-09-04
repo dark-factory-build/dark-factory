@@ -42,6 +42,7 @@ go_gate_stage 1200 go test -short -timeout=20m -count=1 \
     ./internal/buildinfo/... \
     ./internal/install \
     ./internal/kernel \
+    ./internal/relayhost \
     ./internal/runner \
     ./spikes/browser-connectivity
 

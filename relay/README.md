@@ -23,7 +23,7 @@ and queues nothing while a peer is away.
 | node id | derived | lowercase RFC 4648 base32, no padding, of the first 20 bytes of `SHA-256(node public key)`; exactly 32 characters `[a-z2-7]`; names the Durable Object |
 | controller id | `factoryd` | 16 random bytes minted at pairing; the daemon's client identity for one PWA installation |
 | device key | PWA | non-exportable ECDSA P-256 key; the public key is its 65-byte uncompressed SEC1 point |
-| host generation | `factoryd` | `(generation, sequence)`: `generation` is a boot counter persisted in the home, `sequence` counts dials within one boot |
+| host generation | `factoryd` | `(generation, sequence)`: `generation` is the daemon's start time in unix seconds, `sequence` counts dials within one boot |
 
 The node id is self-certifying: a Durable Object accepts a host only when the
 presented public key hashes to the object's own name, so the relay needs no

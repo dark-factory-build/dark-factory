@@ -58,6 +58,12 @@ func (daemon *Daemon) revokeBrowserClientHeld(ctx context.Context, id kernel.Bro
 		runtimes = append(runtimes, runtime)
 	}
 	daemon.browserMu.Unlock()
+	// Tell the relay first so its controllers observe a revocation close
+	// rather than the loopback teardown that follows. The relay holds no
+	// authority and this is best effort: a relay that cannot be told still
+	// cannot admit this client, because the daemon reloads the committed
+	// revocation on every authentication.
+	daemon.revokeRelayClient(id)
 	cleanupErrors := []error{effectCleanupErr}
 	for _, runtime := range runtimes {
 		cleanupErrors = append(cleanupErrors, runtime.closeClient(id))
