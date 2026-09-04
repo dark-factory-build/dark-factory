@@ -1,0 +1,116 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
+import { layoutScene, placeWorkers, workerSprite } from "../../dist/src/factory-scene/scene.js";
+
+const topology = {
+  digest: "fixture-1",
+  nodes: [
+    { id: "repo", parentId: "", path: ".", label: "Repository", kind: "repository", fileCount: 9 },
+    { id: "lib", parentId: "repo", path: "packages/lib", label: "<Shared & Library> 📦📦", kind: "package", fileCount: 4 },
+    { id: "src", parentId: "lib", path: "packages/lib/src", label: "Source", kind: "directory", fileCount: 3 },
+  ],
+};
+
+const workers = [
+  { id: "worker-b", name: "Builder", role: "worker", provider: "codex", activity: "busy", nodeId: "src" },
+  { id: "worker-a", name: "Planner", role: "orchestrator", activity: "needs-you", nodeId: "missing" },
+];
+
+const workItems = [
+  { id: "release", stage: "release-ready" },
+  { id: "staged", stage: "staged" },
+];
+
+function render(props = {}) {
+  return renderToStaticMarkup(createElement(FactoryScene, { topology, workers, workItems, ...props }));
+}
+
+test("the pure scene model feeds a deterministic SVG renderer", () => {
+  const layout = layoutScene(topology);
+  assert.deepEqual(layout, layoutScene({ ...topology, nodes: [...topology.nodes].reverse() }));
+  assert.deepEqual(Object.keys(layout.rooms[0]).sort(), ["anchor", "height", "id", "width", "x", "y"]);
+  assert.deepEqual(layout.rooms[0].anchor, {
+    x: layout.rooms[0].x + layout.rooms[0].width / 2,
+    y: layout.rooms[0].y + layout.rooms[0].height / 2,
+  });
+
+  const placements = placeWorkers(layout, workers);
+  assert.deepEqual(placements, placeWorkers(layout, [...workers].reverse()));
+  assert.deepEqual(workerSprite(workers[0]), workerSprite({ ...workers[0] }));
+  assert.equal(workerSprite(workers[0]).size, 16);
+
+  const first = render();
+  const reordered = render({
+    topology: { ...topology, nodes: [...topology.nodes].reverse() },
+    workers: [...workers].reverse(),
+    workItems: [...workItems].reverse(),
+  });
+  assert.equal(first, reordered);
+  assert.match(first, /data-topology-digest="fixture-1"/);
+  assert.match(first, /data-room-id="src"/);
+  assert.match(first, /&lt;Shared &amp; Library…/);
+  assert.equal(first.includes("�"), false);
+  assert.equal((first.match(/data-worker-id=/g) ?? []).length, workers.length);
+  assert.equal((first.match(/<use /g) ?? []).length, workers.length);
+  assert.equal((first.match(/<symbol /g) ?? []).length, new Set(workers.map((worker) => workerSprite(worker).key)).size);
+  assert.equal((first.match(/data-worker-id="[^"]+" transform="translate\([^)]+\)"/g) ?? []).length, workers.length);
+  assert.equal(first.includes("<image"), false);
+  assert.equal(first.includes("<line"), false);
+  assert.equal(first.includes("<animate"), false);
+
+  const denseWorkers = Array.from({ length: 100 }, (_, index) => ({
+    id: `worker-${index}`,
+    name: `Worker ${index}`,
+    role: "worker",
+    activity: "busy",
+    nodeId: "src",
+  }));
+  const densePlacements = placeWorkers(layout, denseWorkers);
+  assert.equal(new Set(densePlacements.map(({ x, y }) => `${x},${y}`)).size, denseWorkers.length);
+  const srcRoom = layout.rooms.find((room) => room.id === "src");
+  assert.deepEqual(densePlacements[0], { id: "worker-0", roomId: "src", x: srcRoom.anchor.x, y: srcRoom.anchor.y });
+  for (const placement of densePlacements.filter(({ y }) => y < layout.height)) {
+    assert.ok(placement.x - 8 >= srcRoom.x && placement.x + 8 <= srcRoom.x + srcRoom.width);
+    assert.ok(placement.y - 8 >= srcRoom.y && placement.y + 8 <= srcRoom.y + srcRoom.height);
+  }
+  const denseSvg = render({ workers: denseWorkers });
+  assert.match(denseSvg, /WORKER OVERFLOW · 72/);
+  const denseHeight = Number(denseSvg.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
+  assert.ok(denseHeight > Math.max(...densePlacements.map(({ y }) => y + 8)));
+
+  const stackedLayout = {
+    width: 176,
+    height: 256,
+    rooms: [
+      { id: "top", x: 12, y: 40, width: 152, height: 96, anchor: { x: 88, y: 88 } },
+      { id: "bottom", x: 12, y: 148, width: 152, height: 96, anchor: { x: 88, y: 196 } },
+    ],
+  };
+  const stackedWorkers = Array.from({ length: 100 }, (_, index) => ({
+    id: `stacked-${index}`,
+    name: `Stacked ${index}`,
+    role: "worker",
+    activity: "idle",
+    nodeId: index < 50 ? "top" : "bottom",
+  }));
+  const stackedPlacements = placeWorkers(stackedLayout, stackedWorkers);
+  assert.equal(new Set(stackedPlacements.map(({ x, y }) => `${x},${y}`)).size, stackedWorkers.length);
+
+  const changed = layoutScene({
+    digest: "fixture-2",
+    nodes: [...topology.nodes, { id: "docs", parentId: "repo", path: "docs", label: "Docs", kind: "directory", fileCount: 2 }],
+  });
+  assert.equal(changed.rooms.some((room) => room.id === "docs"), true);
+  assert.notDeepEqual(changed, layout);
+
+  const emptyLayout = layoutScene({ digest: "empty", nodes: [] });
+  const emptyWorkers = denseWorkers.slice(0, 20).map(({ nodeId: _nodeId, ...worker }) => worker);
+  const emptyPlacements = placeWorkers(emptyLayout, emptyWorkers);
+  assert.equal(new Set(emptyPlacements.map(({ x, y }) => `${x},${y}`)).size, emptyWorkers.length);
+  const emptySvg = render({ topology: { digest: "empty", nodes: [] }, workers: emptyWorkers, workItems: [] });
+  assert.match(emptySvg, /EMPTY FLOOR/);
+  assert.match(emptySvg, /aria-label="20 unassigned workers"/);
+});
