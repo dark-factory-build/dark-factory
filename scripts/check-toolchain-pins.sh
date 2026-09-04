@@ -25,6 +25,11 @@ check_pin .github/workflows/release.yml 'echo "/opt/homebrew/bin" >> "$GITHUB_PA
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=arm64" "the exact Darwin arm64 release target"
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=amd64" "the exact Darwin amd64 release target"
 
+if grep -Fq 'brew update' .github/workflows/ci.yml; then
+    echo "routine CI must not update the whole Homebrew index" >&2
+    exit 1
+fi
+
 if grep -Eq 'required_go=|installed_go=|brew upgrade go' \
     .github/workflows/ci.yml .github/workflows/release.yml scripts/go-check.sh; then
     echo "routine gates must not equate Homebrew's current patch with the Go minimum" >&2

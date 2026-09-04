@@ -25,9 +25,11 @@ is not.
    baseline plus affected-package and focused race/stress tests only when the
    change can affect those boundaries. Load-bearing durability, projection,
    ownership, finalization, and recovery changes need causal tests. Do not run
-   unrelated stress. One memory-heavy Go run at a time. A conflict-free merge
-   whose tree exactly matches its reviewed, gated parent needs no duplicate
-   post-merge gate.
+   unrelated stress. The protected queue classifier selects source gates from
+   the whole combined-tree diff and sends unknown paths through the Darwin
+   gate. One memory-heavy Go run at a time. A conflict-free merge whose tree
+   exactly matches its reviewed, gated parent needs no duplicate post-merge
+   gate.
 6. Keep commits small and coherent. Update behavior docs and resolve every
    tracked issue the change completes; otherwise record the exact handoff.
 7. Never touch `~/.dark-factory`, its launchd job, or a live daemon without a

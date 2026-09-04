@@ -68,15 +68,27 @@ require_job() {
 }
 
 # A pull request does only the cheap admission check. The exact combined tree
-# receives the full gates and exact-head review once, in the merge queue.
+# receives its selected gates and exact-head review once, in the merge queue.
 assert_job_field eligibility if "github.event_name == 'pull_request'"
 require_job eligibility 'git diff --check "$BASE_SHA" "$GITHUB_SHA"'
 full_events="github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'"
-assert_job_field checks if "$full_events"
-assert_job_field control-plane if "$full_events"
+assert_job_field scope if "$full_events"
+assert_job_field checks needs "scope"
+assert_job_field checks if "needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'"
+assert_job_field control-plane needs "scope"
+assert_job_field control-plane if "needs.scope.result == 'success' && needs.scope.outputs.control_plane == 'true'"
 assert_job_field review if "github.event_name == 'merge_group'"
 assert_job_field required if "always()"
-assert_job_field required needs "[eligibility, checks, control-plane, review]"
+assert_job_field required needs "[eligibility, scope, checks, control-plane, review]"
+require_job scope 'BASE_SHA: ${{ github.event.merge_group.base_sha }}'
+require_job scope 'git diff --check "$BASE_SHA" "$GITHUB_SHA"'
+require_job scope 'git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$BASE_SHA" "$GITHUB_SHA"'
+expected_scope_keys=$(printf '%s\n' name id env run)
+[ "$(step_keys scope 'Select fixed gates from the combined tree')" = "$expected_scope_keys" ] || {
+    echo "combined-tree scope has unexpected step controls" >&2
+    exit 1
+}
+require_job checks './scripts/local-ci.sh'
 diagnostic_events="github.event_name == 'pull_request' || github.event_name == 'merge_group'"
 [ "$(step_field required 'Confirm the live merge rules' if)" = "$diagnostic_events" ] || {
     echo "live merge-rule diagnostic is not bound to PR and queue events" >&2
@@ -87,7 +99,7 @@ expected_diagnostic_keys=$(printf '%s\n' name if env run)
     echo "live merge-rule diagnostic has unexpected step controls" >&2
     exit 1
 }
-source_condition="if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.checks.result != 'success' || needs.control-plane.result != 'success'))"
+source_condition="if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success')))"
 require_job required "$source_condition"
 require_job required "needs.review.result != 'success' && (github.event_name == 'merge_group' || needs.review.result != 'skipped')"
 require_job required 'rules/branches/${BASE_BRANCH}'
@@ -159,6 +171,74 @@ elif [ "$1" = api ] && [ "${2-}" = -X ] && { [ "${3-}" = PUT ] || [ "${3-}" = PO
 fi
 STUB
 chmod 755 "$temporary/bin/gh"
+
+# Drive the exact CODEOWNED scope body. Documentation and control-plane-only
+# changes skip macOS; source, workflow, mixed, and unknown changes fail closed.
+awk '
+    /^      - name: Select fixed gates from the combined tree$/ { step = 1; next }
+    step && /^        run: \|$/ { body = 1; next }
+    body && /^          / { sub(/^          /, ""); print; next }
+    body && /^ *$/ { print ""; next }
+    body { exit }
+' "$workflow" >"$temporary/scope.sh"
+cat >"$temporary/bin/git" <<'STUB'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$DF_SCOPE_GIT_LOG"
+case "$1:${2-}" in
+    init:|remote:add|fetch:*) ;;
+    diff:--check) [ "${DF_SCOPE_DIFF_FAIL-}" != 1 ] ;;
+    diff:--name-only)
+        while IFS= read -r path; do [ -z "$path" ] || printf '%s\0' "$path"; done <"$DF_SCOPE_PATHS"
+        ;;
+    *) exit 1 ;;
+esac
+STUB
+chmod 755 "$temporary/bin/git"
+run_scope() (
+    event=$1
+    base=$2
+    diff_fail=$3
+    shift 3
+    printf '%s\n' "$@" >"$temporary/scope-paths"
+    : >"$temporary/scope-output"
+    : >"$temporary/scope-git-log"
+    export PATH="$temporary/bin:/usr/bin:/bin"
+    export DF_SCOPE_PATHS="$temporary/scope-paths" DF_SCOPE_GIT_LOG="$temporary/scope-git-log"
+    export GITHUB_EVENT_NAME="$event" BASE_SHA="$base"
+    export GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    export GITHUB_REPOSITORY=dark-factory-build/dark-factory
+    export GITHUB_OUTPUT="$temporary/scope-output" RUNNER_TEMP="$temporary"
+    [ "$diff_fail" = false ] || export DF_SCOPE_DIFF_FAIL=1
+    CDPATH= cd -- "$temporary"
+    /bin/bash "$temporary/scope.sh"
+)
+scope_case() {
+    want_macos=$1
+    want_control=$2
+    shift 2
+    run_scope merge_group aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa false "$@"
+    [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
+        "control_plane=$want_control macos=$want_macos " ]
+}
+scope_case false false docs/install.md README.md
+scope_case false true control-plane/src/lib.rs
+scope_case false true .github/workflows/deploy-control-plane.yml
+scope_case true false internal/kernel/store.go
+scope_case true true control-plane/src/lib.rs internal/kernel/store.go
+scope_case true true .github/workflows/ci.yml
+scope_case true false unclassified-boundary
+run_scope workflow_dispatch '' false
+[ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
+    'control_plane=true macos=true ' ]
+if run_scope merge_group bad false >/dev/null 2>&1; then
+    echo "invalid scope commit passed" >&2
+    exit 1
+fi
+if run_scope merge_group aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa true >/dev/null 2>&1; then
+    echo "failing combined-tree diff check passed" >&2
+    exit 1
+fi
 
 # Execute the actual inline merge-rule step, including its jq projection, from
 # raw ruleset JSON. Every missing or misbound fact and an API failure must stop.
