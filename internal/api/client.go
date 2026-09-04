@@ -485,12 +485,16 @@ func decodeResponse(encoded []byte, output any) error {
 	return &RemoteError{code: envelope.Error}
 }
 
+// decodeExact reads one bounded JSON value with this protocol's exact grammar.
+// A member neither side's build knows is ignored, so factoryctl, factoryd and
+// factory-runner tolerate an added member instead of failing closed on it.
+// Every bound, and every explicit required-member and value check made by the
+// caller, still applies.
 func decodeExact(encoded []byte, output any) error {
 	if err := validateJSONNames(encoded); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(output); err != nil {
 		return err
 	}

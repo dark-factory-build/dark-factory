@@ -27,6 +27,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const fixture = (name) => readFileSync(join(root, "protocol/browser/v2/fixtures", name), "utf8").trim();
 const manifest = JSON.parse(fixture("../manifest.json"));
 const expectMalformed = (operation) => assert.throws(operation, (error) => error instanceof ProtocolError && ["malformed", "wrong_direction", "unsupported_version", "oversized"].includes(error.code));
+// The contract tolerates additive change: a member this build does not know is
+// ignored on the wire. Proving it is only additive means showing the mutated
+// frame decodes to exactly the frame the unmutated one decodes to.
+const expectIgnoredMember = (base, mutated, role = "client") => {
+  const decode = role === "client" ? decodeClientControl : decodeServerControl;
+  assert.deepEqual(decode(mutated), decode(base));
+};
 const ids = {
   project: "01010101010101010101010101010101",
   agent: "02020202020202020202020202020202",
@@ -88,16 +95,20 @@ test("STATE_GET carries no selector and STATE_CHANGED carries only a head", () =
   const request = encodeStateGet("state", {});
   assert.equal(request, `{"v":${PROTOCOL_VERSION},"type":"STATE_GET","id":"state","body":{}}`);
   assert.deepEqual(decodeClientControl(request).body, {});
+  // STATE_GET has no selector member, so none of these reaches a field.
   for (const body of ['{"cursor":null}', '{"kind":"task"}', '{"after":"1"}']) {
-    expectMalformed(() => decodeClientControl(`{"v":${PROTOCOL_VERSION},"type":"STATE_GET","id":"state","body":${body}}`));
+    expectIgnoredMember(request, `{"v":${PROTOCOL_VERSION},"type":"STATE_GET","id":"state","body":${body}}`);
   }
   const changed = encodeStateChanged("watch", { head: 9n });
   assert.equal(changed, `{"v":${PROTOCOL_VERSION},"type":"STATE_CHANGED","id":"watch","body":{"head":"9"}}`);
   assert.equal(decodeServerControl(changed).body.head, 9n);
   expectMalformed(() => encodeStateChanged("watch", { head: 0n }));
-  for (const body of ['{"head":"9","entity_kind":"task"}', '{"head":"9","revision":"2"}', '{"head":"9","deleted":false}', "{}"]) {
-    expectMalformed(() => decodeServerControl(`{"v":${PROTOCOL_VERSION},"type":"STATE_CHANGED","id":"watch","body":${body}}`));
+  // Residue from the deleted per-entity taxonomy reaches no field.
+  for (const body of ['{"head":"9","entity_kind":"task"}', '{"head":"9","revision":"2"}', '{"head":"9","deleted":false}']) {
+    expectIgnoredMember(changed, `{"v":${PROTOCOL_VERSION},"type":"STATE_CHANGED","id":"watch","body":${body}}`, "server");
   }
+  // The head itself stays required.
+  expectMalformed(() => decodeServerControl(`{"v":${PROTOCOL_VERSION},"type":"STATE_CHANGED","id":"watch","body":{}}`));
 });
 
 test("the previous protocol generation and its retired frames are refused", () => {
@@ -196,7 +207,9 @@ test("the agent provider is exact on the wire in both roles", () => {
   expectMalformed(() => encodeStateSnapshot("provider", snapshotBody({ agents: [without] })));
   expectMalformed(() => decodeServerControl(wire.replace('"provider":"claude_code",', "")));
   expectMalformed(() => encodeStateSnapshot("provider", snapshotBody({ agents: [{ ...agentItem(), model: "sonnet" }] })));
-  expectMalformed(() => decodeServerControl(wire.replace('"provider":"claude_code"', '"provider":"claude_code","model":"sonnet"')));
+  // A private agent field added beside the provider reaches no field of the
+  // decoded item, so the UI can never read it.
+  expectIgnoredMember(wire, wire.replace('"provider":"claude_code"', '"provider":"claude_code","model":"sonnet"'), "server");
 });
 
 test("public state cannot carry private fields and detail is separately bounded", () => {
@@ -221,10 +234,10 @@ test("state parsing rejects case-folded/duplicate/unknown/trailing/depth/member/
     valid.replace('"head"', '"Head"'),
     valid.replace('"factory"', '"Factory"'),
     valid.replace('"title"', '"TITLE"'),
-    valid.replace('"title"', '"extra":false,"title"'),
     valid.replace('"head":"9007199254740993"', '"head":"9007199254740993","head":"2"'),
     `${valid}{}`,
   ]) expectMalformed(() => decodeServerControl(wire));
+  expectIgnoredMember(valid, valid.replace('"title"', '"extra":false,"title"'), "server");
   const members = Array.from({ length: 33 }, (_, index) => `"x${index}":0`).join(",");
   expectMalformed(() => decodeClientControl(`{"v":${PROTOCOL_VERSION},"type":"STATE_WATCH","id":"watch","body":{${members}}}`));
   // A client frame keeps the small array bound; only the server snapshot may
@@ -263,4 +276,35 @@ test("manifest bounds and registry are an exact readable mirror", () => {
     maxTerminalRows: manifest.bounds.max_terminal_rows,
     maxTerminalCols: manifest.bounds.max_terminal_cols,
   });
+});
+
+test("the client tolerates added members but nothing else", () => {
+  // A newer daemon may add a member to any frame without a coordinated
+  // release. STATE_SNAPSHOT and HELLO cover both the largest server frame and
+  // the first frame of a session.
+  const snapshot = encodeStateSnapshot("state", snapshotBody());
+  expectIgnoredMember(snapshot, snapshot.replace('"head":"1"', '"head":"1","future_head":"2"'), "server");
+  expectIgnoredMember(snapshot, snapshot.replace('"body":{', '"future":{"nested":[1,2,3]},"body":{'), "server");
+  expectIgnoredMember(snapshot, snapshot.replace('"capacity":8', '"capacity":8,"future_capacity":9'), "server");
+  const hello = fixture("hello.json");
+  expectIgnoredMember(hello, hello.replace('"body":{', '"future":1,"body":{'), "server");
+  expectIgnoredMember(hello, hello.replace('"daemon_id":', '"future_id":"00","daemon_id":'), "server");
+
+  // Tolerance is additive only. The same frame is still refused when it
+  // exceeds its bound, and a missing required member is still malformed.
+  const oversized = snapshot.replace('"body":{', `"future":"${"x".repeat(MAX_SNAPSHOT_BYTES)}","body":{`);
+  expectMalformed(() => decodeServerControl(oversized));
+  const watch = encodeStateWatch("watch", { after_head: 1n });
+  const padded = watch.replace('"body":{', `"future":"${"x".repeat(MAX_CONTROL_BYTES)}","body":{`);
+  expectMalformed(() => decodeClientControl(padded));
+  expectMalformed(() => decodeServerControl(snapshot.replace('"head":"1"', '"future_head":"1"')));
+  expectMalformed(() => decodeServerControl(snapshot.replace('"capacity":8,', "")));
+  expectMalformed(() => decodeServerControl(hello.replace('"boot_id"', '"future_id"')));
+  // An unknown member is still a member: the object bound is unchanged.
+  const crowded = Array.from({ length: 32 }, (_, index) => `"future${index}":0`).join(",");
+  expectMalformed(() => decodeClientControl(watch.replace('"after_head":"1"', `"after_head":"1",${crowded}`)));
+  // Only members are tolerated: an unknown type and a wrong direction remain
+  // finite refusals.
+  expectMalformed(() => decodeServerControl(snapshot.replace('"STATE_SNAPSHOT"', '"STATE_FUTURE"')));
+  expectMalformed(() => decodeClientControl(snapshot.replace('"body":{', '"future":1,"body":{')));
 });

@@ -129,11 +129,11 @@ func TestStateGetCarriesNoSelector(t *testing.T) {
 	if _, err := DecodeClientControl(encoded); err != nil {
 		t.Fatal(err)
 	}
+	// STATE_GET has no selector member, so a caller cannot smuggle one: each
+	// of these decodes to exactly the same empty request.
 	for _, body := range []string{`{"cursor":null}`, `{"kind":"task"}`, `{"after":"1"}`} {
 		wire := fmt.Sprintf(`{"v":%d,"type":"STATE_GET","id":"state","body":%s}`, ProtocolVersion, body)
-		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
-			t.Fatalf("STATE_GET selector %s accepted: %v", body, err)
-		}
+		assertIgnoredMember(t, string(encoded), wire, false)
 	}
 }
 
@@ -273,17 +273,20 @@ func TestStateChangedIsAHeadAndNothingElse(t *testing.T) {
 	if _, err := EncodeStateChanged("watch", StateChanged{Head: 0}); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("zero head accepted: %v", err)
 	}
+	// STATE_CHANGED carries a head and nothing else. Residue from the deleted
+	// per-entity taxonomy reaches no field, so it changes nothing.
 	for _, body := range []string{
 		`{"head":"9","entity_kind":"task"}`,
 		`{"head":"9","revision":"2"}`,
 		`{"head":"9","deleted":false}`,
 		`{"head":"9","sequence":"9"}`,
-		`{}`,
 	} {
 		frame := fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"watch","body":%s}`, ProtocolVersion, body)
-		if _, err := DecodeServerControl([]byte(frame)); err != ErrMalformed {
-			t.Fatalf("STATE_CHANGED body %s accepted: %v", body, err)
-		}
+		assertIgnoredMember(t, string(wire), frame, true)
+	}
+	// The head itself stays required.
+	if _, err := DecodeServerControl([]byte(fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"watch","body":{}}`, ProtocolVersion))); err != ErrMalformed {
+		t.Fatalf("STATE_CHANGED without a head accepted: %v", err)
 	}
 }
 
@@ -558,10 +561,12 @@ func TestStateMalformedEnvelopeBodyAndGlobalBounds(t *testing.T) {
 		strings.Replace(valid, `"head"`, `"Head"`, 1),
 		strings.Replace(valid, `"factory"`, `"Factory"`, 1),
 		strings.Replace(valid, `"title"`, `"TITLE"`, 1),
-		strings.Replace(valid, `"title"`, `"extra":false,"title"`, 1),
 		strings.Replace(valid, `"head":"9007199254740993"`, `"head":"9007199254740993","head":"2"`, 1),
 		valid + `{}`,
 	}
+	// An added item member is tolerated but reaches no field: the decoded
+	// snapshot is identical to the one without it.
+	assertIgnoredMember(t, valid, strings.Replace(valid, `"title"`, `"extra":false,"title"`, 1), true)
 	for _, wire := range cases {
 		if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
 			t.Fatalf("malformed state accepted: %v\n%s", err, wire)

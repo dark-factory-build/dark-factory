@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -443,15 +444,10 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "casefold method", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","Method":"snapshot","params":{}}`), code: RemoteInvalidRequest},
 		{name: "nested duplicate", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"expected_revision":2,"enabled":true}}`), code: RemoteInvalidRequest},
 		{name: "nested noncanonical", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"Expected_revision":1,"enabled":true}}`), code: RemoteInvalidRequest},
-		{name: "unknown nested", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"enabled":true,"private":"sentinel"}}`), code: RemoteInvalidRequest},
 		{name: "removed shell-only create alias", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_shell_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
-		{name: "removed selectable launch policy", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"shell","tool_budget_limit":20,"` + "execution" + `_mode":"unrestricted"}}`), code: RemoteInvalidRequest},
 		{name: "create agent requires provider", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
 		{name: "shell agent rejects model", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"shell","model":"private","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
 		{name: "claude rejects ultra effort", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"claude_code","reasoning_effort":"ultra","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
-		{name: "attempt cannot supply id", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
-		{name: "attempt task requires empty params", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"task","params":{"id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
-		{name: "attempt cannot supply failure code", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"x","code":"internal"}}`), code: RemoteInvalidRequest},
 		{name: "empty block detail", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"block","params":{"detail":""}}`), code: RemoteInvalidRequest},
 		{name: "oversized failure detail", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"fail","params":{"detail":"` + strings.Repeat("x", 4097) + `"}}`), code: RemoteInvalidRequest},
 		{name: "request human operator domain", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question"}}`), code: RemoteForbidden},
@@ -461,8 +457,6 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "request human empty question", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":""}}`), code: RemoteInvalidRequest},
 		{name: "request human oversized question", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"` + strings.Repeat("x", 8193) + `"}}`), code: RemoteInvalidRequest},
 		{name: "request human duplicate question", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"one","question":"two"}}`), code: RemoteInvalidRequest},
-		{name: "request human unknown run", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","run_id":"` + id('1') + `"}}`), code: RemoteInvalidRequest},
-		{name: "request human unknown action", generation: protocolGeneration, domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","action":"publish"}}`), code: RemoteInvalidRequest},
 		{name: "invalid UTF-8", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte("{\"method\":\"health\",\"params\":{},\"x\":\"\xff\"}"), code: RemoteInvalidRequest},
 		{name: "lone high surrogate", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\ud800","root":"/private/project"}}`), code: RemoteInvalidRequest},
 		{name: "lone low surrogate", generation: protocolGeneration, domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_project","params":{"id":"` + id('1') + `","name":"\udc00","root":"/private/project"}}`), code: RemoteInvalidRequest},
@@ -491,6 +485,100 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 				t.Fatalf("invalid request dispatched: %+v, %v", result.call, result.err)
 			}
 		})
+	}
+}
+
+// The local API tolerates a member this build does not know, so a newer
+// factoryctl and an older factoryd still talk. Tolerance is only additive: an
+// added member reaches no field, so it cannot become authority. Each case
+// below is a value a caller must never be able to supply -- an entity id, a
+// failure code, a run destination, an action, a removed launch policy -- and
+// the proof is that the derived call is byte-identical to the call decoded
+// from the same request without it.
+func TestUnknownMembersAreIgnoredAndCannotBecomeAuthority(t *testing.T) {
+	operatorBearer := testCredential('O')
+	attemptBearer := testCredential('A')
+	receive := func(t *testing.T, domain byte, bearer credential, body []byte) Call {
+		t.Helper()
+		listener, socketPath := newAPITestListener(t, operatorBearer)
+		done := startServerReceive(t, listener, nil)
+		// The helper never dispatches, so the server closes without a reply;
+		// the received call below is the observation this test needs.
+		_, _ = exchangeRaw(socketPath, rawRequest(protocolGeneration, domain, bearer, body), true)
+		result := <-done
+		if result.err != nil {
+			t.Fatalf("tolerant request refused: %v", result.err)
+		}
+		return result.call
+	}
+	tests := []struct {
+		name           string
+		domain         byte
+		bearer         credential
+		clean, mutated []byte
+	}{
+		{
+			name: "operator cannot smuggle a dispatch member", domain: operatorDomain, bearer: operatorBearer,
+			clean:   []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"enabled":true}}`),
+			mutated: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"enabled":true,"private":"sentinel"}}`),
+		},
+		{
+			name: "removed selectable launch policy", domain: operatorDomain, bearer: operatorBearer,
+			clean:   []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"shell","tool_budget_limit":20}}`),
+			mutated: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"shell","tool_budget_limit":20,"execution_mode":"unrestricted"}}`),
+		},
+		{
+			name: "attempt cannot supply an id", domain: attemptDomain, bearer: attemptBearer,
+			clean:   []byte(`{"method":"fail","params":{"detail":"x"}}`),
+			mutated: []byte(`{"method":"fail","params":{"detail":"x","id":"` + id('1') + `"}}`),
+		},
+		{
+			name: "attempt task takes no selector", domain: attemptDomain, bearer: attemptBearer,
+			clean:   []byte(`{"method":"task","params":{}}`),
+			mutated: []byte(`{"method":"task","params":{"id":"` + id('1') + `"}}`),
+		},
+		{
+			name: "attempt cannot supply a failure code", domain: attemptDomain, bearer: attemptBearer,
+			clean:   []byte(`{"method":"fail","params":{"detail":"x"}}`),
+			mutated: []byte(`{"method":"fail","params":{"detail":"x","code":"internal"}}`),
+		},
+		{
+			name: "request_human takes no run destination", domain: attemptDomain, bearer: attemptBearer,
+			clean:   []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question"}}`),
+			mutated: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","run_id":"` + id('1') + `"}}`),
+		},
+		{
+			name: "request_human takes no action", domain: attemptDomain, bearer: attemptBearer,
+			clean:   []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question"}}`),
+			mutated: []byte(`{"method":"request_human","params":{"idempotency_key":"0123456789abcdef0123456789abcdef","question":"question","action":"publish"}}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clean := receive(t, test.domain, test.bearer, test.clean)
+			mutated := receive(t, test.domain, test.bearer, test.mutated)
+			if !reflect.DeepEqual(clean, mutated) {
+				t.Fatalf("added member changed the call:\n got %+v\nwant %+v", mutated, clean)
+			}
+			if strings.Contains(fmt.Sprintf("%+v", mutated), "sentinel") || strings.Contains(fmt.Sprintf("%+v", mutated), "unrestricted") || strings.Contains(fmt.Sprintf("%+v", mutated), "publish") {
+				t.Fatalf("added member reached the call: %+v", mutated)
+			}
+		})
+	}
+}
+
+// Tolerance is additive only: an oversized frame is still refused, and the
+// added member counts toward the same bound.
+func TestUnknownMembersDoNotRelaxTheFrameBound(t *testing.T) {
+	bearer := testCredential('O')
+	listener, socketPath := newAPITestListener(t, bearer)
+	done := startServerReceive(t, listener, nil)
+	body := []byte(`{"method":"health","params":{},"future":"` + strings.Repeat("x", maxFrameBytes) + `"}`)
+	if _, err := exchangeRaw(socketPath, rawRequest(protocolGeneration, operatorDomain, bearer, body), true); err == nil {
+		t.Fatal("oversized tolerant request was answered")
+	}
+	if result := <-done; result.err == nil || result.call.Kind() != 0 {
+		t.Fatalf("oversized tolerant request dispatched: %+v, %v", result.call, result.err)
 	}
 }
 

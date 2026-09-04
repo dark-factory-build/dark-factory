@@ -209,7 +209,7 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
   let value: unknown;
   try { value = JSON.parse(text) as unknown; } catch { malformed(); }
   if (!isObject(value)) malformed();
-  exactKeys(value, ["v", "type", "body"], ["id"]);
+  requireKeys(value, ["v", "type", "body"]);
   if (value.v !== PROTOCOL_VERSION) throw new ProtocolError("unsupported_version");
   if (!isControlType(value.type)) malformed();
   if (encodedLength > controlLimit(value.type)) malformed();
@@ -236,17 +236,17 @@ function validateControlID(type: ControlType, hasID: boolean, id: unknown): void
 function validateBody(type: ControlType, body: unknown, wire: boolean): ControlBody {
   if (!isObject(body)) malformed();
   switch (type) {
-    case "HELLO": exactKeys(body, ["daemon_id", "boot_id", "connection_nonce"]); return { daemon_id: fixedHex(body.daemon_id, HEX_BYTES.daemon_id), boot_id: fixedHex(body.boot_id, HEX_BYTES.boot_id), connection_nonce: fixedHex(body.connection_nonce, HEX_BYTES.connection_nonce) };
-    case "PAIR_PROVE": exactKeys(body, ["challenge", "public_key_sec1", "signature"]); return { challenge: fixedHex(body.challenge, HEX_BYTES.challenge), public_key_sec1: fixedHex(body.public_key_sec1, HEX_BYTES.public_key_sec1, true), signature: fixedHex(body.signature, HEX_BYTES.signature) };
-    case "AUTH_PROVE": exactKeys(body, ["client_id", "signature"]); return { client_id: fixedHex(body.client_id, HEX_BYTES.client_id), signature: fixedHex(body.signature, HEX_BYTES.signature) };
-    case "PAIR_RESULT": case "AUTH_RESULT": exactKeys(body, ["client_id", "capabilities"]); return { client_id: fixedHex(body.client_id, HEX_BYTES.client_id), capabilities: capabilities(body.capabilities) };
-    case "STATE_GET": exactKeys(body, []); return {};
+    case "HELLO": requireKeys(body, ["daemon_id", "boot_id", "connection_nonce"], wire); return { daemon_id: fixedHex(body.daemon_id, HEX_BYTES.daemon_id), boot_id: fixedHex(body.boot_id, HEX_BYTES.boot_id), connection_nonce: fixedHex(body.connection_nonce, HEX_BYTES.connection_nonce) };
+    case "PAIR_PROVE": requireKeys(body, ["challenge", "public_key_sec1", "signature"], wire); return { challenge: fixedHex(body.challenge, HEX_BYTES.challenge), public_key_sec1: fixedHex(body.public_key_sec1, HEX_BYTES.public_key_sec1, true), signature: fixedHex(body.signature, HEX_BYTES.signature) };
+    case "AUTH_PROVE": requireKeys(body, ["client_id", "signature"], wire); return { client_id: fixedHex(body.client_id, HEX_BYTES.client_id), signature: fixedHex(body.signature, HEX_BYTES.signature) };
+    case "PAIR_RESULT": case "AUTH_RESULT": requireKeys(body, ["client_id", "capabilities"], wire); return { client_id: fixedHex(body.client_id, HEX_BYTES.client_id), capabilities: capabilities(body.capabilities) };
+    case "STATE_GET": requireKeys(body, [], wire); return {};
     case "STATE_SNAPSHOT": return stateSnapshot(body, wire);
-    case "STATE_WATCH": exactKeys(body, ["after_head"]); return { after_head: decimal(body.after_head, wire) };
-    case "STATE_CHANGED": exactKeys(body, ["head"]); return { head: decimal(body.head, wire, true) };
-    case "HUMAN_REQUEST_DETAIL_GET": exactKeys(body, ["request_id", "expected_revision"]); return { request_id: dynamicID(body.request_id), expected_revision: decimal(body.expected_revision, wire, true) };
+    case "STATE_WATCH": requireKeys(body, ["after_head"], wire); return { after_head: decimal(body.after_head, wire) };
+    case "STATE_CHANGED": requireKeys(body, ["head"], wire); return { head: decimal(body.head, wire, true) };
+    case "HUMAN_REQUEST_DETAIL_GET": requireKeys(body, ["request_id", "expected_revision"], wire); return { request_id: dynamicID(body.request_id), expected_revision: decimal(body.expected_revision, wire, true) };
     case "HUMAN_REQUEST_DETAIL": {
-      exactKeys(body, ["request_id", "revision", "question", "can_reply", "reply_max_bytes", "terminal_target", "cancel_run"]);
+      requireKeys(body, ["request_id", "revision", "question", "can_reply", "reply_max_bytes", "terminal_target", "cancel_run"], wire);
       const request_id = dynamicID(body.request_id); const revision = decimal(body.revision, wire, true);
       if (typeof body.can_reply !== "boolean") malformed();
       const can_reply = body.can_reply; const reply_max_bytes = integer(body.reply_max_bytes, MAX_HUMAN_REPLY_BYTES, MAX_HUMAN_REPLY_BYTES);
@@ -254,41 +254,41 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
       let cancel_run: HumanRequestCancelRunDetail | null = null;
       if (body.cancel_run !== null) {
         if (!isObject(body.cancel_run)) malformed();
-        exactKeys(body.cancel_run, ["expected_request_revision", "expected_run_revision"]);
+        requireKeys(body.cancel_run, ["expected_request_revision", "expected_run_revision"], wire);
         cancel_run = { expected_request_revision: decimal(body.cancel_run.expected_request_revision, wire, true), expected_run_revision: decimal(body.cancel_run.expected_run_revision, wire, true) };
       }
       if (cancel_run !== null && (terminal_target === null || !can_reply || cancel_run.expected_request_revision !== revision || cancel_run.expected_run_revision !== terminal_target.run_revision)) malformed();
       if (can_reply && (terminal_target === null || cancel_run === null)) malformed();
       return { request_id, revision, question: boundedText(body.question, 1, MAX_HUMAN_QUESTION_BYTES), can_reply, reply_max_bytes, terminal_target, cancel_run };
     }
-    case "HUMAN_REQUEST_REPLY": exactKeys(body, ["request_id", "expected_revision", "reply"]); return { request_id: dynamicID(body.request_id), expected_revision: decimal(body.expected_revision, wire, true), reply: boundedText(body.reply, 1, MAX_HUMAN_REPLY_BYTES) };
-    case "HUMAN_REQUEST_REPLY_RESULT": exactKeys(body, ["request_id", "revision", "status"]); if (body.status !== "resolved" && body.status !== "delivery_unknown") malformed(); return { request_id: dynamicID(body.request_id), revision: decimal(body.revision, wire, true), status: body.status };
-    case "HUMAN_REQUEST_CANCEL_RUN": exactKeys(body, ["request_id", "expected_request_revision", "expected_run_revision"]); return { request_id: dynamicID(body.request_id), expected_request_revision: decimal(body.expected_request_revision, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true) };
-    case "HUMAN_REQUEST_CANCEL_RUN_RESULT": exactKeys(body, ["run_id", "run_revision", "request_id", "request_revision"]); return { run_id: dynamicID(body.run_id), run_revision: decimal(body.run_revision, wire, true), request_id: dynamicID(body.request_id), request_revision: decimal(body.request_revision, wire, true) };
-    case "TASK_ENQUEUE": exactKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"]); return { task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES) };
-    case "TASK_ENQUEUE_RESULT": exactKeys(body, ["task_id", "revision", "agent_revision"]); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), agent_revision: decimal(body.agent_revision, wire, true) };
-    case "TERMINAL_TARGET_GET": exactKeys(body, ["agent_id", "expected_agent_revision", "expected_head"]); return { agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), expected_head: decimal(body.expected_head, wire) };
-    case "TERMINAL_TARGET": exactKeys(body, ["agent_id", "agent_revision", "head", "target"]); { const target = body.target === null ? null : terminalTargetDescriptor(body.target, wire); return { agent_id: dynamicID(body.agent_id), agent_revision: decimal(body.agent_revision, wire, true), head: decimal(body.head, wire), target }; }
-    case "TERMINAL_ATTACH": exactKeys(body, ["run_id", "session_id", "expected_run_revision", "expected_session_revision", "after_sequence"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true), after_sequence: decimal(body.after_sequence, wire) };
-    case "TERMINAL_ATTACHED": exactKeys(body, ["session_id", "floor", "head", "acknowledged_sequence", "max_unacked_bytes"]); { const floor = decimal(body.floor, wire); const head = decimal(body.head, wire); const acknowledged_sequence = decimal(body.acknowledged_sequence, wire); const max_unacked_bytes = decimal(body.max_unacked_bytes, wire); if (floor > head || acknowledged_sequence > head || max_unacked_bytes !== BigInt(MAX_TERMINAL_UNACKED_BYTES)) malformed(); return { session_id: dynamicID(body.session_id), floor, head, acknowledged_sequence, max_unacked_bytes }; }
-    case "TERMINAL_ACK": exactKeys(body, ["session_id", "next_sequence"]); return { session_id: dynamicID(body.session_id), next_sequence: decimal(body.next_sequence, wire, true) };
-    case "TERMINAL_LEASE_ACQUIRE": exactKeys(body, ["run_id", "session_id", "expected_run_revision", "expected_session_revision"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true) };
-    case "TERMINAL_LEASE_RENEW": case "TERMINAL_LEASE_RELEASE": exactKeys(body, ["run_id", "session_id", "generation", "expected_run_revision", "expected_session_revision"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true) };
-    case "TERMINAL_LEASE_RESULT": exactKeys(body, ["operation", "run_id", "session_id", "generation", "last_input_sequence", "run_revision", "session_revision"], ["expires_at_ms"]); if (body.operation !== "acquired" && body.operation !== "renewed" && body.operation !== "released") malformed(); { const operation = body.operation; const run_id = dynamicID(body.run_id); const session_id = dynamicID(body.session_id); const generation = decimal(body.generation, wire, true); const expires_at_ms = Object.prototype.hasOwnProperty.call(body, "expires_at_ms") ? decimal(body.expires_at_ms, wire, true) : undefined; const last_input_sequence = decimal(body.last_input_sequence, wire); const run_revision = decimal(body.run_revision, wire, true); const session_revision = decimal(body.session_revision, wire, true); if (operation === "released") { if (expires_at_ms !== undefined) malformed(); return { operation, run_id, session_id, generation, last_input_sequence, run_revision, session_revision }; } if (expires_at_ms === undefined) malformed(); return { operation, run_id, session_id, generation, expires_at_ms, last_input_sequence, run_revision, session_revision }; }
-    case "TERMINAL_RESIZE": exactKeys(body, ["run_id", "session_id", "generation", "expected_run_revision", "expected_session_revision", "rows", "cols"]); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true), rows: integer(body.rows, 1, MAX_TERMINAL_ROWS), cols: integer(body.cols, 1, MAX_TERMINAL_COLS) };
-    case "TERMINAL_RESIZED": exactKeys(body, ["session_id", "generation", "rows", "cols"]); return { session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), rows: integer(body.rows, 1, MAX_TERMINAL_ROWS), cols: integer(body.cols, 1, MAX_TERMINAL_COLS) };
-    case "TERMINAL_DETACH": exactKeys(body, ["session_id"]); return { session_id: dynamicID(body.session_id) };
-    case "TERMINAL_DETACHED": exactKeys(body, ["session_id"]); return { session_id: dynamicID(body.session_id) };
-    case "TERMINAL_INPUT_RESULT": exactKeys(body, ["session_id", "generation", "sequence", "status", "accepted_bytes"]); if (body.status !== "accepted" && body.status !== "rejected" && body.status !== "partial" && body.status !== "uncertain") malformed(); { const accepted_bytes = decimal(body.accepted_bytes, wire); if (!validTerminalInputResult(body.status, accepted_bytes)) malformed(); return { session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), sequence: decimal(body.sequence, wire, true), status: body.status, accepted_bytes }; }
-    case "TERMINAL_EOF": exactKeys(body, ["session_id"]); return { session_id: dynamicID(body.session_id) };
-    case "TERMINAL_EXIT": exactKeys(body, ["session_id", "exit_code", "exit_signal", "aborted"]); if (typeof body.aborted !== "boolean") malformed(); { const exit_code = integer(body.exit_code, 0, Number.MAX_SAFE_INTEGER); const exit_signal = integer(body.exit_signal, 0, Number.MAX_SAFE_INTEGER); if (exit_signal !== 0 && exit_code !== 0) malformed(); return { session_id: dynamicID(body.session_id), exit_code, exit_signal, aborted: body.aborted }; }
-    case "TERMINAL_RESET": exactKeys(body, ["session_id", "floor", "head"]); { const floor = decimal(body.floor, wire); const head = decimal(body.head, wire); if (floor > head) malformed(); return { session_id: dynamicID(body.session_id), floor, head }; }
-    case "ERROR": exactKeys(body, ["code", "retryable"]); if (typeof body.code !== "string" || !(ERROR_CODES as readonly string[]).includes(body.code) || typeof body.retryable !== "boolean") malformed(); return { code: body.code as ErrorCode, retryable: body.retryable };
+    case "HUMAN_REQUEST_REPLY": requireKeys(body, ["request_id", "expected_revision", "reply"], wire); return { request_id: dynamicID(body.request_id), expected_revision: decimal(body.expected_revision, wire, true), reply: boundedText(body.reply, 1, MAX_HUMAN_REPLY_BYTES) };
+    case "HUMAN_REQUEST_REPLY_RESULT": requireKeys(body, ["request_id", "revision", "status"], wire); if (body.status !== "resolved" && body.status !== "delivery_unknown") malformed(); return { request_id: dynamicID(body.request_id), revision: decimal(body.revision, wire, true), status: body.status };
+    case "HUMAN_REQUEST_CANCEL_RUN": requireKeys(body, ["request_id", "expected_request_revision", "expected_run_revision"], wire); return { request_id: dynamicID(body.request_id), expected_request_revision: decimal(body.expected_request_revision, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true) };
+    case "HUMAN_REQUEST_CANCEL_RUN_RESULT": requireKeys(body, ["run_id", "run_revision", "request_id", "request_revision"], wire); return { run_id: dynamicID(body.run_id), run_revision: decimal(body.run_revision, wire, true), request_id: dynamicID(body.request_id), request_revision: decimal(body.request_revision, wire, true) };
+    case "TASK_ENQUEUE": requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire); return { task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES) };
+    case "TASK_ENQUEUE_RESULT": requireKeys(body, ["task_id", "revision", "agent_revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), agent_revision: decimal(body.agent_revision, wire, true) };
+    case "TERMINAL_TARGET_GET": requireKeys(body, ["agent_id", "expected_agent_revision", "expected_head"], wire); return { agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), expected_head: decimal(body.expected_head, wire) };
+    case "TERMINAL_TARGET": requireKeys(body, ["agent_id", "agent_revision", "head", "target"], wire); { const target = body.target === null ? null : terminalTargetDescriptor(body.target, wire); return { agent_id: dynamicID(body.agent_id), agent_revision: decimal(body.agent_revision, wire, true), head: decimal(body.head, wire), target }; }
+    case "TERMINAL_ATTACH": requireKeys(body, ["run_id", "session_id", "expected_run_revision", "expected_session_revision", "after_sequence"], wire); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true), after_sequence: decimal(body.after_sequence, wire) };
+    case "TERMINAL_ATTACHED": requireKeys(body, ["session_id", "floor", "head", "acknowledged_sequence", "max_unacked_bytes"], wire); { const floor = decimal(body.floor, wire); const head = decimal(body.head, wire); const acknowledged_sequence = decimal(body.acknowledged_sequence, wire); const max_unacked_bytes = decimal(body.max_unacked_bytes, wire); if (floor > head || acknowledged_sequence > head || max_unacked_bytes !== BigInt(MAX_TERMINAL_UNACKED_BYTES)) malformed(); return { session_id: dynamicID(body.session_id), floor, head, acknowledged_sequence, max_unacked_bytes }; }
+    case "TERMINAL_ACK": requireKeys(body, ["session_id", "next_sequence"], wire); return { session_id: dynamicID(body.session_id), next_sequence: decimal(body.next_sequence, wire, true) };
+    case "TERMINAL_LEASE_ACQUIRE": requireKeys(body, ["run_id", "session_id", "expected_run_revision", "expected_session_revision"], wire); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true) };
+    case "TERMINAL_LEASE_RENEW": case "TERMINAL_LEASE_RELEASE": requireKeys(body, ["run_id", "session_id", "generation", "expected_run_revision", "expected_session_revision"], wire); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true) };
+    case "TERMINAL_LEASE_RESULT": requireKeys(body, ["operation", "run_id", "session_id", "generation", "last_input_sequence", "run_revision", "session_revision"], wire, ["expires_at_ms"]); if (body.operation !== "acquired" && body.operation !== "renewed" && body.operation !== "released") malformed(); { const operation = body.operation; const run_id = dynamicID(body.run_id); const session_id = dynamicID(body.session_id); const generation = decimal(body.generation, wire, true); const expires_at_ms = Object.prototype.hasOwnProperty.call(body, "expires_at_ms") ? decimal(body.expires_at_ms, wire, true) : undefined; const last_input_sequence = decimal(body.last_input_sequence, wire); const run_revision = decimal(body.run_revision, wire, true); const session_revision = decimal(body.session_revision, wire, true); if (operation === "released") { if (expires_at_ms !== undefined) malformed(); return { operation, run_id, session_id, generation, last_input_sequence, run_revision, session_revision }; } if (expires_at_ms === undefined) malformed(); return { operation, run_id, session_id, generation, expires_at_ms, last_input_sequence, run_revision, session_revision }; }
+    case "TERMINAL_RESIZE": requireKeys(body, ["run_id", "session_id", "generation", "expected_run_revision", "expected_session_revision", "rows", "cols"], wire); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true), rows: integer(body.rows, 1, MAX_TERMINAL_ROWS), cols: integer(body.cols, 1, MAX_TERMINAL_COLS) };
+    case "TERMINAL_RESIZED": requireKeys(body, ["session_id", "generation", "rows", "cols"], wire); return { session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), rows: integer(body.rows, 1, MAX_TERMINAL_ROWS), cols: integer(body.cols, 1, MAX_TERMINAL_COLS) };
+    case "TERMINAL_DETACH": requireKeys(body, ["session_id"], wire); return { session_id: dynamicID(body.session_id) };
+    case "TERMINAL_DETACHED": requireKeys(body, ["session_id"], wire); return { session_id: dynamicID(body.session_id) };
+    case "TERMINAL_INPUT_RESULT": requireKeys(body, ["session_id", "generation", "sequence", "status", "accepted_bytes"], wire); if (body.status !== "accepted" && body.status !== "rejected" && body.status !== "partial" && body.status !== "uncertain") malformed(); { const accepted_bytes = decimal(body.accepted_bytes, wire); if (!validTerminalInputResult(body.status, accepted_bytes)) malformed(); return { session_id: dynamicID(body.session_id), generation: decimal(body.generation, wire, true), sequence: decimal(body.sequence, wire, true), status: body.status, accepted_bytes }; }
+    case "TERMINAL_EOF": requireKeys(body, ["session_id"], wire); return { session_id: dynamicID(body.session_id) };
+    case "TERMINAL_EXIT": requireKeys(body, ["session_id", "exit_code", "exit_signal", "aborted"], wire); if (typeof body.aborted !== "boolean") malformed(); { const exit_code = integer(body.exit_code, 0, Number.MAX_SAFE_INTEGER); const exit_signal = integer(body.exit_signal, 0, Number.MAX_SAFE_INTEGER); if (exit_signal !== 0 && exit_code !== 0) malformed(); return { session_id: dynamicID(body.session_id), exit_code, exit_signal, aborted: body.aborted }; }
+    case "TERMINAL_RESET": requireKeys(body, ["session_id", "floor", "head"], wire); { const floor = decimal(body.floor, wire); const head = decimal(body.head, wire); if (floor > head) malformed(); return { session_id: dynamicID(body.session_id), floor, head }; }
+    case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || !(ERROR_CODES as readonly string[]).includes(body.code) || typeof body.retryable !== "boolean") malformed(); return { code: body.code as ErrorCode, retryable: body.retryable };
   }
 }
 
 function stateSnapshot(body: Record<string, unknown>, wire: boolean): StateSnapshotBody {
-  exactKeys(body, ["head", "factory", "projects", "agents", "tasks", "human_requests"]);
+  requireKeys(body, ["head", "factory", "projects", "agents", "tasks", "human_requests"], wire);
   const head = decimal(body.head, wire);
   if (!isObject(body.factory)) malformed();
   const factory = factoryItem(body.factory, wire);
@@ -311,30 +311,30 @@ function uniqueIDs(items: readonly { id: string }[]): void {
   for (const item of items) { if (seen.has(item.id)) malformed(); seen.add(item.id); }
 }
 function factoryItem(value: unknown, wire: boolean): FactoryItem {
-  if (!isObject(value)) malformed(); exactKeys(value, ["dispatch_enabled", "capacity", "active_runs", "revision"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["dispatch_enabled", "capacity", "active_runs", "revision"], wire);
   if (typeof value.dispatch_enabled !== "boolean") malformed(); const capacity = integer(value.capacity, 1, MAX_FACTORY_CAPACITY); const active_runs = integer(value.active_runs, 0, MAX_FACTORY_CAPACITY);
   if (active_runs > capacity) malformed(); return { dispatch_enabled: value.dispatch_enabled, capacity, active_runs, revision: decimal(value.revision, wire, true) };
 }
-function projectItem(value: unknown, wire: boolean): ProjectItem { if (!isObject(value)) malformed(); exactKeys(value, ["id", "name", "revision"]); return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), revision: decimal(value.revision, wire, true) }; }
+function projectItem(value: unknown, wire: boolean): ProjectItem { if (!isObject(value)) malformed(); requireKeys(value, ["id", "name", "revision"], wire); return { id: dynamicID(value.id), name: boundedText(value.name, 1, MAX_PROJECT_NAME_BYTES), revision: decimal(value.revision, wire, true) }; }
 function agentItem(value: unknown, wire: boolean): AgentItem {
-  if (!isObject(value)) malformed(); exactKeys(value, ["id", "project_id", "name", "role", "provider", "paused", "revision"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "name", "role", "provider", "paused", "revision"], wire);
   if (value.role !== "orchestrator" && value.role !== "worker" || typeof value.paused !== "boolean") malformed();
   if (value.provider !== "claude_code" && value.provider !== "codex" && value.provider !== "shell") malformed();
   return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), role: value.role, provider: value.provider, paused: value.paused, revision: decimal(value.revision, wire, true) };
 }
 function taskItem(value: unknown, wire: boolean): TaskItem {
-  if (!isObject(value)) malformed(); exactKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"], wire);
   if (typeof value.status !== "string" || !["queued", "running", "blocked", "succeeded", "failed", "cancelled"].includes(value.status)) malformed();
   return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), assigned_agent_id: dynamicID(value.assigned_agent_id), title: boundedText(value.title, 1, MAX_TASK_TITLE_BYTES), status: value.status as TaskItem["status"], priority: integer(value.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY), revision: decimal(value.revision, wire, true) };
 }
 function humanRequestItem(value: unknown, wire: boolean): HumanRequestItem {
-  if (!isObject(value)) malformed(); exactKeys(value, ["id", "project_id", "agent_id", "task_id", "created_at", "updated_at", "revision", "kind", "status", "reply_max_bytes", "can_reply"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "agent_id", "task_id", "created_at", "updated_at", "revision", "kind", "status", "reply_max_bytes", "can_reply"], wire);
   const created_at = decimal(value.created_at, wire); const updated_at = decimal(value.updated_at, wire);
   if (updated_at < created_at || value.kind !== "question" || typeof value.status !== "string" || !["open", "delivering", "delivery_unknown"].includes(value.status) || typeof value.can_reply !== "boolean") malformed();
   return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), agent_id: dynamicID(value.agent_id), task_id: dynamicID(value.task_id), created_at, updated_at, revision: decimal(value.revision, wire, true), kind: "question", status: value.status as HumanRequestItem["status"], reply_max_bytes: integer(value.reply_max_bytes, 1, MAX_HUMAN_REPLY_BYTES), can_reply: value.can_reply };
 }
 function terminalTargetDescriptor(value: unknown, wire: boolean): TerminalTargetDescriptor {
-  if (!isObject(value)) malformed(); exactKeys(value, ["run_id", "session_id", "run_revision", "session_revision"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["run_id", "session_id", "run_revision", "session_revision"], wire);
   return { run_id: dynamicID(value.run_id), session_id: dynamicID(value.session_id), run_revision: decimal(value.run_revision, wire, true), session_revision: decimal(value.session_revision, wire, true) };
 }
 
@@ -365,7 +365,18 @@ function capabilities(value: unknown): number { const result = integer(value, 0,
 function validID(value: string): boolean { return value.length > 0 && value.length <= 64 && [...value].every((character) => character.charCodeAt(0) >= 0x21 && character.charCodeAt(0) <= 0x7e); }
 function isControlType(value: unknown): value is ControlType { return typeof value === "string" && (CONTROL_TYPES as readonly string[]).includes(value); }
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-function exactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): void { const allowed = new Set([...required, ...optional]); if (required.some((key) => !Object.prototype.hasOwnProperty.call(value, key)) || Object.keys(value).some((key) => !allowed.has(key))) malformed(); }
+/**
+ * Every required member must be present and every member this build knows is
+ * validated below. Decoding a wire frame ignores a member it does not know, so
+ * a newer daemon may add one without a coordinated release; it reaches no
+ * field of the decoded frame. Byte, depth, array and object-member bounds
+ * still apply. A locally constructed frame stays exact, so a caller cannot
+ * quietly hand this encoder a field it will drop.
+ */
+function requireKeys(value: Record<string, unknown>, required: string[], wire = true, optional: string[] = []): void {
+  if (required.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) malformed();
+  if (!wire && Object.keys(value).some((key) => !required.includes(key) && !optional.includes(key))) malformed();
+}
 
 // JSON.parse permits duplicate names and unsafe integers. This structural scan
 // applies the same duplicate/depth/member/array/number bounds as Go.

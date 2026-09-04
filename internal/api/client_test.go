@@ -242,9 +242,14 @@ func TestMutationResultUsesCanonicalHeadAndAllowsZero(t *testing.T) {
 	<-fixture.request
 	fixture.wait(t)
 
+	// The obsolete `sequence` member reaches no field, so it can never be read
+	// as a head: the decoded result is the canonical zero head.
 	var oldShape MutationResult
-	if err := decodeResponse([]byte(successResponse(`{"sequence":1,"revision":1}`)), &oldShape); !errors.Is(err, ErrProtocol) {
+	if err := decodeResponse([]byte(successResponse(`{"sequence":1,"revision":1}`)), &oldShape); err != nil {
 		t.Fatalf("obsolete sequence response = %v", err)
+	}
+	if oldShape.Head != 0 || oldShape.Revision != 1 {
+		t.Fatalf("obsolete sequence member reached the result: %+v", oldShape)
 	}
 }
 
@@ -470,7 +475,7 @@ func TestAttemptOutcomeDoesNotAcknowledgeInvalidResponse(t *testing.T) {
 		name string
 		body string
 	}{
-		{name: "malformed envelope", body: `{"ok":true,"data":{"head":9,"revision":4},"private":true}`},
+		{name: "malformed envelope", body: `{"ok":true,"error":"internal","data":{"head":9,"revision":4}}`},
 		{name: "zero revision", body: `{"ok":true,"data":{"head":9,"revision":0}}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -564,12 +569,14 @@ func TestResponseFramingIsExactBoundedAndStrict(t *testing.T) {
 		{name: "invalid UTF-8 error", write: func(connection net.Conn) error {
 			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, "{\"ok\":false,\"error\":\"\xff\"}")
 		}, want: ErrProtocol},
-		{name: "unknown envelope field", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"private":"sentinel"}`)
-		}, want: ErrProtocol},
-		{name: "unknown data field", write: func(connection net.Conn) error {
-			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true,"private":"sentinel"}}`)
-		}, want: ErrProtocol},
+		// Tolerance is additive: a member this build does not know is ignored
+		// in the envelope and in the data, and the answer is still served.
+		{name: "unknown envelope member", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true},"future":"added"}`)
+		}},
+		{name: "unknown data member", write: func(connection net.Conn) error {
+			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"ok":true,"data":{"ready":true,"future":"added"}}`)
+		}},
 		{name: "missing ok", write: func(connection net.Conn) error {
 			return writeTestResponse(connection, wireGeneration, wireOperatorDomain, `{"data":{"ready":true}}`)
 		}, want: ErrProtocol},
@@ -998,7 +1005,9 @@ func TestWebOpenPreservesDecodedLaunchOnProtocolError(t *testing.T) {
 	challenge := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	digest := "4884fdaafea47c29fea7159d0daddd9c085d6200e1359e85bb81736af6b7c837"
 	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-		body := `{"launch_url":"https://app.darkfactory.build/#df_pair=` + challenge + `","expires_at_ms":1234,"challenge_digest":"` + digest + `","outcome":"ready","unexpected":"sentinel"}`
+		// A complete but invalid launch: the URL is not https, so the client
+		// refuses it after decoding every bounded field.
+		body := `{"launch_url":"http://app.darkfactory.build/#df_pair=` + challenge + `","expires_at_ms":1234,"challenge_digest":"` + digest + `","outcome":"ready"}`
 		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(body))
 	})
 	client, err := NewOperatorClient(fixture.socket, fixture.token)
@@ -1034,15 +1043,21 @@ func TestWebAbandonOpenUsesUnambiguousEmptyAcknowledgement(t *testing.T) {
 	}
 	fixture.wait(t)
 
+	// The deleted `abandoned` result member cannot come back as authority: it
+	// reaches no field, so the acknowledgement stays the empty one above.
 	fixture = newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
-		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"abandoned":true}`))
+		return writeTestResponse(connection, wireGeneration, wireOperatorDomain, successResponse(`{"abandoned":false}`))
 	})
 	client, err = NewOperatorClient(fixture.socket, fixture.token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.WebAbandonOpen(context.Background(), digest); !errors.Is(err, ErrProtocol) {
+	result, err := client.WebAbandonOpen(context.Background(), digest)
+	if err != nil {
 		t.Fatalf("legacy abandonment result = %v", err)
+	}
+	if result != (WebAbandonOpenResult{}) {
+		t.Fatalf("legacy abandonment member reached the result: %+v", result)
 	}
 	<-fixture.request
 	fixture.wait(t)

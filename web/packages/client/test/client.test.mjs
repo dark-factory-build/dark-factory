@@ -32,6 +32,14 @@ const fixture = (name) => readFileSync(join(root, "protocol/browser/v2/fixtures"
 const json = (name) => JSON.parse(fixture(name));
 const bytes = (hex) => hexBytes(hex);
 const expectMalformed = (fn) => assert.throws(fn, (e) => e instanceof ProtocolError && ["malformed", "wrong_direction", "unsupported_version"].includes(e.code));
+// The contract tolerates additive change: a member this build does not know is
+// ignored on the wire. The proof that it is only additive is that the mutated
+// frame decodes to exactly the frame the unmutated one decodes to, so the
+// added bytes reach no field and become no authority.
+const expectIgnoredMember = (base, mutated, role = "client") => {
+  const decode = role === "client" ? decodeClientControl : decodeServerControl;
+  assert.deepEqual(decode(mutated), decode(base));
+};
 
 test("canonical control fixtures decode by sender role and re-encode exactly", () => {
   const client = ["pair_prove", "auth_prove"];
@@ -73,10 +81,10 @@ test("control envelope IDs are symmetrically required, optional, or forbidden", 
 test("control role, envelope, field and capability validation is closed", () => {
   expectMalformed(() => decodeClientControl(fixture("hello.json")));
   expectMalformed(() => decodeServerControl(fixture("pair_prove.json")));
+  expectIgnoredMember(fixture("auth_result.json"), fixture("auth_result.json").replace('"client_id":', '"extra":1,"client_id":'), "server");
   for (const mutation of [
     (s) => s.replace('"v":2', '"v":1'),
     (s) => s.replace('"type":"AUTH_RESULT"', '"type":"NOPE"'),
-    (s) => s.replace('"client_id":', '"extra":1,"client_id":'),
     (s) => s.replace('"client_id":"', '"client_id":"0'),
     (s) => s.replace('"capabilities":9', '"capabilities":8'),
     (s) => s.replace('"capabilities":9', '"capabilities":16'),
@@ -84,8 +92,13 @@ test("control role, envelope, field and capability validation is closed", () => 
     (s) => s.replace('"id":"auth-1"', '"id":"auth-1","id":"other"'),
   ]) expectMalformed(() => decodeServerControl(mutation(fixture("auth_result.json"))));
   expectMalformed(() => decodeClientControl('{"v":2,"type":"ERROR","body":{"code":"secret","retryable":false}}'));
-  expectMalformed(() => decodeClientControl('{"v":2,"type":"ERROR","body":{"code":"internal","retryable":false,"message":"private"}}'));
-  expectMalformed(() => decodeClientControl(fixture("auth_prove.json").replace('"signature"', '"public_key_sec1":"046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5","signature"')));
+  // A daemon diagnostic added beside the finite error code reaches no field,
+  // so it can never be rendered; the decoded body is code and retryable only.
+  expectIgnoredMember('{"v":2,"type":"ERROR","body":{"code":"internal","retryable":false}}', '{"v":2,"type":"ERROR","body":{"code":"internal","retryable":false,"message":"private"}}');
+  assert.deepEqual(decodeClientControl('{"v":2,"type":"ERROR","body":{"code":"internal","retryable":false,"message":"private"}}').body, { code: "internal", retryable: false });
+  // AUTH_PROVE has no public-key member: the daemon reads the key from its
+  // durable client row, so a caller-supplied one is ignored, never adopted.
+  expectIgnoredMember(fixture("auth_prove.json"), fixture("auth_prove.json").replace('"signature"', '"public_key_sec1":"046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5","signature"'));
   for (const number of ["1.0", "1e0", "01", "+1", "9007199254740992", "-9007199254740992"]) {
     expectMalformed(() => decodeServerControl(`{"v":2,"type":"AUTH_RESULT","id":"auth-1","body":{"client_id":"606162636465666768696a6b6c6d6e6f","capabilities":${number}}}`));
   }
@@ -133,12 +146,15 @@ test("browser terminal and HumanRequest controls are typed, directional, and bou
   const humanCancel = fixture("human_request_cancel_run.json");
   const humanDetail = fixture("human_request_detail.json");
   const humanCancelResult = fixture("human_request_cancel_run_result.json");
-  expectMalformed(() => decodeClientControl(humanReply.replace('"request_id":', `"run_id":"${"11".repeat(16)}","request_id":`)));
-  expectMalformed(() => decodeClientControl(humanCancel.replace('"request_id":', `"run_id":"${"11".repeat(16)}","request_id":`)));
+  // Reply and cancellation have no run destination member, so a caller-supplied
+  // one changes nothing: the Store still derives the origin.
+  expectIgnoredMember(humanReply, humanReply.replace('"request_id":', `"run_id":"${"11".repeat(16)}","request_id":`));
+  expectIgnoredMember(humanCancel, humanCancel.replace('"request_id":', `"run_id":"${"11".repeat(16)}","request_id":`));
   expectMalformed(() => decodeClientControl(humanCancel.replace('"expected_run_revision"', '"Expected_Run_Revision"')));
   expectMalformed(() => decodeServerControl(humanDetail.replace('"expected_run_revision":"8"', '"expected_run_revision":"7"')));
-  expectMalformed(() => decodeServerControl(humanDetail.replace('"cancel_run":{', '"cancel_run":{"action":"cancel_run",')));
-  expectMalformed(() => decodeServerControl(humanCancelResult.replace('"run_id":', '"action":"cancel_run","run_id":')));
+  // Residue from the deleted generic action shape carries no meaning.
+  expectIgnoredMember(humanDetail, humanDetail.replace('"cancel_run":{', '"cancel_run":{"action":"cancel_run",'), "server");
+  expectIgnoredMember(humanCancelResult, humanCancelResult.replace('"run_id":', '"action":"cancel_run","run_id":'), "server");
   expectMalformed(() => decodeServerControl(humanCancelResult.replace('"type":"HUMAN_REQUEST_CANCEL_RUN_RESULT"', '"type":"HUMAN_REQUEST_ACTION_RESULT"')));
   const lease = fixture("terminal_lease_result.json");
   const target = fixture("terminal_target.json");
@@ -148,11 +164,13 @@ test("browser terminal and HumanRequest controls are typed, directional, and bou
   expectMalformed(() => decodeClientControl(targetGet.replace('"agent_id"', '"Agent_ID"')));
   assert.equal(decodeServerControl(target).body.target.run_id, "11".repeat(16));
   assert.equal(decodeServerControl(target).body.head, 9007199254740993n);
-  expectMalformed(() => decodeServerControl(target.replace('"target":{', '"target":{"pid":1,')));
+  // A terminal target is an observation coordinate with a closed shape: a
+  // process identity added beside it can never be read.
+  expectIgnoredMember(target, target.replace('"target":{', '"target":{"pid":1,'), "server");
   expectMalformed(() => decodeServerControl(target.replace(',"session_revision":"9"', '')));
   const unavailable = target.replace(/"target":\{[^}]+\}/, '"target":null');
   assert.equal(encodeServerControl(decodeServerControl(unavailable)), unavailable);
-  expectMalformed(() => decodeServerControl(lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":"10000","renew_after_ms":"10000"')));
+  expectIgnoredMember(lease, lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":"10000","renew_after_ms":"10000"'), "server");
   expectMalformed(() => decodeServerControl(lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":null')));
   expectMalformed(() => decodeServerControl(lease.replace(',"expires_at_ms":"10000"', '')));
   expectMalformed(() => decodeServerControl(lease.replace('"expires_at_ms":"10000"', '"expires_at_ms":"0"')));

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -187,17 +188,14 @@ func TestBinaryFixturesRoundTrip(t *testing.T) {
 func TestControlMalformed(t *testing.T) {
 	valid := string(fixtureBytes(t, "hello.json"))
 	deep := `{"v":2,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.Repeat("[", MaxJSONDepth+2) + "0" + strings.Repeat("]", MaxJSONDepth+2) + `]}}`
-	arrays := `{"v":2,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.TrimSuffix(strings.Repeat("0,", MaxJSONArray+1), ",") + `]}}`
 	cases := []struct{ name, data string }{
 		{"wrong version", strings.Replace(valid, `"v":2`, `"v":1`, 1)},
 		{"unknown type", strings.Replace(valid, `"HELLO"`, `"NOPE"`, 1)},
 		{"missing body", `{"v":2,"type":"HELLO"}`},
-		{"unknown envelope field", strings.Replace(valid, `,"body"`, `,"extra":1,"body"`, 1)},
-		{"unknown body field", strings.Replace(valid, `}}`, `,"extra":1}}`, 1)},
+		{"missing body member", strings.Replace(valid, `"boot_id"`, `"future_id"`, 1)},
 		{"duplicate envelope", strings.Replace(valid, `,"type"`, `,"v":2,"type"`, 1)},
 		{"duplicate body", strings.Replace(valid, `,"boot_id"`, `,"daemon_id":"`+strings.Repeat("00", 16)+`","boot_id"`, 1)},
 		{"trailing", valid + ` {}`},
-		{"array bound", arrays},
 		{"depth bound", deep},
 		{"unsafe number", strings.Replace(valid, `"v":2`, `"v":9007199254740992`, 1)},
 		{"fractional number", strings.Replace(valid, `"v":2`, `"v":2.0`, 1)},
@@ -225,11 +223,113 @@ func TestControlMalformed(t *testing.T) {
 	}
 }
 
-func TestAuthProveRejectsCallerSuppliedPublicKey(t *testing.T) {
+// assertIgnoredMember proves an added member cannot change what a frame means.
+// The mutated frame decodes to exactly the frame the unmutated one decodes to,
+// so the extra bytes reach no field and become no authority.
+func assertIgnoredMember(t *testing.T, base, mutated string, server bool) {
+	t.Helper()
+	decode := DecodeClientControl
+	if server {
+		decode = DecodeServerControl
+	}
+	want, err := decode([]byte(base))
+	if err != nil {
+		t.Fatalf("base frame rejected: %v", err)
+	}
+	got, err := decode([]byte(mutated))
+	if err != nil {
+		t.Fatalf("frame with an added member rejected: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("added member changed the decoded frame:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// The contract tolerates additive change: a peer may add a member this build
+// does not know without a coordinated release. Bounds, required members, type
+// validation, frame types and directions stay exactly as strict as before.
+func TestControlIgnoresUnknownMembers(t *testing.T) {
+	watch := string(fixtureBytes(t, "state_watch.json"))
+	withUnknownEnvelope := strings.Replace(watch, `,"body"`, `,"future":{"nested":[1,2,3]},"body"`, 1)
+	withUnknownBody := strings.Replace(watch, `}}`, `,"future":"ignored"}}`, 1)
+	withBoth := strings.Replace(withUnknownEnvelope, `}}`, `,"future":"ignored"}}`, 1)
+	want, err := DecodeClientControl([]byte(watch))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, data string }{
+		{"unknown envelope member", withUnknownEnvelope},
+		{"unknown body member", withUnknownBody},
+		{"both", withBoth},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frame, err := DecodeClientControl([]byte(test.data))
+			if err != nil {
+				t.Fatalf("tolerant decode failed: %v", err)
+			}
+			// The unknown member is ignored, not surfaced: the decoded body is
+			// exactly the closed struct this build knows.
+			if !reflect.DeepEqual(frame, want) {
+				t.Fatalf("decoded %+v, want %+v", frame, want)
+			}
+		})
+	}
+	// Tolerance is additive only. Size still binds on the same frame.
+	padded := strings.Replace(watch, `,"body"`, `,"future":"`+strings.Repeat("x", MaxControlBytes)+`","body"`, 1)
+	if _, err := DecodeClientControl([]byte(padded)); !errors.Is(err, ErrOversized) {
+		t.Fatalf("oversized tolerant frame error = %v, want ErrOversized", err)
+	}
+	// So does the object-member bound: an unknown member is still a member.
+	members := make([]string, 0, MaxJSONObject)
+	for i := 0; i < MaxJSONObject; i++ {
+		members = append(members, fmt.Sprintf("%q:%d", fmt.Sprintf("future_%d", i), i))
+	}
+	crowded := strings.Replace(watch, `}}`, `,`+strings.Join(members, ",")+`}}`, 1)
+	if _, err := DecodeClientControl([]byte(crowded)); err != ErrMalformed {
+		t.Fatalf("object-bound tolerant frame error = %v, want ErrMalformed", err)
+	}
+}
+
+// An unknown frame type and a frame sent in the wrong direction stay finite
+// refusals; only members are tolerated.
+func TestControlRefusesUnknownTypesAndWrongDirection(t *testing.T) {
+	watch := string(fixtureBytes(t, "state_watch.json"))
+	if _, err := DecodeClientControl([]byte(strings.Replace(watch, `"STATE_WATCH"`, `"STATE_FUTURE"`, 1))); err != ErrMalformed {
+		t.Fatalf("unknown type error = %v, want ErrMalformed", err)
+	}
+	// A known client frame carrying an unknown member still cannot cross into
+	// the server decoder.
+	if _, err := DecodeServerControl([]byte(strings.Replace(watch, `}}`, `,"future":1}}`, 1))); err != ErrMalformed {
+		t.Fatalf("wrong-direction error = %v, want ErrMalformed", err)
+	}
+	snapshot := string(fixtureBytes(t, "state_changed.json"))
+	if _, err := DecodeClientControl([]byte(snapshot)); err != ErrMalformed {
+		t.Fatalf("server frame accepted by client decoder: %v", err)
+	}
+}
+
+// AUTH_PROVE has no public-key member at all: the daemon reads the key from
+// its durable client row. A caller-supplied one is ignored, never adopted.
+func TestAuthProveIgnoresCallerSuppliedPublicKey(t *testing.T) {
 	valid := string(fixtureBytes(t, "auth_prove.json"))
 	withKey := strings.Replace(valid, `"signature"`, `"public_key_sec1":"046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5","signature"`, 1)
-	if _, err := DecodeClientControl([]byte(withKey)); err != ErrMalformed {
-		t.Fatalf("AUTH_PROVE accepted redundant public key: %v", err)
+	frame, err := DecodeClientControl([]byte(withKey))
+	if err != nil {
+		t.Fatalf("AUTH_PROVE with an extra member: %v", err)
+	}
+	body, ok := frame.Body.(AuthProve)
+	if !ok {
+		t.Fatalf("AUTH_PROVE body type %T", frame.Body)
+	}
+	expected, err := DecodeClientControl([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(body, expected.Body) {
+		t.Fatalf("AUTH_PROVE body %+v, want %+v", body, expected.Body)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", body), "046b17d1") {
+		t.Fatal("AUTH_PROVE carried a caller-supplied public key")
 	}
 }
 
@@ -777,12 +877,15 @@ func TestHumanRequestAuthorityWireRejectsLegacyAndForgedShapes(t *testing.T) {
 	cancel := string(fixtureBytes(t, "human_request_cancel_run.json"))
 	detail := string(fixtureBytes(t, "human_request_detail.json"))
 	result := string(fixtureBytes(t, "human_request_cancel_run_result.json"))
+	// A reply or cancellation has no run destination member at all, so a
+	// caller-supplied one reaches nothing: the frame decodes to exactly the
+	// frame without it and the Store still derives the origin.
+	assertIgnoredMember(t, reply, strings.Replace(reply, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1), false)
+	assertIgnoredMember(t, cancel, strings.Replace(cancel, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1), false)
 	for name, test := range map[string]struct {
 		wire   string
 		server bool
 	}{
-		"reply caller run":      {wire: strings.Replace(reply, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1)},
-		"cancel caller run":     {wire: strings.Replace(cancel, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1)},
 		"cancel field case":     {wire: strings.Replace(cancel, `"expected_run_revision"`, `"Expected_Run_Revision"`, 1)},
 		"detail missing target": {wire: strings.Replace(detail, `,"terminal_target":{"run_id":"11111111111111111111111111111111","session_id":"22222222222222222222222222222222","run_revision":"8","session_revision":"9"}`, ``, 1), server: true},
 	} {
@@ -803,13 +906,13 @@ func TestHumanRequestAuthorityWireRejectsLegacyAndForgedShapes(t *testing.T) {
 	if _, err := DecodeServerControl([]byte(legacyResult)); err != ErrMalformed {
 		t.Fatalf("legacy generic result accepted: %v", err)
 	}
+	// Residue from the deleted generic result shape carries no meaning: it is
+	// ignored, so the exact typed result is still the only authority.
 	for _, mutation := range []string{
 		strings.Replace(result, `"run_id":`, `"action":"cancel_run","run_id":`, 1),
 		strings.Replace(result, `"request_revision":"2"`, `"request_revision":"2","status":"resolved"`, 1),
 	} {
-		if _, err := DecodeServerControl([]byte(mutation)); err != ErrMalformed {
-			t.Fatalf("generic result residue accepted: %v", err)
-		}
+		assertIgnoredMember(t, result, mutation, true)
 	}
 }
 
@@ -851,16 +954,16 @@ func TestTerminalTargetContract(t *testing.T) {
 		strings.Replace(string(response), `"agent_revision":"7"`, `"agent_revision":"0"`, 1),
 		strings.Replace(string(response), `"head":"9007199254740993"`, `"head":"01"`, 1),
 		strings.Replace(string(response), `,"session_revision":"9"`, "", 1),
-		strings.Replace(string(response), `"target":{`, `"target":{"pid":1,`, 1),
 	} {
 		if _, err := DecodeServerControl([]byte(mutation)); err != ErrMalformed {
 			t.Fatalf("target mutation accepted: %v", err)
 		}
 	}
-	lease := strings.Replace(string(fixtureBytes(t, "terminal_lease_result.json")), `"expires_at_ms":"10000"`, `"expires_at_ms":"10000","renew_after_ms":"10000"`, 1)
-	if _, err := DecodeServerControl([]byte(lease)); err != ErrMalformed {
-		t.Fatalf("lease renew_after_ms accepted: %v", err)
-	}
+	// A terminal target is an observation coordinate with a closed shape. A
+	// process identity added beside it is ignored, so it can never be read.
+	assertIgnoredMember(t, string(response), strings.Replace(string(response), `"target":{`, `"target":{"pid":1,`, 1), true)
+	leaseResult := string(fixtureBytes(t, "terminal_lease_result.json"))
+	assertIgnoredMember(t, leaseResult, strings.Replace(leaseResult, `"expires_at_ms":"10000"`, `"expires_at_ms":"10000","renew_after_ms":"10000"`, 1), true)
 	if _, err := DecodeClientControl(bytes.Replace(get, []byte(`"id":"target-get-1"`), nil, 1)); err != ErrMalformed {
 		t.Fatalf("missing request id accepted: %v", err)
 	}

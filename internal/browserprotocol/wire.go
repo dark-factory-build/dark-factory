@@ -519,11 +519,10 @@ func unmarshalObject(data []byte, target any) error {
 	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
 		return fmt.Errorf("%w: object required", ErrMalformed)
 	}
-	if err := validateExactJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
+	if err := validateJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
@@ -539,11 +538,10 @@ func unmarshalArray(data []byte, target any) error {
 	if len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
 		return fmt.Errorf("%w: array required", ErrMalformed)
 	}
-	if err := validateExactJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
+	if err := validateJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
@@ -554,7 +552,11 @@ func unmarshalArray(data []byte, target any) error {
 	return nil
 }
 
-func validateExactJSONShape(data []byte, target reflect.Type) error {
+// validateJSONShape checks the type of every member this build knows and
+// requires every non-optional one. A member this build does not know is
+// ignored, so the peer may add one without a coordinated release. Size,
+// depth, array and object-member bounds still apply to the whole frame.
+func validateJSONShape(data []byte, target reflect.Type) error {
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}
@@ -585,12 +587,12 @@ func validateExactJSONShape(data []byte, target reflect.Type) error {
 		for name, raw := range object {
 			fieldType, ok := fields[name]
 			if !ok {
-				return fmt.Errorf("%w: unknown object field", ErrMalformed)
+				continue
 			}
 			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) && fieldType.Kind() == reflect.Pointer {
 				continue
 			}
-			if err := validateExactJSONShape(raw, fieldType); err != nil {
+			if err := validateJSONShape(raw, fieldType); err != nil {
 				return err
 			}
 		}
@@ -605,7 +607,7 @@ func validateExactJSONShape(data []byte, target reflect.Type) error {
 			return fmt.Errorf("%w: array required", ErrMalformed)
 		}
 		for _, raw := range values {
-			if err := validateExactJSONShape(raw, target.Elem()); err != nil {
+			if err := validateJSONShape(raw, target.Elem()); err != nil {
 				return err
 			}
 		}
