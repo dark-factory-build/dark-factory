@@ -435,24 +435,31 @@ func TestServiceInstallLeavesAnUpgradeRecoverableWhenASiblingCopyFails(t *testin
 	first := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(600))}
 	fixture.install(t, first.run)
 
-	// Crash residue from an earlier staged write collides with the second
-	// binary this upgrade publishes, after the job has already been booted out.
+	// The invoking directory is nobody's property but the operator's: it can
+	// lose a binary after the set was proved and the job was booted out.
 	current := filepath.Join(ServiceDirectoryPath(fixture.home), "bin", "current")
-	stage := filepath.Join(current, ".factory-runner.stage")
-	if err := os.WriteFile(stage, []byte("crash residue"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	fixture.writeSourceBinaries(t, "second")
-	blocked := &recordedLaunchctl{results: []launchctlResult{
-		fixture.printRunning(600),
-		{status: 0}, {status: launchctlNotFound},
-	}}
-	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, blocked.run)
-	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceResidue) {
-		t.Fatalf("blocked upgrade = %+v, %v", status, err)
+	booted := true
+	vanish := func(_ context.Context, arguments ...string) launchctlResult {
+		switch arguments[0] {
+		case "print":
+			if booted {
+				return fixture.printRunning(600)
+			}
+			return launchctlResult{status: launchctlNotFound}
+		case "bootout":
+			booted = false
+			if err := os.Remove(filepath.Join(fixture.sourceDir, "factory-runner")); err != nil {
+				t.Fatal(err)
+			}
+			return launchctlResult{status: 0}
+		default:
+			return launchctlResult{status: -1, err: fmt.Errorf("unexpected verb %q", arguments[0])}
+		}
 	}
-	if len(blocked.calls) != 3 || blocked.calls[1][0] != "bootout" {
-		t.Fatalf("blocked upgrade verbs = %q", blocked.calls)
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, vanish)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceAmbiguous) {
+		t.Fatalf("blocked upgrade = %+v, %v", status, err)
 	}
 	program, err := os.ReadFile(filepath.Join(current, serviceProgramName))
 	if err != nil || !bytes.Equal(program, manageBinaryBody(serviceProgramName, "first")) {
@@ -482,11 +489,9 @@ func TestServiceInstallLeavesAnUpgradeRecoverableWhenASiblingCopyFails(t *testin
 
 	// The sibling set is mixed — the copy that ran published the new factoryctl
 	// — but the program launchd runs and the receipt that proves it agree, and
-	// that is everything any verb needs. With the residue resolved the same
-	// install command completes the upgrade.
-	if err := os.Remove(stage); err != nil {
-		t.Fatal(err)
-	}
+	// that is everything any verb needs. With the invoking set whole again the
+	// same install command completes the upgrade.
+	fixture.writeSourceBinaries(t, "second")
 	retry := &recordedLaunchctl{results: []launchctlResult{
 		fixture.printRunning(601),
 		{status: 0}, {status: launchctlNotFound},
@@ -497,6 +502,99 @@ func TestServiceInstallLeavesAnUpgradeRecoverableWhenASiblingCopyFails(t *testin
 		t.Fatalf("retried upgrade = %+v, %v", status, err)
 	}
 	fixture.assertInstalledBuild(t, "second")
+}
+
+// An upgrade publishes over exactly the staging names this engine writes, so
+// its own crash residue must not send the operator to uninstall. Anything else
+// wearing those names is not this installation's to delete.
+func TestServiceUpgradeClearsItsOwnStageResidueButNotForeignBytes(t *testing.T) {
+	fixture := newManageFixture(t)
+	fixture.writeSourceBinaries(t, "first")
+	first := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(900))}
+	fixture.install(t, first.run)
+	serviceDir := ServiceDirectoryPath(fixture.home)
+	current := filepath.Join(serviceDir, "bin", "current")
+
+	// A directory wearing a stage name is not an owned regular file: the
+	// upgrade refuses it without booting the running daemon out.
+	decoy := filepath.Join(current, ".factoryctl.stage")
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeSourceBinaries(t, "second")
+	foreign := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(900)}}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, foreign.run)
+	if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceForeign) {
+		t.Fatalf("upgrade over a foreign stage name = %+v, %v", status, err)
+	}
+	if len(foreign.calls) != 1 || foreign.calls[0][0] != "print" {
+		t.Fatalf("upgrade over a foreign stage name verbs = %q", foreign.calls)
+	}
+	if _, statErr := os.Lstat(decoy); statErr != nil {
+		t.Fatal("the foreign stage name was deleted")
+	}
+	if err := os.Remove(decoy); err != nil {
+		t.Fatal(err)
+	}
+	fixture.assertInstalledBuild(t, "first")
+
+	// This engine's own staged writes are its residue to resolve: the upgrade
+	// clears them and completes instead of demanding an uninstall.
+	stages := []string{
+		filepath.Join(current, ".factoryd.stage"),
+		filepath.Join(current, ".factoryctl.stage"),
+		filepath.Join(current, ".factory-runner.stage"),
+		filepath.Join(serviceDir, "."+serviceReceiptName+".stage"),
+	}
+	for _, stage := range stages {
+		if err := os.WriteFile(stage, []byte("crash residue"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upgrade := &recordedLaunchctl{results: []launchctlResult{
+		fixture.printRunning(900),
+		{status: 0}, {status: launchctlNotFound},
+		{status: 0}, fixture.printRunning(901),
+	}}
+	status, err = serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, upgrade.run)
+	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 901}) {
+		t.Fatalf("upgrade over stage residue = %+v, %v", status, err)
+	}
+	for _, stage := range stages {
+		if _, statErr := os.Lstat(stage); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("stage survived the upgrade: %s", stage)
+		}
+	}
+	fixture.assertInstalledBuild(t, "second")
+}
+
+// A fresh install proves the invoking set before it creates the first
+// directory, so a refusal leaves the account exactly as it found it.
+func TestServiceInstallCreatesNothingForAnIncompleteInvokingSet(t *testing.T) {
+	fixture := newManageFixture(t)
+	fixture.writeSourceBinaries(t, "first")
+	if err := os.Remove(filepath.Join(fixture.sourceDir, "factory-runner")); err != nil {
+		t.Fatal(err)
+	}
+	absent := &recordedLaunchctl{results: fixture.printAbsent()}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, absent.run)
+	if !errors.Is(err, ErrServiceAmbiguous) {
+		t.Fatalf("incomplete fresh install = %+v, %v", status, err)
+	}
+	if _, statErr := os.Lstat(ServiceDirectoryPath(fixture.home)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("the refused install created the service directory")
+	}
+	if _, statErr := os.Lstat(fixture.plistPath()); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("the refused install wrote the plist")
+	}
+
+	// The whole set installs normally afterwards, with no residue to resolve.
+	fixture.writeSourceBinaries(t, "first")
+	full := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(950))}
+	if status := fixture.install(t, full.run); status.State != ServiceRunning {
+		t.Fatalf("install after the refusal = %+v", status)
+	}
+	fixture.assertInstalledBuild(t, "first")
 }
 
 func TestServiceInstallRefusesAnIncompleteSiblingSet(t *testing.T) {
@@ -536,8 +634,8 @@ func TestServiceInstallRefusesAnIncompleteSiblingSet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// An installation missing a sibling is ambiguous: install cannot repair it
-	// because it cannot prove what the incomplete tree is.
+	// Install refuses an installed set missing a sibling, because it replaces
+	// all three and cannot prove what the incomplete tree is.
 	if err := os.Remove(filepath.Join(ServiceDirectoryPath(fixture.home), "bin", "current", "factoryctl")); err != nil {
 		t.Fatal(err)
 	}
@@ -548,6 +646,20 @@ func TestServiceInstallRefusesAnIncompleteSiblingSet(t *testing.T) {
 	}
 	if len(incomplete.calls) != 1 || incomplete.calls[0][0] != "print" {
 		t.Fatalf("incomplete installation verbs = %q", incomplete.calls)
+	}
+
+	// Only install refuses. The receipt names factoryd alone, so status still
+	// reports the installation and start still loads it — the documented
+	// diagnosis has to match what the operator will actually see.
+	observed := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(700)}}
+	status, err = inspectServiceAtHome(context.Background(), fixture.home, fixture.userHome, fixture.config, observed.run)
+	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 700}) {
+		t.Fatalf("status of the incomplete installation = %+v, %v", status, err)
+	}
+	restart := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(702))}
+	status, err = serviceStartAt(context.Background(), fixture.home, fixture.userHome, fixture.config, restart.run)
+	if err != nil || status != (ServiceStatus{State: ServiceRunning, PID: 702}) {
+		t.Fatalf("start of the incomplete installation = %+v, %v", status, err)
 	}
 
 	// Uninstall is the route back, and the same command installs again.

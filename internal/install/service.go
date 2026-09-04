@@ -123,14 +123,18 @@ func InspectServiceWithConfig(ctx context.Context, home string, config ServiceCo
 // factoryctl, and factory-runner binaries to install (normally the invoking
 // factoryctl's own directory). All three must be present there and owned by
 // this account, executable, and writable by nobody else; an incomplete or
-// unowned set refuses before anything is touched.
+// unowned set refuses before anything is created or replaced.
 //
 // Repeating an install with the same sibling set is recognized; a different set
-// upgrades this home's installation in place. The upgrade keeps the installed
-// plist, so it requires that plist to be exactly what this build renders and
-// the installed set to be complete — neither is repairable here, and both
-// report ambiguous until ServiceUninstall resolves them. A foreign artifact
-// refuses, and crash residue resolves through ServiceUninstall.
+// upgrades this home's installation in place. Two conditions bound that
+// upgrade, and neither is repairable here. It keeps the installed plist, so
+// that plist must be exactly what this build renders; when it is not, every
+// verb reports ambiguous. And it replaces all three installed binaries, so it
+// refuses an installed set missing one — while the receipt names factoryd
+// alone, so InspectService and ServiceStart keep working on that installation
+// and only install refuses. Both resolve through ServiceUninstall followed by
+// ServiceInstall. A foreign artifact refuses, and crash residue resolves
+// through ServiceUninstall.
 func ServiceInstall(ctx context.Context, home string, config ServiceConfig, sourceDir string) (ServiceStatus, error) {
 	return serviceInstall(ctx, home, config, sourceDir)
 }

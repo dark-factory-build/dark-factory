@@ -236,6 +236,12 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	if errors.Is(err, ErrServiceResidue) {
 		return ServiceStatus{State: ServiceAmbiguous}, err
 	}
+	// Prove the invoking sibling set before creating the first directory, so an
+	// incomplete or unowned set leaves no artifact behind. The copies below read
+	// and digest each binary again; nothing measured here is trusted later.
+	if _, err := serviceSiblingDigests(sourceDir); err != nil {
+		return ServiceStatus{}, err
+	}
 	plistDirectory, plistPath := servicePlistLocation(userHome, config)
 	if err := ensureOwnedDirectory(plistDirectory); err != nil {
 		return ServiceStatus{}, err
@@ -312,6 +318,9 @@ func serviceUpgradeLockedAt(ctx context.Context, home, userHome string, config S
 	if err != nil {
 		return ServiceStatus{State: ServiceAmbiguous}, err
 	}
+	if err := clearServiceStageResidue(serviceDir, current); err != nil {
+		return ServiceStatus{State: ServiceAmbiguous}, err
+	}
 	if inspection.observation.present {
 		if err := bootoutService(ctx, config, launchctl); err != nil {
 			return ServiceStatus{State: ServiceAmbiguous}, err
@@ -330,6 +339,22 @@ func serviceUpgradeLockedAt(ctx context.Context, home, userHome string, config S
 		return ServiceStatus{State: ServiceAmbiguous}, err
 	}
 	return bootstrapService(ctx, home, userHome, config, launchctl)
+}
+
+// clearServiceStageResidue removes exactly the staging names this engine
+// writes, before an upgrade publishes over them. They are this installation's
+// own crash residue, and uninstall already resolves them by these same names
+// and the same ownership rule — a stage that is not an owned regular file is
+// somebody else's and refuses instead. Doing it here keeps an interrupted
+// upgrade from steering the operator at uninstall for a state service start
+// recovers.
+func clearServiceStageResidue(serviceDir, current string) error {
+	for _, name := range serviceBinaryNames {
+		if err := removeOwnedFile(current, "."+name+".stage"); err != nil {
+			return err
+		}
+	}
+	return removeOwnedFile(serviceDir, "."+serviceReceiptName+".stage")
 }
 
 // publishServiceBinaries copies the three sibling binaries into the service

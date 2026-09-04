@@ -39,18 +39,22 @@ factoryctl service install --home "$HOME/.dark-factory"
 The command compares the invoking `factoryd`, `factory-runner`, and
 `factoryctl` with the installed ones. All three must be in the invoking
 binary's own directory, owned by you and writable by nobody else; an
-incomplete or unowned set refuses before anything is touched. An identical set
-is recognized and changes nothing. A different set boots the job out, replaces
-the three binaries, records them in the receipt, and bootstraps the new
-program. The home, its socket, database, and operator token are untouched, and
-an installation that is not this home's own is refused rather than replaced.
+incomplete or unowned set refuses before anything is created or replaced. An
+identical set is recognized and changes nothing. A different set boots the job
+out, replaces the three binaries, records them in the receipt, and bootstraps
+the new program. The home, its socket, database, and operator token are
+untouched, and an installation that is not this home's own is refused rather
+than replaced.
 
-The upgrade keeps the installed launchd plist, so it applies only while that
-plist is still byte-identical to the one the invoking build renders, and only
-while the installed `bin/current` holds all three binaries. When either is no
-longer true — a release that changes the plist, or a service directory missing
-a binary — `factoryctl service status` reports `ambiguous` and every verb
-refuses. That is the case `service uninstall` exists for:
+Two conditions bound the upgrade, and `service install` cannot repair either.
+It keeps the installed launchd plist, so it applies only while that plist is
+still byte-identical to the one the invoking build renders; a build that
+renders a different plist makes `factoryctl service status` report `ambiguous`
+and every verb refuse. And it replaces all three installed binaries, so it
+refuses a `bin/current` that is missing one. The receipt names `factoryd`
+alone, so that second case is quieter: `service status` still reports the
+installation as `installed` or `running` and `service start` still works — only
+`service install` refuses. Both cases resolve the same way:
 
 ```sh
 factoryctl service uninstall --home "$HOME/.dark-factory"
