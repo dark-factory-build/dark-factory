@@ -52,6 +52,7 @@ jobs:
     outputs:
       macos: ${{ steps.select.outputs.macos }}
       control_plane: ${{ steps.select.outputs.control_plane }}
+      relay: ${{ steps.select.outputs.relay }}
     steps:
       - name: Select fixed gates from the combined tree
         id: select
@@ -60,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           emit_all() {
-            for gate in macos control_plane; do
+            for gate in macos control_plane relay; do
               printf '%s=true\n' "$gate"
             done >>"$GITHUB_OUTPUT"
           }
@@ -83,6 +84,7 @@ jobs:
 
           macos=false
           control_plane=false
+          relay=false
           while IFS= read -r -d '' path; do
             case "$path" in
               docs/*|README.md|ARCHITECTURE.md|CONTRIBUTING.md|ROADMAP.md|SECURITY.md|CLAUDE.md|LICENSE|LICENSE.*|launchd/README.md)
@@ -93,8 +95,11 @@ jobs:
               .github/workflows/deploy-control-plane.yml)
                 control_plane=true
                 ;;
+              relay|relay/*)
+                relay=true
+                ;;
               .github/workflows/ci.yml)
-                macos=true; control_plane=true
+                macos=true; control_plane=true; relay=true
                 ;;
               .gitignore|scripts/bootstrap-maintainer-v2.sh)
                 macos=true; control_plane=true
@@ -107,6 +112,7 @@ jobs:
           {
             printf 'macos=%s\n' "$macos"
             printf 'control_plane=%s\n' "$control_plane"
+            printf 'relay=%s\n' "$relay"
           } >>"$GITHUB_OUTPUT"
 
   # Darwin runtime changes use the existing gate unchanged. Documentation and
@@ -199,14 +205,14 @@ jobs:
   # selected when the ruleset was first configured.
   required:
     if: always()
-    needs: [eligibility, scope, checks, control-plane, review]
+    needs: [eligibility, scope, checks, control-plane, relay, review]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every hosted source gate
-        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success')))
+        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success') || (needs.scope.outputs.relay == 'true' && needs.relay.result != 'success')))
         run: |
-          echo "required source gates failed: eligibility=${{ needs.eligibility.result }}, scope=${{ needs.scope.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}" >&2
+          echo "required source gates failed: eligibility=${{ needs.eligibility.result }}, scope=${{ needs.scope.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}, relay=${{ needs.relay.result }}" >&2
           exit 1
       - name: Confirm the pull request is eligible for the queue
         if: github.event_name == 'pull_request'
@@ -354,3 +360,25 @@ jobs:
 
       - name: Run the control-plane authoritative gate
         run: ./control-plane/scripts/local-ci.sh
+
+  relay:
+    needs: scope
+    if: needs.scope.result == 'success' && needs.scope.outputs.relay == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out $GITHUB_SHA
+        run: |
+          set -euxo pipefail
+          rm -rf .git
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --force --detach FETCH_HEAD
+          git clean -ffdx
+
+      - name: Verify the supported Node runtime
+        run: node -e "if (Number(process.versions.node.split('.')[0]) < 22) process.exit(1)"
+
+      - name: Run the relay gate
+        run: ./relay/scripts/local-ci.sh
