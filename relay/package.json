@@ -1,0 +1,17 @@
+{
+  "name": "dark-factory-relay-worker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test:relay": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260822.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.125.0",
+    "ws": "8.21.3"
+  }
+}
