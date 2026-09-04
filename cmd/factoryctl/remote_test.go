@@ -224,7 +224,10 @@ func TestRemoteStatusPrintsTheNodeRelayAndConnection(t *testing.T) {
 // finder patterns in their corners. Without this the renderer could be off by
 // one module, or inverted, and still look plausible.
 func TestTerminalCodeDrawsTheRealSymbol(t *testing.T) {
-	text := "https://app.darkfactory.build/remote#df_remote=" + strings.Repeat("A", 512)
+	// 517 bytes: a realistic invitation link, and just large enough to force
+	// a version-15 symbol. Rendered width is size + 8 columns (the
+	// 4-module quiet zone on each side): 85 for version 15.
+	text := "https://app.darkfactory.build/remote#df_remote=" + strings.Repeat("A", 470)
 	rendered, err := renderQR(text)
 	if err != nil {
 		t.Fatal(err)
@@ -233,6 +236,9 @@ func TestTerminalCodeDrawsTheRealSymbol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if code.Size != 77 {
+		t.Fatalf("fixture text encodes as version %d, want version 15 (size 77)", (code.Size-17)/4)
+	}
 	span := code.Size + 2*qrQuietModules
 	grid := decodeHalfBlocks(t, rendered, span)
 
@@ -240,7 +246,7 @@ func TestTerminalCodeDrawsTheRealSymbol(t *testing.T) {
 		for x := 0; x < span; x++ {
 			quiet := x < qrQuietModules || y < qrQuietModules || x >= span-qrQuietModules || y >= span-qrQuietModules
 			if quiet && grid[y][x] {
-				t.Fatalf("ink inside the quiet zone at (%d,%d)", x, y)
+				t.Fatalf("dark module inside the quiet zone at (%d,%d)", x, y)
 			}
 			if grid[y][x] != code.Black(x-qrQuietModules, y-qrQuietModules) {
 				t.Fatalf("module (%d,%d) does not match the encoded symbol", x, y)
@@ -264,6 +270,10 @@ func TestTerminalCodeDrawsTheRealSymbol(t *testing.T) {
 	}
 }
 
+// decodeQuadrants inverts renderQR: it turns each quadrant-block character
+// back into the modules it drew. The mapping is written out here literally,
+// not derived from renderQR's own switch, so a renderer that inverts or
+// mis-draws a glyph cannot also make its own proof pass.
 func decodeHalfBlocks(t *testing.T, rendered string, span int) [][]bool {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")
@@ -280,20 +290,23 @@ func decodeHalfBlocks(t *testing.T, rendered string, span int) [][]bool {
 			t.Fatalf("rendered row %d has %d columns, want %d", row, len(runes), span)
 		}
 		for column, character := range runes {
-			var upper, lower bool
+			// Ink is a LIGHT module, so the DARK grid this returns is the
+			// negation of what each glyph draws.
+			var upperDark, lowerDark bool
 			switch character {
 			case '█':
-				upper, lower = true, true
+				upperDark, lowerDark = false, false
 			case '▀':
-				upper = true
+				upperDark, lowerDark = false, true
 			case '▄':
-				lower = true
+				upperDark, lowerDark = true, false
 			case ' ':
+				upperDark, lowerDark = true, true
 			default:
 				t.Fatalf("rendered row %d column %d is %q, which is not a half block", row, column, character)
 			}
-			grid[row*2][column] = upper
-			grid[row*2+1][column] = lower
+			grid[row*2][column] = upperDark
+			grid[row*2+1][column] = lowerDark
 		}
 	}
 	return grid[:span]
