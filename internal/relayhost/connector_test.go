@@ -403,17 +403,12 @@ func TestNoTicketFrameFollowsWhenTheDeviceKeyIsGone(t *testing.T) {
 	}
 }
 
-func TestOpensBeyondTheLoopbackSlotCountAreRefusedWithoutASession(t *testing.T) {
+func TestOpensBeyondTheRelayedSessionCapAreRefusedWithoutASession(t *testing.T) {
 	fixture := newHarness(t, nil)
 	host := fixture.relay.accept(t)
 	records := make([]Record, 0, maxSessions+1)
 	for index := 0; index <= maxSessions; index++ {
-		controller := controllerID(uint32(200 + index))
-		payload, err := json.Marshal(openPayload{Controller: base64.RawURLEncoding.EncodeToString(controller[:]), Purpose: PurposeControl, Origin: loopbackOrigin})
-		if err != nil {
-			t.Fatal(err)
-		}
-		records = append(records, Record{Type: RecordOpen, Connection: uint32(200 + index), Payload: payload})
+		records = append(records, openRecord(t, uint32(200+index)))
 	}
 	host.send(t, records...)
 
@@ -510,14 +505,12 @@ func TestAnAnsweredKeepaliveHoldsTheRelayConnection(t *testing.T) {
 	}
 }
 
-func TestRevokeSendsOneRecordOnlyWhileConnected(t *testing.T) {
+func TestRevokeSendsOneRecord(t *testing.T) {
 	fixture := newHarness(t, nil)
 	host := fixture.relay.accept(t)
 	fixture.openSession(t, host, 71)
 	clientID := controllerID(0x1234)
-	if !fixture.connector.Revoke(clientID) {
-		t.Fatal("Revoke did not reach the live relay connection")
-	}
+	fixture.connector.Revoke(clientID)
 	record := host.expect(t, RecordRevoke, 0)
 	var payload revokePayload
 	if err := json.Unmarshal(record.Payload, &payload); err != nil {
@@ -530,9 +523,8 @@ func TestRevokeSendsOneRecordOnlyWhileConnected(t *testing.T) {
 	if err := fixture.connector.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if fixture.connector.Revoke(clientID) {
-		t.Fatal("Revoke claimed to reach a closed connector")
-	}
+	// A closed connector has no queue; Revoke must be a no-op, not a panic.
+	fixture.connector.Revoke(clientID)
 }
 
 func TestAForbiddenHostIsRetriedNoFasterThanHalfTheCeiling(t *testing.T) {
@@ -607,5 +599,80 @@ func TestCloseIsIdempotentAndJoinsEverything(t *testing.T) {
 	session.waitClosed(t)
 	if status := fixture.connector.Status(); status.Connected || status.Sessions != 0 {
 		t.Fatalf("status after close = %+v", status)
+	}
+}
+
+func openRecord(t *testing.T, connection uint32) Record {
+	t.Helper()
+	controller := controllerID(connection)
+	payload, err := json.Marshal(openPayload{Controller: base64.RawURLEncoding.EncodeToString(controller[:]), Purpose: PurposeControl, Origin: loopbackOrigin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Record{Type: RecordOpen, Connection: connection, Payload: payload}
+}
+
+// A CLOSE that arrives in the same message as its OPEN reaches the session
+// before the loopback dial returns. The dialing goroutine must own that
+// socket's close, or every such pair leaves a live listener connection that
+// nothing counts until the relay drops.
+func TestOpenAndCloseInOneMessageLeaveNoLoopbackConnection(t *testing.T) {
+	fixture := newHarness(t, nil)
+	host := fixture.relay.accept(t)
+	const pairs = 200
+	records := make([]Record, 0, 2*pairs)
+	for index := 0; index < pairs; index++ {
+		connection := uint32(400 + index)
+		records = append(records, openRecord(t, connection), closeRecord(connection, 4001, ""))
+	}
+	host.send(t, records...)
+
+	waitFor(t, "every session to finish", func() bool { return fixture.connector.Status().Sessions == 0 })
+	fixture.loopback.settle(t)
+	live, peak, _ := fixture.loopback.counts()
+	if live != 0 {
+		t.Fatalf("live loopback connections = %d, want 0", live)
+	}
+	if peak > maxSessions {
+		t.Fatalf("peak loopback connections = %d, want at most the relayed session cap %d", peak, maxSessions)
+	}
+	if refusals := fixture.loopback.refusals(); refusals != 0 {
+		t.Fatalf("%d loopback handshakes were refused, so orphan dials crowded the listener", refusals)
+	}
+}
+
+func TestACloseLandingMidDialLeavesNoLoopbackConnection(t *testing.T) {
+	fixture := newHarness(t, nil)
+	host := fixture.relay.accept(t)
+	fixture.loopback.hold()
+	host.open(t, 501, controllerID(501), loopbackOrigin)
+	waitFor(t, "the dial to reach the loopback listener", func() bool {
+		_, _, arrived := fixture.loopback.counts()
+		return arrived == 1
+	})
+	host.closeConnection(t, 501, 4001)
+	waitFor(t, "the CLOSE to be applied", func() bool { return fixture.connector.Status().Sessions == 0 })
+	// The close that CLOSE schedules is detached, and it must be the one that
+	// finds no socket. Nothing observable says it has run, so give it a beat
+	// before the handshake can publish one.
+	time.Sleep(50 * time.Millisecond)
+	fixture.loopback.release()
+
+	waitFor(t, "the held handshake to complete", func() bool { _, peak, _ := fixture.loopback.counts(); return peak >= 1 })
+	fixture.loopback.settle(t)
+	if live, peak, _ := fixture.loopback.counts(); live != 0 || peak > 1 {
+		t.Fatalf("live=%d peak=%d after a mid-dial close, want 0 and at most 1", live, peak)
+	}
+}
+
+func waitFor(t *testing.T, what string, done func() bool) {
+	t.Helper()
+	deadline := time.After(testDeadline)
+	for !done() {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", what)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }

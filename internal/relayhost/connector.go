@@ -200,24 +200,21 @@ func (connector *Connector) Status() Status {
 }
 
 // Revoke asks the relay to close and refuse every socket of one controller.
-// It reports whether the record reached a live connection; a false is not a
-// revocation failure, because the durable revocation already committed and a
-// reconnecting controller presents a ticket the daemon no longer honours.
-func (connector *Connector) Revoke(clientID [ControllerIDSize]byte) bool {
+// It is best effort by design: the durable revocation has already committed,
+// and a controller that reconnects presents authority the daemon no longer
+// honours, so there is nothing for a caller to do about a lost record.
+func (connector *Connector) Revoke(clientID [ControllerIDSize]byte) {
 	if connector == nil {
-		return false
+		return
 	}
 	connector.mu.Lock()
 	queue := connector.queue
 	connector.mu.Unlock()
-	if queue == nil {
-		return false
-	}
 	payload, err := json.Marshal(revokePayload{Controller: base64.RawURLEncoding.EncodeToString(clientID[:])})
-	if err != nil {
-		return false
+	if queue == nil || err != nil {
+		return
 	}
-	return queue.push(nil, Record{Type: RecordRevoke, Connection: 0, Payload: payload})
+	queue.push(nil, Record{Type: RecordRevoke, Connection: 0, Payload: payload})
 }
 
 // Close stops the reconnect loop and joins every goroutine it owns.
@@ -555,6 +552,12 @@ func (connector *Connector) shutdownAsync(current *session, status websocket.Sta
 // client and pipes frames both ways. The daemon therefore cannot tell this
 // session from a local one.
 func (connector *Connector) runSession(ctx context.Context, current *session, origin string, queue *outboundQueue) {
+	if current.relayInitiated() {
+		// The CLOSE was applied before this goroutine was scheduled - an
+		// OPEN and its CLOSE in one message - so never dial at all.
+		connector.finishSession(current, queue, 0, "")
+		return
+	}
 	sessionContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	header := make(http.Header)
@@ -566,11 +569,21 @@ func (connector *Connector) runSession(ctx context.Context, current *session, or
 	})
 	cancelDial()
 	if err != nil {
-		connector.finishSession(current, queue, relayCloseUnavailable, "loopback unavailable")
+		code := relayCloseUnavailable
+		if current.relayInitiated() {
+			code = 0
+		}
+		connector.finishSession(current, queue, code, "loopback unavailable")
 		return
 	}
 	loopback.SetReadLimit(maxRecordPayloadBytes)
-	current.setLoopback(loopback)
+	if !current.setLoopback(loopback) {
+		// The relay ended this session during the dial, so its shutdown found
+		// no socket and this goroutine owns the close.
+		_ = loopback.CloseNow()
+		connector.finishSession(current, queue, 0, "")
+		return
+	}
 
 	var pump sync.WaitGroup
 	pump.Add(1)

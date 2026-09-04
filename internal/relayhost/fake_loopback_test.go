@@ -29,6 +29,10 @@ type fakeLoopback struct {
 
 	mu       sync.Mutex
 	rejected int
+	arrived  int
+	live     int
+	peak     int
+	gate     chan struct{}
 	pairBody []byte
 	authBody []byte
 }
@@ -63,6 +67,13 @@ func (loopback *fakeLoopback) address() string {
 }
 
 func (loopback *fakeLoopback) handle(writer http.ResponseWriter, request *http.Request) {
+	loopback.mu.Lock()
+	loopback.arrived++
+	gate := loopback.gate
+	loopback.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	if request.URL.Path != loopbackPath || request.Host != loopback.address() || request.Header.Get("Origin") != loopback.origin {
 		loopback.mu.Lock()
 		loopback.rejected++
@@ -76,7 +87,12 @@ func (loopback *fakeLoopback) handle(writer http.ResponseWriter, request *http.R
 	}
 	connection.SetReadLimit(maxRecordPayloadBytes)
 	session := &loopbackSession{conn: connection, frames: make(chan loopbackFrame, 1024), closed: make(chan struct{}), observedHost: request.Host}
-	loopback.opened <- session
+	loopback.enter()
+	defer loopback.leave()
+	select {
+	case loopback.opened <- session:
+	default:
+	}
 	ctx := context.Background()
 	_ = connection.Write(ctx, websocket.MessageText, []byte(`{"v":1,"type":"HELLO","body":{"daemon_id":"aa","boot_id":"bb","connection_nonce":"cc"}}`))
 	defer close(session.closed)
@@ -126,6 +142,60 @@ func (loopback *fakeLoopback) refusals() int {
 	loopback.mu.Lock()
 	defer loopback.mu.Unlock()
 	return loopback.rejected
+}
+
+func (loopback *fakeLoopback) enter() {
+	loopback.mu.Lock()
+	loopback.live++
+	loopback.peak = max(loopback.peak, loopback.live)
+	loopback.mu.Unlock()
+}
+
+func (loopback *fakeLoopback) leave() {
+	loopback.mu.Lock()
+	loopback.live--
+	loopback.mu.Unlock()
+}
+
+func (loopback *fakeLoopback) counts() (live, peak, arrived int) {
+	loopback.mu.Lock()
+	defer loopback.mu.Unlock()
+	return loopback.live, loopback.peak, loopback.arrived
+}
+
+// hold parks every incoming handshake before it is accepted, so a test can
+// land a relay CLOSE while a dial is in flight.
+func (loopback *fakeLoopback) hold() {
+	loopback.mu.Lock()
+	loopback.gate = make(chan struct{})
+	loopback.mu.Unlock()
+}
+
+func (loopback *fakeLoopback) release() {
+	loopback.mu.Lock()
+	gate := loopback.gate
+	loopback.gate = nil
+	loopback.mu.Unlock()
+	if gate != nil {
+		close(gate)
+	}
+}
+
+// settle waits for every loopback connection to be gone.
+func (loopback *fakeLoopback) settle(t *testing.T) {
+	t.Helper()
+	deadline := time.After(testDeadline)
+	for {
+		live, _, _ := loopback.counts()
+		if live == 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("%d loopback connections outlived their sessions", live)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func (session *loopbackSession) expect(t *testing.T) loopbackFrame {

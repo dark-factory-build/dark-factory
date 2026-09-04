@@ -76,10 +76,19 @@ func (current *session) deliver(record Record) bool {
 	}
 }
 
-func (current *session) setLoopback(connection *websocket.Conn) {
+// setLoopback publishes the dialed socket, or reports false when the relay
+// already ended this session. shutdown takes the same mutex, so a CLOSE that
+// lands while the dial is in flight either finds the socket and closes it or
+// loses here - and then the dialer owns the close. Without that handoff the
+// socket would stay open, uncounted, until the relay connection dropped.
+func (current *session) setLoopback(connection *websocket.Conn) bool {
 	current.mu.Lock()
+	defer current.mu.Unlock()
+	if current.relayClosed {
+		return false
+	}
 	current.loopback = connection
-	current.mu.Unlock()
+	return true
 }
 
 func (current *session) socket() *websocket.Conn {

@@ -543,17 +543,8 @@ func (owner *process) shutdown() error {
 			result = errors.Join(result, owner.schedulerErr)
 		}
 	}
-	// The relay closes before the browser runtime it is a client of, so no
-	// relayed session outlives the listener that authorized it.
-	if owner.relay != nil {
-		if err := owner.relay.Close(); err != nil {
-			result = errors.Join(result, err)
-		} else {
-			owner.lifecycleMu.Lock()
-			owner.relay = nil
-			owner.lifecycleMu.Unlock()
-		}
-	}
+	// The daemon closes the relay before the listeners it is a client of, so
+	// shutdown here does not depend on this ordering.
 	if owner.daemon != nil {
 		if err := closeDaemon(owner.daemon); err != nil {
 			result = errors.Join(result, err)

@@ -111,21 +111,20 @@ func (daemon *Daemon) relayDeviceKey(ctx context.Context, raw [relayhost.Control
 }
 
 // revokeRelayClient asks the relay to close and refuse every socket of one
-// revoked client. It reports whether the record reached a live relay
-// connection. A false is never a revocation failure: revocation already
-// committed durably, the loopback transports have already joined, and a
-// controller that reconnects presents authority the daemon no longer honours.
-func (daemon *Daemon) revokeRelayClient(id kernel.BrowserClientID) bool {
+// revoked client. It cannot fail the revocation: that already committed
+// durably, the loopback transports have already joined, and a controller that
+// reconnects presents authority the daemon no longer honours.
+func (daemon *Daemon) revokeRelayClient(id kernel.BrowserClientID) {
 	if daemon == nil {
-		return false
+		return
 	}
 	daemon.browserMu.Lock()
 	runtime := daemon.relay
 	daemon.browserMu.Unlock()
 	if runtime == nil || runtime.connector == nil {
-		return false
+		return
 	}
 	var raw [relayhost.ControllerIDSize]byte
 	copy(raw[:], id.Bytes())
-	return runtime.connector.Revoke(raw)
+	runtime.connector.Revoke(raw)
 }
