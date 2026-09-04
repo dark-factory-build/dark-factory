@@ -44,6 +44,7 @@ const (
 	usage = `usage:
   factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--base-revision REVISION]
            [--runner PATH] [--factoryctl PATH]
+           [--relay-origin RELAY_ORIGIN]
            [--development-browser-address LOOPBACK]
            [--development-browser-origin EXACT_ORIGIN ...]
   factoryd --version
@@ -64,6 +65,9 @@ type config struct {
 	home           string
 	browserAddress string
 	browserOrigins []string
+	// relayOrigin enables the outbound remote-access relay. Empty is
+	// disabled: the loopback browser surface is unchanged either way.
+	relayOrigin string
 	// Supervisor inputs. Empty runner/factoryctl select sibling self-location
 	// at boot; every executable is committed before the process serves.
 	gitExecutable        string
@@ -89,6 +93,7 @@ type process struct {
 	apiAuthority  *install.LocalAPIAuthority
 	listener      *api.Listener
 	browser       *daemon.BrowserRuntime
+	relay         *daemon.RelayRuntime
 	// supervisorSpec is derived and committed at boot; the scheduler
 	// activation consumes it. A specification that cannot be proven at boot
 	// refuses the whole process rather than failing the first attempt.
@@ -184,6 +189,11 @@ func parse(args []string) (config, bool, bool) {
 				return config{}, false, false
 			}
 			result.factoryctlExecutable = value
+		case "--relay-origin":
+			if result.relayOrigin != "" || !validRelayOrigin(value) {
+				return config{}, false, false
+			}
+			result.relayOrigin = value
 		case "--development-browser-address":
 			if developmentBrowserAddress || !validBrowserAddress(value, true) {
 				return config{}, false, false
@@ -244,6 +254,14 @@ func validBrowserAddress(value string, allowZero bool) bool {
 	return err == nil && port >= minimum && port <= 65535 && strconv.Itoa(port) == rawPort
 }
 
+// validRelayOrigin bounds the relay endpoint to an exact WebSocket origin.
+// ws:// is accepted for development against a local relay; a path, query or
+// credential is refused because the connector appends its own host path.
+func validRelayOrigin(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && (parsed.Scheme == "wss" || parsed.Scheme == "ws") && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value && !strings.Contains(value, "*") && len(value) <= 8192
+}
+
 func validBrowserOrigin(value string) bool {
 	parsed, err := url.Parse(value)
 	return err == nil && (parsed.Scheme == "https" || parsed.Scheme == "http") && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value && !strings.Contains(value, "*") && len(value) <= 8192
@@ -252,7 +270,8 @@ func validBrowserOrigin(value string) bool {
 func serve(ctx context.Context, configuration config) error {
 	if ctx == nil || !validHome(configuration.home) || !validBrowserAddress(configuration.browserAddress, true) || len(configuration.browserOrigins) == 0 ||
 		!validHome(configuration.gitExecutable) || provider.ValidateToolPath(configuration.toolPath) != nil || !validBaseRevision(configuration.baseRevision) ||
-		(configuration.runnerExecutable != "" && !validHome(configuration.runnerExecutable)) || (configuration.factoryctlExecutable != "" && !validHome(configuration.factoryctlExecutable)) {
+		(configuration.runnerExecutable != "" && !validHome(configuration.runnerExecutable)) || (configuration.factoryctlExecutable != "" && !validHome(configuration.factoryctlExecutable)) ||
+		(configuration.relayOrigin != "" && !validRelayOrigin(configuration.relayOrigin)) {
 		return errors.New("invalid factoryd configuration")
 	}
 	for _, origin := range configuration.browserOrigins {
@@ -344,6 +363,16 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("browser")
+	if configuration.relayOrigin != "" {
+		// The relay is a client of the listener above. It is started after the
+		// listener exists so a relayed controller can never reach a daemon
+		// with no loopback surface, and it never blocks boot on reachability.
+		owner.relay, err = owner.daemon.DialRelay(ownedContext, configuration.relayOrigin, configuration.home, owner.browser.Addr())
+		if err != nil {
+			return nil, err
+		}
+		startupPhase("relay")
+	}
 	owner.apiStart = true
 	go owner.accept(ownedContext, owner.listener)
 	owner.supervisorSpec.UnsettledCompletion = func(id kernel.RunID, err error) {
@@ -514,6 +543,17 @@ func (owner *process) shutdown() error {
 			result = errors.Join(result, owner.schedulerErr)
 		}
 	}
+	// The relay closes before the browser runtime it is a client of, so no
+	// relayed session outlives the listener that authorized it.
+	if owner.relay != nil {
+		if err := owner.relay.Close(); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			owner.lifecycleMu.Lock()
+			owner.relay = nil
+			owner.lifecycleMu.Unlock()
+		}
+	}
 	if owner.daemon != nil {
 		if err := closeDaemon(owner.daemon); err != nil {
 			result = errors.Join(result, err)
@@ -521,6 +561,7 @@ func (owner *process) shutdown() error {
 			owner.lifecycleMu.Lock()
 			owner.daemon = nil
 			owner.browser = nil
+			owner.relay = nil
 			owner.lifecycleMu.Unlock()
 		}
 	}

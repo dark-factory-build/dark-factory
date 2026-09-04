@@ -62,6 +62,10 @@ func (daemon *Daemon) revokeBrowserClientHeld(ctx context.Context, id kernel.Bro
 	for _, runtime := range runtimes {
 		cleanupErrors = append(cleanupErrors, runtime.closeClient(id))
 	}
+	// The relay holds no authority, so its refusal record is best effort: a
+	// relay that cannot be told still cannot admit this client, because the
+	// daemon reloads the committed revocation on every authentication.
+	daemon.revokeRelayClient(id)
 	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
 		return client, errors.Join(ErrBrowserClientCleanup, cleanupErr)
 	}

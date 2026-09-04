@@ -22,6 +22,10 @@ type Daemon struct {
 	browserLifecycleMu sync.Mutex
 	browsers           map[*BrowserRuntime]struct{}
 	browserClosing     bool
+	// relay is the optional outbound relay connector. It is a client of the
+	// browser listener above, not a second authority, so it shares that
+	// listener's lifecycle gate.
+	relay              *RelayRuntime
 	browserClientGates *browserClientGates
 
 	// operationMu is the single linearization gate for live-attempt operations

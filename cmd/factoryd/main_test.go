@@ -43,6 +43,7 @@ func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 		args    []string
 		ok      bool
 		address string
+		relay   string
 	}{
 		{name: "default", args: []string{"--home", home}, ok: true, address: defaultBrowserAddress},
 		{name: "development address", args: []string{"--home", home, "--development-browser-address", "127.0.0.1:0"}, ok: true, address: "127.0.0.1:0"},
@@ -59,6 +60,12 @@ func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 		{name: "origin path", args: []string{"--home", home, "--development-browser-origin", testOrigin + "/path"}},
 		{name: "duplicate origin", args: []string{"--home", home, "--development-browser-origin", testOrigin, "--development-browser-origin", testOrigin}},
 		{name: "production origin is implicit", args: []string{"--home", home, "--development-browser-origin", defaultBrowserOrigin}},
+		{name: "relay origin", args: []string{"--home", home, "--relay-origin", "wss://relay.darkfactory.build"}, ok: true, relay: "wss://relay.darkfactory.build"},
+		{name: "development relay origin", args: []string{"--home", home, "--relay-origin", "ws://127.0.0.1:8787"}, ok: true, relay: "ws://127.0.0.1:8787"},
+		{name: "relay origin over https", args: []string{"--home", home, "--relay-origin", "https://relay.darkfactory.build"}},
+		{name: "relay origin with a path", args: []string{"--home", home, "--relay-origin", "wss://relay.darkfactory.build/host"}},
+		{name: "relay origin with a query", args: []string{"--home", home, "--relay-origin", "wss://relay.darkfactory.build?a=b"}},
+		{name: "duplicate relay origin", args: []string{"--home", home, "--relay-origin", "wss://relay.darkfactory.build", "--relay-origin", "wss://relay.darkfactory.build"}},
 		{name: "unknown", args: []string{"--home", home, "--socket", "/private/socket"}},
 	}
 	for _, test := range tests {
@@ -71,7 +78,7 @@ func TestParseOwnsOneFreshHomeAndExactLoopbackBrowserPolicy(t *testing.T) {
 			if expectedAddress == "" {
 				expectedAddress = defaultBrowserAddress
 			}
-			if test.ok && (configuration.home != home || configuration.browserAddress != expectedAddress || len(configuration.browserOrigins) == 0) {
+			if test.ok && (configuration.home != home || configuration.browserAddress != expectedAddress || len(configuration.browserOrigins) == 0 || configuration.relayOrigin != test.relay) {
 				t.Fatalf("valid configuration = %+v", configuration)
 			}
 		})
