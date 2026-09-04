@@ -142,7 +142,7 @@ process="$temporary/process"
 /bin/cp "$ordinary/bin/go" "$process/bin/go"
 /bin/cp "$ordinary/bin/node" "$process/bin/node"
 /bin/cp "$ordinary/bin/corepack" "$process/bin/corepack"
-for process_script in go-browser-e2e.sh go-daemon-e2e.sh; do
+for process_script in go-browser-e2e.sh go-relay-e2e.sh go-daemon-e2e.sh; do
     printf '%s\n' '#!/bin/sh' 'exit 0' >"$process/scripts/$process_script"
 done
 /bin/chmod 755 "$process/scripts/"*.sh "$process/bin/go"

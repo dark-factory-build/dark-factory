@@ -83,7 +83,7 @@ for browser_mode in serial race; do
         || fail "browser $browser_mode mode did not complete"
 done
 
-for e2e_script in go-browser-e2e.sh go-daemon-e2e.sh go-service-e2e.sh; do
+for e2e_script in go-browser-e2e.sh go-relay-e2e.sh go-daemon-e2e.sh go-service-e2e.sh; do
     path="$repository_root/scripts/$e2e_script"
     if /usr/bin/grep -Eq '(^|[[:space:]])go[[:space:]]+(build|test)' "$path"; then
         fail "$e2e_script regressed to a bare Go command"
@@ -103,7 +103,7 @@ for expected in \
     /usr/bin/grep -F "$expected" "$repository_root/scripts/go-browser-e2e.sh" >/dev/null \
         || fail "browser wrapper lost explicit tool resolution: $expected"
 done
-for e2e_script in go-daemon-e2e.sh go-service-e2e.sh; do
+for e2e_script in go-relay-e2e.sh go-daemon-e2e.sh go-service-e2e.sh; do
     /usr/bin/grep -F 'go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")' \
         "$repository_root/scripts/$e2e_script" >/dev/null \
         || fail "$e2e_script lost explicit Go resolution"

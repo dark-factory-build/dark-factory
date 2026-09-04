@@ -49,6 +49,9 @@ go_gate_stage 1200 go test -short -timeout=20m -count=1 \
 echo "go-ci: browser terminal and PTY E2E"
 go_gate_stage 600 "$script_dir/go-browser-e2e.sh"
 
+echo "go-ci: remote relay end-to-end acceptance"
+go_gate_stage 900 "$script_dir/go-relay-e2e.sh"
+
 echo "go-ci: daemon and runner lifecycle E2E"
 go_gate_stage 900 "$script_dir/go-daemon-e2e.sh"
 echo "go-ci: PASS"
