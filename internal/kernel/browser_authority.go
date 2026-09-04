@@ -606,7 +606,11 @@ func (store *Store) AcquireTerminalLease(ctx context.Context, runID RunID, sessi
 	if run.Revision != expectedRun || session.Revision != expectedSession || at.Int64() < run.UpdatedAt.Int64() || at.Int64() < session.UpdatedAt.Int64() || run.Phase != RunRunning || session.State != TerminalSessionActive || client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityTerminalInput) {
 		return TerminalLease{}, tx.Rollback(ErrUnauthorized)
 	}
-	if session.LeaseClientID != nil && session.LeaseExpiresAt != nil && session.LeaseExpiresAt.Int64() > at.Int64() {
+	// Another client's unexpired lease refuses the acquire. The holder itself
+	// may acquire again from a new connection, for example after a page reload
+	// that could not release; the fresh generation fences its old connection
+	// exactly like an expiry replacement.
+	if session.LeaseClientID != nil && session.LeaseExpiresAt != nil && session.LeaseExpiresAt.Int64() > at.Int64() && *session.LeaseClientID != clientID {
 		return TerminalLease{}, tx.Rollback(ErrConflict)
 	}
 	next, err := leaseGenerationNext(int64(session.LeaseGeneration))
@@ -706,7 +710,10 @@ func leaseRows(ctx context.Context, c *sql.Conn, runID RunID, sessionID Terminal
 }
 
 func updateLease(ctx context.Context, c *sql.Conn, session TerminalSession, clientID BrowserClientID, generation int64, expiry int64, at UnixMillis) error {
-	result, err := c.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = ?, lease_generation = ?, lease_expires_at_ms = ?, last_input_sequence = 0 WHERE id = ? AND (lease_client_id IS NULL OR lease_expires_at_ms <= ?)`, clientID.Bytes(), generation, expiry, session.ID.Bytes(), at.Int64())
+	// The guard pins the observed generation so concurrent acquires still have
+	// exactly one durable winner, and admits the current holder's own
+	// reacquire alongside the vacant and expired cases.
+	result, err := c.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = ?, lease_generation = ?, lease_expires_at_ms = ?, last_input_sequence = 0 WHERE id = ? AND lease_generation = ? AND (lease_client_id IS NULL OR lease_expires_at_ms <= ? OR lease_client_id = ?)`, clientID.Bytes(), generation, expiry, session.ID.Bytes(), int64(session.LeaseGeneration), at.Int64(), clientID.Bytes())
 	if err := requireOneRow(result, err); err != nil {
 		return err
 	}

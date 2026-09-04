@@ -1429,3 +1429,40 @@ func TestTerminalEffectKeepsControlEndedSentinel(t *testing.T) {
 		t.Fatalf("effect error does not name the closed controller: %v", err)
 	}
 }
+
+func TestHolderReconnectSupersedesUnexpiredLeaseBeforeExpiry(t *testing.T) {
+	fixture := newTerminalEffectFixture(t)
+	first := fixture.acquire(t, fixture.principal)
+	// A reload keeps the paired client but arrives on a new connection while
+	// the earlier lease is still far from expiry.
+	reconnected := terminalEffectPrincipal(fixture.adapter.client.ID, 4)
+	if reconnected.ConnectionID == fixture.principal.ConnectionID {
+		t.Fatal("reconnect fixture reused the connection identity")
+	}
+	type result struct {
+		lease kernel.TerminalLease
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		lease, err := fixture.adapter.daemon.terminalLeaseAcquire(context.Background(), reconnected, fixture.run.ID, fixture.session.ID, fixture.run.Revision, fixture.session.Revision)
+		done <- result{lease: lease, err: err}
+	}()
+	revoke := readTerminalEffectWire(t, fixture.peer)
+	if revoke.Kind != string(runner.TerminalGenerationRevoke) || revoke.Generation != first.Generation {
+		t.Fatalf("superseded binding revoke = %+v", revoke)
+	}
+	replyTerminalEffect(t, fixture.peer, revoke, runner.TerminalResultOK, 0)
+	install := readTerminalEffectWire(t, fixture.peer)
+	if install.Kind != string(runner.TerminalGenerationInstall) || install.Generation != first.Generation+1 {
+		t.Fatalf("reconnect install = %+v", install)
+	}
+	replyTerminalEffect(t, fixture.peer, install, runner.TerminalResultOK, 0)
+	replaced := <-done
+	if replaced.err != nil || replaced.lease.Generation != first.Generation+1 || replaced.lease.ExpiresAt.Int64() <= first.ExpiresAt.Int64()-kernel.BrowserTerminalLeaseTTL {
+		t.Fatalf("reconnect lease = %+v, %v", replaced.lease, replaced.err)
+	}
+	if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, first.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("stale")); !errors.Is(err, ErrTerminalEffectRejected) {
+		t.Fatalf("superseded connection resumed = %v", err)
+	}
+}
