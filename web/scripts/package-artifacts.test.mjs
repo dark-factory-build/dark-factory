@@ -3,11 +3,12 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { inspectExecutable, toolTreeDigest } from "./package-artifacts.mjs";
+import { fileURLToPath } from "node:url";
+import { assertDirectoryInventory, inspectExecutable, toolTreeDigest } from "./package-artifacts.mjs";
 
-const webRoot = new URL("..", import.meta.url).pathname.slice(0, -1);
+const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(webRoot, "scripts", "package-artifacts.mjs");
 const launcher = join(webRoot, "scripts", "package-artifacts");
 const clientName = "@dark-factory/client";
@@ -50,6 +51,37 @@ child.execFileSync = (file, args, options) => args?.[0] === "rev-parse"
       stdio: "pipe",
     }), "use the package-artifacts launcher");
     assert.equal(existsSync(witness), true);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+// These unit-test the exact guard build() relies on, directly: the extra-file
+// and missing-file negative branches assertDirectoryInventory can take.
+test("assertDirectoryInventory rejects a build output file the inventory does not list", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-inventory-guard-"));
+  try {
+    writeFileSync(join(tempRoot, "control.d.ts"), "");
+    writeFileSync(join(tempRoot, "control.js"), "");
+    mkdirSync(join(tempRoot, "remote"));
+    writeFileSync(join(tempRoot, "remote", "index.js"), "");
+    assert.throws(
+      () => assertDirectoryInventory(tempRoot, ["control.d.ts", "control.js"], "test build"),
+      (error) => error.message === "package artifacts: test build contains unexpected file remote/index.js",
+    );
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("assertDirectoryInventory rejects an inventory entry the build did not produce", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-inventory-guard-"));
+  try {
+    writeFileSync(join(tempRoot, "control.d.ts"), "");
+    assert.throws(
+      () => assertDirectoryInventory(tempRoot, ["control.d.ts", "control.js"], "test build"),
+      (error) => error.message === "package artifacts: test build is missing an expected file",
+    );
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

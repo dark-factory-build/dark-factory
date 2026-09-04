@@ -9,7 +9,7 @@
     "./provenance": "./dist/src/provenance.json"
   },
   "files": ["dist/src"],
-  "scripts": { "typecheck": "tsc --noEmit", "build": "tsc -p tsconfig.json && cp src/factory-console.css dist/src/factory-console.css" },
+  "scripts": { "typecheck": "tsc --noEmit", "build": "rm -rf dist && tsc -p tsconfig.json && cp src/factory-console.css dist/src/factory-console.css" },
   "dependencies": { "@dark-factory/client": "workspace:*" },
   "peerDependencies": {
     "react": "19.1.0",

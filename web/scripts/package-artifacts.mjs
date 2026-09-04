@@ -43,14 +43,20 @@ const packages = {
 const inventory = {
   client: [
     "control.d.ts", "control.js", "errors.d.ts", "errors.js", "index.d.ts", "index.js",
-    "manifest.d.ts", "manifest.js", "session.d.ts", "session.js", "state.d.ts", "state.js",
+    "manifest.d.ts", "manifest.js", "remote/index.d.ts", "remote/index.js",
+    "remote/invitation.d.ts", "remote/invitation.js", "remote/manager.d.ts", "remote/manager.js",
+    "remote/relay-socket.d.ts", "remote/relay-socket.js", "remote/store.d.ts", "remote/store.js",
+    "remote/tokens.d.ts", "remote/tokens.js", "session.d.ts", "session.js", "state.d.ts", "state.js",
     "terminal.d.ts", "terminal.js", "terminal_session.d.ts", "terminal_session.js",
     "transcript.d.ts", "transcript.js", "provenance.json",
   ],
   ui: [
     "console-screens.d.ts", "console-screens.js", "console-view.d.ts", "console-view.js",
     "factory-app-controller.d.ts", "factory-app-controller.js", "factory-app.d.ts", "factory-app.js",
-    "factory-console.css", "factory-console.d.ts", "factory-console.js", "index.d.ts", "index.js",
+    "factory-console.css", "factory-console.d.ts", "factory-console.js",
+    "factory-scene/factory-scene.d.ts", "factory-scene/factory-scene.js",
+    "factory-scene/scene.d.ts", "factory-scene/scene.js", "index.d.ts", "index.js",
+    "remote/remote-app.d.ts", "remote/remote-app.js", "remote/remote-view.d.ts", "remote/remote-view.js",
     "terminal-controller.d.ts", "terminal-controller.js", "xterm-terminal.d.ts", "xterm-terminal.js",
     "provenance.json",
   ],
@@ -701,7 +707,11 @@ function stageAndPack(tools, info, artifactDir, stageRoot, dependency) {
   const stage = join(stageRoot, info.key);
   mkdirSync(join(stage, "dist", "src"), { recursive: true });
   assertDirectoryInventory(distRoot(info), inventory[info.key], `${info.name} source build`);
-  for (const filename of inventory[info.key]) copyFileSync(join(distRoot(info), filename), join(stage, "dist", "src", filename));
+  for (const filename of inventory[info.key]) {
+    const destination = join(stage, "dist", "src", filename);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(join(distRoot(info), filename), destination);
+  }
   writeStableJson(join(stage, "package.json"), sourcePackage);
   const filename = packageFilename(sourcePackage);
   const archive = join(artifactDir, filename);
@@ -740,4 +750,4 @@ if (process.argv[1] && !process.argv[1].startsWith("file:") && realpathSync(proc
 
 // Test-only exports; pack/verify always derive and validate their production
 // tool roots internally and never accept these as caller input.
-export { inspectExecutable, main, toolTreeDigest };
+export { assertDirectoryInventory, inspectExecutable, inventory, main, toolTreeDigest };

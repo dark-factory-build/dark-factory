@@ -8,5 +8,5 @@
     "./provenance": "./dist/src/provenance.json"
   },
   "files": ["dist/src"],
-  "scripts": { "typecheck": "tsc --noEmit", "build": "tsc -p ../../tsconfig.build.json" }
+  "scripts": { "typecheck": "tsc --noEmit", "build": "rm -rf dist && tsc -p ../../tsconfig.build.json" }
 }
