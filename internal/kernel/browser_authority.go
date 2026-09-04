@@ -608,8 +608,9 @@ func (store *Store) AcquireTerminalLease(ctx context.Context, runID RunID, sessi
 	}
 	// Another client's unexpired lease refuses the acquire. The holder itself
 	// may acquire again from a new connection, for example after a page reload
-	// that could not release; the fresh generation fences its old connection
-	// exactly like an expiry replacement.
+	// that could not release, or from a second tab of the same browser
+	// profile, which shares the client key; the fresh generation fences the
+	// earlier connection exactly like an expiry replacement.
 	if session.LeaseClientID != nil && session.LeaseExpiresAt != nil && session.LeaseExpiresAt.Int64() > at.Int64() && *session.LeaseClientID != clientID {
 		return TerminalLease{}, tx.Rollback(ErrConflict)
 	}
@@ -710,9 +711,10 @@ func leaseRows(ctx context.Context, c *sql.Conn, runID RunID, sessionID Terminal
 }
 
 func updateLease(ctx context.Context, c *sql.Conn, session TerminalSession, clientID BrowserClientID, generation int64, expiry int64, at UnixMillis) error {
-	// The guard pins the observed generation so concurrent acquires still have
-	// exactly one durable winner, and admits the current holder's own
-	// reacquire alongside the vacant and expired cases.
+	// Serialized writes already give concurrent acquires one durable winner;
+	// pinning the observed generation is defence in depth against a drifted
+	// read. The guard admits the current holder's own reacquire alongside the
+	// vacant and expired cases.
 	result, err := c.ExecContext(ctx, `UPDATE terminal_sessions SET lease_client_id = ?, lease_generation = ?, lease_expires_at_ms = ?, last_input_sequence = 0 WHERE id = ? AND lease_generation = ? AND (lease_client_id IS NULL OR lease_expires_at_ms <= ? OR lease_client_id = ?)`, clientID.Bytes(), generation, expiry, session.ID.Bytes(), int64(session.LeaseGeneration), at.Int64(), clientID.Bytes())
 	if err := requireOneRow(result, err); err != nil {
 		return err

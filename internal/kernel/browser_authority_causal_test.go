@@ -1596,7 +1596,7 @@ func TestTerminalLeaseHolderSupersedesItsOwnUnexpiredLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holder reacquire error = %v", err)
 	}
-	if second.Generation != first.Generation+1 || second.LastInputSequence != 0 || second.ExpiresAt.Int64() != 33+BrowserTerminalLeaseTTL || second.ClientID != writer.ID {
+	if second.Generation != first.Generation+1 || second.ExpiresAt.Int64() != 33+BrowserTerminalLeaseTTL || second.ClientID != writer.ID {
 		t.Fatalf("holder reacquire = %+v", second)
 	}
 	// The superseded generation is fenced for every effect.
@@ -1606,7 +1606,9 @@ func TestTerminalLeaseHolderSupersedesItsOwnUnexpiredLease(t *testing.T) {
 	if _, err := store.RenewTerminalLease(ctx, run.ID, session.ID, writer.ID, first.Generation, run.Revision, session.Revision, mustTime(t, 34)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("superseded renewal error = %v", err)
 	}
-	if _, err := store.ReserveTerminalInputSequence(ctx, run.ID, session.ID, writer.ID, first.Generation, 2, run.Revision, session.Revision, mustTime(t, 34)); !errors.Is(err, ErrRevisionConflict) {
+	// Sequence 1 is the next valid sequence after the reacquire, so only the
+	// generation guard can refuse this reservation.
+	if _, err := store.ReserveTerminalInputSequence(ctx, run.ID, session.ID, writer.ID, first.Generation, 1, run.Revision, session.Revision, mustTime(t, 34)); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("superseded input error = %v", err)
 	}
 	if _, err := store.CheckTerminalLease(ctx, run.ID, session.ID, writer.ID, second.Generation, run.Revision, session.Revision, mustTime(t, 34)); err != nil {

@@ -197,7 +197,8 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   const observer = terminalObserver(signals);
   const first = await openTerminal(client, config.agentId, signals, observer);
   await signals.until(() => observer.text.includes("E2E_READY"), "initial PTY output");
-  await first.handle.acquireInput();
+  const firstLease = await first.handle.acquireInput();
+  assert.equal(firstLease.generation, 1n, "fresh run did not start at the first lease generation");
   accepted(await first.handle.sendInput(new TextEncoder().encode("input-one\n")), "first terminal input");
   await signals.until(() => observer.text.includes("E2E_INPUT:input-one"), "provider input response");
   const resized = await first.handle.resize(37, 111);
@@ -206,8 +207,9 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   accepted(await first.handle.sendInput(new TextEncoder().encode("measure\n")), "terminal resize witness input");
   await signals.until(() => observer.text.includes("E2E_SIZE:37:111"), "provider-visible PTY resize");
 
-  await first.handle.releaseInput();
-  assert.equal(first.handle.writable, false);
+  // The connection dies while still holding the lease, as a page reload
+  // does; the same paired client must reacquire before that lease expires.
+  assert.equal(first.handle.writable, true);
   const firstSession = client.session;
   const firstSocket = sockets.at(-1);
   assert.ok(firstSocket !== undefined);
@@ -221,7 +223,17 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   assert.notEqual(secondSession, firstSession, "reconnect reused the closed BrowserSession generation");
   assert.ok(secondSocket !== undefined && secondSocket !== firstSocket, "reconnect reused the closed WebSocket");
   assert.equal(sockets.length, 2, "reconnect created more than one replacement WebSocket");
-  await second.handle.acquireInput();
+  const secondLease = await second.handle.acquireInput();
+  // The daemon and this process share one wall clock. Finishing the reacquire
+  // before the first lease's own expiry proves that lease was still held at
+  // that moment, since renewals only ever extend it; a slow reconnect fails
+  // here instead of degrading into a vacant acquire that would also reach
+  // the next generation.
+  assert.ok(
+    BigInt(Date.now()) < firstLease.expiresAtMs,
+    "reconnect outlasted the first lease, so the reacquire did not supersede a held lease",
+  );
+  assert.equal(secondLease.generation, firstLease.generation + 1n, "reacquire did not take the next generation");
   accepted(await second.handle.sendInput(new TextEncoder().encode("proceed\n")), "post-reconnect terminal input");
   const request = await waitForHumanRequest(client, signals);
   assertHumanRequestProjection(client, request, config);

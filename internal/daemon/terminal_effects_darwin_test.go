@@ -1433,6 +1433,21 @@ func TestTerminalEffectKeepsControlEndedSentinel(t *testing.T) {
 func TestHolderReconnectSupersedesUnexpiredLeaseBeforeExpiry(t *testing.T) {
 	fixture := newTerminalEffectFixture(t)
 	first := fixture.acquire(t, fixture.principal)
+	// One accepted input under the first lease moves the durable sequence off
+	// zero so the reacquire's reset below is observable.
+	inputDone := make(chan error, 1)
+	go func() {
+		_, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, first.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("held"))
+		inputDone <- err
+	}()
+	held := readTerminalEffectWire(t, fixture.peer)
+	replyTerminalEffect(t, fixture.peer, held, runner.TerminalResultOK, uint32(len("held")))
+	if err := <-inputDone; err != nil {
+		t.Fatalf("input under the first lease = %v", err)
+	}
+	if before, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID); err != nil || !found || before.LastInputSequence != 1 {
+		t.Fatalf("durable sequence before reconnect = %+v, found=%v, err=%v", before, found, err)
+	}
 	// A reload keeps the paired client but arrives on a new connection while
 	// the earlier lease is still far from expiry.
 	reconnected := terminalEffectPrincipal(fixture.adapter.client.ID, 4)
@@ -1459,8 +1474,16 @@ func TestHolderReconnectSupersedesUnexpiredLeaseBeforeExpiry(t *testing.T) {
 	}
 	replyTerminalEffect(t, fixture.peer, install, runner.TerminalResultOK, 0)
 	replaced := <-done
-	if replaced.err != nil || replaced.lease.Generation != first.Generation+1 || replaced.lease.ExpiresAt.Int64() <= first.ExpiresAt.Int64()-kernel.BrowserTerminalLeaseTTL {
+	// The fixture clock is frozen, so a fresh full TTL expires exactly when the
+	// first lease would have.
+	if replaced.err != nil || replaced.lease.Generation != first.Generation+1 || replaced.lease.ExpiresAt != first.ExpiresAt {
 		t.Fatalf("reconnect lease = %+v, %v", replaced.lease, replaced.err)
+	}
+	// The durable row, not the returned lease, carries the sequence, which the
+	// reacquire restarts from the 1 recorded above.
+	session, found, err := fixture.adapter.store.TerminalSession(context.Background(), fixture.session.ID)
+	if err != nil || !found || session.LeaseClientID == nil || *session.LeaseClientID != fixture.adapter.client.ID || session.LeaseGeneration != replaced.lease.Generation || session.LastInputSequence != 0 {
+		t.Fatalf("durable lease after reconnect = %+v, found=%v, err=%v", session, found, err)
 	}
 	if _, err := fixture.adapter.daemon.terminalInput(context.Background(), fixture.principal, fixture.run.ID, fixture.session.ID, first.Generation, 1, fixture.run.Revision, fixture.session.Revision, []byte("stale")); !errors.Is(err, ErrTerminalEffectRejected) {
 		t.Fatalf("superseded connection resumed = %v", err)
