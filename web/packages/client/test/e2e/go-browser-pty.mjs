@@ -223,10 +223,17 @@ async function scenarioInteractive(config, client, signals, sockets, errors, fra
   assert.notEqual(secondSession, firstSession, "reconnect reused the closed BrowserSession generation");
   assert.ok(secondSocket !== undefined && secondSocket !== firstSocket, "reconnect reused the closed WebSocket");
   assert.equal(sockets.length, 2, "reconnect created more than one replacement WebSocket");
-  // Generation 2 proves the reacquire superseded the still-held lease rather
-  // than taking a lease that had already expired during the reconnect.
   const secondLease = await second.handle.acquireInput();
-  assert.equal(secondLease.generation, firstLease.generation + 1n, "reacquire did not supersede the unexpired lease");
+  // The daemon and this process share one wall clock. Finishing the reacquire
+  // before the first lease's own expiry proves that lease was still held at
+  // that moment, since renewals only ever extend it; a slow reconnect fails
+  // here instead of degrading into a vacant acquire that would also reach
+  // the next generation.
+  assert.ok(
+    BigInt(Date.now()) < firstLease.expiresAtMs,
+    "reconnect outlasted the first lease, so the reacquire did not supersede a held lease",
+  );
+  assert.equal(secondLease.generation, firstLease.generation + 1n, "reacquire did not take the next generation");
   accepted(await second.handle.sendInput(new TextEncoder().encode("proceed\n")), "post-reconnect terminal input");
   const request = await waitForHumanRequest(client, signals);
   assertHumanRequestProjection(client, request, config);

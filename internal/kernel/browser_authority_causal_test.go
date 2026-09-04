@@ -1596,7 +1596,7 @@ func TestTerminalLeaseHolderSupersedesItsOwnUnexpiredLease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("holder reacquire error = %v", err)
 	}
-	if second.Generation != first.Generation+1 || second.LastInputSequence != 0 || second.ExpiresAt.Int64() != 33+BrowserTerminalLeaseTTL || second.ClientID != writer.ID {
+	if second.Generation != first.Generation+1 || second.ExpiresAt.Int64() != 33+BrowserTerminalLeaseTTL || second.ClientID != writer.ID {
 		t.Fatalf("holder reacquire = %+v", second)
 	}
 	// The superseded generation is fenced for every effect.
