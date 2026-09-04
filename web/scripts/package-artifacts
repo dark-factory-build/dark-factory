@@ -1,0 +1,225 @@
+#!/usr/bin/python3 -I -E -s
+"""Pre-Node gate for the local public artifact pack/verify commands."""
+
+import hashlib
+import json
+import os
+import pwd
+import stat
+import subprocess
+import sys
+
+
+MAX_INTEGRITY_BYTES = 64 * 1024
+NODE_CHUNK_BYTES = 1024 * 1024
+NODE_MAX_BYTES = 512 * 1024 * 1024
+
+
+def fail(message):
+    print(f"package artifacts launcher: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def reject_duplicate_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            fail("toolchain integrity has duplicate keys")
+        value[key] = item
+    return value
+
+
+def load_integrity(path):
+    try:
+        with open(path, "rb") as stream:
+            data = stream.read(MAX_INTEGRITY_BYTES + 1)
+    except OSError as error:
+        fail(f"could not read toolchain integrity: {error}")
+    if len(data) > MAX_INTEGRITY_BYTES:
+        fail("toolchain integrity is too large")
+    try:
+        text = data.decode("utf-8")
+        value = json.loads(
+            text,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=lambda _: fail("toolchain integrity has a noncanonical number"),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"toolchain integrity is invalid: {error}")
+    if json.dumps(value, indent=2, ensure_ascii=True) + "\n" != text:
+        fail("toolchain integrity is not canonical JSON")
+    return value
+
+
+def exact_keys(value, keys, label):
+    if not isinstance(value, dict) or list(value) != list(keys):
+        fail(f"{label} has unknown or missing keys")
+
+
+def exact_string(value, key, label):
+    if not isinstance(value.get(key), str):
+        fail(f"{label}.{key} must be a string")
+    return value[key]
+
+
+def exact_integer(value, key, label):
+    if type(value.get(key)) is not int:
+        fail(f"{label}.{key} must be an integer")
+    return value[key]
+
+
+def reviewed_integrity(value):
+    exact_keys(value, ["node", "pnpm", "typescript", "tar"], "toolchain integrity")
+    exact_keys(value["node"], ["version", "sha512", "bytes", "mode"], "toolchain integrity.node")
+    node = value["node"]
+    version = exact_string(node, "version", "toolchain integrity.node")
+    sha512 = exact_string(node, "sha512", "toolchain integrity.node")
+    bytes_count = exact_integer(node, "bytes", "toolchain integrity.node")
+    mode = exact_string(node, "mode", "toolchain integrity.node")
+    parts = version.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        fail("toolchain integrity.node.version is invalid")
+    if len(sha512) != 128 or any(char not in "0123456789abcdef" for char in sha512) or bytes_count <= 0 or bytes_count > NODE_MAX_BYTES or mode != "0755":
+        fail("toolchain integrity.node is invalid")
+    return node
+
+
+def source_is_clean(repository):
+    env = {
+        "CI": "true",
+        "HOME": "/var/tmp",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TMPDIR": "/var/tmp",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+    try:
+        result = subprocess.run(
+            ["/usr/bin/git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=repository,
+            env=env,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"could not inspect source worktree: {error}")
+    if result.stdout:
+        fail("source worktree is dirty; commit or remove all changes first")
+
+
+def candidate_paths(reviewed_version, explicit):
+    if explicit is not None:
+        if not os.path.isabs(explicit):
+            fail("--node must be an absolute path")
+        return [explicit]
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError) as error:
+        fail(f"could not determine the current user's home: {error}")
+    return [
+        os.path.join(home, ".nvm", "versions", "node", f"v{reviewed_version}", "bin", "node"),
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+        "/usr/bin/node",
+    ]
+
+
+def hash_node(candidate, reviewed):
+    candidate = os.path.abspath(candidate)
+    if os.path.islink(candidate):
+        fail("candidate Node must not be a symlink")
+    canonical = os.path.realpath(candidate)
+    try:
+        before = os.lstat(candidate)
+    except OSError as error:
+        fail(f"could not inspect candidate Node: {error}")
+    if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o755:
+        fail("candidate Node is not the reviewed regular executable")
+    if before.st_uid not in (os.getuid(), 0) or before.st_size != reviewed["bytes"] or before.st_size > NODE_MAX_BYTES:
+        fail("candidate Node metadata differs from reviewed toolchain")
+    digest = hashlib.sha512()
+    try:
+        with open(candidate, "rb") as stream:
+            remaining = before.st_size
+            while remaining:
+                chunk = stream.read(min(NODE_CHUNK_BYTES, remaining))
+                if not chunk:
+                    fail("candidate Node changed while hashing")
+                digest.update(chunk)
+                remaining -= len(chunk)
+        after = os.lstat(candidate)
+    except OSError as error:
+        fail(f"could not hash candidate Node: {error}")
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in fields) or os.path.islink(candidate) or os.path.realpath(candidate) != canonical:
+        fail("candidate Node changed while hashing")
+    if digest.hexdigest() != reviewed["sha512"]:
+        fail("candidate Node content differs from reviewed toolchain")
+    return canonical
+
+
+def parse_launcher_args(argv):
+    explicit = None
+    args = list(argv)
+    if args[:1] == ["--node"]:
+        if len(args) < 2:
+            fail("--node requires an absolute path")
+        explicit = args[1]
+        args = args[2:]
+    if args[:1] == ["--node"] or "--node" in args:
+        fail("--node must precede the artifact command")
+    if not args or args[0] not in ("pack", "verify", "test"):
+        fail("usage: package-artifacts [--node ABSOLUTE] <pack|verify> --output <directory> | test")
+    if args[0] == "test" and len(args) != 1:
+        fail("the artifact test file is fixed")
+    return explicit, args
+
+
+def pathlib_to_file_url(path):
+    from urllib.parse import quote
+
+    return "file://" + quote(os.path.realpath(path))
+
+
+def main():
+    script = os.path.realpath(__file__)
+    script_dir = os.path.dirname(script)
+    web_root = os.path.dirname(script_dir)
+    repository = os.path.dirname(web_root)
+    integrity = load_integrity(os.path.join(web_root, "toolchain-integrity.json"))
+    reviewed = reviewed_integrity(integrity)
+    source_is_clean(repository)
+    explicit, args = parse_launcher_args(sys.argv[1:])
+    node = None
+    for candidate in candidate_paths(reviewed["version"], explicit):
+        if os.path.lexists(candidate):
+            node = hash_node(candidate, reviewed)
+            break
+    if node is None:
+        fail("reviewed Node was not found; pass --node with an absolute path")
+    node_dir = os.path.dirname(node)
+    env = {
+        "CI": "true",
+        "HOME": "/var/tmp",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "TMPDIR": "/var/tmp",
+        "PATH": f"{node_dir}:/usr/bin:/bin",
+    }
+    if args[0] == "test":
+        command = [node, "--test", os.path.join(script_dir, "package-artifacts.test.mjs")]
+    else:
+        implementation = pathlib_to_file_url(os.path.join(script_dir, "package-artifacts.mjs"))
+        expression = "const {main}=await import(process.argv[1]); try { process.stdout.write(JSON.stringify(await main(process.argv.slice(2)), null, 2)+'\\n'); } catch (error) { process.stderr.write(error.message+'\\n'); process.exitCode=1; }"
+        command = [node, "--input-type=module", "--eval", expression, implementation, *args]
+    os.execve(node, command, env)
+
+
+if __name__ == "__main__":
+    main()

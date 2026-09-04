@@ -1,0 +1,633 @@
+package browserprotocol
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"reflect"
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
+
+const (
+	projectID = "01010101010101010101010101010101"
+	agentID   = "02020202020202020202020202020202"
+	taskID    = "03030303030303030303030303030303"
+	requestID = "04040404040404040404040404040404"
+	runID     = "05050505050505050505050505050505"
+)
+
+func factoryItem() FactoryItem {
+	return FactoryItem{DispatchEnabled: true, Capacity: 8, ActiveRuns: 2, Revision: 1}
+}
+func projectItem() ProjectItem { return ProjectItem{ID: projectID, Name: "Factory", Revision: 1} }
+func agentItem() AgentItem {
+	return AgentItem{ID: agentID, ProjectID: projectID, Name: "Worker", Role: "worker", Provider: "claude_code", Revision: 1}
+}
+func taskItem() TaskItem {
+	return TaskItem{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, Title: "Ship", Status: "queued", Priority: 1, Revision: 1}
+}
+func humanRequestItem() HumanRequestItem {
+	return HumanRequestItem{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, CreatedAt: 10, UpdatedAt: 11, Revision: 1, Kind: "question", Status: "open", ReplyMaxBytes: MaxHumanReplyBytes, CanReply: true}
+}
+
+// snapshotWith is one valid snapshot the individual bound tests mutate.
+func snapshotWith() StateSnapshot {
+	return StateSnapshot{
+		Head: 1, Factory: factoryItem(),
+		Projects: []ProjectItem{projectItem()}, Agents: []AgentItem{agentItem()},
+		Tasks: []TaskItem{taskItem()}, HumanRequests: []HumanRequestItem{humanRequestItem()},
+	}
+}
+
+func hexIdentity(prefix byte, index int) string {
+	raw := bytes.Repeat([]byte{prefix}, 16)
+	raw[15] = byte(index % 251)
+	raw[14] = byte(index / 251)
+	return fmt.Sprintf("%x", raw)
+}
+
+func rawControl(t *testing.T, kind MessageType, id string, body any) []byte {
+	t.Helper()
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idJSON, err := json.Marshal(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := json.Marshal(controlEnvelope{Type: kind, ID: idJSON, Body: bodyJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestStateFixturesRoundTrip(t *testing.T) {
+	for _, name := range []string{"state_get", "state_snapshot", "state_watch", "state_changed", "human_request_detail_get", "human_request_detail"} {
+		t.Run(name, func(t *testing.T) {
+			wire := fixtureBytes(t, name+".json")
+			frame, err := decodeFixtureControl(name, wire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := encodeDecoded(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(encoded, wire) {
+				t.Fatalf("fixture drift:\n got %s\nwant %s", encoded, wire)
+			}
+		})
+	}
+	frame, err := DecodeServerControl(fixtureBytes(t, "state_snapshot.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := frame.Body.(StateSnapshot)
+	if snapshot.Head != 9_007_199_254_740_993 {
+		t.Fatalf("unsafe chronology truncated: %+v", snapshot)
+	}
+	// The shared fixture is the cross-language contract: it must carry one of
+	// every public kind so a TypeScript consumer exercises the whole shape.
+	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 || len(snapshot.HumanRequests) != 1 {
+		t.Fatalf("snapshot fixture does not cover every kind: %+v", snapshot)
+	}
+}
+
+// The checked-in snapshot fixture is exactly what this Go encoder produces, so
+// the fixture a TypeScript consumer reads cannot drift from the server.
+func TestGoProducesTheSnapshotFixtureByteForByte(t *testing.T) {
+	wire := fixtureBytes(t, "state_snapshot.json")
+	frame, err := DecodeServerControl(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := EncodeStateSnapshot(frame.ID, frame.Body.(StateSnapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(encoded, wire) {
+		t.Fatalf("Go-produced snapshot differs from the fixture:\n got %s\nwant %s", encoded, wire)
+	}
+}
+
+// STATE_GET carries nothing. A body with any member is malformed, so a client
+// cannot smuggle a selector past a server that no longer reads one.
+func TestStateGetCarriesNoSelector(t *testing.T) {
+	encoded, err := EncodeStateGet("state", StateGet{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"body":{}`)) {
+		t.Fatalf("STATE_GET body is not empty: %s", encoded)
+	}
+	if _, err := DecodeClientControl(encoded); err != nil {
+		t.Fatal(err)
+	}
+	// STATE_GET has no selector member, so a caller cannot smuggle one: each
+	// of these decodes to exactly the same empty request.
+	for _, body := range []string{`{"cursor":null}`, `{"kind":"task"}`, `{"after":"1"}`} {
+		wire := fmt.Sprintf(`{"type":"STATE_GET","id":"state","body":%s}`, body)
+		assertIgnoredMember(t, string(encoded), wire, false)
+	}
+}
+
+// The snapshot entity bound is exact and fails closed. Nothing is trimmed.
+func TestSnapshotEntityCountBoundFailsClosed(t *testing.T) {
+	fill := func(total int) StateSnapshot {
+		value := StateSnapshot{Head: 1, Factory: factoryItem(), Projects: []ProjectItem{}, Agents: []AgentItem{}, Tasks: []TaskItem{}, HumanRequests: []HumanRequestItem{}}
+		for index := 1; index <= total; index++ {
+			item := projectItem()
+			item.ID = hexIdentity(0xa1, index)
+			value.Projects = append(value.Projects, item)
+		}
+		return value
+	}
+	if _, err := EncodeStateSnapshot("state", fill(MaxSnapshotEntities-1)); err != nil {
+		t.Fatalf("maximum snapshot rejected: %v", err)
+	}
+	if _, err := EncodeStateSnapshot("state", fill(MaxSnapshotEntities)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("oversized snapshot accepted: %v", err)
+	}
+	// The bound counts every collection plus the factory together.
+	spread := StateSnapshot{Head: 1, Factory: factoryItem(), Projects: []ProjectItem{}, Agents: []AgentItem{}, Tasks: []TaskItem{}, HumanRequests: []HumanRequestItem{}}
+	for index := 1; index <= MaxSnapshotEntities/2; index++ {
+		project := projectItem()
+		project.ID = hexIdentity(0xa1, index)
+		agent := agentItem()
+		agent.ID = hexIdentity(0xa2, index)
+		spread.Projects = append(spread.Projects, project)
+		spread.Agents = append(spread.Agents, agent)
+	}
+	if _, err := EncodeStateSnapshot("state", spread); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("spread overflow accepted: %v", err)
+	}
+}
+
+// One encoded snapshot may reach 1 MiB and not a byte more. Oversize is a
+// finite refusal on both sides; nothing is truncated or partially published.
+func TestSnapshotByteBoundIsOneMebibyteAndFailsClosed(t *testing.T) {
+	value := StateSnapshot{Head: 1, Factory: factoryItem(), Projects: []ProjectItem{}, Agents: []AgentItem{}, Tasks: []TaskItem{}, HumanRequests: []HumanRequestItem{}}
+	for index := 1; len(value.Tasks) < MaxSnapshotEntities-2; index++ {
+		item := taskItem()
+		item.ID = hexIdentity(0xa3, index)
+		item.Title = strings.Repeat("x", MaxTaskTitleBytes)
+		value.Tasks = append(value.Tasks, item)
+	}
+	if _, err := EncodeStateSnapshot("state", value); !errors.Is(err, ErrOversized) {
+		t.Fatalf("oversized encoded snapshot accepted: %v", err)
+	}
+	small := snapshotWith()
+	encoded, err := EncodeStateSnapshot("state", small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > MaxSnapshotBytes {
+		t.Fatalf("ordinary snapshot is %d bytes", len(encoded))
+	}
+	// Every other frame in either direction stays inside the control bound.
+	if MaxSnapshotBytes != 1<<20 || MaxControlBytes != 64<<10 || controlLimit(TypeStateWatch) != MaxControlBytes || controlLimit(TypeStateSnapshot) != MaxSnapshotBytes {
+		t.Fatalf("frame bounds drifted: snapshot=%d control=%d", MaxSnapshotBytes, MaxControlBytes)
+	}
+	oversizedClient := append([]byte(nil), bytes.Repeat([]byte{' '}, MaxControlBytes+1)...)
+	if _, err := DecodeClientControl(oversizedClient); !errors.Is(err, ErrOversized) {
+		t.Fatalf("oversized client frame error = %v", err)
+	}
+	// A server frame that is not a snapshot may not use the snapshot bound.
+	watch := fmt.Sprintf(`{"type":"STATE_CHANGED","id":"%s","body":{"head":"1"}}`, strings.Repeat("p", 64))
+	padded := append([]byte(watch), bytes.Repeat([]byte{' '}, MaxControlBytes)...)
+	if _, err := DecodeServerControl(padded); !errors.Is(err, ErrOversized) && err != ErrMalformed {
+		t.Fatalf("oversized non-snapshot server frame error = %v", err)
+	}
+}
+
+// Identities are unique per collection. A duplicate would let a server hide
+// one entity behind another in a map-shaped client.
+func TestSnapshotRejectsDuplicateIdentities(t *testing.T) {
+	value := snapshotWith()
+	value.Projects = append(value.Projects, projectItem())
+	if _, err := EncodeStateSnapshot("state", value); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("duplicate project accepted: %v", err)
+	}
+	tasks := snapshotWith()
+	tasks.Tasks = append(tasks.Tasks, taskItem())
+	if _, err := EncodeStateSnapshot("state", tasks); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("duplicate task accepted: %v", err)
+	}
+}
+
+func TestDecimalCanonicalBoundaries(t *testing.T) {
+	valid := []uint64{0, 1, (1 << 53) - 1, 1 << 53, (1 << 53) + 1, math.MaxInt64}
+	for _, value := range valid {
+		encoded := strconvUint(value)
+		parsed, err := parseDecimal(encoded)
+		if err != nil || uint64(parsed) != value {
+			t.Fatalf("decimal %s: parsed=%d err=%v", encoded, parsed, err)
+		}
+		wire, err := EncodeStateWatch("watch", StateWatch{AfterHead: Decimal(value)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		frame, err := DecodeClientControl(wire)
+		if err != nil || uint64(frame.Body.(StateWatch).AfterHead) != value {
+			t.Fatalf("wire decimal %s: %+v %v", encoded, frame, err)
+		}
+	}
+	for _, value := range []string{"", "+1", "-1", "-0", "00", "01", " 1", "1 ", "9223372036854775808", "18446744073709551615", "1.0", "1e0"} {
+		if _, err := parseDecimal(value); err == nil {
+			t.Fatalf("invalid decimal %q accepted", value)
+		}
+		wire := fmt.Sprintf(`{"type":"STATE_WATCH","id":"watch","body":{"after_head":%q}}`, value)
+		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("wire decimal %q accepted: %v", value, err)
+		}
+	}
+	for _, number := range []string{"0", "1", "9007199254740991", "9007199254740992", "9223372036854775807", "-1"} {
+		wire := fmt.Sprintf(`{"type":"STATE_WATCH","id":"watch","body":{"after_head":%s}}`, number)
+		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("JSON number chronology %s accepted: %v", number, err)
+		}
+	}
+	if _, err := EncodeStateWatch("watch", StateWatch{AfterHead: Decimal(MaxSQLiteInteger + 1)}); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("overflow encode error = %v", err)
+	}
+}
+
+func strconvUint(value uint64) string { return fmt.Sprintf("%d", value) }
+
+// STATE_CHANGED is a bare head. A zero head is not a change, and the frame has
+// no room for entity, revision or tombstone data.
+func TestStateChangedIsAHeadAndNothingElse(t *testing.T) {
+	wire, err := EncodeStateChanged("watch", StateChanged{Head: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(wire, []byte(fmt.Sprintf(`{"type":"STATE_CHANGED","id":"watch","body":{"head":"9"}}`))) {
+		t.Fatalf("STATE_CHANGED shape = %s", wire)
+	}
+	if _, err := EncodeStateChanged("watch", StateChanged{Head: 0}); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("zero head accepted: %v", err)
+	}
+	// STATE_CHANGED carries a head and nothing else. Residue from the deleted
+	// per-entity taxonomy reaches no field, so it changes nothing.
+	for _, body := range []string{
+		`{"head":"9","entity_kind":"task"}`,
+		`{"head":"9","revision":"2"}`,
+		`{"head":"9","deleted":false}`,
+		`{"head":"9","sequence":"9"}`,
+	} {
+		frame := fmt.Sprintf(`{"type":"STATE_CHANGED","id":"watch","body":%s}`, body)
+		assertIgnoredMember(t, string(wire), frame, true)
+	}
+	// The head itself stays required.
+	if _, err := DecodeServerControl([]byte(fmt.Sprintf(`{"type":"STATE_CHANGED","id":"watch","body":{}}`))); err != ErrMalformed {
+		t.Fatalf("STATE_CHANGED without a head accepted: %v", err)
+	}
+}
+
+func TestStateExactFieldAndEnumBounds(t *testing.T) {
+	badFactories := []FactoryItem{
+		{Capacity: 0, Revision: 1},
+		{Capacity: MaxFactoryCapacity + 1, Revision: 1},
+		{Capacity: 1, ActiveRuns: 2, Revision: 1},
+		{Capacity: 1, Revision: 0},
+	}
+	for _, item := range badFactories {
+		value := snapshotWith()
+		value.Factory = item
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
+			t.Fatalf("invalid factory accepted: %+v", item)
+		}
+	}
+	badProjects := []ProjectItem{{ID: projectID, Name: "", Revision: 1}, {ID: projectID, Name: strings.Repeat("x", MaxProjectNameBytes+1), Revision: 1}, {ID: strings.Repeat("AB", 16), Name: "x", Revision: 1}, {ID: projectID, Name: "x", Revision: 0}}
+	for _, item := range badProjects {
+		value := snapshotWith()
+		value.Projects = []ProjectItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
+			t.Fatalf("invalid project accepted: %+v", item)
+		}
+	}
+	badAgent := agentItem()
+	badAgent.Role = "manager"
+	value := snapshotWith()
+	value.Agents = []AgentItem{badAgent}
+	if _, err := EncodeStateSnapshot("x", value); err == nil {
+		t.Fatal("unknown agent role accepted")
+	}
+	for _, provider := range []string{"", "claude", "CODEX", "bash"} {
+		item := agentItem()
+		item.Provider = provider
+		value := snapshotWith()
+		value.Agents = []AgentItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
+			t.Fatalf("agent provider %q accepted", provider)
+		}
+	}
+	for _, status := range []string{"", "ready", "OPEN"} {
+		item := taskItem()
+		item.Status = status
+		value := snapshotWith()
+		value.Tasks = []TaskItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
+			t.Fatalf("task status %q accepted", status)
+		}
+	}
+	for _, priority := range []int64{-MaxTaskPriority - 1, MaxTaskPriority + 1} {
+		item := taskItem()
+		item.Priority = priority
+		value := snapshotWith()
+		value.Tasks = []TaskItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
+			t.Fatalf("priority %d accepted", priority)
+		}
+	}
+	oversizedTitle := taskItem()
+	oversizedTitle.Title = strings.Repeat("x", MaxTaskTitleBytes+1)
+	value = snapshotWith()
+	value.Tasks = []TaskItem{oversizedTitle}
+	if _, err := EncodeStateSnapshot("x", value); err == nil {
+		t.Fatal("oversized task title accepted")
+	}
+	for _, edit := range []func(*HumanRequestItem){
+		func(v *HumanRequestItem) { v.Kind = "reply" },
+		func(v *HumanRequestItem) { v.Status = "resolved" },
+		func(v *HumanRequestItem) { v.UpdatedAt = v.CreatedAt - 1 },
+		func(v *HumanRequestItem) { v.ReplyMaxBytes = 0 },
+		func(v *HumanRequestItem) { v.ReplyMaxBytes = MaxHumanReplyBytes + 1 },
+	} {
+		item := humanRequestItem()
+		edit(&item)
+		value := snapshotWith()
+		value.HumanRequests = []HumanRequestItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
+			t.Fatalf("invalid human request accepted: %+v", item)
+		}
+	}
+}
+
+// There is no factory identity on the wire any more: the factory is one
+// embedded object. Every remaining identity is a nonzero dynamic 16-byte hex.
+func TestDynamicEntityIdentitiesAreClosed(t *testing.T) {
+	for _, id := range []string{"factory", strings.Repeat("0", 32), strings.Repeat("AB", 16), "", projectID + "00"} {
+		item := projectItem()
+		item.ID = id
+		value := snapshotWith()
+		value.Projects = []ProjectItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
+			t.Fatalf("invalid identity %q accepted", id)
+		}
+		if _, err := EncodeHumanRequestDetailGet("x", HumanRequestDetailGet{RequestID: id, ExpectedRevision: 1}); err == nil {
+			t.Fatalf("invalid detail identity %q accepted", id)
+		}
+	}
+}
+
+func TestStateBooleanNullIsAlwaysRejected(t *testing.T) {
+	serverFrames := []struct {
+		name  string
+		frame []byte
+		field string
+		value string
+	}{
+		{"factory dispatch", mustEncodeStateSnapshot(t, snapshotWith()), "dispatch_enabled", "true"},
+		{"agent paused", mustEncodeStateSnapshot(t, snapshotWith()), "paused", "false"},
+		{"human can reply", mustEncodeStateSnapshot(t, snapshotWith()), "can_reply", "true"},
+		{"error retryable", mustEncodeError(t, Error{Code: ErrorInvalidRequest}), "retryable", "false"},
+	}
+	for _, test := range serverFrames {
+		t.Run(test.name, func(t *testing.T) {
+			wire := strings.Replace(string(test.frame), fmt.Sprintf(`%q:%s`, test.field, test.value), fmt.Sprintf(`%q:null`, test.field), 1)
+			if wire == string(test.frame) {
+				t.Fatalf("test field %s not found in %s", test.field, test.frame)
+			}
+			if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
+				t.Fatalf("null boolean accepted: %v", err)
+			}
+		})
+	}
+}
+
+func mustEncodeStateSnapshot(t *testing.T, value StateSnapshot) []byte {
+	t.Helper()
+	wire, err := EncodeStateSnapshot("boolean", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func mustEncodeError(t *testing.T, value Error) []byte {
+	t.Helper()
+	wire, err := EncodeError("boolean", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
+}
+
+func TestAgentItemServesExactlyThePublicFields(t *testing.T) {
+	fields := reflect.VisibleFields(reflect.TypeOf(AgentItem{}))
+	actual := make([]string, 0, len(fields))
+	for _, field := range fields {
+		actual = append(actual, field.Tag.Get("json"))
+	}
+	want := []string{"id", "project_id", "name", "role", "provider", "paused", "revision"}
+	if !reflect.DeepEqual(actual, want) {
+		t.Fatalf("public AgentItem fields drifted: got %v want %v", actual, want)
+	}
+	for _, provider := range []string{"claude_code", "codex", "shell"} {
+		item := agentItem()
+		item.Provider = provider
+		value := snapshotWith()
+		value.Agents = []AgentItem{item}
+		wire := mustEncodeStateSnapshot(t, value)
+		frame, err := DecodeServerControl(wire)
+		if err != nil {
+			t.Fatalf("provider %q round-trip: %v", provider, err)
+		}
+		agents := frame.Body.(StateSnapshot).Agents
+		if len(agents) != 1 || agents[0].Provider != provider {
+			t.Fatalf("provider %q decoded as %+v", provider, agents)
+		}
+		// Private launch controls never ride the public agent item.
+		for _, private := range []string{`"model":`, `"reasoning_effort":`, `"tool_budget`, `"tool_calls`} {
+			if bytes.Contains(wire, []byte(private)) {
+				t.Fatalf("public agent item exposed %q: %s", private, wire)
+			}
+		}
+	}
+}
+
+func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
+	fields := reflect.VisibleFields(reflect.TypeOf(HumanRequestItem{}))
+	actual := make([]string, 0, len(fields))
+	for _, field := range fields {
+		actual = append(actual, field.Tag.Get("json"))
+	}
+	want := []string{"id", "project_id", "agent_id", "task_id", "created_at", "updated_at", "revision", "kind", "status", "reply_max_bytes", "can_reply"}
+	if !reflect.DeepEqual(actual, want) {
+		t.Fatalf("public HumanRequest fields drifted: got %v want %v", actual, want)
+	}
+	encoded, err := EncodeStateSnapshot("state", snapshotWith())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{`"run_id":`, `"question":`, `"reply":`, `"terminal_target":`, `"cancel_run":`, `"action":`, `"project_name":`, `"agent_name":`, `"task_title":`, `"summary":`, `"why_human_needed":`, `"root":`, `"model":`, `"instruction":`} {
+		if bytes.Contains(encoded, []byte(private)) {
+			t.Fatalf("public snapshot exposed private field %q: %s", private, encoded)
+		}
+	}
+	for _, question := range []string{"x", strings.Repeat("x", MaxHumanQuestionBytes), strings.Repeat("\x00", MaxHumanQuestionBytes)} {
+		if !utf8.ValidString(question) {
+			t.Fatal("test question invalid")
+		}
+		wire, err := EncodeHumanRequestDetail("detail", HumanRequestDetail{RequestID: requestID, Revision: 1, Question: question, ReplyMaxBytes: MaxHumanReplyBytes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(wire) > MaxControlBytes {
+			t.Fatalf("detail frame %d exceeds max", len(wire))
+		}
+	}
+	for _, question := range []string{"", strings.Repeat("x", MaxHumanQuestionBytes+1), string([]byte{0xff})} {
+		if _, err := EncodeHumanRequestDetail("detail", HumanRequestDetail{RequestID: requestID, Revision: 1, Question: question, ReplyMaxBytes: MaxHumanReplyBytes}); err == nil {
+			t.Fatalf("invalid question accepted: %d bytes", len(question))
+		}
+	}
+	if _, err := EncodeHumanRequestDetailGet("detail", HumanRequestDetailGet{RequestID: requestID}); err == nil {
+		t.Fatal("zero expected revision accepted")
+	}
+	target := TerminalTargetDescriptor{RunID: "11111111111111111111111111111111", SessionID: "22222222222222222222222222222222", RunRevision: 8, SessionRevision: 9}
+	cancelRun := HumanRequestCancelRunDescriptor{ExpectedRequestRevision: 2, ExpectedRunRevision: 8}
+	authorized := HumanRequestDetail{RequestID: requestID, Revision: 2, Question: "choose", CanReply: true, ReplyMaxBytes: MaxHumanReplyBytes, TerminalTarget: &target, CancelRun: &cancelRun}
+	if _, err := EncodeHumanRequestDetail("detail", authorized); err != nil {
+		t.Fatalf("authorized detail = %v", err)
+	}
+	for name, mutate := range map[string]func(*HumanRequestDetail){
+		"reply without target": func(value *HumanRequestDetail) { value.TerminalTarget = nil },
+		"reply without cancel": func(value *HumanRequestDetail) { value.CancelRun = nil },
+		"cancel without reply": func(value *HumanRequestDetail) { value.CanReply = false },
+		"request revision":     func(value *HumanRequestDetail) { value.CancelRun.ExpectedRequestRevision++ },
+		"run revision":         func(value *HumanRequestDetail) { value.CancelRun.ExpectedRunRevision++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := authorized
+			copiedTarget, copiedCancelRun := *authorized.TerminalTarget, *authorized.CancelRun
+			value.TerminalTarget, value.CancelRun = &copiedTarget, &copiedCancelRun
+			mutate(&value)
+			if _, err := EncodeHumanRequestDetail("detail", value); err == nil {
+				t.Fatalf("inconsistent detail accepted: %+v", value)
+			}
+		})
+	}
+}
+
+// A hostile snapshot maximally escaped in JSON still has to fit the declared
+// snapshot bound, and a maximal HumanRequest detail still fits the 64 KiB
+// control bound.
+func TestMaximallyEscapedFramesStayBounded(t *testing.T) {
+	value := StateSnapshot{Head: Decimal(MaxSQLiteInteger), Factory: factoryItem(), Projects: []ProjectItem{}, Agents: []AgentItem{}, Tasks: []TaskItem{}, HumanRequests: []HumanRequestItem{}}
+	for index := 1; index <= 8; index++ {
+		item := taskItem()
+		item.ID = hexIdentity(0xa3, index)
+		item.Title = strings.Repeat("\x00", MaxTaskTitleBytes)
+		value.Tasks = append(value.Tasks, item)
+	}
+	snapshot, err := EncodeStateSnapshot("max-snapshot", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := EncodeHumanRequestDetail("max-detail", HumanRequestDetail{RequestID: requestID, Revision: Decimal(MaxSQLiteInteger), Question: strings.Repeat("\x00", MaxHumanQuestionBytes), ReplyMaxBytes: MaxHumanReplyBytes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot) < 49_000 || len(snapshot) > MaxSnapshotBytes || len(detail) < 49_000 || len(detail) > MaxControlBytes {
+		t.Fatalf("unexpected maximal frame sizes: snapshot=%d detail=%d", len(snapshot), len(detail))
+	}
+	if _, err := DecodeServerControl(snapshot); err != nil {
+		t.Fatalf("maximal snapshot did not decode: %v", err)
+	}
+	t.Logf("maximally escaped snapshot=%d bytes (limit %d), question detail=%d bytes (limit %d)", len(snapshot), MaxSnapshotBytes, len(detail), MaxControlBytes)
+}
+
+func TestStateMalformedEnvelopeBodyAndGlobalBounds(t *testing.T) {
+	valid := string(fixtureBytes(t, "state_snapshot.json"))
+	cases := []string{
+		strings.Replace(valid, `"head"`, `"Head"`, 1),
+		strings.Replace(valid, `"factory"`, `"Factory"`, 1),
+		strings.Replace(valid, `"title"`, `"TITLE"`, 1),
+		strings.Replace(valid, `"head":"9007199254740993"`, `"head":"9007199254740993","head":"2"`, 1),
+		valid + `{}`,
+	}
+	// An added item member is tolerated but reaches no field: the decoded
+	// snapshot is identical to the one without it.
+	assertIgnoredMember(t, valid, strings.Replace(valid, `"title"`, `"extra":false,"title"`, 1), true)
+	for _, wire := range cases {
+		if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("malformed state accepted: %v\n%s", err, wire)
+		}
+	}
+	objectMembers := strings.Repeat(`"x":0,`, MaxJSONObject) + `"tail":0`
+	tooManyMembers := fmt.Sprintf(`{"type":"STATE_WATCH","id":"watch","body":{%s}}`, objectMembers)
+	if _, err := DecodeClientControl([]byte(tooManyMembers)); err != ErrMalformed {
+		t.Fatalf("object member bound error = %v", err)
+	}
+	// A client frame keeps the small array bound; the server snapshot is the
+	// only direction that may carry a large array.
+	clientArray := fmt.Sprintf(`{"type":"STATE_WATCH","id":"watch","body":{"after_head":[%s]}}`, strings.TrimSuffix(strings.Repeat(`0,`, MaxJSONArray+1), ","))
+	if _, err := DecodeClientControl([]byte(clientArray)); err != ErrMalformed {
+		t.Fatalf("client array bound error = %v", err)
+	}
+	tooManyArray := fmt.Sprintf(`{"type":"STATE_SNAPSHOT","id":"state","body":{"head":"1","factory":{},"projects":[%s],"agents":[],"tasks":[],"human_requests":[]}}`, strings.TrimSuffix(strings.Repeat(`{},`, MaxSnapshotEntities+1), ","))
+	if _, err := DecodeServerControl([]byte(tooManyArray)); err != ErrMalformed {
+		t.Fatalf("snapshot array bound error = %v", err)
+	}
+	if _, err := DecodeServerControl(append(fixtureBytes(t, "state_snapshot.json"), 0xff)); err != ErrMalformed {
+		t.Fatalf("invalid UTF-8 error = %v", err)
+	}
+	if _, err := DecodeServerControl(bytes.Repeat([]byte{' '}, MaxSnapshotBytes+1)); !errors.Is(err, ErrOversized) {
+		t.Fatalf("oversize error = %v", err)
+	}
+}
+
+// A retired message type is refused, so the deleted paging contract cannot
+// come back through a frame this build does not implement. The envelope has no
+// generation to refuse: an older client's `v` member is simply ignored.
+func TestRetiredStateTypesAreRefused(t *testing.T) {
+	legacy := `{"v":1,"type":"STATE_GET","id":"state","body":{"cursor":null}}`
+	frame, err := DecodeClientControl([]byte(legacy))
+	if err != nil {
+		t.Fatalf("legacy envelope member refused: %v", err)
+	}
+	if frame.Type != TypeStateGet || frame.Body != (StateGet{}) {
+		t.Fatalf("legacy frame decoded to %+v", frame)
+	}
+	for _, kind := range []string{"STATE_SUBSCRIBE", "STATE_ENTITY_GET"} {
+		wire := fmt.Sprintf(`{"type":%q,"id":"x","body":{}}`, kind)
+		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("retired client type %s accepted: %v", kind, err)
+		}
+	}
+	for _, kind := range []string{"STATE_RESTART", "STATE_EVENT", "STATE_ENTITY"} {
+		wire := fmt.Sprintf(`{"type":%q,"id":"x","body":{}}`, kind)
+		if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("retired server type %s accepted: %v", kind, err)
+		}
+	}
+}
+
+func TestErrorTooLargeIsFinite(t *testing.T) {
+	wire, err := EncodeError("state", Error{Code: ErrorTooLarge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := DecodeServerControl(wire)
+	if err != nil || frame.Body.(Error).Code != ErrorTooLarge {
+		t.Fatalf("too_large round trip: %+v %v", frame, err)
+	}
+}

@@ -1,0 +1,38 @@
+name: Bug report
+description: Something the daemon, CLI, web console, or a provider attempt does wrong
+labels: ["bug"]
+body:
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Symptom
+      description: What happened, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest `factoryctl` sequence or web-console actions that show it. Use a throwaway `$DARK_FACTORY_HOME`, never your live one.
+      render: sh
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: "The exact command or browser action, its bounded JSON/error, `factoryctl --version`, and relevant daemon log lines. Do not paste provider output, credentials, pairing fragments, source, or private provider configuration."
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: "e.g. 74ab888, or the release tag"
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider involved
+      options: ["shell", "Claude Code", "Codex", "none / not provider-specific"]
+    validations:
+      required: true

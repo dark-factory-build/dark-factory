@@ -1,0 +1,21 @@
+name: Feature request
+description: A capability Dark Factory should have
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The operator or agent workflow this unblocks, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: "Shared operation first: what local-API operation owns runtime behavior, or what shared Go operation under internal/install works while the daemon is absent? How do the web console and factoryctl reach the same request path?"
+  - type: textarea
+    id: smaller
+    attributes:
+      label: What this lets us delete or simplify
+      description: What becomes smaller or simpler? If the change only adds, say why that is still right.

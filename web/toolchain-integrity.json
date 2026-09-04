@@ -1,0 +1,23 @@
+{
+  "node": {
+    "version": "22.20.0",
+    "sha512": "1476738e01ca6e0a7c4468e30645c91b59c56a2d0eda60510a20a28a72be790954694e06f6074da784cb17f4ea61cac1a1c349326d1eb2e378ba2000548d3599",
+    "bytes": 111332720,
+    "mode": "0755"
+  },
+  "pnpm": {
+    "version": "11.19.0",
+    "treeSha512": "8d869311ce183757cadc459764415f86b4cfbb3c760c3d70ad83f2d2e9d582c6f08da6548bc4f0feeec43e34d97931bb59e1dec03a53f5698936232eae19062d"
+  },
+  "typescript": {
+    "version": "5.8.3",
+    "treeSha512": "5bda0981294f968cc958232814531774b19c0ffdb046bf2b1958733cf13936b5e51ea5f31f50f2513a60c7142176e6476d8d68df7681f7e226cc4b2dd38db492",
+    "lockfileIntegrity": "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ=="
+  },
+  "tar": {
+    "version": "bsdtar 3.5.3 - libarchive 3.7.4 zlib/1.2.12 liblzma/5.4.3 bz2lib/1.0.8",
+    "sha512": "f7c721e9624aad59ec244739017b1354cf21a90cc86e32314419c57271d90d95af574885d3c36e2da34ff928032eb9e5954cf2044422d022b4239b845b06c323",
+    "bytes": 275184,
+    "mode": "0755"
+  }
+}

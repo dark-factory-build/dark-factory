@@ -1,0 +1,6 @@
+# Files that can rewrite automated merge authority.
+
+/.github/workflows/                  @baziyer
+/.github/CODEOWNERS                  @baziyer
+/scripts/github-repo-settings.sh     @baziyer
+/scripts/verify-adversarial-review.sh @baziyer

@@ -1,0 +1,153 @@
+name: Release
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Release recovery {0} {1}', inputs.operation_id, inputs.request_digest) || format('Release {0}', github.ref_name) }}
+
+# A semver tag (`vX.Y.Z`) pushed by a maintainer builds the macOS arm64
+# and Intel binaries serially and publishes them, a SHA256SUMS file, a tap
+# formula candidate, and the `latest.json` manifest as a GitHub Release. A
+# default-branch dispatch safely resumes an existing immutable tag after a
+# workflow defect is fixed. `latest.json` is inert release metadata retained
+# for the independent control-plane asset validator; no local command consumes
+# it as an updater manifest.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      operation_id:
+        description: Durable Maintainer operation UUID
+        required: true
+        type: string
+      request_digest:
+        description: SHA-256 of the complete durable Maintainer request
+        required: true
+        type: string
+      expected_workflow_sha:
+        description: Exact default-branch commit authorized to run recovery
+        required: true
+        type: string
+      tag:
+        description: Existing release tag to recover
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    if: github.event_name == 'push' || (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.sha == inputs.expected_workflow_sha)
+    # Publication authority runs on a fresh GitHub-hosted arm64 macOS worker,
+    # never the owner's persistent machine or its provider credentials. One
+    # job cross-compiles Intel so two publishers cannot race one manifest.
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      # No actions/checkout: codeload.github.com (which serves an action's
+      # tarball) can 429 independently of git itself, so this job never
+      # depends on that download — a plain `git fetch` talks straight to
+      # GitHub's git server instead. See ci.yml for the full rationale;
+      # this is the same step.
+      #
+      # The hosted workspace starts empty. Reinitializing explicitly keeps the
+      # checkout independent of action tarball availability and leaves no
+      # credential in repository configuration.
+      #
+      # $GITHUB_SHA is the tag commit for a push and the protected default-
+      # branch commit for a recovery dispatch. GitHub serves `git fetch` by
+      # arbitrary commit SHA (verified against this repository). The repo is
+      # public, so the fetch is unauthenticated and nothing is written to
+      # .git/config that could leak a credential.
+      - name: Check out $GITHUB_SHA
+        run: |
+          set -euxo pipefail
+          rm -rf .git
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --force --detach FETCH_HEAD
+          git clean -ffdx
+
+      - name: Resolve the immutable release source
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+          RELEASE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: ./scripts/prepare-release-source.sh "$REQUESTED_TAG"
+
+      # Fresh arm64 images do not carry Go. Bootstrap it through the same
+      # Homebrew boundary as CI, then expose that exact binary to later steps.
+      - name: Provide the Homebrew Go toolchain
+        run: |
+          set -euxo pipefail
+          if [ ! -x /opt/homebrew/bin/go ]; then
+            brew update
+            brew install go
+          fi
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          /opt/homebrew/bin/go version
+
+      - name: Check that the tag matches the runtime version
+        run: |
+          version=$(cat VERSION)
+          if [ "v$version" != "$TAG" ]; then
+            echo "tag $TAG does not match VERSION $version" >&2
+            exit 1
+          fi
+
+      - name: Build release binaries
+        run: |
+          set -eu
+          version=$(cat VERSION)
+          GOTOOLCHAIN=go1.27.0 GOENV=off GOAUTH=off go build -trimpath -buildvcs=false \
+            -o release-artifact ./internal/buildinfo/cmd/release-artifact
+          arm_receipt=$(./release-artifact receipt "$version" "$SOURCE_SHA" darwin/arm64)
+          intel_receipt=$(./release-artifact receipt "$version" "$SOURCE_SHA" darwin/amd64)
+          mkdir -p release/aarch64-apple-darwin release/x86_64-apple-darwin
+          for binary in factoryd factory-runner factoryctl; do
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
+              go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$arm_receipt" \
+              -o "release/aarch64-apple-darwin/$binary" "./cmd/$binary"
+            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 GOENV=off GOTOOLCHAIN=go1.27.0 GOAUTH=off \
+              go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$intel_receipt" \
+              -o "release/x86_64-apple-darwin/$binary" "./cmd/$binary"
+          done
+          rm release-artifact
+
+      - name: Package
+        run: |
+          GOTOOLCHAIN=go1.27.0 ./scripts/package-release.sh "$TAG" "$SOURCE_SHA" dist "$GITHUB_REPOSITORY" \
+            aarch64-apple-darwin release/aarch64-apple-darwin \
+            x86_64-apple-darwin release/x86_64-apple-darwin
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          "$PUBLISHER" "$TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" dist/*
+
+      - name: Publish bounded workflow summary
+        if: always()
+        run: |
+          if [ -x ./scripts/github-step-summary.sh ]; then
+            DF_SUMMARY_KIND=release \
+            DF_SUMMARY_REF="refs/tags/$TAG" \
+            DF_SUMMARY_SHA="$SOURCE_SHA" \
+            DF_SUMMARY_RESULT="${{ job.status }}" \
+            DF_SUMMARY_TARGET="$TAG" \
+            DF_SUMMARY_TARGET_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            DF_SUMMARY_RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+              ./scripts/github-step-summary.sh
+          else
+            # The checkout can fail before repository files exist. Keep this
+            # immutable fallback static: no untrusted value is interpolated.
+            {
+              printf '%s\n' '### Dark Factory workflow summary'
+              printf '%s\n' '- Result: <code>failure</code>'
+              printf '%s\n' '- Ref: <code>unavailable before checkout</code>'
+              printf '%s\n' '- SHA: <code>unavailable before checkout</code>'
+              printf '%s\n' '- Release target: <code>unavailable before checkout</code>'
+              printf '%s\n' '- Links: workflow run summary'
+            } >>"$GITHUB_STEP_SUMMARY"
+          fi
