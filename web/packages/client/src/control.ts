@@ -365,8 +365,9 @@ function isControlType(value: unknown): value is ControlType { return typeof val
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 /**
  * Every required member must be present and every member this build knows is
- * validated below. Decoding a wire frame ignores a member that is not a known
- * name under any case, so a newer daemon may add one without a coordinated
+ * validated below. Decoding a wire frame ignores an ASCII member that is not a
+ * known name under any case (a non-ASCII name is refused, matching Go's Unicode
+ * fold), so a newer daemon may add one without a coordinated
  * release; it reaches no field of the decoded frame. Byte, depth, array and
  * object-member bounds still apply. A locally constructed frame stays exact,
  * so a caller cannot quietly hand this encoder a field it will drop.
@@ -382,7 +383,8 @@ function requireKeys(value: Record<string, unknown>, required: string[], wire = 
   const present = Object.keys(value).filter((key) => !known.includes(key));
   if (!wire) { if (present.length !== 0) malformed(); return; }
   const folded = new Set(known.map((key) => key.toLowerCase()));
-  if (present.some((key) => folded.has(key.toLowerCase()))) malformed();
+  // Go's decoder folds Unicode, so a non-ASCII name is refused on both sides.
+  if (present.some((key) => /[^\x00-\x7f]/.test(key) || folded.has(key.toLowerCase()))) malformed();
 }
 
 // JSON.parse permits duplicate names and unsafe integers. This structural scan

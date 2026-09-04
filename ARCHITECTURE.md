@@ -103,10 +103,11 @@ the loopback path is `/browser`. A control frame carrying a member this build
 does not know is served, so the hosted console and the daemon can be installed
 in either order without a mismatch window.
 
-An ignored member is one whose name is not a known name under any case. A
-member differing from a known one only in case is refused, not ignored: Go
-matches struct fields case-insensitively, so tolerating it would let it
-overwrite the exact member the shape check validated while a TypeScript peer,
+An ignored member is an ASCII name that is not a known name under any case. A
+non-ASCII name is refused outright, and a member differing from a known one
+only in case is refused, not ignored: Go matches struct fields with Unicode
+case folding, so tolerating either would let it overwrite the exact member the
+shape check validated while a TypeScript peer,
 whose keys are exact, kept reading the exact one. Both decoders refuse it, so
 both read the same frame the same way.
 

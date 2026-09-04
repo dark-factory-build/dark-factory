@@ -329,7 +329,14 @@ func TestCaseVariantOfAKnownMemberIsRefused(t *testing.T) {
 			}
 		})
 	}
-	// A name that is unknown under every case is still ignored.
+	// A long s folds onto s under Go's Unicode fold, so `ſession_id` would have
+	// reached session_id; a non-ASCII name is refused before that can happen.
+	attached := string(fixtureBytes(t, "terminal_attached.json"))
+	folded := strings.Replace(attached, `"floor"`, `"\u017fession_id":"`+strings.Repeat("ee", 16)+`","floor"`, 1)
+	if _, err := DecodeServerControl([]byte(folded)); err != ErrMalformed {
+		t.Fatalf("unicode fold variant accepted: %v", err)
+	}
+	// An ASCII name that is unknown under every case is still ignored.
 	tolerated := strings.Replace(valid, `"boot_id"`, `"FUTURE_ID":"`+shadow+`","boot_id"`, 1)
 	assertIgnoredMember(t, valid, tolerated, true)
 }
