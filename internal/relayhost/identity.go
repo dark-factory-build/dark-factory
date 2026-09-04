@@ -31,8 +31,8 @@ const (
 // concrete cause is joined for operators; callers only branch on this.
 var ErrIdentity = errors.New("relayhost: node identity unavailable")
 
-// Identity is one factory's relay identity plus the boot counter observed by
-// the LoadOrCreate call that produced it. It is immutable and safe to copy.
+// Identity is one factory's relay identity plus the boot generation observed
+// by the LoadOrCreate call that produced it. It is immutable and safe to copy.
 type Identity struct {
 	private    ed25519.PrivateKey
 	nodeID     string
@@ -82,7 +82,9 @@ func (identity Identity) PublicKey() ed25519.PublicKey {
 	return identity.private.Public().(ed25519.PublicKey)
 }
 
-// Generation is the durable boot counter observed by LoadOrCreate.
+// Generation is the daemon start time in unix seconds that LoadOrCreate
+// observed. It is read by tests and by factoryctl remote status once the
+// pairing slice lands.
 func (identity Identity) Generation() uint64 { return identity.generation }
 
 func (identity Identity) valid() bool {

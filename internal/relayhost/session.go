@@ -141,11 +141,11 @@ func loopbackCloseCode(err error) int {
 }
 
 // ticketFrame returns the transport frame that follows a pairing or
-// authentication result, or nil. The ticket travels as its own frame rather
-// than as a member added to the result, so the daemon's bytes reach the
-// session decoder untouched: neither protocol decoder tolerates an unknown
-// member, and the client's relay socket wrapper consumes this frame instead
-// of forwarding it. Frames are never logged and never decoded with a protocol
+// authentication result, or nil. The result itself is forwarded byte for
+// byte and the ticket travels as its own frame, so the relay path never
+// depends on how either protocol decoder treats members it does not know.
+// The client's relay socket wrapper consumes this frame instead of
+// forwarding it. Frames are never logged and never decoded with a protocol
 // decoder: this side must not become a second interpreter of daemon messages.
 func (connector *Connector) ticketFrame(ctx context.Context, frame []byte) []byte {
 	// Almost every frame is neither result, and a snapshot must not pay for

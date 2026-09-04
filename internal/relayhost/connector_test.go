@@ -424,7 +424,7 @@ func TestOpensBeyondTheLoopbackSlotCountAreRefusedWithoutASession(t *testing.T) 
 		fixture.loopback.accept(t)
 	}
 	if sessions := fixture.connector.Status().Sessions; sessions != maxSessions {
-		t.Fatalf("sessions = %d, want the loopback slot count %d", sessions, maxSessions)
+		t.Fatalf("sessions = %d, want the relayed session cap %d", sessions, maxSessions)
 	}
 	select {
 	case session := <-fixture.loopback.opened:

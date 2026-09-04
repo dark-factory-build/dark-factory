@@ -232,10 +232,10 @@ func (controller *relayController) quiet(t *testing.T) {
 }
 
 // ticket reads the transport frame the connector sends immediately after a
-// pairing or authentication result. It is a frame of its own, not a member
-// added to the result, so no protocol decoder on either side has to tolerate
-// it; the PWA's relay socket wrapper consumes it the same way. See
-// web/packages/client/src/remote/relay-socket.ts.
+// pairing or authentication result. It is a frame of its own, so the result
+// itself is forwarded byte for byte and no protocol decoder ever sees a
+// transport member. The PWA's relay socket wrapper consumes this frame the
+// same way; see web/packages/client/src/remote/relay-socket.ts.
 func (controller *relayController) ticket(t *testing.T) string {
 	t.Helper()
 	record := controller.next(t)
@@ -396,10 +396,10 @@ func (controller *relayController) resolveClient(t *testing.T, fixture *adapterF
 	}
 }
 
-// The relay ticket is a frame of its own so the daemon's result bytes reach
-// the session decoder untouched. Both decoders reject unknown members, so a
-// member added to the result body would have made the relay path depend on
-// decoder tolerance neither side offers.
+// The relay ticket is a frame of its own, so the daemon's result bytes reach
+// the session decoder byte for byte. This test proves the forwarded result
+// still decodes; the byte equality that proves it was not rewritten at all
+// lives in internal/relayhost, where the canned result bytes are known.
 func TestTheRelayTicketArrivesAsItsOwnFrameAfterAnUnalteredResult(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	relay, _, identity := dialRelayFixture(t, fixture)
@@ -408,8 +408,9 @@ func TestTheRelayTicketArrivesAsItsOwnFrameAfterAnUnalteredResult(t *testing.T) 
 	controller := host.open(t, 131, relayKey(t))
 	controller.proveePair(t, fixture, controller.hello(t), challenge)
 
-	// frame decodes with the real server decoder and no stripping, so this
-	// fails if the connector ever mutates a result again.
+	// frame decodes with the real server decoder and nothing is stripped
+	// first, so a connector that rewrote the result would have to keep it
+	// decodable - and internal/relayhost proves it is not rewritten at all.
 	frame := controller.frame(t)
 	if frame.Type != browserprotocol.TypePairResult {
 		t.Fatalf("relayed result = %+v, want PAIR_RESULT", frame)

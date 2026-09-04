@@ -25,10 +25,11 @@ const (
 	defaultPingInterval   = 25 * time.Second
 	defaultPongTimeout    = 10 * time.Second
 
-	// maxSessions is the loopback listener's own connection slot count. A
-	// relay opening beyond it would only collect 503 handshakes, so this side
-	// refuses first and never spawns the session.
-	maxSessions = 32
+	// maxSessions is held strictly below the loopback listener's 32
+	// connection slots so relayed sessions can never take the last one: 8
+	// slots stay reserved for the operator's own local browser, which a
+	// hostile or merely busy relay would otherwise starve with 503s.
+	maxSessions = 24
 
 	relayDialTimeout    = 15 * time.Second
 	loopbackDialTimeout = 5 * time.Second
@@ -77,7 +78,8 @@ type Config struct {
 	PongTimeout  time.Duration
 }
 
-// Status is the bounded operator view of one connector.
+// Status is the bounded view of one connector, read by tests and by
+// factoryctl remote status once the pairing slice lands.
 type Status struct {
 	Connected bool
 	NodeID    string
