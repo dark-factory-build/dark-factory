@@ -35,9 +35,17 @@ type browserStateWatch struct {
 	err   error
 }
 
-// WatchState registers the watcher and only then rereads the durable head, so
-// a commit that landed between the caller's snapshot and this registration is
-// delivered immediately instead of waiting for the next poll.
+// WatchState reads the durable head once to decide whether the requested
+// after_head can ever be satisfied, and refuses a head above it as stale
+// rather than installing a producer that could never notify. A store read that
+// fails here fails the whole watch finitely: no watcher is registered, no
+// goroutine is started, and the caller gets one mapped error.
+//
+// Registration still happens before the producer reads the head again, and
+// that reread -- the producer's first action, not this one -- is what closes
+// the snapshot-to-watch gap: a commit landing between the caller's snapshot
+// and this registration is delivered immediately instead of waiting for the
+// next poll.
 func (backend *browserBackend) WatchState(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, afterHead browserprotocol.Decimal) (browser.StateSubscription, error) {
 	if uint64(afterHead) > browserprotocol.MaxSQLiteInteger {
 		return nil, browser.ErrStale
@@ -50,7 +58,18 @@ func (backend *browserBackend) WatchState(ctx context.Context, rawClient [browse
 	if err != nil {
 		return nil, err
 	}
+	state, headErr := backend.store.Factory(ctx)
 	release()
+	if headErr != nil {
+		return nil, mapBrowserError(headErr)
+	}
+	// A watcher can only ever announce a head the durable store has reached, so
+	// an after_head above the current head would install a producer that never
+	// notifies. That is a stale client view, and it gets one finite answer
+	// rather than a silent subscription.
+	if after.Int64() > state.Head.Int64() {
+		return nil, browser.ErrStale
+	}
 
 	backend.subMu.Lock()
 	if backend.closing {

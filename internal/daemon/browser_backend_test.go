@@ -502,6 +502,38 @@ func TestBrowserAdapterSubscriptionReloadsAuthorityAndJoins(t *testing.T) {
 	}
 }
 
+// A watcher announces only heads the durable store has reached, so an
+// after_head above the current head can never be satisfied. Installing a
+// producer for it would leave the client waiting on a notification that cannot
+// arrive; it is one finite stale answer instead.
+func TestBrowserAdapterWatchRefusesAnAfterHeadAboveTheDurableHead(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	fixture.pair(t)
+	state, err := fixture.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := decimalSequence(state.Head)
+	if _, err := fixture.backend.WatchState(context.Background(), rawBrowserClient(fixture.client.ID), head+1); !errors.Is(err, browser.ErrStale) {
+		t.Fatalf("future after_head = %v, want ErrStale", err)
+	}
+	// Nothing is registered and no producer is started. A store read that
+	// fails before registration returns through this same early exit.
+	fixture.backend.subMu.Lock()
+	remaining := len(fixture.backend.subs)
+	fixture.backend.subMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("refused watch registered %d subscriptions", remaining)
+	}
+	// The current head itself is the ordinary case and still subscribes.
+	subscription, err := fixture.backend.WatchState(context.Background(), rawBrowserClient(fixture.client.ID), head)
+	if err != nil {
+		t.Fatalf("current head refused: %v", err)
+	}
+	subscription.Cancel()
+	adapterWaitSubscription(t, subscription)
+}
+
 func TestBrowserAdapterRestartUsesNewBootAndDurableClient(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	paired := fixture.pair(t)
