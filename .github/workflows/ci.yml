@@ -87,7 +87,7 @@ jobs:
             case "$path" in
               docs/*|README.md|ARCHITECTURE.md|CONTRIBUTING.md|ROADMAP.md|SECURITY.md|CLAUDE.md|LICENSE|LICENSE.*|launchd/README.md)
                 ;;
-              control-plane/*)
+              control-plane|control-plane/*)
                 control_plane=true
                 ;;
               .github/workflows/deploy-control-plane.yml)

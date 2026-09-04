@@ -222,6 +222,7 @@ scope_case() {
         "control_plane=$want_control macos=$want_macos " ]
 }
 scope_case false false docs/install.md README.md
+scope_case false true control-plane
 scope_case false true control-plane/src/lib.rs
 scope_case false true .github/workflows/deploy-control-plane.yml
 scope_case true false internal/kernel/store.go
