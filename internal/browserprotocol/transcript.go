@@ -14,15 +14,14 @@ import (
 )
 
 const (
-	ProtocolVersion = uint16(2)
-	DaemonIDSize    = 16
-	BootIDSize      = 16
-	NonceSize       = 32
-	ChallengeSize   = 32
-	ClientIDSize    = 16
-	PublicKeySize   = 65
-	SignatureSize   = 64
-	MaxTextBytes    = 4096
+	DaemonIDSize  = 16
+	BootIDSize    = 16
+	NonceSize     = 32
+	ChallengeSize = 32
+	ClientIDSize  = 16
+	PublicKeySize = 65
+	SignatureSize = 64
+	MaxTextBytes  = 4096
 )
 
 var (
@@ -55,14 +54,18 @@ type AuthTranscript struct {
 	ValidatedOrigin string
 }
 
+// The domain has no generation. The contract is unversioned by owner decision
+// on 4 September 2026, and a durable pairing must keep working across a site
+// deploy: the stored non-exportable key is what persists, and it signs this
+// exact domain on every reconnect.
 const (
-	pairDomain = "dark-factory/browser/v2/pair\x00"
-	authDomain = "dark-factory/browser/v2/auth\x00"
+	pairDomain = "dark-factory/browser/pair\x00"
+	authDomain = "dark-factory/browser/auth\x00"
 )
 
 // BuildPairTranscript returns the exact bytes signed by a browser while
-// pairing. The domain is intentionally unlength-prefixed; every field after
-// the version has a u32 big-endian byte length.
+// pairing. The domain is intentionally unlength-prefixed; every field has a
+// u32 big-endian byte length.
 func BuildPairTranscript(input PairTranscript) ([]byte, error) {
 	return buildTranscript(pairDomain, [][]byte{
 		input.DaemonID,
@@ -92,11 +95,8 @@ func buildTranscript(domain string, fields [][]byte, fixed []int) ([]byte, error
 	if len(fields) != len(fixed) {
 		return nil, fmt.Errorf("%w: field count", ErrInvalidLength)
 	}
-	result := make([]byte, 0, len(domain)+2+len(fields)*4)
+	result := make([]byte, 0, len(domain)+len(fields)*4)
 	result = append(result, domain...)
-	var version [2]byte
-	binary.BigEndian.PutUint16(version[:], ProtocolVersion)
-	result = append(result, version[:]...)
 	for i, field := range fields {
 		if fixed[i] != 0 && len(field) != fixed[i] {
 			return nil, fmt.Errorf("%w: field %d is %d bytes, want %d", ErrInvalidLength, i, len(field), fixed[i])

@@ -258,8 +258,20 @@ table of similar size.
 
 ### Final state protocol
 
-Use an explicit browser protocol generation cutover rather than keeping a
-parallel compatibility server:
+Superseded: this document's "explicit protocol generation cutover" guidance no
+longer applies. By owner decision on 4 September 2026 the browser contract is
+unversioned and tolerant of additive change. There is no envelope generation,
+no versioned loopback path (`/browser`), no version in the pairing or auth
+transcript domains, no `unsupported_version` code, and no protocol identity in
+the published artifacts; the local API frame prelude is its auth-domain byte
+alone. Both decoders ignore a member whose name is not a known name under any
+case -- a case-variant of a known member is refused on both sides -- so the
+hosted console and the daemon can be installed in either order. Every bound, required-member
+and type check, and the refusal of unknown frame types and wrong directions,
+are unchanged. Read every "generation cutover" instruction below as "ship the
+new shape; the old member is ignored".
+
+The state shape landed as:
 
 ```text
 STATE_GET {}
@@ -351,7 +363,7 @@ Stop if:
 - a real external consumer of page/entity APIs is found;
 - representative state cannot fit the chosen bound;
 - watcher installation cannot causally close the missed-change window;
-- the protocol generation and site artifact cutover cannot be coordinated;
+- the site artifact refresh cannot be coordinated;
 - `TASK_ENQUEUE` or any current site behavior would be weakened;
 - public/private projection, revocation, HumanRequest, or terminal authority
   would be weakened;
@@ -395,8 +407,8 @@ Fields and data that must remain unrepresentable include:
 If the Unix dashboard snapshot still has no production consumer beyond
 `Factory.Revision`, replace it with a narrow Factory operation instead of
 maintaining a second partial snapshot. If a consumer exists on the writing
-head, use the same semantic projection and preserve its protocol-generation
-failure boundary.
+head, use the same semantic projection and preserve its bound and validation
+boundary. There is no protocol generation to preserve.
 
 The new causal proof must build one kernel fixture containing every public
 field and private sentinels, project it through every retained public transport,
@@ -621,10 +633,11 @@ IMPLEMENT
   refresh, and monotonic complete publication;
 - a fresh snapshot after reconnect and rejection of old-socket messages.
 
-Use an explicit protocol generation cutover; do not keep a parallel old state
-server. Keep client-to-server control at 64 KiB. Bound a server snapshot at
-exactly 1 MiB and retain the 4,096 total-entity read guard initially. Never
-truncate. Return a finite snapshot_too_large failure.
+Do not keep a parallel old state server, and do not introduce a protocol
+generation: the contract is unversioned and tolerant by owner decision on
+4 September 2026. Keep client-to-server control at 64 KiB. Bound a server
+snapshot at exactly 1 MiB and retain the 4,096 total-entity read guard
+initially. Never truncate. Return a finite snapshot_too_large failure.
 
 Do not change pairing authority, P-256 transcripts, HumanRequest action
 semantics, terminal authority, browserClientGates, installed SQLite schema, or

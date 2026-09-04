@@ -96,10 +96,25 @@ only a server snapshot may reach 1 MiB, and the kernel refuses to project more
 than 4,096 entities. Neither bound truncates: a Factory that does not fit is
 one finite `too_large` answer, never a partial view.
 
-The wire generation is explicit. The envelope version, the loopback path, the
-pairing and auth transcript domains, and the published artifact identity move
-together, so a client speaking a previous generation is refused at its first
-frame instead of failing partway through a session.
+The wire contract is unversioned and tolerates additive change. There is no
+envelope generation, no versioned loopback path, no version in the pairing and
+auth transcript domains, and no protocol identity in the published artifacts;
+the loopback path is `/browser`. A control frame carrying a member this build
+does not know is served, so the hosted console and the daemon can be installed
+in either order without a mismatch window.
+
+An ignored member is one whose name is not a known name under any case. A
+member differing from a known one only in case is refused, not ignored: Go
+matches struct fields case-insensitively, so tolerating it would let it
+overwrite the exact member the shape check validated while a TypeScript peer,
+whose keys are exact, kept reading the exact one. Both decoders refuse it, so
+both read the same frame the same way.
+
+Tolerance is additive only. Every size, count, depth and member bound still
+binds, and an unknown member counts toward them: an array or a nesting depth
+inside a tolerated member is measured exactly as one inside a known member. A
+missing required member, a member of the wrong type, an unknown frame type and
+a frame arriving in the wrong direction all remain finite refusals.
 
 ## Browser HumanRequest authority
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -237,6 +238,36 @@ func dialServer(t *testing.T, server *Server, origin string) (*websocket.Conn, *
 	}
 	t.Cleanup(func() { _ = connection.CloseNow() })
 	return connection, response
+}
+
+// dialStalledObserver dials with a deliberately small receive buffer. The test
+// that uses it never reads, so the server's writes stall after a bounded number
+// of frames instead of after whatever the kernel is willing to buffer.
+func dialStalledObserver(t *testing.T, server *Server) *websocket.Conn {
+	t.Helper()
+	dialer := &net.Dialer{Control: func(_, _ string, raw syscall.RawConn) error {
+		var setErr error
+		if err := raw.Control(func(handle uintptr) {
+			setErr = syscall.SetsockoptInt(int(handle), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4096)
+		}); err != nil {
+			return err
+		}
+		return setErr
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), backendCallLimit+2*time.Second)
+	defer cancel()
+	header := make(http.Header)
+	header.Set("Origin", testOrigin)
+	connection, _, err := websocket.Dial(ctx, "ws://"+server.Addr()+Path, &websocket.DialOptions{
+		HTTPClient:      &http.Client{Transport: &http.Transport{DialContext: dialer.DialContext}},
+		HTTPHeader:      header,
+		CompressionMode: websocket.CompressionNoContextTakeover,
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.CloseNow() })
+	return connection
 }
 
 func readServerFrame(t *testing.T, connection *websocket.Conn) browserprotocol.ControlFrame {
@@ -512,17 +543,20 @@ func TestMalformedOversizedBinaryAndSecondAuthAreRejected(t *testing.T) {
 		server := startServer(t, newFakeBackend())
 		connection, _ := dialServer(t, server, testOrigin)
 		_ = readServerFrame(t, connection)
-		writeClientFrame(t, connection, []byte(`{"v":2,"type":"AUTH_PROVE"}`))
+		writeClientFrame(t, connection, []byte(`{"type":"AUTH_PROVE"}`))
 		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInvalidRequest)
 	})
-	// A stale site artifact still speaking the previous generation is refused
-	// at its first frame with the exact unsupported_version code.
-	t.Run("previous generation", func(t *testing.T) {
+	// A site artifact that still sends the deleted envelope generation is
+	// served: the member is unknown, so it is ignored like any other.
+	t.Run("legacy envelope generation", func(t *testing.T) {
 		server := startServer(t, newFakeBackend())
 		connection, _ := dialServer(t, server, testOrigin)
 		_ = readServerFrame(t, connection)
-		writeClientFrame(t, connection, []byte(`{"v":1,"type":"AUTH_PROVE","id":"auth","body":{"client_id":"101112131415161718191a1b1c1d1e1f","signature":"01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"}}`))
-		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnsupportedVersion)
+		writeClientFrame(t, connection, []byte(`{"v":1,"type":"AUTH_PROVE","id":"auth","body":{"client_id":"`+testID+`","signature":"`+strings.Repeat("01", browserprotocol.SignatureSize)+`"}}`))
+		result := readServerFrame(t, connection)
+		if result.Type != browserprotocol.TypeAuthResult || result.ID != "auth" {
+			t.Fatalf("legacy envelope member refused: %+v", result)
+		}
 	})
 	t.Run("oversized", func(t *testing.T) {
 		server := startServer(t, newFakeBackend())
@@ -661,6 +695,57 @@ func TestStateOperationsChronologyCapabilitiesAndRedaction(t *testing.T) {
 	encoded := fmt.Sprintf("%+v", redacted)
 	if strings.Contains(encoded, "SENTINEL") {
 		t.Fatalf("private error escaped: %s", encoded)
+	}
+}
+
+// The contract tolerates additive change. A newer console may add a member to
+// a frame this daemon does not know and still be served. Tolerance is additive
+// only: the same frame is still refused when it exceeds the control bound.
+func TestServerServesFramesCarryingUnknownMembers(t *testing.T) {
+	backend := newFakeBackend()
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
+
+	writeClientFrame(t, connection, []byte(`{"type":"STATE_GET","id":"state","future":{"added":true},"body":{"future_selector":"ignored"}}`))
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeStateSnapshot || frame.ID != "state" {
+		t.Fatalf("tolerant STATE_GET answered with %+v", frame)
+	}
+	if snapshot := frame.Body.(browserprotocol.StateSnapshot); snapshot.Head != 7 || len(snapshot.Projects) != 1 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+
+	padded := fmt.Sprintf(`{"type":"STATE_GET","id":"big","future":%q,"body":{}}`, strings.Repeat("x", browserprotocol.MaxControlBytes))
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = connection.Write(ctx, websocket.MessageText, []byte(padded))
+	if _, _, err := connection.Read(ctx); err == nil || websocket.CloseStatus(err) != websocket.StatusMessageTooBig {
+		t.Fatalf("oversized tolerant frame err=%v status=%v", err, websocket.CloseStatus(err))
+	}
+}
+
+// Only members are tolerated. An unknown frame type and a server-direction
+// frame arriving from a client stay finite refusals.
+func TestServerRefusesUnknownTypesAndWrongDirection(t *testing.T) {
+	for name, payload := range map[string]string{
+		"unknown type":    `{"type":"STATE_FUTURE","id":"x","body":{}}`,
+		"wrong direction": `{"type":"STATE_CHANGED","id":"x","body":{"head":"8"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := newFakeBackend()
+			server := startServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticate(t, connection)
+			writeClientFrame(t, connection, []byte(payload))
+			assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInvalidRequest)
+			backend.mu.Lock()
+			calls := backend.stateCalls
+			backend.mu.Unlock()
+			if calls != 0 {
+				t.Fatalf("refused frame reached the backend %d times", calls)
+			}
+		})
 	}
 }
 
@@ -919,7 +1004,11 @@ func TestServerCloseWaitsForConnectionOwnedSubscriptionJoin(t *testing.T) {
 func TestSlowSubscriberCannotGrowTransportMemoryOrBlockShutdown(t *testing.T) {
 	backend := newFakeBackend()
 	server := startServer(t, backend)
-	connection, _ := dialServer(t, server, testOrigin)
+	// The observer's receive window is pinned small so the stall is caused by
+	// the observer, not by how much this machine's loopback happens to absorb.
+	// With an auto-tuned window the kernel buffers tens of megabytes and the
+	// proof silently becomes a race between the producer and the buffer.
+	connection := dialStalledObserver(t, server)
 	authenticate(t, connection)
 	subscribe, _ := browserprotocol.EncodeStateWatch("slow", browserprotocol.StateWatch{AfterHead: 0})
 	writeClientFrame(t, connection, subscribe)

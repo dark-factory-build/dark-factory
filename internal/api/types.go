@@ -25,17 +25,16 @@ var (
 type RemoteErrorCode string
 
 const (
-	RemoteInvalidRequest      RemoteErrorCode = "invalid_request"
-	RemoteUnsupportedProtocol RemoteErrorCode = "unsupported_protocol"
-	RemoteUnauthorized        RemoteErrorCode = "unauthorized"
-	RemoteForbidden           RemoteErrorCode = "forbidden"
-	RemoteNotFound            RemoteErrorCode = "not_found"
-	RemoteConflict            RemoteErrorCode = "conflict"
-	RemoteRevisionConflict    RemoteErrorCode = "revision_conflict"
-	RemoteTooLarge            RemoteErrorCode = "too_large"
-	RemoteUnavailable         RemoteErrorCode = "unavailable"
-	RemoteCleanupUnresolved   RemoteErrorCode = "cleanup_unresolved"
-	RemoteInternal            RemoteErrorCode = "internal"
+	RemoteInvalidRequest    RemoteErrorCode = "invalid_request"
+	RemoteUnauthorized      RemoteErrorCode = "unauthorized"
+	RemoteForbidden         RemoteErrorCode = "forbidden"
+	RemoteNotFound          RemoteErrorCode = "not_found"
+	RemoteConflict          RemoteErrorCode = "conflict"
+	RemoteRevisionConflict  RemoteErrorCode = "revision_conflict"
+	RemoteTooLarge          RemoteErrorCode = "too_large"
+	RemoteUnavailable       RemoteErrorCode = "unavailable"
+	RemoteCleanupUnresolved RemoteErrorCode = "cleanup_unresolved"
+	RemoteInternal          RemoteErrorCode = "internal"
 )
 
 type RemoteError struct {
@@ -46,8 +45,6 @@ func (err *RemoteError) Error() string {
 	switch err.code {
 	case RemoteInvalidRequest:
 		return "local API rejected the request"
-	case RemoteUnsupportedProtocol:
-		return "local API protocol generation is unsupported"
 	case RemoteUnauthorized:
 		return "local API credential is unauthorized"
 	case RemoteForbidden:
@@ -77,11 +74,6 @@ type HealthStatus struct {
 	Ready bool `json:"ready"`
 }
 
-// BrowserProtocolVersion is the exact browser wire generation this local API
-// reports. It must equal browserprotocol.ProtocolVersion; the api package
-// stays free of that dependency, so one test binds the two.
-const BrowserProtocolVersion uint16 = 2
-
 // WebStatus is the bounded, non-secret operator view of the loopback browser
 // adapter. It intentionally contains no challenge, key, token or client
 // identity data.
@@ -94,7 +86,6 @@ type WebStatus struct {
 	ActiveClients    uint64   `json:"active_clients"`
 	RevokedClients   uint64   `json:"revoked_clients"`
 	ActiveChallenges uint64   `json:"active_challenges"`
-	ProtocolVersion  uint16   `json:"protocol_version"`
 }
 
 // WebLaunchOutcome describes whether the daemon knows that the challenge mint

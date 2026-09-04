@@ -3,7 +3,6 @@ package browser
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -149,11 +148,7 @@ func (current *connection) authenticate(identity Identity, nonce [browserprotoco
 		}
 		frame, err := browserprotocol.DecodeClientControl(message.data)
 		if err != nil {
-			code := browserprotocol.ErrorInvalidRequest
-			if unsupportedProtocolVersion(message.data) {
-				code = browserprotocol.ErrorUnsupportedVersion
-			}
-			current.sendError("", code, false)
+			current.sendError("", browserprotocol.ErrorInvalidRequest, false)
 			return false
 		}
 		if frame.Type != browserprotocol.TypePairProve && frame.Type != browserprotocol.TypeAuthProve {
@@ -294,11 +289,7 @@ func (current *connection) serve() {
 			}
 			frame, err := browserprotocol.DecodeClientControl(message.data)
 			if err != nil {
-				code := browserprotocol.ErrorInvalidRequest
-				if unsupportedProtocolVersion(message.data) {
-					code = browserprotocol.ErrorUnsupportedVersion
-				}
-				current.sendError("", code, false)
+				current.sendError("", browserprotocol.ErrorInvalidRequest, false)
 				return
 			}
 			if frame.Type == browserprotocol.TypePairProve || frame.Type == browserprotocol.TypeAuthProve || frame.Type == browserprotocol.TypeError {
@@ -941,11 +932,4 @@ func fixedBytes(encoded string, size int) ([]byte, error) {
 		return nil, fmt.Errorf("invalid fixed hex")
 	}
 	return decoded, nil
-}
-
-func unsupportedProtocolVersion(payload []byte) bool {
-	var envelope struct {
-		Version *uint16 `json:"v"`
-	}
-	return json.Unmarshal(payload, &envelope) == nil && envelope.Version != nil && *envelope.Version != browserprotocol.ProtocolVersion
 }

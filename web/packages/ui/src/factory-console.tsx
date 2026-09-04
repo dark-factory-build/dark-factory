@@ -36,7 +36,6 @@ const ERROR_LABELS = new Map<string, string>([
   ["crypto_unavailable", "Browser cryptography is unavailable."],
   ["malformed", "The server sent an invalid frame."],
   ["oversized", "The server frame exceeded the protocol limit."],
-  ["unsupported_version", "The server protocol version is unsupported."],
   ["wrong_direction", "The server sent an invalid frame direction."],
   ["unauthorized", "This browser client is not authorized."],
   ["invalid_request", "The request was rejected."],

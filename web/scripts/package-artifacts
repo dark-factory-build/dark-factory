@@ -69,9 +69,7 @@ def exact_integer(value, key, label):
 
 
 def reviewed_integrity(value):
-    exact_keys(value, ["schemaVersion", "toolTreeVersion", "node", "pnpm", "typescript", "tar"], "toolchain integrity")
-    if value["schemaVersion"] != 1 or value["toolTreeVersion"] != "dark-factory/tool-tree/v2":
-        fail("toolchain integrity schema is unsupported")
+    exact_keys(value, ["node", "pnpm", "typescript", "tar"], "toolchain integrity")
     exact_keys(value["node"], ["version", "sha512", "bytes", "mode"], "toolchain integrity.node")
     node = value["node"]
     version = exact_string(node, "version", "toolchain integrity.node")

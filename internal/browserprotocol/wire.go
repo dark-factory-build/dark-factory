@@ -129,23 +129,21 @@ type Error struct {
 type ErrorCode string
 
 const (
-	ErrorUnauthorized       ErrorCode = "unauthorized"
-	ErrorInvalidRequest     ErrorCode = "invalid_request"
-	ErrorUnsupportedVersion ErrorCode = "unsupported_version"
-	ErrorRateLimited        ErrorCode = "rate_limited"
-	ErrorNotFound           ErrorCode = "not_found"
-	ErrorStale              ErrorCode = "stale"
-	ErrorTooLarge           ErrorCode = "too_large"
-	ErrorInternal           ErrorCode = "internal"
+	ErrorUnauthorized   ErrorCode = "unauthorized"
+	ErrorInvalidRequest ErrorCode = "invalid_request"
+	ErrorRateLimited    ErrorCode = "rate_limited"
+	ErrorNotFound       ErrorCode = "not_found"
+	ErrorStale          ErrorCode = "stale"
+	ErrorTooLarge       ErrorCode = "too_large"
+	ErrorInternal       ErrorCode = "internal"
 )
 
-// ControlFrame is the decoded, closed v1 union. Body is always one of the
+// ControlFrame is the decoded, closed union. Body is always one of the
 // concrete protocol structs above; callers never need a map[string]any assertion.
 type ControlFrame struct {
-	Version uint16
-	Type    MessageType
-	ID      string
-	Body    any
+	Type MessageType
+	ID   string
+	Body any
 }
 
 var (
@@ -153,11 +151,14 @@ var (
 	ErrOversized = errors.New("browser protocol: control frame too large")
 )
 
+// The envelope carries no generation. The contract is unversioned by owner
+// decision on 4 September 2026: a member that is not a known name under any
+// case is ignored, so evolution is additive and neither side has to move in
+// lockstep.
 type controlEnvelope struct {
-	Version uint16          `json:"v"`
-	Type    MessageType     `json:"type"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Body    json.RawMessage `json:"body"`
+	Type MessageType     `json:"type"`
+	ID   json.RawMessage `json:"id,omitempty"`
+	Body json.RawMessage `json:"body"`
 }
 
 func EncodeHello(value Hello) ([]byte, error) { return encodeControl(TypeHello, "", value) }
@@ -213,7 +214,7 @@ func encodeControl(kind MessageType, id string, body any) ([]byte, error) {
 			return nil, fmt.Errorf("%w: id: %v", ErrMalformed, err)
 		}
 	}
-	frame, err := json.Marshal(controlEnvelope{Version: ProtocolVersion, Type: kind, ID: wireID, Body: payload})
+	frame, err := json.Marshal(controlEnvelope{Type: kind, ID: wireID, Body: payload})
 	if err != nil {
 		return nil, fmt.Errorf("%w: envelope: %v", ErrMalformed, err)
 	}
@@ -261,9 +262,6 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	}
 	var envelope controlEnvelope
 	if err := unmarshalObject(data, &envelope); err != nil {
-		return ControlFrame{}, ErrMalformed
-	}
-	if envelope.Version != ProtocolVersion {
 		return ControlFrame{}, ErrMalformed
 	}
 	if len(data) > controlLimit(envelope.Type) {
@@ -367,7 +365,7 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		if err := validateBody(envelope.Type, body); err != nil {
 			return ControlFrame{}, ErrMalformed
 		}
-		return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: id, Body: body}, nil
+		return ControlFrame{Type: envelope.Type, ID: id, Body: body}, nil
 	default:
 		return ControlFrame{}, ErrMalformed
 	}
@@ -377,7 +375,7 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	if err := validateBody(envelope.Type, body); err != nil {
 		return ControlFrame{}, ErrMalformed
 	}
-	return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: id, Body: dereferenceBody(body)}, nil
+	return ControlFrame{Type: envelope.Type, ID: id, Body: dereferenceBody(body)}, nil
 }
 
 func decodeID(raw json.RawMessage) (string, bool, bool) {
@@ -519,11 +517,10 @@ func unmarshalObject(data []byte, target any) error {
 	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
 		return fmt.Errorf("%w: object required", ErrMalformed)
 	}
-	if err := validateExactJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
+	if err := validateJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
@@ -539,11 +536,10 @@ func unmarshalArray(data []byte, target any) error {
 	if len(trimmed) < 2 || trimmed[0] != '[' || trimmed[len(trimmed)-1] != ']' {
 		return fmt.Errorf("%w: array required", ErrMalformed)
 	}
-	if err := validateExactJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
+	if err := validateJSONShape(trimmed, reflect.TypeOf(target)); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
@@ -554,7 +550,11 @@ func unmarshalArray(data []byte, target any) error {
 	return nil
 }
 
-func validateExactJSONShape(data []byte, target reflect.Type) error {
+// validateJSONShape checks the type of every member this build knows and
+// requires every non-optional one. A member that is not a known name under any
+// case is ignored, so the peer may add one without a coordinated release. Size,
+// depth, array and object-member bounds still apply to the whole frame.
+func validateJSONShape(data []byte, target reflect.Type) error {
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}
@@ -569,6 +569,7 @@ func validateExactJSONShape(data []byte, target reflect.Type) error {
 		}
 		fields := make(map[string]reflect.Type, target.NumField())
 		required := make(map[string]bool, target.NumField())
+		folded := make(map[string]struct{}, target.NumField())
 		for index := 0; index < target.NumField(); index++ {
 			field := target.Field(index)
 			tag := field.Tag.Get("json")
@@ -581,16 +582,27 @@ func validateExactJSONShape(data []byte, target reflect.Type) error {
 			}
 			fields[name] = field.Type
 			required[name] = options != "omitempty"
+			folded[strings.ToLower(name)] = struct{}{}
 		}
 		for name, raw := range object {
 			fieldType, ok := fields[name]
 			if !ok {
-				return fmt.Errorf("%w: unknown object field", ErrMalformed)
+				// encoding/json falls back to a case-insensitive match, so a
+				// member that case-folds onto a known name is not unknown to
+				// the decoder: ignoring it here would let `DAEMON_ID` silently
+				// overwrite the `daemon_id` this function validated, and the
+				// TypeScript decoder -- whose object keys are exact -- would
+				// disagree about the same frame. Only a name that is unknown
+				// under every case is ignored.
+				if _, collides := folded[strings.ToLower(name)]; collides {
+					return fmt.Errorf("%w: object field case collision", ErrMalformed)
+				}
+				continue
 			}
 			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) && fieldType.Kind() == reflect.Pointer {
 				continue
 			}
-			if err := validateExactJSONShape(raw, fieldType); err != nil {
+			if err := validateJSONShape(raw, fieldType); err != nil {
 				return err
 			}
 		}
@@ -605,7 +617,7 @@ func validateExactJSONShape(data []byte, target reflect.Type) error {
 			return fmt.Errorf("%w: array required", ErrMalformed)
 		}
 		for _, raw := range values {
-			if err := validateExactJSONShape(raw, target.Elem()); err != nil {
+			if err := validateJSONShape(raw, target.Elem()); err != nil {
 				return err
 			}
 		}
@@ -859,7 +871,7 @@ func validateCapabilities(value Capabilities) error {
 
 func validateError(value Error) error {
 	switch value.Code {
-	case ErrorUnauthorized, ErrorInvalidRequest, ErrorUnsupportedVersion, ErrorRateLimited, ErrorNotFound, ErrorStale, ErrorTooLarge, ErrorInternal:
+	case ErrorUnauthorized, ErrorInvalidRequest, ErrorRateLimited, ErrorNotFound, ErrorStale, ErrorTooLarge, ErrorInternal:
 		return nil
 	default:
 		return fmt.Errorf("%w: unknown error code %q", ErrMalformed, value.Code)

@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	Path           = "/browser/v2"
+	Path           = "/browser"
 	maxOrigins     = 8
 	maxConnections = 32
 	// One coherent snapshot is one request, and a notification burst

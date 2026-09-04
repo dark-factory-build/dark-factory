@@ -19,12 +19,14 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
+// A frame's prelude is its auth domain and nothing else. There is no protocol
+// generation: factoryctl, factory-runner and factoryd are siblings of one
+// build, and the sibling-binary boundary already refuses a mixed installation.
 const (
-	protocolGeneration  byte = 3
 	operatorDomain      byte = 1
 	attemptDomain       byte = 2
-	requestPrelude           = 2 + credentialBytes
-	responsePrelude          = 2
+	requestPrelude           = 1 + credentialBytes
+	responsePrelude          = 1
 	outcomeReceiptBytes      = 32
 	requestTimeout           = 5 * time.Second
 	attemptTokenFileEnv      = "DARK_FACTORY_ATTEMPT_TOKEN_FILE"
@@ -310,8 +312,8 @@ func (client client) call(ctx context.Context, method string, params, output any
 	defer stop()
 
 	payload := make([]byte, requestPrelude+len(encoded))
-	payload[0], payload[1] = protocolGeneration, client.domain
-	copy(payload[2:requestPrelude], current.bearer[:])
+	payload[0] = client.domain
+	copy(payload[1:requestPrelude], current.bearer[:])
 	copy(payload[requestPrelude:], encoded)
 	if err := writeFrame(connection, payload); err != nil {
 		return classifyTransport(ctx)
@@ -328,7 +330,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 	if err != nil {
 		return classifyFrameError(ctx, err)
 	}
-	if len(response) < responsePrelude || response[0] != protocolGeneration || response[1] != client.domain {
+	if len(response) < responsePrelude || response[0] != client.domain {
 		return ErrProtocol
 	}
 	responseErr := decodeResponse(response[responsePrelude:], output)
@@ -485,12 +487,16 @@ func decodeResponse(encoded []byte, output any) error {
 	return &RemoteError{code: envelope.Error}
 }
 
+// decodeExact reads one bounded JSON value with this protocol's exact grammar.
+// A member neither side's build knows is ignored, so factoryctl, factoryd and
+// factory-runner tolerate an added member instead of failing closed on it.
+// Every bound, and every explicit required-member and value check made by the
+// caller, still applies.
 func decodeExact(encoded []byte, output any) error {
 	if err := validateJSONNames(encoded); err != nil {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(output); err != nil {
 		return err
 	}
@@ -651,7 +657,7 @@ func canonicalJSONName(name string) bool {
 
 func validRemoteCode(code RemoteErrorCode) bool {
 	switch code {
-	case RemoteInvalidRequest, RemoteUnsupportedProtocol, RemoteUnauthorized, RemoteForbidden, RemoteNotFound, RemoteConflict, RemoteRevisionConflict, RemoteTooLarge, RemoteUnavailable, RemoteCleanupUnresolved, RemoteInternal:
+	case RemoteInvalidRequest, RemoteUnauthorized, RemoteForbidden, RemoteNotFound, RemoteConflict, RemoteRevisionConflict, RemoteTooLarge, RemoteUnavailable, RemoteCleanupUnresolved, RemoteInternal:
 		return true
 	default:
 		return false
@@ -699,9 +705,6 @@ func validProvider(value string) bool {
 
 func validWebStatus(status WebStatus) bool {
 	if status.State != "ready" && status.State != "stopped" && status.State != "degraded" {
-		return false
-	}
-	if status.ProtocolVersion != BrowserProtocolVersion {
 		return false
 	}
 	if status.State == "stopped" {

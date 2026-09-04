@@ -37,7 +37,7 @@ not replace this response.
 
 ## Principals and capabilities
 
-Every request carries a versioned envelope and is resolved once as one of:
+Every request carries one auth-domain byte and is resolved once as one of:
 
 - **Anonymous**: health only.
 - **Operator**: authenticated by the private operator credential. Operator
@@ -176,6 +176,22 @@ requires a separate user, sandbox, or container.
 
 Local frames, messages, events, and logs have hard size limits. SQLite uses
 durable transactions for authority.
+
+The browser control frames and the local API bodies are unversioned JSON that
+ignores a member neither build knows, so a hosted console and a daemon can be
+installed in either order. An ignored member is one whose name is not a known
+name under any case; a member differing from a known one only in case is
+refused, because Go matches struct fields case-insensitively and would
+otherwise let it overwrite the exact member that was validated. The local API
+reaches the same result by requiring every member name to be canonical
+lowercase and rejecting duplicates.
+
+Tolerance is additive only and grants no authority: an ignored member reaches
+no field, so a caller cannot supply an entity id, a run destination, a failure
+code, or any other value the decoded shape has no place for. Size, count, depth
+and member bounds bind unchanged and are measured inside a tolerated member
+too, required members and value types are still validated, and an unknown frame
+type or a frame in the wrong direction is still refused.
 
 Prompts, raw output, message bodies, and source content do not belong in public
 events or diagnostic projections. HumanRequest questions and replies are

@@ -91,7 +91,7 @@ test("pairing is scrubbed before exact client construction and connection", () =
   context.controller.start();
   assert.deepEqual(order, ["scrub", "create", "connect"]);
   assert.deepEqual(replacement, { state: context.historyState, url: "/factory?preview=1" });
-  assert.equal(context.clientOptions().url, "ws://127.0.0.1:43123/browser/v2");
+  assert.equal(context.clientOptions().url, "ws://127.0.0.1:43123/browser");
   assert.equal(context.clientOptions().host, "127.0.0.1:43123");
   assert.equal(context.clientOptions().origin, "https://app.darkfactory.build");
   assert.equal(context.clientOptions().challenge, challenge);

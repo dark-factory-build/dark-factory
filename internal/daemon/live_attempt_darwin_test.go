@@ -352,14 +352,16 @@ func TestHandleConnectionClearsOnlyTheFailedOutcomeReceipt(t *testing.T) {
 		return payload
 	}
 	body := []byte(`{"method":"succeed","params":{"result":"receipt-failure"}}`)
-	request := make([]byte, 2+len(active.bearer)+len(body))
-	request[0], request[1] = 3, 2
-	copy(request[2:], active.bearer)
-	copy(request[2+len(active.bearer):], body)
+	// The local API frame prelude is one auth-domain byte: 2 is the attempt
+	// domain. There is no protocol generation byte in front of it.
+	request := make([]byte, 1+len(active.bearer)+len(body))
+	request[0] = 2
+	copy(request[1:], active.bearer)
+	copy(request[1+len(active.bearer):], body)
 	writeFrame(request)
 	response := readFrame()
 	receipt := readFrame()
-	if len(response) < 2 || !bytes.Contains(response[2:], []byte(`"ok":true`)) || len(receipt) != 32 {
+	if len(response) < 1 || !bytes.Contains(response[1:], []byte(`"ok":true`)) || len(receipt) != 32 {
 		t.Fatalf("outcome response = %q, receipt bytes = %d", response, len(receipt))
 	}
 	var extra [1]byte

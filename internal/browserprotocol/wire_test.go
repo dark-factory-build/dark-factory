@@ -9,12 +9,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
 
 func fixturePath(name string) string {
-	return filepath.Join("..", "..", "protocol", "browser", "v2", "fixtures", name)
+	return filepath.Join("..", "..", "protocol", "browser", "fixtures", name)
 }
 
 func fixtureBytes(t *testing.T, name string) []byte {
@@ -61,9 +62,6 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 			decoded, err := decodeFixtureControl(test.name, got)
 			if err != nil {
 				t.Fatal(err)
-			}
-			if decoded.Version != ProtocolVersion {
-				t.Fatalf("version %d", decoded.Version)
 			}
 			again, err := encodeDecoded(decoded)
 			if err != nil {
@@ -186,25 +184,22 @@ func TestBinaryFixturesRoundTrip(t *testing.T) {
 
 func TestControlMalformed(t *testing.T) {
 	valid := string(fixtureBytes(t, "hello.json"))
-	deep := `{"v":2,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.Repeat("[", MaxJSONDepth+2) + "0" + strings.Repeat("]", MaxJSONDepth+2) + `]}}`
-	arrays := `{"v":2,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.TrimSuffix(strings.Repeat("0,", MaxJSONArray+1), ",") + `]}}`
+	deep := `{"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.Repeat("[", MaxJSONDepth+2) + "0" + strings.Repeat("]", MaxJSONDepth+2) + `]}}`
 	cases := []struct{ name, data string }{
-		{"wrong version", strings.Replace(valid, `"v":2`, `"v":1`, 1)},
 		{"unknown type", strings.Replace(valid, `"HELLO"`, `"NOPE"`, 1)},
-		{"missing body", `{"v":2,"type":"HELLO"}`},
-		{"unknown envelope field", strings.Replace(valid, `,"body"`, `,"extra":1,"body"`, 1)},
-		{"unknown body field", strings.Replace(valid, `}}`, `,"extra":1}}`, 1)},
-		{"duplicate envelope", strings.Replace(valid, `,"type"`, `,"v":2,"type"`, 1)},
+		{"missing body", `{"type":"HELLO"}`},
+		{"missing body member", strings.Replace(valid, `"boot_id"`, `"future_id"`, 1)},
+		{"duplicate envelope", strings.Replace(valid, `{"type"`, `{"type":"HELLO","type"`, 1)},
 		{"duplicate body", strings.Replace(valid, `,"boot_id"`, `,"daemon_id":"`+strings.Repeat("00", 16)+`","boot_id"`, 1)},
 		{"trailing", valid + ` {}`},
-		{"array bound", arrays},
 		{"depth bound", deep},
-		{"unsafe number", strings.Replace(valid, `"v":2`, `"v":9007199254740992`, 1)},
-		{"fractional number", strings.Replace(valid, `"v":2`, `"v":2.0`, 1)},
 		{"upper hex", strings.Replace(valid, "000102030405060708090a0b0c0d0e0f", "000102030405060708090A0b0c0d0e0f", 1)},
 		{"bad id", strings.Replace(valid, `"type":"HELLO"`, `"type":"HELLO","id":"bad id"`, 1)},
 		{"hello id", strings.Replace(valid, `"type":"HELLO"`, `"type":"HELLO","id":"x"`, 1)},
-		{"error missing retryable", `{"v":2,"type":"ERROR","body":{"code":"unauthorized"}}`},
+		{"error missing retryable", `{"type":"ERROR","body":{"code":"unauthorized"}}`},
+		// encoding/json would match these onto the exact member they shadow.
+		{"envelope case collision", strings.Replace(valid, `{"type"`, `{"TYPE":"NOPE","type"`, 1)},
+		{"body case collision", strings.Replace(valid, `,"boot_id"`, `,"DAEMON_ID":"`+strings.Repeat("ff", 16)+`","boot_id"`, 1)},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -225,11 +220,160 @@ func TestControlMalformed(t *testing.T) {
 	}
 }
 
-func TestAuthProveRejectsCallerSuppliedPublicKey(t *testing.T) {
+// assertIgnoredMember proves an added member cannot change what a frame means.
+// The mutated frame decodes to exactly the frame the unmutated one decodes to,
+// so the extra bytes reach no field and become no authority.
+func assertIgnoredMember(t *testing.T, base, mutated string, server bool) {
+	t.Helper()
+	decode := DecodeClientControl
+	if server {
+		decode = DecodeServerControl
+	}
+	want, err := decode([]byte(base))
+	if err != nil {
+		t.Fatalf("base frame rejected: %v", err)
+	}
+	got, err := decode([]byte(mutated))
+	if err != nil {
+		t.Fatalf("frame with an added member rejected: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("added member changed the decoded frame:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// The contract tolerates additive change: a peer may add a member this build
+// does not know without a coordinated release. Bounds, required members, type
+// validation, frame types and directions stay exactly as strict as before.
+func TestControlIgnoresUnknownMembers(t *testing.T) {
+	watch := string(fixtureBytes(t, "state_watch.json"))
+	withUnknownEnvelope := strings.Replace(watch, `,"body"`, `,"future":{"nested":[1,2,3]},"body"`, 1)
+	withUnknownBody := strings.Replace(watch, `}}`, `,"future":"ignored"}}`, 1)
+	withBoth := strings.Replace(withUnknownEnvelope, `}}`, `,"future":"ignored"}}`, 1)
+	want, err := DecodeClientControl([]byte(watch))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, data string }{
+		{"unknown envelope member", withUnknownEnvelope},
+		{"unknown body member", withUnknownBody},
+		{"both", withBoth},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frame, err := DecodeClientControl([]byte(test.data))
+			if err != nil {
+				t.Fatalf("tolerant decode failed: %v", err)
+			}
+			// The unknown member is ignored, not surfaced: the decoded body is
+			// exactly the closed struct this build knows.
+			if !reflect.DeepEqual(frame, want) {
+				t.Fatalf("decoded %+v, want %+v", frame, want)
+			}
+		})
+	}
+	// Tolerance is additive only. Size still binds on the same frame.
+	padded := strings.Replace(watch, `,"body"`, `,"future":"`+strings.Repeat("x", MaxControlBytes)+`","body"`, 1)
+	if _, err := DecodeClientControl([]byte(padded)); !errors.Is(err, ErrOversized) {
+		t.Fatalf("oversized tolerant frame error = %v, want ErrOversized", err)
+	}
+	// So does the object-member bound: an unknown member is still a member.
+	members := make([]string, 0, MaxJSONObject)
+	for i := 0; i < MaxJSONObject; i++ {
+		members = append(members, fmt.Sprintf("%q:%d", fmt.Sprintf("future_%d", i), i))
+	}
+	crowded := strings.Replace(watch, `}}`, `,`+strings.Join(members, ",")+`}}`, 1)
+	if _, err := DecodeClientControl([]byte(crowded)); err != ErrMalformed {
+		t.Fatalf("object-bound tolerant frame error = %v, want ErrMalformed", err)
+	}
+	// And the array bound: a tolerated member is not an unmeasured hole. A
+	// client frame keeps the small array bound wherever the array appears.
+	wide := strings.Replace(watch, `}}`, `,"future":[`+strings.TrimSuffix(strings.Repeat("0,", MaxJSONArray+1), ",")+`]}}`, 1)
+	if _, err := DecodeClientControl([]byte(wide)); err != ErrMalformed {
+		t.Fatalf("array-bound tolerant frame error = %v, want ErrMalformed", err)
+	}
+	// And the depth bound.
+	nested := strings.Replace(watch, `}}`, `,"future":`+strings.Repeat("[", MaxJSONDepth+2)+"0"+strings.Repeat("]", MaxJSONDepth+2)+`}}`, 1)
+	if _, err := DecodeClientControl([]byte(nested)); err != ErrMalformed {
+		t.Fatalf("depth-bound tolerant frame error = %v, want ErrMalformed", err)
+	}
+}
+
+// encoding/json matches a struct field case-insensitively when no exact name
+// matches, so a member differing only in case from a known one is not unknown
+// to the decoder even though the shape check would skip it. Left alone, that
+// member would overwrite the exact member this package validated, and the
+// TypeScript decoder -- whose keys are exact -- would read the frame
+// differently. Both sides refuse it instead.
+func TestCaseVariantOfAKnownMemberIsRefused(t *testing.T) {
+	exact := strings.Repeat("00", 16)
+	shadow := strings.Repeat("ff", 16)
+	valid := `{"type":"HELLO","body":{"daemon_id":"` + exact + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `"}}`
+	frame, err := DecodeServerControl([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Body.(Hello).DaemonID != exact {
+		t.Fatalf("baseline daemon_id = %q", frame.Body.(Hello).DaemonID)
+	}
+	for name, mutated := range map[string]string{
+		"upper":       strings.Replace(valid, `"boot_id"`, `"DAEMON_ID":"`+shadow+`","boot_id"`, 1),
+		"mixed":       strings.Replace(valid, `"boot_id"`, `"Daemon_Id":"`+shadow+`","boot_id"`, 1),
+		"before":      strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID":"`+shadow+`","daemon_id"`, 1),
+		"no exact":    strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID"`, 1),
+		"envelope":    strings.Replace(valid, `{"type"`, `{"Type":"NOPE","type"`, 1),
+		"nested item": strings.Replace(valid, `"boot_id"`, `"Connection_Nonce":"`+strings.Repeat("33", 32)+`","boot_id"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeServerControl([]byte(mutated)); err != ErrMalformed {
+				t.Fatalf("case variant accepted: %v", err)
+			}
+		})
+	}
+	// A name that is unknown under every case is still ignored.
+	tolerated := strings.Replace(valid, `"boot_id"`, `"FUTURE_ID":"`+shadow+`","boot_id"`, 1)
+	assertIgnoredMember(t, valid, tolerated, true)
+}
+
+// An unknown frame type and a frame sent in the wrong direction stay finite
+// refusals; only members are tolerated.
+func TestControlRefusesUnknownTypesAndWrongDirection(t *testing.T) {
+	watch := string(fixtureBytes(t, "state_watch.json"))
+	if _, err := DecodeClientControl([]byte(strings.Replace(watch, `"STATE_WATCH"`, `"STATE_FUTURE"`, 1))); err != ErrMalformed {
+		t.Fatalf("unknown type error = %v, want ErrMalformed", err)
+	}
+	// A known client frame carrying an unknown member still cannot cross into
+	// the server decoder.
+	if _, err := DecodeServerControl([]byte(strings.Replace(watch, `}}`, `,"future":1}}`, 1))); err != ErrMalformed {
+		t.Fatalf("wrong-direction error = %v, want ErrMalformed", err)
+	}
+	snapshot := string(fixtureBytes(t, "state_changed.json"))
+	if _, err := DecodeClientControl([]byte(snapshot)); err != ErrMalformed {
+		t.Fatalf("server frame accepted by client decoder: %v", err)
+	}
+}
+
+// AUTH_PROVE has no public-key member at all: the daemon reads the key from
+// its durable client row. A caller-supplied one is ignored, never adopted.
+func TestAuthProveIgnoresCallerSuppliedPublicKey(t *testing.T) {
 	valid := string(fixtureBytes(t, "auth_prove.json"))
 	withKey := strings.Replace(valid, `"signature"`, `"public_key_sec1":"046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5","signature"`, 1)
-	if _, err := DecodeClientControl([]byte(withKey)); err != ErrMalformed {
-		t.Fatalf("AUTH_PROVE accepted redundant public key: %v", err)
+	frame, err := DecodeClientControl([]byte(withKey))
+	if err != nil {
+		t.Fatalf("AUTH_PROVE with an extra member: %v", err)
+	}
+	body, ok := frame.Body.(AuthProve)
+	if !ok {
+		t.Fatalf("AUTH_PROVE body type %T", frame.Body)
+	}
+	expected, err := DecodeClientControl([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(body, expected.Body) {
+		t.Fatalf("AUTH_PROVE body %+v, want %+v", body, expected.Body)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", body), "046b17d1") {
+		t.Fatal("AUTH_PROVE carried a caller-supplied public key")
 	}
 }
 
@@ -290,7 +434,7 @@ func TestControlIDAndBodyValidation(t *testing.T) {
 func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	data := fixtureBytes(t, "../manifest.json")
 	var manifest struct {
-		Version      int `json:"version"`
+		Name         string `json:"name"`
 		Capabilities []struct {
 			Name  string `json:"name"`
 			Bit   int    `json:"bit"`
@@ -346,7 +490,9 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		t.Fatalf("manifest trailing JSON: %v", err)
 	}
-	if manifest.Version != int(ProtocolVersion) || len(manifest.Control) != 35 || len(manifest.Terminal.Opcodes) != 2 {
+	// The manifest carries a stable name, not a generation: the contract is
+	// unversioned by owner decision on 4 September 2026.
+	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 35 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input"}
@@ -479,7 +625,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"transcript_v2.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_watch.json": true, "state_changed.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
+	expectedFiles := map[string]bool{"transcript.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_watch.json": true, "state_changed.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}
@@ -661,7 +807,7 @@ func TestBinaryOutputRangeOverflow(t *testing.T) {
 }
 
 func TestDecodeErrorsAreStable(t *testing.T) {
-	_, err := DecodeServerControl([]byte(`{"v":1,"type":"NOPE","body":{}}`))
+	_, err := DecodeServerControl([]byte(`{"type":"NOPE","body":{}}`))
 	if err != ErrMalformed {
 		t.Fatalf("error = %v, want exact ErrMalformed", err)
 	}
@@ -669,9 +815,12 @@ func TestDecodeErrorsAreStable(t *testing.T) {
 		t.Fatal("private text in public error")
 	}
 	malformed := [][]byte{
-		[]byte(`{"v":1,"type":"HELLO","id":null,"body":{}}`),
-		[]byte(`{"v":1,"type":"HELLO","body":{"daemon_id":"private-sentinel"}}`),
-		[]byte(`{"v":1,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","private":"sentinel"}}`),
+		[]byte(`{"type":"HELLO","id":null,"body":{}}`),
+		[]byte(`{"type":"HELLO","body":{"daemon_id":"private-sentinel"}}`),
+		// Tolerated members do not soften the refusal or the error: this frame
+		// is missing connection_nonce, and the ignored member's text must not
+		// reach the public error either.
+		[]byte(`{"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","private":"sentinel"}}`),
 	}
 	for _, value := range malformed {
 		err := func() error { _, err := DecodeServerControl(value); return err }()
@@ -764,7 +913,7 @@ func TestTerminalExitRequiresOneCanonicalStatusArm(t *testing.T) {
 			if _, err := EncodeTerminalExit("exit", TerminalExit{SessionID: sessionID, ExitCode: test.code, ExitSignal: test.signal}); !errors.Is(err, ErrMalformed) {
 				t.Fatalf("noncanonical terminal exit accepted: %v", err)
 			}
-			wire := fmt.Sprintf(`{"v":1,"type":"TERMINAL_EXIT","id":"exit","body":{"session_id":"%s","exit_code":%d,"exit_signal":%d,"aborted":false}}`, sessionID, test.code, test.signal)
+			wire := fmt.Sprintf(`{"type":"TERMINAL_EXIT","id":"exit","body":{"session_id":"%s","exit_code":%d,"exit_signal":%d,"aborted":false}}`, sessionID, test.code, test.signal)
 			if _, err := DecodeServerControl([]byte(wire)); !errors.Is(err, ErrMalformed) {
 				t.Fatalf("noncanonical terminal exit decoded: %v", err)
 			}
@@ -777,12 +926,15 @@ func TestHumanRequestAuthorityWireRejectsLegacyAndForgedShapes(t *testing.T) {
 	cancel := string(fixtureBytes(t, "human_request_cancel_run.json"))
 	detail := string(fixtureBytes(t, "human_request_detail.json"))
 	result := string(fixtureBytes(t, "human_request_cancel_run_result.json"))
+	// A reply or cancellation has no run destination member at all, so a
+	// caller-supplied one reaches nothing: the frame decodes to exactly the
+	// frame without it and the Store still derives the origin.
+	assertIgnoredMember(t, reply, strings.Replace(reply, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1), false)
+	assertIgnoredMember(t, cancel, strings.Replace(cancel, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1), false)
 	for name, test := range map[string]struct {
 		wire   string
 		server bool
 	}{
-		"reply caller run":      {wire: strings.Replace(reply, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1)},
-		"cancel caller run":     {wire: strings.Replace(cancel, `"request_id":`, `"run_id":"11111111111111111111111111111111","request_id":`, 1)},
 		"cancel field case":     {wire: strings.Replace(cancel, `"expected_run_revision"`, `"Expected_Run_Revision"`, 1)},
 		"detail missing target": {wire: strings.Replace(detail, `,"terminal_target":{"run_id":"11111111111111111111111111111111","session_id":"22222222222222222222222222222222","run_revision":"8","session_revision":"9"}`, ``, 1), server: true},
 	} {
@@ -803,13 +955,13 @@ func TestHumanRequestAuthorityWireRejectsLegacyAndForgedShapes(t *testing.T) {
 	if _, err := DecodeServerControl([]byte(legacyResult)); err != ErrMalformed {
 		t.Fatalf("legacy generic result accepted: %v", err)
 	}
+	// Residue from the deleted generic result shape carries no meaning: it is
+	// ignored, so the exact typed result is still the only authority.
 	for _, mutation := range []string{
 		strings.Replace(result, `"run_id":`, `"action":"cancel_run","run_id":`, 1),
 		strings.Replace(result, `"request_revision":"2"`, `"request_revision":"2","status":"resolved"`, 1),
 	} {
-		if _, err := DecodeServerControl([]byte(mutation)); err != ErrMalformed {
-			t.Fatalf("generic result residue accepted: %v", err)
-		}
+		assertIgnoredMember(t, result, mutation, true)
 	}
 }
 
@@ -851,16 +1003,16 @@ func TestTerminalTargetContract(t *testing.T) {
 		strings.Replace(string(response), `"agent_revision":"7"`, `"agent_revision":"0"`, 1),
 		strings.Replace(string(response), `"head":"9007199254740993"`, `"head":"01"`, 1),
 		strings.Replace(string(response), `,"session_revision":"9"`, "", 1),
-		strings.Replace(string(response), `"target":{`, `"target":{"pid":1,`, 1),
 	} {
 		if _, err := DecodeServerControl([]byte(mutation)); err != ErrMalformed {
 			t.Fatalf("target mutation accepted: %v", err)
 		}
 	}
-	lease := strings.Replace(string(fixtureBytes(t, "terminal_lease_result.json")), `"expires_at_ms":"10000"`, `"expires_at_ms":"10000","renew_after_ms":"10000"`, 1)
-	if _, err := DecodeServerControl([]byte(lease)); err != ErrMalformed {
-		t.Fatalf("lease renew_after_ms accepted: %v", err)
-	}
+	// A terminal target is an observation coordinate with a closed shape. A
+	// process identity added beside it is ignored, so it can never be read.
+	assertIgnoredMember(t, string(response), strings.Replace(string(response), `"target":{`, `"target":{"pid":1,`, 1), true)
+	leaseResult := string(fixtureBytes(t, "terminal_lease_result.json"))
+	assertIgnoredMember(t, leaseResult, strings.Replace(leaseResult, `"expires_at_ms":"10000"`, `"expires_at_ms":"10000","renew_after_ms":"10000"`, 1), true)
 	if _, err := DecodeClientControl(bytes.Replace(get, []byte(`"id":"target-get-1"`), nil, 1)); err != ErrMalformed {
 		t.Fatalf("missing request id accepted: %v", err)
 	}

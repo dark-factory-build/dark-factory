@@ -1,6 +1,4 @@
 {
-  "schemaVersion": 1,
-  "toolTreeVersion": "dark-factory/tool-tree/v2",
   "node": {
     "version": "22.20.0",
     "sha512": "1476738e01ca6e0a7c4468e30645c91b59c56a2d0eda60510a20a28a72be790954694e06f6074da784cb17f4ea61cac1a1c349326d1eb2e378ba2000548d3599",
@@ -9,11 +7,11 @@
   },
   "pnpm": {
     "version": "11.19.0",
-    "treeSha512": "cddae857a6d5a9418503ff2dc97f960cf2501a8d11ea394c0b7e1ba03dfac041caf95b9087e301ece71d3b7b3feee28b55821fcb0151cd6a921481ac3f46abeb"
+    "treeSha512": "8d869311ce183757cadc459764415f86b4cfbb3c760c3d70ad83f2d2e9d582c6f08da6548bc4f0feeec43e34d97931bb59e1dec03a53f5698936232eae19062d"
   },
   "typescript": {
     "version": "5.8.3",
-    "treeSha512": "d981b85faf14b893ded04d707227b9b85620cd649f092192cc7e4ff9b0bf648938615058b256400a0479b318639dda19e89e75d02a1d3b7f5a55825be7c59c6f",
+    "treeSha512": "5bda0981294f968cc958232814531774b19c0ffdb046bf2b1958733cf13936b5e51ea5f31f50f2513a60c7142176e6476d8d68df7681f7e226cc4b2dd38db492",
     "lockfileIntegrity": "sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ=="
   },
   "tar": {

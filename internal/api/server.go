@@ -348,7 +348,7 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 		return Call{}, connection.reject(RemoteInvalidRequest)
 	}
 	defer clear(payload[:requestPrelude])
-	domain := payload[1]
+	domain := payload[0]
 	if domain == operatorDomain || domain == attemptDomain {
 		connection.domain = domain
 	}
@@ -358,11 +358,8 @@ func (connection *Connection) Receive(ctx context.Context) (Call, error) {
 	if domain != operatorDomain && domain != attemptDomain {
 		return Call{}, ErrProtocol
 	}
-	if payload[0] != protocolGeneration {
-		return Call{}, connection.reject(RemoteUnsupportedProtocol)
-	}
 	var bearer credential
-	copy(bearer[:], payload[2:requestPrelude])
+	copy(bearer[:], payload[1:requestPrelude])
 	defer clear(bearer[:])
 	call, code := decodeCall(domain, bearer, payload[requestPrelude:])
 	if err := ctx.Err(); err != nil {
@@ -711,7 +708,7 @@ func (connection *Connection) writeReply(reply Reply) error {
 		return connection.writeReply(tooLarge)
 	}
 	payload := make([]byte, responsePrelude+len(encoded))
-	payload[0], payload[1] = protocolGeneration, connection.domain
+	payload[0] = connection.domain
 	copy(payload[responsePrelude:], encoded)
 	// Every dispatched outcome response carries a receipt, including an error
 	// produced after the durable outcome committed. Receipt presence must not

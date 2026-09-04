@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir, userInfo } from "node:os";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(webRoot, "..");
@@ -23,7 +23,6 @@ const manifestName = "dark-factory-public-artifacts.json";
 const gitPath = "/usr/bin/git";
 const tarPath = "/usr/bin/tar";
 const toolchainIntegrityPath = join(webRoot, "toolchain-integrity.json");
-const toolTreeVersion = "dark-factory/tool-tree/v2";
 const maxToolTreeFiles = 4096;
 const maxToolTreeBytes = 128 * 1024 * 1024;
 const maxToolTreePathBytes = 4096;
@@ -215,7 +214,6 @@ function toolTreeDigest(root) {
   walk(root, "");
   records.sort((a, b) => Buffer.compare(a.relativeBytes, b.relativeBytes) || a.type.localeCompare(b.type));
   const hash = createHash("sha512");
-  hash.update(Buffer.from(`${toolTreeVersion}\0`));
   const count = Buffer.alloc(4);
   count.writeUInt32BE(records.length);
   hash.update(count);
@@ -241,9 +239,7 @@ function toolTreeDigest(root) {
 
 function reviewedToolchain() {
   const value = strictJsonFile(toolchainIntegrityPath, "toolchain integrity");
-  exactKeys(value, ["schemaVersion", "toolTreeVersion", "node", "pnpm", "typescript", "tar"], "toolchain integrity");
-  if (value.schemaVersion !== 1) fail("toolchain integrity schema version is unsupported");
-  if (value.toolTreeVersion !== toolTreeVersion) fail("toolchain integrity tree framing version is unsupported");
+  exactKeys(value, ["node", "pnpm", "typescript", "tar"], "toolchain integrity");
   exactKeys(value.node, ["version", "sha512", "bytes", "mode"], "toolchain integrity.node");
   exactKeys(value.pnpm, ["version", "treeSha512"], "toolchain integrity.pnpm");
   exactKeys(value.typescript, ["version", "treeSha512", "lockfileIntegrity"], "toolchain integrity.typescript");
@@ -319,7 +315,6 @@ function trustedTools() {
     paths: { node, pnpm, pnpmRoot: pnpmRootPath, tsc, typescriptRoot: tscRoot, tar: tarInfo.path },
     expected: { node: reviewed.node, pnpm: reviewed.pnpm, typescript: reviewed.typescript, tar: reviewed.tar },
     versions: {
-      toolTreeVersion,
       node: { version: reviewed.node.version, bytes: nodeInfo.bytes, mode: nodeInfo.mode, sha512: nodeInfo.sha512 },
       pnpm: pnpmVersion,
       pnpmTreeSha512,
@@ -339,13 +334,12 @@ function assertToolsUnchanged(tools) {
   if (toolTreeDigest(tools.paths.typescriptRoot) !== tools.expected.typescript.treeSha512) fail("installed TypeScript content changed while building");
 }
 
+// The browser contract is unversioned, so an artifact has no protocol identity
+// to bind: the exact source commit already names the contract these packages
+// were built from.
 function sourceIdentity(sourceCommit, tools) {
-  const protocol = readJson(join(repositoryRoot, "protocol", "browser", "v2", "manifest.json"));
-  if (!Number.isSafeInteger(protocol.version)) fail("protocol/browser/v2/manifest.json has an invalid version");
   return {
-    schemaVersion: 1,
     source: { commit: sourceCommit, clean: true },
-    protocol: { name: "dark-factory/browser/v2", version: protocol.version },
     buildTools: tools.versions,
   };
 }
@@ -425,16 +419,6 @@ function assertDirectoryInventory(root, expected, label) {
   if (!existsSync(root) || !lstatSync(root).isDirectory()) fail(`${label} is missing`);
   walk(root, "");
   if (seen.size !== expectedFiles.size) fail(`${label} is missing an expected file`);
-}
-
-async function compiledProtocolVersion() {
-  const path = join(distRoot(packages.client), "manifest.js");
-  try {
-    const module = await import(pathToFileURL(path).href);
-    return module.PROTOCOL_VERSION;
-  } catch (error) {
-    fail(`could not load compiled client manifest: ${error.message}`);
-  }
 }
 
 function runTypeScript(tools, packageInfo, config) {
@@ -553,20 +537,16 @@ function outputDestination(requested, requireAbsent) {
 }
 
 function validateManifestShape(manifest) {
-  exactKeys(manifest, ["schemaVersion", "source", "protocol", "buildTools", "packages"], "manifest");
-  if (manifest.schemaVersion !== 1) fail("manifest schema version is unsupported");
+  exactKeys(manifest, ["source", "buildTools", "packages"], "manifest");
   exactKeys(manifest.source, ["commit", "clean"], "manifest.source");
   if (!/^[0-9a-f]{40}$/.test(stringField(manifest.source, "commit", "manifest.source")) || manifest.source.clean !== true) fail("manifest source is invalid");
-  exactKeys(manifest.protocol, ["name", "version"], "manifest.protocol");
-  if (stringField(manifest.protocol, "name", "manifest.protocol") !== "dark-factory/browser/v2" || integerField(manifest.protocol, "version", "manifest.protocol") !== 2) fail("manifest protocol is invalid");
-  exactKeys(manifest.buildTools, ["toolTreeVersion", "node", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity", "tar"], "manifest.buildTools");
+  exactKeys(manifest.buildTools, ["node", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity", "tar"], "manifest.buildTools");
   exactKeys(manifest.buildTools.node, ["version", "bytes", "mode", "sha512"], "manifest.buildTools.node");
   exactKeys(manifest.buildTools.tar, ["version", "bytes", "mode", "sha512"], "manifest.buildTools.tar");
   for (const key of ["version", "mode", "sha512"]) stringField(manifest.buildTools.node, key, "manifest.buildTools.node");
   for (const key of ["version", "mode", "sha512"]) stringField(manifest.buildTools.tar, key, "manifest.buildTools.tar");
   integerField(manifest.buildTools.node, "bytes", "manifest.buildTools.node");
   integerField(manifest.buildTools.tar, "bytes", "manifest.buildTools.tar");
-  if (stringField(manifest.buildTools, "toolTreeVersion", "manifest.buildTools") !== toolTreeVersion) fail("manifest build tool tree framing version is invalid");
   stringField(manifest.buildTools, "pnpm", "manifest.buildTools");
   stringField(manifest.buildTools, "pnpmTreeSha512", "manifest.buildTools");
   stringField(manifest.buildTools, "typescript", "manifest.buildTools");
@@ -576,7 +556,7 @@ function validateManifestShape(manifest) {
   exactKeys(manifest.packages, [packages.client.name, packages.ui.name], "manifest.packages");
   for (const info of Object.values(packages)) {
     const entry = manifest.packages[info.name];
-    exactKeys(entry, info === packages.ui ? ["schemaVersion", "source", "protocol", "buildTools", "package", "dependency", "artifact"] : ["schemaVersion", "source", "protocol", "buildTools", "package", "artifact"], `${info.name} provenance`);
+    exactKeys(entry, info === packages.ui ? ["source", "buildTools", "package", "dependency", "artifact"] : ["source", "buildTools", "package", "artifact"], `${info.name} provenance`);
     exactKeys(entry.package, ["name", "version"], `${info.name}.package`);
     exactKeys(entry.artifact, ["bytes", "sha512", "integrity", "filename", "version"], `${info.name}.artifact`);
     integerField(entry.artifact, "bytes", `${info.name}.artifact`);
@@ -612,10 +592,10 @@ function compareArtifactDirectories(actual, expected, expectedFilenames) {
 
 function validateArtifactSet(output, manifest, tools, identity) {
   validateManifestShape(manifest);
-  if (JSON.stringify(manifest.source) !== JSON.stringify(identity.source) || JSON.stringify(manifest.protocol) !== JSON.stringify(identity.protocol) || JSON.stringify(manifest.buildTools) !== JSON.stringify(identity.buildTools)) fail("constructed manifest identity is stale");
+  if (JSON.stringify(manifest.source) !== JSON.stringify(identity.source) || JSON.stringify(manifest.buildTools) !== JSON.stringify(identity.buildTools)) fail("constructed manifest identity is stale");
   for (const info of Object.values(packages)) {
     const entry = manifest.packages[info.name];
-    if (entry.schemaVersion !== identity.schemaVersion || JSON.stringify(entry.source) !== JSON.stringify(identity.source) || JSON.stringify(entry.protocol) !== JSON.stringify(identity.protocol) || JSON.stringify(entry.buildTools) !== JSON.stringify(identity.buildTools)) fail(`${info.name} constructed provenance identity is stale`);
+    if (JSON.stringify(entry.source) !== JSON.stringify(identity.source) || JSON.stringify(entry.buildTools) !== JSON.stringify(identity.buildTools)) fail(`${info.name} constructed provenance identity is stale`);
     const sourcePackage = packageJson(info);
     if (entry.package.name !== info.name || entry.package.version !== sourcePackage.version || entry.artifact.filename !== packageFilename(sourcePackage) || entry.artifact.version !== sourcePackage.version) fail(`${info.name} constructed package identity is stale`);
     if (info === packages.ui && (entry.dependency.name !== packages.client.name || entry.dependency.version !== manifest.packages[packages.client.name].package.version || entry.dependency.tarball !== manifest.packages[packages.client.name].artifact.filename || entry.dependency.integrity !== manifest.packages[packages.client.name].artifact.integrity)) fail("constructed UI does not bind the exact client artifact and version");
@@ -650,7 +630,6 @@ async function constructArtifacts(destination, tools, identity) {
   const stageRoot = mkdtempSync(join(dirname(destination), ".dark-factory-public-stage-"));
   try {
     build(tools);
-    if (await compiledProtocolVersion() !== identity.protocol.version) fail("compiled client protocol version differs from protocol/browser/v2/manifest.json");
     if (currentSource() !== identity.source.commit) fail("source changed while constructing artifacts");
     writeStableJson(join(distRoot(packages.client), "provenance.json"), provenance(packages.client, identity));
     const clientArtifact = stageAndPack(tools, packages.client, destination, stageRoot);

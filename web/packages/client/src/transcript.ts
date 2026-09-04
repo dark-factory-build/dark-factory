@@ -1,7 +1,9 @@
 import { malformed, normalizeBoundary, ProtocolError } from "./errors.js";
-import { PROTOCOL_VERSION } from "./manifest.js";
 
-const PROTOCOL = new TextEncoder().encode("dark-factory/browser/v2/");
+// The transcript domain has no generation. A durable pairing must survive a
+// site deploy: the stored non-exportable key is what persists, and it signs
+// this exact domain on every reconnect.
+const PROTOCOL = new TextEncoder().encode("dark-factory/browser/");
 const PAIR = new TextEncoder().encode("pair\0");
 const AUTH = new TextEncoder().encode("auth\0");
 
@@ -35,7 +37,7 @@ function text(value: string): Uint8Array {
 function fixed(value: string, bytes: number): Uint8Array { return hexBytes(value, bytes); }
 function publicKey(value: string): Uint8Array { const result = fixed(value, 65); if (result[0] !== 4) malformed(); return result; }
 function transcript(domain: Uint8Array, fields: Array<{ value: Uint8Array; fixed?: number }>): Uint8Array {
-  const parts = [PROTOCOL, domain, new Uint8Array([PROTOCOL_VERSION >>> 8, PROTOCOL_VERSION & 0xff])];
+  const parts = [PROTOCOL, domain];
   let size = parts.reduce((n, p) => n + p.length, 0);
   for (const field of fields) { if (field.fixed !== undefined && field.value.length !== field.fixed) malformed(); const length = new Uint8Array(4); new DataView(length.buffer).setUint32(0, field.value.length); parts.push(length, field.value); size += 4 + field.value.length; }
   const result = new Uint8Array(size); let offset = 0; for (const part of parts) { result.set(part, offset); offset += part.length; } return result;
@@ -59,7 +61,7 @@ export function buildAuthTranscript(input: AuthTranscriptInput): Uint8Array {
   });
 }
 
-/** Verify the raw IEEE-P1363 P-256 signature used by browser v1. */
+/** Verify the raw IEEE-P1363 P-256 signature used by the browser boundary. */
 export async function verifyP256Signature(publicKeySEC1: Uint8Array, signature: Uint8Array, signed: Uint8Array): Promise<boolean> {
   if (!(publicKeySEC1 instanceof Uint8Array) || !(signature instanceof Uint8Array) || !(signed instanceof Uint8Array)) throw new ProtocolError("malformed");
   if (publicKeySEC1.length !== 65 || publicKeySEC1[0] !== 4 || signature.length !== 64) return false;
