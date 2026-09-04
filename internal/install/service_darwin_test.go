@@ -786,6 +786,70 @@ func TestServiceDirectoryRecheckToleratesAncestorChurnAndStaysFailClosed(t *test
 	}
 }
 
+// An install that upgrades a running installation boots the daemon out and
+// bootstraps the new one inside one mutation, so the SQLite sidecars are
+// deleted and recreated as fresh inodes while the home capability is held.
+func TestServiceHomeSnapshotsTolerateSidecarRecreation(t *testing.T) {
+	root := serviceTestRoot(t)
+	home := filepath.Join(root, "factory")
+	if _, err := Init(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	sidecars := map[string][]byte{
+		databaseName + "-wal": []byte("wal"),
+		databaseName + "-shm": make([]byte, operationalMinSHMBytes),
+	}
+	writeSidecars := func() {
+		t.Helper()
+		for name, body := range sidecars {
+			if err := os.WriteFile(filepath.Join(home, name), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	writeSidecars()
+	capability, err := openServiceHomeCapability(context.Background(), home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = capability.close() })
+	baseline := capability.image
+
+	for name := range sidecars {
+		if err := os.Remove(filepath.Join(home, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSidecars()
+	image, err := snapshotServiceHome(context.Background(), capability.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sameServiceHomeImage(baseline, image); err != nil {
+		t.Fatalf("recreated sidecars refused: %v", err)
+	}
+
+	// The database is not derived state: a same-name replacement still refuses.
+	databasePath := filepath.Join(home, databaseName)
+	body, err := os.ReadFile(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(databasePath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := snapshotServiceHome(context.Background(), capability.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sameServiceHomeImage(baseline, replaced); err == nil {
+		t.Fatal("a replaced database passed the service image comparison")
+	}
+}
+
 func TestServiceHomeSnapshotsTolerateLiveDirectoryChurnButRejectReplacement(t *testing.T) {
 	root := serviceTestRoot(t)
 	home := filepath.Join(root, "factory")

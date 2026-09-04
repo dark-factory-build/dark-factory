@@ -118,7 +118,8 @@ func InspectServiceWithConfig(ctx context.Context, home string, config ServiceCo
 // receipt in the sibling service directory, the rendered plist, and one
 // launchctl bootstrap. sourceDir names the directory holding the factoryd,
 // factoryctl, and factory-runner binaries to install (normally the invoking
-// factoryctl's own directory). Repeating an exact install is recognized, a
+// factoryctl's own directory). Repeating an install with the same sibling set
+// is recognized; a different set upgrades this home's installation in place. A
 // foreign artifact refuses, and crash residue resolves through
 // ServiceUninstall.
 func ServiceInstall(ctx context.Context, home string, config ServiceConfig, sourceDir string) (ServiceStatus, error) {

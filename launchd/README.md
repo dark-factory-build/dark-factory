@@ -8,7 +8,11 @@ engine and operated through `factoryctl service install / start / stop /
 uninstall / status --home <ABSOLUTE>`. Install places the invoking
 factoryctl's own sibling binaries into the sibling `<home>.service`
 directory, writes a durable receipt, renders the plist from the one Go
-authority (`install.ServicePlist`), and bootstraps the job. Present
+authority (`install.ServicePlist`), and bootstraps the job. Run again from
+a different build over an installation this home's receipt and plist
+already prove, it boots the job out, replaces the three binaries, rewrites
+the receipt's program digest, and bootstraps the new program; the data
+home is untouched and an identical build is the recognized repeat. Present
 service states are provable only through an exact receipt, plist, and
 program-digest agreement; anything else reports ambiguous, and
 `factoryctl service uninstall` is the resolution path for residue,

@@ -32,7 +32,10 @@ remain clients of the same local API; neither owns lifecycle or policy.
 ## Installation
 
 The [installation guide](docs/install.md) covers the three binaries, managed
-service, and paired browser console.
+service, and paired browser console. The same `factoryctl service install
+--home "$HOME/.dark-factory"` command installs that home and upgrades a running
+installation to the invoking build in place; `factoryctl service uninstall` is
+only for removal and crash residue.
 
 ## Development
 

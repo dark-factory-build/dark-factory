@@ -99,9 +99,10 @@ publishes two archives, `SHA256SUMS`, a Homebrew formula candidate, and
 The fixed recovery workflow can resume a failed release while remaining bound
 to its tag and exact default-branch workflow commit.
 
-The current installer is deliberately fresh and small. `factoryctl service
-install` copies the exact sibling `factoryd`, `factory-runner`, and `factoryctl`
-binaries, writes its receipt and launchd plist, and loads that job. It does not
-download a release, update a different existing installation, migrate another
-home, maintain version pointers, or promise rollback. See
+The current installer is deliberately small. `factoryctl service install` copies
+the exact sibling `factoryd`, `factory-runner`, and `factoryctl` binaries,
+writes its receipt and launchd plist, and loads that job; over an installation
+the same home's receipt and plist already prove, it replaces those binaries in
+place instead. It does not download a release, update a different installation,
+migrate another home, maintain version pointers, or promise rollback. See
 [the installation guide](../install.md).

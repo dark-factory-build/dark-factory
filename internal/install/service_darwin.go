@@ -533,12 +533,15 @@ func sameServiceHomeImage(left, right serviceHomeImage) error {
 	for name := range names {
 		expected, inLeft := left.files[name]
 		actual, inRight := right.files[name]
+		if name == databaseName+"-wal" || name == databaseName+"-shm" {
+			// The SQLite sidecars are derived state one daemon deletes on exit
+			// and the next recreates as fresh inodes, so an upgrade's restart
+			// legitimately changes both their presence and their identity. Each
+			// snapshot still bounds them; only the database itself, which the
+			// restart does not replace, must hold its census position.
+			continue
+		}
 		if !inLeft || !inRight {
-			// A live daemon creates and removes the SQLite sidecars between
-			// passes; every durable member must hold its census position.
-			if name == databaseName+"-wal" || name == databaseName+"-shm" {
-				continue
-			}
 			return fmt.Errorf("%w: service home census changed", ErrInvalidHome)
 		}
 		if actual != expected {

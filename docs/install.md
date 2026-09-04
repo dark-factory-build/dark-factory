@@ -27,6 +27,22 @@ factoryctl service install --home "$HOME/.dark-factory"
 factoryctl service status --home "$HOME/.dark-factory"
 ```
 
+## Upgrade an installation
+
+Running the same command from a newer build upgrades that installation in
+place; there is no uninstall step:
+
+```sh
+factoryctl service install --home "$HOME/.dark-factory"
+```
+
+The command compares the invoking `factoryd`, `factory-runner`, and
+`factoryctl` with the installed ones. An identical set is recognized and
+changes nothing. A different set boots the job out, replaces the three
+binaries, records them in the receipt, and bootstraps the new program. The
+home, its socket, database, and operator token are untouched, and an
+installation that is not this home's own is refused rather than replaced.
+
 Point the operator client at that home and open the paired hosted console:
 
 ```sh
@@ -59,5 +75,6 @@ contract](providers.md) for discovery, model, effort, and task-delivery details.
 `factoryctl service stop` stops the managed daemon without removing the
 installation; restart it with `factoryctl service start --home
 "$HOME/.dark-factory"`. `factoryctl service uninstall` is the evidence-first
-removal path for that exact home and label. Homebrew does not own the running
+removal path for that exact home and label; it is for removal and for crash
+residue, never a step before an upgrade. Homebrew does not own the running
 service; do not use `brew services` for Dark Factory.
