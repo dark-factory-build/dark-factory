@@ -582,7 +582,7 @@ func remoteErrorCode(err error) api.RemoteErrorCode {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return api.RemoteUnavailable
-	case errors.Is(err, kernel.ErrInvalidValue), errors.Is(err, kernel.ErrFutureCursor):
+	case errors.Is(err, kernel.ErrInvalidValue):
 		return api.RemoteInvalidRequest
 	case errors.Is(err, kernel.ErrUnauthorized):
 		return api.RemoteUnauthorized

@@ -332,7 +332,7 @@ async function scenarioCancel(config, client, signals) {
 async function main() {
   if (process.argv.length !== 3) throw new Error("one E2E configuration path is required");
   const config = JSON.parse(await readFile(process.argv[2], "utf8"));
-  assert.match(config.url, /^ws:\/\/127\.0\.0\.1:[0-9]+\/browser\/v1$/);
+  assert.match(config.url, /^ws:\/\/127\.0\.0\.1:[0-9]+\/browser\/v2$/);
   assert.match(config.host, /^127\.0\.0\.1:[0-9]+$/);
   assert.equal(config.origin, "https://app.darkfactory.build");
   assert.match(config.challenge, /^[0-9a-f]{64}$/);

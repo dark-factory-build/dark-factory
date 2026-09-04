@@ -142,9 +142,12 @@ test("unknown and inherited error codes use a finite fallback", () => {
 });
 
 test("empty and maximum bounded collections have explicit, semantic output", () => {
-  const emptyState = baseState({ factory: [], projects: new Map(), agents: new Map(), tasks: new Map(), humanRequests: new Map() });
+  // Before the first snapshot there is no state at all; after it there is
+  // always a factory, even when every collection is empty.
+  assert.match(render({ state: undefined }), /BUILDING STATE UNAVAILABLE/);
+  const emptyState = baseState({ projects: new Map(), agents: new Map(), tasks: new Map(), humanRequests: new Map() });
   const emptyHome = render({ state: emptyState });
-  assert.match(emptyHome, /BUILDING STATE UNAVAILABLE/);
+  assert.doesNotMatch(emptyHome, /BUILDING STATE UNAVAILABLE/);
   assert.match(emptyHome, /no agents/);
   assert.match(emptyHome, /no tasks yet/);
   assert.match(render({ state: emptyState, screen: { kind: "needs-you" } }), /all quiet — nothing needs you/);

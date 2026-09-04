@@ -5,28 +5,25 @@ import {
   encodeHumanRequestDetailGet,
   encodeHumanRequestReply,
   encodePairProve,
-  encodeStateEntityGet,
   encodeStateGet,
-  encodeStateSubscribe,
+  encodeStateWatch,
   encodeTaskEnqueue,
   encodeTerminalTargetGet,
   type AuthResultFrame,
-  type EntityChangedEvent,
   type ErrorFrame,
   type HelloBody,
   type HumanRequestCancelRunResultBody,
   type HumanRequestReplyResultBody,
   type PairResultFrame,
   type ServerControlFrame,
-  type StateEntityFrame,
-  type StateEventFrame,
+  type StateChangedFrame,
   type StateSnapshotFrame,
   type TaskEnqueueResultBody,
   type TerminalTargetDescriptor,
 } from "./control.js";
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
 import { CAPABILITIES, MAX_ARRAY_ITEMS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
-import { StateAccumulator, type StateView } from "./state.js";
+import { snapshotView, type StateView } from "./state.js";
 import { createTerminalHandle, terminalControlFrame, type InternalTerminalHandle, type TerminalHandle, type TerminalOptions } from "./terminal_session.js";
 import { decodeTerminalServer } from "./terminal_session.js";
 import { buildAuthTranscript, buildPairTranscript, hexBytes } from "./transcript.js";
@@ -34,7 +31,6 @@ import { buildAuthTranscript, buildPairTranscript, hexBytes } from "./transcript
 const CLOSED = 3;
 const PUBLIC_KEY_BYTES = 65;
 const SIGNATURE_BYTES = 64;
-const MAX_PENDING_ENTITY_REFRESHES = 32;
 
 export interface BrowserTimer {
   setTimeout(callback: () => void, delayMs: number): unknown;
@@ -119,8 +115,7 @@ export type BrowserSessionOptions = {
   onError?: (error: SessionError | ProtocolError) => void;
 };
 
-type Pending = "pair" | "auth" | "snapshot" | "entity";
-type PendingEntity = { kind: EntityChangedEvent["entity_kind"]; id: string };
+type Pending = "pair" | "auth" | "snapshot";
 type TargetPending = {
   agentId: string;
   expectedAgentRevision: bigint;
@@ -174,7 +169,6 @@ const TARGET_AUTHORITIES = new WeakMap<object, TargetAuthority>();
  * never reused after close. BrowserClient is the optional reconnect owner.
  */
 export class BrowserSession {
-  #accumulator = new StateAccumulator();
   #options: BrowserSessionOptions;
   #socket: BrowserSocket | undefined;
   #status: SessionStatus = "idle";
@@ -187,11 +181,18 @@ export class BrowserSession {
   #publicKey: Uint8Array | undefined;
   #pending = new Map<string, Pending>();
   #targetPending = new Map<string, TargetPending>();
-  #entities = new Map<string, PendingEntity>();
-  #retiredEntities = new Map<string, PendingEntity>();
   #subscriptionID: string | undefined;
   #stateHeadFloor = 0n;
-  #firstSnapshotPage = true;
+  // The published snapshot survives a refresh: readers keep coherent state
+  // while a newer one is in flight.
+  #state: StateView | undefined;
+  // The greatest head any STATE_CHANGED announced, which may be ahead of the
+  // published snapshot while a refresh is in flight.
+  #notifiedHead = 0n;
+  // At most one STATE_GET is outstanding, and a burst of notifications during
+  // it collapses into at most one trailing refresh.
+  #refreshID: string | undefined;
+  #refreshQueued = false;
   #requestNumber = 1;
   #closed = false;
   #pairing = false;
@@ -213,7 +214,7 @@ export class BrowserSession {
   }
 
   get status(): SessionStatus { return this.#status; }
-  get state(): StateView | undefined { return this.#accumulator.current; }
+  get state(): StateView | undefined { return this.#state; }
   get clientId(): string | undefined { return this.#clientId; }
   get capabilities(): CapabilityMask { return this.#capabilities; }
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
@@ -353,9 +354,7 @@ export class BrowserSession {
     this.#closeHumanPending(new SessionError("closed"));
     for (const handle of this.#terminalHandles) handle.terminate(new SessionError("closed"));
     this.#terminalHandles.clear();
-    this.#entities.clear();
-    this.#retiredEntities.clear();
-    this.#accumulator.applyRestart("gap");
+    this.#discardState();
     const socket = this.#socket;
     this.#socket = undefined;
     try { socket?.close(1000, "closed"); } catch { /* finite close semantics */ }
@@ -506,7 +505,7 @@ export class BrowserSession {
     this.#resolveConnect?.();
     this.#resolveConnect = undefined;
     this.#rejectConnect = undefined;
-    this.#beginSnapshot(null);
+    this.#requestSnapshot();
   }
 
   #applicationFrame(frame: ServerControlFrame): void {
@@ -531,77 +530,76 @@ export class BrowserSession {
     }
     switch (frame.type) {
       case "STATE_SNAPSHOT": this.#snapshot(frame); return;
-      case "STATE_RESTART": this.#wireRestart(frame); return;
-      case "STATE_EVENT": this.#event(frame); return;
-      case "STATE_ENTITY": this.#entity(frame); return;
+      case "STATE_CHANGED": this.#changed(frame); return;
       case "ERROR": this.#errorFrame(frame); return;
       default: throw new ProtocolError("wrong_direction");
     }
   }
 
   #snapshot(frame: StateSnapshotFrame): void {
-    if (this.#pending.get(frame.id) !== "snapshot" || this.#retiredEntities.size !== 0) throw new ProtocolError("malformed");
-    if (this.#firstSnapshotPage && frame.body.head < this.#stateHeadFloor) throw new ProtocolError("malformed");
+    if (this.#refreshID !== frame.id || this.#pending.get(frame.id) !== "snapshot") throw new ProtocolError("malformed");
+    this.#refreshID = undefined;
     this.#pending.delete(frame.id);
-    const result = this.#accumulator.applySnapshot(frame);
-    if (result.kind === "restart") throw new ProtocolError("malformed");
-    if (result.kind === "published") {
-      this.#advanceStateHead(result.state.head);
-      notify(this.#options.onState, result.state);
-      this.#ensureLive();
+    // Publication is monotonic. A snapshot older than one already published,
+    // or older than a head this session already observed, is never shown.
+    if (frame.body.head < this.#stateHeadFloor) throw new ProtocolError("malformed");
+    const first = this.#subscriptionID === undefined;
+    if (!first && this.#state !== undefined && frame.body.head <= this.#state.head) {
+      this.#maybeRefresh();
+      return;
+    }
+    this.#advanceStateHead(frame.body.head);
+    this.#state = snapshotView(frame.body);
+    notify(this.#options.onState, this.#state);
+    this.#ensureLive();
+    if (first) {
       this.#setStatus("ready");
       const id = this.#nextID("watch");
       this.#subscriptionID = id;
-      this.#send(encodeStateSubscribe(id, { after: result.state.head }));
-    } else if (result.kind === "staged") {
-      this.#firstSnapshotPage = false;
-      this.#beginSnapshot(this.#accumulator.nextCursor);
+      this.#send(encodeStateWatch(id, { after_head: frame.body.head }));
     }
+    this.#maybeRefresh();
   }
 
-  #event(frame: StateEventFrame): void {
+  #changed(frame: StateChangedFrame): void {
     if (frame.id !== this.#subscriptionID) throw new ProtocolError("malformed");
-    if (frame.body.event === "entity_changed" && !frame.body.deleted && this.#entities.size >= MAX_PENDING_ENTITY_REFRESHES) throw new SessionError("rate_limited", true);
-    const result = this.#accumulator.apply(frame);
-    if (result.kind === "restart") throw new ProtocolError("malformed");
-    if (result.kind === "applied" || result.kind === "ignored") {
-      this.#advanceStateHead(result.state.head);
-      notify(this.#options.onState, result.state);
-      this.#ensureLive();
-      if (frame.body.event === "entity_changed" && !frame.body.deleted) this.#refresh(frame.body);
-    }
+    // Heads are strictly increasing for one watch. A repeat or a regression is
+    // a protocol fault, not something to reconcile.
+    if (frame.body.head <= this.#notifiedHead) throw new ProtocolError("malformed");
+    this.#notifiedHead = frame.body.head;
+    this.#maybeRefresh();
   }
 
-  #refresh(event: EntityChangedEvent): void {
-    const id = this.#nextID("entity");
-    this.#entities.set(id, { kind: event.entity_kind, id: event.entity_id });
-    this.#pending.set(id, "entity");
-    this.#send(encodeStateEntityGet(id, { kind: event.entity_kind, id: event.entity_id }));
-  }
-
-  #entity(frame: StateEntityFrame): void {
-    const retired = this.#retiredEntities.get(frame.id);
-    if (retired !== undefined) {
-      if (retired.kind !== frame.body.kind || retired.id !== frame.body.id) throw new ProtocolError("malformed");
-      this.#retiredEntities.delete(frame.id);
+  /** One refresh in flight; a burst becomes at most one trailing refresh. */
+  #maybeRefresh(): void {
+    if (this.#state !== undefined && this.#notifiedHead <= this.#state.head) {
+      this.#refreshQueued = false;
       return;
     }
-    const expected = this.#entities.get(frame.id);
-    if (expected === undefined || expected.kind !== frame.body.kind || expected.id !== frame.body.id) throw new ProtocolError("malformed");
-    this.#entities.delete(frame.id);
-    this.#pending.delete(frame.id);
-    const result = this.#accumulator.applyEntity(frame.body);
-    if (result.kind === "restart") throw new ProtocolError("malformed");
-    else if (result.kind === "applied" || result.kind === "ignored") {
-      this.#advanceStateHead(result.state.head);
-      notify(this.#options.onState, result.state);
-      this.#ensureLive();
+    if (this.#refreshID !== undefined) {
+      this.#refreshQueued = true;
+      return;
     }
+    this.#refreshQueued = false;
+    this.#requestSnapshot();
+  }
+
+  #requestSnapshot(): void {
+    const id = this.#nextID("state");
+    this.#refreshID = id;
+    this.#pending.set(id, "snapshot");
+    this.#send(encodeStateGet(id, {}));
+  }
+
+  #discardState(): void {
+    this.#state = undefined;
+    this.#refreshID = undefined;
+    this.#refreshQueued = false;
+    this.#subscriptionID = undefined;
   }
 
   #errorFrame(frame: ErrorFrame): void {
     const id = frame.id;
-    if (id !== undefined && this.#retiredEntities.delete(id)) return;
     if (id !== undefined) {
       const target = this.#targetPending.get(id);
       if (target !== undefined) {
@@ -629,39 +627,6 @@ export class BrowserSession {
       this.#pending.delete(id);
     }
     throw new SessionError(frame.body.code, frame.body.retryable);
-  }
-
-  #beginSnapshot(cursor: string | null): void {
-    const result = this.#accumulator.beginSnapshot(cursor);
-    if (result.kind === "restart") throw new ProtocolError("malformed");
-    if (result.kind !== "requested") throw new ProtocolError("malformed");
-    this.#pending.set(result.request.id, "snapshot");
-    this.#send(encodeStateGet(result.request.id, { cursor }));
-  }
-
-  #wireRestart(frame: Extract<ServerControlFrame, { type: "STATE_RESTART" }>): void {
-    const fromWatch = frame.id === this.#subscriptionID;
-    const fromSnapshot = this.#pending.get(frame.id) === "snapshot";
-    if (!fromWatch && !fromSnapshot) throw new ProtocolError("malformed");
-    this.#advanceStateHead(frame.body.head);
-    if (fromWatch) {
-      if (this.#retiredEntities.size !== 0) throw new ProtocolError("malformed");
-      for (const [id, entity] of this.#entities) {
-        if (this.#pending.get(id) !== "entity") throw new ProtocolError("malformed");
-        this.#retiredEntities.set(id, entity);
-        this.#pending.delete(id);
-      }
-      this.#entities.clear();
-      this.#subscriptionID = undefined;
-    } else {
-      if (this.#subscriptionID !== undefined || this.#entities.size !== 0) throw new ProtocolError("malformed");
-      this.#pending.delete(frame.id);
-    }
-    this.#accumulator.applyRestart("gap");
-    this.#firstSnapshotPage = true;
-    this.#setStatus("syncing");
-    this.#ensureLive();
-    this.#beginSnapshot(null);
   }
 
   #advanceStateHead(head: bigint): void {
@@ -765,11 +730,9 @@ export class BrowserSession {
     this.#closeTargetPending(normalized);
     this.#closeTaskPending(normalized);
     this.#closeHumanPending(normalized);
-    this.#entities.clear();
-    this.#retiredEntities.clear();
     for (const handle of this.#terminalHandles) handle.terminate(normalized);
     this.#terminalHandles.clear();
-    this.#accumulator.applyRestart("gap");
+    this.#discardState();
     const socket = this.#socket;
     this.#socket = undefined;
     try { socket?.close(1000, "protocol"); } catch { /* ignore close failures */ }

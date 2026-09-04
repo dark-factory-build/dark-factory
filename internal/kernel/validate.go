@@ -17,8 +17,7 @@ func validateDurableControls(ctx context.Context, connection *sql.Conn) error {
 }
 
 // validateDurableEntityControls validates every durable authority row except
-// invalidations. WatchAfter validates the invalidation log itself so it can
-// distinguish a finite browser restart from malformed durable values.
+// the invalidation log itself, which validateDurableControls then checks.
 func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (FactoryState, error) {
 	state, err := factoryState(ctx, connection)
 	if err != nil {

@@ -17,9 +17,7 @@ import {
   encodeHumanRequestDetail,
   encodeHumanRequestReplyResult,
   encodeTaskEnqueueResult,
-  encodeStateEntity,
-  encodeStateEvent,
-  encodeStateRestart,
+  encodeStateChanged,
   encodeStateSnapshot,
   encodeTerminalAttached,
   encodeTerminalExit,
@@ -62,17 +60,15 @@ function serverFor(socket) {
   const capabilities = CAPABILITIES.observe | CAPABILITIES.private_human_request_detail | CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
   if (frame.type === "PAIR_PROVE") socket.reply(encodePairResult(frame.id, { client_id: clientID, capabilities }));
   if (frame.type === "AUTH_PROVE") socket.reply(encodeAuthResult(frame.id, { client_id: clientID, capabilities }));
-  if (frame.type === "STATE_GET") replyStatePage(socket, frame, 1n);
+  if (frame.type === "STATE_GET") replySnapshot(socket, frame, 1n);
 }
 
-const statePages = {
-  null: ["factory", [factory()], "p"], p: ["project", [], "a"], a: ["agent", [], "t"], t: ["task", [], "r"], r: ["human_request", [], null],
-};
+function snapshotBody(head, overrides = {}) {
+  return { head, factory: factory(head === 0n ? 1n : head), projects: [], agents: [], tasks: [], human_requests: [], ...overrides };
+}
 
-function replyStatePage(socket, frame, head) {
-  const [kind, originalItems, next_cursor] = statePages[String(frame.body.cursor)];
-  const items = kind === "factory" ? [factory(head)] : originalItems;
-  socket.reply(encodeStateSnapshot(frame.id, { head, kind, items, next_cursor }));
+function replySnapshot(socket, frame, head, overrides = {}) {
+  socket.reply(encodeStateSnapshot(frame.id, snapshotBody(head, overrides)));
 }
 
 function tick() { return new Promise((resolve) => setTimeout(resolve, 0)); }
@@ -88,10 +84,10 @@ async function openControlledStateSession(options = {}) {
   const server = (current, frame) => {
     if (frame.type === "PAIR_PROVE") current.reply(encodePairResult(frame.id, { client_id: clientID, capabilities }));
     if (frame.type === "AUTH_PROVE") current.reply(encodeAuthResult(frame.id, { client_id: clientID, capabilities }));
-    if (frame.type === "STATE_GET" && automatic) replyStatePage(current, frame, 1n);
+    if (frame.type === "STATE_GET" && automatic) replySnapshot(current, frame, 1n);
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example",
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(server); return socket; }, ...options,
   });
   await session.connect();
@@ -101,39 +97,21 @@ async function openControlledStateSession(options = {}) {
   return { session, socket };
 }
 
-async function completePendingSnapshot(socket, head) {
-  for (const cursor of [null, "p", "a", "t", "r"]) {
-    const frame = decodeClientControl(socket.sent.at(-1));
-    assert.equal(frame.type, "STATE_GET");
-    assert.equal(frame.body.cursor, cursor);
-    replyStatePage(socket, frame, head);
-    await tick();
-  }
+async function completePendingSnapshot(socket, head, overrides = {}) {
+  const frame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(frame.type, "STATE_GET");
+  replySnapshot(socket, frame, head, overrides);
+  await tick();
 }
 
-const firstEntityID = "aa".repeat(16);
-const secondEntityID = "bb".repeat(16);
-
-async function beginRetiredEntityRace(options = {}) {
-  const opened = await openControlledStateSession(options);
-  const watch = lastFrame(opened.socket, "STATE_SUBSCRIBE");
-  opened.socket.reply(encodeStateEvent(watch.id, { event: "entity_changed", sequence: 2n, head: 2n, entity_kind: "project", entity_id: firstEntityID, revision: 2n, deleted: false }));
-  await tick();
-  const first = lastFrame(opened.socket, "STATE_ENTITY_GET");
-  opened.socket.reply(encodeStateEvent(watch.id, { event: "entity_changed", sequence: 3n, head: 3n, entity_kind: "agent", entity_id: secondEntityID, revision: 2n, deleted: false }));
-  await tick();
-  const second = lastFrame(opened.socket, "STATE_ENTITY_GET");
-  opened.socket.reply(encodeStateRestart(watch.id, { head: 3n, floor: 1n, reason: "gap" }));
-  await tick();
-  assert.equal(opened.session.status, "syncing");
-  const snapshot = lastFrame(opened.socket, "STATE_GET");
-  return { ...opened, watch, first, second, snapshot };
+function stateRequests(socket) {
+  return socket.sent.map((wire) => decodeClientControl(wire)).filter((frame) => frame.type === "STATE_GET");
 }
 
 async function openHumanSession(onError) {
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1",
+    url: "ws://127.0.0.1:43123/browser/v2",
     host: "127.0.0.1:43123",
     origin: "https://preview.example",
     challenge,
@@ -159,12 +137,12 @@ function humanDetail(requestId, overrides = {}) {
   };
 }
 
-test("pairing signs through WebCrypto, persists the key, fetches all pages, and subscribes", async () => {
+test("pairing signs through WebCrypto, persists the key, reads one snapshot, and watches", async () => {
   const store = new MemoryKeys();
   const sockets = [];
   const states = [];
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1",
+    url: "ws://127.0.0.1:43123/browser/v2",
     host: "127.0.0.1:43123",
     origin: "https://preview.example",
     challenge,
@@ -178,7 +156,8 @@ test("pairing signs through WebCrypto, persists the key, fetches all pages, and 
   assert.equal(session.clientId, clientID);
   assert.equal(store.value.key.extractable, false);
   assert.equal(states.at(-1).head, 1n);
-  assert.equal(decodeClientControl(sockets[0].sent.at(-1)).type, "STATE_SUBSCRIBE");
+  assert.equal(decodeClientControl(sockets[0].sent.at(-1)).type, "STATE_WATCH");
+  assert.equal(stateRequests(sockets[0]).length, 1, "one coherent snapshot needs one request");
   assert.equal(sockets[0].sent.some((wire) => wire.includes(challenge)), true, "challenge is used only in proof, never URL");
   session.close();
 });
@@ -186,7 +165,7 @@ test("pairing signs through WebCrypto, persists the key, fetches all pages, and 
 test("HumanRequest methods are fenced before HELLO and after close, without a raw getter", async () => {
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1",
+    url: "ws://127.0.0.1:43123/browser/v2",
     host: "127.0.0.1:43123",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -208,7 +187,7 @@ test("authenticated HumanRequest methods emit exact frames and correlate results
   const store = new MemoryKeys();
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1",
+    url: "ws://127.0.0.1:43123/browser/v2",
     host: "127.0.0.1:43123",
     origin: "https://preview.example",
     challenge,
@@ -364,7 +343,7 @@ test("task enqueue result mismatches close the generation", async (t) => {
 test("task enqueue requires bounded human-actions authority before sending", async () => {
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v1",
+    url: "ws://127.0.0.1/browser/v2",
     host: "127.0.0.1",
     origin: "https://preview.example",
     challenge,
@@ -372,7 +351,7 @@ test("task enqueue requires bounded human-actions authority before sending", asy
     socketFactory: () => {
       socket = new Socket((current, frame) => {
         if (frame.type === "PAIR_PROVE") current.reply(encodePairResult(frame.id, { client_id: clientID, capabilities: CAPABILITIES.observe }));
-        if (frame.type === "STATE_GET") replyStatePage(current, frame, 1n);
+        if (frame.type === "STATE_GET") replySnapshot(current, frame, 1n);
       });
       return socket;
     },
@@ -480,7 +459,7 @@ test("malformed and binary frames fail with finite errors and never leak frame d
   const errors = [];
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v1",
+    url: "ws://127.0.0.1/browser/v2",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -498,7 +477,7 @@ test("malformed and binary frames fail with finite errors and never leak frame d
 test("a closed pairing generation rejects as uncertain and never saves a permanent key", async () => {
   const store = new MemoryKeys();
   let socket;
-  const session = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { socket = new Socket(() => {}); return socket; } });
+  const session = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { socket = new Socket(() => {}); return socket; } });
   const pending = session.connect();
   await new Promise((resolve) => setTimeout(resolve, 0));
   socket.close();
@@ -506,236 +485,126 @@ test("a closed pairing generation rejects as uncertain and never saves a permane
   assert.equal(store.value, null);
 });
 
-test("event refresh is correlated to its entity and updates canonical state", async () => {
-  const store = new MemoryKeys();
+// One refresh is in flight at a time, a burst collapses into at most one
+// trailing refresh, and the session ends at the greatest notified head.
+test("a change burst during one refresh produces one in-flight and one trailing refresh", async () => {
   const states = [];
-  let socket;
-  const session = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { socket = new Socket(serverFor); return socket; }, onState: (state) => states.push(state) });
-  await session.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  const watch = decodeClientControl(socket.sent.findLast((wire) => decodeClientControl(wire).type === "STATE_SUBSCRIBE"));
-  socket.onmessage({ data: encodeStateEvent(watch.id, { event: "entity_changed", sequence: 2n, head: 2n, entity_kind: "factory", entity_id: "factory", revision: 2n, deleted: false }) });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const refresh = decodeClientControl(socket.sent.at(-1));
-  assert.equal(refresh.type, "STATE_ENTITY_GET");
-  socket.reply(encodeStateEntity(refresh.id, { head: 2n, kind: "factory", id: "factory", revision: 2n, deleted: false, item: factory(2n) }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(states.at(-1).factory[0].revision, 2n);
+  const { session, socket } = await openControlledStateSession({ onState: (state) => states.push(state) });
+  const watch = lastFrame(socket, "STATE_WATCH");
+  assert.equal(watch.body.after_head, 1n);
+  const initial = stateRequests(socket).length;
+
+  socket.reply(encodeStateChanged(watch.id, { head: 2n }));
+  await tick();
+  const inflight = decodeClientControl(socket.sent.at(-1));
+  assert.equal(inflight.type, "STATE_GET");
+  assert.equal(stateRequests(socket).length, initial + 1);
+
+  for (const head of [3n, 4n, 5n]) {
+    socket.reply(encodeStateChanged(watch.id, { head }));
+    await tick();
+  }
+  assert.equal(stateRequests(socket).length, initial + 1, "a burst opened more than one in-flight refresh");
+  assert.equal(session.state.head, 1n, "an unfinished refresh replaced the published snapshot");
+
+  replySnapshot(socket, inflight, 2n);
+  await tick();
+  assert.equal(states.at(-1).head, 2n);
+  const trailing = decodeClientControl(socket.sent.at(-1));
+  assert.equal(trailing.type, "STATE_GET");
+  assert.equal(stateRequests(socket).length, initial + 2, "the burst produced more than one trailing refresh");
+
+  replySnapshot(socket, trailing, 5n);
+  await tick();
+  assert.equal(states.at(-1).head, 5n);
+  assert.equal(stateRequests(socket).length, initial + 2, "a satisfied notification kept refreshing");
   session.close();
 });
 
-test("wire restart retires exact entity responses, then publishes one fresh monotonic snapshot on the same socket", async () => {
+// A snapshot older than a head the session was already told about is not
+// published; the session refetches until it catches up.
+test("a snapshot older than the greatest notified head is refetched, never published", async () => {
   const states = [];
-  const errors = [];
-  const { session, socket, watch, first, second } = await beginRetiredEntityRace({ onState: (state) => states.push(state), onError: (error) => errors.push(error) });
-  const beforeRetired = states.length;
-  socket.reply(encodeStateEntity(first.id, { head: 3n, kind: "project", id: firstEntityID, revision: 2n, deleted: true, item: null }));
+  const { session, socket } = await openControlledStateSession({ onState: (state) => states.push(state) });
+  const watch = lastFrame(socket, "STATE_WATCH");
+  const published = states.length;
+  socket.reply(encodeStateChanged(watch.id, { head: 4n }));
   await tick();
-  assert.equal(session.status, "syncing", errors.map((error) => `${error.name}:${error.code}`).join(","));
-  assert.equal(states.length, beforeRetired, "a retired response must not publish its body");
-  socket.reply(encodeServerError({ code: "not_found", retryable: false }, second.id));
+  const first = decodeClientControl(socket.sent.at(-1));
+  replySnapshot(socket, first, 1n);
   await tick();
-  assert.equal(session.status, "syncing", errors.map((error) => `${error.name}:${error.code}`).join(","));
-
-  await completePendingSnapshot(socket, 4n);
-  assert.equal(session.status, "ready");
-  assert.equal(socket.readyState, 1);
-  assert.deepEqual(states.map((state) => state.head), [1n, 2n, 3n, 4n]);
-  assert.equal(states.at(-1).projects.size, 0, "retired project body never entered the fresh snapshot");
-  const replacementWatch = lastFrame(socket, "STATE_SUBSCRIBE");
-  assert.notEqual(replacementWatch.id, watch.id);
-  assert.equal(replacementWatch.body.after, 4n);
+  assert.equal(states.length, published, "an overtaken snapshot was published");
+  assert.equal(session.state.head, 1n);
+  const retry = decodeClientControl(socket.sent.at(-1));
+  assert.equal(retry.type, "STATE_GET");
+  assert.notEqual(retry.id, first.id);
+  replySnapshot(socket, retry, 4n);
+  await tick();
+  assert.equal(states.at(-1).head, 4n);
   session.close();
 });
 
-test("retired entity correlations match exactly and consume one entity or error response", async (t) => {
-  for (const mismatch of ["kind", "id", "duplicate entity", "duplicate error"]) {
-    await t.test(mismatch, async () => {
+// Publication is monotonic for the life of one session, and a change head that
+// repeats or regresses is a protocol fault rather than something to reconcile.
+test("published snapshots and notified heads are monotonic", async (t) => {
+  await t.test("a regressed snapshot closes the session", async () => {
+    const errors = [];
+    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+    const watch = lastFrame(socket, "STATE_WATCH");
+    socket.reply(encodeStateChanged(watch.id, { head: 2n }));
+    await tick();
+    const refresh = decodeClientControl(socket.sent.at(-1));
+    socket.reply(encodeStateSnapshot(refresh.id, snapshotBody(0n)));
+    await tick();
+    assert.equal(session.status, "closed");
+    assert.equal(errors.at(-1) instanceof ProtocolError, true);
+  });
+  await t.test("a repeated or regressed change head closes the session", async () => {
+    for (const second of [2n, 1n]) {
       const errors = [];
-      const { session, socket, first } = await beginRetiredEntityRace({ onError: (error) => errors.push(error) });
-      const exact = { head: 3n, kind: "project", id: firstEntityID, revision: 2n, deleted: true, item: null };
-      if (mismatch === "kind") socket.reply(encodeStateEntity(first.id, { ...exact, kind: "task" }));
-      else if (mismatch === "id") socket.reply(encodeStateEntity(first.id, { ...exact, id: secondEntityID }));
-      else if (mismatch === "duplicate entity") {
-        socket.reply(encodeStateEntity(first.id, exact));
-        await tick();
-        assert.equal(session.status, "syncing");
-        socket.reply(encodeStateEntity(first.id, exact));
-      } else {
-        const error = encodeServerError({ code: "not_found", retryable: false }, first.id);
-        socket.reply(error);
-        await tick();
-        assert.equal(session.status, "syncing");
-        socket.reply(error);
-      }
+      const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
+      const watch = lastFrame(socket, "STATE_WATCH");
+      socket.reply(encodeStateChanged(watch.id, { head: 2n }));
+      await tick();
+      socket.reply(encodeStateChanged(watch.id, { head: second }));
       await tick();
       assert.equal(session.status, "closed");
-      assert.equal(mismatch === "duplicate error"
-        ? errors.at(-1) instanceof SessionError && errors.at(-1).code === "not_found"
-        : errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
-    });
-  }
-});
-
-test("unknown state entities, restart IDs, and snapshot IDs fail closed", async (t) => {
-  await t.test("unknown entity", async () => {
-    const errors = [];
-    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
-    socket.reply(encodeStateEntity("unknown-entity", { head: 1n, kind: "project", id: firstEntityID, revision: 1n, deleted: true, item: null }));
-    await tick();
-    assert.equal(session.status, "closed");
-    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
-  });
-
-  await t.test("arbitrary restart", async () => {
-    const errors = [];
-    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
-    socket.reply(encodeStateRestart("forged-watch", { head: 1n, floor: 1n, reason: "gap" }));
-    await tick();
-    assert.equal(session.status, "closed");
-    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
-  });
-
-  await t.test("unknown snapshot", async () => {
-    const errors = [];
-    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
-    const watch = lastFrame(socket, "STATE_SUBSCRIBE");
-    socket.reply(encodeStateRestart(watch.id, { head: 1n, floor: 1n, reason: "gap" }));
-    await tick();
-    socket.reply(encodeStateSnapshot("forged-snapshot", { head: 1n, kind: "factory", items: [factory()], next_cursor: "p" }));
-    await tick();
-    assert.equal(session.status, "closed");
-    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+      assert.equal(errors.at(-1) instanceof ProtocolError, true);
+    }
   });
 });
 
-test("a fresh snapshot cannot overtake its retired entity responses", async () => {
-  const errors = [];
-  const { session, socket, snapshot } = await beginRetiredEntityRace({ onError: (error) => errors.push(error) });
-  socket.reply(encodeStateSnapshot(snapshot.id, { head: 3n, kind: "factory", items: [factory(3n)], next_cursor: "p" }));
-  await tick();
-  assert.equal(session.status, "closed");
-  assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
-});
-
-test("outstanding entity refreshes are capped at 32 and close retryably before a 33rd request", async () => {
-  const errors = [];
-  const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
-  const watch = lastFrame(socket, "STATE_SUBSCRIBE");
-  for (let index = 0; index < 33; index += 1) {
-    const sequence = BigInt(index + 2);
-    socket.reply(encodeStateEvent(watch.id, { event: "entity_changed", sequence, head: sequence, entity_kind: "project", entity_id: firstEntityID, revision: sequence, deleted: false }));
-    await tick();
-  }
-  assert.equal(session.status, "closed");
-  assert.equal(socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_ENTITY_GET").length, 32);
-  assert.equal(errors.at(-1) instanceof SessionError && errors.at(-1).code === "rate_limited" && errors.at(-1).retryable, true);
-});
-
-test("an exact pending snapshot restart starts a fresh bounded snapshot on the same socket", async () => {
-  const { session, socket } = await openControlledStateSession();
-  const watch = lastFrame(socket, "STATE_SUBSCRIBE");
-  socket.reply(encodeStateRestart(watch.id, { head: 2n, floor: 1n, reason: "gap" }));
-  await tick();
-  const firstSnapshot = lastFrame(socket, "STATE_GET");
-  socket.reply(encodeStateRestart(firstSnapshot.id, { head: 2n, floor: 1n, reason: "head_changed" }));
-  await tick();
-  const replacement = lastFrame(socket, "STATE_GET");
-  assert.notEqual(replacement.id, firstSnapshot.id);
-  await completePendingSnapshot(socket, 2n);
-  assert.equal(session.status, "ready");
-  assert.equal(session.state.head, 2n);
-  session.close();
-});
-
-test("closing from the restart status callback cannot send a post-close snapshot request", async () => {
-  let session;
-  let becameReady = false;
-  const opened = await openControlledStateSession({ onStatus: (status) => {
-    if (status === "ready") becameReady = true;
-    if (becameReady && status === "syncing") session?.close();
-  } });
-  session = opened.session;
-  const stateGets = opened.socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length;
-  const watch = lastFrame(opened.socket, "STATE_SUBSCRIBE");
-  opened.socket.reply(encodeStateRestart(watch.id, { head: 2n, floor: 1n, reason: "gap" }));
-  await tick();
-  assert.equal(session.status, "closed");
-  assert.equal(opened.socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length, stateGets);
-});
-
-test("late old-watch events and reducer-detected gaps close instead of installing another watch", async (t) => {
-  await t.test("late old-watch event", async () => {
+// A forged correlation cannot inject state: only the exact outstanding request
+// id and the exact installed watch id are accepted.
+test("forged snapshot and change correlations fail closed", async (t) => {
+  await t.test("unknown snapshot id", async () => {
     const errors = [];
     const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
-    const watch = lastFrame(socket, "STATE_SUBSCRIBE");
-    socket.reply(encodeStateRestart(watch.id, { head: 2n, floor: 1n, reason: "gap" }));
-    await tick();
-    socket.reply(encodeStateEvent(watch.id, { event: "hidden_advance", sequence: 2n, head: 2n }));
+    socket.reply(encodeStateSnapshot("forged-state", snapshotBody(9n)));
     await tick();
     assert.equal(session.status, "closed");
-    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+    assert.equal(errors.at(-1) instanceof ProtocolError, true);
   });
-
-  await t.test("reducer gap", async () => {
+  await t.test("unknown watch id", async () => {
     const errors = [];
     const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
-    const initialGets = socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length;
-    const watch = lastFrame(socket, "STATE_SUBSCRIBE");
-    socket.reply(encodeStateEvent(watch.id, { event: "hidden_advance", sequence: 3n, head: 3n }));
+    socket.reply(encodeStateChanged("forged-watch", { head: 9n }));
     await tick();
     assert.equal(session.status, "closed");
-    assert.equal(socket.sent.filter((wire) => decodeClientControl(wire).type === "STATE_GET").length, initialGets);
-    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
+    assert.equal(errors.at(-1) instanceof ProtocolError, true);
   });
-});
-
-test("wire restart and the first fresh snapshot preserve a session-lifetime monotonic head floor", async (t) => {
-  await t.test("restart cannot lower the published head", async () => {
-    const errors = [];
-    const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error) });
-    const watch = lastFrame(socket, "STATE_SUBSCRIBE");
-    socket.reply(encodeStateRestart(watch.id, { head: 0n, floor: 1n, reason: "gap" }));
-    await tick();
-    assert.equal(session.status, "closed");
-    assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
-  });
-
-  for (const [label, head, accepted] of [["N-1", 4n, false], ["N", 5n, true], ["N+1", 6n, true]]) {
-    await t.test(label, async () => {
-      const errors = [];
-      const states = [];
-      const { session, socket } = await openControlledStateSession({ onError: (error) => errors.push(error), onState: (state) => states.push(state) });
-      const watch = lastFrame(socket, "STATE_SUBSCRIBE");
-      socket.reply(encodeStateRestart(watch.id, { head: 5n, floor: 1n, reason: "gap" }));
-      await tick();
-      if (!accepted) {
-        const snapshot = lastFrame(socket, "STATE_GET");
-        socket.reply(encodeStateSnapshot(snapshot.id, { head, kind: "factory", items: [factory(head)], next_cursor: "p" }));
-        await tick();
-        assert.equal(session.status, "closed");
-        assert.equal(errors.at(-1) instanceof ProtocolError && errors.at(-1).code === "malformed", true);
-        assert.deepEqual(states.map((state) => state.head), [1n]);
-        return;
-      }
-      await completePendingSnapshot(socket, head);
-      assert.equal(session.status, "ready");
-      assert.deepEqual(states.map((state) => state.head), [1n, head]);
-      session.close();
-    });
-  }
 });
 
 test("reconnect creates a fresh generation and stale socket frames are fenced", async () => {
   const store = new MemoryKeys();
   const sockets = [];
-  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
+  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
   await pairing.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   pairing.close();
   const errors = [];
   const timer = new VirtualTimer();
-  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, timer, reconnectInitialDelayMs: 10, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; }, onError: (error) => errors.push(error) });
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, timer, reconnectInitialDelayMs: 10, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; }, onError: (error) => errors.push(error) });
   await client.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   sockets[1].close();
@@ -746,6 +615,51 @@ test("reconnect creates a fresh generation and stale socket frames are fenced", 
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.notEqual(client.session, undefined);
   assert.equal(client.session.status, "ready", errors.map((error) => error.code).join(","));
+  client.close();
+});
+
+// The old socket keeps its correlation ids. Neither a newer-looking snapshot
+// nor a newer change on it may overwrite the reconnected generation.
+test("old-socket snapshot and change frames cannot overwrite a reconnected session", async () => {
+  const store = new MemoryKeys();
+  const sockets = [];
+  const states = [];
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  await seed.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  seed.close();
+
+  const timer = new VirtualTimer();
+  const client = new BrowserClient({
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, timer, reconnectInitialDelayMs: 10,
+    socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; },
+    onState: (state) => states.push(state),
+  });
+  await client.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const staleSession = client.session;
+  const staleSocket = sockets[0];
+  const staleWatch = lastFrame(staleSocket, "STATE_WATCH");
+  const staleSnapshot = stateRequests(staleSocket).at(-1);
+
+  staleSocket.close();
+  timer.advance(10);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(sockets.length, 2);
+  assert.notEqual(client.session, staleSession);
+  assert.equal(client.session.status, "ready");
+  assert.equal(client.state.head, 1n);
+  const published = states.length;
+
+  staleSocket.readyState = 1;
+  staleSocket.onmessage?.({ data: encodeStateChanged(staleWatch.id, { head: 99n }) });
+  staleSocket.onmessage?.({ data: encodeStateSnapshot(staleSnapshot.id, snapshotBody(99n)) });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(states.length, published, "an old socket published into the reconnected session");
+  assert.equal(client.state.head, 1n);
+  assert.equal(client.session.status, "ready");
+  assert.equal(staleSession.status, "closed");
   client.close();
 });
 
@@ -776,7 +690,7 @@ test("successful pairing consumes challenge state and reconnects through AUTH af
   const store = new MemoryKeys();
   const timer = new VirtualTimer();
   const sockets = [];
-  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
   await client.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(decodeClientControl(sockets[0].sent.find((wire) => decodeClientControl(wire).type === "PAIR_PROVE")).type, "PAIR_PROVE");
@@ -791,13 +705,13 @@ test("successful pairing consumes challenge state and reconnects through AUTH af
 
 test("stale saved authorization repairs once through the still-held pairing challenge", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
   const sockets = [];
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     socketFactory: () => { const socket = new Socket((current, frame) => {
       if (frame.type === "AUTH_PROVE") current.reply(encodeServerError({ code: "unauthorized", retryable: false }));
       if (frame.type === "PAIR_PROVE") current.reply(encodePairResult(frame.id, { client_id: "77".repeat(16), capabilities: CAPABILITIES.observe }));
@@ -814,7 +728,7 @@ test("stale saved authorization repairs once through the still-held pairing chal
 
 test("a persisted repair that closes before ready reconnects through AUTH", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
@@ -822,7 +736,7 @@ test("a persisted repair that closes before ready reconnects through AUTH", asyn
   const sockets = [];
   let client;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
     onStatus: (status) => { if (status === "syncing" && sockets.length === 2) client.session?.close(); },
     socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); if (frame.type === "PAIR_PROVE") _current.reply(encodePairResult(frame.id, { client_id: "88".repeat(16), capabilities: CAPABILITIES.observe })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
   });
@@ -839,7 +753,7 @@ test("a persisted repair that closes before ready reconnects through AUTH", asyn
 
 test("closing while repair persistence is pending does not replay pairing", async () => {
   const seedStore = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
@@ -850,8 +764,8 @@ test("closing while repair persistence is pending does not replay pairing", asyn
   const sockets = [];
   let client;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
-    socketFactory: () => { const index = sockets.length; const server = index === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : index === 1 ? ((_current, frame) => { if (frame.type === "PAIR_PROVE") _current.reply(encodePairResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); }) : ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeAuthResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); if (frame.type === "STATE_GET") replyStatePage(_current, frame, 1n); }); const socket = new Socket(server); sockets.push(socket); return socket; },
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    socketFactory: () => { const index = sockets.length; const server = index === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : index === 1 ? ((_current, frame) => { if (frame.type === "PAIR_PROVE") _current.reply(encodePairResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); }) : ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeAuthResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); if (frame.type === "STATE_GET") replySnapshot(_current, frame, 1n); }); const socket = new Socket(server); sockets.push(socket); return socket; },
   });
   saveStarted = () => client.close();
   const connecting = client.connect();
@@ -869,7 +783,7 @@ test("closing while repair persistence is pending does not replay pairing", asyn
 
 test("a persisted repair clears the challenge before a rejected manual reconnect", async () => {
   const seedStore = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
@@ -881,7 +795,7 @@ test("a persisted repair clears the challenge before a rejected manual reconnect
   };
   const sockets = [];
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     socketFactory: () => {
       const index = sockets.length;
       const server = index === 0
@@ -909,7 +823,7 @@ test("a persisted repair clears the challenge before a rejected manual reconnect
 test("a pairing authorization error never replays the one-shot challenge", async () => {
   const sockets = [];
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(),
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(),
     socketFactory: () => { const socket = new Socket((_current, frame) => { if (frame.type === "PAIR_PROVE") socket.reply(encodeServerError({ code: "unauthorized", retryable: false })); }); sockets.push(socket); return socket; },
   });
   await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
@@ -921,14 +835,14 @@ test("a pairing authorization error never replays the one-shot challenge", async
 
 test("closing from stale authorization error fences the pending repair", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
   const sockets = [];
   let client;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     onError: () => client.close(),
     socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
   });
@@ -940,7 +854,7 @@ test("closing from stale authorization error fences the pending repair", async (
 
 test("a newer generation started by the auth error fences the old repair", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
@@ -948,7 +862,7 @@ test("a newer generation started by the auth error fences the old repair", async
   let client;
   let replaced = false;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     onError: () => {
       if (!replaced) { replaced = true; void client.connect().catch(() => {}); }
     },
@@ -967,12 +881,12 @@ test("authorization repair requires a fresh challenge and only exact nonretryabl
     { code: "unauthorized", retryable: false },
   ]) {
     const store = new MemoryKeys();
-    const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+    const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
     await seed.connect();
     await new Promise((resolve) => setTimeout(resolve, 10));
     seed.close();
     let sockets = 0;
-    const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, challenge: error.retryable ? challenge : undefined, socketFactory: () => { sockets += 1; return new Socket((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError(error)); }); } });
+    const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, challenge: error.retryable ? challenge : undefined, socketFactory: () => { sockets += 1; return new Socket((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError(error)); }); } });
     await assert.rejects(client.connect(), (actual) => actual instanceof SessionError && actual.code === "unauthorized");
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(sockets, 1);
@@ -982,12 +896,12 @@ test("authorization repair requires a fresh challenge and only exact nonretryabl
 
 test("valid saved authorization with a fresh challenge does not duplicate the client", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
   let sockets = 0;
-  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { sockets += 1; return new Socket(serverFor); } });
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { sockets += 1; return new Socket(serverFor); } });
   await client.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(sockets, 1);
@@ -1066,14 +980,14 @@ test("ordinary anchors are neither pairing authority nor scrubbed", () => {
 
 test("consumer callback exceptions cannot escape cleanup or stop a later state lifecycle", async () => {
   let malformedSocket;
-  const malformed = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", keyStore: new MemoryKeys(), socketFactory: () => { malformedSocket = new Socket(() => {}); return malformedSocket; }, onError: () => { throw new Error("onError"); }, onStatus: () => { throw new Error("onStatus"); } });
+  const malformed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: new MemoryKeys(), socketFactory: () => { malformedSocket = new Socket(() => {}); return malformedSocket; }, onError: () => { throw new Error("onError"); }, onStatus: () => { throw new Error("onStatus"); } });
   const rejected = malformed.connect();
   malformedSocket.onmessage({ data: new Uint8Array([0xff]) });
   await assert.rejects(rejected, (error) => error instanceof ProtocolError && error.code === "malformed");
   assert.equal(malformed.status, "closed");
 
   const states = [];
-  const session = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(), socketFactory: () => new Socket(serverFor), onState: (state) => { states.push(state); throw new Error("onState"); }, onStatus: () => { throw new Error("onStatus"); } });
+  const session = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(), socketFactory: () => new Socket(serverFor), onState: (state) => { states.push(state); throw new Error("onState"); }, onStatus: () => { throw new Error("onStatus"); } });
   await session.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(session.status, "ready");
@@ -1083,13 +997,13 @@ test("consumer callback exceptions cannot escape cleanup or stop a later state l
 
 test("unavailable daemon reconnects use bounded exponential virtual time", async () => {
   const pairingStore = new MemoryKeys();
-  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
+  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
   await pairing.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   pairing.close();
   const timer = new VirtualTimer();
   let attempts = 0;
-  const unavailable = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", keyStore: pairingStore, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { attempts += 1; throw new Error("no daemon"); } });
+  const unavailable = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: pairingStore, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { attempts += 1; throw new Error("no daemon"); } });
   await assert.rejects(unavailable.connect(), (error) => error instanceof SessionError && error.code === "connection");
   assert.equal(attempts, 1);
   timer.advance(9);
@@ -1106,14 +1020,14 @@ test("unavailable daemon reconnects use bounded exponential virtual time", async
 
 test("close clears a pending reconnect timer and manual connect can schedule a new lifecycle", async () => {
   const pairingStore = new MemoryKeys();
-  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
+  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
   await pairing.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   pairing.close();
   const timer = new VirtualTimer();
   let available = false;
   let attempts = 0;
-  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", keyStore: pairingStore, timer, reconnectInitialDelayMs: 10, socketFactory: () => { attempts += 1; if (!available) throw new Error("no daemon"); return new Socket(serverFor); } });
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: pairingStore, timer, reconnectInitialDelayMs: 10, socketFactory: () => { attempts += 1; if (!available) throw new Error("no daemon"); return new Socket(serverFor); } });
   await assert.rejects(client.connect());
   assert.equal(timer.tasks.size, 1);
   client.close();
@@ -1132,7 +1046,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   let loadStarted;
   const loadStore = { async load() { loadStarted?.(); await new Promise((resolve) => { releaseLoad = resolve; }); return null; }, async save() {} };
   let loadSocket;
-  const loading = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: loadStore, socketFactory: () => { loadSocket = new Socket(() => {}); return loadSocket; } });
+  const loading = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: loadStore, socketFactory: () => { loadSocket = new Socket(() => {}); return loadSocket; } });
   const loadReady = new Promise((resolve) => { loadStarted = resolve; });
   const loadingConnect = loading.connect();
   await loadReady;
@@ -1142,7 +1056,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   assert.equal(loadSocket.sent.length, 0);
 
   const sourceStore = new MemoryKeys();
-  const source = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: sourceStore, socketFactory: () => new Socket(serverFor) });
+  const source = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: sourceStore, socketFactory: () => new Socket(serverFor) });
   await source.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   source.close();
@@ -1151,7 +1065,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   const realCrypto = globalThis.crypto;
   const signingCrypto = { ...realCrypto, subtle: { ...realCrypto.subtle, sign: async (...args) => { signStarted?.(); await new Promise((resolve) => { releaseSign = resolve; }); return realCrypto.subtle.sign(...args); } } };
   let signSocket;
-  const signing = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", keyStore: sourceStore, crypto: signingCrypto, socketFactory: () => { signSocket = new Socket(() => {}); return signSocket; } });
+  const signing = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: sourceStore, crypto: signingCrypto, socketFactory: () => { signSocket = new Socket(() => {}); return signSocket; } });
   const signReady = new Promise((resolve) => { signStarted = resolve; });
   const signingConnect = signing.connect();
   await signReady;
@@ -1164,7 +1078,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   let saveStarted;
   const saveStore = { async load() { return null; }, async save() { saveStarted?.(); await new Promise((resolve) => { releaseSave = resolve; }); } };
   let saveSocket;
-  const saving = new BrowserSession({ url: "ws://127.0.0.1/browser/v1", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: saveStore, socketFactory: () => { saveSocket = new Socket(serverFor); return saveSocket; } });
+  const saving = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: saveStore, socketFactory: () => { saveSocket = new Socket(serverFor); return saveSocket; } });
   const saveReady = new Promise((resolve) => { saveStarted = resolve; });
   const savingConnect = saving.connect();
   await saveReady;
@@ -1178,7 +1092,7 @@ test("reentrant connecting status close rejects before creating a socket", async
   let session;
   let sessionSockets = 0;
   session = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v1",
+    url: "ws://127.0.0.1/browser/v2",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -1192,7 +1106,7 @@ test("reentrant connecting status close rejects before creating a socket", async
   let factorySession;
   let factorySocket;
   factorySession = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v1",
+    url: "ws://127.0.0.1/browser/v2",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -1208,7 +1122,7 @@ test("reentrant connecting status close rejects before creating a socket", async
   let client;
   let clientSockets = 0;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1",
+    url: "ws://127.0.0.1/browser/v2",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -1237,7 +1151,7 @@ test("BrowserClient does not replay a one-shot proof while PairResult save is de
   const timer = new VirtualTimer();
   const sockets = [];
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1",
+    url: "ws://127.0.0.1/browser/v2",
     host: "127.0.0.1",
     origin: "https://preview.example",
     challenge,
@@ -1289,7 +1203,7 @@ test("reconnect timer ownership fences stale callbacks with undefined handles", 
   const timer = new HostileTimer();
   let attempts = 0;
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v1",
+    url: "ws://127.0.0.1/browser/v2",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: store,
@@ -1334,7 +1248,7 @@ test("agent terminal discovery mints an opaque generation-bound target for openT
     }));
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: store, socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
@@ -1373,16 +1287,11 @@ test("a newer public head makes an overtaken terminal target response stale", as
     expectedHead: 1n,
   });
   const targetGet = lastFrame(socket, "TERMINAL_TARGET_GET");
-  const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+  const watch = lastFrame(socket, "STATE_WATCH");
 
-  socket.reply(
-    encodeStateEvent(watch.id, {
-      event: "hidden_advance",
-      sequence: 2n,
-      head: 2n,
-    }),
-  );
+  socket.reply(encodeStateChanged(watch.id, { head: 2n }));
   await tick();
+  await completePendingSnapshot(socket, 2n);
   assert.equal(session.state.head, 2n);
 
   const rejected = assert.rejects(
@@ -1407,7 +1316,7 @@ test("a newer public head makes an overtaken terminal target response stale", as
   session.close();
 });
 
-test("a restart preserves pending discovery but rejects its old-head target", async () => {
+test("a refresh preserves pending discovery but rejects its old-head target", async () => {
   const { session, socket } = await openControlledStateSession();
   const agentId = "78".repeat(16);
   const pending = session.resolveAgentTerminal({
@@ -1416,11 +1325,12 @@ test("a restart preserves pending discovery but rejects its old-head target", as
     expectedHead: 1n,
   });
   const targetGet = lastFrame(socket, "TERMINAL_TARGET_GET");
-  const watch = lastFrame(socket, "STATE_SUBSCRIBE");
+  const watch = lastFrame(socket, "STATE_WATCH");
 
-  socket.reply(encodeStateRestart(watch.id, { head: 2n, floor: 1n, reason: "gap" }));
+  socket.reply(encodeStateChanged(watch.id, { head: 2n }));
   await tick();
-  assert.equal(session.status, "syncing");
+  await completePendingSnapshot(socket, 2n);
+  assert.equal(session.state.head, 2n);
 
   const rejected = assert.rejects(
     pending,
@@ -1435,8 +1345,6 @@ test("a restart preserves pending discovery but rejects its old-head target", as
     }),
   );
   await rejected;
-  assert.equal(session.status, "syncing");
-  await completePendingSnapshot(socket, 2n);
   assert.equal(session.status, "ready");
   session.close();
 });
@@ -1446,7 +1354,7 @@ test("terminal target discovery is bounded, exact-correlated, and null is explic
   const agentId = "79".repeat(16);
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: store, socketFactory: () => { socket = new Socket(serverFor); return socket; },
   });
   await session.connect();
@@ -1463,7 +1371,7 @@ test("terminal target discovery is bounded, exact-correlated, and null is explic
 
   let malformedSocket;
   const malformed = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { malformedSocket = new Socket(serverFor); return malformedSocket; },
   });
   await malformed.connect();
@@ -1490,7 +1398,7 @@ test("EXIT closes the old handle and routes its duplicate away from a replacemen
     }));
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
@@ -1544,7 +1452,7 @@ test("RESET closes the old handle and a replacement may select a fresh after-seq
     }));
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
@@ -1599,7 +1507,7 @@ test("terminal replacement retains only the previous closed handle and fences ev
     }));
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v1", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
     onError: (error) => errors.push(error),
   });

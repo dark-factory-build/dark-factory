@@ -39,14 +39,12 @@ type fakeBackend struct {
 	authWait       bool
 	stateErr       error
 	stateWait      bool
-	entityErr      error
 	detailErr      error
 	subErr         error
 	subWait        bool
 	subFactory     func() StateSubscription
-	page           StatePage
-	pageFunc       func(int, *Cursor) StatePage
-	entity         browserprotocol.StateEntity
+	snapshot       browserprotocol.StateSnapshot
+	snapshotFunc   func(int) browserprotocol.StateSnapshot
 	detail         browserprotocol.HumanRequestDetail
 	target         browserprotocol.TerminalTarget
 	targetErr      error
@@ -73,18 +71,13 @@ func newFakeBackend() *fakeBackend {
 	clientBytes, _ := hex.DecodeString(testID)
 	copy(backend.authentication.Principal.ClientID[:], clientBytes)
 	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityPrivateHumanRequestDetail
-	next := Cursor{Head: 7, Kind: browserprotocol.StateProject}
-	backend.page = StatePage{
-		Head: 7,
-		Kind: browserprotocol.StateFactory,
-		Items: browserprotocol.FactoryItems([]browserprotocol.FactoryItem{{
-			DispatchEnabled: true, Capacity: 2, ActiveRuns: 1, Revision: 1,
-		}}),
-		NextCursor: &next,
-	}
-	backend.entity = browserprotocol.StateEntity{
-		Head: 7, Kind: browserprotocol.StateProject, ID: projectID, Revision: 1,
-		Item: browserprotocol.ProjectStateItem(browserprotocol.ProjectItem{ID: projectID, Name: "Factory", Revision: 1}),
+	backend.snapshot = browserprotocol.StateSnapshot{
+		Head:          7,
+		Factory:       browserprotocol.FactoryItem{DispatchEnabled: true, Capacity: 2, ActiveRuns: 1, Revision: 1},
+		Projects:      []browserprotocol.ProjectItem{{ID: projectID, Name: "Factory", Revision: 1}},
+		Agents:        []browserprotocol.AgentItem{},
+		Tasks:         []browserprotocol.TaskItem{},
+		HumanRequests: []browserprotocol.HumanRequestItem{},
 	}
 	backend.detail = browserprotocol.HumanRequestDetail{RequestID: requestID, Revision: 1, Question: "Choose one", ReplyMaxBytes: browserprotocol.MaxHumanReplyBytes}
 	backend.target = browserprotocol.TerminalTarget{AgentID: strings.Repeat("01", 16), AgentRevision: 1, Head: 7}
@@ -121,25 +114,19 @@ func (backend *fakeBackend) Authenticate(ctx context.Context, request AuthReques
 	}
 	return result, err
 }
-func (backend *fakeBackend) StatePage(ctx context.Context, client [16]byte, cursor *Cursor) (StatePage, error) {
+func (backend *fakeBackend) StateSnapshot(ctx context.Context, client [16]byte) (browserprotocol.StateSnapshot, error) {
 	backend.mu.Lock()
 	backend.stateCalls++
 	backend.clients = append(backend.clients, client)
-	wait, page, backendErr, pageFunc, call := backend.stateWait, backend.page, backend.stateErr, backend.pageFunc, backend.stateCalls
+	wait, snapshot, backendErr, snapshotFunc, call := backend.stateWait, backend.snapshot, backend.stateErr, backend.snapshotFunc, backend.stateCalls
 	backend.mu.Unlock()
 	if wait {
 		<-ctx.Done()
 	}
-	if pageFunc != nil {
-		return pageFunc(call, cursor), backendErr
+	if snapshotFunc != nil {
+		return snapshotFunc(call), backendErr
 	}
-	return page, backendErr
-}
-func (backend *fakeBackend) StateEntity(_ context.Context, client [16]byte, _ browserprotocol.StateEntityGet) (browserprotocol.StateEntity, error) {
-	backend.mu.Lock()
-	defer backend.mu.Unlock()
-	backend.clients = append(backend.clients, client)
-	return backend.entity, backend.entityErr
+	return snapshot, backendErr
 }
 func (backend *fakeBackend) HumanRequestDetail(_ context.Context, client [16]byte, _ browserprotocol.HumanRequestDetailGet) (browserprotocol.HumanRequestDetail, error) {
 	backend.mu.Lock()
@@ -166,7 +153,7 @@ func (backend *fakeBackend) TerminalTarget(ctx context.Context, client [16]byte,
 	}
 	return result, backendErr
 }
-func (backend *fakeBackend) SubscribeState(ctx context.Context, client [16]byte, _ browserprotocol.Decimal) (StateSubscription, error) {
+func (backend *fakeBackend) WatchState(ctx context.Context, client [16]byte, _ browserprotocol.Decimal) (StateSubscription, error) {
 	backend.mu.Lock()
 	backend.subCalls++
 	backend.clients = append(backend.clients, client)
@@ -525,14 +512,16 @@ func TestMalformedOversizedBinaryAndSecondAuthAreRejected(t *testing.T) {
 		server := startServer(t, newFakeBackend())
 		connection, _ := dialServer(t, server, testOrigin)
 		_ = readServerFrame(t, connection)
-		writeClientFrame(t, connection, []byte(`{"v":1,"type":"AUTH_PROVE"}`))
+		writeClientFrame(t, connection, []byte(`{"v":2,"type":"AUTH_PROVE"}`))
 		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInvalidRequest)
 	})
-	t.Run("unsupported version", func(t *testing.T) {
+	// A stale site artifact still speaking the previous generation is refused
+	// at its first frame with the exact unsupported_version code.
+	t.Run("previous generation", func(t *testing.T) {
 		server := startServer(t, newFakeBackend())
 		connection, _ := dialServer(t, server, testOrigin)
 		_ = readServerFrame(t, connection)
-		writeClientFrame(t, connection, []byte(`{"v":2,"type":"AUTH_PROVE","id":"auth","body":{"client_id":"101112131415161718191a1b1c1d1e1f","signature":"01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"}}`))
+		writeClientFrame(t, connection, []byte(`{"v":1,"type":"AUTH_PROVE","id":"auth","body":{"client_id":"101112131415161718191a1b1c1d1e1f","signature":"01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"}}`))
 		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnsupportedVersion)
 	})
 	t.Run("oversized", func(t *testing.T) {
@@ -632,43 +621,27 @@ func TestStateOperationsChronologyCapabilitiesAndRedaction(t *testing.T) {
 
 	state, _ := browserprotocol.EncodeStateGet("state", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, state)
-	snapshot := readServerFrame(t, connection)
-	if snapshot.Type != browserprotocol.TypeStateSnapshot || snapshot.ID != "state" {
+	frame := readServerFrame(t, connection)
+	if frame.Type != browserprotocol.TypeStateSnapshot || frame.ID != "state" {
+		t.Fatalf("snapshot=%+v", frame)
+	}
+	snapshot := frame.Body.(browserprotocol.StateSnapshot)
+	if snapshot.Head != 7 || len(snapshot.Projects) != 1 {
 		t.Fatalf("snapshot=%+v", snapshot)
 	}
-	page := snapshot.Body.(browserprotocol.StateSnapshot)
-	if page.Head != 7 || page.NextCursor == nil {
-		t.Fatalf("page=%+v", page)
-	}
-	decoded, err := decodeCursor(*page.NextCursor)
-	if err != nil || decoded.Kind != browserprotocol.StateProject || decoded.Head != 7 {
-		t.Fatalf("cursor=%+v err=%v", decoded, err)
-	}
 
-	entityRequest, _ := browserprotocol.EncodeStateEntityGet("entity", browserprotocol.StateEntityGet{Kind: browserprotocol.StateProject, ID: projectID})
-	writeClientFrame(t, connection, entityRequest)
-	if entity := readServerFrame(t, connection); entity.Type != browserprotocol.TypeStateEntity {
-		t.Fatalf("entity=%+v", entity)
-	}
 	detailRequest, _ := browserprotocol.EncodeHumanRequestDetailGet("detail", browserprotocol.HumanRequestDetailGet{RequestID: requestID, ExpectedRevision: 1})
 	writeClientFrame(t, connection, detailRequest)
 	if detail := readServerFrame(t, connection); detail.Type != browserprotocol.TypeHumanRequestDetail {
 		t.Fatalf("detail=%+v", detail)
 	}
 
-	subscribe, _ := browserprotocol.EncodeStateSubscribe("sub", browserprotocol.StateSubscribe{After: 7})
-	writeClientFrame(t, connection, subscribe)
-	event := browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: 8, Head: 8})
-	backend.sub.updates <- StateUpdate{Event: &event}
-	eventFrame := readServerFrame(t, connection)
-	if eventFrame.Type != browserprotocol.TypeStateEvent || eventFrame.ID != "sub" {
-		t.Fatalf("event=%+v", eventFrame)
-	}
-	restart := browserprotocol.StateRestart{Head: 9, Floor: 2, Reason: browserprotocol.RestartGap}
-	backend.sub.updates <- StateUpdate{Restart: &restart}
-	restartFrame := readServerFrame(t, connection)
-	if restartFrame.Type != browserprotocol.TypeStateRestart || restartFrame.ID != "sub" || backend.sub.closed.Load() != 1 {
-		t.Fatalf("restart=%+v closed=%d", restartFrame, backend.sub.closed.Load())
+	watch, _ := browserprotocol.EncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 7})
+	writeClientFrame(t, connection, watch)
+	backend.sub.updates <- StateUpdate{Head: 8}
+	changed := readServerFrame(t, connection)
+	if changed.Type != browserprotocol.TypeStateChanged || changed.ID != "watch" || changed.Body.(browserprotocol.StateChanged).Head != 8 {
+		t.Fatalf("change=%+v", changed)
 	}
 
 	backend.mu.Lock()
@@ -691,20 +664,76 @@ func TestStateOperationsChronologyCapabilitiesAndRedaction(t *testing.T) {
 	}
 }
 
-func TestStateRestartAndFiniteErrorMapping(t *testing.T) {
+// A head that repeats or regresses within one watch is a backend fault. The
+// transport must not forward it, and the connection ends rather than letting a
+// client see a non-monotonic chronology.
+func TestStateChangeHeadsAreStrictlyIncreasing(t *testing.T) {
+	for _, second := range []browserprotocol.Decimal{7, 6, 0} {
+		backend := newFakeBackend()
+		server := startServer(t, backend)
+		connection, _ := dialServer(t, server, testOrigin)
+		authenticate(t, connection)
+		watch, _ := browserprotocol.EncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 6})
+		writeClientFrame(t, connection, watch)
+		backend.sub.updates <- StateUpdate{Head: 7}
+		if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateChanged {
+			t.Fatalf("first change=%+v", frame)
+		}
+		backend.sub.updates <- StateUpdate{Head: second}
+		if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeError {
+			t.Fatalf("non-monotonic head %d produced %+v", second, frame)
+		}
+	}
+}
+
+// An oversized snapshot is a finite too_large answer. The client never sees a
+// truncated snapshot, and the connection stays usable.
+func TestOversizedSnapshotIsAFiniteTooLargeAnswer(t *testing.T) {
 	backend := newFakeBackend()
-	backend.stateErr = &RestartError{State: browserprotocol.StateRestart{Head: 9, Floor: 2, Reason: browserprotocol.RestartHeadChanged}}
+	oversized := browserprotocol.StateSnapshot{
+		Head: 7, Factory: browserprotocol.FactoryItem{DispatchEnabled: true, Capacity: 2, ActiveRuns: 1, Revision: 1},
+		Projects: []browserprotocol.ProjectItem{}, Agents: []browserprotocol.AgentItem{},
+		Tasks: []browserprotocol.TaskItem{}, HumanRequests: []browserprotocol.HumanRequestItem{},
+	}
+	for index := 1; index <= 2048; index++ {
+		raw := make([]byte, 16)
+		raw[14], raw[15] = byte(index/251), byte(index%251)
+		raw[0] = 0xa3
+		oversized.Tasks = append(oversized.Tasks, browserprotocol.TaskItem{
+			ID: fmt.Sprintf("%x", raw), ProjectID: projectID, AssignedAgentID: testID,
+			Title: strings.Repeat("t", browserprotocol.MaxTaskTitleBytes), Status: "queued", Priority: 1, Revision: 1,
+		})
+	}
+	backend.snapshotFunc = func(call int) browserprotocol.StateSnapshot {
+		if call == 1 {
+			return oversized
+		}
+		return backend.snapshot
+	}
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	request, _ := browserprotocol.EncodeStateGet("state", browserprotocol.StateGet{})
+	request, _ := browserprotocol.EncodeStateGet("too-large", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, request)
-	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateRestart {
-		t.Fatalf("frame=%+v", frame)
+	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorTooLarge)
+	// The refusal is finite: the same connection still serves a fitting snapshot.
+	again, _ := browserprotocol.EncodeStateGet("fits", browserprotocol.StateGet{})
+	writeClientFrame(t, connection, again)
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateSnapshot {
+		t.Fatalf("connection did not survive a too_large answer: %+v", frame)
 	}
+}
+
+func TestFiniteBackendErrorMapping(t *testing.T) {
+	backend := newFakeBackend()
+	server := startServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	authenticate(t, connection)
 	for index, backendErr := range []error{ErrNotFound, ErrStale, ErrTooLarge} {
-		backend.entityErr = backendErr
-		request, _ := browserprotocol.EncodeStateEntityGet(fmt.Sprintf("entity-%d", index), browserprotocol.StateEntityGet{Kind: browserprotocol.StateProject, ID: projectID})
+		backend.mu.Lock()
+		backend.stateErr = backendErr
+		backend.mu.Unlock()
+		request, _ := browserprotocol.EncodeStateGet(fmt.Sprintf("state-%d", index), browserprotocol.StateGet{})
 		writeClientFrame(t, connection, request)
 		frame := readServerFrame(t, connection)
 		want := []browserprotocol.ErrorCode{browserprotocol.ErrorNotFound, browserprotocol.ErrorStale, browserprotocol.ErrorTooLarge}[index]
@@ -761,69 +790,6 @@ func TestDuplicateRequestIDAndConnectionLimit(t *testing.T) {
 			t.Fatalf("cap dial err=%v response=%v", err, response)
 		}
 	})
-}
-
-func TestMaximumValidStateTraversalFitsLifetimeRequestBudget(t *testing.T) {
-	backend := newFakeBackend()
-	item := browserprotocol.HumanRequestItem{
-		ID: requestID, ProjectID: projectID, AgentID: testID, TaskID: projectID,
-		CreatedAt: 1, UpdatedAt: 1, Revision: 1, Kind: "question", Status: "open",
-		ReplyMaxBytes: browserprotocol.MaxHumanReplyBytes, CanReply: true,
-	}
-	backend.pageFunc = func(call int, _ *Cursor) StatePage {
-		nextFor := func(kind browserprotocol.StateKind) *Cursor {
-			return &Cursor{Head: 1, Kind: kind}
-		}
-		switch call {
-		case 1:
-			return StatePage{Head: 1, Kind: browserprotocol.StateFactory, Items: browserprotocol.FactoryItems([]browserprotocol.FactoryItem{{DispatchEnabled: true, Capacity: 1, Revision: 1}}), NextCursor: nextFor(browserprotocol.StateProject)}
-		case 2:
-			return StatePage{Head: 1, Kind: browserprotocol.StateProject, Items: browserprotocol.ProjectItems(nil), NextCursor: nextFor(browserprotocol.StateAgent)}
-		case 3:
-			return StatePage{Head: 1, Kind: browserprotocol.StateAgent, Items: browserprotocol.AgentItems(nil), NextCursor: nextFor(browserprotocol.StateTask)}
-		case 4:
-			return StatePage{Head: 1, Kind: browserprotocol.StateTask, Items: browserprotocol.TaskItems(nil), NextCursor: nextFor(browserprotocol.StateHumanRequest)}
-		default:
-			items := make([]browserprotocol.HumanRequestItem, browserprotocol.MaxStatePageItems)
-			for index := range items {
-				items[index] = item
-			}
-			if call == 516 {
-				items = items[:7]
-				return StatePage{Head: 1, Kind: browserprotocol.StateHumanRequest, Items: browserprotocol.HumanRequestItems(items)}
-			}
-			next := nextFor(browserprotocol.StateHumanRequest)
-			next.HasAfter = true
-			next.AfterID[0] = 1
-			return StatePage{Head: 1, Kind: browserprotocol.StateHumanRequest, Items: browserprotocol.HumanRequestItems(items), NextCursor: next}
-		}
-	}
-	server := startServer(t, backend)
-	connection, _ := dialServer(t, server, testOrigin)
-	authenticate(t, connection)
-	var cursor *string
-	for pageNumber := 1; pageNumber <= 516; pageNumber++ {
-		request, err := browserprotocol.EncodeStateGet(fmt.Sprintf("page-%d", pageNumber), browserprotocol.StateGet{Cursor: cursor})
-		if err != nil {
-			t.Fatal(err)
-		}
-		writeClientFrame(t, connection, request)
-		frame := readServerFrame(t, connection)
-		if frame.Type != browserprotocol.TypeStateSnapshot {
-			t.Fatalf("page %d response=%+v", pageNumber, frame)
-		}
-		snapshot := frame.Body.(browserprotocol.StateSnapshot)
-		cursor = snapshot.NextCursor
-	}
-	if cursor != nil {
-		t.Fatal("maximum traversal did not terminate")
-	}
-	backend.mu.Lock()
-	calls := backend.stateCalls
-	backend.mu.Unlock()
-	if calls != 516 {
-		t.Fatalf("state calls=%d want 516", calls)
-	}
 }
 
 func TestLifetimeRequestBudgetRemainsFinite(t *testing.T) {
@@ -911,7 +877,7 @@ func TestServerCloseWaitsForConnectionOwnedSubscriptionJoin(t *testing.T) {
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	subscribe, _ := browserprotocol.EncodeStateSubscribe("sub", browserprotocol.StateSubscribe{})
+	subscribe, _ := browserprotocol.EncodeStateWatch("sub", browserprotocol.StateWatch{})
 	writeClientFrame(t, connection, subscribe)
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -955,7 +921,7 @@ func TestSlowSubscriberCannotGrowTransportMemoryOrBlockShutdown(t *testing.T) {
 	server := startServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticate(t, connection)
-	subscribe, _ := browserprotocol.EncodeStateSubscribe("slow", browserprotocol.StateSubscribe{After: 0})
+	subscribe, _ := browserprotocol.EncodeStateWatch("slow", browserprotocol.StateWatch{AfterHead: 0})
 	writeClientFrame(t, connection, subscribe)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -976,9 +942,8 @@ func TestSlowSubscriberCannotGrowTransportMemoryOrBlockShutdown(t *testing.T) {
 	go func() {
 		defer close(producerDone)
 		for sequence := uint64(1); sequence <= 100_000; sequence++ {
-			event := browserprotocol.HiddenAdvanceEvent(browserprotocol.HiddenAdvance{Sequence: browserprotocol.Decimal(sequence), Head: browserprotocol.Decimal(sequence)})
 			select {
-			case backend.sub.updates <- StateUpdate{Event: &event}:
+			case backend.sub.updates <- StateUpdate{Head: browserprotocol.Decimal(sequence)}:
 			case <-backend.sub.done:
 				return
 			case <-producerContext.Done():

@@ -340,12 +340,12 @@ function assertToolsUnchanged(tools) {
 }
 
 function sourceIdentity(sourceCommit, tools) {
-  const protocol = readJson(join(repositoryRoot, "protocol", "browser", "v1", "manifest.json"));
-  if (!Number.isSafeInteger(protocol.version)) fail("protocol/browser/v1/manifest.json has an invalid version");
+  const protocol = readJson(join(repositoryRoot, "protocol", "browser", "v2", "manifest.json"));
+  if (!Number.isSafeInteger(protocol.version)) fail("protocol/browser/v2/manifest.json has an invalid version");
   return {
     schemaVersion: 1,
     source: { commit: sourceCommit, clean: true },
-    protocol: { name: "dark-factory/browser/v1", version: protocol.version },
+    protocol: { name: "dark-factory/browser/v2", version: protocol.version },
     buildTools: tools.versions,
   };
 }
@@ -558,7 +558,7 @@ function validateManifestShape(manifest) {
   exactKeys(manifest.source, ["commit", "clean"], "manifest.source");
   if (!/^[0-9a-f]{40}$/.test(stringField(manifest.source, "commit", "manifest.source")) || manifest.source.clean !== true) fail("manifest source is invalid");
   exactKeys(manifest.protocol, ["name", "version"], "manifest.protocol");
-  if (stringField(manifest.protocol, "name", "manifest.protocol") !== "dark-factory/browser/v1" || integerField(manifest.protocol, "version", "manifest.protocol") !== 1) fail("manifest protocol is invalid");
+  if (stringField(manifest.protocol, "name", "manifest.protocol") !== "dark-factory/browser/v2" || integerField(manifest.protocol, "version", "manifest.protocol") !== 2) fail("manifest protocol is invalid");
   exactKeys(manifest.buildTools, ["toolTreeVersion", "node", "pnpm", "pnpmTreeSha512", "typescript", "typescriptTreeSha512", "typescriptIntegrity", "tar"], "manifest.buildTools");
   exactKeys(manifest.buildTools.node, ["version", "bytes", "mode", "sha512"], "manifest.buildTools.node");
   exactKeys(manifest.buildTools.tar, ["version", "bytes", "mode", "sha512"], "manifest.buildTools.tar");
@@ -650,7 +650,7 @@ async function constructArtifacts(destination, tools, identity) {
   const stageRoot = mkdtempSync(join(dirname(destination), ".dark-factory-public-stage-"));
   try {
     build(tools);
-    if (await compiledProtocolVersion() !== identity.protocol.version) fail("compiled client protocol version differs from protocol/browser/v1/manifest.json");
+    if (await compiledProtocolVersion() !== identity.protocol.version) fail("compiled client protocol version differs from protocol/browser/v2/manifest.json");
     if (currentSource() !== identity.source.commit) fail("source changed while constructing artifacts");
     writeStableJson(join(distRoot(packages.client), "provenance.json"), provenance(packages.client, identity));
     const clientArtifact = stageAndPack(tools, packages.client, destination, stageRoot);

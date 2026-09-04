@@ -13,7 +13,7 @@ import (
 	"unicode/utf8"
 )
 
-// Adding a v1 message is a contract change: add its manifest entry, fixture and
+// Adding a message is a contract change: add its manifest entry, fixture and
 // explicit case in the role-specific decoders together.
 const (
 	MaxControlBytes = 64 << 10
@@ -21,6 +21,16 @@ const (
 	MaxJSONArray    = 32
 	MaxJSONObject   = 32
 )
+
+// controlLimit is the exact encoded bound for one message type. Client-to-
+// server control stays at 64 KiB; only the server's whole-state snapshot may
+// reach 1 MiB.
+func controlLimit(kind MessageType) int {
+	if kind == TypeStateSnapshot {
+		return MaxSnapshotBytes
+	}
+	return MaxControlBytes
+}
 
 type MessageType string
 
@@ -32,11 +42,8 @@ const (
 	TypeAuthResult                  MessageType = "AUTH_RESULT"
 	TypeStateGet                    MessageType = "STATE_GET"
 	TypeStateSnapshot               MessageType = "STATE_SNAPSHOT"
-	TypeStateRestart                MessageType = "STATE_RESTART"
-	TypeStateSubscribe              MessageType = "STATE_SUBSCRIBE"
-	TypeStateEvent                  MessageType = "STATE_EVENT"
-	TypeStateEntityGet              MessageType = "STATE_ENTITY_GET"
-	TypeStateEntity                 MessageType = "STATE_ENTITY"
+	TypeStateWatch                  MessageType = "STATE_WATCH"
+	TypeStateChanged                MessageType = "STATE_CHANGED"
 	TypeHumanRequestDetailGet       MessageType = "HUMAN_REQUEST_DETAIL_GET"
 	TypeHumanRequestDetail          MessageType = "HUMAN_REQUEST_DETAIL"
 	TypeHumanRequestReply           MessageType = "HUMAN_REQUEST_REPLY"
@@ -172,20 +179,11 @@ func EncodeStateGet(id string, value StateGet) ([]byte, error) {
 func EncodeStateSnapshot(id string, value StateSnapshot) ([]byte, error) {
 	return encodeControl(TypeStateSnapshot, id, value)
 }
-func EncodeStateRestart(id string, value StateRestart) ([]byte, error) {
-	return encodeControl(TypeStateRestart, id, value)
+func EncodeStateWatch(id string, value StateWatch) ([]byte, error) {
+	return encodeControl(TypeStateWatch, id, value)
 }
-func EncodeStateSubscribe(id string, value StateSubscribe) ([]byte, error) {
-	return encodeControl(TypeStateSubscribe, id, value)
-}
-func EncodeStateEvent(id string, value StateEvent) ([]byte, error) {
-	return encodeControl(TypeStateEvent, id, value)
-}
-func EncodeStateEntityGet(id string, value StateEntityGet) ([]byte, error) {
-	return encodeControl(TypeStateEntityGet, id, value)
-}
-func EncodeStateEntity(id string, value StateEntity) ([]byte, error) {
-	return encodeControl(TypeStateEntity, id, value)
+func EncodeStateChanged(id string, value StateChanged) ([]byte, error) {
+	return encodeControl(TypeStateChanged, id, value)
 }
 func EncodeHumanRequestDetailGet(id string, value HumanRequestDetailGet) ([]byte, error) {
 	return encodeControl(TypeHumanRequestDetailGet, id, value)
@@ -215,11 +213,11 @@ func encodeControl(kind MessageType, id string, body any) ([]byte, error) {
 			return nil, fmt.Errorf("%w: id: %v", ErrMalformed, err)
 		}
 	}
-	frame, err := json.Marshal(controlEnvelope{Version: 1, Type: kind, ID: wireID, Body: payload})
+	frame, err := json.Marshal(controlEnvelope{Version: ProtocolVersion, Type: kind, ID: wireID, Body: payload})
 	if err != nil {
 		return nil, fmt.Errorf("%w: envelope: %v", ErrMalformed, err)
 	}
-	if len(frame) > MaxControlBytes {
+	if len(frame) > controlLimit(kind) {
 		return nil, ErrOversized
 	}
 	return frame, nil
@@ -245,21 +243,31 @@ const (
 )
 
 func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
-	if len(data) > MaxControlBytes {
+	// A browser can only ever send a 64 KiB control frame. Only the server
+	// direction admits the larger whole-state snapshot, and the exact
+	// per-type bound below still applies once the type is known.
+	entryLimit, arrayLimit := MaxControlBytes, MaxJSONArray
+	if role == serverRole {
+		entryLimit, arrayLimit = MaxSnapshotBytes, MaxSnapshotEntities
+	}
+	if len(data) > entryLimit {
 		return ControlFrame{}, ErrOversized
 	}
 	if len(data) == 0 || !utf8.Valid(data) {
 		return ControlFrame{}, ErrMalformed
 	}
-	if err := validateJSON(data); err != nil {
+	if err := validateJSON(data, arrayLimit); err != nil {
 		return ControlFrame{}, ErrMalformed
 	}
 	var envelope controlEnvelope
 	if err := unmarshalObject(data, &envelope); err != nil {
 		return ControlFrame{}, ErrMalformed
 	}
-	if envelope.Version != 1 {
+	if envelope.Version != ProtocolVersion {
 		return ControlFrame{}, ErrMalformed
+	}
+	if len(data) > controlLimit(envelope.Type) {
+		return ControlFrame{}, ErrOversized
 	}
 	id, idPresent, ok := decodeID(envelope.ID)
 	if !ok || !validIDPresence(id, idPresent, envelope.Type) {
@@ -289,29 +297,11 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	case TypeStateGet:
 		body = new(StateGet)
 	case TypeStateSnapshot:
-		value, err := decodeStateSnapshot(envelope.Body)
-		if err != nil {
-			return ControlFrame{}, ErrMalformed
-		}
-		body = value
-	case TypeStateRestart:
-		body = new(StateRestart)
-	case TypeStateSubscribe:
-		body = new(StateSubscribe)
-	case TypeStateEvent:
-		value, err := decodeStateEvent(envelope.Body)
-		if err != nil {
-			return ControlFrame{}, ErrMalformed
-		}
-		body = value
-	case TypeStateEntityGet:
-		body = new(StateEntityGet)
-	case TypeStateEntity:
-		value, err := decodeStateEntity(envelope.Body)
-		if err != nil {
-			return ControlFrame{}, ErrMalformed
-		}
-		body = value
+		body = new(StateSnapshot)
+	case TypeStateWatch:
+		body = new(StateWatch)
+	case TypeStateChanged:
+		body = new(StateChanged)
 	case TypeHumanRequestDetailGet:
 		body = new(HumanRequestDetailGet)
 	case TypeHumanRequestDetail:
@@ -381,19 +371,13 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	default:
 		return ControlFrame{}, ErrMalformed
 	}
-	if !bodyAlreadyDecoded(envelope.Type) {
-		if err := unmarshalObject(envelope.Body, body); err != nil {
-			return ControlFrame{}, ErrMalformed
-		}
+	if err := unmarshalObject(envelope.Body, body); err != nil {
+		return ControlFrame{}, ErrMalformed
 	}
 	if err := validateBody(envelope.Type, body); err != nil {
 		return ControlFrame{}, ErrMalformed
 	}
 	return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: id, Body: dereferenceBody(body)}, nil
-}
-
-func bodyAlreadyDecoded(kind MessageType) bool {
-	return kind == TypeStateSnapshot || kind == TypeStateEvent || kind == TypeStateEntity
 }
 
 func decodeID(raw json.RawMessage) (string, bool, bool) {
@@ -427,8 +411,7 @@ func validIDPresence(id string, present bool, kind MessageType) bool {
 func idRequired(kind MessageType) bool {
 	switch kind {
 	case TypePairProve, TypePairResult, TypeAuthProve, TypeAuthResult,
-		TypeStateGet, TypeStateSnapshot, TypeStateRestart, TypeStateSubscribe,
-		TypeStateEvent, TypeStateEntityGet, TypeStateEntity,
+		TypeStateGet, TypeStateSnapshot, TypeStateWatch, TypeStateChanged,
 		TypeHumanRequestDetailGet, TypeHumanRequestDetail,
 		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
 		TypeTaskEnqueue, TypeTaskEnqueueResult,
@@ -448,11 +431,10 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	}
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
-			kind == TypeStateSubscribe || kind == TypeStateEntityGet || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskEnqueue
+			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskEnqueue
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
-		kind == TypeStateSnapshot || kind == TypeStateRestart || kind == TypeStateEvent ||
-		kind == TypeStateEntity || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
+		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
 }
 
 func dereferenceBody(body any) any {
@@ -469,11 +451,11 @@ func dereferenceBody(body any) any {
 		return *value
 	case *StateGet:
 		return *value
-	case *StateRestart:
+	case *StateSnapshot:
 		return *value
-	case *StateSubscribe:
+	case *StateWatch:
 		return *value
-	case *StateEntityGet:
+	case *StateChanged:
 		return *value
 	case *HumanRequestDetailGet:
 		return *value
@@ -525,8 +507,6 @@ func dereferenceBody(body any) any {
 		return *value
 	case *TerminalReset:
 		return *value
-	case StateSnapshot, StateEvent, StateEntity:
-		return value
 	case *Error:
 		return *value
 	default:
@@ -720,51 +700,33 @@ func validateBody(kind MessageType, body any) error {
 	case TypeStateSnapshot:
 		value, ok := body.(StateSnapshot)
 		if !ok {
-			return fmt.Errorf("%w: STATE_SNAPSHOT body type", ErrMalformed)
+			if pointer, ok := body.(*StateSnapshot); ok {
+				value = *pointer
+			} else {
+				return fmt.Errorf("%w: STATE_SNAPSHOT body type", ErrMalformed)
+			}
 		}
 		return validateStateSnapshot(value)
-	case TypeStateRestart:
-		value, ok := body.(StateRestart)
+	case TypeStateWatch:
+		value, ok := body.(StateWatch)
 		if !ok {
-			if pointer, ok := body.(*StateRestart); ok {
+			if pointer, ok := body.(*StateWatch); ok {
 				value = *pointer
 			} else {
-				return fmt.Errorf("%w: STATE_RESTART body type", ErrMalformed)
+				return fmt.Errorf("%w: STATE_WATCH body type", ErrMalformed)
 			}
 		}
-		return validateStateRestart(value)
-	case TypeStateSubscribe:
-		value, ok := body.(StateSubscribe)
+		return validateStateWatch(value)
+	case TypeStateChanged:
+		value, ok := body.(StateChanged)
 		if !ok {
-			if pointer, ok := body.(*StateSubscribe); ok {
+			if pointer, ok := body.(*StateChanged); ok {
 				value = *pointer
 			} else {
-				return fmt.Errorf("%w: STATE_SUBSCRIBE body type", ErrMalformed)
+				return fmt.Errorf("%w: STATE_CHANGED body type", ErrMalformed)
 			}
 		}
-		return validateStateSubscribe(value)
-	case TypeStateEvent:
-		value, ok := body.(StateEvent)
-		if !ok {
-			return fmt.Errorf("%w: STATE_EVENT body type", ErrMalformed)
-		}
-		return validateStateEvent(value)
-	case TypeStateEntityGet:
-		value, ok := body.(StateEntityGet)
-		if !ok {
-			if pointer, ok := body.(*StateEntityGet); ok {
-				value = *pointer
-			} else {
-				return fmt.Errorf("%w: STATE_ENTITY_GET body type", ErrMalformed)
-			}
-		}
-		return validateStateEntityGet(value)
-	case TypeStateEntity:
-		value, ok := body.(StateEntity)
-		if !ok {
-			return fmt.Errorf("%w: STATE_ENTITY body type", ErrMalformed)
-		}
-		return validateStateEntity(value)
+		return validateStateChanged(value)
 	case TypeHumanRequestDetailGet:
 		value, ok := body.(HumanRequestDetailGet)
 		if !ok {
@@ -918,13 +880,13 @@ func fixedHex(name, value string, size int) ([]byte, error) {
 // validateJSON checks the properties encoding/json intentionally leaves
 // permissive: duplicate names, bounded nesting/arrays, and safe integer
 // spelling. Typed decoding below then rejects unknown fields.
-func validateJSON(data []byte) error {
+func validateJSON(data []byte, arrayLimit int) error {
 	if err := validateSurrogateEscapes(data); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	if err := scanJSONValue(decoder, 0); err != nil {
+	if err := scanJSONValue(decoder, 0, arrayLimit); err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 	var extra any
@@ -1027,7 +989,7 @@ func rejectTerminalNulls(kind MessageType, body []byte) error {
 	return nil
 }
 
-func scanJSONValue(decoder *json.Decoder, depth int) error {
+func scanJSONValue(decoder *json.Decoder, depth, arrayLimit int) error {
 	if depth > MaxJSONDepth {
 		return errors.New("JSON nesting too deep")
 	}
@@ -1056,7 +1018,7 @@ func scanJSONValue(decoder *json.Decoder, depth int) error {
 					return errors.New("too many object members")
 				}
 				keys[key] = struct{}{}
-				if err := scanJSONValue(decoder, depth+1); err != nil {
+				if err := scanJSONValue(decoder, depth+1, arrayLimit); err != nil {
 					return err
 				}
 			}
@@ -1067,10 +1029,10 @@ func scanJSONValue(decoder *json.Decoder, depth int) error {
 		case '[':
 			count := 0
 			for decoder.More() {
-				if count == MaxJSONArray {
+				if count == arrayLimit {
 					return errors.New("array too large")
 				}
-				if err := scanJSONValue(decoder, depth+1); err != nil {
+				if err := scanJSONValue(decoder, depth+1, arrayLimit); err != nil {
 					return err
 				}
 				count++

@@ -77,6 +77,30 @@ canonical queued, running, or terminal state. An idle configured agent remains
 selectable so the operator can add work; no provider process or terminal is
 created until admission starts a run.
 
+## Browser state
+
+The browser reads one bounded, transactionally pinned public snapshot and is
+told only that the durable head moved. There is no cursor, page, per-entity
+refresh, tombstone or restart taxonomy: a client either holds one whole
+coherent snapshot or none, and a change notification carries nothing but a
+head.
+
+The snapshot read runs in a single pinned SQLite transaction and selects only
+public columns, so a concurrent writer cannot produce a mixed head and private
+durable data is never loaded. A watcher registers before rereading the durable
+head, so a commit landing between a client's snapshot and its registration is
+announced immediately rather than waiting for the next poll.
+
+Bounds are exact and fail closed. Client-to-server control stays at 64 KiB;
+only a server snapshot may reach 1 MiB, and the kernel refuses to project more
+than 4,096 entities. Neither bound truncates: a Factory that does not fit is
+one finite `too_large` answer, never a partial view.
+
+The wire generation is explicit. The envelope version, the loopback path, the
+pairing and auth transcript domains, and the published artifact identity move
+together, so a client speaking a previous generation is refused at its first
+frame instead of failing partway through a session.
+
 ## Browser HumanRequest authority
 
 The Go runtime keeps HumanRequest authority in SQLite and exposes only bounded,

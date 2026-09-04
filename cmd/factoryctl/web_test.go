@@ -79,7 +79,7 @@ func TestWebStatusWithoutDaemonIsBoundedAndDoesNotReadOperatorToken(t *testing.T
 		}
 		return "private-operator-token"
 	}, &stdout, &stderr, nil)
-	if exit != 0 || stderr.Len() != 0 || stdout.String() != `{"state":"stopped","ready":false,"address":"","path":"","origins":null,"active_clients":0,"revoked_clients":0,"active_challenges":0,"protocol_version":1}`+"\n" {
+	if exit != 0 || stderr.Len() != 0 || stdout.String() != `{"state":"stopped","ready":false,"address":"","path":"","origins":null,"active_clients":0,"revoked_clients":0,"active_challenges":0,"protocol_version":2}`+"\n" {
 		t.Fatalf("status = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 	if strings.Join(lookups, ",") != "DARK_FACTORY_SOCKET" {
@@ -114,7 +114,7 @@ func TestWebStatusWithStaleSocketIsBoundedAndDoesNotReadOperatorToken(t *testing
 		lookups = append(lookups, name)
 		return "private-operator-token"
 	}, &stdout, &stderr, nil)
-	if exit != 0 || stderr.Len() != 0 || stdout.String() != `{"state":"stopped","ready":false,"address":"","path":"","origins":null,"active_clients":0,"revoked_clients":0,"active_challenges":0,"protocol_version":1}`+"\n" {
+	if exit != 0 || stderr.Len() != 0 || stdout.String() != `{"state":"stopped","ready":false,"address":"","path":"","origins":null,"active_clients":0,"revoked_clients":0,"active_challenges":0,"protocol_version":2}`+"\n" {
 		t.Fatalf("status = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 	if strings.Join(lookups, ",") != "DARK_FACTORY_SOCKET" {

@@ -205,7 +205,7 @@ func TestBrowserRevocationReportsCleanupFailureAfterDurableCommit(t *testing.T) 
 	if frame := adapterRead(t, connection); frame.Type != browserprotocol.TypeAuthResult {
 		t.Fatalf("cleanup fixture auth = %+v", frame)
 	}
-	subscribe, _ := browserprotocol.EncodeStateSubscribe("unresolved", browserprotocol.StateSubscribe{})
+	subscribe, _ := browserprotocol.EncodeStateWatch("unresolved", browserprotocol.StateWatch{})
 	adapterWrite(t, connection, subscribe)
 	<-backend.started
 
@@ -292,11 +292,8 @@ func (backend *unresolvedDaemonBackend) Pair(context.Context, browser.PairReques
 func (backend *unresolvedDaemonBackend) Authenticate(context.Context, browser.AuthRequest) (browser.Authentication, error) {
 	return backend.auth, nil
 }
-func (backend *unresolvedDaemonBackend) StatePage(context.Context, [browserprotocol.ClientIDSize]byte, *browser.Cursor) (browser.StatePage, error) {
-	return browser.StatePage{}, browser.ErrNotFound
-}
-func (backend *unresolvedDaemonBackend) StateEntity(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.StateEntityGet) (browserprotocol.StateEntity, error) {
-	return browserprotocol.StateEntity{}, browser.ErrNotFound
+func (backend *unresolvedDaemonBackend) StateSnapshot(context.Context, [browserprotocol.ClientIDSize]byte) (browserprotocol.StateSnapshot, error) {
+	return browserprotocol.StateSnapshot{}, browser.ErrNotFound
 }
 func (backend *unresolvedDaemonBackend) HumanRequestDetail(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.HumanRequestDetailGet) (browserprotocol.HumanRequestDetail, error) {
 	return browserprotocol.HumanRequestDetail{}, browser.ErrUnauthorized
@@ -304,7 +301,7 @@ func (backend *unresolvedDaemonBackend) HumanRequestDetail(context.Context, [bro
 func (backend *unresolvedDaemonBackend) TerminalTarget(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error) {
 	return browserprotocol.TerminalTarget{}, browser.ErrUnauthorized
 }
-func (backend *unresolvedDaemonBackend) SubscribeState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (browser.StateSubscription, error) {
+func (backend *unresolvedDaemonBackend) WatchState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (browser.StateSubscription, error) {
 	if backend.calls.Add(1) == 1 {
 		close(backend.started)
 	}

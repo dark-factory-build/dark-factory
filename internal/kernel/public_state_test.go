@@ -12,57 +12,9 @@ import (
 	"testing"
 )
 
-func TestPublicStateProjectPageBoundariesAndRawIDOrder(t *testing.T) {
-	for _, test := range []struct {
-		count     int
-		pageSizes []int
-	}{
-		{count: 0, pageSizes: []int{0}},
-		{count: 1, pageSizes: []int{1}},
-		{count: 7, pageSizes: []int{7}},
-		{count: 8, pageSizes: []int{8, 0}},
-		{count: 9, pageSizes: []int{8, 1}},
-		{count: 16, pageSizes: []int{8, 8, 0}},
-	} {
-		t.Run(fmt.Sprintf("rows_%d", test.count), func(t *testing.T) {
-			store, _ := newTestStore(t)
-			defer store.Close()
-			insertPublicProjects(t, store, test.count)
-			state, err := store.Factory(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			cursor := &PublicStateCursor{Head: state.Head, Kind: PublicStateProject}
-			got := make([]string, 0, test.count)
-			for pageIndex, wantSize := range test.pageSizes {
-				page, err := store.ReadPublicStatePage(context.Background(), cursor)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(page.Items) != wantSize || page.Kind != PublicStateProject || page.Head != state.Head {
-					t.Fatalf("page %d = %+v, items=%d", pageIndex, page, len(page.Items))
-				}
-				for _, item := range page.Items {
-					summary, ok := item.Project()
-					if !ok {
-						t.Fatalf("page %d item = %+v", pageIndex, item)
-					}
-					got = append(got, summary.ID.String())
-				}
-				cursor = page.NextCursor
-			}
-			want := publicIDs(test.count, func(index int) string { return publicProjectID(t, index).String() })
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("traversal = %v, want %v", got, want)
-			}
-			if cursor == nil || cursor.Kind != PublicStateAgent || cursor.AfterID != nil {
-				t.Fatalf("next kind = %+v", cursor)
-			}
-		})
-	}
-}
-
-func TestPublicStateTraversalKeepsEveryKindAndNoRowsAreLost(t *testing.T) {
+// One snapshot carries every public kind, in raw identity order, with nothing
+// dropped. Traversal used to be paged; the coherent read replaces it.
+func TestPublicSnapshotKeepsEveryKindInRawIDOrder(t *testing.T) {
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -111,81 +63,84 @@ func TestPublicStateTraversalKeepsEveryKindAndNoRowsAreLost(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, test := range []struct {
-		kind PublicStateKind
-		ids  []string
-	}{
-		{kind: PublicStateAgent, ids: append([]string{run.AgentID.String()}, publicIDs(9, func(index int) string { return publicAgentID(t, index).String() })...)},
-		{kind: PublicStateTask, ids: append([]string{run.TaskID.String()}, publicIDs(9, func(index int) string { return publicTaskID(t, index).String() })...)},
-		{kind: PublicStateHumanRequest, ids: publicIDs(9, func(index int) string { return publicHumanRequestID(t, index).String() })},
-	} {
-		cursor := &PublicStateCursor{Head: state.Head, Kind: test.kind}
-		var got []string
-		for cursor != nil && cursor.Kind == test.kind {
-			page, err := store.ReadPublicStatePage(ctx, cursor)
-			if err != nil {
-				t.Fatalf("%s page: %v", test.kind.String(), err)
-			}
-			for _, item := range page.Items {
-				got = append(got, item.id().String())
-			}
-			cursor = page.NextCursor
-		}
-		if !reflect.DeepEqual(got, test.ids) {
-			t.Fatalf("%s traversal = %v, want %v", test.kind.String(), got, test.ids)
-		}
-	}
-}
-
-func TestPublicStateFactoryAndEmptyKindTraversal(t *testing.T) {
-	store, _ := newTestStore(t)
-	defer store.Close()
-	ctx := context.Background()
-	page, err := store.ReadPublicStatePage(ctx, nil)
+	snapshot, err := store.ReadPublicSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Kind != PublicStateFactory || len(page.Items) != 1 || page.NextCursor == nil || page.NextCursor.Kind != PublicStateProject || page.NextCursor.AfterID != nil {
-		t.Fatalf("factory page = %+v", page)
+	if snapshot.Head != state.Head {
+		t.Fatalf("snapshot head = %d, want %d", snapshot.Head.Int64(), state.Head.Int64())
 	}
-	if page.Items[0].id().String() != "factory" || len(page.Items[0].id().Bytes()) != 0 {
-		t.Fatalf("factory exposed durable sentinel: %+v", page.Items[0].id())
+	agents := make([]string, 0, len(snapshot.Agents))
+	for _, item := range snapshot.Agents {
+		agents = append(agents, item.ID.String())
 	}
-	for _, kind := range []PublicStateKind{PublicStateProject, PublicStateAgent, PublicStateTask, PublicStateHumanRequest} {
-		page, err = store.ReadPublicStatePage(ctx, page.NextCursor)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if page.Kind != kind || page.Items == nil || len(page.Items) != 0 {
-			t.Fatalf("empty %s page = %+v", kind.String(), page)
-		}
+	tasks := make([]string, 0, len(snapshot.Tasks))
+	for _, item := range snapshot.Tasks {
+		tasks = append(tasks, item.ID.String())
 	}
-	if page.NextCursor != nil {
-		t.Fatalf("final human request cursor = %+v", page.NextCursor)
+	requests := make([]string, 0, len(snapshot.HumanRequests))
+	for _, item := range snapshot.HumanRequests {
+		requests = append(requests, item.ID.String())
+	}
+	wantAgents := append([]string{run.AgentID.String()}, publicIDs(9, func(index int) string { return publicAgentID(t, index).String() })...)
+	wantTasks := append([]string{run.TaskID.String()}, publicIDs(9, func(index int) string { return publicTaskID(t, index).String() })...)
+	wantRequests := publicIDs(9, func(index int) string { return publicHumanRequestID(t, index).String() })
+	if !reflect.DeepEqual(agents, wantAgents) || !reflect.DeepEqual(tasks, wantTasks) || !reflect.DeepEqual(requests, wantRequests) {
+		t.Fatalf("snapshot = agents %v, tasks %v, requests %v", agents, tasks, requests)
+	}
+	if len(snapshot.Projects) != 1 || snapshot.Projects[0].ID != project.ID {
+		t.Fatalf("snapshot projects = %+v", snapshot.Projects)
 	}
 }
 
-func TestPublicStateCountIncludesFactoryAndRejectsBeforeItems(t *testing.T) {
+// An empty Factory still returns a complete snapshot: the collections are
+// present and empty rather than absent or nil-typed.
+func TestPublicSnapshotOfAnEmptyFactoryIsComplete(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	snapshot, err := store.ReadPublicSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Factory.Capacity == 0 || snapshot.Factory.Revision.Int64() < 1 {
+		t.Fatalf("factory summary = %+v", snapshot.Factory)
+	}
+	if snapshot.Projects == nil || snapshot.Agents == nil || snapshot.Tasks == nil || snapshot.HumanRequests == nil {
+		t.Fatalf("empty snapshot has an absent collection: %+v", snapshot)
+	}
+	if len(snapshot.Projects)+len(snapshot.Agents)+len(snapshot.Tasks)+len(snapshot.HumanRequests) != 0 {
+		t.Fatalf("empty snapshot is not empty: %+v", snapshot)
+	}
+}
+
+// The entity bound is exact and fails closed. At the limit the snapshot is
+// refused entirely; nothing partial or truncated is returned.
+func TestPublicSnapshotCountBoundFailsClosedWithoutTruncation(t *testing.T) {
 	for _, count := range []int{PublicStateEntityLimit - 1, PublicStateEntityLimit} {
 		t.Run(fmt.Sprintf("dynamic_%d", count), func(t *testing.T) {
 			store, _ := newTestStore(t)
 			defer store.Close()
 			insertPublicProjects(t, store, count)
-			page, err := store.ReadPublicStatePage(context.Background(), nil)
+			snapshot, err := store.ReadPublicSnapshot(context.Background())
 			if count == PublicStateEntityLimit-1 {
-				if err != nil || len(page.Items) != 1 {
-					t.Fatalf("maximum accepted page = %+v, %v", page, err)
+				if err != nil || len(snapshot.Projects) != count {
+					t.Fatalf("maximum accepted snapshot = %d projects, %v", len(snapshot.Projects), err)
 				}
 				return
 			}
-			if !errors.Is(err, ErrSnapshotTooLarge) || len(page.Items) != 0 || page.NextCursor != nil {
-				t.Fatalf("oversized page = %+v, %v", page, err)
+			if !errors.Is(err, ErrSnapshotTooLarge) {
+				t.Fatalf("oversized snapshot = %v", err)
+			}
+			if len(snapshot.Projects) != 0 || len(snapshot.Agents) != 0 || len(snapshot.Tasks) != 0 || len(snapshot.HumanRequests) != 0 || snapshot.Head.Int64() != 0 {
+				t.Fatalf("oversized read returned partial state: %+v", snapshot)
 			}
 		})
 	}
 }
 
-func TestPublicStateCountBoundIncludesEveryDynamicKind(t *testing.T) {
+// The bound counts the factory plus every dynamic kind together, so no single
+// kind can be under its own limit while the whole is over.
+func TestPublicSnapshotCountBoundIncludesEveryDynamicKind(t *testing.T) {
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -195,71 +150,21 @@ func TestPublicStateCountBoundIncludesEveryDynamicKind(t *testing.T) {
 	// The running fixture contributes one project, agent, and task; its open
 	// request is the fourth dynamic kind. Fill projects to 4,095 dynamic rows.
 	insertPublicProjects(t, store, PublicStateEntityLimit-5)
-	page, err := store.ReadPublicStatePage(ctx, nil)
-	if err != nil || len(page.Items) != 1 {
-		t.Fatalf("distributed maximum page = %+v, %v", page, err)
+	if _, err := store.ReadPublicSnapshot(ctx); err != nil {
+		t.Fatalf("distributed maximum snapshot: %v", err)
 	}
 	overflow := publicProjectID(t, PublicStateEntityLimit-4)
 	if _, err := store.writer.Exec(`INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(?, 'overflow', '/public/overflow', 'none', 1, 401, 401)`, overflow.Bytes()); err != nil {
 		t.Fatal(err)
 	}
-	page, err = store.ReadPublicStatePage(ctx, nil)
-	if !errors.Is(err, ErrSnapshotTooLarge) || len(page.Items) != 0 {
-		t.Fatalf("distributed overflow page = %+v, %v", page, err)
+	snapshot, err := store.ReadPublicSnapshot(ctx)
+	if !errors.Is(err, ErrSnapshotTooLarge) || len(snapshot.Projects) != 0 {
+		t.Fatalf("distributed overflow snapshot = %+v, %v", snapshot, err)
 	}
 }
 
-func TestPublicStateCursorHeadAndIdentityFailClosed(t *testing.T) {
-	store, _ := newTestStore(t)
-	defer store.Close()
-	ctx := context.Background()
-	insertPublicProjects(t, store, 9)
-	first, err := store.ReadPublicStatePage(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	projectPage, err := store.ReadPublicStatePage(ctx, first.NextCursor)
-	if err != nil || projectPage.NextCursor == nil || projectPage.NextCursor.AfterID == nil {
-		t.Fatalf("project page = %+v, %v", projectPage, err)
-	}
-	created, err := store.CreateProject(ctx, NewProject{ID: publicProjectID(t, 10), Name: "committed", Root: "/public/committed"}, mustTime(t, 1000))
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := store.ReadPublicStatePage(ctx, projectPage.NextCursor)
-	var restart *PublicStateRestartError
-	if !errors.As(err, &restart) || restart.Head.Int64() != first.Head.Int64()+1 || restart.Floor.Int64() != 1 || len(result.Items) != 0 {
-		t.Fatalf("stale continuation = %+v, restart=%+v, err=%v", result, restart, err)
-	}
-	future := &PublicStateCursor{Head: mustSequence(t, restart.Head.Int64()+1), Kind: PublicStateProject}
-	if _, err := store.ReadPublicStatePage(ctx, future); !errors.As(err, &restart) || restart.Head.Int64() != first.Head.Int64()+1 {
-		t.Fatalf("future continuation = %+v, %v", restart, err)
-	}
-	badDynamic := PublicStateID{}
-	missing, _ := PublicStateIDFromBytes(publicRawID(0xee, 99))
-	factoryID := FactoryPublicStateID()
-	createdID := mustPublicStateID(t, created.ID.Bytes())
-	for _, test := range []struct {
-		name   string
-		cursor *PublicStateCursor
-	}{
-		{name: "zero cursor", cursor: &PublicStateCursor{}},
-		{name: "unknown kind", cursor: &PublicStateCursor{Head: restart.Head, Kind: PublicStateKind(99)}},
-		{name: "factory after", cursor: &PublicStateCursor{Head: restart.Head, Kind: PublicStateFactory, AfterID: &missing}},
-		{name: "zero after", cursor: &PublicStateCursor{Head: restart.Head, Kind: PublicStateProject, AfterID: &badDynamic}},
-		{name: "factory as after", cursor: &PublicStateCursor{Head: restart.Head, Kind: PublicStateProject, AfterID: &factoryID}},
-		{name: "missing after", cursor: &PublicStateCursor{Head: restart.Head, Kind: PublicStateProject, AfterID: &missing}},
-		{name: "wrong-kind after", cursor: &PublicStateCursor{Head: restart.Head, Kind: PublicStateAgent, AfterID: &createdID}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if _, err := store.ReadPublicStatePage(ctx, test.cursor); !errors.Is(err, ErrInvalidValue) {
-				t.Fatalf("cursor %+v error = %v", test.cursor, err)
-			}
-		})
-	}
-}
-
-func TestPublicStatePinnedReadCannotMixConcurrentCommit(t *testing.T) {
+// One pinned read cannot observe a commit that lands after it began.
+func TestPublicSnapshotPinnedReadCannotMixConcurrentCommit(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -271,32 +176,32 @@ func TestPublicStatePinnedReadCannotMixConcurrentCommit(t *testing.T) {
 	if err := validateDurableControls(ctx, tx.connection); err != nil {
 		t.Fatal(err)
 	}
-	state, err := factoryState(ctx, tx.connection)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := enforcePublicStateCount(ctx, tx.connection); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CreateProject(ctx, NewProject{ID: publicProjectID(t, 1), Name: "later", Root: "/later"}, mustTime(t, 2)); err != nil {
 		t.Fatal(err)
 	}
-	items, err := readPublicStateItems(ctx, tx.connection, PublicStateProject, nil)
-	if err != nil || len(items) != 0 {
-		t.Fatalf("pinned items = %+v, %v", items, err)
+	projects, err := readPublicProjects(ctx, tx.connection)
+	if err != nil || len(projects) != 0 {
+		t.Fatalf("pinned projects = %+v, %v", projects, err)
 	}
-	current, err := store.ReadPublicStatePage(ctx, &PublicStateCursor{Head: mustSequence(t, state.Head.Int64()+1), Kind: PublicStateProject})
-	if err != nil || len(current.Items) != 1 {
-		t.Fatalf("current page = %+v, %v", current, err)
+	current, err := store.ReadPublicSnapshot(ctx)
+	if err != nil || len(current.Projects) != 1 {
+		t.Fatalf("current snapshot = %+v, %v", current, err)
 	}
 }
 
-func TestPublicStateConcurrentWriterNeverMixesPageHeadAndCount(t *testing.T) {
+// A concurrent writer can never produce a mixed-head snapshot: the head and
+// the rows always come from the same transaction, so the project count is
+// exactly the number of commits the head accounts for.
+func TestPublicSnapshotConcurrentWriterNeverMixesHeadAndRows(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
-	specs := make([]NewProject, PublicStatePageSize)
-	times := make([]UnixMillis, PublicStatePageSize)
+	const writes = 8
+	specs := make([]NewProject, writes)
+	times := make([]UnixMillis, writes)
 	for index := range specs {
 		specs[index] = NewProject{ID: publicProjectID(t, index+1), Name: fmt.Sprintf("project-%d", index+1), Root: fmt.Sprintf("/concurrent/%d", index+1)}
 		times[index] = mustTime(t, int64(index+2))
@@ -304,8 +209,7 @@ func TestPublicStateConcurrentWriterNeverMixesPageHeadAndCount(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		for index := range specs {
-			_, err := store.CreateProject(ctx, specs[index], times[index])
-			if err != nil {
+			if _, err := store.CreateProject(ctx, specs[index], times[index]); err != nil {
 				done <- err
 				return
 			}
@@ -313,28 +217,23 @@ func TestPublicStateConcurrentWriterNeverMixesPageHeadAndCount(t *testing.T) {
 		done <- nil
 	}()
 	writerDone := false
+	observed := 0
 	for !writerDone {
-		factoryPage, err := store.ReadPublicStatePage(ctx, nil)
+		snapshot, err := store.ReadPublicSnapshot(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		projectPage, err := store.ReadPublicStatePage(ctx, factoryPage.NextCursor)
-		var restart *PublicStateRestartError
-		if errors.As(err, &restart) {
-			continue
+		// Every commit in this fixture is exactly one project creation, so the
+		// head is the number of projects the same transaction must contain.
+		if len(snapshot.Projects) != int(snapshot.Head.Int64()) {
+			t.Fatalf("mixed snapshot: head=%d projects=%d", snapshot.Head.Int64(), len(snapshot.Projects))
 		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if projectPage.Head != factoryPage.Head || len(projectPage.Items) != int(projectPage.Head.Int64()) {
-			t.Fatalf("mixed page: factory head=%d project head=%d items=%d", factoryPage.Head.Int64(), projectPage.Head.Int64(), len(projectPage.Items))
-		}
-		for index, item := range projectPage.Items {
-			summary, ok := item.Project()
-			if !ok || summary.ID != publicProjectID(t, index+1) {
-				t.Fatalf("mixed item %d = %+v, summary=%+v", index, item, summary)
+		for index, summary := range snapshot.Projects {
+			if summary.ID != publicProjectID(t, index+1) {
+				t.Fatalf("mixed row %d = %+v", index, summary)
 			}
 		}
+		observed++
 		select {
 		case err := <-done:
 			if err != nil {
@@ -344,202 +243,18 @@ func TestPublicStateConcurrentWriterNeverMixesPageHeadAndCount(t *testing.T) {
 		default:
 		}
 	}
+	if observed == 0 {
+		t.Fatal("no snapshot was observed during the concurrent write")
+	}
 	state, err := store.Factory(ctx)
-	if err != nil || state.Head.Int64() != PublicStatePageSize {
+	if err != nil || state.Head.Int64() != writes {
 		t.Fatalf("final state = %+v, %v", state, err)
 	}
 }
 
-func TestPublicStateEntityReadTransactionPinsHeadAndRevision(t *testing.T) {
-	store, _ := newTestStore(t)
-	defer store.Close()
-	ctx := context.Background()
-	tx, err := store.beginRead(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Close()
-	if err := validateDurableControls(ctx, tx.connection); err != nil {
-		t.Fatal(err)
-	}
-	before, err := factoryState(ctx, tx.connection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.SetDispatch(ctx, before.Revision, true, mustTime(t, 2)); err != nil {
-		t.Fatal(err)
-	}
-	item, found, err := readPublicStateEntityItem(ctx, tx.connection, PublicStateFactory, FactoryPublicStateID())
-	if err != nil || !found {
-		t.Fatalf("pinned factory item found=%v err=%v", found, err)
-	}
-	revision, ok := item.revision()
-	if !ok || revision != before.Revision {
-		t.Fatalf("pinned item revision = %d, want %d", revision.Int64(), before.Revision.Int64())
-	}
-	after, err := store.ReadPublicStateEntity(ctx, PublicStateFactory, FactoryPublicStateID())
-	if err != nil || after.Head.Int64() != before.Head.Int64()+1 || after.Revision.Int64() != before.Revision.Int64()+1 {
-		t.Fatalf("current factory entity = %+v, %v", after, err)
-	}
-}
-
-func TestPublicStateEntityReadsAreExactSlimAndDeleted(t *testing.T) {
-	store, run, _ := runningOrchestratorRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(111), QuestionText: "PRIVATE_QUESTION_SENTINEL"}, mustTime(t, 400))
-	if err != nil {
-		t.Fatal(err)
-	}
-	locators := []struct {
-		kind PublicStateKind
-		id   PublicStateID
-	}{
-		{PublicStateFactory, FactoryPublicStateID()},
-		{PublicStateProject, mustPublicStateID(t, run.ProjectID.Bytes())},
-		{PublicStateAgent, mustPublicStateID(t, run.AgentID.Bytes())},
-		{PublicStateTask, mustPublicStateID(t, run.TaskID.Bytes())},
-		{PublicStateHumanRequest, mustPublicStateID(t, request.ID.Bytes())},
-	}
-	for _, locator := range locators {
-		entity, err := store.ReadPublicStateEntity(ctx, locator.kind, locator.id)
-		if err != nil || entity.Deleted || entity.Item == nil || entity.Kind != locator.kind || entity.EntityID.String() != locator.id.String() {
-			t.Fatalf("%s entity = %+v, %v", locator.kind.String(), entity, err)
-		}
-		itemRevision, ok := entity.Item.revision()
-		if !ok || entity.Revision != itemRevision {
-			t.Fatalf("%s entity revision = %d, item=%d ok=%v", locator.kind.String(), entity.Revision.Int64(), itemRevision.Int64(), ok)
-		}
-	}
-	hr, _ := func() (HumanRequestProjection, bool) {
-		entity, _ := store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, mustPublicStateID(t, request.ID.Bytes()))
-		return entity.Item.HumanRequest()
-	}()
-	encoded, err := json.Marshal(hr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, private := range []string{"PRIVATE_QUESTION_SENTINEL", "orchestrator", "task", "Agent needs", "WhyHumanNeeded", "QuestionText", "TerminalTarget", "CancelRun", "RunID", "ProjectName", "AgentName", "TaskTitle"} {
-		if strings.Contains(string(encoded), private) {
-			t.Fatalf("human request projection exposed %q: %s", private, encoded)
-		}
-	}
-	if !hr.CanReply || hr.ReplyMaxBytes != MaxHumanRequestReplyBytes {
-		t.Fatalf("human request public projection = %+v", hr)
-	}
-	wantFields := []string{"ID", "ProjectID", "AgentID", "TaskID", "CreatedAt", "UpdatedAt", "Revision", "Kind", "Status", "ReplyMaxBytes", "CanReply"}
-	projectionType := reflect.TypeOf(HumanRequestProjection{})
-	gotFields := make([]string, projectionType.NumField())
-	for index := range gotFields {
-		gotFields[index] = projectionType.Field(index).Name
-	}
-	if !reflect.DeepEqual(gotFields, wantFields) {
-		t.Fatalf("HumanRequestProjection fields = %v, want %v", gotFields, wantFields)
-	}
-
-	missing := mustPublicStateID(t, publicRawID(0xfd, 1))
-	entity, err := store.ReadPublicStateEntity(ctx, PublicStateProject, missing)
-	if !errors.Is(err, ErrNotFound) || entity != (PublicStateEntityResult{}) {
-		t.Fatalf("missing entity = %+v, %v", entity, err)
-	}
-	if _, err := store.ReadPublicStateEntity(ctx, PublicStateFactory, PublicStateID{}); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("zero factory locator = %v", err)
-	}
-	if _, err := store.ReadPublicStateEntity(ctx, PublicStateProject, FactoryPublicStateID()); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("literal factory used dynamically = %v", err)
-	}
-
-	client := humanQuestionClient(t, store, 112, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
-	delivery, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, 113), "private reply", mustTime(t, 401))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AcknowledgeHumanReply(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
-		t.Fatal(err)
-	}
-	resolved, found, err := store.HumanRequest(ctx, request.ID)
-	if err != nil || !found || resolved.Status != HumanRequestResolved {
-		t.Fatalf("resolved request = %+v, found=%v, err=%v", resolved, found, err)
-	}
-	entity, err = store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, mustPublicStateID(t, request.ID.Bytes()))
-	if err != nil || !entity.Deleted || entity.Item != nil || entity.Revision != resolved.Revision {
-		t.Fatalf("resolved entity = %+v, %v", entity, err)
-	}
-}
-
-func TestPublicStateEntityStaleTombstoneHasExactRevision(t *testing.T) {
-	store, run, _ := runningOrchestratorRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(119), QuestionText: "question"}, mustTime(t, 400))
-	if err != nil {
-		t.Fatal(err)
-	}
-	proposal, err := NewBlockedProposal("waiting")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, mustTime(t, 401)); err != nil {
-		t.Fatal(err)
-	}
-	stale, found, err := store.HumanRequest(ctx, request.ID)
-	if err != nil || !found || stale.Status != HumanRequestStale {
-		t.Fatalf("stale request = %+v, found=%v, err=%v", stale, found, err)
-	}
-	entity, err := store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, mustPublicStateID(t, request.ID.Bytes()))
-	if err != nil || !entity.Deleted || entity.Item != nil || entity.Revision != stale.Revision {
-		t.Fatalf("stale entity = %+v, %v", entity, err)
-	}
-}
-
-func TestPublicStateEntityTombstoneMustBeLatestAndMatchDurableRequest(t *testing.T) {
-	store, run, _ := runningOrchestratorRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	client := humanQuestionClient(t, store, 120, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
-	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(121), QuestionText: "question"}, mustTime(t, 400))
-	if err != nil {
-		t.Fatal(err)
-	}
-	delivery, err := store.BeginHumanReply(ctx, client.ID, request.ID, request.Revision, humanDeliveryID(t, 122), "reply", mustTime(t, 401))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AcknowledgeHumanReply(ctx, request.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
-		t.Fatal(err)
-	}
-	id := mustPublicStateID(t, request.ID.Bytes())
-	resolved, found, err := store.HumanRequest(ctx, request.ID)
-	if err != nil || !found || resolved.Status != HumanRequestResolved {
-		t.Fatalf("resolved request = %+v, found=%v, err=%v", resolved, found, err)
-	}
-
-	corruptSQL(t, store, `UPDATE invalidations SET deleted = 0 WHERE entity_kind = 'human_request' AND entity_id = ? AND revision = ?`, request.ID.Bytes(), resolved.Revision.Int64())
-	if _, err := store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, id); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("nondeleted latest invalidation = %v", err)
-	}
-	corruptSQL(t, store, `UPDATE invalidations SET deleted = 1, revision = ? WHERE entity_kind = 'human_request' AND entity_id = ? AND revision = ?`, resolved.Revision.Int64()+1, request.ID.Bytes(), resolved.Revision.Int64())
-	if _, err := store.ReadPublicStateEntity(ctx, PublicStateHumanRequest, id); !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("wrong tombstone revision = %v", err)
-	}
-}
-
-func TestPublicStateEntityRejectsInventedDynamicDeletion(t *testing.T) {
-	for _, deleted := range []int{0, 1} {
-		store, _ := newTestStore(t)
-		ctx := context.Background()
-		id := publicProjectID(t, 128+deleted)
-		corruptSQL(t, store, `INSERT INTO invalidations(sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted) VALUES(1, 2, 'project', ?, 1, ?)`, id.Bytes(), deleted)
-		corruptSQL(t, store, `UPDATE factory SET next_invalidation_sequence = 2`)
-		if _, err := store.ReadPublicStateEntity(ctx, PublicStateProject, mustPublicStateID(t, id.Bytes())); !errors.Is(err, ErrCorruptState) {
-			store.Close()
-			t.Fatalf("missing project with deleted=%d invalidation = %v", deleted, err)
-		}
-		store.Close()
-	}
-}
-
-func TestPublicStateEntityProjectionOmitsPrivateRows(t *testing.T) {
+// The snapshot is a positive allowlist. Private durable columns are not even
+// selected, so they cannot reach a projection.
+func TestPublicSnapshotProjectionOmitsPrivateRows(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -551,48 +266,27 @@ func TestPublicStateEntityProjectionOmitsPrivateRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task, err := store.EnqueueTask(ctx, NewTask{ID: publicTaskID(t, 1), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 231), Title: "public task", Body: "PRIVATE_BODY_SENTINEL", Priority: 9}, mustTime(t, 4))
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: publicTaskID(t, 1), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 231), Title: "public task", Body: "PRIVATE_BODY_SENTINEL", Priority: 9}, mustTime(t, 4)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.ReadPublicSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectEntity, err := store.ReadPublicStateEntity(ctx, PublicStateProject, mustPublicStateID(t, project.ID.Bytes()))
+	encoded, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectSummary, _ := projectEntity.Item.Project()
-	agentEntity, err := store.ReadPublicStateEntity(ctx, PublicStateAgent, mustPublicStateID(t, agent.ID.Bytes()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentSummary, _ := agentEntity.Item.Agent()
-	taskEntity, err := store.ReadPublicStateEntity(ctx, PublicStateTask, mustPublicStateID(t, task.ID.Bytes()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	taskSummary, _ := taskEntity.Item.Task()
-	projectJSON, err := json.Marshal(projectSummary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentJSON, err := json.Marshal(agentSummary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	taskJSON, err := json.Marshal(taskSummary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded := string(projectJSON) + string(agentJSON) + string(taskJSON)
 	// The agent's provider is deliberately a served public fact (the console's
 	// C/X glyphs derive from it); model, reasoning effort, tool budgets,
 	// roots and bodies remain private.
 	for _, private := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_MODEL_SENTINEL", "PRIVATE_BODY_SENTINEL", "xhigh", "987654321"} {
-		if strings.Contains(encoded, private) {
-			t.Fatalf("entity projections exposed %q: %s", private, encoded)
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("snapshot exposed %q: %s", private, encoded)
 		}
 	}
-	if !strings.Contains(string(agentJSON), "codex") {
-		t.Fatalf("agent entity projection dropped the served provider: %s", agentJSON)
+	if !strings.Contains(string(encoded), "codex") {
+		t.Fatalf("snapshot dropped the served provider: %s", encoded)
 	}
 }
 
@@ -618,32 +312,16 @@ func TestAgentSummariesServeTheExactProviderOnEveryReadPath(t *testing.T) {
 		}
 		want[created.ID.String()] = provider.String()
 	}
-	state, err := store.Factory(ctx)
+	publicSnapshot, err := store.ReadPublicSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := store.ReadPublicStatePage(ctx, &PublicStateCursor{Head: state.Head, Kind: PublicStateAgent})
-	if err != nil {
-		t.Fatal(err)
+	publicProviders := map[string]string{}
+	for _, summary := range publicSnapshot.Agents {
+		publicProviders[summary.ID.String()] = summary.Provider
 	}
-	pageProviders := map[string]string{}
-	for _, item := range page.Items {
-		summary, ok := item.Agent()
-		if !ok {
-			t.Fatalf("agent page item was not an agent: %+v", item)
-		}
-		pageProviders[summary.ID.String()] = summary.Provider
-		entity, err := store.ReadPublicStateEntity(ctx, PublicStateAgent, mustPublicStateID(t, summary.ID.bytes()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		entitySummary, ok := entity.Item.Agent()
-		if !ok || entitySummary.Provider != summary.Provider {
-			t.Fatalf("entity provider mismatch for %s: %+v", summary.ID, entity.Item)
-		}
-	}
-	if !reflect.DeepEqual(pageProviders, want) {
-		t.Fatalf("page providers = %v, want %v", pageProviders, want)
+	if !reflect.DeepEqual(publicProviders, want) {
+		t.Fatalf("public snapshot providers = %v, want %v", publicProviders, want)
 	}
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -658,7 +336,7 @@ func TestAgentSummariesServeTheExactProviderOnEveryReadPath(t *testing.T) {
 	}
 }
 
-func TestPublicStateReadsRejectMalformedDurableControls(t *testing.T) {
+func TestPublicSnapshotRejectsMalformedDurableControls(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		corrupt string
@@ -674,15 +352,10 @@ func TestPublicStateReadsRejectMalformedDurableControls(t *testing.T) {
 				seedDurableAuthority(t, store)
 			}
 			corruptSQL(t, store, test.corrupt)
-			if _, err := store.ReadPublicStatePage(context.Background(), nil); !errors.Is(err, ErrCorruptState) {
-				t.Fatalf("page = %v", err)
+			if _, err := store.ReadPublicSnapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("snapshot = %v", err)
 			} else if test.secret != "" && strings.Contains(err.Error(), test.secret) {
-				t.Fatalf("page error exposed private control: %v", err)
-			}
-			if _, err := store.ReadPublicStateEntity(context.Background(), PublicStateFactory, FactoryPublicStateID()); !errors.Is(err, ErrCorruptState) {
-				t.Fatalf("entity = %v", err)
-			} else if test.secret != "" && strings.Contains(err.Error(), test.secret) {
-				t.Fatalf("entity error exposed private control: %v", err)
+				t.Fatalf("snapshot error exposed private control: %v", err)
 			}
 		})
 	}
@@ -779,15 +452,6 @@ func publicTaskID(t *testing.T, index int) TaskID {
 func publicHumanRequestID(t *testing.T, index int) HumanRequestID {
 	t.Helper()
 	id, err := HumanRequestIDFromBytes(publicRawID(0xa4, index))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return id
-}
-
-func mustPublicStateID(t *testing.T, raw []byte) PublicStateID {
-	t.Helper()
-	id, err := PublicStateIDFromBytes(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

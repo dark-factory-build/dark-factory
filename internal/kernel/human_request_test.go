@@ -62,12 +62,9 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("projection = %+v, %v, found=%v", projection, err, found)
 	}
-	batch, err := store.WatchAfter(ctx, before.Head)
-	if err != nil {
-		t.Fatal(err)
-	}
+	invalidations := invalidationsAfter(t, store, before.Head)
 	seen := false
-	for _, invalidation := range batch.Invalidations {
+	for _, invalidation := range invalidations {
 		if invalidation.EntityKind == EntityHumanRequest.String() && invalidation.EntityID == request.ID.String() && invalidation.Revision.Int64() == 1 {
 			if invalidation.Deleted {
 				t.Fatalf("open request emitted tombstone: %+v", invalidation)
@@ -76,7 +73,7 @@ func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 		}
 	}
 	if !seen {
-		t.Fatalf("human request invalidation missing: %+v", batch.Invalidations)
+		t.Fatalf("human request invalidation missing: %+v", invalidations)
 	}
 	if projection.Status != HumanRequestOpen || !projection.CanReply || projection.ProjectID != run.ProjectID || projection.AgentID != run.AgentID || projection.TaskID != run.TaskID {
 		t.Fatalf("unsafe projection = %+v", projection)
@@ -743,12 +740,9 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 			if _, err := store.Snapshot(ctx); err != nil {
 				t.Fatalf("snapshot after process exit = %v", err)
 			}
-			batch, err := store.WatchAfter(ctx, before.Head)
-			if err != nil {
-				t.Fatal(err)
-			}
+			invalidations := invalidationsAfter(t, store, before.Head)
 			var runEvents, requestEvents int
-			for _, invalidation := range batch.Invalidations {
+			for _, invalidation := range invalidations {
 				switch {
 				case invalidation.EntityKind == EntityRun.String() && invalidation.EntityID == run.ID.String() && invalidation.Revision == observed.Revision:
 					runEvents++
@@ -760,7 +754,7 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 				}
 			}
 			if runEvents != 1 || requestEvents != 1 {
-				t.Fatalf("process-exit invalidations run=%d request=%d: %+v", runEvents, requestEvents, batch.Invalidations)
+				t.Fatalf("process-exit invalidations run=%d request=%d: %+v", runEvents, requestEvents, invalidations)
 			}
 
 			// The other owner may report later; the request transition must not
@@ -790,11 +784,8 @@ func TestHumanQuestionProcessExitConvergesRequestsAtomically(t *testing.T) {
 
 func assertHumanRequestInvalidation(t *testing.T, store *Store, after EventSequence, id HumanRequestID, revision Revision, deleted bool) {
 	t.Helper()
-	batch, err := store.WatchAfter(context.Background(), after)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, invalidation := range batch.Invalidations {
+	invalidations := invalidationsAfter(t, store, after)
+	for _, invalidation := range invalidations {
 		if invalidation.EntityKind == EntityHumanRequest.String() && invalidation.EntityID == id.String() && invalidation.Revision == revision {
 			if invalidation.Deleted != deleted {
 				t.Fatalf("human request invalidation = %+v, want deleted=%v", invalidation, deleted)
@@ -802,7 +793,7 @@ func assertHumanRequestInvalidation(t *testing.T, store *Store, after EventSeque
 			return
 		}
 	}
-	t.Fatalf("human request invalidation id=%s revision=%d missing from %+v", id.String(), revision.Int64(), batch.Invalidations)
+	t.Fatalf("human request invalidation id=%s revision=%d missing from %+v", id.String(), revision.Int64(), invalidations)
 }
 
 func TestHumanQuestionProcessExitInvalidationFailureRollsBackBothTransitions(t *testing.T) {

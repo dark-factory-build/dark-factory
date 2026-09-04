@@ -292,13 +292,20 @@ func TestDispatchCapacityRevisionGuards(t *testing.T) {
 	if _, err := store.SetDispatch(ctx, Revision{}, false, mustTime(t, 4)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("zero revision error = %v", err)
 	}
-	batch, err := store.WatchAfter(ctx, mustSequence(t, 0))
-	if err != nil || len(batch.Invalidations) != 2 || batch.Invalidations[0].Revision.Int64() != 2 || batch.Invalidations[1].Revision.Int64() != 3 {
-		t.Fatalf("factory invalidations = %+v, %v", batch, err)
+	invalidations := invalidationsAfter(t, store, mustSequence(t, 0))
+	if len(invalidations) != 2 || invalidations[0].Revision.Int64() != 2 || invalidations[1].Revision.Int64() != 3 {
+		t.Fatalf("factory invalidations = %+v", invalidations)
 	}
 }
 
-func TestInvalidationRetentionBatchAndGapSemantics(t *testing.T) {
+// TestInvalidationRetentionPrunesToLimit keeps the retention-metadata proof
+// that TestInvalidationRetentionBatchAndGapSemantics used to carry alongside
+// its now-deleted batch/gap/resync/future-cursor assertions (those classified
+// the removed browser WatchAfter subscription's restart conditions, which no
+// longer exist): once the durable log exceeds EventRetentionLimit rows, the
+// factory floor advances and exactly EventRetentionLimit rows remain,
+// contiguous ending at the new head.
+func TestInvalidationRetentionPrunesToLimit(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -315,149 +322,30 @@ func TestInvalidationRetentionBatchAndGapSemantics(t *testing.T) {
 	if state.Head.Int64() != EventRetentionLimit+1 || state.Floor.Int64() != 2 {
 		t.Fatalf("retention metadata = %+v", state)
 	}
-	var count int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM invalidations`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != EventRetentionLimit {
-		t.Fatalf("retained %d invalidations, want %d", count, EventRetentionLimit)
-	}
-	if _, err := store.WatchAfter(ctx, mustSequence(t, 0)); !isResync(err) {
-		t.Fatalf("old cursor error = %v", err)
-	}
-	if _, err := store.WatchAfter(ctx, mustSequence(t, state.Head.Int64()+1)); !errors.Is(err, ErrFutureCursor) {
-		t.Fatalf("future cursor error = %v", err)
-	}
-	batch, err := store.WatchAfter(ctx, mustSequence(t, 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(batch.Invalidations) != WatchBatchLimit || batch.Invalidations[0].Sequence.Int64() != 2 || batch.Invalidations[WatchBatchLimit-1].Sequence.Int64() != 257 {
-		t.Fatalf("batch boundaries = first/last/count %+v/%+v/%d", batch.Invalidations[0], batch.Invalidations[len(batch.Invalidations)-1], len(batch.Invalidations))
-	}
-	if _, err := store.writer.Exec(`DELETE FROM invalidations WHERE sequence = 100`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.WatchAfter(ctx, mustSequence(t, 98)); !isWatchRestart(err, WatchRestartGap, state) || !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("gap error = %v", err)
-	}
-	if _, err := store.WatchAfter(ctx, state.Head); !isWatchRestart(err, WatchRestartGap, state) || !errors.Is(err, ErrCorruptState) {
-		t.Fatalf("gap behind cursor error = %v", err)
+	retained := invalidationsAfter(t, store, mustSequence(t, 0))
+	if len(retained) != EventRetentionLimit || retained[0].Sequence.Int64() != 2 || retained[len(retained)-1].Sequence.Int64() != EventRetentionLimit+1 {
+		t.Fatalf("retained invalidations = %d entries, first=%+v last=%+v", len(retained), retained[0], retained[len(retained)-1])
 	}
 }
 
-func TestWatchAfterRestartClassificationsAreFiniteAndPrivate(t *testing.T) {
-	if WatchRestartGap.String() != "gap" || WatchRestartHiddenDependency.String() != "hidden_dependency" || WatchRestartReason(99).String() != "" {
-		t.Fatal("watch restart reason strings are not closed")
-	}
-	t.Run("early end is gap", func(t *testing.T) {
-		store, _ := newTestStore(t)
-		defer store.Close()
-		state, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 2))
-		if err != nil {
-			t.Fatal(err)
-		}
-		corruptSQL(t, store, `DELETE FROM invalidations WHERE sequence = 1`)
-		if _, err := store.WatchAfter(context.Background(), mustSequence(t, 0)); !isWatchRestart(err, WatchRestartGap, state) || !errors.Is(err, ErrCorruptState) {
-			t.Fatalf("early-end error = %v", err)
-		}
-	})
-
-	t.Run("empty retained log only represents initial state", func(t *testing.T) {
-		store, _ := newTestStore(t)
-		defer store.Close()
-		batch, err := store.WatchAfter(context.Background(), mustSequence(t, 0))
-		if err != nil || batch.Head.Int64() != 0 || batch.Floor.Int64() != 1 || len(batch.Invalidations) != 0 {
-			t.Fatalf("initial empty log = %+v, %v", batch, err)
-		}
-	})
-
-	for _, metadata := range []struct {
-		name  string
-		next  int64
-		floor int64
-	}{
-		{name: "one missing event", next: 2, floor: 2},
-		{name: "noninitial missing history", next: 4, floor: 4},
-	} {
-		t.Run(metadata.name, func(t *testing.T) {
-			store, _ := newTestStore(t)
-			defer store.Close()
-			corruptSQL(t, store, `UPDATE factory SET next_invalidation_sequence = ?, invalidation_floor = ?`, metadata.next, metadata.floor)
-			state, err := store.Factory(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, after := range []int64{0, state.Head.Int64(), state.Floor.Int64()} {
-				if _, err := store.WatchAfter(context.Background(), mustSequence(t, after)); !isWatchRestart(err, WatchRestartGap, state) || !errors.Is(err, ErrCorruptState) {
-					t.Fatalf("after=%d empty advanced log error = %v", after, err)
-				}
-			}
-		})
-	}
-
-	t.Run("unknown kind is hidden dependency", func(t *testing.T) {
-		store, _ := newTestStore(t)
-		defer store.Close()
-		state, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 2))
-		if err != nil {
-			t.Fatal(err)
-		}
-		const secret = "PRIVATE_UNKNOWN_KIND_SENTINEL"
-		corruptSQL(t, store, `UPDATE invalidations SET entity_kind = ? WHERE sequence = 1`, secret)
-		_, err = store.WatchAfter(context.Background(), mustSequence(t, 0))
-		if !isWatchRestart(err, WatchRestartHiddenDependency, state) || !errors.Is(err, ErrCorruptState) {
-			t.Fatalf("unknown-kind error = %v", err)
-		}
-		if strings.Contains(err.Error(), secret) {
-			t.Fatalf("unknown-kind error exposed durable value: %v", err)
-		}
-	})
-}
-
-func TestWatchAfterMalformedKnownRowsRemainCorruption(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		mutate string
-	}{
-		{name: "revision", mutate: `UPDATE invalidations SET revision = 0 WHERE sequence = 1`},
-		{name: "identity", mutate: `UPDATE invalidations SET entity_id = zeroblob(15) WHERE sequence = 1`},
-		{name: "deleted", mutate: `UPDATE invalidations SET deleted = 2 WHERE sequence = 1`},
-		{name: "time", mutate: `UPDATE invalidations SET occurred_at_ms = -1 WHERE sequence = 1`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, _ := newTestStore(t)
-			defer store.Close()
-			if _, err := store.SetDispatch(context.Background(), mustRevision(t, 1), true, mustTime(t, 2)); err != nil {
-				t.Fatal(err)
-			}
-			corruptSQL(t, store, test.mutate)
-			_, err := store.WatchAfter(context.Background(), mustSequence(t, 0))
-			var restart *WatchRestartError
-			if !errors.Is(err, ErrCorruptState) || errors.As(err, &restart) {
-				t.Fatalf("malformed row error = %v", err)
-			}
-		})
-	}
-}
-
-func TestWatchAfterRetainsExactChangeAndRunChronology(t *testing.T) {
+func TestInvalidationLogRetainsExactChangeAndRunChronology(t *testing.T) {
 	store, _, _ := admittedWorkerRun(t)
 	defer store.Close()
-	batch, err := store.WatchAfter(context.Background(), mustSequence(t, 0))
+	invalidations := invalidationsAfter(t, store, mustSequence(t, 0))
+	state, err := store.Factory(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	var change, run bool
-	for index, event := range batch.Invalidations {
+	for index, event := range invalidations {
 		if event.Sequence.Int64() != int64(index+1) {
 			t.Fatalf("event %d sequence = %d", index, event.Sequence.Int64())
 		}
 		change = change || event.EntityKind == EntityChange.String()
 		run = run || event.EntityKind == EntityRun.String()
 	}
-	if !change || !run || batch.Head.Int64() != int64(len(batch.Invalidations)) {
-		t.Fatalf("change/run chronology = %+v", batch)
+	if !change || !run || state.Head.Int64() != int64(len(invalidations)) {
+		t.Fatalf("change/run chronology = %+v", invalidations)
 	}
 }
 
@@ -488,7 +376,7 @@ func TestReadTransactionPinsSnapshotBeforeConcurrentWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Close()
-	state, err := factoryState(ctx, tx.connection)
+	pinned, err := factoryState(ctx, tx.connection)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,13 +387,16 @@ func TestReadTransactionPinsSnapshotBeforeConcurrentWrite(t *testing.T) {
 	if _, found, err := projectByID(ctx, tx.connection, spec.ID); err != nil || found {
 		t.Fatalf("pinned read observed concurrent write found=%v err=%v", found, err)
 	}
-	batch, err := store.WatchAfter(ctx, state.Head)
-	if err != nil || len(batch.Invalidations) != 1 {
-		t.Fatalf("watch after pinned head = %+v, %v", batch, err)
+	snapshot, err := store.ReadPublicSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Head.Int64() != pinned.Head.Int64()+1 || len(snapshot.Projects) != 1 || snapshot.Projects[0].ID != spec.ID {
+		t.Fatalf("read after pinned transaction = %+v, pinned head = %d", snapshot, pinned.Head.Int64())
 	}
 }
 
-func TestSnapshotWatchAgreementAndPrivateStateBoundary(t *testing.T) {
+func TestSnapshotInvalidationLogAgreementAndPrivateStateBoundary(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -538,23 +429,20 @@ func TestSnapshotWatchAgreementAndPrivateStateBoundary(t *testing.T) {
 	if err := <-finished; err != nil {
 		t.Fatal(err)
 	}
-	batch, err := store.WatchAfter(ctx, snapshot.Head)
-	if err != nil {
-		t.Fatal(err)
-	}
+	invalidations := invalidationsAfter(t, store, snapshot.Head)
 	switch snapshot.Factory.Revision.Int64() {
 	case 1:
-		if snapshot.Factory.DispatchEnabled || len(batch.Invalidations) != 1 {
-			t.Fatalf("old snapshot did not pair with one event: %+v %+v", snapshot.Factory, batch)
+		if snapshot.Factory.DispatchEnabled || len(invalidations) != 1 {
+			t.Fatalf("old snapshot did not pair with one event: %+v %+v", snapshot.Factory, invalidations)
 		}
 	case 2:
-		if !snapshot.Factory.DispatchEnabled || len(batch.Invalidations) != 0 {
-			t.Fatalf("new snapshot did not pair with empty tail: %+v %+v", snapshot.Factory, batch)
+		if !snapshot.Factory.DispatchEnabled || len(invalidations) != 0 {
+			t.Fatalf("new snapshot did not pair with empty tail: %+v %+v", snapshot.Factory, invalidations)
 		}
 	default:
 		t.Fatalf("unexpected snapshot revision %d", snapshot.Factory.Revision.Int64())
 	}
-	for name, value := range map[string]any{"snapshot": snapshot, "watch": batch} {
+	for name, value := range map[string]any{"snapshot": snapshot, "invalidations": invalidations} {
 		encoded, err := json.Marshal(value)
 		if err != nil {
 			t.Fatal(err)
@@ -742,7 +630,7 @@ func TestOpenRefusesRetainedRollbackDatabaseWithoutMutation(t *testing.T) {
 	assertDatabaseEvidenceUnchanged(t, path, before)
 }
 
-func TestSnapshotAndWatchRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
+func TestSnapshotAndPublicReadRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
 	tests := map[string]struct {
 		corrupt string
 		repair  string
@@ -765,20 +653,16 @@ func TestSnapshotAndWatchRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
 			store, _ := newTestStore(t)
 			defer store.Close()
 			seedDurableAuthority(t, store)
-			state, err := store.Factory(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
 			corruptSQL(t, store, test.corrupt)
 			if _, err := store.Snapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
 				t.Fatalf("Snapshot error = %v", err)
 			} else if test.secret != "" && strings.Contains(err.Error(), test.secret) {
 				t.Fatalf("Snapshot exposed hidden control: %v", err)
 			}
-			if _, err := store.WatchAfter(context.Background(), state.Head); !errors.Is(err, ErrCorruptState) {
-				t.Fatalf("WatchAfter error = %v", err)
+			if _, err := store.ReadPublicSnapshot(context.Background()); !errors.Is(err, ErrCorruptState) {
+				t.Fatalf("ReadPublicSnapshot error = %v", err)
 			} else if test.secret != "" && strings.Contains(err.Error(), test.secret) {
-				t.Fatalf("WatchAfter exposed hidden control: %v", err)
+				t.Fatalf("ReadPublicSnapshot exposed hidden control: %v", err)
 			}
 			var args []any
 			if test.args != nil {
@@ -788,8 +672,8 @@ func TestSnapshotAndWatchRejectHiddenControlsInPinnedSnapshot(t *testing.T) {
 			if _, err := store.Snapshot(context.Background()); err != nil {
 				t.Fatalf("Snapshot after repair: %v", err)
 			}
-			if batch, err := store.WatchAfter(context.Background(), state.Head); err != nil || len(batch.Invalidations) != 0 {
-				t.Fatalf("WatchAfter after repair = %+v, %v", batch, err)
+			if _, err := store.ReadPublicSnapshot(context.Background()); err != nil {
+				t.Fatalf("ReadPublicSnapshot after repair: %v", err)
 			}
 		})
 	}
@@ -846,8 +730,8 @@ func TestConcurrentOpenAndValidWriterReturnsBoundedSnapshotFailure(t *testing.T)
 	if _, err := writer.Snapshot(ctx); err != nil {
 		t.Fatalf("final Snapshot: %v", err)
 	}
-	if _, err := writer.WatchAfter(ctx, mustSequence(t, 0)); err != nil {
-		t.Fatalf("final WatchAfter: %v", err)
+	if _, err := writer.ReadPublicSnapshot(ctx); err != nil {
+		t.Fatalf("final ReadPublicSnapshot: %v", err)
 	}
 }
 
@@ -1037,12 +921,61 @@ func mustSequence(t *testing.T, value int64) EventSequence {
 	return result
 }
 
-func isResync(err error) bool {
-	var target *ResyncRequiredError
-	return errors.As(err, &target)
-}
-
-func isWatchRestart(err error, reason WatchRestartReason, state FactoryState) bool {
-	var target *WatchRestartError
-	return errors.As(err, &target) && target.Reason == reason && target.Head == state.Head && target.Floor == state.Floor
+// invalidationsAfter reads the durable invalidation log directly. The browser
+// watch API that used to expose it is gone; the log itself is still the record
+// of what every mutation invalidated, and these tests assert on that record.
+func invalidationsAfter(t *testing.T, store *Store, after EventSequence) []struct {
+	Sequence   EventSequence
+	OccurredAt UnixMillis
+	EntityKind string
+	EntityID   string
+	Revision   Revision
+	Deleted    bool
+} {
+	t.Helper()
+	rows, err := store.writer.Query(`SELECT sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted FROM invalidations WHERE sequence > ? ORDER BY sequence ASC`, after.Int64())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var result []struct {
+		Sequence   EventSequence
+		OccurredAt UnixMillis
+		EntityKind string
+		EntityID   string
+		Revision   Revision
+		Deleted    bool
+	}
+	for rows.Next() {
+		var sequence, occurredAt, revision, deleted int64
+		var kind string
+		var rawID []byte
+		if err := rows.Scan(&sequence, &occurredAt, &kind, &rawID, &revision, &deleted); err != nil {
+			t.Fatal(err)
+		}
+		seq, err := NewEventSequence(sequence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at, err := NewUnixMillis(occurredAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rev, err := NewRevision(revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result = append(result, struct {
+			Sequence   EventSequence
+			OccurredAt UnixMillis
+			EntityKind string
+			EntityID   string
+			Revision   Revision
+			Deleted    bool
+		}{Sequence: seq, OccurredAt: at, EntityKind: kind, EntityID: fmt.Sprintf("%x", rawID), Revision: rev, Deleted: deleted == 1})
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }

@@ -1,13 +1,13 @@
-export const PROTOCOL_VERSION = 1 as const;
+export const PROTOCOL_VERSION = 2 as const;
 export const MAX_CONTROL_BYTES = 64 * 1024;
 export const MAX_TERMINAL_PAYLOAD = 8 * 1024;
 export const TERMINAL_HEADER_BYTES = 40;
 export const MAX_JSON_DEPTH = 16;
 export const MAX_ARRAY_ITEMS = 32;
 export const MAX_OBJECT_MEMBERS = 32;
-export const MAX_STATE_PAGE_ITEMS = 8;
-export const MAX_FACTORY_PAGE_ITEMS = 1;
-export const MAX_CURSOR_BYTES = 256;
+/** Only a server STATE_SNAPSHOT may exceed MAX_CONTROL_BYTES. */
+export const MAX_SNAPSHOT_BYTES = 1024 * 1024;
+export const MAX_SNAPSHOT_ENTITIES = 4096;
 export const MAX_PROJECT_NAME_BYTES = 128;
 export const MAX_AGENT_NAME_BYTES = 128;
 export const MAX_TASK_TITLE_BYTES = 1024;
@@ -41,11 +41,8 @@ export const CONTROL_MANIFEST = [
   { type: "AUTH_RESULT", direction: "server", id: "required", fixture: "auth_result.json" },
   { type: "STATE_GET", direction: "client", id: "required", fixture: "state_get.json" },
   { type: "STATE_SNAPSHOT", direction: "server", id: "required", fixture: "state_snapshot.json" },
-  { type: "STATE_RESTART", direction: "server", id: "required", fixture: "state_restart.json" },
-  { type: "STATE_SUBSCRIBE", direction: "client", id: "required", fixture: "state_subscribe.json" },
-  { type: "STATE_EVENT", direction: "server", id: "required", fixture: "state_event.json" },
-  { type: "STATE_ENTITY_GET", direction: "client", id: "required", fixture: "state_entity_get.json" },
-  { type: "STATE_ENTITY", direction: "server", id: "required", fixture: "state_entity.json" },
+  { type: "STATE_WATCH", direction: "client", id: "required", fixture: "state_watch.json" },
+  { type: "STATE_CHANGED", direction: "server", id: "required", fixture: "state_changed.json" },
   { type: "HUMAN_REQUEST_DETAIL_GET", direction: "client", id: "required", fixture: "human_request_detail_get.json" },
   { type: "HUMAN_REQUEST_DETAIL", direction: "server", id: "required", fixture: "human_request_detail.json" },
   { type: "HUMAN_REQUEST_REPLY", direction: "client", id: "required", fixture: "human_request_reply.json" },
@@ -101,9 +98,8 @@ export const BROWSER_MANIFEST = {
     maxJSONDepth: MAX_JSON_DEPTH,
     maxArrayItems: MAX_ARRAY_ITEMS,
     maxObjectMembers: MAX_OBJECT_MEMBERS,
-    maxStatePageItems: MAX_STATE_PAGE_ITEMS,
-    maxFactoryPageItems: MAX_FACTORY_PAGE_ITEMS,
-    maxCursorBytes: MAX_CURSOR_BYTES,
+    maxSnapshotBytes: MAX_SNAPSHOT_BYTES,
+    maxSnapshotEntities: MAX_SNAPSHOT_ENTITIES,
     maxProjectNameBytes: MAX_PROJECT_NAME_BYTES,
     maxAgentNameBytes: MAX_AGENT_NAME_BYTES,
     maxTaskTitleBytes: MAX_TASK_TITLE_BYTES,
