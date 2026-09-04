@@ -396,6 +396,7 @@ test("active-task target absence waits for the next public head before retrying"
   await flush();
   assert.equal(context.latest().selectedAgent.id, agent.id);
   assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().terminal.finishing, false);
   assert.equal(context.latest().error, undefined);
   assert.equal(context.sessionCloses(), 0);
 
@@ -887,7 +888,7 @@ test("a prior lease refusal does not turn a clean terminal switch into session f
   assert.equal(context.latest().terminal.error, undefined);
 });
 
-test("normal terminal exit returns the configured agent to its idle input", async () => {
+test("terminal exit keeps the selected task pinned until durable finalization", async () => {
   const context = terminalHarness();
   context.controller.start();
   context.ready();
@@ -896,10 +897,54 @@ test("normal terminal exit returns the configured agent to its idle input", asyn
   assert.equal(context.latest().terminal.phase, "ready", "the handle closes before its typed exit callback");
   terminal.options.onExit();
   assert.equal(context.latest().selectedAgent.id, agent.id);
-  assert.equal(context.latest().terminal.phase, "idle");
-  assert.equal(context.latest().terminal.taskTitle, undefined);
+  assert.equal(context.latest().terminal.taskTitle, "Review the state projection");
+  assert.equal(context.latest().terminal.finishing, true);
+  assert.equal(context.latest().terminal.queued, false);
+  assert.equal(await context.controller.enqueueAgentInstruction("must wait"), false);
   assert.equal(context.latest().error, undefined);
   assert.equal(context.sessionCloses(), 0);
+
+  context.clientOptions().onState(stateAt(43));
+  assert.equal(context.latest().terminal.finishing, true, "an unrelated public head cannot reopen a finished terminal");
+
+  const tasks = new Map(fixtureState.tasks);
+  const running = [...tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
+  assert.notEqual(running, undefined);
+  tasks.set(running.id, { ...running, status: "succeeded", revision: running.revision + 1n });
+  context.clientOptions().onState(stateAt(44, { tasks }));
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().terminal.taskTitle, undefined);
+  assert.equal(context.latest().terminal.finishing, false);
+  assert.equal(context.latest().terminal.queued, false);
+});
+
+test("the retired terminal surface is fenced while the selected task finalizes", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  const terminal = await openTerminal(context);
+
+  const retiredSurfaceVersion = context.latest().terminal.surfaceVersion;
+  terminal.options.onExit();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.taskTitle, "Review the state projection");
+  assert.equal(context.latest().terminal.finishing, true);
+
+  const tasks = new Map(fixtureState.tasks);
+  const running = [...tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
+  assert.notEqual(running, undefined);
+  tasks.set(running.id, { ...running, status: "succeeded", revision: running.revision + 1n });
+  context.clientOptions().onState(stateAt(43, { tasks }));
+  assert.equal(context.latest().terminal.taskTitle, undefined);
+  assert.equal(context.latest().terminal.finishing, false);
+
+  // The old Xterm cleanup callback carries its retired surface version.
+  context.controller.endTerminalSurface(terminal.token, retiredSurfaceVersion);
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.taskTitle, undefined);
+  assert.equal(context.latest().error, undefined);
+  assert.equal(await context.controller.enqueueAgentInstruction("ready for the next task"), true);
 });
 
 test("clean exit after the selected task terminals clears its queued identity", async () => {

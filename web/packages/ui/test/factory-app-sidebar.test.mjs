@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
-import { AgentInstruction, TerminalPanel } from "../dist/src/factory-app.js";
+import { AgentInstruction, TerminalContent, TerminalPanel } from "../dist/src/factory-app.js";
 
 function terminalView(overrides = {}) {
   return {
@@ -16,6 +16,7 @@ function terminalView(overrides = {}) {
     instructionPending: false,
     queued: false,
     resets: 0,
+    finishing: false,
     surfaceVersion: 0,
     ...overrides,
   };
@@ -39,6 +40,16 @@ test("the terminal is a quiet sidebar", () => {
     assert.equal(markup.includes(noise), false, noise);
   }
   assert.equal((markup.match(/<button/g) ?? []).length, 1, "close is the only terminal control");
+});
+
+test("finalizing work shows no blank terminal or idle input", () => {
+  const markup = renderToStaticMarkup(createElement(TerminalContent, {
+    terminal: terminalView({ taskTitle: "Repair finalization", finishing: true }),
+    controller: {},
+  }));
+  assert.match(markup, />FINISHING<\/p>/);
+  assert.equal(markup.includes("textarea"), false);
+  assert.equal(markup.includes('role="application"'), false);
 });
 
 test("an idle configured agent accepts one compact instruction", async () => {
