@@ -15,7 +15,7 @@ import (
 )
 
 func fixturePath(name string) string {
-	return filepath.Join("..", "..", "protocol", "browser", "v2", "fixtures", name)
+	return filepath.Join("..", "..", "protocol", "browser", "fixtures", name)
 }
 
 func fixtureBytes(t *testing.T, name string) []byte {
@@ -62,9 +62,6 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 			decoded, err := decodeFixtureControl(test.name, got)
 			if err != nil {
 				t.Fatal(err)
-			}
-			if decoded.Version != ProtocolVersion {
-				t.Fatalf("version %d", decoded.Version)
 			}
 			again, err := encodeDecoded(decoded)
 			if err != nil {
@@ -187,22 +184,19 @@ func TestBinaryFixturesRoundTrip(t *testing.T) {
 
 func TestControlMalformed(t *testing.T) {
 	valid := string(fixtureBytes(t, "hello.json"))
-	deep := `{"v":2,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.Repeat("[", MaxJSONDepth+2) + "0" + strings.Repeat("]", MaxJSONDepth+2) + `]}}`
+	deep := `{"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.Repeat("[", MaxJSONDepth+2) + "0" + strings.Repeat("]", MaxJSONDepth+2) + `]}}`
 	cases := []struct{ name, data string }{
-		{"wrong version", strings.Replace(valid, `"v":2`, `"v":1`, 1)},
 		{"unknown type", strings.Replace(valid, `"HELLO"`, `"NOPE"`, 1)},
-		{"missing body", `{"v":2,"type":"HELLO"}`},
+		{"missing body", `{"type":"HELLO"}`},
 		{"missing body member", strings.Replace(valid, `"boot_id"`, `"future_id"`, 1)},
-		{"duplicate envelope", strings.Replace(valid, `,"type"`, `,"v":2,"type"`, 1)},
+		{"duplicate envelope", strings.Replace(valid, `{"type"`, `{"type":"HELLO","type"`, 1)},
 		{"duplicate body", strings.Replace(valid, `,"boot_id"`, `,"daemon_id":"`+strings.Repeat("00", 16)+`","boot_id"`, 1)},
 		{"trailing", valid + ` {}`},
 		{"depth bound", deep},
-		{"unsafe number", strings.Replace(valid, `"v":2`, `"v":9007199254740992`, 1)},
-		{"fractional number", strings.Replace(valid, `"v":2`, `"v":2.0`, 1)},
 		{"upper hex", strings.Replace(valid, "000102030405060708090a0b0c0d0e0f", "000102030405060708090A0b0c0d0e0f", 1)},
 		{"bad id", strings.Replace(valid, `"type":"HELLO"`, `"type":"HELLO","id":"bad id"`, 1)},
 		{"hello id", strings.Replace(valid, `"type":"HELLO"`, `"type":"HELLO","id":"x"`, 1)},
-		{"error missing retryable", `{"v":2,"type":"ERROR","body":{"code":"unauthorized"}}`},
+		{"error missing retryable", `{"type":"ERROR","body":{"code":"unauthorized"}}`},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -390,7 +384,7 @@ func TestControlIDAndBodyValidation(t *testing.T) {
 func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	data := fixtureBytes(t, "../manifest.json")
 	var manifest struct {
-		Version      int `json:"version"`
+		Name         string `json:"name"`
 		Capabilities []struct {
 			Name  string `json:"name"`
 			Bit   int    `json:"bit"`
@@ -446,7 +440,9 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		t.Fatalf("manifest trailing JSON: %v", err)
 	}
-	if manifest.Version != int(ProtocolVersion) || len(manifest.Control) != 35 || len(manifest.Terminal.Opcodes) != 2 {
+	// The manifest carries a stable name, not a generation: the contract is
+	// unversioned by owner decision on 4 September 2026.
+	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 35 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input"}
@@ -579,7 +575,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"transcript_v2.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_watch.json": true, "state_changed.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
+	expectedFiles := map[string]bool{"transcript.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_watch.json": true, "state_changed.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}
@@ -761,7 +757,7 @@ func TestBinaryOutputRangeOverflow(t *testing.T) {
 }
 
 func TestDecodeErrorsAreStable(t *testing.T) {
-	_, err := DecodeServerControl([]byte(`{"v":1,"type":"NOPE","body":{}}`))
+	_, err := DecodeServerControl([]byte(`{"type":"NOPE","body":{}}`))
 	if err != ErrMalformed {
 		t.Fatalf("error = %v, want exact ErrMalformed", err)
 	}
@@ -769,9 +765,12 @@ func TestDecodeErrorsAreStable(t *testing.T) {
 		t.Fatal("private text in public error")
 	}
 	malformed := [][]byte{
-		[]byte(`{"v":1,"type":"HELLO","id":null,"body":{}}`),
-		[]byte(`{"v":1,"type":"HELLO","body":{"daemon_id":"private-sentinel"}}`),
-		[]byte(`{"v":1,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","private":"sentinel"}}`),
+		[]byte(`{"type":"HELLO","id":null,"body":{}}`),
+		[]byte(`{"type":"HELLO","body":{"daemon_id":"private-sentinel"}}`),
+		// Tolerated members do not soften the refusal or the error: this frame
+		// is missing connection_nonce, and the ignored member's text must not
+		// reach the public error either.
+		[]byte(`{"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","private":"sentinel"}}`),
 	}
 	for _, value := range malformed {
 		err := func() error { _, err := DecodeServerControl(value); return err }()
@@ -864,7 +863,7 @@ func TestTerminalExitRequiresOneCanonicalStatusArm(t *testing.T) {
 			if _, err := EncodeTerminalExit("exit", TerminalExit{SessionID: sessionID, ExitCode: test.code, ExitSignal: test.signal}); !errors.Is(err, ErrMalformed) {
 				t.Fatalf("noncanonical terminal exit accepted: %v", err)
 			}
-			wire := fmt.Sprintf(`{"v":1,"type":"TERMINAL_EXIT","id":"exit","body":{"session_id":"%s","exit_code":%d,"exit_signal":%d,"aborted":false}}`, sessionID, test.code, test.signal)
+			wire := fmt.Sprintf(`{"type":"TERMINAL_EXIT","id":"exit","body":{"session_id":"%s","exit_code":%d,"exit_signal":%d,"aborted":false}}`, sessionID, test.code, test.signal)
 			if _, err := DecodeServerControl([]byte(wire)); !errors.Is(err, ErrMalformed) {
 				t.Fatalf("noncanonical terminal exit decoded: %v", err)
 			}

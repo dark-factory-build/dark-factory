@@ -60,7 +60,7 @@ func rawControl(t *testing.T, kind MessageType, id string, body any) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := json.Marshal(controlEnvelope{Version: ProtocolVersion, Type: kind, ID: idJSON, Body: bodyJSON})
+	result, err := json.Marshal(controlEnvelope{Type: kind, ID: idJSON, Body: bodyJSON})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestStateGetCarriesNoSelector(t *testing.T) {
 	// STATE_GET has no selector member, so a caller cannot smuggle one: each
 	// of these decodes to exactly the same empty request.
 	for _, body := range []string{`{"cursor":null}`, `{"kind":"task"}`, `{"after":"1"}`} {
-		wire := fmt.Sprintf(`{"v":%d,"type":"STATE_GET","id":"state","body":%s}`, ProtocolVersion, body)
+		wire := fmt.Sprintf(`{"type":"STATE_GET","id":"state","body":%s}`, body)
 		assertIgnoredMember(t, string(encoded), wire, false)
 	}
 }
@@ -199,7 +199,7 @@ func TestSnapshotByteBoundIsOneMebibyteAndFailsClosed(t *testing.T) {
 		t.Fatalf("oversized client frame error = %v", err)
 	}
 	// A server frame that is not a snapshot may not use the snapshot bound.
-	watch := fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"%s","body":{"head":"1"}}`, ProtocolVersion, strings.Repeat("p", 64))
+	watch := fmt.Sprintf(`{"type":"STATE_CHANGED","id":"%s","body":{"head":"1"}}`, strings.Repeat("p", 64))
 	padded := append([]byte(watch), bytes.Repeat([]byte{' '}, MaxControlBytes)...)
 	if _, err := DecodeServerControl(padded); !errors.Is(err, ErrOversized) && err != ErrMalformed {
 		t.Fatalf("oversized non-snapshot server frame error = %v", err)
@@ -242,13 +242,13 @@ func TestDecimalCanonicalBoundaries(t *testing.T) {
 		if _, err := parseDecimal(value); err == nil {
 			t.Fatalf("invalid decimal %q accepted", value)
 		}
-		wire := fmt.Sprintf(`{"v":%d,"type":"STATE_WATCH","id":"watch","body":{"after_head":%q}}`, ProtocolVersion, value)
+		wire := fmt.Sprintf(`{"type":"STATE_WATCH","id":"watch","body":{"after_head":%q}}`, value)
 		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
 			t.Fatalf("wire decimal %q accepted: %v", value, err)
 		}
 	}
 	for _, number := range []string{"0", "1", "9007199254740991", "9007199254740992", "9223372036854775807", "-1"} {
-		wire := fmt.Sprintf(`{"v":%d,"type":"STATE_WATCH","id":"watch","body":{"after_head":%s}}`, ProtocolVersion, number)
+		wire := fmt.Sprintf(`{"type":"STATE_WATCH","id":"watch","body":{"after_head":%s}}`, number)
 		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
 			t.Fatalf("JSON number chronology %s accepted: %v", number, err)
 		}
@@ -267,7 +267,7 @@ func TestStateChangedIsAHeadAndNothingElse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(wire, []byte(fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"watch","body":{"head":"9"}}`, ProtocolVersion))) {
+	if !bytes.Equal(wire, []byte(fmt.Sprintf(`{"type":"STATE_CHANGED","id":"watch","body":{"head":"9"}}`))) {
 		t.Fatalf("STATE_CHANGED shape = %s", wire)
 	}
 	if _, err := EncodeStateChanged("watch", StateChanged{Head: 0}); !errors.Is(err, ErrMalformed) {
@@ -281,11 +281,11 @@ func TestStateChangedIsAHeadAndNothingElse(t *testing.T) {
 		`{"head":"9","deleted":false}`,
 		`{"head":"9","sequence":"9"}`,
 	} {
-		frame := fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"watch","body":%s}`, ProtocolVersion, body)
+		frame := fmt.Sprintf(`{"type":"STATE_CHANGED","id":"watch","body":%s}`, body)
 		assertIgnoredMember(t, string(wire), frame, true)
 	}
 	// The head itself stays required.
-	if _, err := DecodeServerControl([]byte(fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"watch","body":{}}`, ProtocolVersion))); err != ErrMalformed {
+	if _, err := DecodeServerControl([]byte(fmt.Sprintf(`{"type":"STATE_CHANGED","id":"watch","body":{}}`))); err != ErrMalformed {
 		t.Fatalf("STATE_CHANGED without a head accepted: %v", err)
 	}
 }
@@ -573,17 +573,17 @@ func TestStateMalformedEnvelopeBodyAndGlobalBounds(t *testing.T) {
 		}
 	}
 	objectMembers := strings.Repeat(`"x":0,`, MaxJSONObject) + `"tail":0`
-	tooManyMembers := fmt.Sprintf(`{"v":%d,"type":"STATE_WATCH","id":"watch","body":{%s}}`, ProtocolVersion, objectMembers)
+	tooManyMembers := fmt.Sprintf(`{"type":"STATE_WATCH","id":"watch","body":{%s}}`, objectMembers)
 	if _, err := DecodeClientControl([]byte(tooManyMembers)); err != ErrMalformed {
 		t.Fatalf("object member bound error = %v", err)
 	}
 	// A client frame keeps the small array bound; the server snapshot is the
 	// only direction that may carry a large array.
-	clientArray := fmt.Sprintf(`{"v":%d,"type":"STATE_WATCH","id":"watch","body":{"after_head":[%s]}}`, ProtocolVersion, strings.TrimSuffix(strings.Repeat(`0,`, MaxJSONArray+1), ","))
+	clientArray := fmt.Sprintf(`{"type":"STATE_WATCH","id":"watch","body":{"after_head":[%s]}}`, strings.TrimSuffix(strings.Repeat(`0,`, MaxJSONArray+1), ","))
 	if _, err := DecodeClientControl([]byte(clientArray)); err != ErrMalformed {
 		t.Fatalf("client array bound error = %v", err)
 	}
-	tooManyArray := fmt.Sprintf(`{"v":%d,"type":"STATE_SNAPSHOT","id":"state","body":{"head":"1","factory":{},"projects":[%s],"agents":[],"tasks":[],"human_requests":[]}}`, ProtocolVersion, strings.TrimSuffix(strings.Repeat(`{},`, MaxSnapshotEntities+1), ","))
+	tooManyArray := fmt.Sprintf(`{"type":"STATE_SNAPSHOT","id":"state","body":{"head":"1","factory":{},"projects":[%s],"agents":[],"tasks":[],"human_requests":[]}}`, strings.TrimSuffix(strings.Repeat(`{},`, MaxSnapshotEntities+1), ","))
 	if _, err := DecodeServerControl([]byte(tooManyArray)); err != ErrMalformed {
 		t.Fatalf("snapshot array bound error = %v", err)
 	}
@@ -595,24 +595,26 @@ func TestStateMalformedEnvelopeBodyAndGlobalBounds(t *testing.T) {
 	}
 }
 
-// An old-generation frame is refused as an unsupported version, not silently
-// reinterpreted, so a stale site artifact fails loudly at its first frame.
-func TestPreviousProtocolGenerationIsRefused(t *testing.T) {
-	if ProtocolVersion != 2 {
-		t.Fatalf("protocol generation = %d", ProtocolVersion)
-	}
+// A retired message type is refused, so the deleted paging contract cannot
+// come back through a frame this build does not implement. The envelope has no
+// generation to refuse: an older client's `v` member is simply ignored.
+func TestRetiredStateTypesAreRefused(t *testing.T) {
 	legacy := `{"v":1,"type":"STATE_GET","id":"state","body":{"cursor":null}}`
-	if _, err := DecodeClientControl([]byte(legacy)); err != ErrMalformed {
-		t.Fatalf("previous generation accepted: %v", err)
+	frame, err := DecodeClientControl([]byte(legacy))
+	if err != nil {
+		t.Fatalf("legacy envelope member refused: %v", err)
+	}
+	if frame.Type != TypeStateGet || frame.Body != (StateGet{}) {
+		t.Fatalf("legacy frame decoded to %+v", frame)
 	}
 	for _, kind := range []string{"STATE_SUBSCRIBE", "STATE_ENTITY_GET"} {
-		wire := fmt.Sprintf(`{"v":%d,"type":%q,"id":"x","body":{}}`, ProtocolVersion, kind)
+		wire := fmt.Sprintf(`{"type":%q,"id":"x","body":{}}`, kind)
 		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
 			t.Fatalf("retired client type %s accepted: %v", kind, err)
 		}
 	}
 	for _, kind := range []string{"STATE_RESTART", "STATE_EVENT", "STATE_ENTITY"} {
-		wire := fmt.Sprintf(`{"v":%d,"type":%q,"id":"x","body":{}}`, ProtocolVersion, kind)
+		wire := fmt.Sprintf(`{"type":%q,"id":"x","body":{}}`, kind)
 		if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
 			t.Fatalf("retired server type %s accepted: %v", kind, err)
 		}

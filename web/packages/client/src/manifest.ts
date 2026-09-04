@@ -1,4 +1,9 @@
-export const PROTOCOL_VERSION = 2 as const;
+/** The browser contract has no generation: it is unversioned and tolerant of
+ * added members by owner decision on 4 September 2026. This name identifies
+ * the contract; it never moves. */
+export const BROWSER_PROTOCOL_NAME = "dark-factory/browser" as const;
+/** The fixed third byte of every binary terminal frame, beside the "DF" magic. */
+export const TERMINAL_FRAME_VERSION = 1 as const;
 export const MAX_CONTROL_BYTES = 64 * 1024;
 export const MAX_TERMINAL_PAYLOAD = 8 * 1024;
 export const TERMINAL_HEADER_BYTES = 40;
@@ -76,7 +81,6 @@ export type ControlType = (typeof CONTROL_TYPES)[number];
 export const ERROR_CODES = [
   "unauthorized",
   "invalid_request",
-  "unsupported_version",
   "rate_limited",
   "not_found",
   "stale",
@@ -91,7 +95,7 @@ export const TERMINAL_OPCODES = {
 } as const;
 
 export const BROWSER_MANIFEST = {
-  version: PROTOCOL_VERSION,
+  name: BROWSER_PROTOCOL_NAME,
   capabilities: CAPABILITIES,
   bounds: {
     maxControlBytes: MAX_CONTROL_BYTES,
@@ -118,7 +122,7 @@ export const BROWSER_MANIFEST = {
   control: CONTROL_MANIFEST,
   terminal: {
     magic: "DF",
-    version: PROTOCOL_VERSION,
+    version: TERMINAL_FRAME_VERSION,
     headerBytes: TERMINAL_HEADER_BYTES,
     maxPayloadBytes: MAX_TERMINAL_PAYLOAD,
     opcodes: TERMINAL_OPCODES,

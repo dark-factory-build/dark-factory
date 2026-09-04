@@ -101,7 +101,7 @@ func TestProcessServesAPIAndBrowserThenReleasesExactHome(t *testing.T) {
 	callContext, callCancel = context.WithTimeout(context.Background(), 3*time.Second)
 	status, err := client.WebStatus(callContext)
 	callCancel()
-	if err != nil || !status.Ready || status.Address != owner.browser.Addr() || status.Path != "/browser/v2" || len(status.Origins) != 1 || status.Origins[0] != testOrigin {
+	if err != nil || !status.Ready || status.Address != owner.browser.Addr() || status.Path != "/browser" || len(status.Origins) != 1 || status.Origins[0] != testOrigin {
 		t.Fatalf("web status = %+v, %v", status, err)
 	}
 

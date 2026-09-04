@@ -22,7 +22,6 @@ import {
   MAX_TERMINAL_UNACKED_BYTES,
   MAX_TASK_PRIORITY,
   MAX_TASK_TITLE_BYTES,
-  PROTOCOL_VERSION,
   type CapabilityMask,
   type ControlType,
   type ErrorCode,
@@ -88,47 +87,47 @@ export type TerminalEOFBody = { session_id: string };
 export type TerminalExitBody = { session_id: string; exit_code: number; exit_signal: number; aborted: boolean };
 export type TerminalResetBody = { session_id: string; floor: bigint; head: bigint };
 
-export type HelloFrame = { v: 2; type: "HELLO"; body: HelloBody };
-export type PairProveFrame = { v: 2; type: "PAIR_PROVE"; id: string; body: PairProveBody };
-export type PairResultFrame = { v: 2; type: "PAIR_RESULT"; id: string; body: PairResultBody };
-export type AuthProveFrame = { v: 2; type: "AUTH_PROVE"; id: string; body: AuthProveBody };
-export type AuthResultFrame = { v: 2; type: "AUTH_RESULT"; id: string; body: AuthResultBody };
-export type StateGetFrame = { v: 2; type: "STATE_GET"; id: string; body: StateGetBody };
-export type StateSnapshotFrame = { v: 2; type: "STATE_SNAPSHOT"; id: string; body: StateSnapshotBody };
-export type StateWatchFrame = { v: 2; type: "STATE_WATCH"; id: string; body: StateWatchBody };
-export type StateChangedFrame = { v: 2; type: "STATE_CHANGED"; id: string; body: StateChangedBody };
-export type HumanRequestDetailGetFrame = { v: 2; type: "HUMAN_REQUEST_DETAIL_GET"; id: string; body: HumanRequestDetailGetBody };
-export type HumanRequestDetailFrame = { v: 2; type: "HUMAN_REQUEST_DETAIL"; id: string; body: HumanRequestDetailBody };
-export type ErrorFrame = { v: 2; type: "ERROR"; id?: string; body: ErrorBody };
+export type HelloFrame = { type: "HELLO"; body: HelloBody };
+export type PairProveFrame = { type: "PAIR_PROVE"; id: string; body: PairProveBody };
+export type PairResultFrame = { type: "PAIR_RESULT"; id: string; body: PairResultBody };
+export type AuthProveFrame = { type: "AUTH_PROVE"; id: string; body: AuthProveBody };
+export type AuthResultFrame = { type: "AUTH_RESULT"; id: string; body: AuthResultBody };
+export type StateGetFrame = { type: "STATE_GET"; id: string; body: StateGetBody };
+export type StateSnapshotFrame = { type: "STATE_SNAPSHOT"; id: string; body: StateSnapshotBody };
+export type StateWatchFrame = { type: "STATE_WATCH"; id: string; body: StateWatchBody };
+export type StateChangedFrame = { type: "STATE_CHANGED"; id: string; body: StateChangedBody };
+export type HumanRequestDetailGetFrame = { type: "HUMAN_REQUEST_DETAIL_GET"; id: string; body: HumanRequestDetailGetBody };
+export type HumanRequestDetailFrame = { type: "HUMAN_REQUEST_DETAIL"; id: string; body: HumanRequestDetailBody };
+export type ErrorFrame = { type: "ERROR"; id?: string; body: ErrorBody };
 export type TerminalControlFrame =
-  | { v: 2; type: "TERMINAL_ATTACH"; id: string; body: TerminalAttachBody }
-  | { v: 2; type: "TERMINAL_ACK"; body: TerminalAckBody }
-  | { v: 2; type: "TERMINAL_LEASE_ACQUIRE"; id: string; body: TerminalLeaseAcquireBody }
-  | { v: 2; type: "TERMINAL_LEASE_RENEW"; id: string; body: TerminalLeaseRenewBody }
-  | { v: 2; type: "TERMINAL_LEASE_RELEASE"; id: string; body: TerminalLeaseReleaseBody }
-  | { v: 2; type: "TERMINAL_RESIZE"; id: string; body: TerminalResizeBody }
-  | { v: 2; type: "TERMINAL_DETACH"; id: string; body: TerminalDetachBody };
+  | { type: "TERMINAL_ATTACH"; id: string; body: TerminalAttachBody }
+  | { type: "TERMINAL_ACK"; body: TerminalAckBody }
+  | { type: "TERMINAL_LEASE_ACQUIRE"; id: string; body: TerminalLeaseAcquireBody }
+  | { type: "TERMINAL_LEASE_RENEW"; id: string; body: TerminalLeaseRenewBody }
+  | { type: "TERMINAL_LEASE_RELEASE"; id: string; body: TerminalLeaseReleaseBody }
+  | { type: "TERMINAL_RESIZE"; id: string; body: TerminalResizeBody }
+  | { type: "TERMINAL_DETACH"; id: string; body: TerminalDetachBody };
 export type TerminalServerControlFrame =
-  | { v: 2; type: "TERMINAL_ATTACHED"; id: string; body: TerminalAttachedBody }
-  | { v: 2; type: "TERMINAL_LEASE_RESULT"; id: string; body: TerminalLeaseResultBody }
-  | { v: 2; type: "TERMINAL_RESIZED"; id: string; body: TerminalResizedBody }
-  | { v: 2; type: "TERMINAL_DETACHED"; id: string; body: TerminalDetachedBody }
-  | { v: 2; type: "TERMINAL_INPUT_RESULT"; id: string; body: TerminalInputResultBody }
-  | { v: 2; type: "TERMINAL_EOF"; id: string; body: TerminalEOFBody }
-  | { v: 2; type: "TERMINAL_EXIT"; id: string; body: TerminalExitBody }
-  | { v: 2; type: "TERMINAL_RESET"; id: string; body: TerminalResetBody };
+  | { type: "TERMINAL_ATTACHED"; id: string; body: TerminalAttachedBody }
+  | { type: "TERMINAL_LEASE_RESULT"; id: string; body: TerminalLeaseResultBody }
+  | { type: "TERMINAL_RESIZED"; id: string; body: TerminalResizedBody }
+  | { type: "TERMINAL_DETACHED"; id: string; body: TerminalDetachedBody }
+  | { type: "TERMINAL_INPUT_RESULT"; id: string; body: TerminalInputResultBody }
+  | { type: "TERMINAL_EOF"; id: string; body: TerminalEOFBody }
+  | { type: "TERMINAL_EXIT"; id: string; body: TerminalExitBody }
+  | { type: "TERMINAL_RESET"; id: string; body: TerminalResetBody };
 
 export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
-  | { v: 2; type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
-  | { v: 2; type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
-  | { v: 2; type: "TASK_ENQUEUE_RESULT"; id: string; body: TaskEnqueueResultBody }
-  | { v: 2; type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
+  | { type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
+  | { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
+  | { type: "TASK_ENQUEUE_RESULT"; id: string; body: TaskEnqueueResultBody }
+  | { type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
   | TerminalServerControlFrame | ErrorFrame;
 export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
-  | { v: 2; type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
-  | { v: 2; type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
-  | { v: 2; type: "TASK_ENQUEUE"; id: string; body: TaskEnqueueBody }
-  | { v: 2; type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
+  | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
+  | { type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
+  | { type: "TASK_ENQUEUE"; id: string; body: TaskEnqueueBody }
+  | { type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
   | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
 
@@ -137,49 +136,49 @@ const CLIENT_TYPES: readonly ControlType[] = ["PAIR_PROVE", "AUTH_PROVE", "STATE
 const SERVER_TYPES: readonly ControlType[] = ["HELLO", "PAIR_RESULT", "AUTH_RESULT", "STATE_SNAPSHOT", "STATE_CHANGED", "HUMAN_REQUEST_DETAIL", "HUMAN_REQUEST_REPLY_RESULT", "HUMAN_REQUEST_CANCEL_RUN_RESULT", "TASK_ENQUEUE_RESULT", "TERMINAL_TARGET", "TERMINAL_ATTACHED", "TERMINAL_LEASE_RESULT", "TERMINAL_RESIZED", "TERMINAL_DETACHED", "TERMINAL_INPUT_RESULT", "TERMINAL_EOF", "TERMINAL_EXIT", "TERMINAL_RESET", "ERROR"];
 
 export function encodeClientControl(frame: ClientControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "client"))); }
-export function encodePairProve(id: string, body: PairProveBody): string { return encodeClientControl({ v: 2, type: "PAIR_PROVE", id, body }); }
-export function encodeAuthProve(id: string, body: AuthProveBody): string { return encodeClientControl({ v: 2, type: "AUTH_PROVE", id, body }); }
-export function encodeStateGet(id: string, body: StateGetBody): string { return encodeClientControl({ v: 2, type: "STATE_GET", id, body }); }
-export function encodeStateWatch(id: string, body: StateWatchBody): string { return encodeClientControl({ v: 2, type: "STATE_WATCH", id, body }); }
-export function encodeHumanRequestDetailGet(id: string, body: HumanRequestDetailGetBody): string { return encodeClientControl({ v: 2, type: "HUMAN_REQUEST_DETAIL_GET", id, body }); }
-export function encodeHumanRequestReply(id: string, body: HumanRequestReplyBody): string { return encodeClientControl({ v: 2, type: "HUMAN_REQUEST_REPLY", id, body }); }
-export function encodeHumanRequestCancelRun(id: string, body: HumanRequestCancelRunBody): string { return encodeClientControl({ v: 2, type: "HUMAN_REQUEST_CANCEL_RUN", id, body }); }
-export function encodeTaskEnqueue(id: string, body: TaskEnqueueBody): string { return encodeClientControl({ v: 2, type: "TASK_ENQUEUE", id, body }); }
-export function encodeTerminalTargetGet(id: string, body: TerminalTargetGetBody): string { return encodeClientControl({ v: 2, type: "TERMINAL_TARGET_GET", id, body }); }
-export function encodeTerminalAttach(id: string, body: TerminalAttachBody): string { return encodeClientControl({ v: 2, type: "TERMINAL_ATTACH", id, body }); }
-export function encodeTerminalAck(body: TerminalAckBody): string { return encodeClientControl({ v: 2, type: "TERMINAL_ACK", body }); }
-export function encodeTerminalLeaseAcquire(id: string, body: TerminalLeaseAcquireBody): string { return encodeClientControl({ v: 2, type: "TERMINAL_LEASE_ACQUIRE", id, body }); }
-export function encodeTerminalLeaseRenew(id: string, body: TerminalLeaseRenewBody): string { return encodeClientControl({ v: 2, type: "TERMINAL_LEASE_RENEW", id, body }); }
-export function encodeTerminalLeaseRelease(id: string, body: TerminalLeaseReleaseBody): string { return encodeClientControl({ v: 2, type: "TERMINAL_LEASE_RELEASE", id, body }); }
-export function encodeTerminalResize(id: string, body: TerminalResizeBody): string { return encodeClientControl({ v: 2, type: "TERMINAL_RESIZE", id, body }); }
-export function encodeTerminalDetach(id: string, body: TerminalDetachBody): string { return encodeClientControl({ v: 2, type: "TERMINAL_DETACH", id, body }); }
-export function encodeClientError(body: ErrorBody, id?: string): string { return encodeClientControl({ v: 2, type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
+export function encodePairProve(id: string, body: PairProveBody): string { return encodeClientControl({ type: "PAIR_PROVE", id, body }); }
+export function encodeAuthProve(id: string, body: AuthProveBody): string { return encodeClientControl({ type: "AUTH_PROVE", id, body }); }
+export function encodeStateGet(id: string, body: StateGetBody): string { return encodeClientControl({ type: "STATE_GET", id, body }); }
+export function encodeStateWatch(id: string, body: StateWatchBody): string { return encodeClientControl({ type: "STATE_WATCH", id, body }); }
+export function encodeHumanRequestDetailGet(id: string, body: HumanRequestDetailGetBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_DETAIL_GET", id, body }); }
+export function encodeHumanRequestReply(id: string, body: HumanRequestReplyBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_REPLY", id, body }); }
+export function encodeHumanRequestCancelRun(id: string, body: HumanRequestCancelRunBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_CANCEL_RUN", id, body }); }
+export function encodeTaskEnqueue(id: string, body: TaskEnqueueBody): string { return encodeClientControl({ type: "TASK_ENQUEUE", id, body }); }
+export function encodeTerminalTargetGet(id: string, body: TerminalTargetGetBody): string { return encodeClientControl({ type: "TERMINAL_TARGET_GET", id, body }); }
+export function encodeTerminalAttach(id: string, body: TerminalAttachBody): string { return encodeClientControl({ type: "TERMINAL_ATTACH", id, body }); }
+export function encodeTerminalAck(body: TerminalAckBody): string { return encodeClientControl({ type: "TERMINAL_ACK", body }); }
+export function encodeTerminalLeaseAcquire(id: string, body: TerminalLeaseAcquireBody): string { return encodeClientControl({ type: "TERMINAL_LEASE_ACQUIRE", id, body }); }
+export function encodeTerminalLeaseRenew(id: string, body: TerminalLeaseRenewBody): string { return encodeClientControl({ type: "TERMINAL_LEASE_RENEW", id, body }); }
+export function encodeTerminalLeaseRelease(id: string, body: TerminalLeaseReleaseBody): string { return encodeClientControl({ type: "TERMINAL_LEASE_RELEASE", id, body }); }
+export function encodeTerminalResize(id: string, body: TerminalResizeBody): string { return encodeClientControl({ type: "TERMINAL_RESIZE", id, body }); }
+export function encodeTerminalDetach(id: string, body: TerminalDetachBody): string { return encodeClientControl({ type: "TERMINAL_DETACH", id, body }); }
+export function encodeClientError(body: ErrorBody, id?: string): string { return encodeClientControl({ type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 
 export function encodeServerControl(frame: ServerControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "server"))); }
-export function encodeHello(body: HelloBody): string { return encodeServerControl({ v: 2, type: "HELLO", body }); }
-export function encodePairResult(id: string, body: PairResultBody): string { return encodeServerControl({ v: 2, type: "PAIR_RESULT", id, body }); }
-export function encodeAuthResult(id: string, body: AuthResultBody): string { return encodeServerControl({ v: 2, type: "AUTH_RESULT", id, body }); }
-export function encodeStateSnapshot(id: string, body: StateSnapshotBody): string { return encodeServerControl({ v: 2, type: "STATE_SNAPSHOT", id, body }); }
-export function encodeStateChanged(id: string, body: StateChangedBody): string { return encodeServerControl({ v: 2, type: "STATE_CHANGED", id, body }); }
-export function encodeHumanRequestDetail(id: string, body: HumanRequestDetailBody): string { return encodeServerControl({ v: 2, type: "HUMAN_REQUEST_DETAIL", id, body }); }
-export function encodeHumanRequestReplyResult(id: string, body: HumanRequestReplyResultBody): string { return encodeServerControl({ v: 2, type: "HUMAN_REQUEST_REPLY_RESULT", id, body }); }
-export function encodeHumanRequestCancelRunResult(id: string, body: HumanRequestCancelRunResultBody): string { return encodeServerControl({ v: 2, type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", id, body }); }
-export function encodeTaskEnqueueResult(id: string, body: TaskEnqueueResultBody): string { return encodeServerControl({ v: 2, type: "TASK_ENQUEUE_RESULT", id, body }); }
-export function encodeTerminalTarget(id: string, body: TerminalTargetBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_TARGET", id, body }); }
-export function encodeTerminalAttached(id: string, body: TerminalAttachedBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_ATTACHED", id, body }); }
-export function encodeTerminalLeaseResult(id: string, body: TerminalLeaseResultBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_LEASE_RESULT", id, body }); }
-export function encodeTerminalResized(id: string, body: TerminalResizedBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_RESIZED", id, body }); }
-export function encodeTerminalDetached(id: string, body: TerminalDetachedBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_DETACHED", id, body }); }
-export function encodeTerminalInputResult(id: string, body: TerminalInputResultBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_INPUT_RESULT", id, body }); }
-export function encodeTerminalEOF(id: string, body: TerminalEOFBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_EOF", id, body }); }
-export function encodeTerminalExit(id: string, body: TerminalExitBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_EXIT", id, body }); }
-export function encodeTerminalReset(id: string, body: TerminalResetBody): string { return encodeServerControl({ v: 2, type: "TERMINAL_RESET", id, body }); }
-export function encodeServerError(body: ErrorBody, id?: string): string { return encodeServerControl({ v: 2, type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
+export function encodeHello(body: HelloBody): string { return encodeServerControl({ type: "HELLO", body }); }
+export function encodePairResult(id: string, body: PairResultBody): string { return encodeServerControl({ type: "PAIR_RESULT", id, body }); }
+export function encodeAuthResult(id: string, body: AuthResultBody): string { return encodeServerControl({ type: "AUTH_RESULT", id, body }); }
+export function encodeStateSnapshot(id: string, body: StateSnapshotBody): string { return encodeServerControl({ type: "STATE_SNAPSHOT", id, body }); }
+export function encodeStateChanged(id: string, body: StateChangedBody): string { return encodeServerControl({ type: "STATE_CHANGED", id, body }); }
+export function encodeHumanRequestDetail(id: string, body: HumanRequestDetailBody): string { return encodeServerControl({ type: "HUMAN_REQUEST_DETAIL", id, body }); }
+export function encodeHumanRequestReplyResult(id: string, body: HumanRequestReplyResultBody): string { return encodeServerControl({ type: "HUMAN_REQUEST_REPLY_RESULT", id, body }); }
+export function encodeHumanRequestCancelRunResult(id: string, body: HumanRequestCancelRunResultBody): string { return encodeServerControl({ type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", id, body }); }
+export function encodeTaskEnqueueResult(id: string, body: TaskEnqueueResultBody): string { return encodeServerControl({ type: "TASK_ENQUEUE_RESULT", id, body }); }
+export function encodeTerminalTarget(id: string, body: TerminalTargetBody): string { return encodeServerControl({ type: "TERMINAL_TARGET", id, body }); }
+export function encodeTerminalAttached(id: string, body: TerminalAttachedBody): string { return encodeServerControl({ type: "TERMINAL_ATTACHED", id, body }); }
+export function encodeTerminalLeaseResult(id: string, body: TerminalLeaseResultBody): string { return encodeServerControl({ type: "TERMINAL_LEASE_RESULT", id, body }); }
+export function encodeTerminalResized(id: string, body: TerminalResizedBody): string { return encodeServerControl({ type: "TERMINAL_RESIZED", id, body }); }
+export function encodeTerminalDetached(id: string, body: TerminalDetachedBody): string { return encodeServerControl({ type: "TERMINAL_DETACHED", id, body }); }
+export function encodeTerminalInputResult(id: string, body: TerminalInputResultBody): string { return encodeServerControl({ type: "TERMINAL_INPUT_RESULT", id, body }); }
+export function encodeTerminalEOF(id: string, body: TerminalEOFBody): string { return encodeServerControl({ type: "TERMINAL_EOF", id, body }); }
+export function encodeTerminalExit(id: string, body: TerminalExitBody): string { return encodeServerControl({ type: "TERMINAL_EXIT", id, body }); }
+export function encodeTerminalReset(id: string, body: TerminalResetBody): string { return encodeServerControl({ type: "TERMINAL_RESET", id, body }); }
+export function encodeServerError(body: ErrorBody, id?: string): string { return encodeServerControl({ type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 export function decodeClientControl(data: string | Uint8Array): ClientControlFrame { return normalizeBoundary(() => decodeControl(data, "client") as ClientControlFrame); }
 export function decodeServerControl(data: string | Uint8Array): ServerControlFrame { return normalizeBoundary(() => decodeControl(data, "server") as ServerControlFrame); }
 
 function encode(frame: ClientControlFrame | ServerControlFrame, body: ControlBody): string {
-  const envelope: Record<string, unknown> = { v: 2, type: frame.type };
+  const envelope: Record<string, unknown> = { type: frame.type };
   if (Object.prototype.hasOwnProperty.call(frame, "id") && "id" in frame) envelope.id = frame.id;
   envelope.body = wireValue(body);
   const result = JSON.stringify(envelope);
@@ -209,8 +208,7 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
   let value: unknown;
   try { value = JSON.parse(text) as unknown; } catch { malformed(); }
   if (!isObject(value)) malformed();
-  requireKeys(value, ["v", "type", "body"]);
-  if (value.v !== PROTOCOL_VERSION) throw new ProtocolError("unsupported_version");
+  requireKeys(value, ["type", "body"]);
   if (!isControlType(value.type)) malformed();
   if (encodedLength > controlLimit(value.type)) malformed();
   const hasID = Object.prototype.hasOwnProperty.call(value, "id");
@@ -218,10 +216,10 @@ function decodeControl(data: string | Uint8Array, role: "client" | "server"): Cl
   if (role === "client" && !CLIENT_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
   if (role === "server" && !SERVER_TYPES.includes(value.type)) throw new ProtocolError("wrong_direction");
   const body = validateBody(value.type, value.body, true);
-  return { v: 2, type: value.type, ...(hasID ? { id: value.id as string } : {}), body } as ClientControlFrame | ServerControlFrame;
+  return { type: value.type, ...(hasID ? { id: value.id as string } : {}), body } as ClientControlFrame | ServerControlFrame;
 }
 function validateControl(frame: ClientControlFrame | ServerControlFrame, role: "client" | "server"): ControlBody {
-  if (!isObject(frame) || frame.v !== PROTOCOL_VERSION || !isControlType(frame.type)) malformed();
+  if (!isObject(frame) || !isControlType(frame.type)) malformed();
   if (role === "client" && !CLIENT_TYPES.includes(frame.type) || role === "server" && !SERVER_TYPES.includes(frame.type)) throw new ProtocolError("wrong_direction");
   const hasID = Object.prototype.hasOwnProperty.call(frame, "id");
   validateControlID(frame.type, hasID, "id" in frame ? frame.id : undefined);

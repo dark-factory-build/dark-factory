@@ -49,7 +49,7 @@ func readFixture(t *testing.T) fixture {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(source), "..", "..", "protocol", "browser", "v2", "fixtures", "transcript_v2.json"))
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(source), "..", "..", "protocol", "browser", "fixtures", "transcript.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -129,23 +129,21 @@ type Error struct {
 type ErrorCode string
 
 const (
-	ErrorUnauthorized       ErrorCode = "unauthorized"
-	ErrorInvalidRequest     ErrorCode = "invalid_request"
-	ErrorUnsupportedVersion ErrorCode = "unsupported_version"
-	ErrorRateLimited        ErrorCode = "rate_limited"
-	ErrorNotFound           ErrorCode = "not_found"
-	ErrorStale              ErrorCode = "stale"
-	ErrorTooLarge           ErrorCode = "too_large"
-	ErrorInternal           ErrorCode = "internal"
+	ErrorUnauthorized   ErrorCode = "unauthorized"
+	ErrorInvalidRequest ErrorCode = "invalid_request"
+	ErrorRateLimited    ErrorCode = "rate_limited"
+	ErrorNotFound       ErrorCode = "not_found"
+	ErrorStale          ErrorCode = "stale"
+	ErrorTooLarge       ErrorCode = "too_large"
+	ErrorInternal       ErrorCode = "internal"
 )
 
-// ControlFrame is the decoded, closed v1 union. Body is always one of the
+// ControlFrame is the decoded, closed union. Body is always one of the
 // concrete protocol structs above; callers never need a map[string]any assertion.
 type ControlFrame struct {
-	Version uint16
-	Type    MessageType
-	ID      string
-	Body    any
+	Type MessageType
+	ID   string
+	Body any
 }
 
 var (
@@ -153,11 +151,13 @@ var (
 	ErrOversized = errors.New("browser protocol: control frame too large")
 )
 
+// The envelope carries no generation. The contract is unversioned by owner
+// decision on 4 September 2026: a member neither build knows is ignored, so
+// evolution is additive and neither side has to move in lockstep.
 type controlEnvelope struct {
-	Version uint16          `json:"v"`
-	Type    MessageType     `json:"type"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Body    json.RawMessage `json:"body"`
+	Type MessageType     `json:"type"`
+	ID   json.RawMessage `json:"id,omitempty"`
+	Body json.RawMessage `json:"body"`
 }
 
 func EncodeHello(value Hello) ([]byte, error) { return encodeControl(TypeHello, "", value) }
@@ -213,7 +213,7 @@ func encodeControl(kind MessageType, id string, body any) ([]byte, error) {
 			return nil, fmt.Errorf("%w: id: %v", ErrMalformed, err)
 		}
 	}
-	frame, err := json.Marshal(controlEnvelope{Version: ProtocolVersion, Type: kind, ID: wireID, Body: payload})
+	frame, err := json.Marshal(controlEnvelope{Type: kind, ID: wireID, Body: payload})
 	if err != nil {
 		return nil, fmt.Errorf("%w: envelope: %v", ErrMalformed, err)
 	}
@@ -261,9 +261,6 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	}
 	var envelope controlEnvelope
 	if err := unmarshalObject(data, &envelope); err != nil {
-		return ControlFrame{}, ErrMalformed
-	}
-	if envelope.Version != ProtocolVersion {
 		return ControlFrame{}, ErrMalformed
 	}
 	if len(data) > controlLimit(envelope.Type) {
@@ -367,7 +364,7 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		if err := validateBody(envelope.Type, body); err != nil {
 			return ControlFrame{}, ErrMalformed
 		}
-		return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: id, Body: body}, nil
+		return ControlFrame{Type: envelope.Type, ID: id, Body: body}, nil
 	default:
 		return ControlFrame{}, ErrMalformed
 	}
@@ -377,7 +374,7 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	if err := validateBody(envelope.Type, body); err != nil {
 		return ControlFrame{}, ErrMalformed
 	}
-	return ControlFrame{Version: envelope.Version, Type: envelope.Type, ID: id, Body: dereferenceBody(body)}, nil
+	return ControlFrame{Type: envelope.Type, ID: id, Body: dereferenceBody(body)}, nil
 }
 
 func decodeID(raw json.RawMessage) (string, bool, bool) {
@@ -861,7 +858,7 @@ func validateCapabilities(value Capabilities) error {
 
 func validateError(value Error) error {
 	switch value.Code {
-	case ErrorUnauthorized, ErrorInvalidRequest, ErrorUnsupportedVersion, ErrorRateLimited, ErrorNotFound, ErrorStale, ErrorTooLarge, ErrorInternal:
+	case ErrorUnauthorized, ErrorInvalidRequest, ErrorRateLimited, ErrorNotFound, ErrorStale, ErrorTooLarge, ErrorInternal:
 		return nil
 	default:
 		return fmt.Errorf("%w: unknown error code %q", ErrMalformed, value.Code)

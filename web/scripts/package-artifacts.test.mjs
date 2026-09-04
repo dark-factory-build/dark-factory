@@ -115,7 +115,6 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     assert.equal(packed.schemaVersion, 1);
     assert.match(packed.source.commit, /^[0-9a-f]{40}$/);
     assert.equal(packed.source.clean, true);
-    assert.deepEqual(packed.protocol, { name: "dark-factory/browser/v2", version: 2 });
     assert.equal(packed.buildTools.toolTreeVersion, "dark-factory/tool-tree/v2");
     assert.deepEqual(packed.buildTools.pnpm, "11.19.0");
     assert.deepEqual(packed.buildTools.typescript, "5.8.3");
@@ -163,7 +162,7 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     writeFileSync(join(consumer, "package.json"), JSON.stringify({ name: "artifact-consumer", private: true, type: "module" }));
     const env = { ...process.env, npm_config_cache: join(tempRoot, "npm-cache"), npm_config_offline: "true", npm_config_registry: "http://127.0.0.1:9/" };
     execFileSync("npm", ["install", "--offline", "--ignore-scripts", "--no-package-lock", join(output, client.artifact.filename)], { cwd: consumer, env, stdio: "pipe" });
-    execFileSync(process.execPath, ["--input-type=module", "-e", "import { PROTOCOL_VERSION } from '@dark-factory/client'; const p = await import('@dark-factory/client/provenance', { with: { type: 'json' } }); if (PROTOCOL_VERSION !== 2 || p.default.package.name !== '@dark-factory/client') throw new Error('bad provenance export');"], { cwd: consumer, env, stdio: "pipe" });
+    execFileSync(process.execPath, ["--input-type=module", "-e", "import { BROWSER_PROTOCOL_NAME } from '@dark-factory/client'; const p = await import('@dark-factory/client/provenance', { with: { type: 'json' } }); if (BROWSER_PROTOCOL_NAME !== 'dark-factory/browser' || p.default.package.name !== '@dark-factory/client') throw new Error('bad provenance export');"], { cwd: consumer, env, stdio: "pipe" });
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -278,9 +277,11 @@ test("verification rejects archive inventory, runtime protocol, and strict manif
     rmSync(clientArchive);
     renameSync(backup, clientArchive);
 
+    // Any source edit invalidates the artifact set: verification is bound to
+    // one clean commit, so an edited manifest fails before anything is read.
     const sourceManifest = join(webRoot, "packages", "client", "src", "manifest.ts");
     const sourceText = readFileSync(sourceManifest, "utf8");
-    writeFileSync(sourceManifest, sourceText.replace("PROTOCOL_VERSION = 2", "PROTOCOL_VERSION = 3"));
+    writeFileSync(sourceManifest, sourceText.replace("MAX_CONTROL_BYTES = 64 * 1024", "MAX_CONTROL_BYTES = 32 * 1024"));
     expectFailure(() => run("verify", output), "worktree is dirty");
     writeFileSync(sourceManifest, sourceText);
   } finally {

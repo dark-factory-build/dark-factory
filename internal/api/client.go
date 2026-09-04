@@ -705,9 +705,6 @@ func validWebStatus(status WebStatus) bool {
 	if status.State != "ready" && status.State != "stopped" && status.State != "degraded" {
 		return false
 	}
-	if status.ProtocolVersion != BrowserProtocolVersion {
-		return false
-	}
 	if status.State == "stopped" {
 		return !status.Ready && status.Address == "" && status.Path == "" && status.Origins == nil && status.ActiveClients == 0 && status.RevokedClients == 0 && status.ActiveChallenges == 0
 	}

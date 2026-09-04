@@ -1,5 +1,5 @@
 import { malformed, normalizeBoundary } from "./errors.js";
-import { MAX_TERMINAL_PAYLOAD, TERMINAL_HEADER_BYTES } from "./manifest.js";
+import { MAX_TERMINAL_PAYLOAD, TERMINAL_FRAME_VERSION, TERMINAL_HEADER_BYTES } from "./manifest.js";
 
 export type TerminalDirection = "input" | "output";
 export type TerminalFrame = {
@@ -26,13 +26,13 @@ function encode(frame: TerminalFrame): Uint8Array {
   if (frame.direction === "input" && (frame.sequence === 0n || frame.leaseGeneration === 0n)) malformed();
   if (frame.direction === "output" && (frame.leaseGeneration !== 0n || frame.sequence + BigInt(frame.payload.length) >= 0x1_0000_0000_0000_0000n)) malformed();
   const result = new Uint8Array(TERMINAL_HEADER_BYTES + frame.payload.length); const view = new DataView(result.buffer);
-  result.set([0x44, 0x46, 1, frame.direction === "input" ? 1 : 2], 0); result.set(frame.sessionId, 4);
+  result.set([0x44, 0x46, TERMINAL_FRAME_VERSION, frame.direction === "input" ? 1 : 2], 0); result.set(frame.sessionId, 4);
   view.setBigUint64(20, frame.sequence); view.setBigUint64(28, frame.leaseGeneration); view.setUint32(36, frame.payload.length); result.set(frame.payload, TERMINAL_HEADER_BYTES); return result;
 }
 function decode(data: Uint8Array, direction: TerminalDirection): TerminalFrame {
   if (!(data instanceof Uint8Array)) malformed();
   if (data.length < TERMINAL_HEADER_BYTES || data.length > TERMINAL_HEADER_BYTES + MAX_TERMINAL_PAYLOAD) malformed();
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength); if (data[0] !== 0x44 || data[1] !== 0x46 || data[2] !== 1) malformed();
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength); if (data[0] !== 0x44 || data[1] !== 0x46 || data[2] !== TERMINAL_FRAME_VERSION) malformed();
   const opcode = data[3]; if ((direction === "input" && opcode !== 1) || (direction === "output" && opcode !== 2)) malformed();
   const sessionId = data.slice(4, 20); const sequence = view.getBigUint64(20); const leaseGeneration = view.getBigUint64(28); const length = view.getUint32(36);
   if (sessionId.every((b) => b === 0) || length === 0 || length > MAX_TERMINAL_PAYLOAD || length + TERMINAL_HEADER_BYTES !== data.length) malformed();

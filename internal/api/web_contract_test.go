@@ -8,14 +8,14 @@ import (
 )
 
 func TestWebStatusAndClientPageValidationIsStrict(t *testing.T) {
-	stopped := WebStatus{State: "stopped", ProtocolVersion: BrowserProtocolVersion}
+	stopped := WebStatus{State: "stopped"}
 	if !validWebStatus(stopped) {
 		t.Fatal("canonical stopped status rejected")
 	}
 	for _, invalid := range []WebStatus{
-		{State: "stopped", Path: "/browser/v2", ProtocolVersion: BrowserProtocolVersion},
-		{State: "stopped", ActiveClients: 1, ProtocolVersion: BrowserProtocolVersion},
-		{State: "ready", Ready: true, Address: "127.0.0.1:1", Path: "/browser/v2", Origins: []string{"*"}, ProtocolVersion: BrowserProtocolVersion},
+		{State: "stopped", Path: "/browser"},
+		{State: "stopped", ActiveClients: 1},
+		{State: "ready", Ready: true, Address: "127.0.0.1:1", Path: "/browser", Origins: []string{"*"}},
 	} {
 		if validWebStatus(invalid) {
 			t.Fatalf("invalid status accepted: %+v", invalid)

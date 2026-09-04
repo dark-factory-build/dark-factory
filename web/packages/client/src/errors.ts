@@ -1,7 +1,6 @@
 export type ProtocolErrorCode =
   | "malformed"
   | "oversized"
-  | "unsupported_version"
   | "wrong_direction"
   | "unauthorized";
 

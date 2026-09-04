@@ -57,8 +57,8 @@ test("StrictMode mounts the public FactoryApp and closes each owned BrowserClien
     });
     assert.equal(sockets.length, 2);
     assert.deepEqual(sockets.map((socket) => ({ url: socket.url, closeCount: socket.closeCount })), [
-      { url: "ws://127.0.0.1:43123/browser/v2", closeCount: 1 },
-      { url: "ws://127.0.0.1:43123/browser/v2", closeCount: 0 },
+      { url: "ws://127.0.0.1:43123/browser", closeCount: 1 },
+      { url: "ws://127.0.0.1:43123/browser", closeCount: 0 },
     ]);
     assert.deepEqual(statuses, [{ status: "connecting" }, { status: "connecting" }]);
 

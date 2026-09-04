@@ -5,7 +5,10 @@ import {
   BrowserClient,
   CAPABILITIES,
   MAX_TASK_INSTRUCTION_BYTES,
+  buildAuthTranscript,
   consumePairingChallenge,
+  hexBytes,
+  verifyP256Signature,
   ProtocolError,
   SessionError,
   decodeClientControl,
@@ -87,7 +90,7 @@ async function openControlledStateSession(options = {}) {
     if (frame.type === "STATE_GET" && automatic) replySnapshot(current, frame, 1n);
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example",
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(server); return socket; }, ...options,
   });
   await session.connect();
@@ -111,7 +114,7 @@ function stateRequests(socket) {
 async function openHumanSession(onError) {
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2",
+    url: "ws://127.0.0.1:43123/browser",
     host: "127.0.0.1:43123",
     origin: "https://preview.example",
     challenge,
@@ -142,7 +145,7 @@ test("pairing signs through WebCrypto, persists the key, reads one snapshot, and
   const sockets = [];
   const states = [];
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2",
+    url: "ws://127.0.0.1:43123/browser",
     host: "127.0.0.1:43123",
     origin: "https://preview.example",
     challenge,
@@ -165,7 +168,7 @@ test("pairing signs through WebCrypto, persists the key, reads one snapshot, and
 test("HumanRequest methods are fenced before HELLO and after close, without a raw getter", async () => {
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2",
+    url: "ws://127.0.0.1:43123/browser",
     host: "127.0.0.1:43123",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -187,7 +190,7 @@ test("authenticated HumanRequest methods emit exact frames and correlate results
   const store = new MemoryKeys();
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2",
+    url: "ws://127.0.0.1:43123/browser",
     host: "127.0.0.1:43123",
     origin: "https://preview.example",
     challenge,
@@ -343,7 +346,7 @@ test("task enqueue result mismatches close the generation", async (t) => {
 test("task enqueue requires bounded human-actions authority before sending", async () => {
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v2",
+    url: "ws://127.0.0.1/browser",
     host: "127.0.0.1",
     origin: "https://preview.example",
     challenge,
@@ -459,7 +462,7 @@ test("malformed and binary frames fail with finite errors and never leak frame d
   const errors = [];
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v2",
+    url: "ws://127.0.0.1/browser",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -477,7 +480,7 @@ test("malformed and binary frames fail with finite errors and never leak frame d
 test("a closed pairing generation rejects as uncertain and never saves a permanent key", async () => {
   const store = new MemoryKeys();
   let socket;
-  const session = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { socket = new Socket(() => {}); return socket; } });
+  const session = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { socket = new Socket(() => {}); return socket; } });
   const pending = session.connect();
   await new Promise((resolve) => setTimeout(resolve, 0));
   socket.close();
@@ -598,13 +601,13 @@ test("forged snapshot and change correlations fail closed", async (t) => {
 test("reconnect creates a fresh generation and stale socket frames are fenced", async () => {
   const store = new MemoryKeys();
   const sockets = [];
-  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
+  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
   await pairing.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   pairing.close();
   const errors = [];
   const timer = new VirtualTimer();
-  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, timer, reconnectInitialDelayMs: 10, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; }, onError: (error) => errors.push(error) });
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, timer, reconnectInitialDelayMs: 10, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; }, onError: (error) => errors.push(error) });
   await client.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   sockets[1].close();
@@ -624,14 +627,14 @@ test("old-socket snapshot and change frames cannot overwrite a reconnected sessi
   const store = new MemoryKeys();
   const sockets = [];
   const states = [];
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
 
   const timer = new VirtualTimer();
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, timer, reconnectInitialDelayMs: 10,
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, timer, reconnectInitialDelayMs: 10,
     socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; },
     onState: (state) => states.push(state),
   });
@@ -690,7 +693,7 @@ test("successful pairing consumes challenge state and reconnects through AUTH af
   const store = new MemoryKeys();
   const timer = new VirtualTimer();
   const sockets = [];
-  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
   await client.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(decodeClientControl(sockets[0].sent.find((wire) => decodeClientControl(wire).type === "PAIR_PROVE")).type, "PAIR_PROVE");
@@ -705,13 +708,13 @@ test("successful pairing consumes challenge state and reconnects through AUTH af
 
 test("stale saved authorization repairs once through the still-held pairing challenge", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
   const sockets = [];
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     socketFactory: () => { const socket = new Socket((current, frame) => {
       if (frame.type === "AUTH_PROVE") current.reply(encodeServerError({ code: "unauthorized", retryable: false }));
       if (frame.type === "PAIR_PROVE") current.reply(encodePairResult(frame.id, { client_id: "77".repeat(16), capabilities: CAPABILITIES.observe }));
@@ -728,7 +731,7 @@ test("stale saved authorization repairs once through the still-held pairing chal
 
 test("a persisted repair that closes before ready reconnects through AUTH", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
@@ -736,7 +739,7 @@ test("a persisted repair that closes before ready reconnects through AUTH", asyn
   const sockets = [];
   let client;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
     onStatus: (status) => { if (status === "syncing" && sockets.length === 2) client.session?.close(); },
     socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); if (frame.type === "PAIR_PROVE") _current.reply(encodePairResult(frame.id, { client_id: "88".repeat(16), capabilities: CAPABILITIES.observe })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
   });
@@ -753,7 +756,7 @@ test("a persisted repair that closes before ready reconnects through AUTH", asyn
 
 test("closing while repair persistence is pending does not replay pairing", async () => {
   const seedStore = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
@@ -764,7 +767,7 @@ test("closing while repair persistence is pending does not replay pairing", asyn
   const sockets = [];
   let client;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     socketFactory: () => { const index = sockets.length; const server = index === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : index === 1 ? ((_current, frame) => { if (frame.type === "PAIR_PROVE") _current.reply(encodePairResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); }) : ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeAuthResult(frame.id, { client_id: "99".repeat(16), capabilities: CAPABILITIES.observe })); if (frame.type === "STATE_GET") replySnapshot(_current, frame, 1n); }); const socket = new Socket(server); sockets.push(socket); return socket; },
   });
   saveStarted = () => client.close();
@@ -783,7 +786,7 @@ test("closing while repair persistence is pending does not replay pairing", asyn
 
 test("a persisted repair clears the challenge before a rejected manual reconnect", async () => {
   const seedStore = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: seedStore, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
@@ -795,7 +798,7 @@ test("a persisted repair clears the challenge before a rejected manual reconnect
   };
   const sockets = [];
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     socketFactory: () => {
       const index = sockets.length;
       const server = index === 0
@@ -823,7 +826,7 @@ test("a persisted repair clears the challenge before a rejected manual reconnect
 test("a pairing authorization error never replays the one-shot challenge", async () => {
   const sockets = [];
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(),
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(),
     socketFactory: () => { const socket = new Socket((_current, frame) => { if (frame.type === "PAIR_PROVE") socket.reply(encodeServerError({ code: "unauthorized", retryable: false })); }); sockets.push(socket); return socket; },
   });
   await assert.rejects(client.connect(), (error) => error instanceof SessionError && error.code === "unauthorized");
@@ -835,14 +838,14 @@ test("a pairing authorization error never replays the one-shot challenge", async
 
 test("closing from stale authorization error fences the pending repair", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
   const sockets = [];
   let client;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     onError: () => client.close(),
     socketFactory: () => { const server = sockets.length === 0 ? ((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError({ code: "unauthorized", retryable: false })); }) : serverFor; const socket = new Socket(server); sockets.push(socket); return socket; },
   });
@@ -854,7 +857,7 @@ test("closing from stale authorization error fences the pending repair", async (
 
 test("a newer generation started by the auth error fences the old repair", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
@@ -862,7 +865,7 @@ test("a newer generation started by the auth error fences the old repair", async
   let client;
   let replaced = false;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store,
     onError: () => {
       if (!replaced) { replaced = true; void client.connect().catch(() => {}); }
     },
@@ -881,12 +884,12 @@ test("authorization repair requires a fresh challenge and only exact nonretryabl
     { code: "unauthorized", retryable: false },
   ]) {
     const store = new MemoryKeys();
-    const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+    const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
     await seed.connect();
     await new Promise((resolve) => setTimeout(resolve, 10));
     seed.close();
     let sockets = 0;
-    const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, challenge: error.retryable ? challenge : undefined, socketFactory: () => { sockets += 1; return new Socket((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError(error)); }); } });
+    const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: store, challenge: error.retryable ? challenge : undefined, socketFactory: () => { sockets += 1; return new Socket((_current, frame) => { if (frame.type === "AUTH_PROVE") _current.reply(encodeServerError(error)); }); } });
     await assert.rejects(client.connect(), (actual) => actual instanceof SessionError && actual.code === "unauthorized");
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(sockets, 1);
@@ -896,12 +899,12 @@ test("authorization repair requires a fresh challenge and only exact nonretryabl
 
 test("valid saved authorization with a fresh challenge does not duplicate the client", async () => {
   const store = new MemoryKeys();
-  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  const seed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
   await seed.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   seed.close();
   let sockets = 0;
-  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { sockets += 1; return new Socket(serverFor); } });
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => { sockets += 1; return new Socket(serverFor); } });
   await client.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(sockets, 1);
@@ -980,14 +983,14 @@ test("ordinary anchors are neither pairing authority nor scrubbed", () => {
 
 test("consumer callback exceptions cannot escape cleanup or stop a later state lifecycle", async () => {
   let malformedSocket;
-  const malformed = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: new MemoryKeys(), socketFactory: () => { malformedSocket = new Socket(() => {}); return malformedSocket; }, onError: () => { throw new Error("onError"); }, onStatus: () => { throw new Error("onStatus"); } });
+  const malformed = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: new MemoryKeys(), socketFactory: () => { malformedSocket = new Socket(() => {}); return malformedSocket; }, onError: () => { throw new Error("onError"); }, onStatus: () => { throw new Error("onStatus"); } });
   const rejected = malformed.connect();
   malformedSocket.onmessage({ data: new Uint8Array([0xff]) });
   await assert.rejects(rejected, (error) => error instanceof ProtocolError && error.code === "malformed");
   assert.equal(malformed.status, "closed");
 
   const states = [];
-  const session = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(), socketFactory: () => new Socket(serverFor), onState: (state) => { states.push(state); throw new Error("onState"); }, onStatus: () => { throw new Error("onStatus"); } });
+  const session = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: new MemoryKeys(), socketFactory: () => new Socket(serverFor), onState: (state) => { states.push(state); throw new Error("onState"); }, onStatus: () => { throw new Error("onStatus"); } });
   await session.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(session.status, "ready");
@@ -997,13 +1000,13 @@ test("consumer callback exceptions cannot escape cleanup or stop a later state l
 
 test("unavailable daemon reconnects use bounded exponential virtual time", async () => {
   const pairingStore = new MemoryKeys();
-  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
+  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
   await pairing.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   pairing.close();
   const timer = new VirtualTimer();
   let attempts = 0;
-  const unavailable = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: pairingStore, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { attempts += 1; throw new Error("no daemon"); } });
+  const unavailable = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: pairingStore, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { attempts += 1; throw new Error("no daemon"); } });
   await assert.rejects(unavailable.connect(), (error) => error instanceof SessionError && error.code === "connection");
   assert.equal(attempts, 1);
   timer.advance(9);
@@ -1020,14 +1023,14 @@ test("unavailable daemon reconnects use bounded exponential virtual time", async
 
 test("close clears a pending reconnect timer and manual connect can schedule a new lifecycle", async () => {
   const pairingStore = new MemoryKeys();
-  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
+  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: pairingStore, socketFactory: () => new Socket(serverFor) });
   await pairing.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   pairing.close();
   const timer = new VirtualTimer();
   let available = false;
   let attempts = 0;
-  const client = new BrowserClient({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: pairingStore, timer, reconnectInitialDelayMs: 10, socketFactory: () => { attempts += 1; if (!available) throw new Error("no daemon"); return new Socket(serverFor); } });
+  const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: pairingStore, timer, reconnectInitialDelayMs: 10, socketFactory: () => { attempts += 1; if (!available) throw new Error("no daemon"); return new Socket(serverFor); } });
   await assert.rejects(client.connect());
   assert.equal(timer.tasks.size, 1);
   client.close();
@@ -1046,7 +1049,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   let loadStarted;
   const loadStore = { async load() { loadStarted?.(); await new Promise((resolve) => { releaseLoad = resolve; }); return null; }, async save() {} };
   let loadSocket;
-  const loading = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: loadStore, socketFactory: () => { loadSocket = new Socket(() => {}); return loadSocket; } });
+  const loading = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: loadStore, socketFactory: () => { loadSocket = new Socket(() => {}); return loadSocket; } });
   const loadReady = new Promise((resolve) => { loadStarted = resolve; });
   const loadingConnect = loading.connect();
   await loadReady;
@@ -1056,7 +1059,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   assert.equal(loadSocket.sent.length, 0);
 
   const sourceStore = new MemoryKeys();
-  const source = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: sourceStore, socketFactory: () => new Socket(serverFor) });
+  const source = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: sourceStore, socketFactory: () => new Socket(serverFor) });
   await source.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
   source.close();
@@ -1065,7 +1068,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   const realCrypto = globalThis.crypto;
   const signingCrypto = { ...realCrypto, subtle: { ...realCrypto.subtle, sign: async (...args) => { signStarted?.(); await new Promise((resolve) => { releaseSign = resolve; }); return realCrypto.subtle.sign(...args); } } };
   let signSocket;
-  const signing = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", keyStore: sourceStore, crypto: signingCrypto, socketFactory: () => { signSocket = new Socket(() => {}); return signSocket; } });
+  const signing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", keyStore: sourceStore, crypto: signingCrypto, socketFactory: () => { signSocket = new Socket(() => {}); return signSocket; } });
   const signReady = new Promise((resolve) => { signStarted = resolve; });
   const signingConnect = signing.connect();
   await signReady;
@@ -1078,7 +1081,7 @@ test("close fences deferred load, sign, and pairing persistence completions", as
   let saveStarted;
   const saveStore = { async load() { return null; }, async save() { saveStarted?.(); await new Promise((resolve) => { releaseSave = resolve; }); } };
   let saveSocket;
-  const saving = new BrowserSession({ url: "ws://127.0.0.1/browser/v2", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: saveStore, socketFactory: () => { saveSocket = new Socket(serverFor); return saveSocket; } });
+  const saving = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: saveStore, socketFactory: () => { saveSocket = new Socket(serverFor); return saveSocket; } });
   const saveReady = new Promise((resolve) => { saveStarted = resolve; });
   const savingConnect = saving.connect();
   await saveReady;
@@ -1092,7 +1095,7 @@ test("reentrant connecting status close rejects before creating a socket", async
   let session;
   let sessionSockets = 0;
   session = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v2",
+    url: "ws://127.0.0.1/browser",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -1106,7 +1109,7 @@ test("reentrant connecting status close rejects before creating a socket", async
   let factorySession;
   let factorySocket;
   factorySession = new BrowserSession({
-    url: "ws://127.0.0.1/browser/v2",
+    url: "ws://127.0.0.1/browser",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -1122,7 +1125,7 @@ test("reentrant connecting status close rejects before creating a socket", async
   let client;
   let clientSockets = 0;
   client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2",
+    url: "ws://127.0.0.1/browser",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: new MemoryKeys(),
@@ -1151,7 +1154,7 @@ test("BrowserClient does not replay a one-shot proof while PairResult save is de
   const timer = new VirtualTimer();
   const sockets = [];
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2",
+    url: "ws://127.0.0.1/browser",
     host: "127.0.0.1",
     origin: "https://preview.example",
     challenge,
@@ -1203,7 +1206,7 @@ test("reconnect timer ownership fences stale callbacks with undefined handles", 
   const timer = new HostileTimer();
   let attempts = 0;
   const client = new BrowserClient({
-    url: "ws://127.0.0.1/browser/v2",
+    url: "ws://127.0.0.1/browser",
     host: "127.0.0.1",
     origin: "https://preview.example",
     keyStore: store,
@@ -1248,7 +1251,7 @@ test("agent terminal discovery mints an opaque generation-bound target for openT
     }));
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: store, socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
@@ -1354,7 +1357,7 @@ test("terminal target discovery is bounded, exact-correlated, and null is explic
   const agentId = "79".repeat(16);
   let socket;
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: store, socketFactory: () => { socket = new Socket(serverFor); return socket; },
   });
   await session.connect();
@@ -1371,7 +1374,7 @@ test("terminal target discovery is bounded, exact-correlated, and null is explic
 
   let malformedSocket;
   const malformed = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { malformedSocket = new Socket(serverFor); return malformedSocket; },
   });
   await malformed.connect();
@@ -1398,7 +1401,7 @@ test("EXIT closes the old handle and routes its duplicate away from a replacemen
     }));
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
@@ -1452,7 +1455,7 @@ test("RESET closes the old handle and a replacement may select a fresh after-seq
     }));
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
   });
   await session.connect();
@@ -1507,7 +1510,7 @@ test("terminal replacement retains only the previous closed handle and fences ev
     }));
   };
   const session = new BrowserSession({
-    url: "ws://127.0.0.1:43123/browser/v2", host: "127.0.0.1:43123", origin: "https://preview.example",
+    url: "ws://127.0.0.1:43123/browser", host: "127.0.0.1:43123", origin: "https://preview.example",
     challenge, keyStore: new MemoryKeys(), socketFactory: () => { socket = new Socket(targetServer); return socket; },
     onError: (error) => errors.push(error),
   });
@@ -1552,4 +1555,43 @@ test("terminal replacement retains only the previous closed handle and fences ev
   assert.equal(replacement.closed, true);
   assert.equal(errors.filter((error) => error instanceof ProtocolError && error.code === "malformed").length, 1);
   session.close();
+});
+
+// The browser contract lost its generation, and with it the version bytes in
+// the pairing and auth transcript domains. A durable pairing must survive that
+// unchanged: the key, not the transcript, is what persists. This pairs, then
+// reconnects with only the stored record and proves the daemon can verify the
+// new AUTH_PROVE signature against the same stored public key.
+test("a pairing survives the versionless transcript domain", async () => {
+  const store = new MemoryKeys();
+  const pairing = new BrowserSession({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, socketFactory: () => new Socket(serverFor) });
+  await pairing.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  pairing.close();
+  const paired = store.value;
+  assert.equal(paired.clientId, clientID);
+  assert.equal(paired.key.extractable, false);
+
+  let socket;
+  const client = new BrowserClient({
+    url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example",
+    keyStore: store, socketFactory: () => { socket = new Socket(serverFor); return socket; },
+  });
+  await client.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(client.session.status, "ready");
+  // The stored record is untouched by reconnecting: the same client id and the
+  // same non-exportable key object.
+  assert.equal(store.value.clientId, paired.clientId);
+  assert.equal(store.value.key, paired.key);
+
+  const prove = lastFrame(socket, "AUTH_PROVE");
+  assert.equal(prove.body.client_id, clientID);
+  const transcript = buildAuthTranscript({
+    daemon_id: daemonID, boot_id: bootID, connection_nonce: nonce, client_id: clientID,
+    host: "127.0.0.1", origin: "https://preview.example",
+  });
+  assert.equal(new TextDecoder().decode(transcript.slice(0, 25)), "dark-factory/browser/auth");
+  assert.equal(await verifyP256Signature(paired.publicKeySEC1, hexBytes(prove.body.signature), transcript), true);
+  client.close();
 });

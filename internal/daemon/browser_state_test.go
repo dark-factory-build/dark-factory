@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -286,13 +285,5 @@ func TestBrowserTaskEnqueueAppearsInTheNextSnapshotWithoutItsInstruction(t *test
 	stored, found, err := fixture.store.Task(context.Background(), taskID)
 	if err != nil || !found || stored.Body != instruction {
 		t.Fatalf("durable task = %+v, found=%v, err=%v", stored, found, err)
-	}
-}
-
-// internal/api deliberately does not import browserprotocol, so this is the
-// one place the reported protocol generation is bound to the wire generation.
-func TestReportedBrowserProtocolVersionMatchesTheWire(t *testing.T) {
-	if api.BrowserProtocolVersion != browserprotocol.ProtocolVersion {
-		t.Fatalf("api reports protocol %d, wire is %d", api.BrowserProtocolVersion, browserprotocol.ProtocolVersion)
 	}
 }

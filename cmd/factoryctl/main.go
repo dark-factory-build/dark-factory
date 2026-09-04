@@ -768,7 +768,7 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 	}
 	if command.kind == commandWebStatus {
 		if !socketDaemonPresent(socket) {
-			return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false, ProtocolVersion: api.BrowserProtocolVersion})
+			return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false})
 		}
 	}
 	token := getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE")
@@ -779,7 +779,7 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 	client, err := api.NewOperatorClient(socket, token)
 	if err != nil {
 		if command.kind == commandWebStatus && errors.Is(err, api.ErrInvalidClient) {
-			return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false, ProtocolVersion: api.BrowserProtocolVersion})
+			return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false})
 		}
 		_, _ = io.WriteString(stderr, "factoryctl: web client configuration is invalid\n")
 		return exitFailure
@@ -791,7 +791,7 @@ func runWeb(ctx context.Context, command attemptCommand, getenv func(string) str
 		result, callErr := client.WebStatus(callContext)
 		if callErr != nil {
 			if errors.Is(callErr, api.ErrInvalidClient) || errors.Is(callErr, api.ErrTransport) {
-				return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false, ProtocolVersion: api.BrowserProtocolVersion})
+				return writeJSON(stdout, api.WebStatus{State: "stopped", Ready: false})
 			}
 			return writeWebFailure(stderr, "web status", callErr)
 		}
