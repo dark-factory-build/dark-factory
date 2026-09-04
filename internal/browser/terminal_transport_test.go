@@ -299,6 +299,78 @@ func TestTerminalTransportDeliversCanonicalExitAndRetainsConnection(t *testing.T
 	}
 }
 
+func TestTerminalTransportAcknowledgesOutputBeforeClosingTerminal(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		event    TerminalEvent
+		wantType browserprotocol.MessageType
+	}{
+		{name: "exit", event: TerminalEvent{Kind: TerminalEventExit}, wantType: browserprotocol.TypeTerminalExit},
+		{name: "reset", event: TerminalEvent{Kind: TerminalEventReset, Floor: 1, Head: 1}, wantType: browserprotocol.TypeTerminalReset},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newTerminalTestBackend()
+			backend.authentication.Capabilities = browserprotocol.CapabilityObserve
+			server := startTerminalServer(t, backend)
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticateTerminalTest(t, connection)
+			writeClientFrame(t, connection, terminalAttachRequest(t, "attach", 0))
+			sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventAttached, Accepted: true, Head: 1})
+			_ = readServerFrame(t, connection)
+
+			attachment := backend.currentAttachment(t)
+			sendTerminalEvent(t, backend, TerminalEvent{Kind: TerminalEventOutput, Start: 0, End: 1, Payload: []byte("x")})
+			_ = readTerminalBinary(t, connection)
+			closing := beginTerminalRead(connection)
+			sendTerminalEvent(t, backend, test.event)
+			select {
+			case result := <-closing:
+				t.Fatalf("terminal closed before output ACK: kind=%v err=%v", result.kind, result.err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if attachment.closed.Load() != 0 {
+				t.Fatal("attachment closed before output ACK")
+			}
+
+			ack, err := browserprotocol.EncodeTerminalAck(browserprotocol.TerminalAck{SessionID: projectID, NextSequence: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeClientFrame(t, connection, ack)
+			var result terminalReadResult
+			select {
+			case result = <-closing:
+			case <-time.After(time.Second):
+				t.Fatal("terminal did not close after output ACK")
+			}
+			if result.err != nil || result.kind != websocket.MessageText {
+				t.Fatalf("closing frame kind=%v err=%v", result.kind, result.err)
+			}
+			frame, err := browserprotocol.DecodeServerControl(result.payload)
+			if err != nil || frame.Type != test.wantType || frame.ID != "attach" {
+				t.Fatalf("closing frame=%+v err=%v", frame, err)
+			}
+			select {
+			case <-attachment.closeDone:
+			case <-time.After(time.Second):
+				t.Fatal("closing event did not close attachment")
+			}
+			if attachment.closed.Load() != 1 || attachment.closeCalls.Load() != 1 {
+				t.Fatalf("closing event attachment close = %d calls %d", attachment.closed.Load(), attachment.closeCalls.Load())
+			}
+
+			target, err := browserprotocol.EncodeTerminalTargetGet("still-open", browserprotocol.TerminalTargetGet{AgentID: strings.Repeat("01", 16), ExpectedAgentRevision: 1, ExpectedHead: 7})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeClientFrame(t, connection, target)
+			if next := readServerFrame(t, connection); next.Type != browserprotocol.TypeTerminalTarget || next.ID != "still-open" {
+				t.Fatalf("connection was not retained: %+v", next)
+			}
+		})
+	}
+}
+
 func TestTerminalTransportRejectsNoncanonicalExitWithoutFrame(t *testing.T) {
 	for _, test := range []struct {
 		name  string

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from "react";
 import { FactoryAppController, type FactoryAppSnapshot, type FactoryAppStatus, type FactoryTerminalView } from "./factory-app-controller.js";
 import { FactoryConsole } from "./factory-console.js";
 import { XtermTerminal } from "./xterm-terminal.js";
@@ -43,7 +43,15 @@ export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
       terminal={snapshot.terminal}
       onClose={() => controller.clearAgentTerminal()}
     >
-      <TerminalHost key={`${snapshot.selectedAgent.id}:${snapshot.terminal.surfaceVersion}`} controller={controller} surfaceVersion={snapshot.terminal.surfaceVersion} />
+      {snapshot.terminal.taskTitle === undefined ? (
+        <AgentInstruction
+          key={snapshot.selectedAgent.id}
+          terminal={snapshot.terminal}
+          onSubmit={(instruction) => controller.enqueueAgentInstruction(instruction)}
+        />
+      ) : (
+        <TerminalHost key={`${snapshot.selectedAgent.id}:${snapshot.terminal.surfaceVersion}`} controller={controller} surfaceVersion={snapshot.terminal.surfaceVersion} />
+      )}
     </TerminalPanel>
   );
 
@@ -75,7 +83,7 @@ export function TerminalPanel({
   children: ReactNode;
 }) {
   return (
-    <section className="dfFactoryConsole__terminalPanel" aria-label={`Terminal for ${terminal.agentName}`}>
+    <section className="dfFactoryConsole__terminalPanel" aria-label={`Agent console for ${terminal.agentName}`}>
       <div className="dfFactoryConsole__terminalHeading">
         <p className="dfFactoryConsole__terminalAgent">
           {terminal.agentName}{terminal.taskTitle === undefined ? "" : ` · ${terminal.taskTitle}`}
@@ -84,9 +92,9 @@ export function TerminalPanel({
           type="button"
           disabled={terminal.phase === "closing" || terminal.phase === "closed"}
           onClick={onClose}
-          title="close this terminal view; the worker keeps running"
+          title="close this agent console; running work continues"
         >
-          CLOSE TERMINAL
+          CLOSE
         </button>
       </div>
       {terminal.error === undefined ? null : (
@@ -103,6 +111,53 @@ export function TerminalPanel({
       )}
       {children}
     </section>
+  );
+}
+
+export function AgentInstruction({
+  terminal,
+  onSubmit,
+}: {
+  terminal: FactoryTerminalView;
+  onSubmit: (instruction: string) => Promise<boolean>;
+}) {
+  const [instruction, setInstruction] = useState("");
+  const submit = async (event?: SyntheticEvent) => {
+    event?.preventDefault();
+    if (terminal.paused || terminal.instructionPending || instruction.trim().length === 0) return;
+    if (await onSubmit(instruction)) setInstruction("");
+  };
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void submit(event);
+  };
+  if (terminal.paused) return <p className="dfFactoryConsole__instructionState">PAUSED</p>;
+  if (terminal.queued) return <p className="dfFactoryConsole__instructionState">QUEUED</p>;
+  const errorCopy = terminal.instructionError === undefined
+    ? undefined
+    : ["invalid_request", "unauthorized", "stale", "too_large", "rate_limited", "not_found", "crypto_unavailable"].includes(terminal.instructionError.code)
+      ? "NOT SENT"
+      : "SEND NOT CONFIRMED — CHECK TASKS BEFORE RETRYING";
+  return (
+    <form className="dfFactoryConsole__instruction" onSubmit={(event) => { void submit(event); }}>
+      <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-instruction-${terminal.agentId}`}>
+        Instruction for {terminal.agentName}
+      </label>
+      <textarea
+        id={`df-instruction-${terminal.agentId}`}
+        value={instruction}
+        autoFocus
+        disabled={terminal.instructionPending}
+        placeholder="Add an instruction…"
+        onChange={(event) => setInstruction(event.target.value)}
+        onKeyDown={onKeyDown}
+      />
+      <div className="dfFactoryConsole__instructionActions">
+        {errorCopy === undefined ? null : <span role="alert">{errorCopy}</span>}
+        <button type="submit" disabled={terminal.instructionPending || instruction.trim().length === 0}>
+          {terminal.instructionPending ? "SENDING" : "SEND"}
+        </button>
+      </div>
+    </form>
   );
 }
 

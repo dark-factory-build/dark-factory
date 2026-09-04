@@ -423,6 +423,21 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
 			return false
 		}
+	case browserprotocol.TaskEnqueue:
+		if current.server.taskBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.taskBackend.EnqueueTask(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.TaskID != body.TaskID || result.AgentRevision != body.ExpectedAgentRevision || result.Revision == 0 {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeTaskEnqueueResult(frame.ID, result)
 	case browserprotocol.HumanRequestReply:
 		if current.server.terminalBackend == nil {
 			err = ErrUnauthorized
@@ -762,7 +777,7 @@ func (current *connection) handleTerminalAck(ack browserprotocol.TerminalAck) bo
 		current.terminalAckTimer.Stop()
 		current.terminalAckTimer = nil
 	}
-	if current.terminalPending != nil && current.terminalPending.End-current.terminalAck <= browserprotocol.MaxTerminalUnackedBytes {
+	if current.terminalPending != nil && current.terminalPendingReady(*current.terminalPending) {
 		pending := *current.terminalPending
 		current.terminalPending = nil
 		current.terminalEvents = current.attachment.Events()
@@ -771,6 +786,26 @@ func (current *connection) handleTerminalAck(ack browserprotocol.TerminalAck) bo
 	if current.terminalPending == nil {
 		current.terminalEvents = current.attachment.Events()
 	}
+	return true
+}
+
+func (current *connection) terminalPendingReady(event TerminalEvent) bool {
+	switch event.Kind {
+	case TerminalEventOutput:
+		return event.End >= current.terminalAck && event.End-current.terminalAck <= browserprotocol.MaxTerminalUnackedBytes
+	case TerminalEventReset, TerminalEventExit:
+		return current.terminalAck == current.terminalSent
+	default:
+		return false
+	}
+}
+
+func (current *connection) holdTerminalEvent(event TerminalEvent) bool {
+	if current.terminalPending != nil {
+		return false
+	}
+	current.terminalPending = &event
+	current.terminalEvents = nil
 	return true
 }
 
@@ -812,13 +847,7 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 			return false
 		}
 		if event.End-current.terminalAck > browserprotocol.MaxTerminalUnackedBytes {
-			if current.terminalPending != nil {
-				return false
-			}
-			copyEvent := event
-			current.terminalPending = &copyEvent
-			current.terminalEvents = nil
-			return true
+			return current.holdTerminalEvent(event)
 		}
 		payload, err := browserprotocol.EncodeTerminalOutput(fixedID(current.terminalAttach.SessionID), event.Start, event.Payload)
 		if err != nil || current.writeBinary(payload) != nil {
@@ -828,6 +857,9 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 		current.armTerminalAckTimer()
 		return true
 	case TerminalEventReset:
+		if current.terminalAck != current.terminalSent {
+			return current.holdTerminalEvent(event)
+		}
 		payload, err := browserprotocol.EncodeTerminalReset(current.terminalAttachID, browserprotocol.TerminalReset{SessionID: current.terminalAttach.SessionID, Floor: browserprotocol.Decimal(event.Floor), Head: browserprotocol.Decimal(event.Head)})
 		if err != nil || current.write(payload) != nil {
 			return false
@@ -840,6 +872,9 @@ func (current *connection) sendTerminalEvent(event TerminalEvent) bool {
 		payload, err := browserprotocol.EncodeTerminalEOF(current.terminalAttachID, browserprotocol.TerminalEOF{SessionID: current.terminalAttach.SessionID})
 		return err == nil && current.write(payload) == nil
 	case TerminalEventExit:
+		if current.terminalAck != current.terminalSent {
+			return current.holdTerminalEvent(event)
+		}
 		if !current.terminalAnnounced {
 			return false
 		}

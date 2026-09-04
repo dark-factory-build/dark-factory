@@ -3,7 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
-import { TerminalPanel } from "../dist/src/factory-app.js";
+import { AgentInstruction, TerminalPanel } from "../dist/src/factory-app.js";
 
 function terminalView(overrides = {}) {
   return {
@@ -12,6 +12,9 @@ function terminalView(overrides = {}) {
     agentRevision: 10n,
     phase: "ready",
     writable: true,
+    paused: false,
+    instructionPending: false,
+    queued: false,
     resets: 0,
     surfaceVersion: 0,
     ...overrides,
@@ -31,11 +34,62 @@ test("the terminal is a quiet sidebar", () => {
   assert.match(markup, /dfFactoryConsole__terminalPanel/);
   assert.match(markup, /Builder One · Repair finalization/);
   assert.match(markup, /live terminal surface/);
-  assert.match(markup, />CLOSE TERMINAL<\/button>/);
+  assert.match(markup, />CLOSE<\/button>/);
   for (const noise of ["CURRENT RUN TERMINAL", "READY", "you have control", "watching", "take control", "hand back", "Steer"]) {
     assert.equal(markup.includes(noise), false, noise);
   }
   assert.equal((markup.match(/<button/g) ?? []).length, 1, "close is the only terminal control");
+});
+
+test("an idle configured agent accepts one compact instruction", async () => {
+  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    const submitted = [];
+    let renderer;
+    await act(async () => {
+      renderer = create(createElement(AgentInstruction, {
+        terminal: terminalView({ phase: "idle", writable: false }),
+        onSubmit: async (instruction) => { submitted.push(instruction); return true; },
+      }));
+    });
+    const textarea = renderer.root.findByType("textarea");
+    await act(async () => { textarea.props.onChange({ target: { value: "Repair the queue" } }); });
+    const form = renderer.root.findByType("form");
+    await act(async () => { form.props.onSubmit({ preventDefault() {} }); });
+    assert.deepEqual(submitted, ["Repair the queue"]);
+    assert.equal(renderer.root.findByType("textarea").props.value, "");
+    await act(async () => { renderer.unmount(); });
+  } finally {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
+  }
+});
+
+test("paused agents remain identifiable without a false input", () => {
+  const markup = renderToStaticMarkup(createElement(AgentInstruction, {
+    terminal: terminalView({ phase: "idle", writable: false, paused: true }),
+    onSubmit: async () => true,
+  }));
+  assert.match(markup, />PAUSED<\/p>/);
+  assert.equal(markup.includes("textarea"), false);
+});
+
+test("an uncertain instruction send never claims the task was absent", () => {
+  const markup = renderToStaticMarkup(createElement(AgentInstruction, {
+    terminal: terminalView({ phase: "idle", writable: false, instructionError: { code: "connection" } }),
+    onSubmit: async () => false,
+  }));
+  assert.match(markup, /SEND NOT CONFIRMED — CHECK TASKS BEFORE RETRYING/);
+  assert.equal(markup.includes(">NOT SENT<"), false);
+});
+
+test("crypto-unavailable preflight is definitively not sent", () => {
+  const markup = renderToStaticMarkup(createElement(AgentInstruction, {
+    terminal: terminalView({ phase: "idle", writable: false, instructionError: { code: "crypto_unavailable" } }),
+    onSubmit: async () => false,
+  }));
+  assert.match(markup, />NOT SENT</);
+  assert.equal(markup.includes("SEND NOT CONFIRMED"), false);
 });
 
 test("close remains available through setup and invokes the owner once", async () => {

@@ -226,7 +226,10 @@ class TerminalController {
           this.#handleEnded(new SessionError(this.#detachRequested ? "closed" : "stale"));
         },
         onClose: (error) => {
-          if (this.#detachRequested && error === undefined) return;
+          // A clean protocol exit/reset closes the handle before delivering
+          // its typed callback. Let that callback own the terminal outcome;
+          // an undefined close alone carries no failure evidence.
+          if (error === undefined) return;
           this.#handleEnded(finiteError(error));
         },
       });

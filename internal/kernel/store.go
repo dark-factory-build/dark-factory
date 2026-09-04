@@ -124,38 +124,59 @@ func (store *Store) EnqueueTask(ctx context.Context, spec NewTask, at UnixMillis
 		return Task{}, err
 	}
 	defer tx.Close()
-	existing, found, err := taskByID(ctx, tx.connection, spec.ID)
+	existing, replay, err := taskCreationReplay(ctx, tx.connection, spec)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
-	if found {
-		if taskMatchesCreation(existing, spec) {
-			if err := tx.Rollback(nil); err != nil {
-				return Task{}, err
-			}
-			return existing, nil
+	if replay {
+		if err := tx.Rollback(nil); err != nil {
+			return Task{}, err
 		}
-		return Task{}, tx.Rollback(ErrConflict)
+		return existing, nil
 	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO tasks(
+	result, err := insertTaskOnConnection(ctx, tx.connection, spec, at)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Task{}, err
+	}
+	return result, nil
+}
+
+// taskCreationReplay and insertTaskOnConnection are the single task-creation
+// implementation. Their callers own validation and the write transaction.
+func taskCreationReplay(ctx context.Context, connection *sql.Conn, spec NewTask) (Task, bool, error) {
+	existing, found, err := taskByID(ctx, connection, spec.ID)
+	if err != nil {
+		return Task{}, false, err
+	}
+	if !found {
+		return Task{}, false, nil
+	}
+	if !taskMatchesCreation(existing, spec) {
+		return Task{}, false, ErrConflict
+	}
+	return existing, true, nil
+}
+
+func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewTask, at UnixMillis) (Task, error) {
+	if _, err := connection.ExecContext(ctx, `INSERT INTO tasks(
         id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body,
         status, priority, blocked_reason, result, completed_at_ms, revision,
         created_at_ms, updated_at_ms
-    ) VALUES(?, ?, ?, ?, 1, ?, ?, 'queued', ?, NULL, NULL, NULL, 1, ?, ?)`,
+	    ) VALUES(?, ?, ?, ?, 1, ?, ?, 'queued', ?, NULL, NULL, NULL, 1, ?, ?)`,
 		spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.AssignedAgentID.Bytes(), spec.IncarnationID.Bytes(), spec.Title, spec.Body, spec.Priority, at.Int64(), at.Int64()); err != nil {
-		return Task{}, tx.Rollback(err)
+		return Task{}, err
 	}
-	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: spec.ID.Bytes(), revision: 1}}); err != nil {
-		return Task{}, tx.Rollback(err)
+	if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityTask, id: spec.ID.Bytes(), revision: 1}}); err != nil {
+		return Task{}, err
 	}
-	result, found, err := taskByID(ctx, tx.connection, spec.ID)
+	result, found, err := taskByID(ctx, connection, spec.ID)
 	if err != nil || !found {
 		if err == nil {
 			err = ErrCorruptState
 		}
-		return Task{}, tx.Rollback(err)
-	}
-	if err := tx.Commit(ctx); err != nil {
 		return Task{}, err
 	}
 	return result, nil

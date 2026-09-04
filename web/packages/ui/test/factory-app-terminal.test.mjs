@@ -6,6 +6,7 @@ import { fixtureState } from "../../../fixtures/state.mjs";
 
 const agent = [...fixtureState.agents.values()][0];
 const secondAgent = [...fixtureState.agents.values()][1];
+const thirdAgent = [...fixtureState.agents.values()][2];
 const request = [...fixtureState.humanRequests.values()][0];
 const target = Object.freeze({});
 
@@ -24,7 +25,7 @@ function stateAt(head, overrides = {}) {
   return { ...fixtureState, head: BigInt(head), sequence: BigInt(head), ...overrides };
 }
 
-function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), detachImpl, acquireImpl } = {}) {
+function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), detachImpl, acquireImpl, enqueueImpl } = {}) {
   let attachReset = false;
   const snapshots = [];
   const calls = [];
@@ -45,6 +46,11 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
     }),
     replyHumanRequest: async () => ({ status: "resolved" }),
     cancelHumanRequest: async () => ({ request_id: request.id }),
+    enqueueAgentTask: async (value) => {
+      calls.push({ kind: "enqueue", value });
+      if (enqueueImpl !== undefined) return enqueueImpl(value);
+      return { taskId: "51".repeat(16), revision: 1n };
+    },
     resolveAgentTerminal: (value) => {
       calls.push({ kind: "resolve", value });
       const gate = deferred();
@@ -94,7 +100,7 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
     surfaceFailure: fail === "surface",
     setAttachReset: (value) => { attachReset = value; },
     latest: () => snapshots.at(-1),
-    ready: () => { clientOptions.onState(fixtureState); clientOptions.onStatus("ready"); },
+    ready: (state = fixtureState) => { clientOptions.onState(state); clientOptions.onStatus("ready"); },
   };
 }
 
@@ -140,6 +146,175 @@ test("public terminal composition buffers direct input until writable authority"
   context.controller.sendTerminalBinary(token, String.fromCharCode(0, 255));
   await flush();
   assert.deepEqual(context.calls.filter((call) => call.kind === "input").map((call) => [...call.bytes]), [[98, 101, 102, 111, 114, 101], [0xc3, 0xa9], [0, 255]]);
+});
+
+test("completed work leaves its configured agent idle and able to enqueue a durable instruction", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  const tasks = new Map(fixtureState.tasks);
+  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
+  context.ready(stateAt(42, { tasks }));
+  context.controller.selectAgent(thirdAgent);
+  assert.equal([...tasks.values()].some((task) => task.assigned_agent_id === thirdAgent.id && ["succeeded", "failed"].includes(task.status)), true);
+  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
+  assert.equal(context.latest().terminal.taskTitle, undefined);
+  assert.equal(context.latest().terminal.instructionPending, false);
+  assert.equal(context.latest().terminal.queued, false);
+  assert.equal(context.targetGates.length, 0, "idle selection must not probe for a fake terminal");
+
+  const queued = context.controller.enqueueAgentInstruction("  Investigate the build\n  ");
+  assert.equal(context.latest().terminal.instructionPending, true);
+  assert.deepEqual(context.calls.at(-1), {
+    kind: "enqueue",
+    value: { agentId: thirdAgent.id, expectedAgentRevision: thirdAgent.revision, instruction: "Investigate the build" },
+  });
+  assert.equal(await queued, true);
+  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
+  assert.equal(context.latest().terminal.instructionPending, false);
+  assert.equal(context.latest().terminal.queued, true);
+});
+
+test("a selected idle agent follows its canonical pause revision without exposing input", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  const tasks = new Map(fixtureState.tasks);
+  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
+  context.ready(stateAt(42, { tasks }));
+  context.controller.selectAgent(thirdAgent);
+
+  const paused = { ...thirdAgent, paused: true, revision: thirdAgent.revision + 1n };
+  const agents = new Map(fixtureState.agents);
+  agents.set(paused.id, paused);
+  context.clientOptions().onState(stateAt(43, { agents, tasks }));
+
+  assert.equal(context.latest().selectedAgent.id, paused.id);
+  assert.equal(context.latest().selectedAgent.revision, paused.revision);
+  assert.equal(context.latest().terminal.paused, true);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().error, undefined);
+  assert.equal(context.targetGates.length, 0);
+  assert.equal(await context.controller.enqueueAgentInstruction("Must not enqueue while paused"), false);
+  assert.equal(context.calls.some((call) => call.kind === "enqueue"), false);
+});
+
+test("a newly running instruction turns the same idle sidebar into the real terminal", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  const initialTasks = new Map(fixtureState.tasks);
+  for (const [id, task] of initialTasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") initialTasks.delete(id);
+  context.ready(stateAt(42, { tasks: initialTasks }));
+  context.controller.selectAgent(thirdAgent);
+
+  const tasks = new Map(initialTasks);
+  tasks.set("51".repeat(16), {
+    id: "51".repeat(16),
+    project_id: thirdAgent.project_id,
+    assigned_agent_id: thirdAgent.id,
+    title: "Direct instruction",
+    status: "running",
+    priority: 0,
+    revision: 1n,
+  });
+  context.clientOptions().onState(stateAt(43, { tasks }));
+  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
+  assert.equal(context.latest().terminal.taskTitle, "Direct instruction");
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
+  await flush();
+  assert.equal(context.targetGates.length, 1);
+  context.targetGates[0].resolve(target);
+  await flush();
+  assert.equal(context.latest().terminal.phase, "ready");
+});
+
+test("current running work wins over the selected agent's queued instruction", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  const initialTasks = new Map(fixtureState.tasks);
+  for (const [id, task] of initialTasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") initialTasks.delete(id);
+  context.ready(stateAt(42, { tasks: initialTasks }));
+  context.controller.selectAgent(thirdAgent);
+  assert.equal(await context.controller.enqueueAgentInstruction("Do this next"), true);
+
+  const tasks = new Map(initialTasks);
+  tasks.set("51".repeat(16), {
+    id: "51".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
+    title: "Direct instruction", status: "queued", priority: 0, revision: 1n,
+  });
+  tasks.set("52".repeat(16), {
+    id: "52".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
+    title: "Already running", status: "running", priority: 1, revision: 2n,
+  });
+  context.clientOptions().onState(stateAt(43, { tasks }));
+  assert.equal(context.latest().terminal.taskTitle, "Already running");
+  assert.equal(context.latest().terminal.queued, false);
+});
+
+test("a terminal task observed before its enqueue response cannot leave the sidebar queued", async () => {
+  const response = deferred();
+  const context = terminalHarness({ enqueueImpl: () => response.promise });
+  context.controller.start();
+  const initialTasks = new Map(fixtureState.tasks);
+  for (const [id, task] of initialTasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") initialTasks.delete(id);
+  context.ready(stateAt(42, { tasks: initialTasks }));
+  context.controller.selectAgent(thirdAgent);
+  const submission = context.controller.enqueueAgentInstruction("Finish quickly");
+
+  const tasks = new Map(initialTasks);
+  tasks.set("51".repeat(16), {
+    id: "51".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
+    title: "Direct instruction", status: "succeeded", priority: 0, revision: 2n,
+  });
+  context.clientOptions().onState(stateAt(43, { tasks }));
+  response.resolve({ taskId: "51".repeat(16), revision: 2n });
+  assert.equal(await submission, true);
+  assert.equal(context.latest().terminal.queued, false);
+  assert.equal(context.latest().terminal.taskTitle, undefined);
+});
+
+test("when queued task A terminals, queued task B remains pinned", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  const taskA = {
+    id: "61".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
+    title: "Queued A", status: "queued", priority: 2, revision: 1n,
+  };
+  const taskB = {
+    id: "62".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
+    title: "Queued B", status: "queued", priority: 1, revision: 1n,
+  };
+  const tasks = new Map(
+    [...fixtureState.tasks].filter(([, task]) => task.assigned_agent_id !== thirdAgent.id || task.status !== "queued"),
+  );
+  tasks.set(taskA.id, taskA);
+  tasks.set(taskB.id, taskB);
+  context.ready(stateAt(42, { tasks }));
+  context.controller.selectAgent(thirdAgent);
+  assert.equal(context.latest().terminal.queued, true);
+
+  const afterA = new Map(tasks);
+  afterA.set(taskA.id, { ...taskA, status: "succeeded", revision: 2n });
+  context.clientOptions().onState(stateAt(43, { tasks: afterA }));
+  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().terminal.queued, true, "B still owns the queued affordance");
+  const enqueues = context.calls.filter((call) => call.kind === "enqueue").length;
+  assert.equal(await context.controller.enqueueAgentInstruction("Do not create C"), false);
+  assert.equal(context.calls.filter((call) => call.kind === "enqueue").length, enqueues);
+});
+
+test("crypto-unavailable enqueue preflight stays selected with a definite failure", async () => {
+  const context = terminalHarness({ enqueueImpl: async () => { throw new SessionError("crypto_unavailable"); } });
+  context.controller.start();
+  const tasks = new Map(fixtureState.tasks);
+  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
+  context.ready(stateAt(42, { tasks }));
+  context.controller.selectAgent(thirdAgent);
+  assert.equal(await context.controller.enqueueAgentInstruction("Try once"), false);
+  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
+  assert.equal(context.latest().terminal.queued, false);
+  assert.equal(context.latest().terminal.instructionError.code, "crypto_unavailable");
 });
 
 test("oversized direct input is rejected before terminal discovery", () => {
@@ -347,7 +522,7 @@ test("stale active-task discovery retries the newer state already received", asy
   assert.equal(context.calls.at(-1).value.expectedHead, 43n);
 });
 
-test("stale discovery preserves an idle observation until newer running state arrives", async () => {
+test("a queued task keeps the configured agent idle until newer running state arrives", async () => {
   const context = terminalHarness();
   const idleTasks = new Map(fixtureState.tasks);
   const running = [...idleTasks.values()].find(
@@ -365,22 +540,25 @@ test("stale discovery preserves an idle observation until newer running state ar
   context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
   await flush();
 
-  context.targetGates[0].reject(new SessionError("stale"));
-  await flush();
   assert.equal(context.latest().selectedAgent.id, agent.id);
   assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().terminal.queued, true);
   assert.equal(context.sessionCloses(), 0);
+  assert.equal(context.targetGates.length, 0, "queued work has no terminal to discover");
 
   await remountSurface(context);
-  assert.equal(context.targetGates.length, 1, "same stale head must not spin discovery");
+  assert.equal(context.targetGates.length, 0, "remounting cannot invent a terminal");
   context.clientOptions().onState(stateAt(42, { tasks: idleTasks }));
   await flush();
   assert.equal(context.latest().selectedAgent.id, agent.id);
-  assert.equal(context.targetGates.length, 1, "same-head entity refresh must preserve stale waiting");
+  assert.equal(context.targetGates.length, 0, "same-head refresh must preserve queued waiting");
 
-  context.clientOptions().onState(stateAt(43, { tasks: idleTasks }));
+  const runningTasks = new Map(idleTasks);
+  runningTasks.set(running.id, running);
+  context.clientOptions().onState(stateAt(43, { tasks: runningTasks }));
   await flush();
-  assert.equal(context.targetGates.length, 2);
+  assert.equal(context.latest().terminal.queued, false);
+  assert.equal(context.targetGates.length, 1);
   assert.equal(context.calls.at(-1).value.expectedHead, 43n);
 });
 
@@ -440,7 +618,7 @@ test("same-socket state resync preserves one live writable terminal", async () =
   assert.equal(new TextDecoder().decode(context.calls.at(-1).bytes), "after resync");
 });
 
-test("target absence for an agent without active work closes only the terminal panel", async () => {
+test("an agent without active work remains selected without terminal discovery", async () => {
   const context = terminalHarness();
   context.controller.start();
   context.ready();
@@ -449,14 +627,13 @@ test("target absence for an agent without active work closes only the terminal p
   context.controller.beginTerminalSurface(token);
   context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
   await flush();
-  context.targetGates[0].resolve(null);
-  await flush();
-  assert.equal(context.latest().selectedAgent, undefined);
-  assert.equal(context.latest().terminal, undefined);
+  assert.equal(context.targetGates.length, 0);
+  assert.equal(context.latest().selectedAgent.id, secondAgent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
   assert.equal(context.sessionCloses(), 0);
 });
 
-test("target absence for a blocked task does not wait for an impossible activation", async () => {
+test("a blocked task presents the configured agent as idle without terminal discovery", async () => {
   const context = terminalHarness();
   const tasks = new Map(fixtureState.tasks);
   const running = [...tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
@@ -470,14 +647,13 @@ test("target absence for a blocked task does not wait for an impossible activati
   context.controller.beginTerminalSurface(token);
   context.controller.setTerminalSurface(token, { write: async () => {}, abort: () => {} });
   await flush();
-  context.targetGates[0].resolve(null);
-  await flush();
-  assert.equal(context.latest().selectedAgent, undefined);
-  assert.equal(context.latest().terminal, undefined);
+  assert.equal(context.targetGates.length, 0);
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
   assert.equal(context.sessionCloses(), 0);
   context.clientOptions().onState(stateAt(44, { tasks }));
   await flush();
-  assert.equal(context.targetGates.length, 1, "unrelated heads must not retry a terminal outcome");
+  assert.equal(context.targetGates.length, 0, "unrelated heads must not invent a terminal");
 });
 
 test("same-head task refresh closes discovery waiting after the run becomes terminal", async () => {
@@ -499,8 +675,8 @@ test("same-head task refresh closes discovery waiting after the run becomes term
   tasks.set(running.id, { ...running, status: "blocked", revision: running.revision + 1n });
   context.clientOptions().onState(stateAt(fixtureState.head, { tasks }));
   await flush();
-  assert.equal(context.latest().selectedAgent, undefined);
-  assert.equal(context.latest().terminal, undefined);
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
   assert.equal(context.sessionCloses(), 0);
   assert.equal(context.targetGates.length, 1);
 });
@@ -595,7 +771,7 @@ test("a fresh explicit selection can start one new terminal attempt after a fata
   assert.equal(context.targetGates.length, 2);
 });
 
-test("selection detaches the old controller before resolving the new public agent and fences stale callbacks", async () => {
+test("selection detaches the old controller before presenting a paused idle agent and fences stale callbacks", async () => {
   const detachGate = deferred();
   const context = terminalHarness({ detachImpl: () => detachGate.promise });
   context.controller.start();
@@ -608,24 +784,22 @@ test("selection detaches the old controller before resolving the new public agen
   assert.equal(context.latest().selectedAgent.id, agent.id, "old terminal stays mounted while detach is pending");
   assert.equal(context.latest().terminal.phase, "closing");
   assert.equal(context.targetGates.length, 1);
+  const latestSecondAgent = { ...secondAgent, revision: secondAgent.revision + 1n };
+  const agents = new Map(fixtureState.agents);
+  agents.set(secondAgent.id, latestSecondAgent);
+  context.clientOptions().onState(stateAt(43, { agents }));
   detachGate.resolve();
   await flush();
   assert.equal(context.latest().selectedAgent.id, secondAgent.id);
+  assert.equal(context.latest().selectedAgent.revision, latestSecondAgent.revision);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().terminal.paused, true);
   assert.equal(context.sessionCloses(), 0);
-
-  const secondToken = {};
-  context.controller.beginTerminalSurface(secondToken);
-  context.controller.setTerminalSurface(secondToken, { write: async () => {}, abort: () => {} });
-  await flush();
-  assert.equal(context.targetGates.length, 2);
-  assert.equal(context.targetGates[1] !== undefined, true);
+  assert.equal(context.targetGates.length, 1, "an idle paused agent has no terminal to resolve");
   oldOptions.onExit();
   assert.equal(context.latest().selectedAgent.id, secondAgent.id);
-  context.targetGates[1].resolve(target);
-  await flush();
-  assert.deepEqual(context.calls.slice(-3).map((call) => call.kind), ["open", "attach", "acquire"]);
   assert.equal(context.calls.some((call) => call.kind === "input"), false);
-  assert.equal(context.latest().terminal.phase, "ready");
+  assert.equal(context.latest().terminal.phase, "idle");
 });
 
 test("selected-agent revision drift cannot escalate an explicit detach to session close", async () => {
@@ -649,6 +823,33 @@ test("selected-agent revision drift cannot escalate an explicit detach to sessio
   assert.equal(context.sessionCloses(), 0);
   assert.equal(context.latest().selectedAgent, undefined);
   assert.equal(context.latest().error, undefined, "the explicit close intent wins over concurrent revision drift");
+});
+
+test("a pending same-agent rebind follows the latest canonical revision", async () => {
+  const detachGate = deferred();
+  const context = terminalHarness({ detachImpl: () => detachGate.promise });
+  context.controller.start();
+  context.ready();
+  await openTerminal(context, agent);
+
+  const firstRevision = { ...agent, paused: true, revision: agent.revision + 1n };
+  const firstAgents = new Map(fixtureState.agents);
+  firstAgents.set(agent.id, firstRevision);
+  context.clientOptions().onState(stateAt(43, { agents: firstAgents }));
+  assert.equal(context.latest().terminal.phase, "closing");
+
+  const latestRevision = { ...agent, paused: false, revision: agent.revision + 2n };
+  const latestAgents = new Map(fixtureState.agents);
+  latestAgents.set(agent.id, latestRevision);
+  context.clientOptions().onState(stateAt(44, { agents: latestAgents }));
+
+  detachGate.resolve();
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().selectedAgent.revision, latestRevision.revision);
+  assert.equal(context.latest().terminal.paused, false);
+  assert.equal(context.latest().error, undefined);
+  assert.equal(context.sessionCloses(), 0);
 });
 
 test("output failure during replacement closes the session and never installs the queued agent", async () => {
@@ -686,16 +887,81 @@ test("a prior lease refusal does not turn a clean terminal switch into session f
   assert.equal(context.latest().terminal.error, undefined);
 });
 
-test("normal terminal exit drops only UI ownership and does not become a connection error", async () => {
+test("normal terminal exit returns the configured agent to its idle input", async () => {
   const context = terminalHarness();
   context.controller.start();
   context.ready();
   const terminal = await openTerminal(context);
+  terminal.options.onClose();
+  assert.equal(context.latest().terminal.phase, "ready", "the handle closes before its typed exit callback");
   terminal.options.onExit();
-  assert.equal(context.latest().selectedAgent, undefined);
-  assert.equal(context.latest().terminal, undefined);
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().terminal.taskTitle, undefined);
   assert.equal(context.latest().error, undefined);
   assert.equal(context.sessionCloses(), 0);
+});
+
+test("clean exit after the selected task terminals clears its queued identity", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  const initialTasks = new Map(fixtureState.tasks);
+  for (const [id, task] of initialTasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") initialTasks.delete(id);
+  context.ready(stateAt(42, { tasks: initialTasks }));
+  context.controller.selectAgent(thirdAgent);
+  assert.equal(await context.controller.enqueueAgentInstruction("Run once"), true);
+
+  const runningTask = {
+    id: "51".repeat(16), project_id: thirdAgent.project_id, assigned_agent_id: thirdAgent.id,
+    title: "Direct instruction", status: "running", priority: 0, revision: 1n,
+  };
+  const runningTasks = new Map(initialTasks);
+  runningTasks.set(runningTask.id, runningTask);
+  context.clientOptions().onState(stateAt(43, { tasks: runningTasks }));
+  const terminal = await openTerminal(context, thirdAgent);
+
+  const terminalTasks = new Map(runningTasks);
+  terminalTasks.set(runningTask.id, { ...runningTask, status: "succeeded", revision: 2n });
+  context.clientOptions().onState(stateAt(44, { tasks: terminalTasks }));
+  terminal.options.onClose();
+  terminal.options.onExit();
+  assert.equal(context.latest().selectedAgent.id, thirdAgent.id);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.latest().terminal.taskTitle, undefined);
+  assert.equal(context.latest().terminal.queued, false);
+});
+
+test("clean exit immediately adopts different running work at the current head", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  const terminal = await openTerminal(context, agent);
+  const tasks = new Map(fixtureState.tasks);
+  const taskA = [...tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
+  assert.notEqual(taskA, undefined);
+  tasks.set(taskA.id, { ...taskA, status: "succeeded", revision: taskA.revision + 1n });
+  const taskB = {
+    ...taskA,
+    id: "63".repeat(16),
+    title: "Replacement work",
+    status: "running",
+    revision: 1n,
+  };
+  tasks.set(taskB.id, taskB);
+  context.clientOptions().onState(stateAt(43, { tasks }));
+
+  terminal.options.onClose();
+  terminal.options.onExit();
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.taskTitle, "Replacement work");
+  assert.equal(context.latest().terminal.phase, "idle");
+  await remountSurface(context);
+  assert.equal(context.targetGates.length, 2, "the current replacement is not hidden by a same-head retry fence");
+  assert.deepEqual(context.calls.at(-1).value, {
+    agentId: agent.id,
+    expectedAgentRevision: agent.revision,
+    expectedHead: 43n,
+  });
 });
 
 test("HumanRequest terminal intent uses only its current public agent relationship and preserves detail draft authority", async () => {

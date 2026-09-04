@@ -43,6 +43,8 @@ const (
 	TypeHumanRequestReplyResult     MessageType = "HUMAN_REQUEST_REPLY_RESULT"
 	TypeHumanRequestCancelRun       MessageType = "HUMAN_REQUEST_CANCEL_RUN"
 	TypeHumanRequestCancelRunResult MessageType = "HUMAN_REQUEST_CANCEL_RUN_RESULT"
+	TypeTaskEnqueue                 MessageType = "TASK_ENQUEUE"
+	TypeTaskEnqueueResult           MessageType = "TASK_ENQUEUE_RESULT"
 	TypeTerminalTargetGet           MessageType = "TERMINAL_TARGET_GET"
 	TypeTerminalTarget              MessageType = "TERMINAL_TARGET"
 	TypeTerminalAttach              MessageType = "TERMINAL_ATTACH"
@@ -78,6 +80,10 @@ const knownCapabilities = CapabilityObserve |
 	CapabilityPrivateHumanRequestDetail |
 	CapabilityHumanActions |
 	CapabilityTerminalInput
+
+// CapabilityHumanActions covers bounded operator mutations, including task
+// enqueue. It remains one durable bit so existing browser pairings and the
+// v1 schema do not need a capability migration.
 
 type Hello struct {
 	DaemonID        string `json:"daemon_id"`
@@ -318,6 +324,10 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(HumanRequestCancelRun)
 	case TypeHumanRequestCancelRunResult:
 		body = new(HumanRequestCancelRunResult)
+	case TypeTaskEnqueue:
+		body = new(TaskEnqueue)
+	case TypeTaskEnqueueResult:
+		body = new(TaskEnqueueResult)
 	case TypeTerminalTargetGet:
 		body = new(TerminalTargetGet)
 	case TypeTerminalTarget:
@@ -421,6 +431,7 @@ func idRequired(kind MessageType) bool {
 		TypeStateEvent, TypeStateEntityGet, TypeStateEntity,
 		TypeHumanRequestDetailGet, TypeHumanRequestDetail,
 		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
+		TypeTaskEnqueue, TypeTaskEnqueueResult,
 		TypeTerminalTargetGet, TypeTerminalTarget,
 		TypeTerminalAttach, TypeTerminalAttached, TypeTerminalLeaseAcquire, TypeTerminalLeaseRenew, TypeTerminalLeaseRelease,
 		TypeTerminalLeaseResult, TypeTerminalResize, TypeTerminalResized, TypeTerminalDetach, TypeTerminalDetached,
@@ -437,11 +448,11 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	}
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
-			kind == TypeStateSubscribe || kind == TypeStateEntityGet || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach
+			kind == TypeStateSubscribe || kind == TypeStateEntityGet || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskEnqueue
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
 		kind == TypeStateSnapshot || kind == TypeStateRestart || kind == TypeStateEvent ||
-		kind == TypeStateEntity || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
+		kind == TypeStateEntity || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
 }
 
 func dereferenceBody(body any) any {
@@ -475,6 +486,10 @@ func dereferenceBody(body any) any {
 	case *HumanRequestCancelRun:
 		return *value
 	case *HumanRequestCancelRunResult:
+		return *value
+	case *TaskEnqueue:
+		return *value
+	case *TaskEnqueueResult:
 		return *value
 	case *TerminalTargetGet:
 		return *value
@@ -778,6 +793,8 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeHumanRequestCancelRunResult:
 		return validTerminalControl(kind, body)
+	case TypeTaskEnqueue, TypeTaskEnqueueResult:
+		return validTaskControl(kind, body)
 	case TypeTerminalTargetGet, TypeTerminalTarget:
 		return validTerminalControl(kind, body)
 	case TypeTerminalAttach:

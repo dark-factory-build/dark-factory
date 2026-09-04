@@ -5,9 +5,11 @@ export class ProtocolError extends Error { constructor(code) { super(code); this
 export const MAX_TERMINAL_PAYLOAD = 4096;
 export const MAX_TERMINAL_ROWS = 4096;
 export const MAX_TERMINAL_COLS = 4096;
+export const MAX_TASK_INSTRUCTION_BYTES = 32768;
 export function consumePairingChallenge() { return null; }
 const agent = { id: "21".repeat(16), project_id: "11".repeat(16), name: "Strict Agent", role: "worker", paused: false, revision: 1n };
-const state = { head: 1n, sequence: 1n, factory: [{ dispatch_enabled: true, capacity: 1, active_runs: 0, revision: 1n }], projects: new Map([[agent.project_id, { id: agent.project_id, name: "Strict Project", revision: 1n }]]), agents: new Map([[agent.id, agent]]), tasks: new Map(), humanRequests: new Map() };
+const task = { id: "31".repeat(16), project_id: agent.project_id, assigned_agent_id: agent.id, title: "Strict task", status: "running", priority: 0, revision: 1n };
+const state = { head: 1n, sequence: 1n, factory: [{ dispatch_enabled: true, capacity: 1, active_runs: 1, revision: 1n }], projects: new Map([[agent.project_id, { id: agent.project_id, name: "Strict Project", revision: 1n }]]), agents: new Map([[agent.id, agent]]), tasks: new Map([[task.id, task]]), humanRequests: new Map() };
 export function createBrowserClient(options) {
   counters.clients += 1;
   let closed = false;

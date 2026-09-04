@@ -78,7 +78,7 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 
 func decodeFixtureControl(name string, data []byte) (ControlFrame, error) {
 	switch name {
-	case "pair_prove", "auth_prove", "state_get", "state_subscribe", "state_entity_get", "human_request_detail_get", "terminal_target_get":
+	case "pair_prove", "auth_prove", "state_get", "state_subscribe", "state_entity_get", "human_request_detail_get", "task_enqueue", "terminal_target_get":
 		return DecodeClientControl(data)
 	default:
 		return DecodeServerControl(data)
@@ -123,6 +123,10 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return encodeControl(TypeHumanRequestCancelRun, frame.ID, value)
 	case HumanRequestCancelRunResult:
 		return encodeControl(TypeHumanRequestCancelRunResult, frame.ID, value)
+	case TaskEnqueue:
+		return EncodeTaskEnqueue(frame.ID, value)
+	case TaskEnqueueResult:
+		return EncodeTaskEnqueueResult(frame.ID, value)
 	case TerminalTargetGet:
 		return EncodeTerminalTargetGet(frame.ID, value)
 	case TerminalTarget:
@@ -328,6 +332,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			MaxTaskTitleBytes            int    `json:"max_task_title_bytes"`
 			MaxHumanQuestionBytes        int    `json:"max_human_question_bytes"`
 			MaxHumanReplyBytes           int    `json:"max_human_reply_bytes"`
+			MaxTaskInstructionBytes      int    `json:"max_task_instruction_bytes"`
 			MaxFactoryCapacity           int    `json:"max_factory_capacity"`
 			MaxTaskPriority              int64  `json:"max_task_priority"`
 			MaxSQLiteInteger             string `json:"max_sqlite_integer"`
@@ -365,7 +370,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		t.Fatalf("manifest trailing JSON: %v", err)
 	}
-	if manifest.Version != 1 || len(manifest.Control) != 36 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Version != 1 || len(manifest.Control) != 38 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input"}
@@ -382,11 +387,11 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		MaxControlBytes, MaxJSONDepth, MaxArrayItems, MaxObjectMembers                                                int
 		MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes                                                        int
 		MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes                                                     int
-		MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity                                                 int
+		MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity                        int
 		MaxTaskPriority                                                                                               int64
 		MaxSQLiteInteger                                                                                              string
 		MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, MaxTerminalRows, MaxTerminalCols int
-	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols)}
+	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols)}
 	if fmt.Sprint(manifest.Bounds) != fmt.Sprint(wantBounds) {
 		t.Fatalf("bounds drift: got %+v want %+v", manifest.Bounds, wantBounds)
 	}
@@ -409,6 +414,8 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		{"HUMAN_REQUEST_REPLY_RESULT", "server", "required", "human_request_reply_result.json"},
 		{"HUMAN_REQUEST_CANCEL_RUN", "client", "required", "human_request_cancel_run.json"},
 		{"HUMAN_REQUEST_CANCEL_RUN_RESULT", "server", "required", "human_request_cancel_run_result.json"},
+		{"TASK_ENQUEUE", "client", "required", "task_enqueue.json"},
+		{"TASK_ENQUEUE_RESULT", "server", "required", "task_enqueue_result.json"},
 		{"TERMINAL_TARGET_GET", "client", "required", "terminal_target_get.json"},
 		{"TERMINAL_TARGET", "server", "required", "terminal_target.json"},
 		{"TERMINAL_ATTACH", "client", "required", "terminal_attach.json"},
@@ -499,7 +506,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_restart.json": true, "state_subscribe.json": true, "state_event.json": true, "state_entity_get.json": true, "state_entity.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
+	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_restart.json": true, "state_subscribe.json": true, "state_event.json": true, "state_entity_get.json": true, "state_entity.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}
@@ -517,7 +524,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			t.Fatalf("manifest fixture not exercised: %q", entry.Fixture)
 		}
 	}
-	for _, name := range []string{"hello", "pair_prove", "pair_result", "auth_prove", "auth_result", "state_get", "state_snapshot", "state_restart", "state_subscribe", "state_event", "state_entity_get", "state_entity", "human_request_detail_get", "human_request_detail", "error"} {
+	for _, name := range []string{"hello", "pair_prove", "pair_result", "auth_prove", "auth_result", "state_get", "state_snapshot", "state_restart", "state_subscribe", "state_event", "state_entity_get", "state_entity", "human_request_detail_get", "human_request_detail", "task_enqueue", "task_enqueue_result", "error"} {
 		if len(fixtureBytes(t, name+".json")) == 0 {
 			t.Fatal("empty fixture")
 		}
