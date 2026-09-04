@@ -152,8 +152,9 @@ var (
 )
 
 // The envelope carries no generation. The contract is unversioned by owner
-// decision on 4 September 2026: a member neither build knows is ignored, so
-// evolution is additive and neither side has to move in lockstep.
+// decision on 4 September 2026: a member that is not a known name under any
+// case is ignored, so evolution is additive and neither side has to move in
+// lockstep.
 type controlEnvelope struct {
 	Type MessageType     `json:"type"`
 	ID   json.RawMessage `json:"id,omitempty"`
