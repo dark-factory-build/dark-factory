@@ -44,6 +44,8 @@ export type FactoryTerminalView = Readonly<{
   agentRevision: bigint;
   /** Current running task title, when this selected agent has one. */
   taskTitle?: string;
+  /** The terminal ended before durable task finalization was published. */
+  finishing: boolean;
   phase: "idle" | "resolving" | "attaching" | "acquiring" | "ready" | "closing" | "closed";
   writable: boolean;
   error?: SessionError | ProtocolError;
@@ -98,6 +100,7 @@ type AgentTerminalSelection = {
   head: bigint;
   /** Public task identity that terminal discovery is allowed to resolve. */
   task?: Pick<TaskItem, "id" | "revision">;
+  finishing: boolean;
   /** Server replay resets survived by this terminal view (banner state). */
   resets: number;
   instructionPending: boolean;
@@ -520,8 +523,9 @@ export class FactoryAppController {
       } else {
         selectedAgent.agent = { ...currentAgent };
         if (this.#terminal === undefined) {
+          const headChanged = selectedAgent.head !== state.head;
           this.#refreshTerminalTask(selectedAgent, state);
-          if (selectedAgent.head !== state.head) {
+          if (headChanged) {
             selectedAgent.head = state.head;
             this.#terminalRetry = undefined;
           }
@@ -617,10 +621,20 @@ export class FactoryAppController {
         const running = runningTask === undefined ? undefined : { id: runningTask.id, revision: runningTask.revision };
         if (running !== undefined && !sameTaskIdentity(endedTask, running)) {
           selected.task = running;
+          selected.finishing = false;
           selected.instructionError = undefined;
           this.#terminalRetry = undefined;
+        } else if (running !== undefined) {
+          // The provider terminal can close before durable task finalization
+          // publishes its terminal state. Keep the exact task selected across
+          // that gap; exposing the idle composer here would allow a second
+          // instruction while the first task is still running.
+          selected.task = running;
+          selected.finishing = true;
+          this.#terminalRetry = { head: state.head, stale: false };
         } else {
           selected.task = undefined;
+          selected.finishing = false;
           this.#terminalRetry = running === undefined ? undefined : { head: state.head, stale: false };
         }
         this.#dropPendingTerminalInput();
@@ -637,6 +651,7 @@ export class FactoryAppController {
       return;
     }
     if (snapshot.phase === "ready") {
+      if (this.#selectedAgent !== undefined) this.#selectedAgent.finishing = false;
       this.#terminalResetBurst = 0;
       if (!snapshot.writable) this.#dropPendingTerminalInput();
     }
@@ -722,6 +737,7 @@ export class FactoryAppController {
     const current = task === undefined ? undefined : { id: task.id, revision: task.revision };
     if (sameTaskIdentity(selected.task, current)) return;
     selected.task = current;
+    selected.finishing = false;
     if (current !== undefined) selected.instructionError = undefined;
     this.#dropPendingTerminalInput();
   }
@@ -764,6 +780,7 @@ export class FactoryAppController {
       agent: { ...agent },
       head: this.#state?.head ?? 0n,
       task: task === undefined ? undefined : { id: task.id, revision: task.revision },
+      finishing: false,
       resets: 0,
       instructionPending: false,
       queuedTaskID: queuedTask?.id,
@@ -827,6 +844,7 @@ export class FactoryAppController {
         taskTitle: this.#selectedAgent.task === undefined || this.#state === undefined
           ? undefined
           : this.#state.tasks.get(this.#selectedAgent.task.id)?.title,
+        finishing: this.#selectedAgent.finishing,
         phase: this.#terminal?.snapshot.phase ?? "idle",
         writable: this.#terminal?.snapshot.writable ?? false,
         error: this.#terminal?.snapshot.error,

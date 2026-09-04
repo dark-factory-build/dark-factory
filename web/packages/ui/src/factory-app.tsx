@@ -43,15 +43,7 @@ export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
       terminal={snapshot.terminal}
       onClose={() => controller.clearAgentTerminal()}
     >
-      {snapshot.terminal.taskTitle === undefined ? (
-        <AgentInstruction
-          key={snapshot.selectedAgent.id}
-          terminal={snapshot.terminal}
-          onSubmit={(instruction) => controller.enqueueAgentInstruction(instruction)}
-        />
-      ) : (
-        <TerminalHost key={`${snapshot.selectedAgent.id}:${snapshot.terminal.surfaceVersion}`} controller={controller} surfaceVersion={snapshot.terminal.surfaceVersion} />
-      )}
+      <TerminalContent terminal={snapshot.terminal} controller={controller} />
     </TerminalPanel>
   );
 
@@ -112,6 +104,27 @@ export function TerminalPanel({
       {children}
     </section>
   );
+}
+
+/** Chooses the one safe surface for the selected agent's durable state. */
+export function TerminalContent({
+  terminal,
+  controller,
+}: {
+  terminal: FactoryTerminalView;
+  controller: FactoryAppController;
+}) {
+  if (terminal.taskTitle === undefined) {
+    return (
+      <AgentInstruction
+        key={terminal.agentId}
+        terminal={terminal}
+        onSubmit={(instruction) => controller.enqueueAgentInstruction(instruction)}
+      />
+    );
+  }
+  if (terminal.finishing) return <p className="dfFactoryConsole__instructionState">FINISHING</p>;
+  return <TerminalHost key={`${terminal.agentId}:${terminal.surfaceVersion}`} controller={controller} surfaceVersion={terminal.surfaceVersion} />;
 }
 
 export function AgentInstruction({
