@@ -9,6 +9,11 @@ const (
 	// legitimate owner of the runtimes directory (the daemon runtime parent)
 	// that must exclude exactly this name from its census.
 	LocalAPISocketName = "factory.sock"
+	// RelayDirectoryName is the home member the relay connector keeps its node
+	// identity in. This package owns the home layout, so it declares the name
+	// and relayhost consumes it: two literals for one directory is how a home
+	// census and its writer drift apart.
+	RelayDirectoryName = "relay"
 	// MaxSocketPathBytes is the byte budget for a Unix socket path derived
 	// from an operational home. It is the conservative minimum across the
 	// supported platforms: macOS sun_path holds 104 bytes including the

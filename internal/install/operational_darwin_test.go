@@ -710,6 +710,30 @@ func TestOperationalHomeRejectsUnknownRootEntry(t *testing.T) {
 	}
 }
 
+// The relay connector creates its identity directory inside a home that is
+// already open, so both censuses have to accept it afterwards: a home that has
+// ever run with --relay-origin must still reopen and still pass doctor.
+func TestHomeCensusesAcceptTheRelayDirectory(t *testing.T) {
+	parent := installTempDir(t)
+	homePath := filepath.Join(parent, "home")
+	if _, err := Init(context.Background(), homePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(homePath, RelayDirectoryName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Doctor(context.Background(), homePath); err != nil {
+		t.Fatalf("doctor refused a home carrying the relay directory: %v", err)
+	}
+	home, err := OpenOperationalHome(context.Background(), homePath)
+	if err != nil {
+		t.Fatalf("open refused a home carrying the relay directory: %v", err)
+	}
+	if err := home.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOperationalHomeCapabilityAndCloseRejectMemberReplacement(t *testing.T) {
 	for _, test := range []struct {
 		name       string

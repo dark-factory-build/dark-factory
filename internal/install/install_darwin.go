@@ -731,19 +731,25 @@ func inspectFD(ctx context.Context, home *os.File) (treeSnapshot, error) {
 	if err := exactDirectory(home); err != nil {
 		return treeSnapshot{}, err
 	}
-	names, err := home.Readdirnames(memberCount + 1)
+	names, err := home.Readdirnames(memberCount + 2)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return treeSnapshot{}, fmt.Errorf("enumerate home: %w", err)
 	}
-	if len(names) != memberCount {
+	if len(names) < memberCount || len(names) > memberCount+1 {
 		return treeSnapshot{}, fmt.Errorf("%w: home census has %d entries", ErrInvalidHome, len(names))
 	}
-	seen := make(map[string]bool, memberCount)
+	seen := make(map[string]bool, len(names))
 	for _, name := range names {
 		if seen[name] {
 			return treeSnapshot{}, fmt.Errorf("%w: duplicate home entry", ErrInvalidHome)
 		}
 		seen[name] = true
+	}
+	// The relay identity directory is the one optional member: Init never
+	// creates it, and a home first started with --relay-origin carries it from
+	// then on. Nothing else may appear.
+	if len(names) == memberCount+1 && !seen[RelayDirectoryName] {
+		return treeSnapshot{}, fmt.Errorf("%w: unknown home entry", ErrInvalidHome)
 	}
 	for _, name := range []string{formatName, databaseName, tokenName} {
 		if !seen[name] {

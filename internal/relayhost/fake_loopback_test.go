@@ -33,6 +33,7 @@ type fakeLoopback struct {
 	live     int
 	peak     int
 	gate     chan struct{}
+	readGate chan struct{}
 	pairBody []byte
 	authBody []byte
 }
@@ -97,6 +98,15 @@ func (loopback *fakeLoopback) handle(writer http.ResponseWriter, request *http.R
 	_ = connection.Write(ctx, websocket.MessageText, []byte(`{"v":1,"type":"HELLO","body":{"daemon_id":"aa","boot_id":"bb","connection_nonce":"cc"}}`))
 	defer close(session.closed)
 	for {
+		// A deafened session answers nothing, including a close frame, so the
+		// peer's close handshake stays outstanding for as long as the test
+		// needs the socket to count as draining.
+		loopback.mu.Lock()
+		reads := loopback.readGate
+		loopback.mu.Unlock()
+		if reads != nil {
+			<-reads
+		}
 		kind, payload, err := connection.Read(ctx)
 		if err != nil {
 			session.closeStatus = websocket.CloseStatus(err)
@@ -169,6 +179,22 @@ func (loopback *fakeLoopback) hold() {
 	loopback.mu.Lock()
 	loopback.gate = make(chan struct{})
 	loopback.mu.Unlock()
+}
+
+func (loopback *fakeLoopback) deafen() {
+	loopback.mu.Lock()
+	loopback.readGate = make(chan struct{})
+	loopback.mu.Unlock()
+}
+
+func (loopback *fakeLoopback) hearAgain() {
+	loopback.mu.Lock()
+	reads := loopback.readGate
+	loopback.readGate = nil
+	loopback.mu.Unlock()
+	if reads != nil {
+		close(reads)
+	}
 }
 
 func (loopback *fakeLoopback) release() {

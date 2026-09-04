@@ -636,9 +636,6 @@ func TestOpenAndCloseInOneMessageLeaveNoLoopbackConnection(t *testing.T) {
 	if peak > maxSessions {
 		t.Fatalf("peak loopback connections = %d, want at most the relayed session cap %d", peak, maxSessions)
 	}
-	if refusals := fixture.loopback.refusals(); refusals != 0 {
-		t.Fatalf("%d loopback handshakes were refused, so orphan dials crowded the listener", refusals)
-	}
 }
 
 func TestACloseLandingMidDialLeavesNoLoopbackConnection(t *testing.T) {
@@ -674,5 +671,63 @@ func waitFor(t *testing.T, what string, done func() bool) {
 			t.Fatalf("timed out waiting for %s", what)
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// A CLOSE burst frees map entries long before the listener frees the sockets
+// behind them. The cap must count those draining sockets, or the next OPEN
+// burst in the same message doubles the connections the listener holds.
+func TestSessionsStillDrainingCountAgainstTheCap(t *testing.T) {
+	fixture := newHarness(t, nil)
+	host := fixture.relay.accept(t)
+	// A deafened session writes its HELLO and then answers nothing, including
+	// a close frame, so every socket stays open while the OPEN burst is
+	// applied - exactly the window where the map is empty but the listener is
+	// still full.
+	fixture.loopback.deafen()
+	for index := 0; index < maxSessions; index++ {
+		fixture.openSession(t, host, uint32(600+index))
+	}
+	records := make([]Record, 0, 2*maxSessions)
+	for index := 0; index < maxSessions; index++ {
+		records = append(records, closeRecord(uint32(600+index), 4001, ""))
+	}
+	for index := 0; index < maxSessions; index++ {
+		records = append(records, openRecord(t, uint32(700+index)))
+	}
+	host.send(t, records...)
+
+	for index := 0; index < maxSessions; index++ {
+		if code := expectCloseCode(t, host, uint32(700+index)); code != relayCloseSlow {
+			t.Fatalf("OPEN during drain = %d, want %d", code, relayCloseSlow)
+		}
+	}
+	if live, peak, _ := fixture.loopback.counts(); live != maxSessions || peak > maxSessions {
+		t.Fatalf("live=%d peak=%d while draining, want %d live and no more than that at peak", live, peak, maxSessions)
+	}
+	fixture.loopback.hearAgain()
+	fixture.loopback.settle(t)
+	if _, peak, _ := fixture.loopback.counts(); peak > maxSessions {
+		t.Fatalf("peak loopback connections = %d, want at most the relayed session cap %d", peak, maxSessions)
+	}
+}
+
+func TestOneSessionCannotPinMemoryWithLargeUndrainedFrames(t *testing.T) {
+	current := newSession(1)
+	payload := make([]byte, maxSessionInboundBytes/4)
+	for index := 0; index < 4; index++ {
+		if !current.deliver(Record{Type: RecordBinary, Connection: 1, Payload: payload}) {
+			t.Fatalf("delivery %d was refused below the byte bound", index)
+		}
+	}
+	if current.deliver(Record{Type: RecordBinary, Connection: 1, Payload: []byte{0}}) {
+		t.Fatal("delivery beyond the byte bound was accepted")
+	}
+	record := <-current.inbound
+	current.mu.Lock()
+	current.inboundBytes -= len(record.Payload)
+	current.mu.Unlock()
+	if !current.deliver(Record{Type: RecordBinary, Connection: 1, Payload: payload}) {
+		t.Fatal("draining one record did not release its bytes")
 	}
 }

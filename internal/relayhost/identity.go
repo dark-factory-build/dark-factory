@@ -19,12 +19,13 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
 const (
-	relayDirectoryName = "relay"
-	nodeKeyFileName    = "node.key"
-	maxIdentityFile    = 1 << 12
+	nodeKeyFileName = "node.key"
+	maxIdentityFile = 1 << 12
 )
 
 // ErrIdentity is every refusal to load or create the node identity. The
@@ -55,7 +56,7 @@ func loadOrCreateAt(home string, now time.Time) (Identity, error) {
 	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home {
 		return Identity{}, fmt.Errorf("%w: home must be an absolute clean path", ErrIdentity)
 	}
-	directory := filepath.Join(home, relayDirectoryName)
+	directory := filepath.Join(home, install.RelayDirectoryName)
 	if err := prepareDirectory(directory); err != nil {
 		return Identity{}, err
 	}

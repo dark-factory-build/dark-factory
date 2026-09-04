@@ -101,7 +101,12 @@ type Connector struct {
 
 	closeOnce sync.Once
 
-	mu        sync.Mutex
+	mu sync.Mutex
+	// draining counts sessions that have left the map but whose loopback
+	// socket is still being closed. They still hold a listener slot, so the
+	// cap must see them or a CLOSE burst followed by an OPEN burst in one
+	// message admits twice the sessions the listener has room for.
+	draining  int
 	connected bool
 	failing   bool
 	lastErr   error
@@ -119,7 +124,7 @@ func Dial(ctx context.Context, config Config) (*Connector, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("%w: nil context", ErrConfig)
 	}
-	if err := validateRelayOrigin(config.RelayOrigin); err != nil {
+	if err := ValidateRelayOrigin(config.RelayOrigin); err != nil {
 		return nil, err
 	}
 	if !config.Identity.valid() {
@@ -167,7 +172,10 @@ func (config Config) withDefaults() Config {
 	return config
 }
 
-func validateRelayOrigin(value string) error {
+// ValidateRelayOrigin bounds the relay endpoint to an exact WebSocket origin.
+// ws:// is accepted for development against a local relay; a path, query or
+// credential is refused because the connector appends its own host path.
+func ValidateRelayOrigin(value string) error {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme != "wss" && parsed.Scheme != "ws" || parsed.Host == "" || parsed.User != nil ||
 		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.String() != value {
@@ -465,10 +473,10 @@ func (connector *Connector) apply(ctx context.Context, record Record, queue *out
 		return nil
 	case RecordClose:
 		return connector.closeSession(record)
-	case RecordRevoke:
-		return fmt.Errorf("%w: REVOKE is host to relay only", ErrRelayProtocol)
 	default:
-		return fmt.Errorf("%w: 0x%02x", ErrRecordType, byte(record.Type))
+		// DecodeRecords admits only the closed set above, and REVOKE is host
+		// to relay only.
+		return fmt.Errorf("%w: REVOKE is host to relay only", ErrRelayProtocol)
 	}
 }
 
@@ -494,7 +502,7 @@ func (connector *Connector) open(ctx context.Context, record Record, queue *outb
 		connector.mu.Unlock()
 		return fmt.Errorf("%w: OPEN reuses a live connection id", ErrRelayProtocol)
 	}
-	if len(connector.sessions) >= maxSessions {
+	if len(connector.sessions)+connector.draining >= maxSessions {
 		connector.mu.Unlock()
 		queue.push(nil, closeRecord(record.Connection, relayCloseSlow, "session capacity"))
 		return nil
@@ -524,10 +532,7 @@ func (connector *Connector) closeSession(record Record) error {
 			return fmt.Errorf("%w: CLOSE payload is not an object", ErrRelayProtocol)
 		}
 	}
-	connector.mu.Lock()
-	current := connector.sessions[record.Connection]
-	delete(connector.sessions, record.Connection)
-	connector.mu.Unlock()
+	current := connector.detach(record.Connection)
 	if current == nil {
 		return nil
 	}
@@ -631,14 +636,24 @@ func (connector *Connector) runSession(ctx context.Context, current *session, or
 
 // dropSession ends one session without touching the relay connection.
 func (connector *Connector) dropSession(current *session, queue *outboundQueue, code int, reason string) {
-	connector.forget(current)
+	connector.detach(current.connection)
 	current.markRelayClosed()
 	queue.push(nil, closeRecord(current.connection, code, reason))
 	connector.shutdownAsync(current, websocket.StatusPolicyViolation)
 }
 
 func (connector *Connector) finishSession(current *session, queue *outboundQueue, code int, reason string) {
-	connector.forget(current)
+	connector.mu.Lock()
+	if connector.sessions[current.connection] == current {
+		delete(connector.sessions, current.connection)
+	}
+	if current.draining {
+		// This goroutine is returning, so the socket it owned is closed and
+		// its listener slot is free.
+		current.draining = false
+		connector.draining--
+	}
+	connector.mu.Unlock()
 	if code == 0 {
 		return
 	}
@@ -651,12 +666,19 @@ func (connector *Connector) sessionFor(connection uint32) *session {
 	return connector.sessions[connection]
 }
 
-func (connector *Connector) forget(current *session) {
+// detach removes a relay-closed session from the map and starts counting it
+// as draining until its goroutine reaches finishSession.
+func (connector *Connector) detach(connection uint32) *session {
 	connector.mu.Lock()
-	if connector.sessions[current.connection] == current {
-		delete(connector.sessions, current.connection)
+	defer connector.mu.Unlock()
+	current := connector.sessions[connection]
+	if current == nil {
+		return nil
 	}
-	connector.mu.Unlock()
+	delete(connector.sessions, connection)
+	current.draining = true
+	connector.draining++
+	return current
 }
 
 // fail retains the first failure of the current dial. Later errors are the

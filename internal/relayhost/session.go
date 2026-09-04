@@ -15,6 +15,10 @@ const (
 	// socket. The daemon reads promptly; a session that stops draining is
 	// dropped alone rather than stalling the relay read loop.
 	maxSessionInbound = 64
+	// maxSessionInboundBytes bounds the same queue by size. Records alone
+	// would let a relay pin 64 MiB per session; sessions are capped, but the
+	// product is still far more memory than a stalled session may hold.
+	maxSessionInboundBytes = 2 << 20
 	// relayCloseSlow is the close code for a session this side cannot keep up
 	// with in either direction.
 	relayCloseSlow = 4003
@@ -52,9 +56,14 @@ type session struct {
 	connection uint32
 	inbound    chan Record
 
-	// queued is the session's unwritten outbound budget. It is owned by
-	// outboundQueue.mu, not by mu.
-	queued int
+	// queued is the session's unwritten outbound budget, and draining says
+	// the relay removed this session from the connector map. Both are owned
+	// by the connector, not by mu: queued by outboundQueue.mu and draining by
+	// Connector.mu.
+	queued   int
+	draining bool
+
+	inboundBytes int
 
 	mu          sync.Mutex
 	loopback    *websocket.Conn
@@ -68,8 +77,14 @@ func newSession(connection uint32) *session {
 // deliver hands one relay record to the session writer without blocking the
 // relay read loop. A refusal means this session is not draining.
 func (current *session) deliver(record Record) bool {
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	if current.inboundBytes+len(record.Payload) > maxSessionInboundBytes {
+		return false
+	}
 	select {
 	case current.inbound <- record:
+		current.inboundBytes += len(record.Payload)
 		return true
 	default:
 		return false
@@ -128,6 +143,9 @@ func (current *session) pump(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case record := <-current.inbound:
+			current.mu.Lock()
+			current.inboundBytes -= len(record.Payload)
+			current.mu.Unlock()
 			kind := websocket.MessageBinary
 			if record.Type == RecordText {
 				kind = websocket.MessageText

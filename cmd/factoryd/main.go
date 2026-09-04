@@ -24,6 +24,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
+	"github.com/dark-factory-build/dark-factory/internal/relayhost"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
@@ -254,12 +255,10 @@ func validBrowserAddress(value string, allowZero bool) bool {
 	return err == nil && port >= minimum && port <= 65535 && strconv.Itoa(port) == rawPort
 }
 
-// validRelayOrigin bounds the relay endpoint to an exact WebSocket origin.
-// ws:// is accepted for development against a local relay; a path, query or
-// credential is refused because the connector appends its own host path.
+// validRelayOrigin defers to the connector's own validator so the flag and
+// the dial cannot disagree about what a relay origin is.
 func validRelayOrigin(value string) bool {
-	parsed, err := url.Parse(value)
-	return err == nil && (parsed.Scheme == "wss" || parsed.Scheme == "ws") && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value && !strings.Contains(value, "*") && len(value) <= 8192
+	return len(value) <= 8192 && relayhost.ValidateRelayOrigin(value) == nil
 }
 
 func validBrowserOrigin(value string) bool {
