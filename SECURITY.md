@@ -179,10 +179,11 @@ durable transactions for authority.
 
 The browser control frames and the local API bodies are unversioned JSON that
 ignores a member neither build knows, so a hosted console and a daemon can be
-installed in either order. An ignored member is one whose name is not a known
-name under any case; a member differing from a known one only in case is
-refused, because Go matches struct fields case-insensitively and would
-otherwise let it overwrite the exact member that was validated. The local API
+installed in either order. An ignored member is an ASCII name that is not a
+known name under any case; a non-ASCII name, or a member differing from a known
+one only in case, is refused, because Go matches struct fields with Unicode
+case folding and would otherwise let it overwrite the exact member that was
+validated. The local API
 reaches the same result by requiring every member name to be canonical
 lowercase and rejecting duplicates.
 

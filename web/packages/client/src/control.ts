@@ -365,8 +365,9 @@ function isControlType(value: unknown): value is ControlType { return typeof val
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 /**
  * Every required member must be present and every member this build knows is
- * validated below. Decoding a wire frame ignores a member that is not a known
- * name under any case, so a newer daemon may add one without a coordinated
+ * validated below. Decoding a wire frame ignores an ASCII member that is not a
+ * known name under any case (a non-ASCII name is refused, matching Go's Unicode
+ * fold), so a newer daemon may add one without a coordinated
  * release; it reaches no field of the decoded frame. Byte, depth, array and
  * object-member bounds still apply. A locally constructed frame stays exact,
  * so a caller cannot quietly hand this encoder a field it will drop.

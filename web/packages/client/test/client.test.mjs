@@ -336,8 +336,10 @@ test("a case variant of a known member is refused, an unknown name is ignored", 
     hello.replace('"daemon_id"', '"DAEMON_ID"'),
     hello.replace('{"type"', '{"Type":"NOPE","type"'),
     hello.replace('"body"', '"BODY":{},"body"'),
-    hello.replace('"boot_id"', `"daemon_id\u017f":"${shadow}","boot_id"`),
   ]) expectMalformed(() => decodeServerControl(mutated));
+  // A long s folds onto s in Go, so `ſession_id` would reach session_id there.
+  const attached = fixture("terminal_attached.json");
+  expectMalformed(() => decodeServerControl(attached.replace('"floor"', `"\u017fession_id":"${"ee".repeat(16)}","floor"`)));
   expectIgnoredMember(hello, hello.replace('"boot_id"', `"FUTURE_ID":"${shadow}","boot_id"`), "server");
   // An optional envelope member is a known name too.
   const detail = fixture("human_request_detail.json");

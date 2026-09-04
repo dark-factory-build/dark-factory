@@ -316,13 +316,12 @@ func TestCaseVariantOfAKnownMemberIsRefused(t *testing.T) {
 		t.Fatalf("baseline daemon_id = %q", frame.Body.(Hello).DaemonID)
 	}
 	for name, mutated := range map[string]string{
-		"upper":        strings.Replace(valid, `"boot_id"`, `"DAEMON_ID":"`+shadow+`","boot_id"`, 1),
-		"mixed":        strings.Replace(valid, `"boot_id"`, `"Daemon_Id":"`+shadow+`","boot_id"`, 1),
-		"before":       strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID":"`+shadow+`","daemon_id"`, 1),
-		"no exact":     strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID"`, 1),
-		"envelope":     strings.Replace(valid, `{"type"`, `{"Type":"NOPE","type"`, 1),
-		"nested item":  strings.Replace(valid, `"boot_id"`, `"Connection_Nonce":"`+strings.Repeat("33", 32)+`","boot_id"`, 1),
-		"unicode fold": strings.Replace(valid, `"boot_id"`, `"daemon_id\u017f":"`+shadow+`","boot_id"`, 1),
+		"upper":       strings.Replace(valid, `"boot_id"`, `"DAEMON_ID":"`+shadow+`","boot_id"`, 1),
+		"mixed":       strings.Replace(valid, `"boot_id"`, `"Daemon_Id":"`+shadow+`","boot_id"`, 1),
+		"before":      strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID":"`+shadow+`","daemon_id"`, 1),
+		"no exact":    strings.Replace(valid, `"daemon_id"`, `"DAEMON_ID"`, 1),
+		"envelope":    strings.Replace(valid, `{"type"`, `{"Type":"NOPE","type"`, 1),
+		"nested item": strings.Replace(valid, `"boot_id"`, `"Connection_Nonce":"`+strings.Repeat("33", 32)+`","boot_id"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeServerControl([]byte(mutated)); err != ErrMalformed {
@@ -330,7 +329,14 @@ func TestCaseVariantOfAKnownMemberIsRefused(t *testing.T) {
 			}
 		})
 	}
-	// A name that is unknown under every case is still ignored.
+	// A long s folds onto s under Go's Unicode fold, so `ſession_id` would have
+	// reached session_id; a non-ASCII name is refused before that can happen.
+	attached := string(fixtureBytes(t, "terminal_attached.json"))
+	folded := strings.Replace(attached, `"floor"`, `"\u017fession_id":"`+strings.Repeat("ee", 16)+`","floor"`, 1)
+	if _, err := DecodeServerControl([]byte(folded)); err != ErrMalformed {
+		t.Fatalf("unicode fold variant accepted: %v", err)
+	}
+	// An ASCII name that is unknown under every case is still ignored.
 	tolerated := strings.Replace(valid, `"boot_id"`, `"FUTURE_ID":"`+shadow+`","boot_id"`, 1)
 	assertIgnoredMember(t, valid, tolerated, true)
 }
