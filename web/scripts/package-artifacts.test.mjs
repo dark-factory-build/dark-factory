@@ -107,15 +107,13 @@ function rewriteArchive(archive, destination, mutate) {
   }
 }
 
-test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes", () => {
+test("public artifacts bind clean HEAD, exact dependencies, and bytes", () => {
   const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
   const output = join(tempRoot, "output");
   try {
     const packed = JSON.parse(run("pack", output));
-    assert.equal(packed.schemaVersion, 1);
     assert.match(packed.source.commit, /^[0-9a-f]{40}$/);
     assert.equal(packed.source.clean, true);
-    assert.equal(packed.buildTools.toolTreeVersion, "dark-factory/tool-tree/v2");
     assert.deepEqual(packed.buildTools.pnpm, "11.19.0");
     assert.deepEqual(packed.buildTools.typescript, "5.8.3");
     assert.deepEqual(packed.buildTools.node, {
@@ -180,7 +178,7 @@ test("artifact pack refuses caller provenance and dirty source", () => {
     expectFailure(() => run("pack", output), "worktree is dirty");
     assert.equal(existsSync(output), false);
     rmSync(dirty);
-    writeFileSync(sourceManifest, `${sourceText}\n// protocol version 999\n`);
+    writeFileSync(sourceManifest, `${sourceText}\n// an edit to any packaged source\n`);
     expectFailure(() => run("pack", output), "worktree is dirty");
   } finally {
     writeFileSync(sourceManifest, sourceText);
@@ -189,17 +187,26 @@ test("artifact pack refuses caller provenance and dirty source", () => {
   }
 });
 
-test("verification rejects stale protocol identity and changed tarball bytes", () => {
+test("verification rejects a stale source identity and changed tarball bytes", () => {
   const tempRoot = mkdtempSync(join(tmpdir(), "dark-factory-public-artifacts-"));
   const output = join(tempRoot, "output");
   try {
     run("pack", output);
     const path = join(output, "dark-factory-public-artifacts.json");
     const original = manifest(output);
-    const staleProtocol = structuredClone(original);
-    staleProtocol.protocol.version = 3;
-    writeFileSync(path, `${JSON.stringify(staleProtocol, null, 2)}\n`);
-    expectFailure(() => run("verify", output), "manifest protocol is invalid");
+    // The source commit and its cleanliness flag are the artifact's whole
+    // identity now that there is no protocol generation beside them, so a
+    // forged one must still fail closed.
+    const dirtySource = structuredClone(original);
+    dirtySource.source.clean = false;
+    writeFileSync(path, `${JSON.stringify(dirtySource, null, 2)}\n`);
+    expectFailure(() => run("verify", output), "manifest source is invalid");
+    writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
+
+    const staleSource = structuredClone(original);
+    staleSource.source.commit = "0".repeat(40);
+    writeFileSync(path, `${JSON.stringify(staleSource, null, 2)}\n`);
+    expectFailure(() => run("verify", output), "differs from clean reconstruction");
     writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
 
     const stalePackage = structuredClone(original);
@@ -223,7 +230,7 @@ test("verification rejects stale protocol identity and changed tarball bytes", (
   }
 });
 
-test("verification rejects archive inventory, runtime protocol, and strict manifest mutations", () => {
+test("verification rejects archive inventory and strict manifest mutations", () => {
   const { tempRoot, output } = fixture();
   try {
     run("pack", output);
@@ -238,7 +245,7 @@ test("verification rejects archive inventory, runtime protocol, and strict manif
     expectFailure(() => run("verify", output), "manifest has unknown or missing keys");
     writeFileSync(path, originalText);
 
-    writeFileSync(path, originalText.replace('"schemaVersion": 1', '"schemaVersion": 1,\n  "schemaVersion": 1'));
+    writeFileSync(path, originalText.replace('"source": {', '"source": {},\n  "source": {'));
     expectFailure(() => run("verify", output), "not canonical JSON");
     writeFileSync(path, originalText);
 
@@ -247,9 +254,9 @@ test("verification rejects archive inventory, runtime protocol, and strict manif
     writeFileSync(path, originalText);
 
     const typeConfused = structuredClone(original);
-    typeConfused.protocol.version = "2";
+    typeConfused.buildTools.node.bytes = String(original.buildTools.node.bytes);
     writeManifest(typeConfused);
-    expectFailure(() => run("verify", output), "manifest.protocol.version must be an integer");
+    expectFailure(() => run("verify", output), "manifest.buildTools.node.bytes must be an integer");
     writeFileSync(path, originalText);
 
     const traversal = structuredClone(original);
