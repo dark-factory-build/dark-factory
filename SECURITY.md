@@ -187,8 +187,8 @@ A pull request can modify its own workflow, including `runs-on`, so the
 Maintainer App refuses workflow and CODEOWNERS publication; an owner must
 explicitly author those changes. Native CODEOWNER approval is limited to the
 few files that can rewrite merge authority, because the App cannot approve its
-own pull request. A green pull-request check alone never authorizes merge to protected
-`main`: every change needs the `required` aggregate on the queue's exact
-combined tree, including the Maintainer's adversarial-review verdict at the
-exact head, plus resolved threads. Persistent CI runner isolation remains a
-separate hardening concern.
+own pull request. A green pull-request check alone never authorizes merge to
+protected `main`: every change needs the `required` aggregate and Maintainer
+review on the queue's exact combined tree. The CODEOWNED classifier selects
+only relevant source gates and sends unknown paths through the Darwin gate.
+Persistent CI runner isolation remains a separate hardening concern.

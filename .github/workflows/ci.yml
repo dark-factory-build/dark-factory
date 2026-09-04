@@ -40,24 +40,81 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_SHA" "$GITHUB_SHA"
           git diff --check "$BASE_SHA" "$GITHUB_SHA"
 
-  # The macOS job is the runtime source gate. The Go daemon is Darwin-only
-  # today, so there is no Linux runtime job to pair with it; Linux support is
-  # #120/#141-144, and the release/publisher/package fixtures stay macOS-only
-  # until #142/#143.
-  #
-  # `runs-on` below is a policy, not a mechanism: a pull request runs the
-  # workflow file it carries, so this expression only governs a PR that
-  # leaves it unmodified — see docs/development/WORKFLOW.md, "GitHub
-  # boundary". Manual runs use the persistent runner;
-  # queue runs use fresh hosted workers. Pull requests run only `eligibility`.
-  checks:
+  # This classifier lives in the CODEOWNED workflow, not in a PR-publishable
+  # script. The two root files consumed by both source trees run both gates;
+  # unclassified paths fail closed through Darwin. The diff is the queue's
+  # whole combined tree, so entries ahead of this one cannot escape its
+  # selected gates.
+  scope:
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
-    # A queue run gates a merge, so it belongs on the ephemeral hosted runner;
-    # letting it fall through would quietly route every gating run onto the
-    # persistent shared runner (#54).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      macos: ${{ steps.select.outputs.macos }}
+      control_plane: ${{ steps.select.outputs.control_plane }}
+    steps:
+      - name: Select fixed gates from the combined tree
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          emit_all() {
+            for gate in macos control_plane; do
+              printf '%s=true\n' "$gate"
+            done >>"$GITHUB_OUTPUT"
+          }
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            emit_all
+            exit 0
+          fi
+          for sha in "$BASE_SHA" "$GITHUB_SHA"; do
+            case "$sha" in
+              *[!0-9a-f]*|'') echo "invalid merge-group commit" >&2; exit 1 ;;
+            esac
+            [ "${#sha}" -eq 40 ] || { echo "invalid merge-group commit" >&2; exit 1; }
+          done
+          git init
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$GITHUB_SHA"
+          git diff --check "$BASE_SHA" "$GITHUB_SHA"
+          git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$BASE_SHA" "$GITHUB_SHA" \
+            >"$RUNNER_TEMP/changed-paths"
+
+          macos=false
+          control_plane=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              docs/*|README.md|ARCHITECTURE.md|CONTRIBUTING.md|ROADMAP.md|SECURITY.md|CLAUDE.md|LICENSE|LICENSE.*|launchd/README.md)
+                ;;
+              control-plane|control-plane/*)
+                control_plane=true
+                ;;
+              .github/workflows/deploy-control-plane.yml)
+                control_plane=true
+                ;;
+              .github/workflows/ci.yml)
+                macos=true; control_plane=true
+                ;;
+              .gitignore|scripts/bootstrap-maintainer-v2.sh)
+                macos=true; control_plane=true
+                ;;
+              *)
+                macos=true
+                ;;
+            esac
+          done <"$RUNNER_TEMP/changed-paths"
+          {
+            printf 'macos=%s\n' "$macos"
+            printf 'control_plane=%s\n' "$control_plane"
+          } >>"$GITHUB_OUTPUT"
+
+  # Darwin runtime changes use the existing gate unchanged. Documentation and
+  # control-plane-only changes never allocate a hosted Mac.
+  checks:
+    needs: scope
+    if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
     runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || 'dark-factory-mac' }}
-    # The Go gate runs the routine short serial suite, one TypeScript client
-    # proof, and the normal browser, daemon and service E2Es back to back.
     timeout-minutes: 30
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
@@ -94,21 +151,17 @@ jobs:
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
 
-      # The Go gate uses /opt/homebrew/bin/go and /opt/homebrew/bin/gofmt, and
-      # its web stage needs Node 22+ with Corepack. The owned runner already
-      # satisfies both, so this step is a no-op there; a fresh hosted image
-      # receives the current Homebrew Go. GOTOOLCHAIN=local inside the gate
-      # keeps the go.mod major/minor series and minimum patch without
-      # downloading another toolchain.
       - name: Provide the Homebrew Go and Node toolchains
         run: |
           set -euxo pipefail
           if [ ! -x /opt/homebrew/bin/go ]; then
+            # The hosted image's bundled formula can trail go.mod. Go's
+            # auto-download cannot satisfy clean helpers using GOTOOLCHAIN=local.
             brew update
-            brew install go
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install go
           fi
           node_major=$(node -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
-          [ "$node_major" -ge 22 ] || brew install node
+          [ "$node_major" -ge 22 ] || HOMEBREW_NO_AUTO_UPDATE=1 brew install node
           /opt/homebrew/bin/go version
 
       - name: Run the macOS source gate
@@ -146,21 +199,21 @@ jobs:
   # selected when the ruleset was first configured.
   required:
     if: always()
-    needs: [eligibility, checks, control-plane, review]
+    needs: [eligibility, scope, checks, control-plane, review]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every hosted source gate
-        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.checks.result != 'success' || needs.control-plane.result != 'success'))
+        if: (github.event_name == 'pull_request' && needs.eligibility.result != 'success') || ((github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch') && (needs.scope.result != 'success' || (needs.scope.outputs.macos == 'true' && needs.checks.result != 'success') || (needs.scope.outputs.control_plane == 'true' && needs.control-plane.result != 'success')))
         run: |
-          echo "required source gates failed: eligibility=${{ needs.eligibility.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}" >&2
+          echo "required source gates failed: eligibility=${{ needs.eligibility.result }}, scope=${{ needs.scope.result }}, macOS=${{ needs.checks.result }}, control-plane=${{ needs.control-plane.result }}" >&2
           exit 1
       - name: Confirm the pull request is eligible for the queue
         if: github.event_name == 'pull_request'
         run: echo "pull request patch is eligible for combined-tree testing"
       - name: Confirm all hosted source gates passed
         if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
-        run: echo "macOS Go and control-plane source gates passed"
+        run: echo "every selected combined-tree gate passed"
 
       # AGENTS.md rule 2, made a merge condition rather than a convention.
       #
@@ -278,7 +331,8 @@ jobs:
             ./scripts/verify-adversarial-review.sh
 
   control-plane:
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    needs: scope
+    if: needs.scope.result == 'success' && needs.scope.outputs.control_plane == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

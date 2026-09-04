@@ -173,11 +173,12 @@ deletion, repository-settings or access change, credential inspection, or
 implicit expansion is allowed — those hold whatever the owner authorizes for
 the task.
 
-Pull-request and merge-queue runs use fresh hosted workers. A manual workflow
-dispatch is the explicit path for a platform investigation on the persistent
-Mac. There is no automatic duplicate full gate after a successful merge.
-Changes to App-refused paths remain owner-authored. Every path still requires
-the independent exact-head review and combined-tree queue gate.
+Pull-request and merge-queue runs use fresh hosted workers. The protected
+workflow classifies the queue's whole combined-tree diff: documentation needs
+no source runner, control-plane-only changes use its Linux gate, and every
+other or unknown path uses the Darwin gate. A manual dispatch runs both. There
+is no duplicate post-merge gate. Changes to App-refused paths remain
+owner-authored, and every path still needs the independent exact-head review.
 
 The Maintainer App design and operation set are documented in
 [GITHUB_APP.md](GITHUB_APP.md).

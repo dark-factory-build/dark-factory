@@ -20,6 +20,7 @@ case "$go_version" in
 esac
 check_pin .github/workflows/release.yml "GOTOOLCHAIN=go$go_version" "runtime Go $go_version"
 check_pin .github/workflows/ci.yml 'brew install go' "fresh hosted macOS Go provisioning"
+check_pin .github/workflows/ci.yml 'brew update' "fresh hosted Homebrew metadata before Go provisioning"
 check_pin .github/workflows/release.yml 'brew install go' "fresh hosted macOS Go provisioning"
 check_pin .github/workflows/release.yml 'echo "/opt/homebrew/bin" >> "$GITHUB_PATH"' "the bootstrapped Go path for later release steps"
 check_pin .github/workflows/release.yml "GOOS=darwin GOARCH=arm64" "the exact Darwin arm64 release target"
