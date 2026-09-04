@@ -34,29 +34,20 @@ func humanRequestItem() HumanRequestItem {
 	return HumanRequestItem{ID: requestID, ProjectID: projectID, AgentID: agentID, TaskID: taskID, CreatedAt: 10, UpdatedAt: 11, Revision: 1, Kind: "question", Status: "open", ReplyMaxBytes: MaxHumanReplyBytes, CanReply: true}
 }
 
-func repeatedStateItems(kind StateKind, count int) StateItems {
-	switch kind {
-	case StateFactory:
-		return FactoryItems(repeat(count, factoryItem))
-	case StateProject:
-		return ProjectItems(repeat(count, projectItem))
-	case StateAgent:
-		return AgentItems(repeat(count, agentItem))
-	case StateTask:
-		return TaskItems(repeat(count, taskItem))
-	case StateHumanRequest:
-		return HumanRequestItems(repeat(count, humanRequestItem))
-	default:
-		panic("unknown state kind")
+// snapshotWith is one valid snapshot the individual bound tests mutate.
+func snapshotWith() StateSnapshot {
+	return StateSnapshot{
+		Head: 1, Factory: factoryItem(),
+		Projects: []ProjectItem{projectItem()}, Agents: []AgentItem{agentItem()},
+		Tasks: []TaskItem{taskItem()}, HumanRequests: []HumanRequestItem{humanRequestItem()},
 	}
 }
 
-func repeat[T any](count int, item func() T) []T {
-	result := make([]T, count)
-	for index := range result {
-		result[index] = item()
-	}
-	return result
+func hexIdentity(prefix byte, index int) string {
+	raw := bytes.Repeat([]byte{prefix}, 16)
+	raw[15] = byte(index % 251)
+	raw[14] = byte(index / 251)
+	return fmt.Sprintf("%x", raw)
 }
 
 func rawControl(t *testing.T, kind MessageType, id string, body any) []byte {
@@ -69,7 +60,7 @@ func rawControl(t *testing.T, kind MessageType, id string, body any) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := json.Marshal(controlEnvelope{Version: 1, Type: kind, ID: idJSON, Body: bodyJSON})
+	result, err := json.Marshal(controlEnvelope{Version: ProtocolVersion, Type: kind, ID: idJSON, Body: bodyJSON})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +68,7 @@ func rawControl(t *testing.T, kind MessageType, id string, body any) []byte {
 }
 
 func TestStateFixturesRoundTrip(t *testing.T) {
-	for _, name := range []string{"state_get", "state_snapshot", "state_restart", "state_subscribe", "state_event", "state_entity_get", "state_entity", "human_request_detail_get", "human_request_detail"} {
+	for _, name := range []string{"state_get", "state_snapshot", "state_watch", "state_changed", "human_request_detail_get", "human_request_detail"} {
 		t.Run(name, func(t *testing.T) {
 			wire := fixtureBytes(t, name+".json")
 			frame, err := decodeFixtureControl(name, wire)
@@ -98,93 +89,137 @@ func TestStateFixturesRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := frame.Body.(StateSnapshot)
-	if snapshot.Head != 9_007_199_254_740_993 || snapshot.Items.Kind() != StateTask {
+	if snapshot.Head != 9_007_199_254_740_993 {
 		t.Fatalf("unsafe chronology truncated: %+v", snapshot)
+	}
+	// The shared fixture is the cross-language contract: it must carry one of
+	// every public kind so a TypeScript consumer exercises the whole shape.
+	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 || len(snapshot.HumanRequests) != 1 {
+		t.Fatalf("snapshot fixture does not cover every kind: %+v", snapshot)
 	}
 }
 
-func TestStatePageKindsAndItemCap(t *testing.T) {
-	cursor := "YWZ0ZXI"
-	for _, kind := range []StateKind{StateProject, StateAgent, StateTask} {
-		for _, count := range []int{0, MaxStatePageItems} {
-			t.Run(fmt.Sprintf("%s/%d", kind, count), func(t *testing.T) {
-				encoded, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: kind, Items: repeatedStateItems(kind, count), NextCursor: &cursor})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := DecodeServerControl(encoded); err != nil {
-					t.Fatal(err)
-				}
-			})
-		}
-		if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: kind, Items: repeatedStateItems(kind, 1)}); err == nil {
-			t.Fatalf("%s accepted a terminal page", kind)
-		}
-		body := StateSnapshot{Head: 1, Kind: kind, Items: repeatedStateItems(kind, MaxStatePageItems+1)}
-		if _, err := EncodeStateSnapshot("page", body); err == nil {
-			t.Fatalf("%s encoded nine items", kind)
-		}
-		if _, err := DecodeServerControl(rawControl(t, TypeStateSnapshot, "page", body)); err != ErrMalformed {
-			t.Fatalf("%s decoded nine items: %v", kind, err)
-		}
-	}
-	for _, count := range []int{0, MaxStatePageItems - 1} {
-		if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, count)}); err != nil {
-			t.Fatalf("human request terminal count %d: %v", count, err)
-		}
-		if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, count), NextCursor: &cursor}); err == nil {
-			t.Fatalf("human request short count %d continued", count)
-		}
-	}
-	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, MaxStatePageItems), NextCursor: &cursor}); err != nil {
-		t.Fatalf("full human request page did not continue: %v", err)
-	}
-	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: repeatedStateItems(StateHumanRequest, MaxStatePageItems)}); err != nil {
-		t.Fatalf("full human request final page rejected: %v", err)
-	}
-	encoded, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()}), NextCursor: &cursor})
+// The checked-in snapshot fixture is exactly what this Go encoder produces, so
+// the fixture a TypeScript consumer reads cannot drift from the server.
+func TestGoProducesTheSnapshotFixtureByteForByte(t *testing.T) {
+	wire := fixtureBytes(t, "state_snapshot.json")
+	frame, err := DecodeServerControl(wire)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeServerControl(encoded); err != nil {
+	encoded, err := EncodeStateSnapshot(frame.ID, frame.Body.(StateSnapshot))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EncodeStateSnapshot("page", StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()})}); err == nil {
-		t.Fatal("factory page terminated")
+	if !bytes.Equal(encoded, wire) {
+		t.Fatalf("Go-produced snapshot differs from the fixture:\n got %s\nwant %s", encoded, wire)
 	}
-	for _, count := range []int{0, 2, MaxStatePageItems, MaxStatePageItems + 1} {
-		body := StateSnapshot{Head: 1, Kind: StateFactory, Items: repeatedStateItems(StateFactory, count), NextCursor: &cursor}
-		if _, err := EncodeStateSnapshot("page", body); err == nil {
-			t.Fatalf("factory encoded %d items", count)
-		}
-		if _, err := DecodeServerControl(rawControl(t, TypeStateSnapshot, "page", body)); err != ErrMalformed {
-			t.Fatalf("factory decoded %d items: %v", count, err)
+}
+
+// STATE_GET carries nothing. A body with any member is malformed, so a client
+// cannot smuggle a selector past a server that no longer reads one.
+func TestStateGetCarriesNoSelector(t *testing.T) {
+	encoded, err := EncodeStateGet("state", StateGet{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"body":{}`)) {
+		t.Fatalf("STATE_GET body is not empty: %s", encoded)
+	}
+	if _, err := DecodeClientControl(encoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{`{"cursor":null}`, `{"kind":"task"}`, `{"after":"1"}`} {
+		wire := fmt.Sprintf(`{"v":%d,"type":"STATE_GET","id":"state","body":%s}`, ProtocolVersion, body)
+		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("STATE_GET selector %s accepted: %v", body, err)
 		}
 	}
 }
 
-func TestStateCursorNullableOpaqueAndBounded(t *testing.T) {
-	for _, cursor := range []*string{nil, pointer("A"), pointer(strings.Repeat("_", MaxCursorBytes))} {
-		encoded, err := EncodeStateGet("page", StateGet{Cursor: cursor})
-		if err != nil {
-			t.Fatal(err)
+// The snapshot entity bound is exact and fails closed. Nothing is trimmed.
+func TestSnapshotEntityCountBoundFailsClosed(t *testing.T) {
+	fill := func(total int) StateSnapshot {
+		value := StateSnapshot{Head: 1, Factory: factoryItem(), Projects: []ProjectItem{}, Agents: []AgentItem{}, Tasks: []TaskItem{}, HumanRequests: []HumanRequestItem{}}
+		for index := 1; index <= total; index++ {
+			item := projectItem()
+			item.ID = hexIdentity(0xa1, index)
+			value.Projects = append(value.Projects, item)
 		}
-		if _, err := DecodeClientControl(encoded); err != nil {
-			t.Fatal(err)
-		}
+		return value
 	}
-	for _, cursor := range []string{"", "a=", "a/b", "a+b", "é", strings.Repeat("a", MaxCursorBytes+1)} {
-		if _, err := EncodeStateGet("page", StateGet{Cursor: &cursor}); err == nil {
-			t.Fatalf("invalid cursor %q accepted", cursor)
-		}
+	if _, err := EncodeStateSnapshot("state", fill(MaxSnapshotEntities-1)); err != nil {
+		t.Fatalf("maximum snapshot rejected: %v", err)
 	}
-	missing := `{"v":1,"type":"STATE_GET","id":"page","body":{}}`
-	if _, err := DecodeClientControl([]byte(missing)); err != ErrMalformed {
-		t.Fatalf("missing cursor accepted: %v", err)
+	if _, err := EncodeStateSnapshot("state", fill(MaxSnapshotEntities)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("oversized snapshot accepted: %v", err)
+	}
+	// The bound counts every collection plus the factory together.
+	spread := StateSnapshot{Head: 1, Factory: factoryItem(), Projects: []ProjectItem{}, Agents: []AgentItem{}, Tasks: []TaskItem{}, HumanRequests: []HumanRequestItem{}}
+	for index := 1; index <= MaxSnapshotEntities/2; index++ {
+		project := projectItem()
+		project.ID = hexIdentity(0xa1, index)
+		agent := agentItem()
+		agent.ID = hexIdentity(0xa2, index)
+		spread.Projects = append(spread.Projects, project)
+		spread.Agents = append(spread.Agents, agent)
+	}
+	if _, err := EncodeStateSnapshot("state", spread); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("spread overflow accepted: %v", err)
 	}
 }
 
-func pointer(value string) *string { return &value }
+// One encoded snapshot may reach 1 MiB and not a byte more. Oversize is a
+// finite refusal on both sides; nothing is truncated or partially published.
+func TestSnapshotByteBoundIsOneMebibyteAndFailsClosed(t *testing.T) {
+	value := StateSnapshot{Head: 1, Factory: factoryItem(), Projects: []ProjectItem{}, Agents: []AgentItem{}, Tasks: []TaskItem{}, HumanRequests: []HumanRequestItem{}}
+	for index := 1; len(value.Tasks) < MaxSnapshotEntities-2; index++ {
+		item := taskItem()
+		item.ID = hexIdentity(0xa3, index)
+		item.Title = strings.Repeat("x", MaxTaskTitleBytes)
+		value.Tasks = append(value.Tasks, item)
+	}
+	if _, err := EncodeStateSnapshot("state", value); !errors.Is(err, ErrOversized) {
+		t.Fatalf("oversized encoded snapshot accepted: %v", err)
+	}
+	small := snapshotWith()
+	encoded, err := EncodeStateSnapshot("state", small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) > MaxSnapshotBytes {
+		t.Fatalf("ordinary snapshot is %d bytes", len(encoded))
+	}
+	// Every other frame in either direction stays inside the control bound.
+	if MaxSnapshotBytes != 1<<20 || MaxControlBytes != 64<<10 || controlLimit(TypeStateWatch) != MaxControlBytes || controlLimit(TypeStateSnapshot) != MaxSnapshotBytes {
+		t.Fatalf("frame bounds drifted: snapshot=%d control=%d", MaxSnapshotBytes, MaxControlBytes)
+	}
+	oversizedClient := append([]byte(nil), bytes.Repeat([]byte{' '}, MaxControlBytes+1)...)
+	if _, err := DecodeClientControl(oversizedClient); !errors.Is(err, ErrOversized) {
+		t.Fatalf("oversized client frame error = %v", err)
+	}
+	// A server frame that is not a snapshot may not use the snapshot bound.
+	watch := fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"%s","body":{"head":"1"}}`, ProtocolVersion, strings.Repeat("p", 64))
+	padded := append([]byte(watch), bytes.Repeat([]byte{' '}, MaxControlBytes)...)
+	if _, err := DecodeServerControl(padded); !errors.Is(err, ErrOversized) && err != ErrMalformed {
+		t.Fatalf("oversized non-snapshot server frame error = %v", err)
+	}
+}
+
+// Identities are unique per collection. A duplicate would let a server hide
+// one entity behind another in a map-shaped client.
+func TestSnapshotRejectsDuplicateIdentities(t *testing.T) {
+	value := snapshotWith()
+	value.Projects = append(value.Projects, projectItem())
+	if _, err := EncodeStateSnapshot("state", value); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("duplicate project accepted: %v", err)
+	}
+	tasks := snapshotWith()
+	tasks.Tasks = append(tasks.Tasks, taskItem())
+	if _, err := EncodeStateSnapshot("state", tasks); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("duplicate task accepted: %v", err)
+	}
+}
 
 func TestDecimalCanonicalBoundaries(t *testing.T) {
 	valid := []uint64{0, 1, (1 << 53) - 1, 1 << 53, (1 << 53) + 1, math.MaxInt64}
@@ -194,12 +229,12 @@ func TestDecimalCanonicalBoundaries(t *testing.T) {
 		if err != nil || uint64(parsed) != value {
 			t.Fatalf("decimal %s: parsed=%d err=%v", encoded, parsed, err)
 		}
-		wire, err := EncodeStateSubscribe("watch", StateSubscribe{After: Decimal(value)})
+		wire, err := EncodeStateWatch("watch", StateWatch{AfterHead: Decimal(value)})
 		if err != nil {
 			t.Fatal(err)
 		}
 		frame, err := DecodeClientControl(wire)
-		if err != nil || uint64(frame.Body.(StateSubscribe).After) != value {
+		if err != nil || uint64(frame.Body.(StateWatch).AfterHead) != value {
 			t.Fatalf("wire decimal %s: %+v %v", encoded, frame, err)
 		}
 	}
@@ -207,23 +242,50 @@ func TestDecimalCanonicalBoundaries(t *testing.T) {
 		if _, err := parseDecimal(value); err == nil {
 			t.Fatalf("invalid decimal %q accepted", value)
 		}
-		wire := fmt.Sprintf(`{"v":1,"type":"STATE_SUBSCRIBE","id":"watch","body":{"after":%q}}`, value)
+		wire := fmt.Sprintf(`{"v":%d,"type":"STATE_WATCH","id":"watch","body":{"after_head":%q}}`, ProtocolVersion, value)
 		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
 			t.Fatalf("wire decimal %q accepted: %v", value, err)
 		}
 	}
 	for _, number := range []string{"0", "1", "9007199254740991", "9007199254740992", "9223372036854775807", "-1"} {
-		wire := fmt.Sprintf(`{"v":1,"type":"STATE_SUBSCRIBE","id":"watch","body":{"after":%s}}`, number)
+		wire := fmt.Sprintf(`{"v":%d,"type":"STATE_WATCH","id":"watch","body":{"after_head":%s}}`, ProtocolVersion, number)
 		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
 			t.Fatalf("JSON number chronology %s accepted: %v", number, err)
 		}
 	}
-	if _, err := EncodeStateSubscribe("watch", StateSubscribe{After: Decimal(MaxSQLiteInteger + 1)}); !errors.Is(err, ErrMalformed) {
+	if _, err := EncodeStateWatch("watch", StateWatch{AfterHead: Decimal(MaxSQLiteInteger + 1)}); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("overflow encode error = %v", err)
 	}
 }
 
 func strconvUint(value uint64) string { return fmt.Sprintf("%d", value) }
+
+// STATE_CHANGED is a bare head. A zero head is not a change, and the frame has
+// no room for entity, revision or tombstone data.
+func TestStateChangedIsAHeadAndNothingElse(t *testing.T) {
+	wire, err := EncodeStateChanged("watch", StateChanged{Head: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(wire, []byte(fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"watch","body":{"head":"9"}}`, ProtocolVersion))) {
+		t.Fatalf("STATE_CHANGED shape = %s", wire)
+	}
+	if _, err := EncodeStateChanged("watch", StateChanged{Head: 0}); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("zero head accepted: %v", err)
+	}
+	for _, body := range []string{
+		`{"head":"9","entity_kind":"task"}`,
+		`{"head":"9","revision":"2"}`,
+		`{"head":"9","deleted":false}`,
+		`{"head":"9","sequence":"9"}`,
+		`{}`,
+	} {
+		frame := fmt.Sprintf(`{"v":%d,"type":"STATE_CHANGED","id":"watch","body":%s}`, ProtocolVersion, body)
+		if _, err := DecodeServerControl([]byte(frame)); err != ErrMalformed {
+			t.Fatalf("STATE_CHANGED body %s accepted: %v", body, err)
+		}
+	}
+}
 
 func TestStateExactFieldAndEnumBounds(t *testing.T) {
 	badFactories := []FactoryItem{
@@ -233,45 +295,59 @@ func TestStateExactFieldAndEnumBounds(t *testing.T) {
 		{Capacity: 1, Revision: 0},
 	}
 	for _, item := range badFactories {
-		if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{item})}); err == nil {
+		value := snapshotWith()
+		value.Factory = item
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
 			t.Fatalf("invalid factory accepted: %+v", item)
 		}
 	}
 	badProjects := []ProjectItem{{ID: projectID, Name: "", Revision: 1}, {ID: projectID, Name: strings.Repeat("x", MaxProjectNameBytes+1), Revision: 1}, {ID: strings.Repeat("AB", 16), Name: "x", Revision: 1}, {ID: projectID, Name: "x", Revision: 0}}
 	for _, item := range badProjects {
-		if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateProject, Items: ProjectItems([]ProjectItem{item})}); err == nil {
+		value := snapshotWith()
+		value.Projects = []ProjectItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
 			t.Fatalf("invalid project accepted: %+v", item)
 		}
 	}
 	badAgent := agentItem()
 	badAgent.Role = "manager"
-	if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{badAgent})}); err == nil {
+	value := snapshotWith()
+	value.Agents = []AgentItem{badAgent}
+	if _, err := EncodeStateSnapshot("x", value); err == nil {
 		t.Fatal("unknown agent role accepted")
 	}
 	for _, provider := range []string{"", "claude", "CODEX", "bash"} {
 		item := agentItem()
 		item.Provider = provider
-		if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{item})}); err == nil {
+		value := snapshotWith()
+		value.Agents = []AgentItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
 			t.Fatalf("agent provider %q accepted", provider)
 		}
 	}
 	for _, status := range []string{"", "ready", "OPEN"} {
 		item := taskItem()
 		item.Status = status
-		if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateTask, Items: TaskItems([]TaskItem{item})}); err == nil {
+		value := snapshotWith()
+		value.Tasks = []TaskItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
 			t.Fatalf("task status %q accepted", status)
 		}
 	}
 	for _, priority := range []int64{-MaxTaskPriority - 1, MaxTaskPriority + 1} {
 		item := taskItem()
 		item.Priority = priority
-		if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateTask, Items: TaskItems([]TaskItem{item})}); err == nil {
+		value := snapshotWith()
+		value.Tasks = []TaskItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
 			t.Fatalf("priority %d accepted", priority)
 		}
 	}
-	item := taskItem()
-	item.Title = strings.Repeat("x", MaxTaskTitleBytes+1)
-	if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateTask, Items: TaskItems([]TaskItem{item})}); err == nil {
+	oversizedTitle := taskItem()
+	oversizedTitle.Title = strings.Repeat("x", MaxTaskTitleBytes+1)
+	value = snapshotWith()
+	value.Tasks = []TaskItem{oversizedTitle}
+	if _, err := EncodeStateSnapshot("x", value); err == nil {
 		t.Fatal("oversized task title accepted")
 	}
 	for _, edit := range []func(*HumanRequestItem){
@@ -283,101 +359,28 @@ func TestStateExactFieldAndEnumBounds(t *testing.T) {
 	} {
 		item := humanRequestItem()
 		edit(&item)
-		if _, err := EncodeStateSnapshot("x", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{item})}); err == nil {
+		value := snapshotWith()
+		value.HumanRequests = []HumanRequestItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
 			t.Fatalf("invalid human request accepted: %+v", item)
 		}
 	}
 }
 
-func TestFactoryLiteralAndDynamicEntityIDs(t *testing.T) {
-	if _, err := EncodeStateEntityGet("x", StateEntityGet{Kind: StateFactory, ID: "factory"}); err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []StateEntityGet{
-		{Kind: StateFactory, ID: projectID},
-		{Kind: StateProject, ID: "factory"},
-		{Kind: StateProject, ID: strings.Repeat("0", 32)},
-		{Kind: StateProject, ID: strings.Repeat("AB", 16)},
-		{Kind: "run", ID: projectID},
-	} {
-		if _, err := EncodeStateEntityGet("x", test); err == nil {
-			t.Fatalf("invalid entity identity accepted: %+v", test)
+// There is no factory identity on the wire any more: the factory is one
+// embedded object. Every remaining identity is a nonzero dynamic 16-byte hex.
+func TestDynamicEntityIdentitiesAreClosed(t *testing.T) {
+	for _, id := range []string{"factory", strings.Repeat("0", 32), strings.Repeat("AB", 16), "", projectID + "00"} {
+		item := projectItem()
+		item.ID = id
+		value := snapshotWith()
+		value.Projects = []ProjectItem{item}
+		if _, err := EncodeStateSnapshot("x", value); err == nil {
+			t.Fatalf("invalid identity %q accepted", id)
 		}
-	}
-}
-
-func TestStateEventVariantsAndChronology(t *testing.T) {
-	entity := EntityChangedEvent(EntityChanged{Sequence: 8, Head: 8, EntityKind: StateTask, EntityID: taskID, Revision: 2})
-	hidden := HiddenAdvanceEvent(HiddenAdvance{Sequence: 9, Head: 10})
-	for _, value := range []StateEvent{entity, hidden} {
-		wire, err := EncodeStateEvent("watch", value)
-		if err != nil {
-			t.Fatal(err)
+		if _, err := EncodeHumanRequestDetailGet("x", HumanRequestDetailGet{RequestID: id, ExpectedRevision: 1}); err == nil {
+			t.Fatalf("invalid detail identity %q accepted", id)
 		}
-		if _, err := DecodeServerControl(wire); err != nil {
-			t.Fatal(err)
-		}
-	}
-	malformed := []string{
-		`{"v":1,"type":"STATE_EVENT","id":"watch","body":{"event":"hidden_advance","sequence":"9","head":"9","entity_kind":"task"}}`,
-		`{"v":1,"type":"STATE_EVENT","id":"watch","body":{"event":"entity_changed","sequence":"9","head":"9"}}`,
-		`{"v":1,"type":"STATE_EVENT","id":"watch","body":{"event":"unknown","sequence":"9","head":"9"}}`,
-	}
-	for _, wire := range malformed {
-		if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
-			t.Fatalf("cross-variant event accepted: %s: %v", wire, err)
-		}
-	}
-	for _, value := range []StateEvent{
-		HiddenAdvanceEvent(HiddenAdvance{Sequence: 0, Head: 0}),
-		HiddenAdvanceEvent(HiddenAdvance{Sequence: 2, Head: 1}),
-		EntityChangedEvent(EntityChanged{Sequence: 2, Head: 2, EntityKind: StateTask, EntityID: taskID, Revision: 0}),
-	} {
-		if _, err := EncodeStateEvent("watch", value); err == nil {
-			t.Fatalf("invalid event accepted: %+v", value)
-		}
-	}
-}
-
-func TestStateEntityTombstoneAndKindConsistency(t *testing.T) {
-	valid := []StateEntity{
-		{Head: 1, Kind: StateFactory, ID: "factory", Revision: 1, Item: FactoryStateItem(factoryItem())},
-		{Head: 1, Kind: StateProject, ID: projectID, Revision: 1, Item: ProjectStateItem(projectItem())},
-		{Head: 1, Kind: StateProject, ID: projectID, Revision: 2, Deleted: true, Item: DeletedStateItem()},
-	}
-	for _, value := range valid {
-		wire, err := EncodeStateEntity("entity", value)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := DecodeServerControl(wire); err != nil {
-			t.Fatal(err)
-		}
-	}
-	invalid := []StateEntity{
-		{Head: 1, Kind: StateProject, ID: projectID, Revision: 1, Deleted: true, Item: ProjectStateItem(projectItem())},
-		{Head: 1, Kind: StateProject, ID: projectID, Revision: 1, Item: DeletedStateItem()},
-		{Head: 1, Kind: StateProject, ID: projectID, Revision: 1, Item: AgentStateItem(agentItem())},
-		{Head: 1, Kind: StateProject, ID: "06060606060606060606060606060606", Revision: 1, Item: ProjectStateItem(projectItem())},
-		{Head: 1, Kind: StateProject, ID: projectID, Revision: 2, Item: ProjectStateItem(projectItem())},
-		{Head: 1, Kind: StateProject, ID: projectID, Item: ProjectStateItem(projectItem())},
-	}
-	for _, value := range invalid {
-		if _, err := EncodeStateEntity("entity", value); err == nil {
-			t.Fatalf("inconsistent entity accepted: %+v", value)
-		}
-	}
-	wrongKind := strings.Replace(string(fixtureBytes(t, "state_entity.json")), `"kind":"human_request"`, `"kind":"task"`, 1)
-	if _, err := DecodeServerControl([]byte(wrongKind)); err != ErrMalformed {
-		t.Fatalf("wrong-kind item accepted: %v", err)
-	}
-	missingRevision := strings.Replace(string(fixtureBytes(t, "state_entity.json")), `"revision":"2","deleted"`, `"deleted"`, 1)
-	if _, err := DecodeServerControl([]byte(missingRevision)); err != ErrMalformed {
-		t.Fatalf("missing entity revision accepted: %v", err)
-	}
-	mismatchedRevision := strings.Replace(string(fixtureBytes(t, "state_entity.json")), `"revision":"2","deleted"`, `"revision":"3","deleted"`, 1)
-	if _, err := DecodeServerControl([]byte(mismatchedRevision)); err != ErrMalformed {
-		t.Fatalf("mismatched entity revision accepted: %v", err)
 	}
 }
 
@@ -388,11 +391,9 @@ func TestStateBooleanNullIsAlwaysRejected(t *testing.T) {
 		field string
 		value string
 	}{
-		{"factory dispatch", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateFactory, Items: FactoryItems([]FactoryItem{factoryItem()}), NextCursor: pointer("next")}), "dispatch_enabled", "true"},
-		{"agent paused", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{agentItem()}), NextCursor: pointer("next")}), "paused", "false"},
-		{"human can reply", mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{humanRequestItem()})}), "can_reply", "true"},
-		{"event deleted", mustEncodeStateEvent(t, EntityChangedEvent(EntityChanged{Sequence: 1, Head: 1, EntityKind: StateTask, EntityID: taskID, Revision: 1})), "deleted", "false"},
-		{"entity deleted", mustEncodeStateEntity(t, StateEntity{Head: 1, Kind: StateTask, ID: taskID, Revision: 1, Item: TaskStateItem(taskItem())}), "deleted", "false"},
+		{"factory dispatch", mustEncodeStateSnapshot(t, snapshotWith()), "dispatch_enabled", "true"},
+		{"agent paused", mustEncodeStateSnapshot(t, snapshotWith()), "paused", "false"},
+		{"human can reply", mustEncodeStateSnapshot(t, snapshotWith()), "can_reply", "true"},
 		{"error retryable", mustEncodeError(t, Error{Code: ErrorInvalidRequest}), "retryable", "false"},
 	}
 	for _, test := range serverFrames {
@@ -411,24 +412,6 @@ func TestStateBooleanNullIsAlwaysRejected(t *testing.T) {
 func mustEncodeStateSnapshot(t *testing.T, value StateSnapshot) []byte {
 	t.Helper()
 	wire, err := EncodeStateSnapshot("boolean", value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return wire
-}
-
-func mustEncodeStateEvent(t *testing.T, value StateEvent) []byte {
-	t.Helper()
-	wire, err := EncodeStateEvent("boolean", value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return wire
-}
-
-func mustEncodeStateEntity(t *testing.T, value StateEntity) []byte {
-	t.Helper()
-	wire, err := EncodeStateEntity("boolean", value)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,13 +440,15 @@ func TestAgentItemServesExactlyThePublicFields(t *testing.T) {
 	for _, provider := range []string{"claude_code", "codex", "shell"} {
 		item := agentItem()
 		item.Provider = provider
-		wire := mustEncodeStateSnapshot(t, StateSnapshot{Head: 1, Kind: StateAgent, Items: AgentItems([]AgentItem{item}), NextCursor: pointer("next")})
+		value := snapshotWith()
+		value.Agents = []AgentItem{item}
+		wire := mustEncodeStateSnapshot(t, value)
 		frame, err := DecodeServerControl(wire)
 		if err != nil {
 			t.Fatalf("provider %q round-trip: %v", provider, err)
 		}
-		agents, ok := frame.Body.(StateSnapshot).Items.Agents()
-		if !ok || len(agents) != 1 || agents[0].Provider != provider {
+		agents := frame.Body.(StateSnapshot).Agents
+		if len(agents) != 1 || agents[0].Provider != provider {
 			t.Fatalf("provider %q decoded as %+v", provider, agents)
 		}
 		// Private launch controls never ride the public agent item.
@@ -485,13 +470,13 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 	if !reflect.DeepEqual(actual, want) {
 		t.Fatalf("public HumanRequest fields drifted: got %v want %v", actual, want)
 	}
-	encoded, err := EncodeStateSnapshot("state", StateSnapshot{Head: 1, Kind: StateHumanRequest, Items: HumanRequestItems([]HumanRequestItem{humanRequestItem()})})
+	encoded, err := EncodeStateSnapshot("state", snapshotWith())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, private := range []string{`"run_id":`, `"question":`, `"reply":`, `"terminal_target":`, `"cancel_run":`, `"action":`, `"project_name":`, `"agent_name":`, `"task_title":`, `"summary":`, `"why_human_needed":`} {
+	for _, private := range []string{`"run_id":`, `"question":`, `"reply":`, `"terminal_target":`, `"cancel_run":`, `"action":`, `"project_name":`, `"agent_name":`, `"task_title":`, `"summary":`, `"why_human_needed":`, `"root":`, `"model":`, `"instruction":`} {
 		if bytes.Contains(encoded, []byte(private)) {
-			t.Fatalf("public item exposed private field %q: %s", private, encoded)
+			t.Fatalf("public snapshot exposed private field %q: %s", private, encoded)
 		}
 	}
 	for _, question := range []string{"x", strings.Repeat("x", MaxHumanQuestionBytes), strings.Repeat("\x00", MaxHumanQuestionBytes)} {
@@ -539,14 +524,18 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 	}
 }
 
+// A hostile snapshot maximally escaped in JSON still has to fit the declared
+// snapshot bound, and a maximal HumanRequest detail still fits the 64 KiB
+// control bound.
 func TestMaximallyEscapedFramesStayBounded(t *testing.T) {
-	tasks := make([]TaskItem, MaxStatePageItems)
-	for index := range tasks {
-		tasks[index] = taskItem()
-		tasks[index].ID = fmt.Sprintf("%032x", index+1)
-		tasks[index].Title = strings.Repeat("\x00", MaxTaskTitleBytes)
+	value := StateSnapshot{Head: Decimal(MaxSQLiteInteger), Factory: factoryItem(), Projects: []ProjectItem{}, Agents: []AgentItem{}, Tasks: []TaskItem{}, HumanRequests: []HumanRequestItem{}}
+	for index := 1; index <= 8; index++ {
+		item := taskItem()
+		item.ID = hexIdentity(0xa3, index)
+		item.Title = strings.Repeat("\x00", MaxTaskTitleBytes)
+		value.Tasks = append(value.Tasks, item)
 	}
-	page, err := EncodeStateSnapshot("max-page", StateSnapshot{Head: Decimal(MaxSQLiteInteger), Kind: StateTask, Items: TaskItems(tasks), NextCursor: pointer(strings.Repeat("_", MaxCursorBytes))})
+	snapshot, err := EncodeStateSnapshot("max-snapshot", value)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,17 +543,20 @@ func TestMaximallyEscapedFramesStayBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page) < 49_000 || len(page) > MaxControlBytes || len(detail) < 49_000 || len(detail) > MaxControlBytes {
-		t.Fatalf("unexpected maximal frame sizes: page=%d detail=%d max=%d", len(page), len(detail), MaxControlBytes)
+	if len(snapshot) < 49_000 || len(snapshot) > MaxSnapshotBytes || len(detail) < 49_000 || len(detail) > MaxControlBytes {
+		t.Fatalf("unexpected maximal frame sizes: snapshot=%d detail=%d", len(snapshot), len(detail))
 	}
-	t.Logf("maximally escaped task page=%d bytes, question detail=%d bytes, limit=%d", len(page), len(detail), MaxControlBytes)
+	if _, err := DecodeServerControl(snapshot); err != nil {
+		t.Fatalf("maximal snapshot did not decode: %v", err)
+	}
+	t.Logf("maximally escaped snapshot=%d bytes (limit %d), question detail=%d bytes (limit %d)", len(snapshot), MaxSnapshotBytes, len(detail), MaxControlBytes)
 }
 
 func TestStateMalformedEnvelopeBodyAndGlobalBounds(t *testing.T) {
 	valid := string(fixtureBytes(t, "state_snapshot.json"))
 	cases := []string{
 		strings.Replace(valid, `"head"`, `"Head"`, 1),
-		strings.Replace(valid, `"kind"`, `"Kind"`, 1),
+		strings.Replace(valid, `"factory"`, `"Factory"`, 1),
 		strings.Replace(valid, `"title"`, `"TITLE"`, 1),
 		strings.Replace(valid, `"title"`, `"extra":false,"title"`, 1),
 		strings.Replace(valid, `"head":"9007199254740993"`, `"head":"9007199254740993","head":"2"`, 1),
@@ -576,19 +568,49 @@ func TestStateMalformedEnvelopeBodyAndGlobalBounds(t *testing.T) {
 		}
 	}
 	objectMembers := strings.Repeat(`"x":0,`, MaxJSONObject) + `"tail":0`
-	tooManyMembers := `{"v":1,"type":"STATE_SUBSCRIBE","id":"watch","body":{` + objectMembers + `}}`
+	tooManyMembers := fmt.Sprintf(`{"v":%d,"type":"STATE_WATCH","id":"watch","body":{%s}}`, ProtocolVersion, objectMembers)
 	if _, err := DecodeClientControl([]byte(tooManyMembers)); err != ErrMalformed {
 		t.Fatalf("object member bound error = %v", err)
 	}
-	tooManyArray := `{"v":1,"type":"STATE_SNAPSHOT","id":"state","body":{"head":"1","kind":"task","items":[` + strings.TrimSuffix(strings.Repeat(`{},`, MaxJSONArray+1), ",") + `],"next_cursor":null}}`
+	// A client frame keeps the small array bound; the server snapshot is the
+	// only direction that may carry a large array.
+	clientArray := fmt.Sprintf(`{"v":%d,"type":"STATE_WATCH","id":"watch","body":{"after_head":[%s]}}`, ProtocolVersion, strings.TrimSuffix(strings.Repeat(`0,`, MaxJSONArray+1), ","))
+	if _, err := DecodeClientControl([]byte(clientArray)); err != ErrMalformed {
+		t.Fatalf("client array bound error = %v", err)
+	}
+	tooManyArray := fmt.Sprintf(`{"v":%d,"type":"STATE_SNAPSHOT","id":"state","body":{"head":"1","factory":{},"projects":[%s],"agents":[],"tasks":[],"human_requests":[]}}`, ProtocolVersion, strings.TrimSuffix(strings.Repeat(`{},`, MaxSnapshotEntities+1), ","))
 	if _, err := DecodeServerControl([]byte(tooManyArray)); err != ErrMalformed {
-		t.Fatalf("array bound error = %v", err)
+		t.Fatalf("snapshot array bound error = %v", err)
 	}
 	if _, err := DecodeServerControl(append(fixtureBytes(t, "state_snapshot.json"), 0xff)); err != ErrMalformed {
 		t.Fatalf("invalid UTF-8 error = %v", err)
 	}
-	if _, err := DecodeServerControl(bytes.Repeat([]byte{' '}, MaxControlBytes+1)); !errors.Is(err, ErrOversized) {
+	if _, err := DecodeServerControl(bytes.Repeat([]byte{' '}, MaxSnapshotBytes+1)); !errors.Is(err, ErrOversized) {
 		t.Fatalf("oversize error = %v", err)
+	}
+}
+
+// An old-generation frame is refused as an unsupported version, not silently
+// reinterpreted, so a stale site artifact fails loudly at its first frame.
+func TestPreviousProtocolGenerationIsRefused(t *testing.T) {
+	if ProtocolVersion != 2 {
+		t.Fatalf("protocol generation = %d", ProtocolVersion)
+	}
+	legacy := `{"v":1,"type":"STATE_GET","id":"state","body":{"cursor":null}}`
+	if _, err := DecodeClientControl([]byte(legacy)); err != ErrMalformed {
+		t.Fatalf("previous generation accepted: %v", err)
+	}
+	for _, kind := range []string{"STATE_SUBSCRIBE", "STATE_ENTITY_GET"} {
+		wire := fmt.Sprintf(`{"v":%d,"type":%q,"id":"x","body":{}}`, ProtocolVersion, kind)
+		if _, err := DecodeClientControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("retired client type %s accepted: %v", kind, err)
+		}
+	}
+	for _, kind := range []string{"STATE_RESTART", "STATE_EVENT", "STATE_ENTITY"} {
+		wire := fmt.Sprintf(`{"v":%d,"type":%q,"id":"x","body":{}}`, ProtocolVersion, kind)
+		if _, err := DecodeServerControl([]byte(wire)); err != ErrMalformed {
+			t.Fatalf("retired server type %s accepted: %v", kind, err)
+		}
 	}
 }
 

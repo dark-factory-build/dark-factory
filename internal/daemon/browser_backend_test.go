@@ -237,7 +237,7 @@ func adapterID(t *testing.T, seed byte) []byte {
 	return value
 }
 
-func TestBrowserAdapterPairsAuthenticatesPagesAndReloadsRevocation(t *testing.T) {
+func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityTerminalInput)
 	ctx := context.Background()
 	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 1))
@@ -264,15 +264,8 @@ func TestBrowserAdapterPairsAuthenticatesPagesAndReloadsRevocation(t *testing.T)
 		t.Fatalf("state frame = %+v", frame)
 	}
 	snapshot := frame.Body.(browserprotocol.StateSnapshot)
-	for page := 1; snapshot.NextCursor != nil; page++ {
-		next, _ := browserprotocol.EncodeStateGet(fmt.Sprintf("state-page-%d", page), browserprotocol.StateGet{Cursor: snapshot.NextCursor})
-		adapterWrite(t, paired, next)
-		frame, pagePayload := adapterReadPayload(t, paired)
-		if frame.Type != browserprotocol.TypeStateSnapshot {
-			t.Fatalf("state continuation = %+v", frame)
-		}
-		payload = append(payload, pagePayload...)
-		snapshot = frame.Body.(browserprotocol.StateSnapshot)
+	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
+		t.Fatalf("one snapshot did not carry the whole Factory: %+v", snapshot)
 	}
 	for _, sentinel := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_MODEL_SENTINEL", "PRIVATE_BODY_SENTINEL"} {
 		if bytes.Contains(payload, []byte(sentinel)) {
@@ -317,84 +310,6 @@ func TestBrowserAdapterBadPairProofDoesNotConsumeChallenge(t *testing.T) {
 		t.Fatal("correct proof after bad proof did not pair")
 	}
 	_ = hello
-}
-
-func TestBrowserAdapterFixedHeadPaginationAndSubscribeBridgesCommit(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	ctx := context.Background()
-	for index := 1; index <= 9; index++ {
-		id, _ := kernel.ProjectIDFromBytes(adapterID(t, byte(20+index)))
-		if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: id, Name: fmt.Sprintf("project-%02d", index), Root: fmt.Sprintf("/project/%02d", index)}, adapterTime(t, int64(20+index))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	connection := fixture.pair(t)
-	request, _ := browserprotocol.EncodeStateGet("factory", browserprotocol.StateGet{})
-	adapterWrite(t, connection, request)
-	factory := adapterRead(t, connection).Body.(browserprotocol.StateSnapshot)
-	if factory.NextCursor == nil {
-		t.Fatal("factory page omitted continuation")
-	}
-	request, _ = browserprotocol.EncodeStateGet("projects-1", browserprotocol.StateGet{Cursor: factory.NextCursor})
-	adapterWrite(t, connection, request)
-	first := adapterRead(t, connection).Body.(browserprotocol.StateSnapshot)
-	projects, ok := first.Items.Projects()
-	if !ok || len(projects) != kernel.PublicStatePageSize || first.NextCursor == nil || first.Head != factory.Head {
-		t.Fatalf("first project page = %+v, items=%d", first, len(projects))
-	}
-	request, _ = browserprotocol.EncodeStateGet("projects-2", browserprotocol.StateGet{Cursor: first.NextCursor})
-	adapterWrite(t, connection, request)
-	second := adapterRead(t, connection).Body.(browserprotocol.StateSnapshot)
-	projects, ok = second.Items.Projects()
-	if !ok || len(projects) != 1 || second.Head != factory.Head {
-		t.Fatalf("second project page = %+v, items=%d", second, len(projects))
-	}
-
-	newID, _ := kernel.ProjectIDFromBytes(adapterID(t, 60))
-	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: newID, Name: "after snapshot", Root: "/after-snapshot"}, adapterTime(t, 100)); err != nil {
-		t.Fatal(err)
-	}
-	subscribe, _ := browserprotocol.EncodeStateSubscribe("watch", browserprotocol.StateSubscribe{After: factory.Head})
-	adapterWrite(t, connection, subscribe)
-	eventFrame := adapterRead(t, connection)
-	if eventFrame.Type != browserprotocol.TypeStateEvent {
-		t.Fatalf("snapshot-to-subscribe bridge = %+v", eventFrame)
-	}
-	event, ok := eventFrame.Body.(browserprotocol.StateEvent).EntityChanged()
-	if !ok || event.Sequence != factory.Head+1 || event.EntityKind != browserprotocol.StateProject || event.EntityID != newID.String() {
-		t.Fatalf("bridged event = %+v", eventFrame.Body)
-	}
-}
-
-func TestBrowserAdapterFutureCursorReturnsCanonicalFiniteRestart(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	connection := fixture.pair(t)
-	state, err := fixture.store.Factory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	subscribe, err := browserprotocol.EncodeStateSubscribe("future", browserprotocol.StateSubscribe{After: browserprotocol.Decimal(state.Head.Int64() + 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapterWrite(t, connection, subscribe)
-	frame := adapterRead(t, connection)
-	if frame.Type != browserprotocol.TypeStateRestart || frame.ID != "future" {
-		t.Fatalf("future cursor response = %+v", frame)
-	}
-	restart := frame.Body.(browserprotocol.StateRestart)
-	if restart.Head != decimalSequence(state.Head) || restart.Floor != decimalSequence(state.Floor) || restart.Reason != browserprotocol.RestartGap {
-		t.Fatalf("future cursor restart = %+v, durable head=%d floor=%d", restart, state.Head.Int64(), state.Floor.Int64())
-	}
-
-	// Restart terminates and joins only the rejected subscription. The client
-	// remains connected and can fetch the exact canonical replacement state.
-	stateGet, _ := browserprotocol.EncodeStateGet("resync", browserprotocol.StateGet{})
-	adapterWrite(t, connection, stateGet)
-	resync := adapterRead(t, connection)
-	if resync.Type != browserprotocol.TypeStateSnapshot || resync.ID != "resync" || resync.Body.(browserprotocol.StateSnapshot).Head != decimalSequence(state.Head) {
-		t.Fatalf("future cursor resync = %+v", resync)
-	}
 }
 
 func TestBrowserAdapterObserveOnlyCannotReadPrivateDetail(t *testing.T) {
@@ -465,7 +380,23 @@ func TestBrowserAdapterTerminalTargetProjectsExactActiveAndNoTarget(t *testing.T
 	}
 }
 
-func TestBrowserAdapterHumanRequestDetailAndExactTombstone(t *testing.T) {
+// snapshotRequest returns the public card for one request, if the coherent
+// snapshot still carries it. A resolved request simply stops appearing.
+func snapshotRequest(t *testing.T, fixture *adapterFixture, id kernel.HumanRequestID) (browserprotocol.HumanRequestItem, bool) {
+	t.Helper()
+	snapshot, err := fixture.backend.StateSnapshot(context.Background(), rawBrowserClient(fixture.client.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range snapshot.HumanRequests {
+		if item.ID == id.String() {
+			return item, true
+		}
+	}
+	return browserprotocol.HumanRequestItem{}, false
+}
+
+func TestBrowserAdapterHumanRequestDetailAndResolvedRequestLeavesTheSnapshot(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail|kernel.BrowserCapabilityHumanActions)
 	fixture.pair(t)
 	run := adapterRunningRun(t, fixture.store, 100)
@@ -477,13 +408,11 @@ func TestBrowserAdapterHumanRequestDetailAndExactTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entityRequest := browserprotocol.StateEntityGet{Kind: browserprotocol.StateHumanRequest, ID: request.ID.String()}
-	entity, err := fixture.backend.StateEntity(context.Background(), rawBrowserClient(fixture.client.ID), entityRequest)
-	if err != nil || bool(entity.Deleted) || entity.Revision != decimalRevision(request.Revision) {
-		t.Fatalf("open request entity = %+v, %v", entity, err)
+	item, present := snapshotRequest(t, fixture, request.ID)
+	if !present || item.Revision != decimalRevision(request.Revision) {
+		t.Fatalf("open request card = %+v, present=%v", item, present)
 	}
-	item, ok := entity.Item.HumanRequest()
-	if !ok || strings.Contains(fmt.Sprintf("%+v", item), "QUESTION_PRIVATE_SENTINEL") {
+	if strings.Contains(fmt.Sprintf("%+v", item), "QUESTION_PRIVATE_SENTINEL") {
 		t.Fatalf("unsafe public HumanRequest item = %+v", item)
 	}
 	detail, err := fixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.HumanRequestDetailGet{
@@ -504,14 +433,8 @@ func TestBrowserAdapterHumanRequestDetailAndExactTombstone(t *testing.T) {
 	if err := fixture.store.AcknowledgeHumanReply(context.Background(), request.ID, delivery.DeliveryID, delivery.Revision, adapterTime(t, 502)); err != nil {
 		t.Fatal(err)
 	}
-	tombstone, err := fixture.backend.StateEntity(context.Background(), rawBrowserClient(fixture.client.ID), entityRequest)
-	if err != nil || !bool(tombstone.Deleted) || tombstone.Revision != browserprotocol.Decimal(request.Revision.Int64()+2) || !tombstone.Item.IsDeleted() {
-		t.Fatalf("resolved request tombstone = %+v, %v", tombstone, err)
-	}
-	missingID := hex.EncodeToString(adapterID(t, 122))
-	_, err = fixture.backend.StateEntity(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.StateEntityGet{Kind: browserprotocol.StateHumanRequest, ID: missingID})
-	if !errors.Is(err, browser.ErrNotFound) {
-		t.Fatalf("never-existing request = %v", err)
+	if resolved, present := snapshotRequest(t, fixture, request.ID); present {
+		t.Fatalf("resolved request remained in the snapshot: %+v", resolved)
 	}
 
 	copy(key[:], adapterID(t, 123))
@@ -540,19 +463,21 @@ func TestBrowserAdapterSubscriptionReloadsAuthorityAndJoins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	subscription, err := fixture.backend.SubscribeState(context.Background(), rawBrowserClient(fixture.client.ID), decimalSequence(state.Head))
-	if err != nil {
-		t.Fatal(err)
-	}
 	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 130))
 	if _, err := fixture.store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "subscription", Root: "/subscription"}, adapterTime(t, 600)); err != nil {
 		t.Fatal(err)
 	}
-	fixture.backend.signalStateChanged()
+	committed, err := fixture.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription, err := fixture.backend.WatchState(context.Background(), rawBrowserClient(fixture.client.ID), decimalSequence(state.Head))
+	if err != nil {
+		t.Fatal(err)
+	}
 	update := adapterNextUpdate(t, subscription)
-	changed, ok := update.Event.EntityChanged()
-	if !ok || changed.Sequence != browserprotocol.Decimal(state.Head.Int64()+1) || changed.EntityID != projectID.String() || update.Floor == 0 {
-		t.Fatalf("subscription update = %+v", update)
+	if update.Head != decimalSequence(committed.Head) {
+		t.Fatalf("watch update = %+v, want head %d", update, committed.Head.Int64())
 	}
 	subscription.Cancel()
 	adapterWaitSubscription(t, subscription)
@@ -572,79 +497,8 @@ func TestBrowserAdapterSubscriptionReloadsAuthorityAndJoins(t *testing.T) {
 	if err != nil || revoked.RevokedAt == nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.backend.SubscribeState(context.Background(), rawBrowserClient(fixture.client.ID), decimalSequence(state.Head)); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.WatchState(context.Background(), rawBrowserClient(fixture.client.ID), decimalSequence(state.Head)); !errors.Is(err, browser.ErrUnauthorized) {
 		t.Fatalf("post-revoke subscription = %v", err)
-	}
-}
-
-func TestBrowserAdapterRunInvalidationRestartsAndSuppressesLaterEvents(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	fixture.pair(t)
-	before, err := fixture.store.Factory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	subscription, err := fixture.backend.SubscribeState(context.Background(), rawBrowserClient(fixture.client.ID), decimalSequence(before.Head))
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapterRunningRun(t, fixture.store, 140)
-	laterID, _ := kernel.ProjectIDFromBytes(adapterID(t, 170))
-	if _, err := fixture.store.CreateProject(context.Background(), kernel.NewProject{ID: laterID, Name: "must be suppressed", Root: "/must-be-suppressed"}, adapterTime(t, 900)); err != nil {
-		t.Fatal(err)
-	}
-	fixture.backend.signalStateChanged()
-	seenRestart := false
-	for !seenRestart {
-		update := adapterNextUpdate(t, subscription)
-		if update.Restart != nil {
-			if update.Restart.Reason != browserprotocol.RestartHiddenDependency {
-				t.Fatalf("run restart = %+v", update.Restart)
-			}
-			seenRestart = true
-			continue
-		}
-		changed, ok := update.Event.EntityChanged()
-		if ok && changed.EntityID == laterID.String() {
-			t.Fatal("public event after hidden run dependency escaped before restart")
-		}
-	}
-	adapterWaitSubscription(t, subscription)
-	if err := subscription.Err(); err != nil {
-		t.Fatalf("restart subscription error = %v", err)
-	}
-}
-
-func TestBrowserAdapterFutureCursorRestartsAndChangeIsHiddenAdvance(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	fixture.pair(t)
-	state, err := fixture.store.Factory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	future := browserprotocol.Decimal(state.Head.Int64() + 1)
-	subscription, err := fixture.backend.SubscribeState(context.Background(), rawBrowserClient(fixture.client.ID), future)
-	if err != nil {
-		t.Fatal(err)
-	}
-	update := adapterNextUpdate(t, subscription)
-	if update.Restart == nil || update.Restart.Reason != browserprotocol.RestartGap || update.Restart.Head != decimalSequence(state.Head) {
-		t.Fatalf("future-cursor restart = %+v", update)
-	}
-	adapterWaitSubscription(t, subscription)
-
-	changeID := hex.EncodeToString(adapterID(t, 180))
-	revision, _ := kernel.NewRevision(3)
-	sequence, _ := kernel.NewEventSequence(9)
-	head, _ := kernel.NewEventSequence(12)
-	floor, _ := kernel.NewEventSequence(1)
-	event, restart, err := projectInvalidation(kernel.WatchBatch{Head: head, Floor: floor}, kernel.Invalidation{Sequence: sequence, EntityKind: "change", EntityID: changeID, Revision: revision})
-	if err != nil || restart != nil {
-		t.Fatalf("Change projection = %+v, %+v, %v", event, restart, err)
-	}
-	hidden, ok := event.HiddenAdvance()
-	if !ok || hidden.Sequence != 9 || hidden.Head != 12 {
-		t.Fatalf("Change hidden advance = %+v", event)
 	}
 }
 
@@ -855,8 +709,8 @@ func TestBrowserCloseJoinsSharedCleanupAndRetainsRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{})}
-	blocked := &browserStateSubscription{backend: backend, done: make(chan struct{}), cancel: func() {}}
+	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateWatch]struct{})}
+	blocked := &browserStateWatch{backend: backend, done: make(chan struct{}), cancel: func() {}}
 	backend.subs[blocked] = struct{}{}
 	runtime := &BrowserRuntime{daemon: daemon, backend: backend}
 	daemon.browserMu.Lock()
@@ -928,8 +782,8 @@ func TestDaemonCloseFirstSharesRuntimeCleanupWithDirectClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{})}
-	blocked := &browserStateSubscription{backend: backend, done: make(chan struct{}), cancel: func() {}}
+	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateWatch]struct{})}
+	blocked := &browserStateWatch{backend: backend, done: make(chan struct{}), cancel: func() {}}
 	backend.subs[blocked] = struct{}{}
 	runtime := &BrowserRuntime{daemon: daemon, backend: backend}
 	daemon.browserMu.Lock()
@@ -999,7 +853,7 @@ func TestBrowserCleanupFailureRetainsRuntimeOwnership(t *testing.T) {
 		store.Close()
 		t.Fatal(err)
 	}
-	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{})}
+	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateWatch]struct{})}
 	runtime := &BrowserRuntime{daemon: daemon, backend: backend}
 	daemon.browserMu.Lock()
 	daemon.browsers[runtime] = struct{}{}

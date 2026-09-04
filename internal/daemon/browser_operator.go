@@ -58,7 +58,7 @@ func (daemon *Daemon) WebStatus(ctx context.Context) (api.WebStatus, error) {
 	if _, err := daemon.store.Factory(ctx); err != nil {
 		return api.WebStatus{}, err
 	}
-	status := api.WebStatus{State: "stopped", ProtocolVersion: 1}
+	status := api.WebStatus{State: "stopped", ProtocolVersion: api.BrowserProtocolVersion}
 	runtime, valid := daemon.webRuntime()
 	if !valid {
 		return status, nil

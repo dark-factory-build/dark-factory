@@ -14,7 +14,7 @@ import (
 )
 
 func fixturePath(name string) string {
-	return filepath.Join("..", "..", "protocol", "browser", "v1", "fixtures", name)
+	return filepath.Join("..", "..", "protocol", "browser", "v2", "fixtures", name)
 }
 
 func fixtureBytes(t *testing.T, name string) []byte {
@@ -62,7 +62,7 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if decoded.Version != 1 {
+			if decoded.Version != ProtocolVersion {
 				t.Fatalf("version %d", decoded.Version)
 			}
 			again, err := encodeDecoded(decoded)
@@ -78,7 +78,7 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 
 func decodeFixtureControl(name string, data []byte) (ControlFrame, error) {
 	switch name {
-	case "pair_prove", "auth_prove", "state_get", "state_subscribe", "state_entity_get", "human_request_detail_get", "task_enqueue", "terminal_target_get":
+	case "pair_prove", "auth_prove", "state_get", "state_watch", "human_request_detail_get", "task_enqueue", "terminal_target_get":
 		return DecodeClientControl(data)
 	default:
 		return DecodeServerControl(data)
@@ -101,16 +101,10 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeStateGet(frame.ID, value)
 	case StateSnapshot:
 		return EncodeStateSnapshot(frame.ID, value)
-	case StateRestart:
-		return EncodeStateRestart(frame.ID, value)
-	case StateSubscribe:
-		return EncodeStateSubscribe(frame.ID, value)
-	case StateEvent:
-		return EncodeStateEvent(frame.ID, value)
-	case StateEntityGet:
-		return EncodeStateEntityGet(frame.ID, value)
-	case StateEntity:
-		return EncodeStateEntity(frame.ID, value)
+	case StateWatch:
+		return EncodeStateWatch(frame.ID, value)
+	case StateChanged:
+		return EncodeStateChanged(frame.ID, value)
 	case HumanRequestDetailGet:
 		return EncodeHumanRequestDetailGet(frame.ID, value)
 	case HumanRequestDetail:
@@ -192,25 +186,25 @@ func TestBinaryFixturesRoundTrip(t *testing.T) {
 
 func TestControlMalformed(t *testing.T) {
 	valid := string(fixtureBytes(t, "hello.json"))
-	deep := `{"v":1,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.Repeat("[", MaxJSONDepth+2) + "0" + strings.Repeat("]", MaxJSONDepth+2) + `]}}`
-	arrays := `{"v":1,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.TrimSuffix(strings.Repeat("0,", MaxJSONArray+1), ",") + `]}}`
+	deep := `{"v":2,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.Repeat("[", MaxJSONDepth+2) + "0" + strings.Repeat("]", MaxJSONDepth+2) + `]}}`
+	arrays := `{"v":2,"type":"HELLO","body":{"daemon_id":"` + strings.Repeat("00", 16) + `","boot_id":"` + strings.Repeat("11", 16) + `","connection_nonce":"` + strings.Repeat("22", 32) + `","x":[` + strings.TrimSuffix(strings.Repeat("0,", MaxJSONArray+1), ",") + `]}}`
 	cases := []struct{ name, data string }{
-		{"wrong version", strings.Replace(valid, `"v":1`, `"v":2`, 1)},
+		{"wrong version", strings.Replace(valid, `"v":2`, `"v":1`, 1)},
 		{"unknown type", strings.Replace(valid, `"HELLO"`, `"NOPE"`, 1)},
-		{"missing body", `{"v":1,"type":"HELLO"}`},
+		{"missing body", `{"v":2,"type":"HELLO"}`},
 		{"unknown envelope field", strings.Replace(valid, `,"body"`, `,"extra":1,"body"`, 1)},
 		{"unknown body field", strings.Replace(valid, `}}`, `,"extra":1}}`, 1)},
-		{"duplicate envelope", strings.Replace(valid, `,"type"`, `,"v":1,"type"`, 1)},
+		{"duplicate envelope", strings.Replace(valid, `,"type"`, `,"v":2,"type"`, 1)},
 		{"duplicate body", strings.Replace(valid, `,"boot_id"`, `,"daemon_id":"`+strings.Repeat("00", 16)+`","boot_id"`, 1)},
 		{"trailing", valid + ` {}`},
 		{"array bound", arrays},
 		{"depth bound", deep},
-		{"unsafe number", strings.Replace(valid, `"v":1`, `"v":9007199254740992`, 1)},
-		{"fractional number", strings.Replace(valid, `"v":1`, `"v":1.0`, 1)},
+		{"unsafe number", strings.Replace(valid, `"v":2`, `"v":9007199254740992`, 1)},
+		{"fractional number", strings.Replace(valid, `"v":2`, `"v":2.0`, 1)},
 		{"upper hex", strings.Replace(valid, "000102030405060708090a0b0c0d0e0f", "000102030405060708090A0b0c0d0e0f", 1)},
 		{"bad id", strings.Replace(valid, `"type":"HELLO"`, `"type":"HELLO","id":"bad id"`, 1)},
 		{"hello id", strings.Replace(valid, `"type":"HELLO"`, `"type":"HELLO","id":"x"`, 1)},
-		{"error missing retryable", `{"v":1,"type":"ERROR","body":{"code":"unauthorized"}}`},
+		{"error missing retryable", `{"v":2,"type":"ERROR","body":{"code":"unauthorized"}}`},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -222,29 +216,12 @@ func TestControlMalformed(t *testing.T) {
 	if err := func() error { _, err := DecodeServerControl(append([]byte(valid), 0xff)); return err }(); err != ErrMalformed {
 		t.Fatalf("invalid UTF-8 error = %v", err)
 	}
-	if _, err := DecodeServerControl(bytes.Repeat([]byte{' '}, MaxControlBytes+1)); !errors.Is(err, ErrOversized) {
-		t.Fatalf("oversize error = %v", err)
+	// A server frame may reach the snapshot bound; a client frame may not.
+	if _, err := DecodeServerControl(bytes.Repeat([]byte{' '}, MaxSnapshotBytes+1)); !errors.Is(err, ErrOversized) {
+		t.Fatalf("server oversize error = %v", err)
 	}
-}
-
-func TestStateRestartCanonicalEmptyChronology(t *testing.T) {
-	empty := StateRestart{Head: 0, Floor: 1, Reason: RestartGap}
-	payload, err := EncodeStateRestart("empty", empty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	frame, err := DecodeServerControl(payload)
-	if err != nil || frame.Body.(StateRestart) != empty {
-		t.Fatalf("empty restart = %+v, %v", frame, err)
-	}
-	for _, invalid := range []StateRestart{
-		{Head: 0, Floor: 0, Reason: RestartGap},
-		{Head: 0, Floor: 2, Reason: RestartGap},
-		{Head: 2, Floor: 3, Reason: RestartGap},
-	} {
-		if _, err := EncodeStateRestart("invalid", invalid); !errors.Is(err, ErrMalformed) {
-			t.Fatalf("invalid restart %+v = %v, want ErrMalformed", invalid, err)
-		}
+	if _, err := DecodeClientControl(bytes.Repeat([]byte{' '}, MaxControlBytes+1)); !errors.Is(err, ErrOversized) {
+		t.Fatalf("client oversize error = %v", err)
 	}
 }
 
@@ -324,9 +301,8 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			MaxJSONDepth                 int    `json:"max_json_depth"`
 			MaxArrayItems                int    `json:"max_array_items"`
 			MaxObjectMembers             int    `json:"max_object_members"`
-			MaxStatePageItems            int    `json:"max_state_page_items"`
-			MaxFactoryPageItems          int    `json:"max_factory_page_items"`
-			MaxCursorBytes               int    `json:"max_cursor_bytes"`
+			MaxSnapshotBytes             int    `json:"max_snapshot_bytes"`
+			MaxSnapshotEntities          int    `json:"max_snapshot_entities"`
 			MaxProjectNameBytes          int    `json:"max_project_name_bytes"`
 			MaxAgentNameBytes            int    `json:"max_agent_name_bytes"`
 			MaxTaskTitleBytes            int    `json:"max_task_title_bytes"`
@@ -370,7 +346,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		t.Fatalf("manifest trailing JSON: %v", err)
 	}
-	if manifest.Version != 1 || len(manifest.Control) != 38 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Version != int(ProtocolVersion) || len(manifest.Control) != 35 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input"}
@@ -385,13 +361,13 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	}
 	wantBounds := struct {
 		MaxControlBytes, MaxJSONDepth, MaxArrayItems, MaxObjectMembers                                                int
-		MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes                                                        int
+		MaxSnapshotBytes, MaxSnapshotEntities                                                                         int
 		MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes                                                     int
 		MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity                        int
 		MaxTaskPriority                                                                                               int64
 		MaxSQLiteInteger                                                                                              string
 		MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, MaxTerminalRows, MaxTerminalCols int
-	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxStatePageItems, MaxFactoryPageItems, MaxCursorBytes, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols)}
+	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxSnapshotBytes, MaxSnapshotEntities, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols)}
 	if fmt.Sprint(manifest.Bounds) != fmt.Sprint(wantBounds) {
 		t.Fatalf("bounds drift: got %+v want %+v", manifest.Bounds, wantBounds)
 	}
@@ -403,11 +379,8 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		{"AUTH_RESULT", "server", "required", "auth_result.json"},
 		{"STATE_GET", "client", "required", "state_get.json"},
 		{"STATE_SNAPSHOT", "server", "required", "state_snapshot.json"},
-		{"STATE_RESTART", "server", "required", "state_restart.json"},
-		{"STATE_SUBSCRIBE", "client", "required", "state_subscribe.json"},
-		{"STATE_EVENT", "server", "required", "state_event.json"},
-		{"STATE_ENTITY_GET", "client", "required", "state_entity_get.json"},
-		{"STATE_ENTITY", "server", "required", "state_entity.json"},
+		{"STATE_WATCH", "client", "required", "state_watch.json"},
+		{"STATE_CHANGED", "server", "required", "state_changed.json"},
 		{"HUMAN_REQUEST_DETAIL_GET", "client", "required", "human_request_detail_get.json"},
 		{"HUMAN_REQUEST_DETAIL", "server", "required", "human_request_detail.json"},
 		{"HUMAN_REQUEST_REPLY", "client", "required", "human_request_reply.json"},
@@ -506,7 +479,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"transcript_v1.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_restart.json": true, "state_subscribe.json": true, "state_event.json": true, "state_entity_get.json": true, "state_entity.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
+	expectedFiles := map[string]bool{"transcript_v2.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_watch.json": true, "state_changed.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}
@@ -524,7 +497,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			t.Fatalf("manifest fixture not exercised: %q", entry.Fixture)
 		}
 	}
-	for _, name := range []string{"hello", "pair_prove", "pair_result", "auth_prove", "auth_result", "state_get", "state_snapshot", "state_restart", "state_subscribe", "state_event", "state_entity_get", "state_entity", "human_request_detail_get", "human_request_detail", "task_enqueue", "task_enqueue_result", "error"} {
+	for _, name := range []string{"hello", "pair_prove", "pair_result", "auth_prove", "auth_result", "state_get", "state_snapshot", "state_watch", "state_changed", "human_request_detail_get", "human_request_detail", "task_enqueue", "task_enqueue_result", "error"} {
 		if len(fixtureBytes(t, name+".json")) == 0 {
 			t.Fatal("empty fixture")
 		}

@@ -42,18 +42,17 @@ type connection struct {
 	stopOnce   sync.Once
 	cleanupErr error
 
-	authenticated        bool
-	principal            Principal
-	pairing              bool
-	authenticating       bool
-	authenticatingID     [browserprotocol.ClientIDSize]byte
-	seen                 map[string]struct{}
-	subscription         StateSubscription
-	updates              <-chan StateUpdate
-	subscriptionID       string
-	subscriptionSequence browserprotocol.Decimal
-	subscriptionHead     browserprotocol.Decimal
-	subscriptionHeadSet  bool
+	authenticated       bool
+	principal           Principal
+	pairing             bool
+	authenticating      bool
+	authenticatingID    [browserprotocol.ClientIDSize]byte
+	seen                map[string]struct{}
+	subscription        StateSubscription
+	updates             <-chan StateUpdate
+	subscriptionID      string
+	subscriptionHead    browserprotocol.Decimal
+	subscriptionHeadSet bool
 
 	attachment        TerminalAttachment
 	terminalEvents    <-chan TerminalEvent
@@ -335,60 +334,30 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 	var err error
 	switch body := frame.Body.(type) {
 	case browserprotocol.StateGet:
-		var cursor *Cursor
-		if body.Cursor != nil {
-			decoded, decodeErr := decodeCursor(*body.Cursor)
-			if decodeErr != nil {
-				current.sendError(frame.ID, browserprotocol.ErrorInvalidRequest, false)
-				return false
-			}
-			cursor = &decoded
-		}
-		page, pageErr := current.server.backend.StatePage(ctx, current.principal.ClientID, cursor)
+		snapshot, snapshotErr := current.server.backend.StateSnapshot(ctx, current.principal.ClientID)
 		if ctx.Err() != nil {
 			err = ctx.Err()
 			break
 		}
-		var restart *RestartError
-		if errors.As(pageErr, &restart) {
-			payload, err = browserprotocol.EncodeStateRestart(frame.ID, restart.State)
+		if snapshotErr != nil {
+			err = snapshotErr
 			break
 		}
-		if pageErr != nil {
-			err = pageErr
-			break
-		}
-		if correlationErr := validatePageCorrelation(page, cursor); correlationErr != nil {
-			err = correlationErr
-			break
-		}
-		var next *string
-		if page.NextCursor != nil {
-			encoded, encodeErr := encodeCursor(*page.NextCursor)
-			if encodeErr != nil {
-				err = encodeErr
+		encoded, encodeErr := browserprotocol.EncodeStateSnapshot(frame.ID, snapshot)
+		if encodeErr != nil {
+			// An oversized encoded snapshot is a finite too_large answer, not
+			// a truncated one and not an internal fault.
+			if errors.Is(encodeErr, browserprotocol.ErrOversized) {
+				err = ErrTooLarge
 				break
 			}
-			next = &encoded
-		}
-		payload, err = browserprotocol.EncodeStateSnapshot(frame.ID, browserprotocol.StateSnapshot{
-			Head: page.Head, Kind: page.Kind, Items: page.Items, NextCursor: next,
-		})
-	case browserprotocol.StateEntityGet:
-		entity, backendErr := current.server.backend.StateEntity(ctx, current.principal.ClientID, body)
-		if ctx.Err() != nil {
-			err = ctx.Err()
+			err = encodeErr
 			break
 		}
-		if backendErr != nil {
-			err = backendErr
-			break
+		if current.writeSnapshot(encoded) != nil {
+			return false
 		}
-		if entity.Kind != body.Kind || entity.ID != body.ID {
-			err = fmt.Errorf("backend returned mismatched state entity")
-			break
-		}
-		payload, err = browserprotocol.EncodeStateEntity(frame.ID, entity)
+		return true
 	case browserprotocol.HumanRequestDetailGet:
 		detail, backendErr := current.server.backend.HumanRequestDetail(ctx, current.principal.ClientID, body)
 		if ctx.Err() != nil {
@@ -561,12 +530,12 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		if err == nil {
 			payload, err = browserprotocol.EncodeTerminalDetached(frame.ID, browserprotocol.TerminalDetached{SessionID: body.SessionID})
 		}
-	case browserprotocol.StateSubscribe:
+	case browserprotocol.StateWatch:
 		if current.subscription != nil {
 			current.sendError(frame.ID, browserprotocol.ErrorInvalidRequest, false)
 			return false
 		}
-		subscription, backendErr := current.server.backend.SubscribeState(ctx, current.principal.ClientID, body.After)
+		subscription, backendErr := current.server.backend.WatchState(ctx, current.principal.ClientID, body.AfterHead)
 		if ctx.Err() != nil {
 			err = current.discardSubscription(subscription, ctx.Err())
 			break
@@ -587,9 +556,8 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		current.subscription = subscription
 		current.updates = updates
 		current.subscriptionID = frame.ID
-		current.subscriptionSequence = body.After
-		current.subscriptionHead = 0
-		current.subscriptionHeadSet = false
+		current.subscriptionHead = body.AfterHead
+		current.subscriptionHeadSet = true
 		return true
 	default:
 		current.sendError(frame.ID, browserprotocol.ErrorInvalidRequest, false)
@@ -606,34 +574,22 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 	return true
 }
 
+// sendUpdate forwards one head-only invalidation. Heads are strictly
+// increasing for the life of one subscription; anything else is a backend
+// fault, not a recoverable client condition.
 func (current *connection) sendUpdate(update StateUpdate) error {
-	if (update.Event == nil) == (update.Restart == nil) || update.Restart != nil && update.Floor != 0 {
-		return fmt.Errorf("invalid state update")
+	if update.Head == 0 || current.subscriptionHeadSet && update.Head <= current.subscriptionHead {
+		return fmt.Errorf("invalid state change head")
 	}
-	if update.Event != nil {
-		sequence, head, chronologyErr := eventChronology(*update.Event)
-		if chronologyErr != nil || sequence == 0 || head < sequence || update.Floor > head || current.stateHeadRegressed(head) {
-			return fmt.Errorf("invalid state event chronology")
-		}
-		if current.subscriptionSequence < update.Floor || current.subscriptionSequence == browserprotocol.Decimal(browserprotocol.MaxSQLiteInteger) || sequence != current.subscriptionSequence+1 {
-			reason := browserprotocol.RestartGap
-			if current.subscriptionSequence < update.Floor {
-				reason = browserprotocol.RestartPruned
-			}
-			return current.sendRestart(browserprotocol.StateRestart{Head: head, Floor: update.Floor, Reason: reason}, false)
-		}
-		payload, err := browserprotocol.EncodeStateEvent(current.subscriptionID, *update.Event)
-		if err == nil {
-			err = current.write(payload)
-		}
-		if err == nil {
-			current.subscriptionSequence = sequence
-			current.subscriptionHead = head
-			current.subscriptionHeadSet = true
-		}
-		return err
+	payload, err := browserprotocol.EncodeStateChanged(current.subscriptionID, browserprotocol.StateChanged{Head: update.Head})
+	if err == nil {
+		err = current.write(payload)
 	}
-	return current.sendRestart(*update.Restart, true)
+	if err == nil {
+		current.subscriptionHead = update.Head
+		current.subscriptionHeadSet = true
+	}
+	return err
 }
 
 func validateHumanReplyResult(request browserprotocol.HumanRequestReply, result browserprotocol.HumanRequestReplyResult) error {
@@ -702,26 +658,6 @@ func validateLeaseResult(operation, runID, sessionID string, generation, expecte
 	return nil
 }
 
-func (current *connection) stateHeadRegressed(next browserprotocol.Decimal) bool {
-	return current.subscriptionHeadSet && next < current.subscriptionHead
-}
-
-func (current *connection) sendRestart(restart browserprotocol.StateRestart, backendRestart bool) error {
-	initialFutureCursor := backendRestart && !current.subscriptionHeadSet && restart.Reason == browserprotocol.RestartGap
-	if restart.Head < current.subscriptionSequence && !initialFutureCursor || current.subscriptionHeadSet && restart.Head < current.subscriptionHead {
-		return fmt.Errorf("restart chronology regressed")
-	}
-	payload, err := browserprotocol.EncodeStateRestart(current.subscriptionID, restart)
-	if err != nil {
-		return err
-	}
-	if err := current.closeSubscription(); err != nil {
-		current.recordCleanup(err)
-		return err
-	}
-	return current.write(payload)
-}
-
 func (current *connection) closeSubscription() error {
 	if current.subscription == nil {
 		return nil
@@ -730,7 +666,6 @@ func (current *connection) closeSubscription() error {
 	current.subscription = nil
 	current.updates = nil
 	current.subscriptionID = ""
-	current.subscriptionSequence = 0
 	current.subscriptionHead = 0
 	current.subscriptionHeadSet = false
 	return stopSubscription(subscription)
@@ -964,64 +899,6 @@ func stopSubscription(subscription StateSubscription) error {
 	}
 }
 
-func eventChronology(event browserprotocol.StateEvent) (browserprotocol.Decimal, browserprotocol.Decimal, error) {
-	if changed, ok := event.EntityChanged(); ok {
-		return changed.Sequence, changed.Head, nil
-	}
-	if hidden, ok := event.HiddenAdvance(); ok {
-		return hidden.Sequence, hidden.Head, nil
-	}
-	return 0, 0, fmt.Errorf("invalid state event")
-}
-
-func validatePageCorrelation(page StatePage, cursor *Cursor) error {
-	expectedKind := browserprotocol.StateFactory
-	if cursor != nil {
-		expectedKind = cursor.Kind
-		if page.Head != cursor.Head {
-			return fmt.Errorf("backend returned mismatched state head")
-		}
-	}
-	if page.Kind != expectedKind {
-		return fmt.Errorf("backend returned mismatched state kind")
-	}
-	if page.NextCursor == nil {
-		if page.Kind != browserprotocol.StateHumanRequest {
-			return fmt.Errorf("backend omitted state continuation")
-		}
-		return nil
-	}
-	next := page.NextCursor
-	if next.Head != page.Head {
-		return fmt.Errorf("backend returned mismatched continuation head")
-	}
-	if next.Kind == page.Kind {
-		if page.Kind == browserprotocol.StateFactory || !next.HasAfter {
-			return fmt.Errorf("backend returned invalid same-kind continuation")
-		}
-		return nil
-	}
-	if next.Kind != nextStateKind(page.Kind) || next.HasAfter {
-		return fmt.Errorf("backend returned invalid kind continuation")
-	}
-	return nil
-}
-
-func nextStateKind(kind browserprotocol.StateKind) browserprotocol.StateKind {
-	switch kind {
-	case browserprotocol.StateFactory:
-		return browserprotocol.StateProject
-	case browserprotocol.StateProject:
-		return browserprotocol.StateAgent
-	case browserprotocol.StateAgent:
-		return browserprotocol.StateTask
-	case browserprotocol.StateTask:
-		return browserprotocol.StateHumanRequest
-	default:
-		return ""
-	}
-}
-
 func (current *connection) sendError(id string, code browserprotocol.ErrorCode, retryable bool) {
 	payload, err := browserprotocol.EncodeError(id, browserprotocol.Error{Code: code, Retryable: retryable})
 	if err == nil {
@@ -1032,6 +909,17 @@ func (current *connection) sendError(id string, code browserprotocol.ErrorCode, 
 func (current *connection) write(payload []byte) error {
 	if len(payload) == 0 || len(payload) > browserprotocol.MaxControlBytes {
 		return fmt.Errorf("invalid outbound control frame")
+	}
+	ctx, cancel := context.WithTimeout(current.ctx, writeLimit)
+	defer cancel()
+	return current.ws.Write(ctx, websocket.MessageText, payload)
+}
+
+// writeSnapshot is the only outbound path allowed past MaxControlBytes. Every
+// other frame in either direction stays inside the 64 KiB control bound.
+func (current *connection) writeSnapshot(payload []byte) error {
+	if len(payload) == 0 || len(payload) > browserprotocol.MaxSnapshotBytes {
+		return fmt.Errorf("invalid outbound snapshot frame")
 	}
 	ctx, cancel := context.WithTimeout(current.ctx, writeLimit)
 	defer cancel()

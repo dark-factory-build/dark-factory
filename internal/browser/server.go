@@ -18,12 +18,13 @@ import (
 )
 
 const (
-	Path           = "/browser/v1"
+	Path           = "/browser/v2"
 	maxOrigins     = 8
 	maxConnections = 32
-	// A maximum valid 4,096-entity state needs at most 516 page requests.
-	// 1,024 retains duplicate IDs for the whole connection while leaving room
-	// for entity refreshes, detail reads and subscription restart.
+	// One coherent snapshot is one request, and a notification burst
+	// collapses into at most one trailing refresh. 1,024 retains every
+	// request ID for the whole connection while leaving ample room for
+	// refreshes, detail reads, terminal control and task enqueue.
 	maxRequests         = 1024
 	readQueueSize       = 8
 	maxHeaderBytes      = 8 << 10
@@ -537,4 +538,13 @@ func errorFrame(err error) browserprotocol.Error {
 	default:
 		return browserprotocol.Error{Code: browserprotocol.ErrorInternal}
 	}
+}
+
+func zero16(value [16]byte) bool {
+	for _, item := range value {
+		if item != 0 {
+			return false
+		}
+	}
+	return true
 }

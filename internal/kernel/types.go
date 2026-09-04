@@ -10,7 +10,6 @@ const (
 	IDBytes                = 16
 	DigestBytes            = 32
 	EventRetentionLimit    = 4096
-	WatchBatchLimit        = 256
 	SnapshotEntityLimit    = 4096
 	MaxFactoryCapacity     = 1024
 	MaxChangeTreeEntries   = 10_000
@@ -566,21 +565,6 @@ type DashboardSnapshot struct {
 	Agents        []AgentSummary
 	Tasks         []TaskSummary
 	HumanRequests []HumanRequestProjection
-}
-
-type Invalidation struct {
-	Sequence   EventSequence
-	OccurredAt UnixMillis
-	EntityKind string
-	EntityID   string
-	Revision   Revision
-	Deleted    bool
-}
-
-type WatchBatch struct {
-	Head          EventSequence
-	Floor         EventSequence
-	Invalidations []Invalidation
 }
 
 func byteLen(value string) int { return len([]byte(value)) }

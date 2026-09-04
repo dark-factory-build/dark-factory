@@ -79,39 +79,11 @@ type AuthRequest struct {
 	Origin          string
 }
 
-// Cursor is the decoded neutral browser continuation. Backend implementations
-// must still revalidate its head, kind and exact identity against durable
-// state. Opaque wire encoding remains transport-owned.
-type Cursor struct {
-	Head     browserprotocol.Decimal
-	Kind     browserprotocol.StateKind
-	AfterID  [16]byte
-	HasAfter bool
-}
-
-type StatePage struct {
-	Head       browserprotocol.Decimal
-	Kind       browserprotocol.StateKind
-	Items      browserprotocol.StateItems
-	NextCursor *Cursor
-}
-
-// RestartError is a bounded causal result, not an internal diagnostic.
-type RestartError struct {
-	State browserprotocol.StateRestart
-}
-
-func (err *RestartError) Error() string { return "browser: state restart required" }
-
-// StateUpdate is exactly one subscription result. A backend sends either an
-// event or a restart, never both. Closing Updates without a restart is treated
-// as an internal failure and forces reconnect.
+// StateUpdate is exactly one head-only invalidation. It carries no entity
+// data: the client refetches a whole snapshot when it wants current state.
+// Closing Updates is treated as an internal failure and forces reconnect.
 type StateUpdate struct {
-	Event   *browserprotocol.StateEvent
-	Restart *browserprotocol.StateRestart
-	// Floor is the current durable event-retention floor for Event updates.
-	// Explicit Restart already contains its floor and requires this field zero.
-	Floor browserprotocol.Decimal
+	Head browserprotocol.Decimal
 }
 
 // TerminalEvent is the small daemon-to-transport projection. It contains no
@@ -178,7 +150,9 @@ type TerminalLeaseResult struct {
 // nonblocking. Updates, Done and Err are nonblocking accessors. Done must close
 // after the producer exits, after which Err is stable. This lets the connection
 // bound shutdown without abandoning a goroutine inside an uncooperative
-// synchronous Close call.
+// synchronous Close call. A subscription must reread the durable head after
+// installing its watcher so a change landing in the snapshot-to-watch gap is
+// still delivered.
 type StateSubscription interface {
 	Updates() <-chan StateUpdate
 	Cancel()
@@ -195,11 +169,10 @@ type Backend interface {
 	Identity(context.Context) (Identity, error)
 	Pair(context.Context, PairRequest) (Authentication, error)
 	Authenticate(context.Context, AuthRequest) (Authentication, error)
-	StatePage(context.Context, [browserprotocol.ClientIDSize]byte, *Cursor) (StatePage, error)
-	StateEntity(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.StateEntityGet) (browserprotocol.StateEntity, error)
+	StateSnapshot(context.Context, [browserprotocol.ClientIDSize]byte) (browserprotocol.StateSnapshot, error)
 	HumanRequestDetail(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.HumanRequestDetailGet) (browserprotocol.HumanRequestDetail, error)
 	TerminalTarget(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TerminalTargetGet) (browserprotocol.TerminalTarget, error)
-	SubscribeState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (StateSubscription, error)
+	WatchState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (StateSubscription, error)
 }
 
 // TaskBackend is the optional bounded operator-mutation half of browser v1.

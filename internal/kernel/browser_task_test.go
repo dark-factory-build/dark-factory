@@ -53,12 +53,13 @@ func TestEnqueueTaskForBrowserAgentBindsAuthorityAndKeepsInstructionPrivate(t *t
 		t.Fatalf("public state leaked private instruction: %s", encoded)
 	}
 
-	batch, err := store.WatchAfter(ctx, before.Head)
+	invalidations := invalidationsAfter(t, store, before.Head)
+	if len(invalidations) != 1 || invalidations[0].EntityKind != EntityTask.String() || invalidations[0].EntityID != task.String() || invalidations[0].Revision.Int64() != 1 || invalidations[0].Deleted {
+		t.Fatalf("enqueue invalidations = %+v", invalidations)
+	}
+	enqueued, err := store.Factory(ctx)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(batch.Invalidations) != 1 || batch.Invalidations[0].EntityKind != EntityTask.String() || batch.Invalidations[0].EntityID != task.String() || batch.Invalidations[0].Revision.Int64() != 1 || batch.Invalidations[0].Deleted {
-		t.Fatalf("enqueue invalidations = %+v", batch.Invalidations)
 	}
 
 	replayed, err := store.EnqueueTaskForBrowserAgent(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, instruction, mustTime(t, 103))
@@ -72,8 +73,8 @@ func TestEnqueueTaskForBrowserAgentBindsAuthorityAndKeepsInstructionPrivate(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if afterReplay.Head != batch.Head {
-		t.Fatalf("replay advanced head from %d to %d", batch.Head.Int64(), afterReplay.Head.Int64())
+	if afterReplay.Head != enqueued.Head {
+		t.Fatalf("replay advanced head from %d to %d", enqueued.Head.Int64(), afterReplay.Head.Int64())
 	}
 
 	if _, err := store.EnqueueTaskForBrowserAgent(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, "different instruction", mustTime(t, 104)); !errors.Is(err, ErrConflict) {

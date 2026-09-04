@@ -1,1 +1,0 @@
-{"v":1,"type":"TERMINAL_LEASE_RESULT","id":"01010101010101010101010101010101","body":{"operation":"acquired","run_id":"11111111111111111111111111111111","session_id":"22222222222222222222222222222222","generation":"1","expires_at_ms":"10000","last_input_sequence":"0","run_revision":"1","session_revision":"1"}}

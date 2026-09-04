@@ -15,6 +15,9 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
+// browserStatePollInterval bounds how long a paired browser waits to learn
+// that durable state moved. There is no commit-time push today; the watcher
+// reads the durable head on a bounded poll.
 const browserStatePollInterval = 100 * time.Millisecond
 
 // browserBackend is the direct browser-to-Store adapter. It deliberately
@@ -32,10 +35,9 @@ type browserBackend struct {
 
 	clientGates *browserClientGates
 
-	subMu       sync.Mutex
-	closing     bool
-	subs        map[*browserStateSubscription]struct{}
-	stateSignal chan struct{}
+	subMu   sync.Mutex
+	closing bool
+	subs    map[*browserStateWatch]struct{}
 }
 
 type browserClientGate struct {
@@ -58,7 +60,7 @@ func newBrowserBackend(store *kernel.Store, now func() time.Time, random io.Read
 	backend := &browserBackend{
 		store: store, now: now, random: random,
 		clientGates: &browserClientGates{gates: make(map[kernel.BrowserClientID]*browserClientGate)},
-		subs:        make(map[*browserStateSubscription]struct{}), stateSignal: make(chan struct{}),
+		subs:        make(map[*browserStateWatch]struct{}),
 	}
 	raw, err := backend.randomIdentifier()
 	if err != nil {
@@ -153,67 +155,17 @@ func (backend *browserBackend) Authenticate(ctx context.Context, request browser
 	return projectBrowserAuthentication(client)
 }
 
-func (backend *browserBackend) StatePage(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, cursor *browser.Cursor) (browser.StatePage, error) {
+func (backend *browserBackend) StateSnapshot(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte) (browserprotocol.StateSnapshot, error) {
 	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
 	if err != nil {
-		return browser.StatePage{}, err
+		return browserprotocol.StateSnapshot{}, err
 	}
 	defer release()
-	kernelCursor, err := parsePublicCursor(cursor)
+	snapshot, err := backend.store.ReadPublicSnapshot(ctx)
 	if err != nil {
-		return browser.StatePage{}, browser.ErrStale
+		return browserprotocol.StateSnapshot{}, mapBrowserError(err)
 	}
-	page, err := backend.store.ReadPublicStatePage(ctx, kernelCursor)
-	if err != nil {
-		var restart *kernel.PublicStateRestartError
-		if errors.As(err, &restart) {
-			return browser.StatePage{}, &browser.RestartError{State: browserprotocol.StateRestart{
-				Head: decimalSequence(restart.Head), Floor: decimalSequence(restart.Floor), Reason: browserprotocol.RestartHeadChanged,
-			}}
-		}
-		return browser.StatePage{}, mapBrowserError(err)
-	}
-	return projectPublicPage(page)
-}
-
-func (backend *browserBackend) StateEntity(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.StateEntityGet) (browserprotocol.StateEntity, error) {
-	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
-	if err != nil {
-		return browserprotocol.StateEntity{}, err
-	}
-	defer release()
-	kind, err := parsePublicKind(request.Kind)
-	if err != nil {
-		return browserprotocol.StateEntity{}, browser.ErrStale
-	}
-	id, err := parsePublicStateID(kind, request.ID)
-	if err != nil {
-		return browserprotocol.StateEntity{}, browser.ErrStale
-	}
-	entity, err := backend.store.ReadPublicStateEntity(ctx, kind, id)
-	if err != nil {
-		return browserprotocol.StateEntity{}, mapBrowserError(err)
-	}
-	result := browserprotocol.StateEntity{
-		Head: decimalSequence(entity.Head), Kind: request.Kind, ID: request.ID,
-		Revision: decimalRevision(entity.Revision), Deleted: browserprotocol.Bool(entity.Deleted),
-	}
-	if entity.Deleted {
-		if entity.Item != nil {
-			return browserprotocol.StateEntity{}, fmt.Errorf("browser entity has item and tombstone")
-		}
-		result.Item = browserprotocol.DeletedStateItem()
-		return result, nil
-	}
-	if entity.Item == nil {
-		return browserprotocol.StateEntity{}, fmt.Errorf("browser entity omitted item")
-	}
-	item, err := projectPublicEntityItem(entity.Kind, *entity.Item)
-	if err != nil {
-		return browserprotocol.StateEntity{}, err
-	}
-	result.Item = item
-	return result, nil
+	return projectPublicSnapshot(snapshot)
 }
 
 func (backend *browserBackend) HumanRequestDetail(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.HumanRequestDetailGet) (browserprotocol.HumanRequestDetail, error) {
@@ -430,209 +382,34 @@ func projectBrowserAuthentication(client kernel.BrowserClient) (browser.Authenti
 	return browser.Authentication{Principal: principal, Capabilities: capabilities}, nil
 }
 
-func parsePublicCursor(cursor *browser.Cursor) (*kernel.PublicStateCursor, error) {
-	if cursor == nil {
-		return nil, nil
+// projectPublicSnapshot is the one positive-allowlist conversion from the
+// kernel public snapshot to the wire. Nothing private is reachable from here.
+func projectPublicSnapshot(snapshot kernel.PublicSnapshot) (browserprotocol.StateSnapshot, error) {
+	result := browserprotocol.StateSnapshot{
+		Head:          decimalSequence(snapshot.Head),
+		Factory:       projectFactory(snapshot.Factory),
+		Projects:      make([]browserprotocol.ProjectItem, 0, len(snapshot.Projects)),
+		Agents:        make([]browserprotocol.AgentItem, 0, len(snapshot.Agents)),
+		Tasks:         make([]browserprotocol.TaskItem, 0, len(snapshot.Tasks)),
+		HumanRequests: make([]browserprotocol.HumanRequestItem, 0, len(snapshot.HumanRequests)),
 	}
-	if uint64(cursor.Head) > math.MaxInt64 {
-		return nil, kernel.ErrInvalidValue
+	for _, item := range snapshot.Projects {
+		result.Projects = append(result.Projects, projectProject(item))
 	}
-	head, err := kernel.NewEventSequence(int64(cursor.Head))
-	if err != nil {
-		return nil, err
+	for _, item := range snapshot.Agents {
+		result.Agents = append(result.Agents, projectAgent(item))
 	}
-	kind, err := parsePublicKind(cursor.Kind)
-	if err != nil {
-		return nil, err
+	for _, item := range snapshot.Tasks {
+		result.Tasks = append(result.Tasks, projectTask(item))
 	}
-	result := &kernel.PublicStateCursor{Head: head, Kind: kind}
-	if cursor.HasAfter {
-		id, err := kernel.PublicStateIDFromBytes(cursor.AfterID[:])
-		if err != nil {
-			return nil, err
-		}
-		result.AfterID = &id
-	}
-	return result, nil
-}
-
-func parsePublicKind(kind browserprotocol.StateKind) (kernel.PublicStateKind, error) {
-	switch kind {
-	case browserprotocol.StateFactory:
-		return kernel.PublicStateFactory, nil
-	case browserprotocol.StateProject:
-		return kernel.PublicStateProject, nil
-	case browserprotocol.StateAgent:
-		return kernel.PublicStateAgent, nil
-	case browserprotocol.StateTask:
-		return kernel.PublicStateTask, nil
-	case browserprotocol.StateHumanRequest:
-		return kernel.PublicStateHumanRequest, nil
-	default:
-		return 0, kernel.ErrInvalidValue
-	}
-}
-
-func projectPublicKind(kind kernel.PublicStateKind) (browserprotocol.StateKind, error) {
-	switch kind {
-	case kernel.PublicStateFactory:
-		return browserprotocol.StateFactory, nil
-	case kernel.PublicStateProject:
-		return browserprotocol.StateProject, nil
-	case kernel.PublicStateAgent:
-		return browserprotocol.StateAgent, nil
-	case kernel.PublicStateTask:
-		return browserprotocol.StateTask, nil
-	case kernel.PublicStateHumanRequest:
-		return browserprotocol.StateHumanRequest, nil
-	default:
-		return "", fmt.Errorf("unknown kernel public state kind")
-	}
-}
-
-func parsePublicStateID(kind kernel.PublicStateKind, encoded string) (kernel.PublicStateID, error) {
-	if kind == kernel.PublicStateFactory {
-		if encoded != "factory" {
-			return kernel.PublicStateID{}, kernel.ErrInvalidValue
-		}
-		return kernel.FactoryPublicStateID(), nil
-	}
-	raw, err := parseID(encoded)
-	if err != nil {
-		return kernel.PublicStateID{}, err
-	}
-	return kernel.PublicStateIDFromBytes(raw)
-}
-
-func projectPublicPage(page kernel.PublicStatePageResult) (browser.StatePage, error) {
-	kind, err := projectPublicKind(page.Kind)
-	if err != nil {
-		return browser.StatePage{}, err
-	}
-	items, err := projectPublicItems(page.Kind, page.Items)
-	if err != nil {
-		return browser.StatePage{}, err
-	}
-	result := browser.StatePage{Head: decimalSequence(page.Head), Kind: kind, Items: items}
-	if page.NextCursor != nil {
-		nextKind, err := projectPublicKind(page.NextCursor.Kind)
-		if err != nil {
-			return browser.StatePage{}, err
-		}
-		next := browser.Cursor{Head: decimalSequence(page.NextCursor.Head), Kind: nextKind}
-		if page.NextCursor.AfterID != nil {
-			raw := page.NextCursor.AfterID.Bytes()
-			if len(raw) != browserprotocol.ClientIDSize {
-				return browser.StatePage{}, fmt.Errorf("invalid public continuation identity")
-			}
-			copy(next.AfterID[:], raw)
-			next.HasAfter = true
-		}
-		result.NextCursor = &next
-	}
-	return result, nil
-}
-
-func projectPublicItems(kind kernel.PublicStateKind, source []kernel.PublicStateItem) (browserprotocol.StateItems, error) {
-	switch kind {
-	case kernel.PublicStateFactory:
-		items := make([]browserprotocol.FactoryItem, 0, len(source))
-		for _, sourceItem := range source {
-			item, ok := sourceItem.Factory()
-			if !ok {
-				return browserprotocol.StateItems{}, fmt.Errorf("mismatched factory state item")
-			}
-			items = append(items, projectFactory(item))
-		}
-		return browserprotocol.FactoryItems(items), nil
-	case kernel.PublicStateProject:
-		items := make([]browserprotocol.ProjectItem, 0, len(source))
-		for _, sourceItem := range source {
-			item, ok := sourceItem.Project()
-			if !ok {
-				return browserprotocol.StateItems{}, fmt.Errorf("mismatched project state item")
-			}
-			items = append(items, projectProject(item))
-		}
-		return browserprotocol.ProjectItems(items), nil
-	case kernel.PublicStateAgent:
-		items := make([]browserprotocol.AgentItem, 0, len(source))
-		for _, sourceItem := range source {
-			item, ok := sourceItem.Agent()
-			if !ok {
-				return browserprotocol.StateItems{}, fmt.Errorf("mismatched agent state item")
-			}
-			items = append(items, projectAgent(item))
-		}
-		return browserprotocol.AgentItems(items), nil
-	case kernel.PublicStateTask:
-		items := make([]browserprotocol.TaskItem, 0, len(source))
-		for _, sourceItem := range source {
-			item, ok := sourceItem.Task()
-			if !ok {
-				return browserprotocol.StateItems{}, fmt.Errorf("mismatched task state item")
-			}
-			items = append(items, projectTask(item))
-		}
-		return browserprotocol.TaskItems(items), nil
-	case kernel.PublicStateHumanRequest:
-		items := make([]browserprotocol.HumanRequestItem, 0, len(source))
-		for _, sourceItem := range source {
-			item, ok := sourceItem.HumanRequest()
-			if !ok {
-				return browserprotocol.StateItems{}, fmt.Errorf("mismatched human-request state item")
-			}
-			projected, err := projectHumanRequest(item)
-			if err != nil {
-				return browserprotocol.StateItems{}, err
-			}
-			items = append(items, projected)
-		}
-		return browserprotocol.HumanRequestItems(items), nil
-	default:
-		return browserprotocol.StateItems{}, fmt.Errorf("unknown public state item kind")
-	}
-}
-
-func projectPublicEntityItem(kind kernel.PublicStateKind, source kernel.PublicStateItem) (browserprotocol.StateItem, error) {
-	switch kind {
-	case kernel.PublicStateFactory:
-		item, ok := source.Factory()
-		if !ok {
-			return browserprotocol.StateItem{}, fmt.Errorf("mismatched factory entity")
-		}
-		return browserprotocol.FactoryStateItem(projectFactory(item)), nil
-	case kernel.PublicStateProject:
-		item, ok := source.Project()
-		if !ok {
-			return browserprotocol.StateItem{}, fmt.Errorf("mismatched project entity")
-		}
-		return browserprotocol.ProjectStateItem(projectProject(item)), nil
-	case kernel.PublicStateAgent:
-		item, ok := source.Agent()
-		if !ok {
-			return browserprotocol.StateItem{}, fmt.Errorf("mismatched agent entity")
-		}
-		return browserprotocol.AgentStateItem(projectAgent(item)), nil
-	case kernel.PublicStateTask:
-		item, ok := source.Task()
-		if !ok {
-			return browserprotocol.StateItem{}, fmt.Errorf("mismatched task entity")
-		}
-		return browserprotocol.TaskStateItem(projectTask(item)), nil
-	case kernel.PublicStateHumanRequest:
-		item, ok := source.HumanRequest()
-		if !ok {
-			return browserprotocol.StateItem{}, fmt.Errorf("mismatched human-request entity")
-		}
+	for _, item := range snapshot.HumanRequests {
 		projected, err := projectHumanRequest(item)
 		if err != nil {
-			return browserprotocol.StateItem{}, err
+			return browserprotocol.StateSnapshot{}, err
 		}
-		return browserprotocol.HumanRequestStateItem(projected), nil
-	default:
-		return browserprotocol.StateItem{}, fmt.Errorf("unknown public state entity kind")
+		result.HumanRequests = append(result.HumanRequests, projected)
 	}
+	return result, nil
 }
 
 func projectFactory(item kernel.FactorySummary) browserprotocol.FactoryItem {
@@ -682,7 +459,7 @@ func mapBrowserError(err error) error {
 		return browser.ErrUnauthorized
 	case errors.Is(err, kernel.ErrNotFound):
 		return browser.ErrNotFound
-	case errors.Is(err, kernel.ErrRevisionConflict), errors.Is(err, kernel.ErrConflict), errors.Is(err, kernel.ErrFutureCursor), errors.Is(err, kernel.ErrInvalidValue):
+	case errors.Is(err, kernel.ErrRevisionConflict), errors.Is(err, kernel.ErrConflict), errors.Is(err, kernel.ErrInvalidValue):
 		return browser.ErrStale
 	case errors.Is(err, kernel.ErrSnapshotTooLarge):
 		return browser.ErrTooLarge

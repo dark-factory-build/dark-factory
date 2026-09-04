@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	ProtocolVersion = uint16(1)
+	ProtocolVersion = uint16(2)
 	DaemonIDSize    = 16
 	BootIDSize      = 16
 	NonceSize       = 32
@@ -56,8 +56,8 @@ type AuthTranscript struct {
 }
 
 const (
-	pairDomain = "dark-factory/browser/v1/pair\x00"
-	authDomain = "dark-factory/browser/v1/auth\x00"
+	pairDomain = "dark-factory/browser/v2/pair\x00"
+	authDomain = "dark-factory/browser/v2/auth\x00"
 )
 
 // BuildPairTranscript returns the exact bytes signed by a browser while
