@@ -92,12 +92,27 @@ function attachmentOf(ws: WebSocket): Attachment | null {
 	return { role: candidate.role, connection: candidate.connection, controller: candidate.controller };
 }
 
+/** The WebSocket protocol caps a close reason at 123 UTF-8 bytes. */
+const CLOSE_REASON_BYTES = 123;
+
 function truncateReason(reason: string): string {
-	// A close reason is capped at 123 UTF-8 bytes by the protocol.
-	const encoder = new TextEncoder();
-	let text = reason;
-	while (encoder.encode(text).length > 123) text = text.slice(0, -1);
-	return text;
+	// A host CLOSE record may carry up to a megabyte of reason, so the input is
+	// bounded before it is ever measured: 123 bytes can never come from more than
+	// 123 UTF-16 code units. The encoded bytes are then trimmed back to a code
+	// point boundary in one pass, so this is O(123) whatever it is handed.
+	let head = reason;
+	if (head.length > CLOSE_REASON_BYTES) {
+		let cut = CLOSE_REASON_BYTES;
+		const last = head.charCodeAt(cut - 1);
+		if (last >= 0xd800 && last <= 0xdbff) cut -= 1; // never split a surrogate pair
+		head = head.slice(0, cut);
+	}
+	const bytes = new TextEncoder().encode(head);
+	if (bytes.length <= CLOSE_REASON_BYTES) return head;
+	let end = CLOSE_REASON_BYTES;
+	// Back off over the continuation bytes of the code point straddling the cap.
+	while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+	return new TextDecoder('utf-8', { fatal: false, ignoreBOM: true }).decode(bytes.subarray(0, end));
 }
 
 function closeRecord(connection: number, code: number, reason: string): RelayRecord {
@@ -174,8 +189,9 @@ export class FactoryRelay implements DurableObject {
 		if (origin === null || origin !== this.#env.PWA_ORIGIN) return refuse(403);
 		if (protocols.length !== 2 && protocols.length !== 3) return refuse(403);
 
-		const host = this.#host();
-		if (host === null) return refuse(503);
+		// A cheap pre-check: with no host there is no key to verify a ticket
+		// against and nothing to talk to, so refuse before spending signature work.
+		if (this.#host() === null) return refuse(503);
 		const stored = (await this.#ctx.storage.get<StoredHost>('host')) ?? null;
 		if (stored === null) return refuse(503);
 		const nodeKey = decodeBase64UrlExact(stored.key, 32);
@@ -195,6 +211,13 @@ export class FactoryRelay implements DurableObject {
 			return refuse(403);
 		}
 
+		// Every check above suspends, and the input gate only covers storage, so a
+		// host close or a competing /host dial can land in any of those gaps and
+		// sweep the controllers. The host is therefore resolved again here and the
+		// rest of this method runs without a single await: on one thread that makes
+		// the check, the accept, and the OPEN atomic with respect to that sweep, so
+		// an accepted controller is always one the live host was told about.
+		if (this.#host() === null) return refuse(503);
 		const live = this.#controllers();
 		if (live.length >= CONTROLLER_SOCKETS_PER_NODE) return refuse(429);
 		const mine = live.filter((ws) => attachmentOf(ws)?.controller === ticket.controller);
@@ -206,7 +229,7 @@ export class FactoryRelay implements DurableObject {
 			'controller',
 			`c:${connection}`,
 		]);
-		this.#send(host, [
+		this.#sendToHost([
 			textRecord(
 				RECORD_OPEN,
 				connection,

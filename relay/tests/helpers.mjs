@@ -6,8 +6,11 @@
 
 import { generateKeyPairSync, randomBytes, sign as nodeSign, createHash } from 'node:crypto';
 import { once } from 'node:events';
+import { readdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { deserialize } from 'node:v8';
 import WebSocket from 'ws';
 
 export const SUBPROTOCOL = 'dark-factory-relay';
@@ -227,6 +230,15 @@ class Tap {
 		return this.records.shift();
 	}
 
+	/** The next text message, skipping binary ones already read as records. */
+	async nextText(timeout = DEFAULT_TIMEOUT) {
+		const deadline = Date.now() + timeout;
+		for (;;) {
+			const message = await this.nextMessage(Math.max(1, deadline - Date.now()));
+			if (typeof message === 'string') return message;
+		}
+	}
+
 	async nextRecordOf(type, timeout = DEFAULT_TIMEOUT) {
 		const deadline = Date.now() + timeout;
 		for (;;) {
@@ -304,6 +316,61 @@ export function openController(origin, node, protocols, { originHeader = PWA_ORI
 
 // -- the wrangler child -----------------------------------------------------
 
+/**
+ * Operator state planted on the Wrangler child on purpose. The clean-environment
+ * wrapper must stop every one of these at the door, so the secrecy sweep asserts
+ * that none of them reaches the child's output or the persisted directory.
+ */
+export const AMBIENT_DECOYS = {
+	HOME: '/operator-home',
+	TMPDIR: '/operator-tmp',
+	CLOUDFLARE_API_TOKEN: 'ambient-token-must-not-cross',
+	CLOUDFLARE_ACCOUNT_ID: 'ambient-account-must-not-cross',
+	WRANGLER_AUTH_TOKEN: 'ambient-oauth-must-not-cross',
+	XDG_CONFIG_HOME: '/operator-config',
+	SSH_AUTH_SOCK: '/operator-keychain-socket',
+};
+
+/**
+ * Every key/value row the relay's Durable Objects persisted, read straight out
+ * of the SQLite files `wrangler dev --local` wrote. A byte scan can only say a
+ * string is absent; this says exactly what the object kept.
+ */
+export async function readPersistedObjects(persistence) {
+	const directory = join(persistence, 'v3', 'do', 'dark-factory-relay-FactoryRelay');
+	let names;
+	try {
+		names = await readdir(directory);
+	} catch {
+		return [];
+	}
+	const objects = [];
+	for (const name of names) {
+		if (!name.endsWith('.sqlite') || name === 'metadata.sqlite') continue;
+		const database = new DatabaseSync(join(directory, name), { readOnly: true });
+		try {
+			const named = database.prepare('SELECT name FROM __miniflare_do_name LIMIT 1').get();
+			// An object that never wrote anything has no key/value table at all,
+			// which is itself the strongest form of "kept nothing".
+			const stored =
+				database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_cf_KV'").get() !==
+				undefined;
+			objects.push({
+				node: named?.name ?? null,
+				records: stored
+					? database
+							.prepare('SELECT key, value FROM _cf_KV ORDER BY key')
+							.all()
+							.map(({ key, value }) => ({ key, value: deserialize(Buffer.from(value)) }))
+					: [],
+			});
+		} finally {
+			database.close();
+		}
+	}
+	return objects;
+}
+
 export async function startWorker(persistence) {
 	const root = process.cwd();
 	const wrangler = join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
@@ -326,16 +393,7 @@ export async function startWorker(persistence) {
 		],
 		{
 			cwd: root,
-			env: {
-				PATH: process.env.PATH ?? '/usr/bin:/bin',
-				HOME: '/operator-home',
-				TMPDIR: '/operator-tmp',
-				CLOUDFLARE_API_TOKEN: 'ambient-token-must-not-cross',
-				CLOUDFLARE_ACCOUNT_ID: 'ambient-account-must-not-cross',
-				WRANGLER_AUTH_TOKEN: 'ambient-oauth-must-not-cross',
-				XDG_CONFIG_HOME: '/operator-config',
-				SSH_AUTH_SOCK: '/operator-keychain-socket',
-			},
+			env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ...AMBIENT_DECOYS },
 			stdio: ['ignore', 'pipe', 'pipe'],
 		},
 	);

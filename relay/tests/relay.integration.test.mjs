@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import test, { after, before } from 'node:test';
 
 import {
+	AMBIENT_DECOYS,
 	PWA_ORIGIN,
 	RECORD_BINARY,
 	RECORD_CLOSE,
@@ -30,6 +31,7 @@ import {
 	nowSeconds,
 	openController,
 	openHost,
+	readPersistedObjects,
 	startWorker,
 } from './helpers.mjs';
 
@@ -167,8 +169,8 @@ test('an older generation is refused after a newer one', async () => {
 	assert.equal(newer.status, 101);
 	const older = await openHost(worker.origin, node.id, mintHostToken(node, { generation: 4, sequence: 9 }));
 	assert.equal(older.status, 403);
-	// The live socket was untouched by the refusal.
-	assert.equal(newer.tap.closed, null);
+	// The live socket was untouched by the refusal, and stays that way.
+	assert.equal((await newer.tap.quiet(200)).closed, null);
 	newer.tap.close(1000, 'done');
 });
 
@@ -220,6 +222,17 @@ test('a controller without an Origin header is refused', async () => {
 test('a controller is unavailable while no host is connected', async () => {
 	const node = createNode();
 	const credential = await controlCredential(node);
+	assert.equal((await openControl(node, credential)).status, 503);
+});
+
+test('a factory with no host refuses even an invalid ticket with 503', async () => {
+	const node = createNode();
+	const credential = await controlCredential(node);
+	// Nothing about a factory's credentials is observable before a host attaches:
+	// a ticket that would fail verification is refused with the same 503 as one
+	// that would pass, so the two cannot be told apart from outside.
+	const forged = corrupt(credential.ticket.token);
+	assert.equal((await openController(worker.origin, node.id, [forged, credential.proof])).status, 503);
 	assert.equal((await openControl(node, credential)).status, 503);
 });
 
@@ -425,7 +438,7 @@ test('a controller close reaches the host as a close record for that id', async 
 	const closed = await host.tap.nextRecordOf(RECORD_CLOSE);
 	assert.equal(closed.connection, openAlpha.connection);
 	assert.deepEqual(JSON.parse(closed.payload.toString('utf8')), { code: 4321, reason: 'controller is done' });
-	assert.equal(bravo.tap.closed, null);
+	assert.equal((await bravo.tap.quiet(200)).closed, null);
 });
 
 test('a host close record chooses the controller close code', async () => {
@@ -467,6 +480,61 @@ test('losing the host socket closes every controller', async () => {
 	assert.equal((await openControl(node, await controlCredential(node))).status, 503);
 });
 
+test('a controller dialing while the host drops is never left orphaned', async () => {
+	const { node, host } = await withHost();
+	const credentials = [];
+	for (let index = 0; index < 24; index += 1) credentials.push(await controlCredential(node));
+
+	// Every dial is left in flight at once, so the host's loss falls somewhere in
+	// the middle of the batch. The point is not to force one interleaving but to
+	// hold the guarantee over whichever one the object happens to take.
+	const dials = credentials.map((credential) => openControl(node, credential));
+	host.tap.terminate();
+	const results = await Promise.all(dials);
+
+	for (const { status } of results) {
+		assert.ok(status === 101 || status === 503, `unexpected status ${status}`);
+	}
+	// The invariant: nothing outlives the host it was accepted for. An accepted
+	// socket is closed with 4001; it is never left alive and unannounced.
+	for (const result of results.filter(({ status }) => status === 101)) {
+		assert.equal((await result.tap.waitClosed()).code, 4001);
+	}
+	assert.equal((await openControl(node, await controlCredential(node))).status, 503);
+});
+
+test('a controller dialing across a host replacement reaches the new host or none', async () => {
+	const { node, host } = await withHost();
+	const credentials = [];
+	for (let index = 0; index < 24; index += 1) credentials.push(await controlCredential(node));
+
+	const dials = credentials.map((credential) => openControl(node, credential));
+	host.tap.terminate();
+	const replacement = await openHost(
+		worker.origin,
+		node.id,
+		mintHostToken(node, { generation: 2, sequence: 1 }),
+	);
+	assert.equal(replacement.status, 101);
+	const results = await Promise.all(dials);
+	await new Promise((resolve) => setTimeout(resolve, 500));
+
+	const announced = new Set(
+		replacement.tap.records
+			.filter((record) => record.type === RECORD_OPEN)
+			.map((record) => JSON.parse(record.payload.toString('utf8')).controller),
+	);
+	for (const [index, result] of results.entries()) {
+		if (result.status === 503) continue;
+		assert.equal(result.status, 101);
+		const { controller } = credentials[index];
+		assert.ok(
+			announced.has(controller) || result.tap.closed?.code === 4001,
+			`an accepted controller was neither announced to the new host nor closed with 4001`,
+		);
+	}
+});
+
 // -- revocation -------------------------------------------------------------
 
 test('a revoke closes every socket of that controller id and leaves others alone', async () => {
@@ -485,7 +553,7 @@ test('a revoke closes every socket of that controller id and leaves others alone
 	);
 	assert.equal((await first.tap.waitClosed()).code, 4002);
 	assert.equal((await second.tap.waitClosed()).code, 4002);
-	assert.equal(other.tap.closed, null);
+	assert.equal((await other.tap.quiet(200)).closed, null);
 
 	// Nothing is remembered: a fresh credential for either controller reconnects,
 	// because the daemon that minted it is the durable authority on revocation.
@@ -505,7 +573,7 @@ test('a controller message over 64 KiB ends that socket', async () => {
 	const closed = await host.tap.nextRecordOf(RECORD_CLOSE);
 	assert.equal(closed.connection, open.connection);
 	assert.equal(JSON.parse(closed.payload.toString('utf8')).code, 4003);
-	assert.equal(host.tap.closed, null);
+	assert.equal((await host.tap.quiet(200)).closed, null);
 });
 
 test('a burst past the token bucket ends the controller and tells the host', async () => {
@@ -518,8 +586,71 @@ test('a burst past the token bucket ends the controller and tells the host', asy
 	const closed = await host.tap.nextRecordOf(RECORD_CLOSE);
 	assert.equal(closed.connection, open.connection);
 	assert.equal(JSON.parse(closed.payload.toString('utf8')).code, 4003);
-	assert.equal(host.tap.closed, null);
+	assert.equal((await host.tap.quiet(200)).closed, null);
 });
+
+test('a record payload past the cap ends the host and every controller', async () => {
+	const { node, host } = await withHost();
+	const alpha = await openControl(node, await controlCredential(node));
+	const open = await host.tap.nextRecordOf(RECORD_OPEN);
+
+	// One byte past 1 MiB + 64, carried in full, so the refusal is about the
+	// bound rather than about a record that ran off the end of the message.
+	host.tap.send(encodeRecord(RECORD_BINARY, open.connection, Buffer.alloc(1024 * 1024 + 65, 0x7a)));
+	assert.equal((await host.tap.waitClosed()).code, 4003);
+	assert.equal((await alpha.tap.waitClosed()).code, 4001);
+});
+
+test('a text frame other than ping ends the host socket', async () => {
+	const { node, host } = await withHost();
+	const controller = await openControl(node, await controlCredential(node));
+	await host.tap.nextRecordOf(RECORD_OPEN);
+
+	// `ping` is answered by the auto-responder and never reaches the envelope,
+	// which is the whole reason any other text on this socket is off-protocol.
+	host.tap.send('ping');
+	assert.equal(await host.tap.nextText(), 'pong');
+	assert.equal((await host.tap.quiet(200)).closed, null);
+
+	host.tap.send('pong');
+	assert.equal((await host.tap.waitClosed()).code, 4004);
+	assert.equal((await controller.tap.waitClosed()).code, 4001);
+});
+
+test(
+	'a megabyte close reason is truncated instead of stalling the object',
+	{ timeout: 30_000 },
+	async () => {
+		const { node, host } = await withHost();
+		const alpha = await openControl(node, await controlCredential(node));
+		const bravo = await openControl(node, await controlCredential(node));
+		const [openAlpha, openBravo] = await host.tap.nextRecords(2);
+
+		const started = Date.now();
+		host.tap.send(
+			encodeRecords([
+				{
+					type: RECORD_CLOSE,
+					connection: openAlpha.connection,
+					payload: JSON.stringify({ code: 4200, reason: 'r'.repeat(1024 * 1024) }),
+				},
+			]),
+		);
+		const closed = await alpha.tap.waitClosed();
+		assert.equal(closed.code, 4200);
+		assert.ok(
+			Buffer.byteLength(closed.reason, 'utf8') <= 123,
+			`close reason was ${Buffer.byteLength(closed.reason, 'utf8')} bytes`,
+		);
+		assert.ok(Date.now() - started < 5_000, `the close took ${Date.now() - started}ms`);
+
+		// The object is still serving rather than wedged on the reason it was handed.
+		host.tap.send(
+			encodeRecords([{ type: RECORD_TEXT, connection: openBravo.connection, payload: 'still serving' }]),
+		);
+		assert.equal(await bravo.tap.nextMessage(), 'still serving');
+	},
+);
 
 test('an unknown record type ends the host and every controller', async () => {
 	const { node, host } = await withHost();
@@ -598,15 +729,31 @@ test('no frame, token, or payload reaches disk or the log', async () => {
 		assert.ok(!haystack.includes(tokenSentinel), `${label} contains a token sentinel`);
 		assert.ok(!haystack.includes(ticket.token), `${label} contains a ticket token`);
 		assert.ok(!haystack.includes(proof), `${label} contains a device proof`);
+		// The operator's ambient environment is planted on the Wrangler child on
+		// purpose. None of it may reach the child's output or its state.
+		for (const [name, decoy] of Object.entries(AMBIENT_DECOYS)) {
+			assert.ok(!haystack.includes(decoy), `${label} contains the ${name} decoy`);
+		}
 	}
 
-	// The positive canary: the routing record the relay is allowed to keep is on
-	// disk, so the absence of everything else above is a real observation.
-	assert.ok(blob.includes('host'), 'the persisted storage holds the host key');
-	assert.ok(blob.includes(node.key), 'the persisted storage holds the node public key');
-	// And nothing else: the ticket and deny lists were removed from the design.
-	assert.ok(!blob.includes('used:'), 'the persisted storage holds no ticket list');
-	assert.ok(!blob.includes('deny:'), 'the persisted storage holds no deny list');
+	// The positive canary, read out of the Durable Object's own SQLite rows
+	// rather than matched in a byte scan: this is what the object kept, and the
+	// absence of everything above is therefore a real observation.
+	const objects = await readPersistedObjects(persistence);
+	const mine = objects.find((object) => object.node === node.id);
+	assert.ok(mine !== undefined, 'the factory has a persisted Durable Object');
+	assert.deepEqual(mine.records, [
+		{ key: 'host', value: { key: node.key, generation: 1, sequence: 1 } },
+	]);
+
+	// And no object anywhere in this run wrote a key other than `host`: the
+	// ticket and deny lists really are gone, not merely unused by this test.
+	assert.deepEqual(
+		objects.flatMap(({ node: name, records }) =>
+			records.filter(({ key }) => key !== 'host').map(({ key }) => `${name}:${key}`),
+		),
+		[],
+	);
 });
 
 async function readTree(directory) {

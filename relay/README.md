@@ -103,10 +103,11 @@ closes that controller with the given code when it lies in 3000–4999 and with
 
 Bounds are exact and fail closed: a controller message larger than 64 KiB, a
 host message larger than 4 MiB, a record payload larger than 1 MiB + 64 bytes,
-a truncated record, an unknown type, a text frame other than `ping`, or a
-controller sending more than 120 messages in a burst or 60 per second sustained
-ends the offending socket (4003 for limits, 4004 for protocol) and, for a host,
-every controller with 4001.
+a truncated record, an unknown type, a text frame other than `ping` **on the
+host socket** (a controller's text frames are application data and are wrapped
+verbatim), or a controller sending more than 120 messages in a burst or 60 per
+second sustained ends the offending socket (4003 for limits, 4004 for protocol)
+and, for a host, every controller with 4001.
 
 ## Storage and logging
 
