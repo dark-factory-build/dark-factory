@@ -22,7 +22,7 @@ async function flush() {
 }
 
 function stateAt(head, overrides = {}) {
-  return { ...fixtureState, head: BigInt(head), sequence: BigInt(head), ...overrides };
+  return { ...fixtureState, head: BigInt(head), ...overrides };
 }
 
 function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), detachImpl, acquireImpl, enqueueImpl } = {}) {

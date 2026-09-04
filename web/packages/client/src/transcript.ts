@@ -1,6 +1,7 @@
 import { malformed, normalizeBoundary, ProtocolError } from "./errors.js";
+import { PROTOCOL_VERSION } from "./manifest.js";
 
-const PROTOCOL = new TextEncoder().encode("dark-factory/browser/v1/");
+const PROTOCOL = new TextEncoder().encode("dark-factory/browser/v2/");
 const PAIR = new TextEncoder().encode("pair\0");
 const AUTH = new TextEncoder().encode("auth\0");
 
@@ -34,7 +35,7 @@ function text(value: string): Uint8Array {
 function fixed(value: string, bytes: number): Uint8Array { return hexBytes(value, bytes); }
 function publicKey(value: string): Uint8Array { const result = fixed(value, 65); if (result[0] !== 4) malformed(); return result; }
 function transcript(domain: Uint8Array, fields: Array<{ value: Uint8Array; fixed?: number }>): Uint8Array {
-  const parts = [PROTOCOL, domain, new Uint8Array([0, 1])];
+  const parts = [PROTOCOL, domain, new Uint8Array([PROTOCOL_VERSION >>> 8, PROTOCOL_VERSION & 0xff])];
   let size = parts.reduce((n, p) => n + p.length, 0);
   for (const field of fields) { if (field.fixed !== undefined && field.value.length !== field.fixed) malformed(); const length = new Uint8Array(4); new DataView(length.buffer).setUint32(0, field.value.length); parts.push(length, field.value); size += 4 + field.value.length; }
   const result = new Uint8Array(size); let offset = 0; for (const part of parts) { result.set(part, offset); offset += part.length; } return result;

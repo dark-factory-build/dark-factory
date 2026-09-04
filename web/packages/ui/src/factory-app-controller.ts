@@ -18,7 +18,7 @@ import {
 } from "@dark-factory/client";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalSurface } from "./terminal-controller.js";
 
-const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser/v1");
+const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser/v2");
 const BROWSER_URL = BROWSER_ENDPOINT.toString();
 const BROWSER_HOST = BROWSER_ENDPOINT.host;
 

@@ -115,7 +115,7 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     assert.equal(packed.schemaVersion, 1);
     assert.match(packed.source.commit, /^[0-9a-f]{40}$/);
     assert.equal(packed.source.clean, true);
-    assert.deepEqual(packed.protocol, { name: "dark-factory/browser/v1", version: 1 });
+    assert.deepEqual(packed.protocol, { name: "dark-factory/browser/v2", version: 2 });
     assert.equal(packed.buildTools.toolTreeVersion, "dark-factory/tool-tree/v2");
     assert.deepEqual(packed.buildTools.pnpm, "11.19.0");
     assert.deepEqual(packed.buildTools.typescript, "5.8.3");
@@ -163,7 +163,7 @@ test("public artifacts bind clean HEAD, protocol, exact dependencies, and bytes"
     writeFileSync(join(consumer, "package.json"), JSON.stringify({ name: "artifact-consumer", private: true, type: "module" }));
     const env = { ...process.env, npm_config_cache: join(tempRoot, "npm-cache"), npm_config_offline: "true", npm_config_registry: "http://127.0.0.1:9/" };
     execFileSync("npm", ["install", "--offline", "--ignore-scripts", "--no-package-lock", join(output, client.artifact.filename)], { cwd: consumer, env, stdio: "pipe" });
-    execFileSync(process.execPath, ["--input-type=module", "-e", "import { PROTOCOL_VERSION } from '@dark-factory/client'; const p = await import('@dark-factory/client/provenance', { with: { type: 'json' } }); if (PROTOCOL_VERSION !== 1 || p.default.package.name !== '@dark-factory/client') throw new Error('bad provenance export');"], { cwd: consumer, env, stdio: "pipe" });
+    execFileSync(process.execPath, ["--input-type=module", "-e", "import { PROTOCOL_VERSION } from '@dark-factory/client'; const p = await import('@dark-factory/client/provenance', { with: { type: 'json' } }); if (PROTOCOL_VERSION !== 2 || p.default.package.name !== '@dark-factory/client') throw new Error('bad provenance export');"], { cwd: consumer, env, stdio: "pipe" });
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -198,7 +198,7 @@ test("verification rejects stale protocol identity and changed tarball bytes", (
     const path = join(output, "dark-factory-public-artifacts.json");
     const original = manifest(output);
     const staleProtocol = structuredClone(original);
-    staleProtocol.protocol.version = 2;
+    staleProtocol.protocol.version = 3;
     writeFileSync(path, `${JSON.stringify(staleProtocol, null, 2)}\n`);
     expectFailure(() => run("verify", output), "manifest protocol is invalid");
     writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
@@ -248,7 +248,7 @@ test("verification rejects archive inventory, runtime protocol, and strict manif
     writeFileSync(path, originalText);
 
     const typeConfused = structuredClone(original);
-    typeConfused.protocol.version = "1";
+    typeConfused.protocol.version = "2";
     writeManifest(typeConfused);
     expectFailure(() => run("verify", output), "manifest.protocol.version must be an integer");
     writeFileSync(path, originalText);
@@ -280,7 +280,7 @@ test("verification rejects archive inventory, runtime protocol, and strict manif
 
     const sourceManifest = join(webRoot, "packages", "client", "src", "manifest.ts");
     const sourceText = readFileSync(sourceManifest, "utf8");
-    writeFileSync(sourceManifest, sourceText.replace("PROTOCOL_VERSION = 1", "PROTOCOL_VERSION = 2"));
+    writeFileSync(sourceManifest, sourceText.replace("PROTOCOL_VERSION = 2", "PROTOCOL_VERSION = 3"));
     expectFailure(() => run("verify", output), "worktree is dirty");
     writeFileSync(sourceManifest, sourceText);
   } finally {

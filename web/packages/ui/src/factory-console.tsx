@@ -113,14 +113,14 @@ export function FactoryConsole({
                 <h2>BUILDING</h2>
                 <span>{state === undefined ? "NO SNAPSHOT" : `HEAD ${state.head.toString()}`}</span>
               </div>
-              {state?.factory[0] === undefined ? (
+              {state === undefined ? (
                 <p className="dfFactoryConsole__empty">BUILDING STATE UNAVAILABLE</p>
               ) : (
                 <dl className="dfFactoryConsole__metrics">
-                  <Metric label="DISPATCH" value={state.factory[0].dispatch_enabled ? "ENABLED" : "PAUSED"} />
-                  <Metric label="CAPACITY" value={String(state.factory[0].capacity)} />
-                  <Metric label="ACTIVE RUNS" value={String(state.factory[0].active_runs)} />
-                  <Metric label="REVISION" value={state.factory[0].revision.toString()} />
+                  <Metric label="DISPATCH" value={state.factory.dispatch_enabled ? "ENABLED" : "PAUSED"} />
+                  <Metric label="CAPACITY" value={String(state.factory.capacity)} />
+                  <Metric label="ACTIVE RUNS" value={String(state.factory.active_runs)} />
+                  <Metric label="REVISION" value={state.factory.revision.toString()} />
                 </dl>
               )}
             </section>

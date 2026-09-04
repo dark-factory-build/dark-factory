@@ -11,8 +11,7 @@ const requestID = "41".repeat(16);
 
 export const fixtureState = {
   head: 42n,
-  sequence: 42n,
-  factory: [{ dispatch_enabled: true, capacity: 8, active_runs: 2, revision: 42n }],
+  factory: { dispatch_enabled: true, capacity: 8, active_runs: 2, revision: 42n },
   projects: new Map([
     [projectID, { id: projectID, name: "North Workshop", revision: 4n }],
     [secondProjectID, { id: secondProjectID, name: "South Workshop", revision: 5n }],
