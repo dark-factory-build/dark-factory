@@ -192,7 +192,6 @@ export class BrowserSession {
   // At most one STATE_GET is outstanding, and a burst of notifications during
   // it collapses into at most one trailing refresh.
   #refreshID: string | undefined;
-  #refreshQueued = false;
   #requestNumber = 1;
   #closed = false;
   #pairing = false;
@@ -572,15 +571,8 @@ export class BrowserSession {
 
   /** One refresh in flight; a burst becomes at most one trailing refresh. */
   #maybeRefresh(): void {
-    if (this.#state !== undefined && this.#notifiedHead <= this.#state.head) {
-      this.#refreshQueued = false;
-      return;
-    }
-    if (this.#refreshID !== undefined) {
-      this.#refreshQueued = true;
-      return;
-    }
-    this.#refreshQueued = false;
+    if (this.#state !== undefined && this.#notifiedHead <= this.#state.head) return;
+    if (this.#refreshID !== undefined) return;
     this.#requestSnapshot();
   }
 
@@ -594,7 +586,6 @@ export class BrowserSession {
   #discardState(): void {
     this.#state = undefined;
     this.#refreshID = undefined;
-    this.#refreshQueued = false;
     this.#subscriptionID = undefined;
   }
 
