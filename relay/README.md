@@ -139,7 +139,7 @@ application frame, token, or payload is ever logged.
 ## Deployment
 
 `wrangler.jsonc` names the Worker `dark-factory-relay`, binds `FACTORY_RELAY`
-to the `FactoryRelay` class, and sets the single variable `PWA_ORIGIN`. There
-are no secrets. `scripts/local-ci.sh` installs dependencies, type-checks,
+to the `FactoryRelay` class, sets the single variable `PWA_ORIGIN`, and routes
+the custom domain `relay.darkfactory.build`. There are no secrets. `scripts/local-ci.sh` installs dependencies, type-checks,
 proves a dry-run deploy, and runs the integration tests against a real
 `wrangler dev --local` process.
