@@ -55,6 +55,33 @@ func TestUpdateAgentValidatesLaunchControlsAtTheObservedRevision(t *testing.T) {
 	}
 }
 
+// A stored row may hold a combination new launches refuse. Pausing such an
+// agent touches no launch control, so the launch rules do not apply to it.
+func TestUpdateAgentPausesALegacyAgentItCouldNotRelaunch(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	legacy, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 234), ProjectID: project.ID, Name: "legacy-claude", Role: RoleOrchestrator,
+		Provider: ProviderClaudeCode, ReasoningEffort: "max", ToolBudgetLimit: 1,
+	}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`UPDATE agents SET reasoning_effort = 'ultra' WHERE id = ?`, legacy.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	paused, model := true, "claude-opus-5"
+	updated, err := store.UpdateAgent(ctx, legacy.ID, legacy.Revision, AgentPatch{Paused: &paused}, mustTime(t, 5))
+	if err != nil || !updated.Paused || updated.ReasoningEffort != "ultra" {
+		t.Fatalf("pause a legacy agent = %+v, %v", updated, err)
+	}
+	// Editing a launch control does hold the whole pair to the launch rules.
+	if _, err := store.UpdateAgent(ctx, legacy.ID, updated.Revision, AgentPatch{Model: &model}, mustTime(t, 6)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("relaunchable-controls edit = %v", err)
+	}
+}
+
 func TestUpdateTaskEditsAndCancelsOnlyWhileQueued(t *testing.T) {
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -93,5 +120,30 @@ func TestUpdateTaskEditsAndCancelsOnlyWhileQueued(t *testing.T) {
 	result, err := store.AdmitNext(ctx, admissionKeys(t, 47, nil), mustTime(t, 10))
 	if err != nil || result.Admitted() || result.Reason != NoAdmissionQueueEmpty {
 		t.Fatalf("cancelled task admission = %+v, %v", result, err)
+	}
+}
+
+// A task re-queued after a terminal run is the second shape cancellation can
+// reach: work revision 2, with a run history stopping one revision behind it.
+// The run-topology invariant admitted only a queued task there.
+func TestUpdateTaskCancelsATaskRequeuedAfterATerminalRun(t *testing.T) {
+	store, terminal, _, _ := retryQueuedWorker(t, 90)
+	defer store.Close()
+	ctx := context.Background()
+	task, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found || task.Status != TaskQueued || task.WorkRevision.Int64() != 2 {
+		t.Fatalf("re-queued task = %+v, found=%v, err=%v", task, found, err)
+	}
+	cancelled, err := store.UpdateTask(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 91))
+	if err != nil || cancelled.Status != TaskCancelled || cancelled.WorkRevision.Int64() != 2 {
+		t.Fatalf("cancel after retry = %+v, %v", cancelled, err)
+	}
+	// The durable validator runs on every read, so a topology it rejects
+	// surfaces as corrupt state rather than as a failed write.
+	if _, _, err := store.Run(ctx, terminal.ID); err != nil {
+		t.Fatalf("run topology after cancelling a re-queued task: %v", err)
+	}
+	if _, err := store.ReadPublicSnapshot(ctx); err != nil {
+		t.Fatalf("public snapshot after cancelling a re-queued task: %v", err)
 	}
 }

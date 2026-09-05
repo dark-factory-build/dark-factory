@@ -281,7 +281,7 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 	if len(envelope.Body) == 0 || bytes.Equal(bytes.TrimSpace(envelope.Body), []byte("null")) {
 		return ControlFrame{}, ErrMalformed
 	}
-	if err := rejectTerminalNulls(envelope.Type, envelope.Body); err != nil {
+	if err := rejectNullMembers(envelope.Type, envelope.Body); err != nil {
 		return ControlFrame{}, ErrMalformed
 	}
 	if !typeAllowed(role, envelope.Type) {
@@ -1022,13 +1022,21 @@ func parseUnicodeEscape(value []byte) (uint16, bool) {
 	return result, true
 }
 
-func rejectTerminalNulls(kind MessageType, body []byte) error {
+// rejectNullMembers refuses an explicit null where the Go body holds a pointer
+// or a scalar encoding/json would silently zero. An optional console member is
+// absent or a value; null would otherwise decode as "unchanged" here while the
+// browser's exact decoder refuses the same frame.
+func rejectNullMembers(kind MessageType, body []byte) error {
 	var fields []string
 	switch kind {
 	case TypeTerminalLeaseResult:
 		fields = []string{"expires_at_ms"}
 	case TypeTerminalExit:
 		fields = []string{"session_id", "exit_code", "exit_signal", "aborted"}
+	case TypeAgentUpdate:
+		fields = []string{"model", "reasoning_effort", "paused"}
+	case TypeTaskUpdate:
+		fields = []string{"title", "priority", "assigned_agent_id", "status"}
 	default:
 		return nil
 	}

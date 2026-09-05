@@ -411,7 +411,7 @@ func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprot
 	}
 	release, err := backend.acquireClient(ctx, clientID)
 	if err != nil {
-		return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, err
+		return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, mapBrowserError(err)
 	}
 	client, found, err := backend.store.BrowserClient(ctx, clientID)
 	if err != nil || !found || client.RevokedAt != nil || !client.CapabilityMask.Has(capability) {
@@ -579,6 +579,11 @@ func mapBrowserError(err error) error {
 		return nil
 	}
 	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// The caller gave up, or its budget expired mid-operation. That is
+		// retryable busyness, not a fault: the same request converges when it
+		// is made again with a budget it fits in.
+		return browser.ErrRateLimited
 	case errors.Is(err, kernel.ErrUnauthorized):
 		return browser.ErrUnauthorized
 	case errors.Is(err, kernel.ErrNotFound):
