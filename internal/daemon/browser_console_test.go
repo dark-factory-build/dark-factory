@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,17 +18,22 @@ import (
 // a queued task to edit.
 type consoleFixture struct {
 	*adapterFixture
-	project kernel.Project
-	agent   kernel.Agent
-	task    kernel.Task
+	// cacheHome is the HOME this fixture redirected, so a test can prove the
+	// topology cache landed inside it rather than in the operator's.
+	cacheHome string
+	project   kernel.Project
+	agent     kernel.Agent
+	task      kernel.Task
 }
 
 func newConsoleFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask, root string) *consoleFixture {
 	t.Helper()
+	// Topology writes a regenerable cache under os.UserCacheDir, which on
+	// Darwin is $HOME/Library/Caches. Moving HOME for the test keeps that
+	// write inside the test's own directory instead of the operator's cache.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	fixture := newAdapterFixture(t, capabilities)
-	// Topology writes a regenerable cache. A test writes it under its own
-	// temporary directory, never into the operator's real cache.
-	fixture.daemon.topologyCacheRoot = t.TempDir()
 	fixture.pair(t)
 	ctx := context.Background()
 	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 0x21))
@@ -46,7 +52,7 @@ func newConsoleFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &consoleFixture{adapterFixture: fixture, project: project, agent: agent, task: task}
+	return &consoleFixture{adapterFixture: fixture, cacheHome: home, project: project, agent: agent, task: task}
 }
 
 func consoleRoot(t *testing.T) string {
@@ -142,6 +148,12 @@ func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTopology(t *testing.T) {
 		if node.Kind == "" || node.Path == "" || node.SizeBucket == "" {
 			t.Fatalf("topology node is not projected: %+v", node)
 		}
+	}
+	// The regenerable cache the request wrote is inside this test's own home,
+	// which is the whole reason the fixture moves HOME.
+	cacheFile := filepath.Join(fixture.cacheHome, "Library", "Caches", "dark-factory", "topology", fixture.project.ID.String(), "snapshot.json")
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("topology cache is not under the test home: %v", err)
 	}
 	// An unknown project is not found; a caller that gave up gets a retryable
 	// answer rather than a fault.
