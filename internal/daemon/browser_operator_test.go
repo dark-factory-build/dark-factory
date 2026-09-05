@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/hex"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -90,5 +91,42 @@ func TestWebOpenAbandonmentReclaimsChallengeCapacity(t *testing.T) {
 	}
 	if _, err := fixture.daemon.OpenBrowser(ctx); err != nil {
 		t.Fatalf("open after repeated abandonment: %v", err)
+	}
+}
+
+// TestPairPageMintsTheSameChallengeAsWebOpen drives the production listener
+// the way a browser does: the page's own same-origin form post answers with a
+// redirect carrying a fresh challenge, and the daemon counts it exactly once.
+func TestPairPageMintsTheSameChallengeAsWebOpen(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail)
+	ctx := context.Background()
+	status, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || status.ActiveChallenges != 1 {
+		t.Fatalf("initial status = %+v, %v", status, err)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	request, err := http.NewRequest(http.MethodPost, "http://"+status.Address+"/pair", strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "same-origin"} {
+		request.Header.Set(key, value)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	location := response.Header.Get("Location")
+	parsed, parseErr := url.Parse(location)
+	if response.StatusCode != http.StatusSeeOther || parseErr != nil || parsed.Scheme != "https" || parsed.Host != "app.darkfactory.build" || parsed.Path != "/" || !strings.HasPrefix(parsed.Fragment, "df_pair=") {
+		t.Fatalf("pair post status=%d location=%q err=%v", response.StatusCode, location, parseErr)
+	}
+	if raw, err := hex.DecodeString(strings.TrimPrefix(parsed.Fragment, "df_pair=")); err != nil || len(raw) != 32 {
+		t.Fatalf("pair challenge = %q, err=%v", parsed.Fragment, err)
+	}
+	status, err = fixture.daemon.WebStatus(ctx)
+	if err != nil || status.ActiveChallenges != 2 {
+		t.Fatalf("post-pair status = %+v, %v", status, err)
 	}
 }

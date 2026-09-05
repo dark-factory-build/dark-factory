@@ -175,6 +175,13 @@ type Backend interface {
 	WatchState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (StateSubscription, error)
 }
 
+// PairBackend serves the first-party pair page: PairLink mints the same
+// one-shot launch link the operator CLI mints, or fails plainly.
+type PairBackend interface {
+	Backend
+	PairLink(context.Context) (string, error)
+}
+
 // TaskBackend is the optional bounded operator-mutation half of browser v1.
 // Keeping it separate preserves the state-only backend seam used by tests and
 // non-production adapters.

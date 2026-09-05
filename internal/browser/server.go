@@ -3,11 +3,15 @@ package browser
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +23,7 @@ import (
 
 const (
 	Path           = "/browser"
+	PairPath       = "/pair"
 	maxOrigins     = 8
 	maxConnections = 32
 	// One coherent snapshot is one request, and a notification burst
@@ -52,6 +57,8 @@ type Server struct {
 	terminalBackend    TerminalBackend
 	taskBackend        TaskBackend
 	consoleBackend     ConsoleBackend
+	pairBackend        PairBackend
+	pairPolicy         string
 	host               string
 	origins            map[string]struct{}
 	terminalAckTimeout time.Duration
@@ -99,6 +106,8 @@ func start(backend Backend, origins map[string]struct{}, listener net.Listener) 
 		terminalBackend:    func() TerminalBackend { value, _ := backend.(TerminalBackend); return value }(),
 		taskBackend:        func() TaskBackend { value, _ := backend.(TaskBackend); return value }(),
 		consoleBackend:     func() ConsoleBackend { value, _ := backend.(ConsoleBackend); return value }(),
+		pairBackend:        func() PairBackend { value, _ := backend.(PairBackend); return value }(),
+		pairPolicy:         pairPolicy(origins),
 		host:               listener.Addr().String(),
 		origins:            origins,
 		terminalAckTimeout: time.Duration(browserprotocol.TerminalAckTimeoutMS) * time.Millisecond,
@@ -254,6 +263,10 @@ func (server *Server) CloseClient(clientID [browserprotocol.ClientIDSize]byte) e
 }
 
 func (server *Server) handle(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == PairPath {
+		server.handlePair(writer, request)
+		return
+	}
 	if request.URL.Path != Path || request.URL.EscapedPath() != Path || request.URL.RawQuery != "" {
 		http.Error(writer, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
@@ -313,6 +326,81 @@ func (server *Server) handle(writer http.ResponseWriter, request *http.Request) 
 	reserved = false
 	defer func() { <-server.slots }()
 	current.run()
+}
+
+// pairPage is the only HTML the daemon serves: one confirm page whose form
+// mints a pairing link. It carries no script and no state; its stylesheet is
+// pinned by hash so the policy below can forbid every other inline source.
+const pairStyle = `body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0d10;color:#d7dde3;font:16px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}main{max-width:32rem;padding:2rem}h1{font-size:1.25rem;letter-spacing:.08em;margin:0 0 1rem}p{margin:0 0 1.5rem}button{font:inherit;letter-spacing:.08em;padding:.75rem 1.5rem;background:#d7dde3;color:#0b0d10;border:0;cursor:pointer}`
+
+const pairPage = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>Pair this browser</title><style>" + pairStyle + "</style><main><h1>PAIR THIS BROWSER</h1><p>Dark Factory on this machine will trust this browser to operate the factory at app.darkfactory.build. Continue only if you opened this page yourself.</p><form method=post action=" + PairPath + "><button>PAIR THIS BROWSER</button></form></main>"
+
+// pairPolicy admits the page's own form post and, because CSP checks
+// form-action against every response in the submission's redirect chain, the
+// console origins the mint redirects to; nothing else may load or run.
+func pairPolicy(origins map[string]struct{}) string {
+	targets := make([]string, 0, len(origins))
+	for origin := range origins {
+		targets = append(targets, origin)
+	}
+	sort.Strings(targets)
+	digest := sha256.Sum256([]byte(pairStyle))
+	return "default-src 'none'; style-src 'sha256-" + base64.StdEncoding.EncodeToString(digest[:]) + "'; form-action 'self' " + strings.Join(targets, " ") + "; base-uri 'none'; frame-ancestors 'none'"
+}
+
+// handlePair admits exactly two requests, both proven by the browser's own
+// Fetch Metadata rather than by anything the page could carry: a top-level
+// document navigation to the page from the address bar (Sec-Fetch-Site none)
+// or from an allowed console origin (its Referer), and the page's own
+// same-origin form post, which mints the link and redirects to the console.
+// Everything else is 404 and mints nothing: fetch and XHR (mode cors), frames
+// (dest iframe), cross-site form posts, and navigations that arrived from any
+// other origin. Sec-Fetch-User is deliberately not required: Safari 26.5
+// sent none of it on an OS-launched navigation (Sec-Fetch-Site none, Mode
+// navigate, Dest document) nor on a real button-click POST (Site
+// same-origin), while Chrome 151 sent "?1" on both; the Referer rule already
+// refuses a scripted navigation from elsewhere, and a scripted same-origin
+// post needs script on a page that has none.
+//
+// These headers prove which browser context sent a request; they do not
+// authenticate the sender as a browser. Any local process able to connect to
+// this loopback port can send them and obtain a challenge, so the port is a
+// same-machine trust boundary, as SECURITY.md records.
+func (server *Server) handlePair(writer http.ResponseWriter, request *http.Request) {
+	header := request.Header
+	if server.pairBackend == nil || request.URL.EscapedPath() != PairPath || request.URL.RawQuery != "" || request.Host != server.host ||
+		header.Get("Sec-Fetch-Mode") != "navigate" || header.Get("Sec-Fetch-Dest") != "document" {
+		http.NotFound(writer, request)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Referrer-Policy", "no-referrer")
+	switch {
+	case request.Method == http.MethodGet && (header.Get("Sec-Fetch-Site") == "none" || server.refererAllowed(header.Get("Referer"))):
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		writer.Header().Set("Content-Security-Policy", server.pairPolicy)
+		writer.Header().Set("X-Content-Type-Options", "nosniff")
+		writer.Header().Set("X-Frame-Options", "DENY")
+		_, _ = io.WriteString(writer, pairPage)
+	case request.Method == http.MethodPost && header.Get("Sec-Fetch-Site") == "same-origin":
+		link, err := server.pairBackend.PairLink(request.Context())
+		if err != nil {
+			http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+			return
+		}
+		http.Redirect(writer, request, link, http.StatusSeeOther)
+	default:
+		http.NotFound(writer, request)
+	}
+}
+
+func (server *Server) refererAllowed(referer string) bool {
+	parsed, err := url.Parse(referer)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	_, ok := server.origins[parsed.Scheme+"://"+parsed.Host]
+	return ok
 }
 
 func (server *Server) validRequest(request *http.Request) (string, bool) {
