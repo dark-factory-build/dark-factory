@@ -1,6 +1,7 @@
 package topology
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +18,12 @@ type cacheRecord struct {
 
 // BuildCached lazily builds root and atomically replaces cacheFile only when
 // its structural fingerprint or source revision changed.
-func BuildCached(root, cacheFile string) (Snapshot, error) {
+func BuildCached(ctx context.Context, root, cacheFile string) (Snapshot, error) {
 	previous, err := readCache(cacheFile)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	result, err := Build(root, previous)
+	result, err := Build(ctx, root, previous)
 	if err != nil {
 		return Snapshot{}, err
 	}

@@ -837,7 +837,9 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 		return invalid
 	}
 	if !found {
-		if task.Status == TaskQueued && task.WorkRevision.Int64() == 1 {
+		// A queued task the console cancels before it is ever admitted has no
+		// run history and never will.
+		if (task.Status == TaskQueued || task.Status == TaskCancelled) && task.WorkRevision.Int64() == 1 {
 			return nil
 		}
 		return fmt.Errorf("%w: task has no run history", ErrCorruptState)
@@ -849,7 +851,7 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 			return fmt.Errorf("%w: current task does not match latest run", ErrCorruptState)
 		}
 	case 1:
-		if latest.Phase != RunTerminal || task.Status != TaskQueued {
+		if latest.Phase != RunTerminal || task.Status != TaskQueued && task.Status != TaskCancelled {
 			return fmt.Errorf("%w: queued task is not the next run revision", ErrCorruptState)
 		}
 		if !retryableTerminal(latest) {

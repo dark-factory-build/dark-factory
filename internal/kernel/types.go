@@ -538,7 +538,11 @@ type AgentSummary struct {
 	// invalidates correctly.
 	Provider string
 	Paused   bool
-	Revision Revision
+	// Model and ReasoningEffort are public launch controls by owner decision
+	// on 5 September 2026: the console displays and edits them.
+	Model           string
+	ReasoningEffort string
+	Revision        Revision
 }
 
 type TaskSummary struct {

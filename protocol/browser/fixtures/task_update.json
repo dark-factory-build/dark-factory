@@ -1,0 +1,1 @@
+{"type":"TASK_UPDATE","id":"task-update-1","body":{"task_id":"03030303030303030303030303030303","expected_revision":"3","title":"Ship browser state","priority":5,"assigned_agent_id":"02020202020202020202020202020202","status":"cancelled"}}

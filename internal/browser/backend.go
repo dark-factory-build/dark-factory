@@ -9,9 +9,12 @@ import (
 )
 
 var (
-	ErrUnauthorized           = errors.New("browser: unauthorized")
-	ErrNotFound               = errors.New("browser: not found")
-	ErrStale                  = errors.New("browser: stale")
+	ErrUnauthorized = errors.New("browser: unauthorized")
+	ErrNotFound     = errors.New("browser: not found")
+	ErrStale        = errors.New("browser: stale")
+	// ErrInvalidRequest is a member the domain refuses. Unlike ErrStale it is
+	// not fixed by refetching: the client must send a different value.
+	ErrInvalidRequest         = errors.New("browser: invalid request")
 	ErrTooLarge               = errors.New("browser: too large")
 	ErrRateLimited            = errors.New("browser: rate limited")
 	ErrSubscriptionUnresolved = errors.New("browser: subscription cleanup unresolved")
@@ -189,6 +192,17 @@ type TaskBackend interface {
 	Backend
 	EnqueueTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskEnqueue) (browserprotocol.TaskEnqueueResult, error)
 	RemoteInvite(context.Context, [browserprotocol.ClientIDSize]byte) (browserprotocol.RemoteInviteResult, error)
+}
+
+// ConsoleBackend is the optional console half of browser v1: the bounded
+// configuration and queue edits plus the on-demand project topology. It is a
+// separate seam for the same reason TaskBackend is: the state-only backend
+// used by bootstrap and tests must stay small.
+type ConsoleBackend interface {
+	Backend
+	UpdateAgent(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AgentUpdate) (browserprotocol.AgentUpdateResult, error)
+	UpdateTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error)
+	Topology(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TopologyGet) (browserprotocol.Topology, error)
 }
 
 // TerminalBackend is the optional effect half of browser v1. Keeping it

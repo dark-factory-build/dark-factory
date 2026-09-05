@@ -262,7 +262,7 @@ func TestPublicSnapshotProjectionOmitsPrivateRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := store.CreateAgent(ctx, NewAgent{ID: publicAgentID(t, 1), ProjectID: project.ID, Name: "public agent", Role: RoleWorker, Provider: ProviderCodex, Model: "PRIVATE_MODEL_SENTINEL", ReasoningEffort: "xhigh", ToolBudgetLimit: 987654321}, mustTime(t, 3))
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: publicAgentID(t, 1), ProjectID: project.ID, Name: "public agent", Role: RoleWorker, Provider: ProviderCodex, Model: "SERVED_MODEL_SENTINEL", ReasoningEffort: "xhigh", ToolBudgetLimit: 987654321}, mustTime(t, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,16 +277,18 @@ func TestPublicSnapshotProjectionOmitsPrivateRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The agent's provider is deliberately a served public fact (the console's
-	// C/X glyphs derive from it); model, reasoning effort, tool budgets,
-	// roots and bodies remain private.
-	for _, private := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_MODEL_SENTINEL", "PRIVATE_BODY_SENTINEL", "xhigh", "987654321"} {
+	// The agent's provider, model and reasoning effort are served public facts
+	// (the console displays and edits the last two by owner decision on 5
+	// September 2026); tool budgets, roots and bodies remain private.
+	for _, private := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_BODY_SENTINEL", "987654321"} {
 		if strings.Contains(string(encoded), private) {
 			t.Fatalf("snapshot exposed %q: %s", private, encoded)
 		}
 	}
-	if !strings.Contains(string(encoded), "codex") {
-		t.Fatalf("snapshot dropped the served provider: %s", encoded)
+	for _, served := range []string{"codex", "SERVED_MODEL_SENTINEL", "xhigh"} {
+		if !strings.Contains(string(encoded), served) {
+			t.Fatalf("snapshot dropped the served fact %q: %s", served, encoded)
+		}
 	}
 }
 

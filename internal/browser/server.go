@@ -57,6 +57,7 @@ type Server struct {
 	backend            Backend
 	terminalBackend    TerminalBackend
 	taskBackend        TaskBackend
+	consoleBackend     ConsoleBackend
 	pairBackend        PairBackend
 	pairPolicy         string
 	host               string
@@ -105,6 +106,7 @@ func start(backend Backend, origins map[string]struct{}, listener net.Listener) 
 		backend:            backend,
 		terminalBackend:    func() TerminalBackend { value, _ := backend.(TerminalBackend); return value }(),
 		taskBackend:        func() TaskBackend { value, _ := backend.(TaskBackend); return value }(),
+		consoleBackend:     func() ConsoleBackend { value, _ := backend.(ConsoleBackend); return value }(),
 		pairBackend:        func() PairBackend { value, _ := backend.(PairBackend); return value }(),
 		pairPolicy:         pairPolicy(origins),
 		host:               listener.Addr().String(),
@@ -636,6 +638,8 @@ func errorFrame(err error) browserprotocol.Error {
 		return browserprotocol.Error{Code: browserprotocol.ErrorNotFound}
 	case errors.Is(err, ErrStale):
 		return browserprotocol.Error{Code: browserprotocol.ErrorStale}
+	case errors.Is(err, ErrInvalidRequest):
+		return browserprotocol.Error{Code: browserprotocol.ErrorInvalidRequest}
 	case errors.Is(err, ErrTooLarge):
 		return browserprotocol.Error{Code: browserprotocol.ErrorTooLarge}
 	case errors.Is(err, ErrRateLimited):

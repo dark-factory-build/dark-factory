@@ -836,7 +836,7 @@ func TestRecoverableRunsAreCanonicalOrderedAndPrivateStateStaysOutOfPublicProjec
 	}
 	snapshot, _ := store.Snapshot(context.Background())
 	encoded, _ := json.Marshal(snapshot)
-	for _, sentinel := range []string{"MODEL_SENTINEL", "BODY_SENTINEL"} {
+	for _, sentinel := range []string{"BODY_SENTINEL"} {
 		if bytes.Contains(encoded, []byte(sentinel)) {
 			t.Fatalf("public snapshot leaked %q: %s", sentinel, encoded)
 		}

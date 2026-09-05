@@ -28,6 +28,11 @@ type Daemon struct {
 	relay              *RelayRuntime
 	browserClientGates *browserClientGates
 
+	// topologies holds the last regenerable topology per project for a short
+	// window. It is a cost guard, not state: losing it only costs one walk.
+	topologyMu sync.Mutex
+	topologies map[kernel.ProjectID]topologySnapshot
+
 	// operationMu is the single linearization gate for live-attempt operations
 	// that combine durable state with an owner-side action. It is deliberately
 	// concrete and global: the local operator has no throughput requirement,
