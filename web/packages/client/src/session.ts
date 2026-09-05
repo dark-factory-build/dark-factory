@@ -5,6 +5,7 @@ import {
   encodeHumanRequestDetailGet,
   encodeHumanRequestReply,
   encodePairProve,
+  encodeRemoteInvite,
   encodeStateGet,
   encodeStateWatch,
   encodeTaskEnqueue,
@@ -15,6 +16,7 @@ import {
   type HumanRequestCancelRunResultBody,
   type HumanRequestReplyResultBody,
   type PairResultFrame,
+  type RemoteInviteResultBody,
   type ServerControlFrame,
   type StateChangedFrame,
   type StateSnapshotFrame,
@@ -133,6 +135,10 @@ type HumanPending = {
   reject: (error: unknown) => void;
 };
 type TaskPending = { taskId: string; expectedAgentRevision: bigint; resolve: (value: { taskId: string; revision: bigint }) => void; reject: (error: unknown) => void };
+type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
+
+/** One minted remote pairing invitation and the code that carries it. */
+export type RemoteInvite = Readonly<{ link: string; expiresAtMs: bigint; svg: string }>;
 
 export type HumanRequestCancelRunDescriptor = Readonly<{
   requestId: string;
@@ -204,6 +210,7 @@ export class BrowserSession {
   #terminalHandles = new Set<InternalTerminalHandle>();
   #humanPending = new Map<string, HumanPending>();
   #taskPending = new Map<string, TaskPending>();
+  #invitePending = new Map<string, InvitePending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
   #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId: string }>();
   #generationToken: object = {};
@@ -233,6 +240,24 @@ export class BrowserSession {
     let payload: string;
     try { payload = encodeTaskEnqueue(id, { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<{ taskId: string; revision: bigint }>((resolve, reject) => this.#taskPending.set(id, { taskId, expectedAgentRevision: request.expectedAgentRevision, resolve, reject }));
+    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
+    return result;
+  }
+
+  /** Mints one remote pairing invitation. The mint is never retried: a failed
+   * request is reported and the operator asks for another. It needs the full
+   * loopback grant, whose terminal_input bit a remote grant never carries, so
+   * a remote controller cannot propagate its own pairing. */
+  inviteRemote(): Promise<RemoteInvite> {
+    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
+    if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
+    const loopbackGrant = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
+    if ((this.#capabilities & loopbackGrant) !== loopbackGrant) return Promise.reject(new SessionError("unauthorized"));
+    if (this.#invitePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    const id = this.#nextID("remote-invite");
+    let payload: string;
+    try { payload = encodeRemoteInvite(id, {}); } catch (error) { return Promise.reject(error); }
+    const result = new Promise<RemoteInvite>((resolve, reject) => this.#invitePending.set(id, { resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
   }
@@ -350,6 +375,7 @@ export class BrowserSession {
     this.#pending.clear();
     this.#closeTargetPending(new SessionError("closed"));
     this.#closeTaskPending(new SessionError("closed"));
+    this.#closeInvitePending(new SessionError("closed"));
     this.#closeHumanPending(new SessionError("closed"));
     for (const handle of this.#terminalHandles) handle.terminate(new SessionError("closed"));
     this.#terminalHandles.clear();
@@ -516,6 +542,10 @@ export class BrowserSession {
       this.#taskResult(frame.body, frame.id);
       return;
     }
+    if (frame.type === "REMOTE_INVITE_RESULT") {
+      this.#inviteResult(frame.body, frame.id);
+      return;
+    }
     if (terminalControlFrame(frame)) {
       if (frame.type === "TERMINAL_EOF") { if (!this.#anyTerminal((handle) => handle.receiveEOF(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
       if (frame.type === "TERMINAL_EXIT") { if (!this.#anyTerminal((handle) => handle.receiveExit(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
@@ -602,6 +632,12 @@ export class BrowserSession {
       if (task !== undefined) {
         this.#taskPending.delete(id);
         task.reject(new SessionError(frame.body.code, frame.body.retryable));
+        return;
+      }
+      const invite = this.#invitePending.get(id);
+      if (invite !== undefined) {
+        this.#invitePending.delete(id);
+        invite.reject(new SessionError(frame.body.code, frame.body.retryable));
         return;
       }
     }
@@ -720,6 +756,7 @@ export class BrowserSession {
     this.#pending.clear();
     this.#closeTargetPending(normalized);
     this.#closeTaskPending(normalized);
+    this.#closeInvitePending(normalized);
     this.#closeHumanPending(normalized);
     for (const handle of this.#terminalHandles) handle.terminate(normalized);
     this.#terminalHandles.clear();
@@ -802,6 +839,18 @@ export class BrowserSession {
   #closeTaskPending(error: SessionError | ProtocolError): void {
     for (const pending of this.#taskPending.values()) pending.reject(error);
     this.#taskPending.clear();
+  }
+
+  #closeInvitePending(error: SessionError | ProtocolError): void {
+    for (const pending of this.#invitePending.values()) pending.reject(error);
+    this.#invitePending.clear();
+  }
+
+  #inviteResult(body: RemoteInviteResultBody, id: string): void {
+    const pending = this.#invitePending.get(id);
+    if (pending === undefined) throw new ProtocolError("malformed");
+    this.#invitePending.delete(id);
+    pending.resolve(Object.freeze({ link: body.link, expiresAtMs: body.expires_at_ms, svg: body.svg }));
   }
 
   #taskResult(body: TaskEnqueueResultBody, id: string): void {

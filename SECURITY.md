@@ -36,19 +36,31 @@ on 5 September 2026 in exchange for pairing without a terminal. The control is
 revocation, through `factoryctl web list-clients` and `web revoke` or the
 console; challenges are capped at 32 per boot and expire after five minutes,
 so a hostile local process can delay pairing but cannot hold a grant it did not
-pair.
+pair. A remote invitation is minted only by a client holding the full loopback
+grant, whose terminal_input bit a remote grant never carries, so a paired phone
+can never invite another phone. Such a console does consume the same cap, so
+the daemon bounds it to four invitations per five minutes: even a console
+looping the request holds at most four of the 32 slots, and the local `/pair`
+page can always still mint one. Revoking any client invalidates every live
+pairing challenge, so a link minted before the revocation cannot pair after
+it.
 
 ### Hosted-origin compromise response
 
 A compromised hosted origin or same-origin dependency can exercise every
 capability granted to a paired browser client. Stop trusting the hosted page,
 revoke every paired browser client through the owner-authenticated local API,
-and prove that no browser connection remains. If revocation cannot prove
-connection cleanup, quiesce the browser runtime or stop the service and keep it
-stopped until cleanup is resolved. Only then remediate and republish the exact
-reviewed hosted artifact. Re-pair clients only after that artifact is live.
-Origin allowlisting, CSP, and non-exportable browser keys reduce risk but do
-not replace this response.
+and prove that no browser connection remains. A compromised console holding the
+full loopback grant can mint remote invitations, but no more than four per five
+minutes, so it can neither exhaust the challenge cap nor deny the local `/pair`
+page; a compromised remote client could not have minted one at all. Revocation
+also invalidates every live pairing challenge, so an invitation minted before it
+cannot pair afterwards. If revocation
+cannot prove connection cleanup, quiesce the browser runtime or stop the
+service and keep it stopped until cleanup is resolved. Only then remediate and
+republish the exact reviewed hosted artifact. Re-pair clients only after that
+artifact is live. Origin allowlisting, CSP, and non-exportable browser keys
+reduce risk but do not replace this response.
 
 ## Principals and capabilities
 

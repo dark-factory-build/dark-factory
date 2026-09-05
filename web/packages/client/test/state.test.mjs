@@ -275,6 +275,8 @@ test("manifest bounds and registry are an exact readable mirror", () => {
     terminalLeaseRenewIntervalMs: manifest.bounds.terminal_lease_renew_interval_ms,
     maxTerminalRows: manifest.bounds.max_terminal_rows,
     maxTerminalCols: manifest.bounds.max_terminal_cols,
+    maxRemoteInviteLinkBytes: manifest.bounds.max_remote_invite_link_bytes,
+    maxRemoteInviteSvgBytes: manifest.bounds.max_remote_invite_svg_bytes,
   });
 });
 

@@ -26,6 +26,12 @@ function detailFor(item = request, suffix = "", replyMaxBytes = 8192) {
   });
 }
 
+const remoteInvite = Object.freeze({
+  link: "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600",
+  expiresAtMs: 1767225600000n,
+  svg: "<svg viewBox=\"0 0 1 1\"/>",
+});
+
 function stateWithRequests(items) {
   return { ...fixtureState, humanRequests: new Map(items.map((item) => [item.id, item])) };
 }
@@ -38,6 +44,8 @@ function harness(overrides = {}) {
     getHumanRequestDetail: overrides.getDetail ?? (async () => detailFor()),
     replyHumanRequest: overrides.reply ?? (async () => ({ status: "resolved" })),
     cancelHumanRequest: overrides.cancel ?? (async () => ({ request_id: request.id })),
+    inviteRemote: overrides.inviteRemote ?? (async () => remoteInvite),
+    capabilities: overrides.capabilities ?? 15,
   };
   const client = {
     session,
@@ -385,4 +393,52 @@ test("deletion or revision change clears detail and fences a late private respon
   assert.equal(context.latest().selectedHumanRequest.question, detailFor().question);
   context.emitState(stateWithRequests([{ ...revised, revision: revised.revision + 1n }]));
   assert.equal(context.latest().selectedHumanRequest, undefined);
+});
+
+test("a remote invitation is offered, stored, dismissed, and its failure reported", async () => {
+  const context = harness();
+  context.controller.start();
+  context.emitStatus("ready");
+  assert.equal(context.latest().remoteInviteAllowed, true);
+  await context.controller.inviteRemote();
+  assert.deepEqual(context.latest().remoteInvite, { link: remoteInvite.link, svg: remoteInvite.svg, expiresAtMs: remoteInvite.expiresAtMs });
+  assert.equal(context.latest().remoteInviteError, undefined);
+  context.controller.dismissRemoteInvite();
+  assert.equal(context.latest().remoteInvite, undefined);
+
+  // The remote grant carries human_actions but never terminal_input: a paired
+  // phone is never offered the button that would propagate its own pairing.
+  for (const capabilities of [1, 7]) {
+    const weaker = harness({ capabilities });
+    weaker.controller.start();
+    weaker.emitStatus("ready");
+    assert.equal(weaker.latest().remoteInviteAllowed, false, String(capabilities));
+  }
+
+  // The mint is never retried: the finite code is what the console shows.
+  const failing = harness({ inviteRemote: async () => { throw new SessionError("not_found"); } });
+  failing.controller.start();
+  failing.emitStatus("ready");
+  await failing.controller.inviteRemote();
+  assert.equal(failing.latest().remoteInvite, undefined);
+  assert.equal(failing.latest().remoteInviteError, "not_found");
+});
+
+test("one invitation is minted at a time and a dropped connection leaves no stale code", async () => {
+  let mints = 0;
+  const release = deferred();
+  const context = harness({ inviteRemote: async () => { mints += 1; await release.promise; return remoteInvite; } });
+  context.controller.start();
+  context.emitStatus("ready");
+  const first = context.controller.inviteRemote();
+  await context.controller.inviteRemote();
+  assert.equal(mints, 1, "a second press while one mint is in flight is ignored");
+  release.resolve();
+  await first;
+  assert.equal(context.latest().remoteInvite.link, remoteInvite.link);
+
+  // The challenge belongs to the connection that minted it.
+  context.emitStatus("syncing");
+  assert.equal(context.latest().remoteInvite, undefined);
+  assert.equal(context.latest().remoteInviteAllowed, false);
 });

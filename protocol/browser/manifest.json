@@ -42,7 +42,9 @@
     "terminal_ack_timeout_ms": 10000,
     "terminal_lease_renew_interval_ms": 10000,
     "max_terminal_rows": 4096,
-    "max_terminal_cols": 4096
+    "max_terminal_cols": 4096,
+    "max_remote_invite_link_bytes": 8192,
+    "max_remote_invite_svg_bytes": 32768
   },
   "control": [
     {
@@ -248,6 +250,18 @@
       "direction": "server",
       "id": "required",
       "fixture": "terminal_reset.json"
+    },
+    {
+      "type": "REMOTE_INVITE",
+      "direction": "client",
+      "id": "required",
+      "fixture": "remote_invite.json"
+    },
+    {
+      "type": "REMOTE_INVITE_RESULT",
+      "direction": "server",
+      "id": "required",
+      "fixture": "remote_invite_result.json"
     },
     {
       "type": "ERROR",
