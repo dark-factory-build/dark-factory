@@ -25,6 +25,11 @@ type topologySnapshot struct {
 // ProjectTopology returns the current regenerable topology for an existing
 // project without adding it to durable or browser state.
 func (daemon *Daemon) ProjectTopology(ctx context.Context, projectID kernel.ProjectID) (topology.Snapshot, error) {
+	// topologyCacheRoot is the seam a test sets so it writes under its own
+	// temporary directory instead of the operator's real cache.
+	if daemon != nil && daemon.topologyCacheRoot != "" {
+		return daemon.projectTopology(ctx, projectID, daemon.topologyCacheRoot)
+	}
 	cacheRoot, err := os.UserCacheDir()
 	if err != nil {
 		return topology.Snapshot{}, fmt.Errorf("resolve Dark Factory cache directory: %w", err)

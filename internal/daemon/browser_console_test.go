@@ -25,6 +25,9 @@ type consoleFixture struct {
 func newConsoleFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask, root string) *consoleFixture {
 	t.Helper()
 	fixture := newAdapterFixture(t, capabilities)
+	// Topology writes a regenerable cache. A test writes it under its own
+	// temporary directory, never into the operator's real cache.
+	fixture.daemon.topologyCacheRoot = t.TempDir()
 	fixture.pair(t)
 	ctx := context.Background()
 	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 0x21))
@@ -129,7 +132,10 @@ func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTopology(t *testing.T) {
 		t.Fatalf("agent after refused update = %+v, found=%v, err=%v", stored, found, err)
 	}
 	result, err := fixture.backend.Topology(ctx, client, browserprotocol.TopologyGet{ProjectID: fixture.project.ID.String()})
-	if err != nil || result.ProjectID != fixture.project.ID.String() || len(result.Digest) != 64 || len(result.Nodes) == 0 {
+	// consoleRoot is a Go module with one package below it, so the served tree
+	// is exactly the module and the repository at ".", plus the package. An
+	// exact count is what catches a projection that silently drops a subtree.
+	if err != nil || result.ProjectID != fixture.project.ID.String() || len(result.Digest) != 64 || len(result.Nodes) != 3 {
 		t.Fatalf("observe-only topology = %+v, %v", result, err)
 	}
 	for _, node := range result.Nodes {
@@ -248,6 +254,11 @@ func TestBrowserConsoleServesAProjectWithAnOverLongDirectoryName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("topology with an over-long directory = %v", err)
 	}
+	// The over-long directory costs its own subtree and nothing else: the
+	// module, the repository and the "one" package are still served.
+	if len(result.Nodes) != 3 {
+		t.Fatalf("served %d nodes: %+v", len(result.Nodes), result.Nodes)
+	}
 	for _, node := range result.Nodes {
 		if len(node.Label) > browserprotocol.MaxAgentNameBytes || len(node.Path) > browserprotocol.MaxTaskTitleBytes {
 			t.Fatalf("served an unencodable node: %+v", node)
@@ -278,5 +289,64 @@ func TestBrowserConsoleReassignsATaskWithinItsProject(t *testing.T) {
 	stored, found, err := fixture.store.Task(ctx, fixture.task.ID)
 	if err != nil || !found || stored.AssignedAgentID != second.ID || stored.Status != kernel.TaskQueued {
 		t.Fatalf("reassigned task = %+v, found=%v, err=%v", stored, found, err)
+	}
+}
+
+// The derived graph is ordered by path and kind, not by ancestry: a root
+// go.mod puts the module node before the repository that contains it. A
+// projection that trusted slice order dropped the module as "parent absent"
+// and, because every top-level node hangs off it, the whole tree with it.
+func TestProjectTopologyKeepsARootModuleAheadOfItsRepository(t *testing.T) {
+	root := t.TempDir()
+	writeTopologyFixture(t, root, "go.mod", "module example.com/console\n")
+	writeTopologyFixture(t, root, "one/one.go", "package one\n")
+	snapshot, err := topology.Build(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The shape this guards against only exists when the module sorts first.
+	if len(snapshot.Nodes) == 0 || snapshot.Nodes[0].Kind != topology.NodeModule {
+		t.Fatalf("fixture does not reproduce the ordering: %+v", snapshot.Nodes)
+	}
+	served := projectTopology("01010101010101010101010101010101", snapshot)
+	if len(served.Nodes) != len(snapshot.Nodes) {
+		t.Fatalf("served %d of %d nodes: %+v", len(served.Nodes), len(snapshot.Nodes), served.Nodes)
+	}
+	kinds := make(map[string]int, len(served.Nodes))
+	for _, node := range served.Nodes {
+		kinds[node.Kind]++
+	}
+	if kinds["module"] != 1 || kinds["repository"] != 1 || kinds["package"] != 1 {
+		t.Fatalf("served kinds = %v", kinds)
+	}
+	if _, err := browserprotocol.EncodeTopology("topology", served); err != nil {
+		t.Fatalf("served topology did not encode: %v", err)
+	}
+}
+
+// A reasoning effort no provider accepts is not a lost race: refetching does
+// not make it valid, so answering stale would send the console around a loop
+// it cannot leave.
+func TestBrowserConsoleAnswersInvalidRequestForARefusedLaunchControl(t *testing.T) {
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
+	ctx := context.Background()
+	client := rawBrowserClient(fixture.client.ID)
+	effort := "sideways"
+	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
+		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), ReasoningEffort: &effort,
+	}); !errors.Is(err, browser.ErrInvalidRequest) {
+		t.Fatalf("refused reasoning effort = %v", err)
+	}
+	// A revision that lost its race is still stale: the two are not the same
+	// answer and the console acts on them differently.
+	paused := browserprotocol.Bool(true)
+	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
+		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision) + 9, Paused: &paused,
+	}); !errors.Is(err, browser.ErrStale) {
+		t.Fatalf("stale revision = %v", err)
+	}
+	stored, found, err := fixture.store.Agent(ctx, fixture.agent.ID)
+	if err != nil || !found || stored.Revision != fixture.agent.Revision {
+		t.Fatalf("agent after refused updates = %+v, found=%v, err=%v", stored, found, err)
 	}
 }

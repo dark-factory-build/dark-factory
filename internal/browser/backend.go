@@ -9,9 +9,12 @@ import (
 )
 
 var (
-	ErrUnauthorized           = errors.New("browser: unauthorized")
-	ErrNotFound               = errors.New("browser: not found")
-	ErrStale                  = errors.New("browser: stale")
+	ErrUnauthorized = errors.New("browser: unauthorized")
+	ErrNotFound     = errors.New("browser: not found")
+	ErrStale        = errors.New("browser: stale")
+	// ErrInvalidRequest is a member the domain refuses. Unlike ErrStale it is
+	// not fixed by refetching: the client must send a different value.
+	ErrInvalidRequest         = errors.New("browser: invalid request")
 	ErrTooLarge               = errors.New("browser: too large")
 	ErrRateLimited            = errors.New("browser: rate limited")
 	ErrSubscriptionUnresolved = errors.New("browser: subscription cleanup unresolved")

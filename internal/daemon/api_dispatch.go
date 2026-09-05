@@ -32,6 +32,10 @@ type Daemon struct {
 	// window. It is a cost guard, not state: losing it only costs one walk.
 	topologyMu sync.Mutex
 	topologies map[kernel.ProjectID]topologySnapshot
+	// topologyCacheRoot overrides the operator's cache directory. It is empty
+	// in production and set by tests that must not write outside their own
+	// temporary directory.
+	topologyCacheRoot string
 
 	// operationMu is the single linearization gate for live-attempt operations
 	// that combine durable state with an owner-side action. It is deliberately

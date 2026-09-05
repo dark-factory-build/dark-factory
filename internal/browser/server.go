@@ -621,6 +621,8 @@ func errorFrame(err error) browserprotocol.Error {
 		return browserprotocol.Error{Code: browserprotocol.ErrorNotFound}
 	case errors.Is(err, ErrStale):
 		return browserprotocol.Error{Code: browserprotocol.ErrorStale}
+	case errors.Is(err, ErrInvalidRequest):
+		return browserprotocol.Error{Code: browserprotocol.ErrorInvalidRequest}
 	case errors.Is(err, ErrTooLarge):
 		return browserprotocol.Error{Code: browserprotocol.ErrorTooLarge}
 	case errors.Is(err, ErrRateLimited):
