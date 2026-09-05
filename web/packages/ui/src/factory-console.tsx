@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { AgentItem, TaskItem } from "@dark-factory/client";
-import type { FactoryAgentSelection, FactoryAppSnapshot, FactoryHumanRequestView } from "./factory-app-controller.js";
+import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor, StageMeter } from "./console-screens.js";
 import { AgentPanel, HumanRequestPanel, SettingsPanel, type AgentConfigEdit, type TaskEdit } from "./console-sidebar.js";
 import { factoryCounters, stageOfTask } from "./console-view.js";
@@ -89,7 +89,7 @@ export function FactoryConsole({
   onReplyHumanRequest,
   onCancelHumanRequest,
   onCloseHumanRequest,
-  address = "127.0.0.1:43123",
+  address = BROWSER_HOST,
   pairing,
   instructionContent,
   terminalContent,

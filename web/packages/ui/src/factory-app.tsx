@@ -39,10 +39,12 @@ export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
   }, []);
 
   // The floor's rooms are regenerable, so they are fetched when the floor is
-  // shown and again whenever a fresh session becomes ready.
+  // shown, whenever a fresh session becomes ready, and whenever the set of
+  // projects changes under them.
+  const projectKey = snapshot.state === undefined ? "" : [...snapshot.state.projects.keys()].join(" ");
   useEffect(() => {
     if (view === "floor" && snapshot.status === "ready") owner.current?.loadTopology();
-  }, [view, snapshot.status]);
+  }, [view, snapshot.status, projectKey]);
 
   const controller = owner.current;
   const agentTerminal = controller === undefined || snapshot.selectedAgent === undefined ? undefined : snapshot.terminal;

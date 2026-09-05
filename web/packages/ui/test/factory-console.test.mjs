@@ -89,16 +89,18 @@ test("the left view toggles between the floor and the ranked agent list", () => 
 test("the floor maps topology to rooms and agents to workers deterministically", () => {
   const scene = floorScene(fixtureState, fixtureTopology);
   // Only the repository root and its direct children become rooms.
-  assert.deepEqual(scene.topology.nodes.map((node) => node.label), ["north-workshop", "kernel", "web"]);
-  assert.deepEqual(scene.topology.nodes.map((node) => node.sizeBucket), ["large", "medium", "small"]);
+  assert.deepEqual(scene.topology.nodes.map((node) => node.label), ["north-workshop", "kernel", "web", "South Workshop"]);
+  assert.deepEqual(scene.topology.nodes.map((node) => node.sizeBucket), ["large", "medium", "small", undefined]);
   assert.equal(scene.topology.digest, fixtureTopology.digest);
   assert.deepEqual(scene, floorScene(fixtureState, { ...fixtureTopology, nodes: [...fixtureTopology.nodes] }));
 
-  // Every agent in the topology's project stands in its repository root.
+  // The detailed project's agents stand in its repository root; a project the
+  // topology does not cover still gets a room, so nobody is stranded.
   const root = scene.topology.nodes[0].id;
+  assert.deepEqual(scene.topology.nodes.at(-1).label, "South Workshop");
   assert.deepEqual(scene.workers.map((worker) => [worker.name, worker.activity, worker.nodeId]), [
     ["Builder One", "needs-you", root],
-    ["Dispatch Lead", "idle", undefined],
+    ["Dispatch Lead", "idle", ids.secondProject],
     ["Builder Two", "waiting", root],
   ]);
   assert.deepEqual(scene.workItems.map((item) => item.stage), ["staged", "release-ready"]);
@@ -123,13 +125,16 @@ test("hostile names and titles are escaped as text and private detail is absent"
     tasks: new Map([[ids.task, { id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title: hostile, status: "running", priority: 10, revision: 12n }]]),
   });
   for (const view of VIEWS) {
-    for (const props of [{ view }, { view, selectedAgent: agentSelection() }]) {
+    // The second pass renders the config form, so the hostile model reaches
+    // an input value rather than being dropped with the whole section.
+    for (const props of [{ view }, { view, selectedAgent: agentSelection(), onSaveAgentConfig: () => {} }]) {
       const markup = render({ state: hostileState, ...props });
       assert.equal(markup.includes("<img"), false, view);
       assert.equal(markup.includes("question"), false, view);
     }
   }
   assert.match(render({ state: hostileState }), /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(render({ state: hostileState, selectedAgent: agentSelection(), onSaveAgentConfig: () => {} }), /<input id="df-model-[0-9a-f]+" value="&lt;img src=x onerror=alert\(1\)&gt;"/);
 });
 
 test("the console never shows a kernel-grammar or retired vocabulary word", () => {
@@ -180,8 +185,12 @@ test("transitional session statuses have stable live labels and offer no factory
 
 test("closed and pairing-uncertain errors have no ineffective action", () => {
   for (const error of [new SessionError("connection", true), new SessionError("pairing_uncertain"), new ProtocolError("malformed")]) {
-    const markup = render({ status: "closed", error });
+    const markup = render({ status: "closed", error, onSelectAgent: () => {}, onSelectHumanRequest: () => {}, onView: () => {}, onToggleSettings: () => {} });
     assert.match(markup, /role="alert"/);
+    // The banner offers nothing to press, and the only live buttons on a
+    // closed console are the three that change nothing in the factory.
+    assert.equal((markup.match(/<button(?![^>]*disabled)/g) ?? []).length, 3);
+    assert.doesNotMatch(markup, /role="alert"[^>]*>[^<]*<button/);
     assert.equal(markup.includes("RETRY CONNECTION"), false);
     assert.equal(markup.includes("Error:"), false);
     assert.equal(markup.includes("secret"), false);
@@ -348,16 +357,15 @@ test("the queued task row edits title, order, assignment, and cancellation", asy
     const state = baseState({
       tasks: new Map([[queued.id, { ...queued, assigned_agent_id: ids.agent }], [other.id, { ...other, assigned_agent_id: ids.agent }]]),
     });
+    const props = {
+      status: "ready",
+      state,
+      selectedAgent: agentSelection(),
+      onSaveAgentConfig: (config) => edits.push(["config", config]),
+      onEditTask: (task, change) => edits.push([task.id, change]),
+    };
     let renderer;
-    await act(async () => {
-      renderer = create(createElement(FactoryConsole, {
-        status: "ready",
-        state,
-        selectedAgent: agentSelection(),
-        onSaveAgentConfig: (config) => edits.push(["config", config]),
-        onEditTask: (task, change) => edits.push([task.id, change]),
-      }));
-    });
+    await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
     const buttons = renderer.root.findAllByType("button");
     const byLabel = (label) => buttons.find((button) => button.props["aria-label"] === label);
     // Moving down takes the neighbour below's priority minus one.
@@ -383,10 +391,33 @@ test("the queued task row edits title, order, assignment, and cancellation", asy
     await act(async () => { buttons.filter((button) => button.props.children === "CANCEL")[0].props.onClick(); });
     assert.deepEqual(edits.at(-1), [queued.id, { cancel: true }]);
 
+    // A refused rename reverts to the served title. A refusal never moves the
+    // revision, so without this the input would resend it on the next blur.
+    const titleValue = () => renderer.root.findAllByType("input").find((input) => input.props.id === `df-title-${queued.id}`).props.value;
+    assert.equal(titleValue(), "Renamed");
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, edit: { pending: false, error: new SessionError("stale") } })); });
+    assert.equal(titleValue(), queued.title);
+    await act(async () => { renderer.update(createElement(FactoryConsole, props)); });
+
+    // A save carries only what changed. Sending an untouched model would make
+    // the daemon revalidate it, so an agent whose stored pair it no longer
+    // accepts could never be paused.
+    const config = () => renderer.root.findAllByType("form")[0];
+    const paused = renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox");
+    await act(async () => { paused.props.onChange({ currentTarget: { checked: true } }); });
+    await act(async () => { config().props.onSubmit({ preventDefault() {} }); });
+    assert.deepEqual(edits.at(-1), ["config", { paused: true }]);
+
     const model = renderer.root.findAllByType("input").find((input) => input.props.value === "claude-opus-5");
     await act(async () => { model.props.onChange({ currentTarget: { value: "claude-sonnet-5" } }); });
-    await act(async () => { renderer.root.findAllByType("form")[0].props.onSubmit({ preventDefault() {} }); });
-    assert.deepEqual(edits.at(-1), ["config", { model: "claude-sonnet-5", reasoningEffort: "high", paused: false }]);
+    await act(async () => { config().props.onSubmit({ preventDefault() {} }); });
+    assert.deepEqual(edits.at(-1), ["config", { model: "claude-sonnet-5", paused: true }]);
+
+    // Saving an untouched form is not a write at all.
+    await act(async () => { model.props.onChange({ currentTarget: { value: "claude-opus-5" } }); });
+    await act(async () => { paused.props.onChange({ currentTarget: { checked: false } }); });
+    await act(async () => { config().props.onSubmit({ preventDefault() {} }); });
+    assert.deepEqual(edits.at(-1), ["config", {}]);
     await act(async () => { renderer.unmount(); });
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;

@@ -404,9 +404,20 @@ test("console edits carry the exact served revision and surface a refusal", asyn
   context.emitStatus("ready");
   context.controller.selectAgent(agent);
 
+  // Pausing alone sends paused alone: the daemon only revalidates a launch
+  // control when the patch touches it, so an agent whose stored model it no
+  // longer accepts must still be pausable.
+  await context.controller.updateAgentConfig({ paused: true });
+  assert.deepEqual(sent.at(-1), ["agent", { agentId: agent.id, expectedRevision: agent.revision, paused: true }]);
+  assert.equal(context.latest().edit, undefined, "a settled edit leaves no state behind");
+
   await context.controller.updateAgentConfig({ model: "claude-opus-5", reasoningEffort: "high", paused: true });
   assert.deepEqual(sent.at(-1), ["agent", { agentId: agent.id, expectedRevision: agent.revision, model: "claude-opus-5", reasoningEffort: "high", paused: true }]);
-  assert.equal(context.latest().edit, undefined, "a settled edit leaves no state behind");
+
+  // An empty patch is not a write, so it cannot bump a revision for nothing.
+  const before = sent.length;
+  await context.controller.updateAgentConfig({});
+  assert.equal(sent.length, before);
 
   refuse = true;
   await context.controller.updateAgentConfig({ model: "gone", reasoningEffort: "", paused: false });
@@ -420,9 +431,10 @@ test("console edits carry the exact served revision and surface a refusal", asyn
   assert.deepEqual(sent.at(-1), ["task", { taskId: queued.id, expectedRevision: queued.revision, priority: 11 }]);
 
   // Nothing is sent while the session is not ready.
+  const settled = sent.length;
   context.emitStatus("syncing");
   await context.controller.editTask(queued, { cancel: true });
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, settled);
 });
 
 test("leaving the terminal keeps the agent selected; closing the sidebar does not", () => {
@@ -471,4 +483,8 @@ test("the floor's topology is fetched once per demand and absence is tolerated",
   await Promise.resolve();
   assert.deepEqual(context.latest().topology, topology);
   assert.equal(requests, 2);
+
+  // A floor belongs to its project; when that project is gone, so is it.
+  context.emitState({ ...fixtureState, projects: new Map() });
+  assert.equal(context.latest().topology, undefined);
 });

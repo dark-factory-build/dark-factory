@@ -4,7 +4,8 @@ import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-con
 import { rankLabel } from "./console-screens.js";
 import { agentActivity, agentCurrentTask } from "./console-view.js";
 
-export type AgentConfigEdit = Readonly<{ model: string; reasoningEffort: string; paused: boolean }>;
+/** Only the controls the operator actually changed; the rest are left alone. */
+export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; paused?: boolean }>;
 
 export type TaskEdit = Readonly<{ title?: string; priority?: number; assignedAgentId?: string; cancel?: boolean }>;
 
@@ -52,6 +53,10 @@ export function AgentPanel({
     .sort((left, right) => right.priority - left.priority);
   const peers = state === undefined ? [] : [...state.agents.values()].filter((peer) => peer.project_id === agent.project_id);
   const errorCopy = editErrorCopy(edit);
+  // A form remounts when the served value moves under it and when an edit is
+  // refused, so a rejected change reverts instead of being resent on the next
+  // blur. A refusal never changes the revision, so it needs its own token.
+  const formKey = (id: string, revision: bigint) => `${id}:${revision}:${errorCopy === undefined ? "" : "refused"}`;
   return (
     <section className="dfConsoleSidebar__panel" aria-label={`Agent ${agent.name}`}>
       <div className="dfConsoleSidebar__heading">
@@ -71,7 +76,7 @@ export function AgentPanel({
 
       {errorCopy === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{errorCopy}</p>}
 
-      <AgentConfig key={`${agent.id}:${agent.revision}`} agent={agent} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} />
+      <AgentConfig key={formKey(agent.id, agent.revision)} agent={agent} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} />
 
       <div className="dfConsoleSidebar__section" aria-label="Agent queue">
         <h3>QUEUE</h3>
@@ -79,7 +84,7 @@ export function AgentPanel({
           <ul className="dfFactoryConsole__list">
             {queued.map((task, index) => (
               <QueuedTask
-                key={task.id}
+                key={formKey(task.id, task.revision)}
                 task={task}
                 above={queued[index - 1]}
                 below={queued[index + 1]}
@@ -116,17 +121,23 @@ function AgentConfig({
   const [reasoningEffort, setReasoningEffort] = useState(agent.reasoning_effort);
   const [paused, setPaused] = useState(agent.paused);
   if (onSave === undefined) return null;
+  // Sending a control the operator did not touch would make the daemon
+  // revalidate it, so a stored pair it no longer accepts could not be paused.
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    onSave({ model, reasoningEffort, paused });
+    onSave({
+      ...(model === agent.model ? {} : { model }),
+      ...(reasoningEffort === agent.reasoning_effort ? {} : { reasoningEffort }),
+      ...(paused === agent.paused ? {} : { paused }),
+    });
   };
   return (
     <form className="dfConsoleSidebar__section dfConsoleSidebar__config" aria-label="Agent configuration" onSubmit={submit}>
       <h3>CONFIG</h3>
       <label htmlFor={`df-model-${agent.id}`}>MODEL</label>
-      <input id={`df-model-${agent.id}`} value={model} disabled={pending} maxLength={128} onChange={(event) => setModel(event.currentTarget.value)} />
+      <input id={`df-model-${agent.id}`} value={model} disabled={pending} onChange={(event) => setModel(event.currentTarget.value)} />
       <label htmlFor={`df-effort-${agent.id}`}>REASONING EFFORT</label>
-      <input id={`df-effort-${agent.id}`} value={reasoningEffort} disabled={pending} maxLength={128} onChange={(event) => setReasoningEffort(event.currentTarget.value)} />
+      <input id={`df-effort-${agent.id}`} value={reasoningEffort} disabled={pending} onChange={(event) => setReasoningEffort(event.currentTarget.value)} />
       <label className="dfConsoleSidebar__toggle" htmlFor={`df-paused-${agent.id}`}>
         <input id={`df-paused-${agent.id}`} type="checkbox" checked={paused} disabled={pending} onChange={(event) => setPaused(event.currentTarget.checked)} />
         PAUSED

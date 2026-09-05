@@ -21,7 +21,8 @@ import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSna
 
 const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser");
 const BROWSER_URL = BROWSER_ENDPOINT.toString();
-const BROWSER_HOST = BROWSER_ENDPOINT.host;
+/** The one loopback address this console dials; SETTINGS shows exactly it. */
+export const BROWSER_HOST = BROWSER_ENDPOINT.host;
 
 export type FactoryHumanRequestView = Readonly<{
   request: HumanRequestItem;
@@ -276,16 +277,21 @@ export class FactoryAppController {
     );
   }
 
-  /** Save the selected agent's configuration against its exact revision. */
-  async updateAgentConfig(config: { model: string; reasoningEffort: string; paused: boolean }): Promise<void> {
+  /**
+   * Save the selected agent's configuration against its exact revision. Only
+   * the controls the caller changed are sent; an omitted one is left alone,
+   * and an empty change is not a write at all.
+   */
+  async updateAgentConfig(config: { model?: string; reasoningEffort?: string; paused?: boolean }): Promise<void> {
     const selected = this.#selectedAgent;
     const session = this.#client?.session;
     if (this.#closed || this.#status !== "ready" || selected === undefined || session === undefined || this.#edit?.pending === true) return;
+    if (Object.values(config).every((value) => value === undefined)) return;
     const generation = this.#generation;
     this.#edit = { pending: true };
     this.#publish();
     try {
-      await session.updateAgent({ agentId: selected.agent.id, expectedRevision: selected.agent.revision, model: config.model, reasoningEffort: config.reasoningEffort, paused: config.paused });
+      await session.updateAgent({ agentId: selected.agent.id, expectedRevision: selected.agent.revision, ...config });
       if (!this.#current(generation)) return;
       this.#edit = undefined;
     } catch (error) {
@@ -591,6 +597,8 @@ export class FactoryAppController {
   #receiveState(generation: number, state: StateView): void {
     if (!this.#current(generation)) return;
     this.#state = state;
+    // Topology belongs to one project; a project that is gone has no floor.
+    if (this.#topology !== undefined && !state.projects.has(this.#topology.projectId)) this.#topology = undefined;
     const selectedAgent = this.#selectedAgent;
     const replacementAgentID = this.#terminalReplacement?.agentId;
     if (replacementAgentID !== undefined) {

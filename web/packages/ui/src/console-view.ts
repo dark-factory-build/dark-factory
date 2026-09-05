@@ -114,13 +114,16 @@ export type FloorScene = Readonly<{
  * worker stands in its own project's room.
  */
 export function floorScene(state: StateView | undefined, topology: TopologyView | undefined): FloorScene {
-  const rooms = topology === undefined ? projectRooms(state) : topologyRooms(topology);
+  const projects = state === undefined ? [] : [...state.projects.values()];
+  // Topology is served one project at a time. Every other project still gets
+  // its own room, so no agent is stranded in the overflow bay.
+  const detailed = topology === undefined ? [] : topologyRooms(topology);
+  const rooms = [...detailed, ...projectRooms(projects.filter((project) => project.id !== topology?.projectId))]
+    .slice(0, MAX_FLOOR_ROOMS);
   const roomIDs = new Set(rooms.map((room) => room.id));
-  const rootID = topology === undefined ? undefined : rooms[0]?.id;
+  const rootID = detailed[0]?.id;
   const roomOfProject = (projectID: string): string | undefined =>
-    topology === undefined
-      ? (roomIDs.has(projectID) ? projectID : undefined)
-      : (projectID === topology.projectId ? rootID : undefined);
+    projectID === topology?.projectId ? rootID : roomIDs.has(projectID) ? projectID : undefined;
   const workers = state === undefined ? [] : [...state.agents.values()].map((agent) => {
     const nodeId = roomOfProject(agent.project_id);
     return {
@@ -152,9 +155,8 @@ function topologyRooms(topology: TopologyView): readonly SceneNode[] {
   }));
 }
 
-function projectRooms(state: StateView | undefined): readonly SceneNode[] {
-  if (state === undefined) return [];
-  return [...state.projects.values()].slice(0, MAX_FLOOR_ROOMS).map((project) => ({
+function projectRooms(projects: readonly { id: string; name: string }[]): readonly SceneNode[] {
+  return projects.map((project) => ({
     id: project.id,
     parentId: "",
     path: project.name,
