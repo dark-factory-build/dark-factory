@@ -46,7 +46,8 @@ const selectedRequest = (overrides = {}) => ({
 
 test("error banner keeps its centered layout after the paragraph reset", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
-  assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
+  // The sidebar is a sibling of the console, so it needs the same reset.
+  assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\),\s*\.dfConsoleSidebar :where\(h1, h2, h3, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
   assert.match(css, /\.dfFactoryConsole__error\s*\{[\s\S]*?margin: 0 auto 1\.25rem;/);
 });
 
@@ -292,6 +293,11 @@ test("the sidebar replaces the right column and the terminal owns it outright", 
   assert.match(css, /\.dfConsoleLayout\s*\{[^}]*grid-template-columns: minmax\(0, 2fr\) minmax\(0, 1fr\);/);
   assert.match(css, /\.dfConsoleLayout--narrow \{ grid-template-columns: minmax\(0, 1fr\); \}/);
   assert.match(css, /\.dfConsoleSidebar\s*\{[^}]*flex: 0 0 clamp\(22rem, 40vw, 44rem\);[^}]*min-width: 0;/);
+  // Every rule the console scopes to its own subtree names the sidebar too,
+  // or the sidebar renders in the browser's default serif on the page ground.
+  for (const rule of [/\.dfConsoleSidebar \*,/, /\.dfConsoleSidebar button \{/, /\.dfConsoleSidebar button:disabled/, /\.dfConsoleSidebar\s*\{[^}]*font-family: ui-monospace/, /\.dfConsoleSidebar\s*\{[^}]*color: var\(--df-console-text\)/]) {
+    assert.match(css, rule);
+  }
   assert.match(css, /@media \(max-width: 1024px\)[\s\S]*?\.dfConsoleShell \{ display: block; \}/);
   assert.match(css, /:focus-visible\s*\{\s*outline: 2px solid var\(--df-console-accent\);/);
 
@@ -437,6 +443,9 @@ test("selected hostile private detail is escaped and actions remain semantic", (
   });
   assert.match(markup, /aria-label="Selected question"/);
   assert.match(markup, /aria-label="Answer this question"/);
+  // The decision card is a sidebar panel, headed like the agent panel.
+  assert.match(markup, /<article class="dfConsoleSidebar__panel dfFactoryConsole__humanRequest"/);
+  assert.match(markup, /<div class="dfConsoleSidebar__heading"><div><p class="dfFactoryConsole__eyebrow">North Workshop · Review the state projection<\/p><h2>Builder One needs you<\/h2><\/div><button type="button">CLOSE<\/button>/);
   assert.match(markup, /&lt;script&gt;steal\(authority\)&lt;\/script&gt;/);
   assert.equal(markup.includes("<script>"), false);
   assert.match(markup, /<textarea[^>]*>&lt;reply&gt;<\/textarea>/);

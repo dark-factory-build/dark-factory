@@ -260,12 +260,15 @@ export function HumanRequestPanel({
   const busy = selected.phase === "replying" || selected.phase === "cancelling";
   const submit = (event: FormEvent) => { event.preventDefault(); onReply?.(); };
   return (
-    <article className="dfFactoryConsole__humanRequest" aria-label="Selected question" aria-live="polite">
-      <div className="dfFactoryConsole__cardTitle">
-        <strong>{agent} needs you</strong>
-        <span>{selected.phase === "replying" ? "ANSWERING" : selected.phase.toUpperCase()}</span>
+    <article className="dfConsoleSidebar__panel dfFactoryConsole__humanRequest" aria-label="Selected question" aria-live="polite">
+      <div className="dfConsoleSidebar__heading">
+        <div>
+          <p className="dfFactoryConsole__eyebrow">{project} · {task}</p>
+          <h2>{agent} needs you</h2>
+        </div>
+        <button type="button" disabled={busy || onClose === undefined} onClick={onClose}>CLOSE</button>
       </div>
-      <p>{project} · {task}</p>
+      <p className="dfConsoleSidebar__status">{selected.phase === "replying" ? "ANSWERING" : selected.phase.toUpperCase()}</p>
       {selected.phase === "loading" ? <p className="dfFactoryConsole__empty">LOADING THE QUESTION…</p> : (
         <>
           <p className="dfFactoryConsole__question">{selected.question}</p>
@@ -285,7 +288,6 @@ export function HumanRequestPanel({
           <div className="dfFactoryConsole__humanActions">
             {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>Stop</button> : null}
             {onOpenTerminal === undefined ? null : <button type="button" disabled={busy || !terminalReady} onClick={() => onOpenTerminal(selected.request)}>OPEN TERMINAL</button>}
-            <button type="button" disabled={busy || onClose === undefined} onClick={onClose}>CLOSE</button>
           </div>
         </>
       )}

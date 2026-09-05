@@ -318,6 +318,17 @@ export class FactoryAppController {
     this.#replaceTerminal({});
   }
 
+  /**
+   * Leave the terminal without dropping the agent the sidebar is showing.
+   * Replacing the terminal with the same exact agent detaches through the one
+   * teardown path, so the protocol handle is released exactly as CLOSE does.
+   */
+  closeAgentTerminal(): void {
+    const selected = this.#selectedAgent;
+    if (this.#closed) return;
+    this.#replaceTerminal(selected === undefined ? {} : { agentId: selected.agent.id, agentRevision: selected.agent.revision });
+  }
+
   async enqueueAgentInstruction(instruction: string): Promise<boolean> {
     const selected = this.#selectedAgent;
     const session = this.#client?.session;
@@ -835,6 +846,9 @@ export class FactoryAppController {
     }
     this.#terminalReplacement = replacement;
     this.#error = undefined;
+    // Release the display token before detaching: the view may unmount the
+    // surface during teardown, and that is this teardown, not a fault.
+    this.#terminalSurfaceToken = undefined;
     void terminal.detach().catch(() => undefined);
     this.#publish();
   }

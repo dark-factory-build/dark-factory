@@ -425,6 +425,26 @@ test("console edits carry the exact served revision and surface a refusal", asyn
   assert.equal(sent.length, 3);
 });
 
+test("leaving the terminal keeps the agent selected; closing the sidebar does not", () => {
+  const agent = fixtureState.agents.get([...fixtureState.agents.keys()][0]);
+  const context = harness();
+  context.controller.start();
+  context.emitState(fixtureState);
+  context.emitStatus("ready");
+
+  context.controller.selectAgent(agent);
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  context.controller.closeAgentTerminal();
+  assert.equal(context.latest().selectedAgent.id, agent.id, "back leaves the sidebar on its agent");
+  assert.equal(context.latest().error, undefined, "a deliberate teardown is not a fault");
+
+  context.controller.clearAgentTerminal();
+  assert.equal(context.latest().selectedAgent, undefined);
+  // With nothing selected the two are the same finite no-op.
+  context.controller.closeAgentTerminal();
+  assert.equal(context.latest().selectedAgent, undefined);
+});
+
 test("the floor's topology is fetched once per demand and absence is tolerated", async () => {
   const project = [...fixtureState.projects.values()][0];
   const topology = { projectId: project.id, digest: "ab".repeat(32), sourceRevision: "", nodes: [] };

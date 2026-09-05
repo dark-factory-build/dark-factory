@@ -60,6 +60,10 @@ try {
     close.props.onClick();
   });
   await waitFor(() => counters.detaches === 1 && counters.terminals === counters.disposes, "terminal did not detach and unmount");
+  // Leaving the terminal returns to the agent's own sidebar, and unmounting
+  // the surface as part of that teardown is not reported as a fault.
+  assert.ok(openTerminal(), "closing the terminal must return to the agent panel");
+  assert.equal(renderer.root.findAll((node) => node.props?.role === "alert").length, 0, "a deliberate close raises no error");
   assert.equal(counters.detaches, 1, "close must detach exactly one terminal observer");
   assert.equal(counters.sessionCloses, 1, "terminal close must preserve the active browser session");
   assert.equal(counters.terminals, counters.disposes, "closed terminal surface must unmount");

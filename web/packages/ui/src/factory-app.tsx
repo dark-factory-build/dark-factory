@@ -49,7 +49,7 @@ export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
   const terminal = agentTerminal === undefined || controller === undefined || !terminalOpen ? undefined : (
     <TerminalPanel
       terminal={agentTerminal}
-      onClose={() => { setTerminalOpen(false); controller.clearAgentTerminal(); }}
+      onClose={() => { setTerminalOpen(false); controller.closeAgentTerminal(); }}
     >
       <TerminalContent terminal={agentTerminal} controller={controller} />
     </TerminalPanel>
