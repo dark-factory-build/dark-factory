@@ -178,8 +178,8 @@ type Backend interface {
 	WatchState(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Decimal) (StateSubscription, error)
 }
 
-// PairBackend serves the first-party pair page: PairLink mints the same
-// one-shot launch link the operator CLI mints, or fails plainly.
+// PairBackend serves the first-party pair page: PairLink mints the page's
+// one-shot launch link, or fails plainly.
 type PairBackend interface {
 	Backend
 	PairLink(context.Context) (string, error)
