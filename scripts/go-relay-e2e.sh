@@ -48,20 +48,25 @@ export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
     "$node" "$corepack" pnpm --filter @dark-factory/client run build
 )
 
-# The relay Worker runs from its own lockfile, exactly as relay/scripts/local-ci.sh
-# installs it. CI starts from a clean tree, so this always installs: npm comes
-# from beside the resolved Node, and its cache goes in the trap-cleaned root
-# because the gate's HOME is not writable.
-npm="$(/usr/bin/dirname "$node")/npm"
-[ -f "$npm" ] && [ -x "$npm" ] || {
-    echo "go-relay-e2e: npm is not installed beside $node" >&2
-    exit 1
-}
-(
-    CDPATH= cd -- "$repository_root/relay"
-    export npm_config_cache="$e2e_root/npm-cache"
-    "$node" "$npm" ci --ignore-scripts --no-audit --no-fund
-)
+# Against a deployed relay the proof never loads relay/tests/helpers.mjs (it
+# imports the relay's own `ws` devDependency at module scope), so relay/ has
+# nothing left to install.
+if [ -z "${DARK_FACTORY_RELAY_ORIGIN-}" ]; then
+    # The relay Worker runs from its own lockfile, exactly as relay/scripts/local-ci.sh
+    # installs it. CI starts from a clean tree, so this always installs: npm comes
+    # from beside the resolved Node, and its cache goes in the trap-cleaned root
+    # because the gate's HOME is not writable.
+    npm="$(/usr/bin/dirname "$node")/npm"
+    [ -f "$npm" ] && [ -x "$npm" ] || {
+        echo "go-relay-e2e: npm is not installed beside $node" >&2
+        exit 1
+    }
+    (
+        CDPATH= cd -- "$repository_root/relay"
+        export npm_config_cache="$e2e_root/npm-cache"
+        "$node" "$npm" ci --ignore-scripts --no-audit --no-fund
+    )
+fi
 
 export DARK_FACTORY_E2E_FACTORYD="$e2e_root/factoryd"
 export DARK_FACTORY_E2E_FACTORYCTL="$e2e_root/factoryctl"

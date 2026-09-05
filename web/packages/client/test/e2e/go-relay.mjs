@@ -17,7 +17,13 @@ import { createRemoteManager, MemoryRemoteStore } from "../../dist/src/index.js"
 const here = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(here, "..", "..", "..", "..", "..");
 const relayRoot = join(repositoryRoot, "relay");
-const { readPersistedObjects, startWorker } = await import(join(relayRoot, "tests", "helpers.mjs"));
+// Set to run this proof against a deployed relay instead of a local
+// `wrangler dev` Worker. helpers.mjs imports the relay's own `ws`
+// devDependency at module scope, so it is loaded only when this is unset --
+// the only reason scripts/go-relay-e2e.sh can skip relay/'s npm ci otherwise.
+const RELAY_ORIGIN = process.env.DARK_FACTORY_RELAY_ORIGIN || undefined;
+const { readPersistedObjects, startWorker } =
+  RELAY_ORIGIN === undefined ? await import(join(relayRoot, "tests", "helpers.mjs")) : {};
 
 // The daemon binds every remote pairing challenge to the production browser
 // origin and refuses to mint an invitation unless the listener allows it, so
@@ -214,14 +220,20 @@ async function main() {
   const root = required("DARK_FACTORY_E2E_RELAY_ROOT");
   const managers = [];
   let worker;
+  let persistence;
   const factories = [];
   try {
-    // One real Worker, spawned exactly as the relay's own gate spawns it.
-    const persistence = join(root, "persist");
-    process.chdir(relayRoot);
-    worker = await startWorker(persistence);
-    process.chdir(repositoryRoot);
-    const relayOrigin = worker.origin.replace("http://", "ws://");
+    let relayOrigin;
+    if (RELAY_ORIGIN === undefined) {
+      // One real Worker, spawned exactly as the relay's own gate spawns it.
+      persistence = join(root, "persist");
+      process.chdir(relayRoot);
+      worker = await startWorker(persistence);
+      process.chdir(repositoryRoot);
+      relayOrigin = worker.origin.replace("http://", "ws://");
+    } else {
+      relayOrigin = RELAY_ORIGIN;
+    }
 
     const alpha = new Factory(root, "a", relayOrigin, await freePort());
     const beta = new Factory(root, "b", relayOrigin, await freePort());
@@ -401,21 +413,31 @@ async function main() {
 
     for (const value of managers) value.close();
     for (const factory of factories) await factory.stop();
-    await worker.stop();
+    if (worker !== undefined) await worker.stop();
 
-    await step("2-relay-knows-nothing", async () => {
-      const objects = await readPersistedObjects(persistence);
-      assert.equal(objects.length, 2, `the relay persisted ${objects.length} objects, want one per factory`);
-      for (const object of objects) {
-        assert.deepEqual(object.records.map(({ key }) => key), ["host"], `object ${object.node} persisted more than the host record`);
-      }
-      const transcript = worker.transcript();
-      for (const secret of [...SECRET.projects, SECRET.body, ...SECRET.questions, ANSWER]) {
-        assert.equal(transcript.includes(secret), false, `the relay's own output carried ${secret}`);
-      }
-    });
+    let note = "";
+    if (RELAY_ORIGIN === undefined) {
+      await step("2-relay-knows-nothing", async () => {
+        const objects = await readPersistedObjects(persistence);
+        assert.equal(objects.length, 2, `the relay persisted ${objects.length} objects, want one per factory`);
+        for (const object of objects) {
+          assert.deepEqual(object.records.map(({ key }) => key), ["host"], `object ${object.node} persisted more than the host record`);
+        }
+        const transcript = worker.transcript();
+        for (const secret of [...SECRET.projects, SECRET.body, ...SECRET.questions, ANSWER]) {
+          assert.equal(transcript.includes(secret), false, `the relay's own output carried ${secret}`);
+        }
+      });
+    } else {
+      await step("2-relay-reachable", async () => {
+        const healthzOrigin = RELAY_ORIGIN.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+        const response = await fetch(`${healthzOrigin}/healthz`);
+        assert.equal(response.status, 200, `GET ${healthzOrigin}/healthz returned ${response.status}`);
+      });
+      note = " (note: persistence and log secrecy were proven against the local worker only, not the deployed relay)";
+    }
 
-    process.stdout.write(`go-relay: PASS ${timings.join(" | ")}\n`);
+    process.stdout.write(`go-relay: PASS ${timings.join(" | ")}${note}\n`);
   } catch (error) {
     process.stderr.write(`go-relay: FAIL ${error.stack}\n`);
     for (const value of managers) process.stderr.write(`--- manager ---\n${value.factories().map((entry) => `${entry.nodeId} ${entry.status} ${entry.error?.code ?? ""}`).join("\n")}\n`);
