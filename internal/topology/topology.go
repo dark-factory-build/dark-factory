@@ -2,6 +2,7 @@
 package topology
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -125,8 +126,8 @@ type analysis struct {
 
 // Build scans root without running project commands. A previous snapshot from
 // this package is returned unchanged when its structural fingerprint matches.
-func Build(root string, previous *Snapshot) (Snapshot, error) {
-	return build(root, previous, defaultLimits)
+func Build(ctx context.Context, root string, previous *Snapshot) (Snapshot, error) {
+	return build(ctx, root, previous, defaultLimits)
 }
 
 // NodeForPath returns the deepest topology node containing relativePath.
@@ -149,8 +150,8 @@ func NodeForPath(snapshot Snapshot, relativePath string) (Node, bool) {
 	return best, bestDepth >= 0
 }
 
-func build(root string, previous *Snapshot, bounds limits) (Snapshot, error) {
-	found, err := discover(root, bounds)
+func build(ctx context.Context, root string, previous *Snapshot, bounds limits) (Snapshot, error) {
+	found, err := discover(ctx, root, bounds)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -179,7 +180,7 @@ func graphDigest(nodes []Node, edges []Edge) string {
 	}{nodes, edges})
 }
 
-func discover(root string, bounds limits) (*discovery, error) {
+func discover(ctx context.Context, root string, bounds limits) (*discovery, error) {
 	if bounds.depth < 0 || bounds.files < 1 || bounds.nodes < 1 || bounds.edges < 0 || bounds.bytes < 0 {
 		return nil, fmt.Errorf("%w: invalid limits", ErrBounds)
 	}
@@ -211,6 +212,11 @@ func discover(root string, bounds limits) (*discovery, error) {
 	err = filepath.WalkDir(root, func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		// The walk can visit tens of thousands of entries. It runs on a request
+		// with a deadline, so it stops when that deadline does.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		rel, err := filepath.Rel(root, name)
 		if err != nil {

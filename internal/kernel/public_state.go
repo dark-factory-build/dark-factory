@@ -214,13 +214,14 @@ func readPublicHumanRequests(ctx context.Context, connection *sql.Conn) ([]Human
 // agentSummarySelect is the one derivation of the served agent summary.
 // Provider is included as a public fact; live activity is deliberately
 // absent (see AgentSummary).
-const agentSummarySelect = `SELECT a.id, a.project_id, a.name, a.role, a.provider, a.paused, a.revision FROM agents a`
+const agentSummarySelect = `SELECT a.id, a.project_id, a.name, a.role, a.provider, a.paused, a.model, a.reasoning_effort, a.revision FROM agents a`
 
 func scanAgentSummary(scanner rowScanner) (AgentSummary, error) {
 	var rawID, rawProjectID []byte
 	var name, rawRole, rawProvider string
+	var model, effort sql.NullString
 	var paused, rawRevision int64
-	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &paused, &rawRevision); err != nil {
+	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &paused, &model, &effort, &rawRevision); err != nil {
 		return AgentSummary{}, err
 	}
 	id, idErr := AgentIDFromBytes(rawID)
@@ -229,8 +230,9 @@ func scanAgentSummary(scanner rowScanner) (AgentSummary, error) {
 	provider, providerErr := ParseProvider(rawProvider)
 	revision, revisionErr := NewRevision(rawRevision)
 	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || revisionErr != nil ||
-		byteLen(name) < 1 || byteLen(name) > 128 || paused != 0 && paused != 1 {
+		byteLen(name) < 1 || byteLen(name) > 128 || paused != 0 && paused != 1 ||
+		validateStoredProviderControls(provider, model.String, effort.String) != nil {
 		return AgentSummary{}, fmt.Errorf("%w: invalid agent summary", ErrCorruptState)
 	}
-	return AgentSummary{ID: id, ProjectID: projectID, Name: name, Role: role.String(), Provider: provider.String(), Paused: paused == 1, Revision: revision}, nil
+	return AgentSummary{ID: id, ProjectID: projectID, Name: name, Role: role.String(), Provider: provider.String(), Paused: paused == 1, Model: model.String, ReasoningEffort: effort.String, Revision: revision}, nil
 }

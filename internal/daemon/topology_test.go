@@ -25,7 +25,8 @@ func TestProjectTopologyUsesProjectRootAndRegenerableProjectCache(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	daemon, err := newDaemon(store, time.Now)
+	clock := time.Unix(1_750_000_000, 0)
+	daemon, err := newDaemon(store, func() time.Time { return clock })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +49,16 @@ func TestProjectTopologyUsesProjectRootAndRegenerableProjectCache(t *testing.T) 
 		t.Fatalf("project-keyed cache: %v", err)
 	}
 	writeTopologyFixture(t, root, "two/two.go", "package two\n")
+	// Inside the freshness window the walk is not repeated, so the answer is
+	// the one already computed even though the tree moved underneath it.
+	held, err := daemon.projectTopology(ctx, projectID, cacheRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.Digest != first.Digest {
+		t.Fatal("topology re-walked the tree inside its freshness window")
+	}
+	clock = clock.Add(topologyFreshness)
 	second, err := daemon.projectTopology(ctx, projectID, cacheRoot)
 	if err != nil {
 		t.Fatal(err)

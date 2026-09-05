@@ -405,8 +405,8 @@ func TestSnapshotInvalidationLogAgreementAndPrivateStateBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	privateModel := "MODEL_SENTINEL_748af8"
-	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "public agent", Role: RoleWorker, Provider: ProviderCodex, Model: privateModel, ReasoningEffort: "xhigh", ToolBudgetLimit: 9}, mustTime(t, 3))
+	servedModel := "MODEL_SENTINEL_748af8"
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "public agent", Role: RoleWorker, Provider: ProviderCodex, Model: servedModel, ReasoningEffort: "xhigh", ToolBudgetLimit: 9}, mustTime(t, 3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,10 +447,10 @@ func TestSnapshotInvalidationLogAgreementAndPrivateStateBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The agent's provider is deliberately a served public fact (the
-		// console's C/X glyphs derive from it); model, reasoning effort,
-		// tool budgets, roots and bodies remain private.
-		for _, private := range []string{privateRoot, privateModel, privateBody, "xhigh", "987654321", "incarnation"} {
+		// The agent's provider, model and reasoning effort are served public
+		// facts (the console displays and edits the last two by owner decision
+		// on 5 September 2026); tool budgets, roots and bodies remain private.
+		for _, private := range []string{privateRoot, privateBody, "987654321", "incarnation"} {
 			if strings.Contains(string(encoded), private) {
 				t.Fatalf("%s exposed private sentinel %q: %s", name, private, encoded)
 			}

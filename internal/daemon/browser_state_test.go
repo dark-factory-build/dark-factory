@@ -198,7 +198,7 @@ func TestBrowserStateSnapshotCannotCarryPrivateData(t *testing.T) {
 	}
 	agent, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
 		ID: agentID, ProjectID: project.ID, Name: "public agent", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex,
-		Model: "MODEL_PRIVATE_SENTINEL", ReasoningEffort: "medium", ToolBudgetLimit: 3,
+		Model: "MODEL_SERVED_FACT", ReasoningEffort: "medium", ToolBudgetLimit: 3,
 	}, adapterTime(t, 511))
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +211,7 @@ func TestBrowserStateSnapshotCannotCarryPrivateData(t *testing.T) {
 	}
 
 	snapshot, raw := adapterSnapshot(t, fixture, connection, "state-1")
-	for _, sentinel := range []string{"QUESTION_PRIVATE_SENTINEL", "ROOT_PRIVATE_SENTINEL", "MODEL_PRIVATE_SENTINEL", "BODY_PRIVATE_SENTINEL"} {
+	for _, sentinel := range []string{"QUESTION_PRIVATE_SENTINEL", "ROOT_PRIVATE_SENTINEL", "BODY_PRIVATE_SENTINEL"} {
 		if bytes.Contains(raw, []byte(sentinel)) {
 			t.Fatalf("encoded snapshot carries %q", sentinel)
 		}

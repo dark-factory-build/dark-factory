@@ -9,11 +9,13 @@ import (
 	"math"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/topology"
 )
 
 // browserStatePollInterval bounds how long a paired browser waits to learn
@@ -303,6 +305,143 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	return browserprotocol.TaskEnqueueResult{TaskID: result.Task.ID.String(), Revision: decimalRevision(result.Task.Revision), AgentRevision: decimalRevision(result.AgentRevision)}, nil
 }
 
+// The transport discovers the console half by type assertion, so a signature
+// that drifts would silently answer unauthorized instead of failing to build.
+var _ browser.ConsoleBackend = (*browserBackend)(nil)
+
+func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.AgentUpdate) (browserprotocol.AgentUpdateResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, err
+	}
+	defer release()
+	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, browser.ErrStale
+	}
+	expected, err := browserDecimal(request.ExpectedRevision)
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, browser.ErrStale
+	}
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, mapBrowserError(err)
+	}
+	patch := kernel.AgentPatch{Model: request.Model, ReasoningEffort: request.ReasoningEffort}
+	if request.Paused != nil {
+		paused := bool(*request.Paused)
+		patch.Paused = &paused
+	}
+	agent, err := backend.store.UpdateAgent(ctx, agentID, expected, patch, at)
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, mapBrowserError(err)
+	}
+	if backend.owner != nil {
+		backend.owner.notifyScheduler()
+	}
+	return browserprotocol.AgentUpdateResult{AgentID: agent.ID.String(), Revision: decimalRevision(agent.Revision)}, nil
+}
+
+func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, err
+	}
+	defer release()
+	taskID, err := browserID(request.TaskID, kernel.TaskIDFromBytes)
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, browser.ErrStale
+	}
+	expected, err := browserDecimal(request.ExpectedRevision)
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, browser.ErrStale
+	}
+	patch := kernel.TaskPatch{Title: request.Title, Priority: request.Priority, Cancel: request.Status != nil}
+	if request.AssignedAgentID != nil {
+		assigned, err := browserID(*request.AssignedAgentID, kernel.AgentIDFromBytes)
+		if err != nil {
+			return browserprotocol.TaskUpdateResult{}, browser.ErrStale
+		}
+		patch.AssignedAgentID = &assigned
+	}
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, mapBrowserError(err)
+	}
+	task, err := backend.store.UpdateTask(ctx, taskID, expected, patch, at)
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, mapBrowserError(err)
+	}
+	if backend.owner != nil {
+		backend.owner.notifyScheduler()
+	}
+	return browserprotocol.TaskUpdateResult{TaskID: task.ID.String(), Revision: decimalRevision(task.Revision)}, nil
+}
+
+// Topology serves the regenerable project structure the daemon already caches
+// on disk. Nodes only: containment is implied by parent, so v1 has no edges.
+func (backend *browserBackend) Topology(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TopologyGet) (browserprotocol.Topology, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
+	if err != nil {
+		return browserprotocol.Topology{}, err
+	}
+	defer release()
+	if backend.owner == nil {
+		return browserprotocol.Topology{}, browser.ErrNotFound
+	}
+	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return browserprotocol.Topology{}, browser.ErrStale
+	}
+	snapshot, err := backend.owner.ProjectTopology(ctx, projectID)
+	if err != nil {
+		return browserprotocol.Topology{}, mapBrowserError(err)
+	}
+	return projectTopology(request.ProjectID, snapshot), nil
+}
+
+// projectTopology is the one conversion from the derived graph to the wire.
+// The tree is a filesystem and bounds nothing; the wire bounds every node's
+// text. A node past a bound is dropped with everything under it, so one
+// long directory name costs its subtree instead of making the whole project
+// unserveable. Truncating instead would invent a label and could silently
+// merge two siblings that differ only past the cut.
+func projectTopology(projectID string, snapshot topology.Snapshot) browserprotocol.Topology {
+	result := browserprotocol.Topology{
+		ProjectID: projectID, Digest: snapshot.Digest, SourceRevision: snapshot.SourceRevision,
+		Nodes: make([]browserprotocol.TopologyNode, 0, len(snapshot.Nodes)),
+	}
+	// Nodes arrive parent-before-child (they are sorted by path, and a parent's
+	// path is a prefix of its children's), so one pass suffices to drop a whole
+	// subtree. A node whose parent is absent for any other reason is dropped
+	// too, rather than served pointing at nothing.
+	kept := make(map[string]struct{}, len(snapshot.Nodes))
+	for _, node := range snapshot.Nodes {
+		if !servableTopologyText(node) {
+			continue
+		}
+		if _, ok := kept[node.ParentID]; !ok && node.ParentID != "" {
+			continue
+		}
+		kept[node.ID] = struct{}{}
+		result.Nodes = append(result.Nodes, browserprotocol.TopologyNode{
+			ID: node.ID, ParentID: node.ParentID, Kind: string(node.Kind), Path: node.RelativePath,
+			Label: node.Label, Language: node.Language, SizeBucket: node.SizeBucket,
+		})
+	}
+	return result
+}
+
+func servableTopologyText(node topology.Node) bool {
+	return validTopologyText(node.RelativePath, 1, browserprotocol.MaxTaskTitleBytes) &&
+		validTopologyText(node.Label, 1, browserprotocol.MaxAgentNameBytes) &&
+		validTopologyText(node.Language, 0, browserprotocol.MaxAgentNameBytes)
+}
+
+func validTopologyText(value string, minimum, maximum int) bool {
+	return len(value) >= minimum && len(value) <= maximum && utf8.ValidString(value)
+}
+
 // RemoteInvite mints one remote pairing invitation for a paired operator: the
 // exact invitation `factoryctl remote pair` mints, plus its scannable code.
 // The mint is never retried; a failure is reported and the operator asks again.
@@ -363,7 +502,7 @@ func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprot
 	}
 	release, err := backend.acquireClient(ctx, clientID)
 	if err != nil {
-		return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, err
+		return kernel.BrowserClientID{}, nil, kernel.BrowserClient{}, mapBrowserError(err)
 	}
 	client, found, err := backend.store.BrowserClient(ctx, clientID)
 	if err != nil || !found || client.RevokedAt != nil || !client.CapabilityMask.Has(capability) {
@@ -497,7 +636,7 @@ func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
 }
 
 func projectAgent(item kernel.AgentSummary) browserprotocol.AgentItem {
-	return browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Revision: decimalRevision(item.Revision)}
+	return browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Model: item.Model, ReasoningEffort: item.ReasoningEffort, Revision: decimalRevision(item.Revision)}
 }
 
 func projectTask(item kernel.TaskSummary) browserprotocol.TaskItem {
@@ -531,6 +670,19 @@ func mapBrowserError(err error) error {
 		return nil
 	}
 	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// An owner-side effect that already reached a verdict keeps it. Its
+		// cause often carries the deadline that produced it, but "the effect
+		// may already have landed" is never retryable busyness: retrying would
+		// attempt it a second time. remoteErrorCode fences OutcomeUnknownError
+		// ahead of its own context arm for the same reason.
+		if terminalEffectVerdict(err) {
+			return err
+		}
+		// Otherwise the caller gave up, or its budget expired before anything
+		// was attempted. That is retryable busyness, not a fault: the same
+		// request converges when it is made again with a budget it fits in.
+		return browser.ErrRateLimited
 	case errors.Is(err, kernel.ErrUnauthorized):
 		return browser.ErrUnauthorized
 	case errors.Is(err, kernel.ErrNotFound):

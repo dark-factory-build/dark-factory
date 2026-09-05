@@ -27,6 +27,7 @@ export const TERMINAL_ACK_TIMEOUT_MS = 10_000;
 export const TERMINAL_LEASE_RENEW_INTERVAL_MS = 10_000;
 export const MAX_TERMINAL_ROWS = 4096;
 export const MAX_TERMINAL_COLS = 4096;
+export const MAX_AGENT_MODEL_BYTES = 128;
 export const MAX_REMOTE_INVITE_LINK_BYTES = 8192;
 export const MAX_REMOTE_INVITE_SVG_BYTES = 32768;
 
@@ -75,6 +76,12 @@ export const CONTROL_MANIFEST = [
   { type: "TERMINAL_EOF", direction: "server", id: "required", fixture: "terminal_eof.json" },
   { type: "TERMINAL_EXIT", direction: "server", id: "required", fixture: "terminal_exit.json" },
   { type: "TERMINAL_RESET", direction: "server", id: "required", fixture: "terminal_reset.json" },
+  { type: "AGENT_UPDATE", direction: "client", id: "required", fixture: "agent_update.json" },
+  { type: "AGENT_UPDATE_RESULT", direction: "server", id: "required", fixture: "agent_update_result.json" },
+  { type: "TASK_UPDATE", direction: "client", id: "required", fixture: "task_update.json" },
+  { type: "TASK_UPDATE_RESULT", direction: "server", id: "required", fixture: "task_update_result.json" },
+  { type: "TOPOLOGY_GET", direction: "client", id: "required", fixture: "topology_get.json" },
+  { type: "TOPOLOGY", direction: "server", id: "required", fixture: "topology.json" },
   { type: "REMOTE_INVITE", direction: "client", id: "required", fixture: "remote_invite.json" },
   { type: "REMOTE_INVITE_RESULT", direction: "server", id: "required", fixture: "remote_invite_result.json" },
   { type: "ERROR", direction: "both", id: "optional", fixture: "error.json" },
@@ -122,6 +129,7 @@ export const BROWSER_MANIFEST = {
     terminalLeaseRenewIntervalMs: TERMINAL_LEASE_RENEW_INTERVAL_MS,
     maxTerminalRows: MAX_TERMINAL_ROWS,
     maxTerminalCols: MAX_TERMINAL_COLS,
+    maxAgentModelBytes: MAX_AGENT_MODEL_BYTES,
     maxRemoteInviteLinkBytes: MAX_REMOTE_INVITE_LINK_BYTES,
     maxRemoteInviteSvgBytes: MAX_REMOTE_INVITE_SVG_BYTES,
   },

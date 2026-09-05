@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   BROWSER_MANIFEST,
+  MAX_AGENT_MODEL_BYTES,
   MAX_CONTROL_BYTES,
   MAX_HUMAN_QUESTION_BYTES,
   MAX_SNAPSHOT_BYTES,
@@ -41,7 +42,7 @@ const ids = {
 };
 const factoryItem = (revision = 1n) => ({ dispatch_enabled: true, capacity: 8, active_runs: 2, revision });
 const projectItem = (revision = 1n) => ({ id: ids.project, name: "Factory", revision });
-const agentItem = (revision = 1n) => ({ id: ids.agent, project_id: ids.project, name: "Worker", role: "worker", provider: "claude_code", paused: false, revision });
+const agentItem = (revision = 1n) => ({ id: ids.agent, project_id: ids.project, name: "Worker", role: "worker", provider: "claude_code", paused: false, model: "claude-opus-5", reasoning_effort: "high", revision });
 const taskItem = (revision = 1n, title = "Ship") => ({ id: ids.task, project_id: ids.project, assigned_agent_id: ids.agent, title, status: "queued", priority: 1, revision });
 const requestItem = (revision = 1n) => ({ id: ids.request, project_id: ids.project, agent_id: ids.agent, task_id: ids.task, created_at: 10n, updated_at: 11n, revision, kind: "question", status: "open", reply_max_bytes: 8192, can_reply: true });
 const snapshotBody = (overrides = {}) => ({
@@ -206,17 +207,33 @@ test("the agent provider is exact on the wire in both roles", () => {
   const { provider: _dropped, ...without } = agentItem();
   expectMalformed(() => encodeStateSnapshot("provider", snapshotBody({ agents: [without] })));
   expectMalformed(() => decodeServerControl(wire.replace('"provider":"claude_code",', "")));
-  expectMalformed(() => encodeStateSnapshot("provider", snapshotBody({ agents: [{ ...agentItem(), model: "sonnet" }] })));
+  // The launch controls beside the provider are served facts, but still bounded.
+  assert.equal(decodeServerControl(encodeStateSnapshot("provider", snapshotBody({ agents: [{ ...agentItem(), model: "sonnet" }] }))).body.agents[0].model, "sonnet");
+  expectMalformed(() => encodeStateSnapshot("provider", snapshotBody({ agents: [{ ...agentItem(), model: "m".repeat(MAX_AGENT_MODEL_BYTES + 1) }] })));
   // A private agent field added beside the provider reaches no field of the
   // decoded item, so the UI can never read it.
-  expectIgnoredMember(wire, wire.replace('"provider":"claude_code"', '"provider":"claude_code","model":"sonnet"'), "server");
+  expectIgnoredMember(wire, wire.replace('"provider":"claude_code"', '"provider":"claude_code","tool_budget_limit":9'), "server");
+});
+
+test("an older daemon's agent reads back as unset launch controls, never as absent", () => {
+  // The console renders these two directly, so the view must never hand it
+  // undefined: a daemon that predates the contract simply has them unset.
+  const wire = encodeStateSnapshot("older", snapshotBody())
+    .replace('"model":"claude-opus-5","reasoning_effort":"high",', "");
+  assert.equal(wire.includes("model"), false);
+  const agent = snapshotView(decodeServerControl(wire).body).agents.get(ids.agent);
+  assert.equal(agent.model, "");
+  assert.equal(agent.reasoning_effort, "");
+  assert.equal(snapshotView(decodeServerControl(encodeStateSnapshot("newer", snapshotBody())).body).agents.get(ids.agent).reasoning_effort, "high");
 });
 
 test("public state cannot carry private fields and detail is separately bounded", () => {
   const wire = encodeStateSnapshot("state", snapshotBody());
-  for (const field of ["run_id", "question", "reply", "terminal_target", "cancel_run", "action", "project_name", "agent_name", "task_title", "summary", "why_human_needed", "root", "model", "instruction"]) {
+  for (const field of ["run_id", "question", "reply", "terminal_target", "cancel_run", "action", "project_name", "agent_name", "task_title", "summary", "why_human_needed", "root", "instruction"]) {
     assert.equal(wire.includes(`"${field}":`), false, field);
   }
+  // The agent's launch controls are served, not private.
+  for (const field of ["model", "reasoning_effort"]) assert.equal(wire.includes(`"${field}":`), true, field);
   expectMalformed(() => encodeStateSnapshot("state", snapshotBody({ human_requests: [{ ...requestItem(), question: "private" }] })));
   expectMalformed(() => encodeStateSnapshot("state", snapshotBody({ projects: [{ ...projectItem(), root: "/private" }] })));
   expectMalformed(() => encodeStateSnapshot("state", snapshotBody({ tasks: [{ ...taskItem(), body: "private" }] })));
@@ -275,6 +292,7 @@ test("manifest bounds and registry are an exact readable mirror", () => {
     terminalLeaseRenewIntervalMs: manifest.bounds.terminal_lease_renew_interval_ms,
     maxTerminalRows: manifest.bounds.max_terminal_rows,
     maxTerminalCols: manifest.bounds.max_terminal_cols,
+    maxAgentModelBytes: manifest.bounds.max_agent_model_bytes,
     maxRemoteInviteLinkBytes: manifest.bounds.max_remote_invite_link_bytes,
     maxRemoteInviteSvgBytes: manifest.bounds.max_remote_invite_svg_bytes,
   });
