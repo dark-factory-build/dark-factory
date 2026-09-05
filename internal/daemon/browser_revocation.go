@@ -67,6 +67,12 @@ func (daemon *Daemon) revokeBrowserClientHeld(ctx context.Context, id kernel.Bro
 	cleanupErrors := []error{effectCleanupErr}
 	for _, runtime := range runtimes {
 		cleanupErrors = append(cleanupErrors, runtime.closeClient(id))
+		// A link handed out before this revocation must not still pair after
+		// it. The durable challenge is the only thing that outlives the
+		// closed sockets, and nothing binds one to the client that minted it.
+		if runtime.backend != nil {
+			cleanupErrors = append(cleanupErrors, daemon.store.InvalidateBrowserPairingChallenges(ctx, runtime.backend.boot))
+		}
 	}
 	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
 		return client, errors.Join(ErrBrowserClientCleanup, cleanupErr)

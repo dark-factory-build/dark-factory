@@ -313,27 +313,30 @@ test("remote invitation correlates its own result and needs bounded human-action
   assert.equal(errors.at(-1) instanceof ProtocolError, true);
   session.close();
 
-  let observeSocket;
-  const observer = new BrowserSession({
+  // The remote grant carries human_actions but never terminal_input, so a
+  // paired phone cannot propagate its own pairing to another phone.
+  const remoteGrant = CAPABILITIES.observe | CAPABILITIES.private_human_request_detail | CAPABILITIES.human_actions;
+  let remoteSocket;
+  const remote = new BrowserSession({
     url: "ws://127.0.0.1/browser",
     host: "127.0.0.1",
     origin: "https://preview.example",
     challenge,
     keyStore: new MemoryKeys(),
     socketFactory: () => {
-      observeSocket = new Socket((current, request) => {
-        if (request.type === "PAIR_PROVE") current.reply(encodePairResult(request.id, { client_id: clientID, capabilities: CAPABILITIES.observe }));
+      remoteSocket = new Socket((current, request) => {
+        if (request.type === "PAIR_PROVE") current.reply(encodePairResult(request.id, { client_id: clientID, capabilities: remoteGrant }));
         if (request.type === "STATE_GET") replySnapshot(current, request, 1n);
       });
-      return observeSocket;
+      return remoteSocket;
     },
   });
-  await observer.connect();
+  await remote.connect();
   await new Promise((resolve) => setTimeout(resolve, 10));
-  const sent = observeSocket.sent.length;
-  await assert.rejects(observer.inviteRemote(), (error) => error instanceof SessionError && error.code === "unauthorized");
-  assert.equal(observeSocket.sent.length, sent);
-  observer.close();
+  const sent = remoteSocket.sent.length;
+  await assert.rejects(remote.inviteRemote(), (error) => error instanceof SessionError && error.code === "unauthorized");
+  assert.equal(remoteSocket.sent.length, sent);
+  remote.close();
 });
 
 test("closing rejects an authenticated pending task enqueue and fences its late result", async () => {

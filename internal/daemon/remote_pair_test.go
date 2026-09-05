@@ -284,6 +284,30 @@ func invitationChallenge(t *testing.T, values url.Values) []byte {
 // client the daemon created for it.
 func pairWithChallenge(t *testing.T, fixture *adapterFixture, challenge []byte) kernel.BrowserClient {
 	t.Helper()
+	frame, publicKey := provePairWithChallenge(t, fixture, challenge)
+	if frame.Type != browserprotocol.TypePairResult || frame.ID != "pair" {
+		t.Fatalf("pair result = %+v", frame)
+	}
+	result := frame.Body.(browserprotocol.PairResult)
+	id, err := kernel.BrowserClientIDFromBytes(adapterHex(t, result.ClientID, browserprotocol.ClientIDSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, found, err := fixture.store.BrowserClient(context.Background(), id)
+	if err != nil || !found {
+		t.Fatalf("durable client = %+v found=%v err=%v", client, found, err)
+	}
+	if !bytes.Equal(client.PublicKey, publicKey) {
+		t.Fatal("the durable client does not carry the paired device key")
+	}
+	return client
+}
+
+// provePairWithChallenge redeems one specific pairing challenge over the
+// fixture's own loopback transport with a fresh device key, and returns the
+// frame the daemon answered with.
+func provePairWithChallenge(t *testing.T, fixture *adapterFixture, challenge []byte) (browserprotocol.ControlFrame, []byte) {
+	t.Helper()
 	key := relayKey(t)
 	connection := adapterDial(t, fixture.server)
 	hello := adapterRead(t, connection).Body.(browserprotocol.Hello)
@@ -303,27 +327,11 @@ func pairWithChallenge(t *testing.T, fixture *adapterFixture, challenge []byte) 
 		t.Fatal(err)
 	}
 	adapterWrite(t, connection, proof)
-	frame := adapterRead(t, connection)
-	if frame.Type != browserprotocol.TypePairResult || frame.ID != "pair" {
-		t.Fatalf("pair result = %+v", frame)
-	}
-	result := frame.Body.(browserprotocol.PairResult)
-	id, err := kernel.BrowserClientIDFromBytes(adapterHex(t, result.ClientID, browserprotocol.ClientIDSize))
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, found, err := fixture.store.BrowserClient(context.Background(), id)
-	if err != nil || !found {
-		t.Fatalf("durable client = %+v found=%v err=%v", client, found, err)
-	}
-	if !bytes.Equal(client.PublicKey, publicKey) {
-		t.Fatal("the durable client does not carry the paired device key")
-	}
-	return client
+	return adapterRead(t, connection), publicKey
 }
 
 func TestBrowserRemoteInviteMintsTheSameInvitationWithAScannableCode(t *testing.T) {
-	fixture := newAdapterFixture(t, remoteCapabilities)
+	fixture := newAdapterFixture(t, webCapabilities)
 	dialRelayFixture(t, fixture)
 	fixture.pair(t)
 	ctx := context.Background()
@@ -351,8 +359,8 @@ func TestBrowserRemoteInviteMintsTheSameInvitationWithAScannableCode(t *testing.
 	}
 }
 
-func TestBrowserRemoteInviteRefusesAClientWithoutHumanActions(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+func TestBrowserRemoteInviteRefusesEveryGrantWeakerThanLoopback(t *testing.T) {
+	fixture := newAdapterFixture(t, remoteCapabilities)
 	dialRelayFixture(t, fixture)
 	fixture.pair(t)
 	ctx := context.Background()
@@ -361,9 +369,11 @@ func TestBrowserRemoteInviteRefusesAClientWithoutHumanActions(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The remote grant carries human_actions but never terminal_input, so a
+	// paired phone cannot propagate its own pairing to another phone.
 	result, inviteErr := fixture.backend.RemoteInvite(ctx, rawBrowserClient(fixture.client.ID))
 	if !errors.Is(inviteErr, browser.ErrUnauthorized) || result != (browserprotocol.RemoteInviteResult{}) {
-		t.Fatalf("observe-only invite = %+v, %v", result, inviteErr)
+		t.Fatalf("remote-granted invite = %+v, %v", result, inviteErr)
 	}
 
 	after, err := fixture.daemon.WebStatus(ctx)
@@ -391,5 +401,37 @@ func TestQRSVGStaysInsideTheWireBoundForALongInvitation(t *testing.T) {
 	want := fmt.Sprintf(`viewBox="0 0 %d %d"`, code.Size+2*qrQuietModules, code.Size+2*qrQuietModules)
 	if !strings.Contains(rendered, want) {
 		t.Fatalf("rendered code does not carry %s: %.120s", want, rendered)
+	}
+}
+
+func TestRevokingAClientInvalidatesEveryLivePairingChallenge(t *testing.T) {
+	fixture := newAdapterFixture(t, webCapabilities)
+	dialRelayFixture(t, fixture)
+	fixture.pair(t)
+	ctx := context.Background()
+
+	invitation, err := fixture.daemon.RemotePair(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := invitationChallenge(t, decodeInvitation(t, invitation.Link))
+	before, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || before.ActiveChallenges != 1 {
+		t.Fatalf("active challenges before revocation = %+v, %v", before, err)
+	}
+
+	if _, err := fixture.daemon.WebRevokeClient(ctx, api.WebClientRevocationInput{ID: fixture.client.ID.String(), ExpectedRevision: uint64(fixture.client.Revision.Int64())}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || after.ActiveChallenges != 0 {
+		t.Fatalf("active challenges after revocation = %+v, %v", after, err)
+	}
+	// The link was already handed out; only the durable row stands between it
+	// and a fresh client carrying the grant that was just revoked.
+	frame, _ := provePairWithChallenge(t, fixture, challenge)
+	if frame.Type != browserprotocol.TypeError {
+		t.Fatalf("a challenge minted before revocation still paired: %+v", frame)
 	}
 }

@@ -303,11 +303,17 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 // exact invitation `factoryctl remote pair` mints, plus its scannable code.
 // The mint is never retried; a failure is reported and the operator asks again.
 func (backend *browserBackend) RemoteInvite(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte) (browserprotocol.RemoteInviteResult, error) {
-	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
+	_, release, client, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
 	if err != nil {
 		return browserprotocol.RemoteInviteResult{}, err
 	}
 	defer release()
+	// terminal_input is the one bit a remote grant never carries, so requiring
+	// it means only a client paired on this machine's own loopback can invite a
+	// phone: a remote controller cannot propagate its own pairing.
+	if !client.CapabilityMask.Has(kernel.BrowserCapabilityTerminalInput) {
+		return browserprotocol.RemoteInviteResult{}, browser.ErrUnauthorized
+	}
 	if backend.owner == nil {
 		return browserprotocol.RemoteInviteResult{}, browser.ErrUnauthorized
 	}

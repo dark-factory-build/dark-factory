@@ -19,12 +19,14 @@ export function RemoteInvitePanel({ invite, error, onInvite, onDismiss }: Remote
         <>
           <img alt="QR code: scan with your phone" src={`data:image/svg+xml;utf8,${encodeURIComponent(invite.svg)}`} />
           <code>{invite.link}</code>
-          <p>EXPIRES {new Date(Number(invite.expiresAtMs)).toISOString()}</p>
-          <button type="button" disabled={onDismiss === undefined} onClick={onDismiss}>DISMISS</button>
+          <p>VALID FOR FIVE MINUTES</p>
         </>
       )}
       {error === undefined ? null : (
         <p className="dfFactoryConsole__empty" role="alert">NO PAIRING CODE — {error.replace(/_/g, " ").toUpperCase()}</p>
+      )}
+      {invite === undefined && error === undefined ? null : (
+        <button type="button" disabled={onDismiss === undefined} onClick={onDismiss}>DISMISS</button>
       )}
     </section>
   );

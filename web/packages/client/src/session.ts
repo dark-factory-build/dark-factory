@@ -245,11 +245,14 @@ export class BrowserSession {
   }
 
   /** Mints one remote pairing invitation. The mint is never retried: a failed
-   * request is reported and the operator asks for another. */
+   * request is reported and the operator asks for another. It needs the full
+   * loopback grant, whose terminal_input bit a remote grant never carries, so
+   * a remote controller cannot propagate its own pairing. */
   inviteRemote(): Promise<RemoteInvite> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
-    if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
+    const loopbackGrant = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
+    if ((this.#capabilities & loopbackGrant) !== loopbackGrant) return Promise.reject(new SessionError("unauthorized"));
     if (this.#invitePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
     const id = this.#nextID("remote-invite");
     let payload: string;

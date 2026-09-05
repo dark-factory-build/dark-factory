@@ -389,7 +389,7 @@
   image-rendering: pixelated;
 }
 
-.dfFactoryConsole__pairPhone a {
+.dfFactoryConsole__pairPhone code {
   overflow-wrap: anywhere;
   font-size: 0.75rem;
 }

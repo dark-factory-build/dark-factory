@@ -424,5 +424,8 @@ test("PAIR A PHONE appears on the home screen only with authority, and shows the
   // The raw markup is never handed to the browser as markup.
   assert.equal(shown.includes("<svg"), false);
 
-  assert.match(render({ remoteInviteAllowed: true, remoteInviteError: "not_found" }), /NO PAIRING CODE — NOT FOUND/);
+  const failed = render({ remoteInviteAllowed: true, remoteInviteError: "not_found" });
+  assert.match(failed, /NO PAIRING CODE — NOT FOUND/);
+  assert.match(failed, /DISMISS/);
+  assert.equal(render({ remoteInviteAllowed: true }).includes("DISMISS"), false);
 });
