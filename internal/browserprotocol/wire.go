@@ -26,7 +26,8 @@ const (
 // server control stays at 64 KiB; only the server's whole-state snapshot may
 // reach 1 MiB.
 func controlLimit(kind MessageType) int {
-	if kind == TypeStateSnapshot {
+	switch kind {
+	case TypeStateSnapshot, TypeTopology:
 		return MaxSnapshotBytes
 	}
 	return MaxControlBytes
@@ -52,6 +53,12 @@ const (
 	TypeHumanRequestCancelRunResult MessageType = "HUMAN_REQUEST_CANCEL_RUN_RESULT"
 	TypeTaskEnqueue                 MessageType = "TASK_ENQUEUE"
 	TypeTaskEnqueueResult           MessageType = "TASK_ENQUEUE_RESULT"
+	TypeAgentUpdate                 MessageType = "AGENT_UPDATE"
+	TypeAgentUpdateResult           MessageType = "AGENT_UPDATE_RESULT"
+	TypeTaskUpdate                  MessageType = "TASK_UPDATE"
+	TypeTaskUpdateResult            MessageType = "TASK_UPDATE_RESULT"
+	TypeTopologyGet                 MessageType = "TOPOLOGY_GET"
+	TypeTopology                    MessageType = "TOPOLOGY"
 	TypeTerminalTargetGet           MessageType = "TERMINAL_TARGET_GET"
 	TypeTerminalTarget              MessageType = "TERMINAL_TARGET"
 	TypeTerminalAttach              MessageType = "TERMINAL_ATTACH"
@@ -316,6 +323,18 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(TaskEnqueue)
 	case TypeTaskEnqueueResult:
 		body = new(TaskEnqueueResult)
+	case TypeAgentUpdate:
+		body = new(AgentUpdate)
+	case TypeAgentUpdateResult:
+		body = new(AgentUpdateResult)
+	case TypeTaskUpdate:
+		body = new(TaskUpdate)
+	case TypeTaskUpdateResult:
+		body = new(TaskUpdateResult)
+	case TypeTopologyGet:
+		body = new(TopologyGet)
+	case TypeTopology:
+		body = new(Topology)
 	case TypeTerminalTargetGet:
 		body = new(TerminalTargetGet)
 	case TypeTerminalTarget:
@@ -413,6 +432,7 @@ func idRequired(kind MessageType) bool {
 		TypeHumanRequestDetailGet, TypeHumanRequestDetail,
 		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
 		TypeTaskEnqueue, TypeTaskEnqueueResult,
+		TypeAgentUpdate, TypeAgentUpdateResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeTopologyGet, TypeTopology,
 		TypeTerminalTargetGet, TypeTerminalTarget,
 		TypeTerminalAttach, TypeTerminalAttached, TypeTerminalLeaseAcquire, TypeTerminalLeaseRenew, TypeTerminalLeaseRelease,
 		TypeTerminalLeaseResult, TypeTerminalResize, TypeTerminalResized, TypeTerminalDetach, TypeTerminalDetached,
@@ -429,10 +449,12 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	}
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
-			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskEnqueue
+			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskEnqueue ||
+			kind == TypeAgentUpdate || kind == TypeTaskUpdate || kind == TypeTopologyGet
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
-		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
+		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset ||
+		kind == TypeAgentUpdateResult || kind == TypeTaskUpdateResult || kind == TypeTopology)
 }
 
 func dereferenceBody(body any) any {
@@ -470,6 +492,18 @@ func dereferenceBody(body any) any {
 	case *TaskEnqueue:
 		return *value
 	case *TaskEnqueueResult:
+		return *value
+	case *AgentUpdate:
+		return *value
+	case *AgentUpdateResult:
+		return *value
+	case *TaskUpdate:
+		return *value
+	case *TaskUpdateResult:
+		return *value
+	case *TopologyGet:
+		return *value
+	case *Topology:
 		return *value
 	case *TerminalTargetGet:
 		return *value
@@ -776,6 +810,8 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeTaskEnqueue, TypeTaskEnqueueResult:
 		return validTaskControl(kind, body)
+	case TypeAgentUpdate, TypeAgentUpdateResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeTopologyGet, TypeTopology:
+		return validConsoleControl(kind, body)
 	case TypeTerminalTargetGet, TypeTerminalTarget:
 		return validTerminalControl(kind, body)
 	case TypeTerminalAttach:

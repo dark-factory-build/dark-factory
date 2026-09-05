@@ -436,7 +436,7 @@ func TestAgentItemServesExactlyThePublicFields(t *testing.T) {
 	for _, field := range fields {
 		actual = append(actual, field.Tag.Get("json"))
 	}
-	want := []string{"id", "project_id", "name", "role", "provider", "paused", "revision"}
+	want := []string{"id", "project_id", "name", "role", "provider", "paused", "model", "reasoning_effort", "revision"}
 	if !reflect.DeepEqual(actual, want) {
 		t.Fatalf("public AgentItem fields drifted: got %v want %v", actual, want)
 	}
@@ -454,8 +454,9 @@ func TestAgentItemServesExactlyThePublicFields(t *testing.T) {
 		if len(agents) != 1 || agents[0].Provider != provider {
 			t.Fatalf("provider %q decoded as %+v", provider, agents)
 		}
-		// Private launch controls never ride the public agent item.
-		for _, private := range []string{`"model":`, `"reasoning_effort":`, `"tool_budget`, `"tool_calls`} {
+		// The launch controls the console edits are public by owner decision on
+		// 5 September 2026; the budget columns beside them are still private.
+		for _, private := range []string{`"tool_budget`, `"tool_calls`} {
 			if bytes.Contains(wire, []byte(private)) {
 				t.Fatalf("public agent item exposed %q: %s", private, wire)
 			}
@@ -477,7 +478,7 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, private := range []string{`"run_id":`, `"question":`, `"reply":`, `"terminal_target":`, `"cancel_run":`, `"action":`, `"project_name":`, `"agent_name":`, `"task_title":`, `"summary":`, `"why_human_needed":`, `"root":`, `"model":`, `"instruction":`} {
+	for _, private := range []string{`"run_id":`, `"question":`, `"reply":`, `"terminal_target":`, `"cancel_run":`, `"action":`, `"project_name":`, `"agent_name":`, `"task_title":`, `"summary":`, `"why_human_needed":`, `"root":`, `"instruction":`} {
 		if bytes.Contains(encoded, []byte(private)) {
 			t.Fatalf("public snapshot exposed private field %q: %s", private, encoded)
 		}

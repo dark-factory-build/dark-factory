@@ -19,6 +19,7 @@ const (
 	MaxSnapshotBytes             = 1 << 20
 	MaxProjectNameBytes          = 128
 	MaxAgentNameBytes            = 128
+	MaxAgentModelBytes           = 128
 	MaxTaskTitleBytes            = 1024
 	MaxHumanQuestionBytes        = 8192
 	MaxHumanReplyBytes           = 8192
@@ -116,9 +117,13 @@ type AgentItem struct {
 	// Provider is a public fact used for display. Live activity facts are
 	// deliberately not item fields; clients derive them from task and
 	// human-request state in the same coherent snapshot.
-	Provider string  `json:"provider"`
-	Paused   Bool    `json:"paused"`
-	Revision Decimal `json:"revision"`
+	Provider string `json:"provider"`
+	Paused   Bool   `json:"paused"`
+	// Model and ReasoningEffort are the operator-editable launch controls the
+	// console displays and AGENT_UPDATE edits. Empty means unset.
+	Model           string  `json:"model"`
+	ReasoningEffort string  `json:"reasoning_effort"`
+	Revision        Decimal `json:"revision"`
 }
 
 type TaskItem struct {
@@ -228,6 +233,9 @@ func validateAgentItem(value AgentItem) error {
 	}
 	if value.Provider != "claude_code" && value.Provider != "codex" && value.Provider != "shell" {
 		return fmt.Errorf("%w: agent provider", ErrMalformed)
+	}
+	if validateBoundedText(value.Model, 0, MaxAgentModelBytes) != nil || validateBoundedText(value.ReasoningEffort, 0, MaxAgentModelBytes) != nil {
+		return fmt.Errorf("%w: agent launch controls", ErrMalformed)
 	}
 	return nil
 }

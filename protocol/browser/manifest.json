@@ -42,7 +42,8 @@
     "terminal_ack_timeout_ms": 10000,
     "terminal_lease_renew_interval_ms": 10000,
     "max_terminal_rows": 4096,
-    "max_terminal_cols": 4096
+    "max_terminal_cols": 4096,
+    "max_agent_model_bytes": 128
   },
   "control": [
     {
@@ -248,6 +249,42 @@
       "direction": "server",
       "id": "required",
       "fixture": "terminal_reset.json"
+    },
+    {
+      "type": "AGENT_UPDATE",
+      "direction": "client",
+      "id": "required",
+      "fixture": "agent_update.json"
+    },
+    {
+      "type": "AGENT_UPDATE_RESULT",
+      "direction": "server",
+      "id": "required",
+      "fixture": "agent_update_result.json"
+    },
+    {
+      "type": "TASK_UPDATE",
+      "direction": "client",
+      "id": "required",
+      "fixture": "task_update.json"
+    },
+    {
+      "type": "TASK_UPDATE_RESULT",
+      "direction": "server",
+      "id": "required",
+      "fixture": "task_update_result.json"
+    },
+    {
+      "type": "TOPOLOGY_GET",
+      "direction": "client",
+      "id": "required",
+      "fixture": "topology_get.json"
+    },
+    {
+      "type": "TOPOLOGY",
+      "direction": "server",
+      "id": "required",
+      "fixture": "topology.json"
     },
     {
       "type": "ERROR",

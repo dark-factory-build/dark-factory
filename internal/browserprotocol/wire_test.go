@@ -119,6 +119,18 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeTaskEnqueue(frame.ID, value)
 	case TaskEnqueueResult:
 		return EncodeTaskEnqueueResult(frame.ID, value)
+	case AgentUpdate:
+		return encodeControl(TypeAgentUpdate, frame.ID, value)
+	case AgentUpdateResult:
+		return EncodeAgentUpdateResult(frame.ID, value)
+	case TaskUpdate:
+		return encodeControl(TypeTaskUpdate, frame.ID, value)
+	case TaskUpdateResult:
+		return EncodeTaskUpdateResult(frame.ID, value)
+	case TopologyGet:
+		return encodeControl(TypeTopologyGet, frame.ID, value)
+	case Topology:
+		return EncodeTopology(frame.ID, value)
 	case TerminalTargetGet:
 		return EncodeTerminalTargetGet(frame.ID, value)
 	case TerminalTarget:
@@ -468,6 +480,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 			TerminalLeaseRenewIntervalMS int    `json:"terminal_lease_renew_interval_ms"`
 			MaxTerminalRows              int    `json:"max_terminal_rows"`
 			MaxTerminalCols              int    `json:"max_terminal_cols"`
+			MaxAgentModelBytes           int    `json:"max_agent_model_bytes"`
 		} `json:"bounds"`
 		Control []struct {
 			Type      string `json:"type"`
@@ -499,7 +512,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	}
 	// The manifest carries a stable name, not a generation: the contract is
 	// unversioned by owner decision on 4 September 2026.
-	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 35 || len(manifest.Terminal.Opcodes) != 2 {
+	if manifest.Name != "dark-factory/browser" || len(manifest.Control) != 41 || len(manifest.Terminal.Opcodes) != 2 {
 		t.Fatalf("manifest registry incomplete: %+v", manifest)
 	}
 	capabilityNames := []string{"observe", "private_human_request_detail", "human_actions", "terminal_input"}
@@ -520,7 +533,8 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		MaxTaskPriority                                                                                               int64
 		MaxSQLiteInteger                                                                                              string
 		MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, MaxTerminalRows, MaxTerminalCols int
-	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxSnapshotBytes, MaxSnapshotEntities, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols)}
+		MaxAgentModelBytes                                                                                            int
+	}{MaxControlBytes, MaxJSONDepth, MaxJSONArray, MaxJSONObject, MaxSnapshotBytes, MaxSnapshotEntities, MaxProjectNameBytes, MaxAgentNameBytes, MaxTaskTitleBytes, MaxHumanQuestionBytes, MaxHumanReplyBytes, MaxTaskInstructionBytes, MaxFactoryCapacity, MaxTaskPriority, fmt.Sprint(MaxSQLiteInteger), MaxTerminalUnackedBytes, TerminalAckTimeoutMS, TerminalLeaseRenewIntervalMS, int(MaxTerminalRows), int(MaxTerminalCols), MaxAgentModelBytes}
 	if fmt.Sprint(manifest.Bounds) != fmt.Sprint(wantBounds) {
 		t.Fatalf("bounds drift: got %+v want %+v", manifest.Bounds, wantBounds)
 	}
@@ -559,6 +573,12 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		{"TERMINAL_EOF", "server", "required", "terminal_eof.json"},
 		{"TERMINAL_EXIT", "server", "required", "terminal_exit.json"},
 		{"TERMINAL_RESET", "server", "required", "terminal_reset.json"},
+		{"AGENT_UPDATE", "client", "required", "agent_update.json"},
+		{"AGENT_UPDATE_RESULT", "server", "required", "agent_update_result.json"},
+		{"TASK_UPDATE", "client", "required", "task_update.json"},
+		{"TASK_UPDATE_RESULT", "server", "required", "task_update_result.json"},
+		{"TOPOLOGY_GET", "client", "required", "topology_get.json"},
+		{"TOPOLOGY", "server", "required", "topology.json"},
 		{"ERROR", "both", "optional", "error.json"},
 	}
 	seenFixtures := make(map[string]bool, len(want))
@@ -632,7 +652,7 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedFiles := map[string]bool{"transcript.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_watch.json": true, "state_changed.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true}
+	expectedFiles := map[string]bool{"transcript.json": true, "hello.json": true, "pair_prove.json": true, "pair_result.json": true, "auth_prove.json": true, "auth_result.json": true, "state_get.json": true, "state_snapshot.json": true, "state_watch.json": true, "state_changed.json": true, "human_request_detail_get.json": true, "human_request_detail.json": true, "error.json": true, "terminal_input.hex": true, "terminal_output.hex": true, "human_request_reply.json": true, "human_request_reply_result.json": true, "human_request_cancel_run.json": true, "human_request_cancel_run_result.json": true, "task_enqueue.json": true, "task_enqueue_result.json": true, "terminal_target_get.json": true, "terminal_target.json": true, "terminal_attach.json": true, "terminal_attached.json": true, "terminal_ack.json": true, "terminal_lease_acquire.json": true, "terminal_lease_renew.json": true, "terminal_lease_release.json": true, "terminal_lease_result.json": true, "terminal_resize.json": true, "terminal_resized.json": true, "terminal_detach.json": true, "terminal_detached.json": true, "terminal_input_result.json": true, "terminal_eof.json": true, "terminal_exit.json": true, "terminal_reset.json": true, "agent_update.json": true, "agent_update_result.json": true, "task_update.json": true, "task_update_result.json": true, "topology_get.json": true, "topology.json": true}
 	if len(entries) != len(expectedFiles) {
 		t.Fatalf("fixture count = %d, want %d", len(entries), len(expectedFiles))
 	}
