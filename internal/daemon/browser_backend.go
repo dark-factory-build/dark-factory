@@ -36,6 +36,10 @@ type browserBackend struct {
 
 	clientGates *browserClientGates
 
+	inviteMu    sync.Mutex
+	inviteMints [4]time.Time
+	inviteNext  int
+
 	subMu   sync.Mutex
 	closing bool
 	subs    map[*browserStateWatch]struct{}
@@ -317,15 +321,39 @@ func (backend *browserBackend) RemoteInvite(ctx context.Context, rawClient [brow
 	if backend.owner == nil {
 		return browserprotocol.RemoteInviteResult{}, browser.ErrUnauthorized
 	}
+	if !backend.admitRemoteInvite() {
+		return browserprotocol.RemoteInviteResult{}, browser.ErrRateLimited
+	}
 	invitation, err := backend.owner.RemotePair(ctx)
 	if err != nil {
 		return browserprotocol.RemoteInviteResult{}, mapBrowserError(err)
 	}
+	// The challenge is already committed. A render that fails here leaves one
+	// unredeemed challenge, which nobody can reach and which expires on its own.
 	code, err := qrSVG(invitation.Link)
 	if err != nil {
 		return browserprotocol.RemoteInviteResult{}, mapBrowserError(err)
 	}
 	return browserprotocol.RemoteInviteResult{Link: invitation.Link, ExpiresAtMS: browserprotocol.Decimal(invitation.Expires * 1000), SVG: code}, nil
+}
+
+// admitRemoteInvite bounds minting to four invitations per challenge TTL. The
+// page asks; it does not choose this bound. Four per TTL means even a console
+// looping REMOTE_INVITE holds at most four of the 32 live challenge slots, so
+// the loopback /pair page can always still mint one, while an operator
+// re-minting after a failed scan never reaches the limit. An admitted attempt
+// spends its slot whether or not the mint that follows succeeds.
+func (backend *browserBackend) admitRemoteInvite() bool {
+	backend.inviteMu.Lock()
+	defer backend.inviteMu.Unlock()
+	now := backend.now()
+	// The slot about to be overwritten holds the oldest of the four.
+	if oldest := backend.inviteMints[backend.inviteNext]; !oldest.IsZero() && now.Sub(oldest) < webChallengeTTL {
+		return false
+	}
+	backend.inviteMints[backend.inviteNext] = now
+	backend.inviteNext = (backend.inviteNext + 1) % len(backend.inviteMints)
+	return true
 }
 
 func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprotocol.ClientIDSize]byte, capability kernel.BrowserCapabilityMask) (kernel.BrowserClientID, func(), kernel.BrowserClient, error) {

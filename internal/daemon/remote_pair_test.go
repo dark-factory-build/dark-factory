@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -360,28 +361,37 @@ func TestBrowserRemoteInviteMintsTheSameInvitationWithAScannableCode(t *testing.
 }
 
 func TestBrowserRemoteInviteRefusesEveryGrantWeakerThanLoopback(t *testing.T) {
-	fixture := newAdapterFixture(t, remoteCapabilities)
-	dialRelayFixture(t, fixture)
-	fixture.pair(t)
-	ctx := context.Background()
-	before, err := fixture.daemon.WebStatus(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The last of these is the remote grant itself: it carries human_actions
+	// but never terminal_input, so a paired phone cannot propagate its own
+	// pairing to another phone.
+	for _, capabilities := range []kernel.BrowserCapabilityMask{
+		kernel.BrowserCapabilityObserve,
+		kernel.BrowserCapabilityObserve | kernel.BrowserCapabilityPrivateHumanRequestDetail,
+		remoteCapabilities,
+	} {
+		t.Run(fmt.Sprintf("mask %#x", uint8(capabilities)), func(t *testing.T) {
+			fixture := newAdapterFixture(t, capabilities)
+			dialRelayFixture(t, fixture)
+			fixture.pair(t)
+			ctx := context.Background()
+			before, err := fixture.daemon.WebStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	// The remote grant carries human_actions but never terminal_input, so a
-	// paired phone cannot propagate its own pairing to another phone.
-	result, inviteErr := fixture.backend.RemoteInvite(ctx, rawBrowserClient(fixture.client.ID))
-	if !errors.Is(inviteErr, browser.ErrUnauthorized) || result != (browserprotocol.RemoteInviteResult{}) {
-		t.Fatalf("remote-granted invite = %+v, %v", result, inviteErr)
-	}
+			result, inviteErr := fixture.backend.RemoteInvite(ctx, rawBrowserClient(fixture.client.ID))
+			if !errors.Is(inviteErr, browser.ErrUnauthorized) || result != (browserprotocol.RemoteInviteResult{}) {
+				t.Fatalf("invite = %+v, %v", result, inviteErr)
+			}
 
-	after, err := fixture.daemon.WebStatus(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.ActiveChallenges != before.ActiveChallenges {
-		t.Fatalf("a refused invite minted a challenge: %d -> %d", before.ActiveChallenges, after.ActiveChallenges)
+			after, err := fixture.daemon.WebStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.ActiveChallenges != before.ActiveChallenges {
+				t.Fatalf("a refused invite minted a challenge: %d -> %d", before.ActiveChallenges, after.ActiveChallenges)
+			}
+		})
 	}
 }
 
@@ -433,5 +443,46 @@ func TestRevokingAClientInvalidatesEveryLivePairingChallenge(t *testing.T) {
 	frame, _ := provePairWithChallenge(t, fixture, challenge)
 	if frame.Type != browserprotocol.TypeError {
 		t.Fatalf("a challenge minted before revocation still paired: %+v", frame)
+	}
+}
+
+func TestBrowserRemoteInviteHoldsAtMostFourOfTheLiveChallengeSlots(t *testing.T) {
+	fixture := newAdapterFixture(t, webCapabilities)
+	dialRelayFixture(t, fixture)
+	fixture.pair(t)
+	ctx := context.Background()
+	// The bound is read off the backend's own clock, so the test moves that
+	// clock rather than waiting five real minutes.
+	var elapsed atomic.Int64
+	base := fixture.clock
+	fixture.backend.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
+	client := rawBrowserClient(fixture.client.ID)
+
+	for attempt := 0; attempt < 4; attempt++ {
+		if _, err := fixture.backend.RemoteInvite(ctx, client); err != nil {
+			t.Fatalf("invite %d = %v", attempt, err)
+		}
+	}
+	before, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || before.ActiveChallenges != 4 {
+		t.Fatalf("active challenges after four invites = %+v, %v", before, err)
+	}
+
+	// A console looping REMOTE_INVITE cannot take a fifth of the 32 slots, so
+	// the loopback /pair page can always still mint one.
+	result, inviteErr := fixture.backend.RemoteInvite(ctx, client)
+	if !errors.Is(inviteErr, browser.ErrRateLimited) || result != (browserprotocol.RemoteInviteResult{}) {
+		t.Fatalf("fifth invite = %+v, %v", result, inviteErr)
+	}
+	after, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || after.ActiveChallenges != before.ActiveChallenges {
+		t.Fatalf("a refused invite minted a challenge: %d -> %+v, %v", before.ActiveChallenges, after, err)
+	}
+
+	// Once the oldest of the four has outlived the challenge TTL its slot is
+	// free again: the bound is a rate, not a lifetime quota.
+	elapsed.Store(int64(webChallengeTTL))
+	if _, err := fixture.backend.RemoteInvite(ctx, client); err != nil {
+		t.Fatalf("invite after the TTL = %v", err)
 	}
 }
