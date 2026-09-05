@@ -9,11 +9,13 @@ import (
 	"math"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/topology"
 )
 
 // browserStatePollInterval bounds how long a paired browser waits to learn
@@ -395,17 +397,49 @@ func (backend *browserBackend) Topology(ctx context.Context, rawClient [browserp
 	if err != nil {
 		return browserprotocol.Topology{}, mapBrowserError(err)
 	}
+	return projectTopology(request.ProjectID, snapshot), nil
+}
+
+// projectTopology is the one conversion from the derived graph to the wire.
+// The tree is a filesystem and bounds nothing; the wire bounds every node's
+// text. A node past a bound is dropped with everything under it, so one
+// long directory name costs its subtree instead of making the whole project
+// unserveable. Truncating instead would invent a label and could silently
+// merge two siblings that differ only past the cut.
+func projectTopology(projectID string, snapshot topology.Snapshot) browserprotocol.Topology {
 	result := browserprotocol.Topology{
-		ProjectID: request.ProjectID, Digest: snapshot.Digest, SourceRevision: snapshot.SourceRevision,
+		ProjectID: projectID, Digest: snapshot.Digest, SourceRevision: snapshot.SourceRevision,
 		Nodes: make([]browserprotocol.TopologyNode, 0, len(snapshot.Nodes)),
 	}
+	// Nodes arrive parent-before-child (they are sorted by path, and a parent's
+	// path is a prefix of its children's), so one pass suffices to drop a whole
+	// subtree. A node whose parent is absent for any other reason is dropped
+	// too, rather than served pointing at nothing.
+	kept := make(map[string]struct{}, len(snapshot.Nodes))
 	for _, node := range snapshot.Nodes {
+		if !servableTopologyText(node) {
+			continue
+		}
+		if _, ok := kept[node.ParentID]; !ok && node.ParentID != "" {
+			continue
+		}
+		kept[node.ID] = struct{}{}
 		result.Nodes = append(result.Nodes, browserprotocol.TopologyNode{
 			ID: node.ID, ParentID: node.ParentID, Kind: string(node.Kind), Path: node.RelativePath,
 			Label: node.Label, Language: node.Language, SizeBucket: node.SizeBucket,
 		})
 	}
-	return result, nil
+	return result
+}
+
+func servableTopologyText(node topology.Node) bool {
+	return validTopologyText(node.RelativePath, 1, browserprotocol.MaxTaskTitleBytes) &&
+		validTopologyText(node.Label, 1, browserprotocol.MaxAgentNameBytes) &&
+		validTopologyText(node.Language, 0, browserprotocol.MaxAgentNameBytes)
+}
+
+func validTopologyText(value string, minimum, maximum int) bool {
+	return len(value) >= minimum && len(value) <= maximum && utf8.ValidString(value)
 }
 
 // RemoteInvite mints one remote pairing invitation for a paired operator: the
@@ -637,9 +671,17 @@ func mapBrowserError(err error) error {
 	}
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// The caller gave up, or its budget expired mid-operation. That is
-		// retryable busyness, not a fault: the same request converges when it
-		// is made again with a budget it fits in.
+		// An owner-side effect that already reached a verdict keeps it. Its
+		// cause often carries the deadline that produced it, but "the effect
+		// may already have landed" is never retryable busyness: retrying would
+		// attempt it a second time. remoteErrorCode fences OutcomeUnknownError
+		// ahead of its own context arm for the same reason.
+		if terminalEffectVerdict(err) {
+			return err
+		}
+		// Otherwise the caller gave up, or its budget expired before anything
+		// was attempted. That is retryable busyness, not a fault: the same
+		// request converges when it is made again with a budget it fits in.
 		return browser.ErrRateLimited
 	case errors.Is(err, kernel.ErrUnauthorized):
 		return browser.ErrUnauthorized

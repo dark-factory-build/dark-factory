@@ -23,6 +23,15 @@ var (
 	ErrTerminalEffectUncertain    = errors.New("daemon: terminal effect outcome is uncertain")
 )
 
+// terminalEffectVerdict reports whether an owner already decided what happened
+// to an effect. Such an error must keep its own outcome: nothing downstream may
+// relabel it as a condition worth retrying.
+func terminalEffectVerdict(err error) bool {
+	var unknown *kernel.OutcomeUnknownError
+	return errors.As(err, &unknown) || errors.Is(err, ErrTerminalEffectUncertain) ||
+		errors.Is(err, ErrTerminalEffectPartial) || errors.Is(err, ErrTerminalEffectRejected)
+}
+
 type terminalEffectKind uint8
 
 const (
