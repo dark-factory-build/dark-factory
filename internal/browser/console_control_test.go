@@ -208,7 +208,10 @@ func TestConsoleInvalidRequestKeepsTheConnectionTheTransportWouldClose(t *testin
 	assertError(t, readServerFrame(t, closing), browserprotocol.ErrorInvalidRequest)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, _, err := closing.Read(ctx); err == nil {
-		t.Fatal("a repeated request id left the connection open")
+	// The transport closes abruptly, so a client sees EOF and no close status.
+	// What has to be observed is that the read ended for some reason other than
+	// this deadline: a connection merely left idle would expire here instead.
+	if _, _, err := closing.Read(ctx); err == nil || ctx.Err() != nil {
+		t.Fatalf("a repeated request id left the connection open: err=%v ctx=%v", err, ctx.Err())
 	}
 }

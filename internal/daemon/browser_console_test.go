@@ -18,9 +18,9 @@ import (
 // a queued task to edit.
 type consoleFixture struct {
 	*adapterFixture
-	// cacheHome is the HOME this fixture redirected, so a test can prove the
-	// topology cache landed inside it rather than in the operator's.
-	cacheHome string
+	// cacheRoot is the cache directory this fixture redirected, so a test can
+	// prove the topology cache landed inside it and not in the operator's.
+	cacheRoot string
 	project   kernel.Project
 	agent     kernel.Agent
 	task      kernel.Task
@@ -28,11 +28,17 @@ type consoleFixture struct {
 
 func newConsoleFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask, root string) *consoleFixture {
 	t.Helper()
-	// Topology writes a regenerable cache under os.UserCacheDir, which on
-	// Darwin is $HOME/Library/Caches. Moving HOME for the test keeps that
-	// write inside the test's own directory instead of the operator's cache.
+	// Topology writes a regenerable cache under os.UserCacheDir, which reads
+	// HOME on Darwin and XDG_CACHE_HOME (else HOME) elsewhere. Redirecting both
+	// keeps that write inside the test's own directory on any host, and the
+	// cache root is then whatever os.UserCacheDir resolves to, never a literal.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture := newAdapterFixture(t, capabilities)
 	fixture.pair(t)
 	ctx := context.Background()
@@ -52,7 +58,7 @@ func newConsoleFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &consoleFixture{adapterFixture: fixture, cacheHome: home, project: project, agent: agent, task: task}
+	return &consoleFixture{adapterFixture: fixture, cacheRoot: cacheRoot, project: project, agent: agent, task: task}
 }
 
 func consoleRoot(t *testing.T) string {
@@ -149,9 +155,9 @@ func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTopology(t *testing.T) {
 			t.Fatalf("topology node is not projected: %+v", node)
 		}
 	}
-	// The regenerable cache the request wrote is inside this test's own home,
-	// which is the whole reason the fixture moves HOME.
-	cacheFile := filepath.Join(fixture.cacheHome, "Library", "Caches", "dark-factory", "topology", fixture.project.ID.String(), "snapshot.json")
+	// The regenerable cache the request wrote is inside this test's own cache
+	// directory, which is the whole reason the fixture redirects it.
+	cacheFile := filepath.Join(fixture.cacheRoot, "dark-factory", "topology", fixture.project.ID.String(), "snapshot.json")
 	if _, err := os.Stat(cacheFile); err != nil {
 		t.Fatalf("topology cache is not under the test home: %v", err)
 	}
