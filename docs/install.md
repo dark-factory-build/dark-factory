@@ -56,11 +56,14 @@ factoryctl web status
 factoryctl web open
 ```
 
-`web open` also replaces a saved browser credential that this daemon no longer
-accepts. To inspect or revoke daemon-side browser clients explicitly, use
-`factoryctl web list-clients` and `factoryctl web revoke CLIENT_ID --revision
-REVISION`. The CLI cannot delete origin-scoped browser storage; a normal fresh
-`web open` makes that manual browser action unnecessary.
+Alternatively, open <http://127.0.0.1:43123/pair> in a browser on this machine
+and confirm; the daemon serves that one first-party page and nothing else.
+`web open` or the pair page also replaces a saved browser credential that this
+daemon no longer accepts. To inspect or revoke daemon-side browser clients
+explicitly, use `factoryctl web list-clients` and `factoryctl web revoke
+CLIENT_ID --revision REVISION`. The CLI cannot delete origin-scoped browser
+storage; a normal fresh `web open` makes that manual browser action
+unnecessary.
 
 Create each agent with an explicit provider. `shell` needs no external tool;
 `claude_code` and `codex` require the corresponding `claude` or `codex` CLI to

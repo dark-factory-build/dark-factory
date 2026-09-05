@@ -23,6 +23,21 @@ WebSocket with exact Host/Origin checks and proof-of-possession client keys; it
 is not a webhook or generic connector listener. Exposing either local surface
 beyond the machine is unsupported.
 
+The same loopback listener serves one first-party page, `/pair`, whose form
+post mints a browser pairing challenge on the strength of the request's Fetch
+Metadata alone (a top-level document navigation, and a same-origin post). Those
+headers say which browser context sent a request; they do not authenticate the
+sender as a browser. Any local process that can connect to 127.0.0.1:43123 can
+send them, obtain a challenge, and, by presenting the console origin, pair a
+client with the full web grant. The loopback listener is therefore a
+same-machine trust boundary, not a per-user one: a separate OS user isolates
+files, credentials and the operator socket, but not pairing. This was accepted
+on 5 September 2026 in exchange for pairing without a terminal. The control is
+revocation, through `factoryctl web list-clients` and `web revoke` or the
+console; challenges are capped at 32 per boot and expire after five minutes,
+so a hostile local process can delay pairing but cannot hold a grant it did not
+pair.
+
 ### Hosted-origin compromise response
 
 A compromised hosted origin or same-origin dependency can exercise every

@@ -99,9 +99,11 @@ one finite `too_large` answer, never a partial view.
 The wire contract is unversioned and tolerates additive change. There is no
 envelope generation, no versioned loopback path, no version in the pairing and
 auth transcript domains, and no protocol identity in the published artifacts;
-the loopback path is `/browser`. A control frame carrying a member this build
-does not know is served, so the hosted console and the daemon can be installed
-in either order without a mismatch window.
+the loopback path is `/browser`, and `/pair` beside it is the one HTML page
+the daemon serves: a script-free confirm page whose form mints a pairing
+challenge and redirects to the hosted console. A control frame carrying a
+member this build does not know is served, so the hosted console and the
+daemon can be installed in either order without a mismatch window.
 
 An ignored member is an ASCII name that is not a known name under any case. A
 non-ASCII name is refused outright, and a member differing from a known one
