@@ -210,8 +210,8 @@ test("a device with no factory explains how to pair one", async () => {
     assert.ok(manager.calls.options[0].store instanceof MemoryRemoteStore);
     assert.equal(manager.calls.options[0].origin, "https://app.darkfactory.build");
     const copy = sectionText(renderer, "dfRemote__none");
-    assert.match(copy, /factoryctl remote pair/);
-    assert.match(copy, /on this device/);
+    assert.match(copy, /PAIR A PHONE/);
+    assert.match(copy, /on this phone/);
     assert.equal(buttons(renderer, "dfRemote__factory").length, 0);
     assert.equal(buttons(renderer, "dfRemote__pasteOpen").length, 1);
   });
@@ -634,7 +634,7 @@ test("forgetting a factory or the device takes a second, inline confirmation", a
     await settle();
     assert.equal(manager.calls.forgetDevice, 1);
     assert.equal(buttons(renderer, "dfRemote__factory").length, 0);
-    assert.match(sectionText(renderer, "dfRemote__none"), /factoryctl remote pair/);
+    assert.match(sectionText(renderer, "dfRemote__none"), /PAIR A PHONE/);
   });
 });
 

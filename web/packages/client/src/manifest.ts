@@ -28,6 +28,8 @@ export const TERMINAL_LEASE_RENEW_INTERVAL_MS = 10_000;
 export const MAX_TERMINAL_ROWS = 4096;
 export const MAX_TERMINAL_COLS = 4096;
 export const MAX_AGENT_MODEL_BYTES = 128;
+export const MAX_REMOTE_INVITE_LINK_BYTES = 8192;
+export const MAX_REMOTE_INVITE_SVG_BYTES = 32768;
 
 export const CAPABILITIES = {
   observe: 1,
@@ -80,6 +82,8 @@ export const CONTROL_MANIFEST = [
   { type: "TASK_UPDATE_RESULT", direction: "server", id: "required", fixture: "task_update_result.json" },
   { type: "TOPOLOGY_GET", direction: "client", id: "required", fixture: "topology_get.json" },
   { type: "TOPOLOGY", direction: "server", id: "required", fixture: "topology.json" },
+  { type: "REMOTE_INVITE", direction: "client", id: "required", fixture: "remote_invite.json" },
+  { type: "REMOTE_INVITE_RESULT", direction: "server", id: "required", fixture: "remote_invite_result.json" },
   { type: "ERROR", direction: "both", id: "optional", fixture: "error.json" },
 ] as const;
 export const CONTROL_TYPES = CONTROL_MANIFEST.map((entry) => entry.type);
@@ -126,6 +130,8 @@ export const BROWSER_MANIFEST = {
     maxTerminalRows: MAX_TERMINAL_ROWS,
     maxTerminalCols: MAX_TERMINAL_COLS,
     maxAgentModelBytes: MAX_AGENT_MODEL_BYTES,
+    maxRemoteInviteLinkBytes: MAX_REMOTE_INVITE_LINK_BYTES,
+    maxRemoteInviteSvgBytes: MAX_REMOTE_INVITE_SVG_BYTES,
   },
   control: CONTROL_MANIFEST,
   terminal: {

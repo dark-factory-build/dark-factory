@@ -7,12 +7,14 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
+	"rsc.io/qr"
 )
 
 const (
@@ -25,6 +27,9 @@ const (
 	// with URLSearchParams and this side with url.ParseQuery: every byte of
 	// JSON or base64 wrapper is a byte of QR code nobody can scan.
 	remoteLinkFragment = "/remote#df_remote"
+	// qrQuietModules is the standard four-module margin. It is drawn rather
+	// than assumed: the edge of an image element is not a quiet zone.
+	qrQuietModules = 4
 )
 
 // RemotePair mints one remote pairing invitation: a browser pairing challenge
@@ -107,6 +112,41 @@ func (daemon *Daemon) RemotePair(ctx context.Context) (api.RemoteInvitation, err
 		Expires:         expiry.Unix(),
 		ChallengeDigest: hex.EncodeToString(digest.Bytes()),
 	}, nil
+}
+
+// qrSVG draws one QR code as an SVG: a light square with one path segment per
+// horizontal run of dark modules, offset by the quiet zone. Runs rather than
+// per-module rectangles keep a real invitation inside the wire bound, and the
+// symbol scales to whatever box the browser gives it.
+func qrSVG(text string) (string, error) {
+	code, err := qr.Encode(text, qr.L)
+	if err != nil {
+		return "", err
+	}
+	if code == nil || code.Size <= 0 {
+		return "", fmt.Errorf("%w: the invitation produced no QR code", kernel.ErrInvalidValue)
+	}
+	span := code.Size + 2*qrQuietModules
+	var builder strings.Builder
+	fmt.Fprintf(&builder, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" shape-rendering="crispEdges"><rect width="%d" height="%d" fill="#fff"/><path fill="#000" d="`, span, span, span, span)
+	for row := 0; row < code.Size; row++ {
+		for column := 0; column < code.Size; {
+			if !code.Black(column, row) {
+				column++
+				continue
+			}
+			start := column
+			for column < code.Size && code.Black(column, row) {
+				column++
+			}
+			fmt.Fprintf(&builder, "M%d %dh%dv1h-%dz", start+qrQuietModules, row+qrQuietModules, column-start, column-start)
+		}
+	}
+	builder.WriteString(`"/></svg>`)
+	if builder.Len() > browserprotocol.MaxRemoteInviteSVGBytes {
+		return "", fmt.Errorf("%w: the invitation code exceeds the wire bound", kernel.ErrInvalidValue)
+	}
+	return builder.String(), nil
 }
 
 // RemoteStatus is the bounded operator view of the relay connector.

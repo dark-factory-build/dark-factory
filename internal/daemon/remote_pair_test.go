@@ -9,16 +9,20 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
+	"rsc.io/qr"
 )
 
 // remoteInvitationMembers is the exact fragment contract when the factory runs
@@ -281,6 +285,30 @@ func invitationChallenge(t *testing.T, values url.Values) []byte {
 // client the daemon created for it.
 func pairWithChallenge(t *testing.T, fixture *adapterFixture, challenge []byte) kernel.BrowserClient {
 	t.Helper()
+	frame, publicKey := provePairWithChallenge(t, fixture, challenge)
+	if frame.Type != browserprotocol.TypePairResult || frame.ID != "pair" {
+		t.Fatalf("pair result = %+v", frame)
+	}
+	result := frame.Body.(browserprotocol.PairResult)
+	id, err := kernel.BrowserClientIDFromBytes(adapterHex(t, result.ClientID, browserprotocol.ClientIDSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, found, err := fixture.store.BrowserClient(context.Background(), id)
+	if err != nil || !found {
+		t.Fatalf("durable client = %+v found=%v err=%v", client, found, err)
+	}
+	if !bytes.Equal(client.PublicKey, publicKey) {
+		t.Fatal("the durable client does not carry the paired device key")
+	}
+	return client
+}
+
+// provePairWithChallenge redeems one specific pairing challenge over the
+// fixture's own loopback transport with a fresh device key, and returns the
+// frame the daemon answered with.
+func provePairWithChallenge(t *testing.T, fixture *adapterFixture, challenge []byte) (browserprotocol.ControlFrame, []byte) {
+	t.Helper()
 	key := relayKey(t)
 	connection := adapterDial(t, fixture.server)
 	hello := adapterRead(t, connection).Body.(browserprotocol.Hello)
@@ -300,21 +328,161 @@ func pairWithChallenge(t *testing.T, fixture *adapterFixture, challenge []byte) 
 		t.Fatal(err)
 	}
 	adapterWrite(t, connection, proof)
-	frame := adapterRead(t, connection)
-	if frame.Type != browserprotocol.TypePairResult || frame.ID != "pair" {
-		t.Fatalf("pair result = %+v", frame)
-	}
-	result := frame.Body.(browserprotocol.PairResult)
-	id, err := kernel.BrowserClientIDFromBytes(adapterHex(t, result.ClientID, browserprotocol.ClientIDSize))
+	return adapterRead(t, connection), publicKey
+}
+
+func TestBrowserRemoteInviteMintsTheSameInvitationWithAScannableCode(t *testing.T) {
+	fixture := newAdapterFixture(t, webCapabilities)
+	dialRelayFixture(t, fixture)
+	fixture.pair(t)
+	ctx := context.Background()
+
+	result, err := fixture.backend.RemoteInvite(ctx, rawBrowserClient(fixture.client.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, found, err := fixture.store.BrowserClient(context.Background(), id)
-	if err != nil || !found {
-		t.Fatalf("durable client = %+v found=%v err=%v", client, found, err)
+	values := decodeInvitation(t, result.Link)
+	for _, name := range remoteInvitationMembers {
+		if _, ok := values[name]; !ok {
+			t.Fatalf("invitation is missing member %q: %v", name, values)
+		}
 	}
-	if !bytes.Equal(client.PublicKey, publicKey) {
-		t.Fatal("the durable client does not carry the paired device key")
+	invitationChallenge(t, values)
+	expires, err := strconv.ParseInt(values.Get("expires"), 10, 64)
+	if err != nil || expires <= 0 {
+		t.Fatalf("invitation expiry = %q: %v", values.Get("expires"), err)
 	}
-	return client
+	if result.ExpiresAtMS != browserprotocol.Decimal(expires*1000) {
+		t.Fatalf("expires_at_ms = %d, link says %d seconds", result.ExpiresAtMS, expires)
+	}
+	if !strings.HasPrefix(result.SVG, "<svg") || !strings.Contains(result.SVG, `<path fill="#000" d="M`) {
+		t.Fatalf("invitation code = %.80s", result.SVG)
+	}
+}
+
+func TestBrowserRemoteInviteRefusesEveryGrantWeakerThanLoopback(t *testing.T) {
+	// The last of these is the remote grant itself: it carries human_actions
+	// but never terminal_input, so a paired phone cannot propagate its own
+	// pairing to another phone.
+	for _, capabilities := range []kernel.BrowserCapabilityMask{
+		kernel.BrowserCapabilityObserve,
+		kernel.BrowserCapabilityObserve | kernel.BrowserCapabilityPrivateHumanRequestDetail,
+		remoteCapabilities,
+	} {
+		t.Run(fmt.Sprintf("mask %#x", uint8(capabilities)), func(t *testing.T) {
+			fixture := newAdapterFixture(t, capabilities)
+			dialRelayFixture(t, fixture)
+			fixture.pair(t)
+			ctx := context.Background()
+			before, err := fixture.daemon.WebStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, inviteErr := fixture.backend.RemoteInvite(ctx, rawBrowserClient(fixture.client.ID))
+			if !errors.Is(inviteErr, browser.ErrUnauthorized) || result != (browserprotocol.RemoteInviteResult{}) {
+				t.Fatalf("invite = %+v, %v", result, inviteErr)
+			}
+
+			after, err := fixture.daemon.WebStatus(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.ActiveChallenges != before.ActiveChallenges {
+				t.Fatalf("a refused invite minted a challenge: %d -> %d", before.ActiveChallenges, after.ActiveChallenges)
+			}
+		})
+	}
+}
+
+func TestQRSVGStaysInsideTheWireBoundForALongInvitation(t *testing.T) {
+	link := "https://app.darkfactory.build/remote#df_remote&" + strings.Repeat("a", 600-46)
+	code, err := qr.Encode(link, qr.L)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := qrSVG(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rendered) > browserprotocol.MaxRemoteInviteSVGBytes {
+		t.Fatalf("a %d-byte link rendered %d bytes, over the %d bound", len(link), len(rendered), browserprotocol.MaxRemoteInviteSVGBytes)
+	}
+	want := fmt.Sprintf(`viewBox="0 0 %d %d"`, code.Size+2*qrQuietModules, code.Size+2*qrQuietModules)
+	if !strings.Contains(rendered, want) {
+		t.Fatalf("rendered code does not carry %s: %.120s", want, rendered)
+	}
+}
+
+func TestRevokingAClientInvalidatesEveryLivePairingChallenge(t *testing.T) {
+	fixture := newAdapterFixture(t, webCapabilities)
+	dialRelayFixture(t, fixture)
+	fixture.pair(t)
+	ctx := context.Background()
+
+	invitation, err := fixture.daemon.RemotePair(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := invitationChallenge(t, decodeInvitation(t, invitation.Link))
+	before, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || before.ActiveChallenges != 1 {
+		t.Fatalf("active challenges before revocation = %+v, %v", before, err)
+	}
+
+	if _, err := fixture.daemon.WebRevokeClient(ctx, api.WebClientRevocationInput{ID: fixture.client.ID.String(), ExpectedRevision: uint64(fixture.client.Revision.Int64())}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || after.ActiveChallenges != 0 {
+		t.Fatalf("active challenges after revocation = %+v, %v", after, err)
+	}
+	// The link was already handed out; only the durable row stands between it
+	// and a fresh client carrying the grant that was just revoked.
+	frame, _ := provePairWithChallenge(t, fixture, challenge)
+	if frame.Type != browserprotocol.TypeError {
+		t.Fatalf("a challenge minted before revocation still paired: %+v", frame)
+	}
+}
+
+func TestBrowserRemoteInviteHoldsAtMostFourOfTheLiveChallengeSlots(t *testing.T) {
+	fixture := newAdapterFixture(t, webCapabilities)
+	dialRelayFixture(t, fixture)
+	fixture.pair(t)
+	ctx := context.Background()
+	// The bound is read off the backend's own clock, so the test moves that
+	// clock rather than waiting five real minutes.
+	var elapsed atomic.Int64
+	base := fixture.clock
+	fixture.backend.now = func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
+	client := rawBrowserClient(fixture.client.ID)
+
+	for attempt := 0; attempt < 4; attempt++ {
+		if _, err := fixture.backend.RemoteInvite(ctx, client); err != nil {
+			t.Fatalf("invite %d = %v", attempt, err)
+		}
+	}
+	before, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || before.ActiveChallenges != 4 {
+		t.Fatalf("active challenges after four invites = %+v, %v", before, err)
+	}
+
+	// A console looping REMOTE_INVITE cannot take a fifth of the 32 slots, so
+	// the loopback /pair page can always still mint one.
+	result, inviteErr := fixture.backend.RemoteInvite(ctx, client)
+	if !errors.Is(inviteErr, browser.ErrRateLimited) || result != (browserprotocol.RemoteInviteResult{}) {
+		t.Fatalf("fifth invite = %+v, %v", result, inviteErr)
+	}
+	after, err := fixture.daemon.WebStatus(ctx)
+	if err != nil || after.ActiveChallenges != before.ActiveChallenges {
+		t.Fatalf("a refused invite minted a challenge: %d -> %+v, %v", before.ActiveChallenges, after, err)
+	}
+
+	// Once the oldest of the four has outlived the challenge TTL its slot is
+	// free again: the bound is a rate, not a lifetime quota.
+	elapsed.Store(int64(webChallengeTTL))
+	if _, err := fixture.backend.RemoteInvite(ctx, client); err != nil {
+		t.Fatalf("invite after the TTL = %v", err)
+	}
 }

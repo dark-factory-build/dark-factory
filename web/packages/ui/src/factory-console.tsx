@@ -2,6 +2,7 @@ import type { FormEvent, ReactNode } from "react";
 import type { AgentItem } from "@dark-factory/client";
 import type { FactoryAgentSelection, FactoryAppSnapshot, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentStrip, HomeScreen, QueueScreen } from "./console-screens.js";
+import { RemoteInvitePanel } from "./remote-invite.js";
 import type { ConsoleScreen } from "./console-view.js";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
@@ -15,6 +16,8 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onReplyHumanRequest?: () => void;
   onCancelHumanRequest?: () => void;
   onCloseHumanRequest?: () => void;
+  onInviteRemote?: () => void;
+  onDismissRemoteInvite?: () => void;
   terminalContent?: ReactNode;
 };
 
@@ -63,6 +66,11 @@ export function FactoryConsole({
   onReplyHumanRequest,
   onCancelHumanRequest,
   onCloseHumanRequest,
+  remoteInviteAllowed,
+  remoteInvite,
+  remoteInviteError,
+  onInviteRemote,
+  onDismissRemoteInvite,
   terminalContent,
 }: FactoryConsoleProps) {
   const ready = status === "ready";
@@ -123,6 +131,9 @@ export function FactoryConsole({
                 </dl>
               )}
             </section>
+            {!remoteInviteAllowed ? null : (
+              <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} />
+            )}
             <HomeScreen state={state} />
           </>
         ) : screen.kind === "queue" ? (
