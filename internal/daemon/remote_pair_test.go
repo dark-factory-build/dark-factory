@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -16,9 +17,11 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/relayhost"
+	"rsc.io/qr"
 )
 
 // remoteInvitationMembers is the exact fragment contract when the factory runs
@@ -317,4 +320,76 @@ func pairWithChallenge(t *testing.T, fixture *adapterFixture, challenge []byte) 
 		t.Fatal("the durable client does not carry the paired device key")
 	}
 	return client
+}
+
+func TestBrowserRemoteInviteMintsTheSameInvitationWithAScannableCode(t *testing.T) {
+	fixture := newAdapterFixture(t, remoteCapabilities)
+	dialRelayFixture(t, fixture)
+	fixture.pair(t)
+	ctx := context.Background()
+
+	result, err := fixture.backend.RemoteInvite(ctx, rawBrowserClient(fixture.client.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := decodeInvitation(t, result.Link)
+	for _, name := range remoteInvitationMembers {
+		if _, ok := values[name]; !ok {
+			t.Fatalf("invitation is missing member %q: %v", name, values)
+		}
+	}
+	invitationChallenge(t, values)
+	expires, err := strconv.ParseInt(values.Get("expires"), 10, 64)
+	if err != nil || expires <= 0 {
+		t.Fatalf("invitation expiry = %q: %v", values.Get("expires"), err)
+	}
+	if result.ExpiresAtMS != browserprotocol.Decimal(expires*1000) {
+		t.Fatalf("expires_at_ms = %d, link says %d seconds", result.ExpiresAtMS, expires)
+	}
+	if !strings.HasPrefix(result.SVG, "<svg") || !strings.Contains(result.SVG, `<path fill="#000" d="M`) {
+		t.Fatalf("invitation code = %.80s", result.SVG)
+	}
+}
+
+func TestBrowserRemoteInviteRefusesAClientWithoutHumanActions(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	dialRelayFixture(t, fixture)
+	fixture.pair(t)
+	ctx := context.Background()
+	before, err := fixture.daemon.WebStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, inviteErr := fixture.backend.RemoteInvite(ctx, rawBrowserClient(fixture.client.ID))
+	if !errors.Is(inviteErr, browser.ErrUnauthorized) || result != (browserprotocol.RemoteInviteResult{}) {
+		t.Fatalf("observe-only invite = %+v, %v", result, inviteErr)
+	}
+
+	after, err := fixture.daemon.WebStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ActiveChallenges != before.ActiveChallenges {
+		t.Fatalf("a refused invite minted a challenge: %d -> %d", before.ActiveChallenges, after.ActiveChallenges)
+	}
+}
+
+func TestQRSVGStaysInsideTheWireBoundForALongInvitation(t *testing.T) {
+	link := "https://app.darkfactory.build/remote#df_remote&" + strings.Repeat("a", 600-46)
+	code, err := qr.Encode(link, qr.L)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := qrSVG(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rendered) > browserprotocol.MaxRemoteInviteSVGBytes {
+		t.Fatalf("a %d-byte link rendered %d bytes, over the %d bound", len(link), len(rendered), browserprotocol.MaxRemoteInviteSVGBytes)
+	}
+	want := fmt.Sprintf(`viewBox="0 0 %d %d"`, code.Size+2*qrQuietModules, code.Size+2*qrQuietModules)
+	if !strings.Contains(rendered, want) {
+		t.Fatalf("rendered code does not carry %s: %.120s", want, rendered)
+	}
 }

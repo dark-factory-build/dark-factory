@@ -45,7 +45,7 @@ receipt and keep proving ownership. Changing or removing the relay origin is
 `factoryctl service uninstall` followed by a fresh install carrying the origin
 you want: repeating an install with a different origin refuses, printing the
 origin already installed, rather than silently keeping or dropping it. Pair a
-phone with `factoryctl remote pair`.
+phone from the console's PAIR A PHONE button (or `factoryctl remote pair`).
 
 Point the operator client at that home and open the paired hosted console:
 

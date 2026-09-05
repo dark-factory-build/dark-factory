@@ -69,6 +69,8 @@ const (
 	TypeTerminalEOF                 MessageType = "TERMINAL_EOF"
 	TypeTerminalExit                MessageType = "TERMINAL_EXIT"
 	TypeTerminalReset               MessageType = "TERMINAL_RESET"
+	TypeRemoteInvite                MessageType = "REMOTE_INVITE"
+	TypeRemoteInviteResult          MessageType = "REMOTE_INVITE_RESULT"
 	TypeError                       MessageType = "ERROR"
 )
 
@@ -203,18 +205,18 @@ func encodeControl(kind MessageType, id string, body any) ([]byte, error) {
 	if err := validateBody(kind, body); err != nil {
 		return nil, err
 	}
-	payload, err := json.Marshal(body)
+	payload, err := marshalControl(body)
 	if err != nil {
 		return nil, fmt.Errorf("%w: body: %v", ErrMalformed, err)
 	}
 	var wireID json.RawMessage
 	if id != "" {
-		wireID, err = json.Marshal(id)
+		wireID, err = marshalControl(id)
 		if err != nil {
 			return nil, fmt.Errorf("%w: id: %v", ErrMalformed, err)
 		}
 	}
-	frame, err := json.Marshal(controlEnvelope{Type: kind, ID: wireID, Body: payload})
+	frame, err := marshalControl(controlEnvelope{Type: kind, ID: wireID, Body: payload})
 	if err != nil {
 		return nil, fmt.Errorf("%w: envelope: %v", ErrMalformed, err)
 	}
@@ -222,6 +224,20 @@ func encodeControl(kind MessageType, id string, body any) ([]byte, error) {
 		return nil, ErrOversized
 	}
 	return frame, nil
+}
+
+// marshalControl is json.Marshal without HTML escaping. The browser encoder is
+// JSON.stringify, which leaves <, > and & literal; escaping them here would
+// make the two implementations emit different bytes for the same frame, and
+// the shared fixtures assert that they do not.
+func marshalControl(value any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
 }
 
 // DecodeClientControl accepts only frames a browser client may send. ERROR is
@@ -350,6 +366,10 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(TerminalExit)
 	case TypeTerminalReset:
 		body = new(TerminalReset)
+	case TypeRemoteInvite:
+		body = new(RemoteInvite)
+	case TypeRemoteInviteResult:
+		body = new(RemoteInviteResult)
 	case TypeError:
 		var value struct {
 			Code      ErrorCode `json:"code"`
@@ -416,7 +436,8 @@ func idRequired(kind MessageType) bool {
 		TypeTerminalTargetGet, TypeTerminalTarget,
 		TypeTerminalAttach, TypeTerminalAttached, TypeTerminalLeaseAcquire, TypeTerminalLeaseRenew, TypeTerminalLeaseRelease,
 		TypeTerminalLeaseResult, TypeTerminalResize, TypeTerminalResized, TypeTerminalDetach, TypeTerminalDetached,
-		TypeTerminalInputResult, TypeTerminalEOF, TypeTerminalExit, TypeTerminalReset:
+		TypeTerminalInputResult, TypeTerminalEOF, TypeTerminalExit, TypeTerminalReset,
+		TypeRemoteInvite, TypeRemoteInviteResult:
 		return true
 	default:
 		return false
@@ -429,10 +450,10 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	}
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
-			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskEnqueue
+			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskEnqueue || kind == TypeRemoteInvite
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
-		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset)
+		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypeRemoteInviteResult)
 }
 
 func dereferenceBody(body any) any {
@@ -504,6 +525,10 @@ func dereferenceBody(body any) any {
 	case *TerminalExit:
 		return *value
 	case *TerminalReset:
+		return *value
+	case *RemoteInvite:
+		return *value
+	case *RemoteInviteResult:
 		return *value
 	case *Error:
 		return *value
@@ -806,6 +831,8 @@ func validateBody(kind MessageType, body any) error {
 		return validTerminalControl(kind, body)
 	case TypeTerminalReset:
 		return validTerminalControl(kind, body)
+	case TypeRemoteInvite, TypeRemoteInviteResult:
+		return validRemoteControl(kind, body)
 	case TypeError:
 		value, ok := body.(Error)
 		if !ok {

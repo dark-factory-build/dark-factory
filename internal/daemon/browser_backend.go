@@ -299,6 +299,29 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	return browserprotocol.TaskEnqueueResult{TaskID: result.Task.ID.String(), Revision: decimalRevision(result.Task.Revision), AgentRevision: decimalRevision(result.AgentRevision)}, nil
 }
 
+// RemoteInvite mints one remote pairing invitation for a paired operator: the
+// exact invitation `factoryctl remote pair` mints, plus its scannable code.
+// The mint is never retried; a failure is reported and the operator asks again.
+func (backend *browserBackend) RemoteInvite(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte) (browserprotocol.RemoteInviteResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
+	if err != nil {
+		return browserprotocol.RemoteInviteResult{}, err
+	}
+	defer release()
+	if backend.owner == nil {
+		return browserprotocol.RemoteInviteResult{}, browser.ErrUnauthorized
+	}
+	invitation, err := backend.owner.RemotePair(ctx)
+	if err != nil {
+		return browserprotocol.RemoteInviteResult{}, mapBrowserError(err)
+	}
+	code, err := qrSVG(invitation.Link)
+	if err != nil {
+		return browserprotocol.RemoteInviteResult{}, mapBrowserError(err)
+	}
+	return browserprotocol.RemoteInviteResult{Link: invitation.Link, ExpiresAtMS: browserprotocol.Decimal(invitation.Expires * 1000), SVG: code}, nil
+}
+
 func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprotocol.ClientIDSize]byte, capability kernel.BrowserCapabilityMask) (kernel.BrowserClientID, func(), kernel.BrowserClient, error) {
 	clientID, err := kernel.BrowserClientIDFromBytes(rawID[:])
 	if err != nil {

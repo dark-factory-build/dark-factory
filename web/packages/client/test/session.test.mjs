@@ -19,6 +19,7 @@ import {
   encodeHumanRequestCancelRunResult,
   encodeHumanRequestDetail,
   encodeHumanRequestReplyResult,
+  encodeRemoteInviteResult,
   encodeTaskEnqueueResult,
   encodeStateChanged,
   encodeStateSnapshot,
@@ -285,6 +286,54 @@ test("authenticated task enqueue mints exact IDs and correlates the durable resu
   }));
   await unicodeWhitespace;
   session.close();
+});
+
+test("remote invitation correlates its own result and needs bounded human-actions authority", async () => {
+  const invitation = {
+    link: "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600",
+    expires_at_ms: 1767225600000n,
+    svg: "<svg viewBox=\"0 0 1 1\"/>",
+  };
+  const { session, socket } = await openHumanSession();
+  const pending = session.inviteRemote();
+  const frame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(frame.type, "REMOTE_INVITE");
+  assert.deepEqual(frame.body, {});
+  socket.reply(encodeRemoteInviteResult(frame.id, invitation));
+  const result = await pending;
+  assert.deepEqual(result, { link: invitation.link, expiresAtMs: invitation.expires_at_ms, svg: invitation.svg });
+  assert.equal(Object.isFrozen(result), true);
+
+  // A result nobody asked for is a protocol fault, not a second invitation.
+  const errors = [];
+  const forged = await openHumanSession((error) => errors.push(error));
+  forged.socket.reply(encodeRemoteInviteResult("forged-invite", invitation));
+  await tick();
+  assert.equal(forged.session.status, "closed");
+  assert.equal(errors.at(-1) instanceof ProtocolError, true);
+  session.close();
+
+  let observeSocket;
+  const observer = new BrowserSession({
+    url: "ws://127.0.0.1/browser",
+    host: "127.0.0.1",
+    origin: "https://preview.example",
+    challenge,
+    keyStore: new MemoryKeys(),
+    socketFactory: () => {
+      observeSocket = new Socket((current, request) => {
+        if (request.type === "PAIR_PROVE") current.reply(encodePairResult(request.id, { client_id: clientID, capabilities: CAPABILITIES.observe }));
+        if (request.type === "STATE_GET") replySnapshot(current, request, 1n);
+      });
+      return observeSocket;
+    },
+  });
+  await observer.connect();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const sent = observeSocket.sent.length;
+  await assert.rejects(observer.inviteRemote(), (error) => error instanceof SessionError && error.code === "unauthorized");
+  assert.equal(observeSocket.sent.length, sent);
+  observer.close();
 });
 
 test("closing rejects an authenticated pending task enqueue and fences its late result", async () => {

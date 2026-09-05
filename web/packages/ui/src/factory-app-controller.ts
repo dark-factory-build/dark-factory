@@ -1,4 +1,5 @@
 import {
+  CAPABILITIES,
   MAX_TERMINAL_PAYLOAD,
   MAX_TASK_INSTRUCTION_BYTES,
   ProtocolError,
@@ -30,6 +31,12 @@ export type FactoryHumanRequestView = Readonly<{
   canCancel: boolean;
   replyMaxBytes: number;
   reply: string;
+}>;
+
+export type FactoryRemoteInvite = Readonly<{
+  link: string;
+  svg: string;
+  expiresAtMs: bigint;
 }>;
 
 export type FactoryAgentSelection = Readonly<{
@@ -65,6 +72,10 @@ export type FactoryAppSnapshot = Readonly<{
   selectedHumanRequest?: FactoryHumanRequestView;
   selectedAgent?: FactoryAgentSelection;
   terminal?: FactoryTerminalView;
+  /** True only while a ready session carries the human-actions capability. */
+  remoteInviteAllowed?: boolean;
+  remoteInvite?: FactoryRemoteInvite;
+  remoteInviteError?: string;
 }>;
 
 export type FactoryAppStatus =
@@ -74,7 +85,8 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTask">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession };
+type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & RemoteInviteSession };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -151,6 +163,8 @@ export class FactoryAppController {
   #terminalReplacement: TerminalReplacement | undefined;
   #pendingTerminalInput = new Uint8Array(0);
   #pendingTerminalResize: { rows: number; cols: number } | undefined;
+  #remoteInvite: FactoryRemoteInvite | undefined;
+  #remoteInviteError: string | undefined;
   #generation = 0;
   #started = false;
   #closed = false;
@@ -289,6 +303,31 @@ export class FactoryAppController {
       this.#publish();
       return false;
     }
+  }
+
+  /** The mint is never retried: a failure is reported and the operator asks again. */
+  async inviteRemote(): Promise<void> {
+    const session = this.#client?.session;
+    if (this.#closed || this.#status !== "ready" || session === undefined) return;
+    const generation = this.#generation;
+    try {
+      const invite = await session.inviteRemote();
+      if (!this.#current(generation)) return;
+      this.#remoteInvite = { link: invite.link, svg: invite.svg, expiresAtMs: invite.expiresAtMs };
+      this.#remoteInviteError = undefined;
+    } catch (error) {
+      if (!this.#current(generation)) return;
+      this.#remoteInvite = undefined;
+      this.#remoteInviteError = finiteError(error).code;
+    }
+    this.#publish();
+  }
+
+  dismissRemoteInvite(): void {
+    if (this.#closed) return;
+    this.#remoteInvite = undefined;
+    this.#remoteInviteError = undefined;
+    this.#publish();
   }
 
   beginTerminalSurface(token: object, surfaceVersion = this.#terminalSurfaceVersion): void {
@@ -832,6 +871,9 @@ export class FactoryAppController {
         replyMaxBytes: selection.detail?.replyMaxBytes ?? 0,
         reply: selection.reply,
       },
+      remoteInviteAllowed: this.#status === "ready" && ((this.#client?.session?.capabilities ?? 0) & CAPABILITIES.human_actions) !== 0,
+      remoteInvite: this.#remoteInvite,
+      remoteInviteError: this.#remoteInviteError,
       selectedAgent: this.#selectedAgent === undefined ? undefined : {
         id: this.#selectedAgent.agent.id,
         name: this.#selectedAgent.agent.name,

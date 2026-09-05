@@ -26,6 +26,12 @@ function detailFor(item = request, suffix = "", replyMaxBytes = 8192) {
   });
 }
 
+const remoteInvite = Object.freeze({
+  link: "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600",
+  expiresAtMs: 1767225600000n,
+  svg: "<svg viewBox=\"0 0 1 1\"/>",
+});
+
 function stateWithRequests(items) {
   return { ...fixtureState, humanRequests: new Map(items.map((item) => [item.id, item])) };
 }
@@ -38,6 +44,8 @@ function harness(overrides = {}) {
     getHumanRequestDetail: overrides.getDetail ?? (async () => detailFor()),
     replyHumanRequest: overrides.reply ?? (async () => ({ status: "resolved" })),
     cancelHumanRequest: overrides.cancel ?? (async () => ({ request_id: request.id })),
+    inviteRemote: overrides.inviteRemote ?? (async () => remoteInvite),
+    capabilities: overrides.capabilities ?? 7,
   };
   const client = {
     session,
@@ -385,4 +393,30 @@ test("deletion or revision change clears detail and fences a late private respon
   assert.equal(context.latest().selectedHumanRequest.question, detailFor().question);
   context.emitState(stateWithRequests([{ ...revised, revision: revised.revision + 1n }]));
   assert.equal(context.latest().selectedHumanRequest, undefined);
+});
+
+test("a remote invitation is offered, stored, dismissed, and its failure reported", async () => {
+  const context = harness();
+  context.controller.start();
+  context.emitStatus("ready");
+  assert.equal(context.latest().remoteInviteAllowed, true);
+  await context.controller.inviteRemote();
+  assert.deepEqual(context.latest().remoteInvite, { link: remoteInvite.link, svg: remoteInvite.svg, expiresAtMs: remoteInvite.expiresAtMs });
+  assert.equal(context.latest().remoteInviteError, undefined);
+  context.controller.dismissRemoteInvite();
+  assert.equal(context.latest().remoteInvite, undefined);
+
+  // Observe-only authority never offers the button at all.
+  const observer = harness({ capabilities: 1 });
+  observer.controller.start();
+  observer.emitStatus("ready");
+  assert.equal(observer.latest().remoteInviteAllowed, false);
+
+  // The mint is never retried: the finite code is what the console shows.
+  const failing = harness({ inviteRemote: async () => { throw new SessionError("not_found"); } });
+  failing.controller.start();
+  failing.emitStatus("ready");
+  await failing.controller.inviteRemote();
+  assert.equal(failing.latest().remoteInvite, undefined);
+  assert.equal(failing.latest().remoteInviteError, "not_found");
 });

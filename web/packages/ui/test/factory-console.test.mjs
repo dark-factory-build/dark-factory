@@ -407,3 +407,22 @@ function expand(node, result = []) {
   expand(node.props.children, result);
   return result;
 }
+
+test("PAIR A PHONE appears on the home screen only with authority, and shows the minted code", () => {
+  const svg = '<svg viewBox="0 0 1 1"/>';
+  const link = "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600";
+  assert.equal(render().includes("PAIR A PHONE"), false);
+  assert.match(render({ remoteInviteAllowed: true }), /PAIR A PHONE/);
+  for (const screen of [{ kind: "queue" }, { kind: "needs-you" }]) {
+    assert.equal(render({ remoteInviteAllowed: true, screen }).includes("PAIR A PHONE"), false, screen.kind);
+  }
+
+  const shown = render({ remoteInviteAllowed: true, remoteInvite: { link, svg, expiresAtMs: 1767225600000n } });
+  assert.ok(shown.includes(`src="data:image/svg+xml;utf8,${encodeURIComponent(svg)}"`), shown);
+  assert.ok(shown.includes(link.replaceAll("&", "&amp;")));
+  assert.match(shown, /DISMISS/);
+  // The raw markup is never handed to the browser as markup.
+  assert.equal(shown.includes("<svg"), false);
+
+  assert.match(render({ remoteInviteAllowed: true, remoteInviteError: "not_found" }), /NO PAIRING CODE — NOT FOUND/);
+});

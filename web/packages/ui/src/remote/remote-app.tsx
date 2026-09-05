@@ -366,8 +366,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           <section className="dfFactoryConsole__section dfRemote__none" aria-label="No factories">
             <div className="dfFactoryConsole__sectionHeading"><h2>NO FACTORY ON THIS DEVICE</h2></div>
             <p className="dfRemote__prose">
-              Run <code>factoryctl remote pair</code> on the factory machine, then open the link it
-              prints on this device.
+              On a paired desktop, open the factory console and choose PAIR A PHONE, then scan the
+              code or open its link on this phone.
             </p>
             <p className="dfRemote__prose">
               You can also paste that link above. The link works once and only on the device that

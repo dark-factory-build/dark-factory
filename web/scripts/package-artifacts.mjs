@@ -56,6 +56,7 @@ const inventory = {
     "factory-console.css", "factory-console.d.ts", "factory-console.js",
     "factory-scene/factory-scene.d.ts", "factory-scene/factory-scene.js",
     "factory-scene/scene.d.ts", "factory-scene/scene.js", "index.d.ts", "index.js",
+    "remote-invite.d.ts", "remote-invite.js",
     "remote/remote-app.d.ts", "remote/remote-app.js", "remote/remote-view.d.ts", "remote/remote-view.js",
     "terminal-controller.d.ts", "terminal-controller.js", "xterm-terminal.d.ts", "xterm-terminal.js",
     "provenance.json",
