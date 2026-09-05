@@ -50,7 +50,7 @@ const (
   factoryctl init --home ABSOLUTE
   factoryctl doctor --home ABSOLUTE
   factoryctl service status --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
-  factoryctl service install --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
+  factoryctl service install --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE] [--relay-origin WSS_ORIGIN]
   factoryctl service start --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl service stop --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl service uninstall --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
@@ -97,6 +97,7 @@ type attemptCommand struct {
 
 	label           string
 	plistDir        string
+	relayOrigin     string
 	name            string
 	root            string
 	project         string
@@ -342,6 +343,13 @@ func parseServiceCommand(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.plistDir = value
+		case "--relay-origin":
+			// Only install renders a plist; every other verb recovers the
+			// origin from the receipt this install writes.
+			if command.kind != commandServiceInstall || !install.ValidRelayOrigin(value) {
+				return attemptCommand{}, false, false
+			}
+			command.relayOrigin = value
 		default:
 			return attemptCommand{}, false, false
 		}
@@ -358,6 +366,7 @@ func serviceConfigFor(command attemptCommand) install.ServiceConfig {
 		config.Label = command.label
 	}
 	config.PlistDirectory = command.plistDir
+	config.RelayOrigin = command.relayOrigin
 	return config
 }
 
@@ -402,6 +411,11 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 			message = "factoryctl: service operations are unsupported on this platform\n"
 		case errors.Is(err, install.ErrInvalidHome):
 			message = "factoryctl: service operations require an exact Go home\n"
+		case errors.Is(err, install.ErrServiceRelayOrigin):
+			// The only service error printed verbatim: it names the installed
+			// origin and the way out, and the engine assembles it from its own
+			// words alone.
+			message = "factoryctl: " + err.Error() + "\n"
 		case errors.Is(err, install.ErrServiceForeign):
 			message = "factoryctl: a service artifact is not this installation's property; refusing\n"
 		case errors.Is(err, install.ErrServiceResidue):

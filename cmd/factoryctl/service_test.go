@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -48,6 +49,42 @@ func TestParseServiceStatusIsOneExplicitCommand(t *testing.T) {
 	for _, args := range [][]string{{"service", "--help"}, {"service", "status", "--help"}} {
 		if _, help, ok := parse(args); !ok || !help {
 			t.Fatalf("service help rejected: %q", args)
+		}
+	}
+}
+
+func TestParseServiceInstallRelayOriginIsInstallOnlyAndExact(t *testing.T) {
+	home := "/private/tmp/factory"
+	const origin = "wss://relay.darkfactory.build"
+	command, help, ok := parse([]string{"service", "install", "--home", home, "--relay-origin", origin})
+	if !ok || help || command != (attemptCommand{kind: commandServiceInstall, home: home, relayOrigin: origin}) {
+		t.Fatalf("parse = %+v, help=%t, ok=%t", command, help, ok)
+	}
+	if config := serviceConfigFor(command); config.RelayOrigin != origin {
+		t.Fatalf("service config relay origin = %q", config.RelayOrigin)
+	}
+	// Omitting the flag installs exactly as before.
+	command, _, ok = parse([]string{"service", "install", "--home", home})
+	if !ok || serviceConfigFor(command).RelayOrigin != "" {
+		t.Fatalf("bare install carried a relay origin: %+v", command)
+	}
+	for _, args := range [][]string{
+		// Only install renders a plist; the other verbs read the receipt.
+		{"service", "status", "--home", home, "--relay-origin", origin},
+		{"service", "uninstall", "--home", home, "--relay-origin", origin},
+		// The connector's own grammar bounds the flag.
+		{"service", "install", "--home", home, "--relay-origin", ""},
+		{"service", "install", "--home", home, "--relay-origin", "https://relay.darkfactory.build"},
+		{"service", "install", "--home", home, "--relay-origin", "wss://relay.darkfactory.build/host"},
+		{"service", "install", "--home", home, "--relay-origin", "wss://relay.darkfactory.build?x=1"},
+		{"service", "install", "--home", home, "--relay-origin", "wss://user@relay.darkfactory.build"},
+		{"service", "install", "--home", home, "--relay-origin", "wss://"},
+		{"service", "install", "--home", home, "--relay-origin", strings.Repeat("w", install.MaxRelayOriginBytes)},
+		// Repeating any service flag is a syntax error, this one included.
+		{"service", "install", "--home", home, "--relay-origin", origin, "--relay-origin", origin},
+	} {
+		if _, _, ok := parse(args); ok {
+			t.Fatalf("invalid relay origin syntax accepted: %q", args)
 		}
 	}
 }
@@ -107,6 +144,24 @@ func TestServiceStatusCLIMapsFailuresWithoutPrivateDiagnostics(t *testing.T) {
 				t.Fatalf("failure = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func TestServiceCLIPrintsTheChangedRelayOriginRefusal(t *testing.T) {
+	const origin = "wss://relay.darkfactory.build"
+	var stdout, stderr bytes.Buffer
+	exit := runWithDependencies(context.Background(), []string{"service", "status", "--home", "/private/tmp/factory"}, func(string) string {
+		return "/private/tmp/user"
+	}, &stdout, &stderr, nil, func(context.Context, string) (install.ServiceStatus, error) {
+		return install.ServiceStatus{}, fmt.Errorf("%w %q; run factoryctl service uninstall first", install.ErrServiceRelayOrigin, origin)
+	})
+	if exit != exitFailure || stdout.Len() != 0 {
+		t.Fatalf("refusal = exit %d, stdout %q", exit, stdout.String())
+	}
+	// Without both halves the operator cannot tell what is installed or how to
+	// replace it, which is the whole point of refusing instead of no-opping.
+	if !strings.Contains(stderr.String(), origin) || !strings.Contains(stderr.String(), "service uninstall") {
+		t.Fatalf("refusal stderr = %q", stderr.String())
 	}
 }
 

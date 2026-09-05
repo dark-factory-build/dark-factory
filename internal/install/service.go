@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -24,6 +25,10 @@ const (
 	serviceMaxLabelBytes = 127
 )
 
+// MaxRelayOriginBytes is the one bound on ServiceConfig.RelayOrigin, shared
+// with the factoryctl flag that supplies it.
+const MaxRelayOriginBytes = 2048
+
 var (
 	ErrServiceAmbiguous = errors.New("service ownership is ambiguous")
 	ErrServiceLaunchctl = errors.New("launchctl result is not authoritative")
@@ -31,6 +36,11 @@ var (
 	ErrServiceReceipt   = errors.New("service receipt is invalid")
 	ErrServiceForeign   = errors.New("service artifact is not this installation's property")
 	ErrServiceResidue   = errors.New("service installation residue requires uninstall")
+
+	// ErrServiceRelayOrigin is the one refusal factoryctl prints verbatim, so
+	// it is assembled only from this engine's own words and the origin its own
+	// receipt recorded; no platform diagnostic is ever joined onto it.
+	ErrServiceRelayOrigin = fmt.Errorf("%w: the installed service uses a different relay origin", ErrServiceForeign)
 )
 
 // ServiceState is the bounded read-only projection returned by factoryctl.
@@ -53,13 +63,18 @@ const (
 type ServiceConfig struct {
 	Label          string
 	PlistDirectory string
+	// RelayOrigin, when set, adds --relay-origin to the installed job's
+	// arguments so the factory dials the hosted relay. It is read by
+	// ServiceInstall only: every other verb recovers the origin from the
+	// receipt, because uninstall and status are invoked without the flag.
+	RelayOrigin string
 }
 
 // DefaultServiceConfig is the production configuration.
 func DefaultServiceConfig() ServiceConfig { return ServiceConfig{Label: DefaultServiceLabel} }
 
 func (config ServiceConfig) valid() bool {
-	if !validServiceLabel(config.Label) {
+	if !validServiceLabel(config.Label) || !validServiceRelayOrigin(config.RelayOrigin) {
 		return false
 	}
 	return config.PlistDirectory == "" || validServicePath(config.PlistDirectory)
@@ -146,17 +161,27 @@ func ServiceUninstall(ctx context.Context, home string, config ServiceConfig) (S
 
 // ServicePlist renders the one Go-v1 launchd job. Exact byte comparison is the
 // parser: accepting a plist means accepting precisely this finite allowlist.
-func ServicePlist(home, label string) ([]byte, [sha256.Size]byte, error) {
+// An empty relayOrigin renders the job with no relay argument at all.
+func ServicePlist(home, label, relayOrigin string) ([]byte, [sha256.Size]byte, error) {
 	if !validServicePath(home) || filepath.Base(home) == string(filepath.Separator) {
 		return nil, [sha256.Size]byte{}, fmt.Errorf("%w: home path", ErrServicePlist)
 	}
 	if !validServiceLabel(label) {
 		return nil, [sha256.Size]byte{}, fmt.Errorf("%w: label", ErrServicePlist)
 	}
+	if !validServiceRelayOrigin(relayOrigin) {
+		return nil, [sha256.Size]byte{}, fmt.Errorf("%w: relay origin", ErrServicePlist)
+	}
 	program := serviceProgramPath(home)
 	var escapedHome, escapedProgram bytes.Buffer
 	escapeXML(&escapedHome, home)
 	escapeXML(&escapedProgram, program)
+	relay := ""
+	if relayOrigin != "" {
+		var escapedRelay bytes.Buffer
+		escapeXML(&escapedRelay, relayOrigin)
+		relay = "\n        <string>--relay-origin</string>\n        <string>" + escapedRelay.String() + "</string>"
+	}
 	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -167,7 +192,7 @@ func ServicePlist(home, label string) ([]byte, [sha256.Size]byte, error) {
     <array>
         <string>` + escapedProgram.String() + `</string>
         <string>--home</string>
-        <string>` + escapedHome.String() + `</string>
+        <string>` + escapedHome.String() + `</string>` + relay + `
     </array>
     <key>WorkingDirectory</key>
     <string>` + escapedHome.String() + `</string>
@@ -194,6 +219,10 @@ type serviceReceipt struct {
 	PlistPath     string `json:"plist_path"`
 	PlistDigest   string `json:"plist_digest"`
 	ProgramDigest string `json:"program_digest"`
+	// RelayOrigin is the exact --relay-origin argument the installed plist
+	// was rendered with. It is last and omitted when empty so a receipt
+	// written before this member existed still round-trips byte for byte.
+	RelayOrigin string `json:"relay_origin,omitempty"`
 }
 
 const (
@@ -205,7 +234,8 @@ const (
 func (receipt serviceReceipt) valid() bool {
 	return receipt.Version == serviceReceiptVersion && validServiceLabel(receipt.Label) &&
 		validServicePath(receipt.PlistPath) && filepath.Base(receipt.PlistPath) == receipt.Label+".plist" &&
-		validDigestHex(receipt.PlistDigest) && validDigestHex(receipt.ProgramDigest)
+		validDigestHex(receipt.PlistDigest) && validDigestHex(receipt.ProgramDigest) &&
+		validServiceRelayOrigin(receipt.RelayOrigin)
 }
 
 func validDigestHex(value string) bool {
@@ -245,6 +275,24 @@ func parseServiceReceipt(body []byte) (serviceReceipt, error) {
 	}
 	return receipt, nil
 }
+
+// ValidRelayOrigin is the one relay-origin grammar in the tree: a bounded,
+// exact wss:// or ws:// origin. relayhost and the factoryctl flag both defer
+// to it, and it lives here because relayhost imports this package. A path,
+// query, fragment or credential is refused because the connector appends its
+// own host path, and because a plist rendered from one would crash-loop.
+func ValidRelayOrigin(value string) bool {
+	if value == "" || len(value) > MaxRelayOriginBytes || !utf8.ValidString(value) {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && (parsed.Scheme == "ws" || parsed.Scheme == "wss") && parsed.Host != "" &&
+		parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.String() == value
+}
+
+// validServiceRelayOrigin additionally accepts the empty origin, which renders
+// a job with no relay argument at all.
+func validServiceRelayOrigin(value string) bool { return value == "" || ValidRelayOrigin(value) }
 
 func validServicePath(value string) bool {
 	return value != "" && len(value) <= serviceMaxPathBytes && utf8.ValidString(value) && filepath.IsAbs(value) && filepath.Clean(value) == value && validXMLText(value) && !strings.ContainsRune(value, 0)
