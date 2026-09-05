@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -242,6 +243,24 @@ func (backend *browserBackend) TerminalTarget(ctx context.Context, rawClient [br
 		}
 	}
 	return result, nil
+}
+
+// PairLink is the pair page's mint: the one-shot launch link OpenBrowser
+// returns. A commit-uncertain mint is a plain failure here, as in RemotePair:
+// the page has no cleanup identity to hand anyone and an unopened challenge
+// simply expires.
+func (backend *browserBackend) PairLink(ctx context.Context) (string, error) {
+	if backend == nil || backend.owner == nil {
+		return "", browser.ErrUnauthorized
+	}
+	launch, err := backend.owner.OpenBrowser(ctx)
+	if err != nil {
+		return "", mapBrowserError(err)
+	}
+	if launch.Outcome != api.WebLaunchReady {
+		return "", browser.ErrUnauthorized
+	}
+	return launch.LaunchURL, nil
 }
 
 func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskEnqueue) (browserprotocol.TaskEnqueueResult, error) {
