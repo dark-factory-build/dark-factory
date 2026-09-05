@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
 const (
@@ -180,9 +182,7 @@ func (config Config) withDefaults() Config {
 // ws:// is accepted for development against a local relay; a path, query or
 // credential is refused because the connector appends its own host path.
 func ValidateRelayOrigin(value string) error {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "wss" && parsed.Scheme != "ws" || parsed.Host == "" || parsed.User != nil ||
-		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.String() != value {
+	if !install.ValidRelayOrigin(value) {
 		return fmt.Errorf("%w: relay origin must be an exact wss:// or ws:// origin", ErrConfig)
 	}
 	return nil

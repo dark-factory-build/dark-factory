@@ -3,6 +3,7 @@
 package install
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -695,5 +697,124 @@ func TestStagedWritersRefuseCollisionsInsteadOfDeleting(t *testing.T) {
 		if err != nil || string(body) != "someone else's bytes" {
 			t.Fatalf("stage %s mutated: %q, %v", stage, body, err)
 		}
+	}
+}
+
+func TestServiceRelayOriginSurvivesInstallStatusAndUninstall(t *testing.T) {
+	const origin = "wss://relay.darkfactory.build"
+	fixture := newManageFixture(t)
+	deny := func(context.Context, ...string) launchctlResult {
+		t.Fatal("launchctl ran for a request that should have been refused")
+		return launchctlResult{}
+	}
+
+	// An origin the render cannot accept refuses before a single byte lands.
+	invalid := fixture.config
+	invalid.RelayOrigin = "https://relay.darkfactory.build"
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, invalid, fixture.sourceDir, deny)
+	if status.State != "" || !errors.Is(err, ErrServiceAmbiguous) {
+		t.Fatalf("invalid relay origin install = %+v, %v", status, err)
+	}
+	for _, path := range []string{ServiceDirectoryPath(fixture.home), fixture.plistPath()} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("refused install created %s", filepath.Base(path))
+		}
+	}
+
+	fixture.config.RelayOrigin = origin
+	installed := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(77))}
+	fixture.install(t, installed.run)
+
+	expected, expectedDigest, err := ServicePlist(fixture.home, fixture.config.Label, origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(fixture.plistPath())
+	if err != nil || !bytes.Equal(body, expected) {
+		t.Fatalf("installed plist is not the relay rendering: %v", err)
+	}
+	receiptBody, err := os.ReadFile(filepath.Join(ServiceDirectoryPath(fixture.home), serviceReceiptName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := parseServiceReceipt(receiptBody)
+	if err != nil || receipt.RelayOrigin != origin || receipt.PlistDigest != hex.EncodeToString(expectedDigest[:]) {
+		t.Fatalf("receipt does not bind the relayed plist: %+v, %v", receipt, err)
+	}
+
+	// Status re-renders from the receipt, so the relayed plist is recognized
+	// as this installation's property rather than read as foreign bytes.
+	bare := fixture.config
+	bare.RelayOrigin = ""
+	running := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(77)}}
+	status, err = inspectServiceAtHome(context.Background(), fixture.home, fixture.userHome, bare, running.run)
+	if err != nil || status.State != ServiceRunning || status.PID != 77 {
+		t.Fatalf("relayed status = %+v, %v", status, err)
+	}
+
+	// Uninstall is invoked without the flag too: the receipt is what
+	// reproduces the exact installed bytes, and removal proves it did.
+	proven := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(77), {status: 0}, {status: launchctlNotFound}}}
+	status, err = serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, bare, proven.run)
+	if err != nil || status.State != ServiceAbsent {
+		t.Fatalf("relayed uninstall = %+v, %v", status, err)
+	}
+	for _, path := range []string{ServiceDirectoryPath(fixture.home), fixture.plistPath()} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived the relayed uninstall", filepath.Base(path))
+		}
+	}
+}
+
+func TestServiceInstallRefusesAChangedRelayOriginInsteadOfNoOpping(t *testing.T) {
+	const originA = "wss://relay.darkfactory.build"
+	const originB = "wss://relay.example.test"
+	fixture := newManageFixture(t)
+
+	// A repeated install that would render a different plist must refuse
+	// rather than report the old installation as satisfying the request.
+	refuses := func(t *testing.T, from, to string) {
+		t.Helper()
+		fixture.config.RelayOrigin = from
+		first := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(88))}
+		fixture.install(t, first.run)
+		installed, err := os.ReadFile(fixture.plistPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := fixture.config
+		changed.RelayOrigin = to
+		status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, changed, fixture.sourceDir, (&recordedLaunchctl{results: []launchctlResult{fixture.printRunning(88)}}).run)
+		if status.State != ServiceAmbiguous || !errors.Is(err, ErrServiceRelayOrigin) || !errors.Is(err, ErrServiceForeign) {
+			t.Fatalf("install %q over %q = %+v, %v", to, from, status, err)
+		}
+		// The refusal must name what is installed, quoted, so an empty
+		// installed origin is still distinguishable from a relayed one.
+		if !strings.Contains(err.Error(), strconv.Quote(from)) || !strings.Contains(err.Error(), "service uninstall") {
+			t.Fatalf("refusal text = %v", err)
+		}
+		if body, readErr := os.ReadFile(fixture.plistPath()); readErr != nil || !bytes.Equal(body, installed) {
+			t.Fatalf("refused install rewrote the plist: %v", readErr)
+		}
+		removed := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(88), {status: 0}, {status: launchctlNotFound}}}
+		if status, err := serviceUninstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, removed.run); err != nil || status.State != ServiceAbsent {
+			t.Fatalf("uninstall after refusal = %+v, %v", status, err)
+		}
+	}
+	refuses(t, "", originA)
+	refuses(t, originA, originB)
+	refuses(t, originA, "")
+
+	// The same origin twice stays idempotent: no plist rewrite, no launchctl
+	// bootstrap, just the recognized installation.
+	fixture.config.RelayOrigin = originA
+	fixture.install(t, (&recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(89))}).run)
+	repeat := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(89)}}
+	status, err := serviceInstallAt(context.Background(), fixture.home, fixture.userHome, fixture.config, fixture.sourceDir, repeat.run)
+	if err != nil || status.State != ServiceRunning || status.PID != 89 {
+		t.Fatalf("repeated identical install = %+v, %v", status, err)
+	}
+	if len(repeat.calls) != 1 || repeat.calls[0][0] != "print" {
+		t.Fatalf("repeated identical install verbs = %q", repeat.calls)
 	}
 }

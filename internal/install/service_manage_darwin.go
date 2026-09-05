@@ -143,8 +143,7 @@ func receiptMatchesInstallation(receipt serviceReceipt, home string, config Serv
 	if receipt.PlistPath != plistPath {
 		return fmt.Errorf("%w: receipt plist path", ErrServiceForeign)
 	}
-	expected, digest, err := ServicePlist(home, config.Label)
-	_ = expected
+	_, digest, err := ServicePlist(home, config.Label, receipt.RelayOrigin)
 	if err != nil {
 		return err
 	}
@@ -204,6 +203,11 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, capability)
 	status := inspection.status
 	if err == nil && (status.State == ServiceInstalled || status.State == ServiceRunning) {
+		if inspection.relayOrigin != config.RelayOrigin {
+			// Repeating an install is recognized only when it would render the
+			// same plist. A changed relay origin needs the old job removed.
+			return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w %q; run factoryctl service uninstall first", ErrServiceRelayOrigin, inspection.relayOrigin)
+		}
 		return status, nil
 	}
 	if err != nil && !errors.Is(err, ErrServiceResidue) {
@@ -235,22 +239,26 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 			programDigest = digest
 		}
 	}
-	plistBytes, plistDigest, err := ServicePlist(home, config.Label)
+	plistBytes, plistDigest, err := ServicePlist(home, config.Label, config.RelayOrigin)
 	if err != nil {
-		return ServiceStatus{}, err
-	}
-	if err := writeExactFile(plistDirectory, config.plistName(), plistBytes, 0o600); err != nil {
 		return ServiceStatus{}, err
 	}
 	receipt := serviceReceipt{
 		Version: serviceReceiptVersion, Label: config.Label, PlistPath: plistPath,
 		PlistDigest: hex.EncodeToString(plistDigest[:]), ProgramDigest: programDigest,
+		RelayOrigin: config.RelayOrigin,
 	}
 	body, err := encodeServiceReceipt(receipt)
 	if err != nil {
 		return ServiceStatus{}, err
 	}
+	// The receipt is published before the plist so the argument list is on
+	// disk whenever the plist is. A crash in the other order would leave a
+	// plist nothing could re-render, which uninstall could never resolve.
 	if err := writeExactFile(serviceDir, serviceReceiptName, body, 0o600); err != nil {
+		return ServiceStatus{}, err
+	}
+	if err := writeExactFile(plistDirectory, config.plistName(), plistBytes, 0o600); err != nil {
 		return ServiceStatus{}, err
 	}
 	uid := strconv.Itoa(os.Geteuid())
@@ -366,11 +374,18 @@ func serviceUninstallAt(ctx context.Context, home, userHome string, config Servi
 
 func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config ServiceConfig, launchctl launchctlRun) (ServiceStatus, error) {
 	plistDirectory, plistPath := servicePlistLocation(userHome, config)
-	expectedPlist, expectedPlistDigest, err := ServicePlist(home, config.Label)
+	// The receipt names the argument list its plist was rendered from, so it
+	// is read before the re-render: the same binary then reproduces the exact
+	// installed bytes, relay origin included.
+	receipt, receiptPresent, receiptErr := readServiceReceipt(home)
+	renderedOrigin := ""
+	if receiptErr == nil && receiptPresent {
+		renderedOrigin = receipt.RelayOrigin
+	}
+	expectedPlist, expectedPlistDigest, err := ServicePlist(home, config.Label, renderedOrigin)
 	if err != nil {
 		return ServiceStatus{}, err
 	}
-	receipt, receiptPresent, receiptErr := readServiceReceipt(home)
 	if receiptErr == nil && receiptPresent {
 		if receipt.Label != config.Label || receipt.PlistPath != plistPath || receipt.PlistDigest != hex.EncodeToString(expectedPlistDigest[:]) {
 			// The service directory belongs to a different installation target;
@@ -380,7 +395,7 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 	}
 	evidence := receiptErr == nil && receiptPresent
 	if !evidence {
-		plistEvidence, err := uninstallPlistEvidence(home, config, plistDirectory)
+		plistEvidence, err := uninstallPlistEvidence(home, config, plistDirectory, renderedOrigin)
 		if err != nil {
 			// A foreign plist refuses before any mutation, launchctl included.
 			return ServiceStatus{State: ServiceAmbiguous}, err
@@ -445,8 +460,8 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 // uninstallPlistEvidence proves label-to-home ownership from the plist alone:
 // exact rendered bytes are evidence, absence is no evidence, and any other
 // bytes refuse the whole uninstall before a single mutation.
-func uninstallPlistEvidence(home string, config ServiceConfig, plistDirectory string) (bool, error) {
-	expected, _, err := ServicePlist(home, config.Label)
+func uninstallPlistEvidence(home string, config ServiceConfig, plistDirectory, relayOrigin string) (bool, error) {
+	expected, _, err := ServicePlist(home, config.Label, relayOrigin)
 	if err != nil {
 		return false, err
 	}

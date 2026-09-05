@@ -30,7 +30,22 @@ factoryctl service status --home "$HOME/.dark-factory"
 To upgrade a running installation to a new build, run `factoryctl service
 uninstall --home "$HOME/.dark-factory"` with the new `factoryctl`, then
 `factoryctl service install --home "$HOME/.dark-factory"`. Only the service's
-binaries, plist, and receipt are replaced; the data home is untouched.
+binaries, plist, and receipt are replaced; the data home is untouched. An
+installation that used `--relay-origin` must repeat that flag on the install
+after the uninstall, or the new job comes back loopback-only.
+
+To reach the factory from the hosted PWA rather than only from this machine's
+loopback, install with `factoryctl service install --home "$HOME/.dark-factory"
+--relay-origin wss://relay.darkfactory.build`. The flag is optional and has no
+default: omitting it installs a loopback-only job exactly as before. The
+installed launchd job then starts `factoryd` with that `--relay-origin`, and the
+service receipt records the exact argument list it was rendered from, so
+`service status` and `service uninstall` reproduce that exact plist from the
+receipt and keep proving ownership. Changing or removing the relay origin is
+`factoryctl service uninstall` followed by a fresh install carrying the origin
+you want: repeating an install with a different origin refuses, printing the
+origin already installed, rather than silently keeping or dropping it. Pair a
+phone with `factoryctl remote pair`.
 
 Point the operator client at that home and open the paired hosted console:
 
