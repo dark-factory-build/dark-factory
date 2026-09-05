@@ -14,6 +14,8 @@ import {
   MAX_JSON_DEPTH,
   MAX_OBJECT_MEMBERS,
   MAX_PROJECT_NAME_BYTES,
+  MAX_REMOTE_INVITE_LINK_BYTES,
+  MAX_REMOTE_INVITE_SVG_BYTES,
   MAX_SNAPSHOT_BYTES,
   MAX_SNAPSHOT_ENTITIES,
   MAX_SQLITE_INTEGER,
@@ -94,6 +96,11 @@ export type TerminalInputResultBody = { session_id: string; generation: bigint; 
 export type TerminalEOFBody = { session_id: string };
 export type TerminalExitBody = { session_id: string; exit_code: number; exit_signal: number; aborted: boolean };
 export type TerminalResetBody = { session_id: string; floor: bigint; head: bigint };
+export type RemoteInviteBody = Record<string, never>;
+export type RemoteInviteResultBody = { link: string; expires_at_ms: bigint; svg: string };
+
+/** The exact everything-before-the-members of a minted invitation link. */
+const REMOTE_INVITE_LINK_PREFIX = "https://app.darkfactory.build/remote#df_remote&";
 
 export type HelloFrame = { type: "HELLO"; body: HelloBody };
 export type PairProveFrame = { type: "PAIR_PROVE"; id: string; body: PairProveBody };
@@ -133,6 +140,7 @@ export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame 
   | { type: "TASK_UPDATE_RESULT"; id: string; body: TaskUpdateResultBody }
   | { type: "TOPOLOGY"; id: string; body: TopologyBody }
   | { type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
+  | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | TerminalServerControlFrame | ErrorFrame;
 export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
@@ -142,12 +150,13 @@ export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame
   | { type: "TASK_UPDATE"; id: string; body: TaskUpdateBody }
   | { type: "TOPOLOGY_GET"; id: string; body: TopologyGetBody }
   | { type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
+  | { type: "REMOTE_INVITE"; id: string; body: RemoteInviteBody }
   | TerminalControlFrame | ErrorFrame;
 type ControlBody = ClientControlFrame["body"] | ServerControlFrame["body"];
 
 const HEX_BYTES = { daemon_id: 16, boot_id: 16, connection_nonce: 32, challenge: 32, client_id: 16, public_key_sec1: 65, signature: 64 } as const;
-const CLIENT_TYPES: readonly ControlType[] = ["PAIR_PROVE", "AUTH_PROVE", "STATE_GET", "STATE_WATCH", "HUMAN_REQUEST_DETAIL_GET", "HUMAN_REQUEST_REPLY", "HUMAN_REQUEST_CANCEL_RUN", "TASK_ENQUEUE", "AGENT_UPDATE", "TASK_UPDATE", "TOPOLOGY_GET", "TERMINAL_TARGET_GET", "TERMINAL_ATTACH", "TERMINAL_ACK", "TERMINAL_LEASE_ACQUIRE", "TERMINAL_LEASE_RENEW", "TERMINAL_LEASE_RELEASE", "TERMINAL_RESIZE", "TERMINAL_DETACH", "ERROR"];
-const SERVER_TYPES: readonly ControlType[] = ["HELLO", "PAIR_RESULT", "AUTH_RESULT", "STATE_SNAPSHOT", "STATE_CHANGED", "HUMAN_REQUEST_DETAIL", "HUMAN_REQUEST_REPLY_RESULT", "HUMAN_REQUEST_CANCEL_RUN_RESULT", "TASK_ENQUEUE_RESULT", "AGENT_UPDATE_RESULT", "TASK_UPDATE_RESULT", "TOPOLOGY", "TERMINAL_TARGET", "TERMINAL_ATTACHED", "TERMINAL_LEASE_RESULT", "TERMINAL_RESIZED", "TERMINAL_DETACHED", "TERMINAL_INPUT_RESULT", "TERMINAL_EOF", "TERMINAL_EXIT", "TERMINAL_RESET", "ERROR"];
+const CLIENT_TYPES: readonly ControlType[] = ["PAIR_PROVE", "AUTH_PROVE", "STATE_GET", "STATE_WATCH", "HUMAN_REQUEST_DETAIL_GET", "HUMAN_REQUEST_REPLY", "HUMAN_REQUEST_CANCEL_RUN", "TASK_ENQUEUE", "AGENT_UPDATE", "TASK_UPDATE", "TOPOLOGY_GET", "TERMINAL_TARGET_GET", "TERMINAL_ATTACH", "TERMINAL_ACK", "TERMINAL_LEASE_ACQUIRE", "TERMINAL_LEASE_RENEW", "TERMINAL_LEASE_RELEASE", "TERMINAL_RESIZE", "TERMINAL_DETACH", "REMOTE_INVITE", "ERROR"];
+const SERVER_TYPES: readonly ControlType[] = ["HELLO", "PAIR_RESULT", "AUTH_RESULT", "STATE_SNAPSHOT", "STATE_CHANGED", "HUMAN_REQUEST_DETAIL", "HUMAN_REQUEST_REPLY_RESULT", "HUMAN_REQUEST_CANCEL_RUN_RESULT", "TASK_ENQUEUE_RESULT", "AGENT_UPDATE_RESULT", "TASK_UPDATE_RESULT", "TOPOLOGY", "TERMINAL_TARGET", "TERMINAL_ATTACHED", "TERMINAL_LEASE_RESULT", "TERMINAL_RESIZED", "TERMINAL_DETACHED", "TERMINAL_INPUT_RESULT", "TERMINAL_EOF", "TERMINAL_EXIT", "TERMINAL_RESET", "REMOTE_INVITE_RESULT", "ERROR"];
 
 export function encodeClientControl(frame: ClientControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "client"))); }
 export function encodePairProve(id: string, body: PairProveBody): string { return encodeClientControl({ type: "PAIR_PROVE", id, body }); }
@@ -166,6 +175,7 @@ export function encodeTerminalLeaseRenew(id: string, body: TerminalLeaseRenewBod
 export function encodeTerminalLeaseRelease(id: string, body: TerminalLeaseReleaseBody): string { return encodeClientControl({ type: "TERMINAL_LEASE_RELEASE", id, body }); }
 export function encodeTerminalResize(id: string, body: TerminalResizeBody): string { return encodeClientControl({ type: "TERMINAL_RESIZE", id, body }); }
 export function encodeTerminalDetach(id: string, body: TerminalDetachBody): string { return encodeClientControl({ type: "TERMINAL_DETACH", id, body }); }
+export function encodeRemoteInvite(id: string, body: RemoteInviteBody): string { return encodeClientControl({ type: "REMOTE_INVITE", id, body }); }
 export function encodeClientError(body: ErrorBody, id?: string): string { return encodeClientControl({ type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 
 export function encodeServerControl(frame: ServerControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "server"))); }
@@ -187,6 +197,7 @@ export function encodeTerminalInputResult(id: string, body: TerminalInputResultB
 export function encodeTerminalEOF(id: string, body: TerminalEOFBody): string { return encodeServerControl({ type: "TERMINAL_EOF", id, body }); }
 export function encodeTerminalExit(id: string, body: TerminalExitBody): string { return encodeServerControl({ type: "TERMINAL_EXIT", id, body }); }
 export function encodeTerminalReset(id: string, body: TerminalResetBody): string { return encodeServerControl({ type: "TERMINAL_RESET", id, body }); }
+export function encodeRemoteInviteResult(id: string, body: RemoteInviteResultBody): string { return encodeServerControl({ type: "REMOTE_INVITE_RESULT", id, body }); }
 export function encodeServerError(body: ErrorBody, id?: string): string { return encodeServerControl({ type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 export function decodeClientControl(data: string | Uint8Array): ClientControlFrame { return normalizeBoundary(() => decodeControl(data, "client") as ClientControlFrame); }
 export function decodeServerControl(data: string | Uint8Array): ServerControlFrame { return normalizeBoundary(() => decodeControl(data, "server") as ServerControlFrame); }
@@ -301,6 +312,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "TERMINAL_EOF": requireKeys(body, ["session_id"], wire); return { session_id: dynamicID(body.session_id) };
     case "TERMINAL_EXIT": requireKeys(body, ["session_id", "exit_code", "exit_signal", "aborted"], wire); if (typeof body.aborted !== "boolean") malformed(); { const exit_code = integer(body.exit_code, 0, Number.MAX_SAFE_INTEGER); const exit_signal = integer(body.exit_signal, 0, Number.MAX_SAFE_INTEGER); if (exit_signal !== 0 && exit_code !== 0) malformed(); return { session_id: dynamicID(body.session_id), exit_code, exit_signal, aborted: body.aborted }; }
     case "TERMINAL_RESET": requireKeys(body, ["session_id", "floor", "head"], wire); { const floor = decimal(body.floor, wire); const head = decimal(body.head, wire); if (floor > head) malformed(); return { session_id: dynamicID(body.session_id), floor, head }; }
+    case "REMOTE_INVITE": requireKeys(body, [], wire); return {};
+    case "REMOTE_INVITE_RESULT": requireKeys(body, ["link", "expires_at_ms", "svg"], wire); { const link = boundedText(body.link, 1, MAX_REMOTE_INVITE_LINK_BYTES); const svg = boundedText(body.svg, 1, MAX_REMOTE_INVITE_SVG_BYTES); if (!link.startsWith(REMOTE_INVITE_LINK_PREFIX) || /[\u0000-\u001f\u007f]/.test(link) || !svg.startsWith("<svg")) malformed(); return { link, expires_at_ms: decimal(body.expires_at_ms, wire, true), svg }; }
     case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || !(ERROR_CODES as readonly string[]).includes(body.code) || typeof body.retryable !== "boolean") malformed(); return { code: body.code as ErrorCode, retryable: body.retryable };
   }
 }

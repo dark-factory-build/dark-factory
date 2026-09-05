@@ -1,4 +1,5 @@
 import {
+  CAPABILITIES,
   MAX_TERMINAL_PAYLOAD,
   MAX_TASK_INSTRUCTION_BYTES,
   ProtocolError,
@@ -23,6 +24,9 @@ const BROWSER_ENDPOINT = new URL("ws://127.0.0.1:43123/browser");
 const BROWSER_URL = BROWSER_ENDPOINT.toString();
 /** The one loopback address this console dials; SETTINGS shows exactly it. */
 export const BROWSER_HOST = BROWSER_ENDPOINT.host;
+// terminal_input is the bit a remote grant never carries: only a client paired
+// on this machine's own loopback may invite a phone.
+const LOOPBACK_GRANT = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
 
 export type FactoryHumanRequestView = Readonly<{
   request: HumanRequestItem;
@@ -32,6 +36,12 @@ export type FactoryHumanRequestView = Readonly<{
   canCancel: boolean;
   replyMaxBytes: number;
   reply: string;
+}>;
+
+export type FactoryRemoteInvite = Readonly<{
+  link: string;
+  svg: string;
+  expiresAtMs: bigint;
 }>;
 
 export type FactoryAgentSelection = Readonly<{
@@ -76,6 +86,10 @@ export type FactoryAppSnapshot = Readonly<{
   /** Regenerable project structure, absent until the daemon serves it. */
   topology?: TopologyView;
   edit?: FactoryEditView;
+  /** True only while a ready session carries the full loopback grant. */
+  remoteInviteAllowed?: boolean;
+  remoteInvite?: FactoryRemoteInvite;
+  remoteInviteError?: string;
 }>;
 
 export type FactoryAppStatus =
@@ -86,7 +100,8 @@ type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRe
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTask">;
 type ConsoleSession = Pick<BrowserSession, "updateAgent" | "updateTask" | "getTopology">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession };
+type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -166,6 +181,9 @@ export class FactoryAppController {
   #topology: TopologyView | undefined;
   #topologyPending = false;
   #edit: FactoryEditView | undefined;
+  #remoteInvite: FactoryRemoteInvite | undefined;
+  #remoteInviteError: string | undefined;
+  #remoteInvitePending = false;
   #generation = 0;
   #started = false;
   #closed = false;
@@ -381,6 +399,34 @@ export class FactoryAppController {
     }
   }
 
+  /** The mint is never retried: a failure is reported and the operator asks again. */
+  async inviteRemote(): Promise<void> {
+    const session = this.#client?.session;
+    if (this.#closed || this.#status !== "ready" || session === undefined || this.#remoteInvitePending) return;
+    const generation = this.#generation;
+    this.#remoteInvitePending = true;
+    try {
+      const invite = await session.inviteRemote();
+      if (!this.#current(generation)) return;
+      this.#remoteInvite = { link: invite.link, svg: invite.svg, expiresAtMs: invite.expiresAtMs };
+      this.#remoteInviteError = undefined;
+    } catch (error) {
+      if (!this.#current(generation)) return;
+      this.#remoteInvite = undefined;
+      this.#remoteInviteError = finiteError(error).code;
+    } finally {
+      this.#remoteInvitePending = false;
+    }
+    this.#publish();
+  }
+
+  dismissRemoteInvite(): void {
+    if (this.#closed) return;
+    this.#remoteInvite = undefined;
+    this.#remoteInviteError = undefined;
+    this.#publish();
+  }
+
   beginTerminalSurface(token: object, surfaceVersion = this.#terminalSurfaceVersion): void {
     if (this.#closed || this.#selectedAgent === undefined || surfaceVersion !== this.#terminalSurfaceVersion) return;
     if (this.#terminalSurfaceToken !== undefined && this.#terminalSurfaceToken !== token) return;
@@ -581,7 +627,12 @@ export class FactoryAppController {
     if (!this.#current(generation)) return;
     this.#status = status;
     this.#statusReason = status === "closed" ? this.#error?.code ?? "closed" : undefined;
-    if (status !== "ready") this.#clearSelection();
+    if (status !== "ready") {
+      this.#clearSelection();
+      // A reconnect must not show a code minted for the connection that dropped.
+      this.#remoteInvite = undefined;
+      this.#remoteInviteError = undefined;
+    }
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.
     if (status !== "ready" && status !== "syncing") {
@@ -932,6 +983,9 @@ export class FactoryAppController {
         replyMaxBytes: selection.detail?.replyMaxBytes ?? 0,
         reply: selection.reply,
       },
+      remoteInviteAllowed: this.#status === "ready" && ((this.#client?.session?.capabilities ?? 0) & LOOPBACK_GRANT) === LOOPBACK_GRANT,
+      remoteInvite: this.#remoteInvite,
+      remoteInviteError: this.#remoteInviteError,
       selectedAgent: this.#selectedAgent === undefined ? undefined : {
         id: this.#selectedAgent.agent.id,
         name: this.#selectedAgent.agent.name,

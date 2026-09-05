@@ -568,3 +568,29 @@ function expand(node, result = []) {
   expand(node.props.children, result);
   return result;
 }
+
+test("PAIR A PHONE appears in settings only with authority, and shows the minted code", () => {
+  const svg = '<svg viewBox="0 0 1 1"/>';
+  const link = "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600";
+  const settings = { settingsOpen: true, onToggleSettings: () => {} };
+  // Pairing lives in the settings sidebar, which is the only place it shows.
+  assert.equal(render({ ...settings }).includes("PAIR A PHONE"), false);
+  assert.match(render({ ...settings, remoteInviteAllowed: true }), /PAIR A PHONE/);
+  assert.equal(render({ remoteInviteAllowed: true }).includes("PAIR A PHONE"), false, "not without settings");
+  assert.equal(render({ ...settings, remoteInviteAllowed: true, selectedAgent: agentSelection() }).includes("PAIR A PHONE"), false, "not behind another sidebar");
+  // Its slot still takes an explicit override.
+  assert.match(render({ ...settings, remoteInviteAllowed: true, pairing: createElement("p", null, "OTHER") }), /OTHER/);
+
+  const shown = render({ ...settings, remoteInviteAllowed: true, remoteInvite: { link, svg, expiresAtMs: 1767225600000n } });
+  assert.ok(shown.includes(`src="data:image/svg+xml;utf8,${encodeURIComponent(svg)}"`), shown);
+  assert.ok(shown.includes(link.replaceAll("&", "&amp;")));
+  assert.match(shown, /DISMISS/);
+  // The minted code is never handed to the browser as markup. The floor draws
+  // its own SVG, so the check names the invite's exact bytes.
+  assert.equal(shown.includes(svg), false);
+
+  const failed = render({ ...settings, remoteInviteAllowed: true, remoteInviteError: "not_found" });
+  assert.match(failed, /NO PAIRING CODE — NOT FOUND/);
+  assert.match(failed, /DISMISS/);
+  assert.equal(render({ ...settings, remoteInviteAllowed: true }).includes("DISMISS"), false);
+});

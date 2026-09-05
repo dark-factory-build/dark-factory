@@ -188,6 +188,7 @@ type PairBackend interface {
 type TaskBackend interface {
 	Backend
 	EnqueueTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskEnqueue) (browserprotocol.TaskEnqueueResult, error)
+	RemoteInvite(context.Context, [browserprotocol.ClientIDSize]byte) (browserprotocol.RemoteInviteResult, error)
 }
 
 // ConsoleBackend is the optional console half of browser v1: the bounded

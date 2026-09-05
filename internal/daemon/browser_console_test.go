@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/topology"
 )
 
 // consoleFixture pairs one browser client and gives it a project, an agent and
@@ -180,5 +182,101 @@ func TestBrowserConsoleRejectsUnusableIdentitiesAndRevisions(t *testing.T) {
 		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), AssignedAgentID: &assigned,
 	}); !errors.Is(err, browser.ErrStale) {
 		t.Fatalf("cross-project reassignment = %v", err)
+	}
+}
+
+// An owner-side effect whose cause carries a deadline still says "the outcome
+// is unknown". Mapping that to retryable busyness would invite a second
+// attempt at an effect that may already have landed.
+func TestBrowserEffectVerdictSurvivesItsDeadlineCause(t *testing.T) {
+	// browser.ErrRateLimited is the only kind the transport answers as
+	// retryable; every other browser kind is a definite, non-retryable answer,
+	// and an unmapped error becomes internal.
+	retryable := func(err error) bool { return errors.Is(err, browser.ErrRateLimited) }
+	for _, verdict := range []error{ErrTerminalEffectUncertain, ErrTerminalEffectPartial, ErrTerminalEffectRejected} {
+		// This is exactly the shape uncertainTerminalEffect(context.DeadlineExceeded)
+		// produces on the owner side.
+		mapped := mapBrowserError(errors.Join(verdict, context.DeadlineExceeded))
+		if !errors.Is(mapped, verdict) || retryable(mapped) {
+			t.Fatalf("%v mapped to %v", verdict, mapped)
+		}
+	}
+	unknown := kernel.NewOutcomeUnknownError(context.DeadlineExceeded)
+	if mapped := mapBrowserError(unknown); !errors.Is(mapped, unknown) || retryable(mapped) {
+		t.Fatalf("outcome-unknown mapped to %v", mapped)
+	}
+	// A bare deadline, with no owner verdict, is still retryable busyness.
+	if mapped := mapBrowserError(context.DeadlineExceeded); !retryable(mapped) {
+		t.Fatalf("bare deadline = %v", mapped)
+	}
+}
+
+// The tree bounds nothing. A node the wire cannot carry is dropped with its
+// subtree so the whole project stays serveable.
+func TestProjectTopologyDropsNodesTheWireCannotCarry(t *testing.T) {
+	root := topology.Node{ID: strings.Repeat("a1", 32), Kind: topology.NodeRepository, RelativePath: ".", Label: "repository", SizeBucket: "small"}
+	longLabel := topology.Node{ID: strings.Repeat("b2", 32), ParentID: root.ID, Kind: topology.NodeDirectory, RelativePath: "wide", Label: strings.Repeat("l", browserprotocol.MaxAgentNameBytes+1), SizeBucket: "small"}
+	childOfLongLabel := topology.Node{ID: strings.Repeat("c3", 32), ParentID: longLabel.ID, Kind: topology.NodeDirectory, RelativePath: "wide/inner", Label: "inner", SizeBucket: "small"}
+	longPath := topology.Node{ID: strings.Repeat("d4", 32), ParentID: root.ID, Kind: topology.NodeDirectory, RelativePath: strings.Repeat("p", browserprotocol.MaxTaskTitleBytes+1), Label: "deep", SizeBucket: "small"}
+	invalidUTF8 := topology.Node{ID: strings.Repeat("e5", 32), ParentID: root.ID, Kind: topology.NodeDirectory, RelativePath: "bad", Label: string([]byte{0xff}), SizeBucket: "small"}
+	keeper := topology.Node{ID: strings.Repeat("f6", 32), ParentID: root.ID, Kind: topology.NodePackage, RelativePath: "internal/kernel", Label: "kernel", Language: "go", SizeBucket: "large"}
+	snapshot := topology.Snapshot{
+		Digest: strings.Repeat("ab", 32),
+		Nodes:  []topology.Node{root, longLabel, childOfLongLabel, longPath, invalidUTF8, keeper},
+	}
+	result := projectTopology("01010101010101010101010101010101", snapshot)
+	served := make([]string, 0, len(result.Nodes))
+	for _, node := range result.Nodes {
+		served = append(served, node.ID)
+	}
+	if len(served) != 2 || served[0] != root.ID || served[1] != keeper.ID {
+		t.Fatalf("served nodes = %v", served)
+	}
+	// The frame the console actually receives must encode.
+	if _, err := browserprotocol.EncodeTopology("topology", result); err != nil {
+		t.Fatalf("clamped topology did not encode: %v", err)
+	}
+}
+
+// A directory the filesystem accepts but the wire cannot label is real: 129
+// bytes is a legal name everywhere Dark Factory runs.
+func TestBrowserConsoleServesAProjectWithAnOverLongDirectoryName(t *testing.T) {
+	root := consoleRoot(t)
+	writeTopologyFixture(t, root, strings.Repeat("d", browserprotocol.MaxAgentNameBytes+1)+"/inner/inner.go", "package inner\n")
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve, root)
+	result, err := fixture.backend.Topology(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.TopologyGet{ProjectID: fixture.project.ID.String()})
+	if err != nil {
+		t.Fatalf("topology with an over-long directory = %v", err)
+	}
+	for _, node := range result.Nodes {
+		if len(node.Label) > browserprotocol.MaxAgentNameBytes || len(node.Path) > browserprotocol.MaxTaskTitleBytes {
+			t.Fatalf("served an unencodable node: %+v", node)
+		}
+	}
+	if _, err := browserprotocol.EncodeTopology("topology", result); err != nil {
+		t.Fatalf("daemon-produced topology did not encode: %v", err)
+	}
+}
+
+// Reassignment inside the project is the queue edit the console offers beside
+// reorder and cancel.
+func TestBrowserConsoleReassignsATaskWithinItsProject(t *testing.T) {
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
+	ctx := context.Background()
+	secondID, _ := kernel.AgentIDFromBytes(adapterID(t, 0x41))
+	second, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: secondID, ProjectID: fixture.project.ID, Name: "second", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, ToolBudgetLimit: 4}, adapterTime(t, 13))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assigned := second.ID.String()
+	result, err := fixture.backend.UpdateTask(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.TaskUpdate{
+		TaskID: fixture.task.ID.String(), ExpectedRevision: decimalRevision(fixture.task.Revision), AssignedAgentID: &assigned,
+	})
+	if err != nil || result.Revision != decimalRevision(fixture.task.Revision)+1 {
+		t.Fatalf("reassignment = %+v, %v", result, err)
+	}
+	stored, found, err := fixture.store.Task(ctx, fixture.task.ID)
+	if err != nil || !found || stored.AssignedAgentID != second.ID || stored.Status != kernel.TaskQueued {
+		t.Fatalf("reassigned task = %+v, found=%v, err=%v", stored, found, err)
 	}
 }

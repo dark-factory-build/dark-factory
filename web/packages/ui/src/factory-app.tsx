@@ -92,6 +92,8 @@ export function FactoryApp({ onStatusChange }: FactoryAppProps = {}) {
       onCancelHumanRequest={() => { void owner.current?.cancelHumanRequest(); }}
       onCloseHumanRequest={() => owner.current?.clearHumanRequest()}
       instructionContent={instruction}
+      onInviteRemote={() => { void owner.current?.inviteRemote(); }}
+      onDismissRemoteInvite={() => owner.current?.dismissRemoteInvite()}
       terminalContent={terminal}
     />
   );

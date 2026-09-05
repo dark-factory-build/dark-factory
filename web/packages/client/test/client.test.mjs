@@ -42,8 +42,8 @@ const expectIgnoredMember = (base, mutated, role = "client") => {
 };
 
 test("canonical control fixtures decode by sender role and re-encode exactly", () => {
-  const client = ["pair_prove", "auth_prove"];
-  const server = ["hello", "pair_result", "auth_result"];
+  const client = ["pair_prove", "auth_prove", "remote_invite"];
+  const server = ["hello", "pair_result", "auth_result", "remote_invite_result"];
   for (const name of client) assert.equal(encodeClientControl(decodeClientControl(fixture(`${name}.json`))), fixture(`${name}.json`));
   for (const name of server) assert.equal(encodeServerControl(decodeServerControl(fixture(`${name}.json`))), fixture(`${name}.json`));
   const error = fixture("error.json");

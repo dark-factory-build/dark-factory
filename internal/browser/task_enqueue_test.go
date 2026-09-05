@@ -17,6 +17,9 @@ type taskDispatchBackend struct {
 	result  browserprotocol.TaskEnqueueResult
 	err     error
 	calls   int
+
+	invitation  browserprotocol.RemoteInviteResult
+	inviteCalls int
 }
 
 func newTaskDispatchBackend() *taskDispatchBackend {
@@ -32,6 +35,14 @@ func (backend *taskDispatchBackend) EnqueueTask(_ context.Context, client [brows
 	backend.client = client
 	backend.request = request
 	return backend.result, backend.err
+}
+
+func (backend *taskDispatchBackend) RemoteInvite(_ context.Context, client [browserprotocol.ClientIDSize]byte) (browserprotocol.RemoteInviteResult, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	backend.inviteCalls++
+	backend.client = client
+	return backend.invitation, backend.err
 }
 
 func startTaskServer(t *testing.T, backend Backend) *Server {
@@ -118,5 +129,49 @@ func TestTaskEnqueueFailsClosedWithoutBackendAndOnMismatchedResult(t *testing.T)
 		authenticate(t, connection)
 		writeClientFrame(t, connection, payload)
 		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorStale)
+	})
+}
+
+// The capability itself is enforced by the daemon backend's authorize, exactly
+// as it is for TASK_ENQUEUE; the transport owns dispatch, correlation, and the
+// refusal when no operator-mutation backend is installed at all.
+func TestRemoteInviteDispatchesAndCorrelatesTheMintedInvitation(t *testing.T) {
+	invitation := browserprotocol.RemoteInviteResult{
+		Link:        "https://app.darkfactory.build/remote#df_remote&node=n0&expires=1767225600",
+		ExpiresAtMS: 1767225600000,
+		SVG:         `<svg viewBox="0 0 1 1"/>`,
+	}
+	payload, err := browserprotocol.EncodeRemoteInvite("invite", browserprotocol.RemoteInvite{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("dispatched result", func(t *testing.T) {
+		backend := newTaskDispatchBackend()
+		backend.invitation = invitation
+		server := startTaskServer(t, backend)
+		connection, _ := dialServer(t, server, testOrigin)
+		authenticate(t, connection)
+		writeClientFrame(t, connection, payload)
+		frame := readServerFrame(t, connection)
+		if frame.Type != browserprotocol.TypeRemoteInviteResult || frame.ID != "invite" || frame.Body.(browserprotocol.RemoteInviteResult) != invitation {
+			t.Fatalf("invite result = %+v", frame)
+		}
+		wantClient, err := hex.DecodeString(testID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backend.mu.Lock()
+		calls, gotClient := backend.inviteCalls, backend.client
+		backend.mu.Unlock()
+		if calls != 1 || string(gotClient[:]) != string(wantClient) {
+			t.Fatalf("dispatch calls=%d client=%x", calls, gotClient)
+		}
+	})
+	t.Run("missing optional backend", func(t *testing.T) {
+		server := startTaskServer(t, newFakeBackend())
+		connection, _ := dialServer(t, server, testOrigin)
+		authenticate(t, connection)
+		writeClientFrame(t, connection, payload)
+		assertError(t, readServerFrame(t, connection), browserprotocol.ErrorUnauthorized)
 	})
 }

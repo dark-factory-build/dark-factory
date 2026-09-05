@@ -382,6 +382,24 @@
   font-size: 0.75rem;
 }
 
+.dfFactoryConsole__pairPhone {
+  display: grid;
+  justify-items: start;
+  gap: 0.75rem;
+}
+
+.dfFactoryConsole__pairPhone img {
+  width: 16rem;
+  max-width: 100%;
+  background: #fff;
+  image-rendering: pixelated;
+}
+
+.dfFactoryConsole__pairPhone code {
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
 @media (max-width: 720px) {
   .dfFactoryConsole__header,
   .dfFactoryConsole__sectionHeading,

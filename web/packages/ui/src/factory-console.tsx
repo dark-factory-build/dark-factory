@@ -3,6 +3,7 @@ import type { AgentItem, TaskItem } from "@dark-factory/client";
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor, StageMeter } from "./console-screens.js";
 import { AgentPanel, HumanRequestPanel, SettingsPanel, type AgentConfigEdit, type TaskEdit } from "./console-sidebar.js";
+import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters, stageOfTask } from "./console-view.js";
 
 export type ConsoleView = "floor" | "agents";
@@ -27,9 +28,11 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onReplyHumanRequest?: () => void;
   onCancelHumanRequest?: () => void;
   onCloseHumanRequest?: () => void;
+  onInviteRemote?: () => void;
+  onDismissRemoteInvite?: () => void;
   /** The loopback address this console is served from. */
   address?: string;
-  /** A self-contained "PAIR A PHONE" surface for the settings panel. */
+  /** Overrides the pairing surface the settings panel mounts by default. */
   pairing?: ReactNode;
   /** The agent's enqueue composer, shown under the sidebar queue. */
   instructionContent?: ReactNode;
@@ -89,6 +92,11 @@ export function FactoryConsole({
   onReplyHumanRequest,
   onCancelHumanRequest,
   onCloseHumanRequest,
+  remoteInviteAllowed,
+  remoteInvite,
+  remoteInviteError,
+  onInviteRemote,
+  onDismissRemoteInvite,
   address = BROWSER_HOST,
   pairing,
   instructionContent,
@@ -125,7 +133,14 @@ export function FactoryConsole({
         {instructionContent}
       </AgentPanel>
     ) : settingsOpen === true ? (
-      <SettingsPanel state={state} address={address} pairing={pairing} onClose={onToggleSettings} />
+      <SettingsPanel
+        state={state}
+        address={address}
+        pairing={pairing ?? (!remoteInviteAllowed ? undefined : (
+          <RemoteInvitePanel invite={remoteInvite} error={remoteInviteError} onInvite={onInviteRemote} onDismiss={onDismissRemoteInvite} />
+        ))}
+        onClose={onToggleSettings}
+      />
     ) : undefined
   );
 

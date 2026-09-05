@@ -9,9 +9,10 @@ import (
 )
 
 // ErrBrowserClientCleanup means revocation committed durably, but one or more
-// transports could not prove that every matching connection joined. Callers
-// must report the cleanup uncertainty without pretending revocation rolled
-// back; the returned BrowserClient contains the committed durable state.
+// transports could not prove that every matching connection joined, or one
+// runtime's live pairing challenges could not be invalidated. Callers must
+// report the cleanup uncertainty without pretending revocation rolled back;
+// the returned BrowserClient contains the committed durable state.
 var ErrBrowserClientCleanup = errors.New("daemon: revoked browser client cleanup unresolved")
 
 // RevokeBrowserClient is the sole daemon-owned revocation lane. The exact
@@ -67,6 +68,16 @@ func (daemon *Daemon) revokeBrowserClientHeld(ctx context.Context, id kernel.Bro
 	cleanupErrors := []error{effectCleanupErr}
 	for _, runtime := range runtimes {
 		cleanupErrors = append(cleanupErrors, runtime.closeClient(id))
+		// A link handed out before this revocation must not still pair after
+		// it. The durable challenge is the only thing that outlives the
+		// closed sockets, and nothing binds one to the client that minted it.
+		// Revocation has already committed, so this runs on its own deadline:
+		// a cancelled request must not report a clean revocation as unresolved.
+		if runtime.backend != nil {
+			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), browserCleanupTimeout)
+			cleanupErrors = append(cleanupErrors, daemon.store.InvalidateBrowserPairingChallenges(cleanupContext, runtime.backend.boot))
+			cleanupCancel()
+		}
 	}
 	if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
 		return client, errors.Join(ErrBrowserClientCleanup, cleanupErr)
