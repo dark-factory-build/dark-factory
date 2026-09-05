@@ -36,8 +36,9 @@ on 5 September 2026 in exchange for pairing without a terminal. The control is
 revocation, through `factoryctl web list-clients` and `web revoke` or the
 console; a boot holds at most 32 live challenges, each expiring after five
 minutes, so a hostile local process can delay pairing but cannot hold a grant
-it did not pair. A bare 503 from the page means that cap is full or the browser
-transport is unavailable; `factoryctl web status` says which. A remote
+it did not pair. A bare 503 from the page means the mint failed — the
+live-challenge cap, the transport, or the store — and `factoryctl web status`
+reports the transport state and the live challenge count. A remote
 invitation is minted only by a client holding the full loopback grant, whose
 terminal_input bit a remote grant never carries, so a paired phone can never
 invite another phone. Such a console does consume the same cap, so the daemon

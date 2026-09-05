@@ -161,7 +161,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return runWeb(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind == commandRemoteStatus {
-		return runRemote(ctx, command, getenv, stdout, stderr)
+		return runRemote(ctx, getenv, stdout, stderr)
 	}
 	if command.kind == commandProjectCreate || command.kind == commandAgentCreate || command.kind == commandTaskAdd || command.kind == commandDispatch {
 		return runOperator(ctx, command, getenv, stdout, stderr)
@@ -381,15 +381,11 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 	var err error
 	switch command.kind {
 	case commandServiceStatus:
-		if command.label == "" && command.plistDir == "" {
-			if inspect == nil {
-				_, _ = io.WriteString(stderr, "factoryctl: service status configuration is invalid\n")
-				return exitFailure
-			}
-			status, err = inspect(callContext, command.home)
-		} else {
-			status, err = install.InspectServiceWithConfig(callContext, command.home, config)
+		if inspect == nil && command.label == "" && command.plistDir == "" {
+			_, _ = io.WriteString(stderr, "factoryctl: service status configuration is invalid\n")
+			return exitFailure
 		}
+		status, err = inspectService(callContext, command, config, inspect)
 	case commandServiceInstall:
 		var self string
 		self, err = serviceSourceDirectory()
@@ -397,7 +393,7 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 			// The service found before the install decides whether this
 			// command started anything: repeating an install returns the
 			// service it found, unchanged, and must open no browser.
-			if found, inspectErr := install.InspectServiceWithConfig(callContext, command.home, config); inspectErr == nil {
+			if found, inspectErr := inspectService(callContext, command, config, inspect); inspectErr == nil {
 				existing = found.State
 			}
 			status, err = install.ServiceInstall(callContext, command.home, config, self)
@@ -451,9 +447,26 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 		return exitFailure
 	}
 	if command.kind == commandServiceInstall && pairPageOpens(existing, status.State) {
-		openPairPage(ctx, pairListenAddress, pairPageURL, opener, stderr)
+		// The one command whose result is more than the projection. Every word
+		// of it goes in the JSON on stdout: this output is parsed, and a stray
+		// stderr line would be merged into it by any caller reading both.
+		return writeJSON(stdout, struct {
+			install.ServiceStatus
+			PairPage      string `json:"pair_page,omitempty"`
+			BrowserOpened bool   `json:"browser_opened"`
+		}{ServiceStatus: status, PairPage: pairPageURL, BrowserOpened: openPairPage(ctx, pairListenAddress, pairPageURL, opener)})
 	}
 	return writeJSON(stdout, status)
+}
+
+// inspectService is the read-only projection status and install share: the
+// injected exact inspector for the default label and plist directory, and the
+// explicit-config inspector otherwise.
+func inspectService(ctx context.Context, command attemptCommand, config install.ServiceConfig, inspect serviceInspector) (install.ServiceStatus, error) {
+	if inspect != nil && command.label == "" && command.plistDir == "" {
+		return inspect(ctx, command.home)
+	}
+	return install.InspectServiceWithConfig(ctx, command.home, config)
 }
 
 // pairPageOpens is true only for an install that actually started the service.
@@ -462,14 +475,11 @@ func pairPageOpens(existing, resulting install.ServiceState) bool {
 }
 
 // openPairPage waits, bounded, for factoryd to accept on its loopback listener
-// and then opens the pair page exactly once. A listener that never appears or
-// an opener that fails is not an install failure: the install succeeded, so
-// the page is named on stderr and the exit code is left alone.
-func openPairPage(ctx context.Context, address, page string, opener browserOpener, stderr io.Writer) {
-	if opener != nil && listenerAccepts(ctx, address) && opener(ctx, page) == nil {
-		return
-	}
-	_, _ = fmt.Fprintf(stderr, "factoryctl: service installed; open %s to pair this browser\n", page)
+// and then opens the pair page exactly once, reporting whether it did. A
+// listener that never appears or an opener that fails is not an install
+// failure: the caller names the page in its own output and exits 0.
+func openPairPage(ctx context.Context, address, page string, opener browserOpener) bool {
+	return opener != nil && listenerAccepts(ctx, address) && opener(ctx, page) == nil
 }
 
 func listenerAccepts(ctx context.Context, address string) bool {

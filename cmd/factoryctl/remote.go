@@ -21,10 +21,7 @@ func parseRemote(args []string) (attemptCommand, bool, bool) {
 	return attemptCommand{}, false, false
 }
 
-func runRemote(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {
-	if command.kind != commandRemoteStatus {
-		return exitUsage
-	}
+func runRemote(ctx context.Context, getenv func(string) string, stdout, stderr io.Writer) int {
 	socket, token := getenv("DARK_FACTORY_SOCKET"), getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE")
 	if socket == "" || token == "" {
 		_, _ = io.WriteString(stderr, "factoryctl: remote client configuration is invalid\n")

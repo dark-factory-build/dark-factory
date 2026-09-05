@@ -19,10 +19,11 @@ release's Homebrew formula installs the same commands if it has been added to a
 tap.
 
 Create and install one managed home. Those two commands are the whole terminal
-side of setup: installation loads the launchd job, waits for the daemon to
-listen, and opens <http://127.0.0.1:43123/pair> in this machine's default
-browser, where confirming pairs that browser. `service start` is the explicit
-command to use after a later stop:
+side of setup: an install that starts a fresh service loads the launchd job,
+waits for the daemon to listen, and opens <http://127.0.0.1:43123/pair> in this
+machine's default browser, where confirming pairs that browser. A repeated
+install returns the service it found and opens nothing. `service start` is the
+explicit command to use after a later stop:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"

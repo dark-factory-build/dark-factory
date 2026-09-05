@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
@@ -93,7 +94,7 @@ func TestParseServiceInstallRelayOriginIsInstallOnlyAndExact(t *testing.T) {
 // TestInstallOpensThePairPageExactlyOnce proves the three outcomes of the
 // post-install open: a service this command started opens the fixed pair URL
 // once, a repeat install that found the service already there opens nothing,
-// and an opener that fails only names the URL — the install still succeeded.
+// and an opener that fails is reported as not opened rather than as a failure.
 func TestInstallOpensThePairPageExactlyOnce(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -121,26 +122,77 @@ func TestInstallOpensThePairPageExactlyOnce(t *testing.T) {
 	}
 
 	opened := []string{}
-	var stderr bytes.Buffer
-	openPairPage(context.Background(), listener.Addr().String(), pairPageURL, func(_ context.Context, value string) error {
+	if !openPairPage(context.Background(), listener.Addr().String(), pairPageURL, func(_ context.Context, value string) error {
 		opened = append(opened, value)
 		return nil
-	}, &stderr)
-	if len(opened) != 1 || opened[0] != pairPageURL || stderr.Len() != 0 {
-		t.Fatalf("open = %q stderr %q", opened, stderr.String())
+	}) || len(opened) != 1 || opened[0] != pairPageURL {
+		t.Fatalf("open = %q", opened)
 	}
 	if pairPageURL != "http://127.0.0.1:43123/pair" {
 		t.Fatalf("pair page URL = %q", pairPageURL)
 	}
 
-	// An opener that fails is not an install failure: nothing is retried and
-	// the URL is named so the operator can open it themselves.
-	stderr.Reset()
-	openPairPage(context.Background(), listener.Addr().String(), pairPageURL, func(context.Context, string) error {
+	// An opener that fails is not an install failure: nothing is retried, and
+	// the caller reports the outcome in its own output rather than on stderr,
+	// which a caller reading both streams would merge into that output.
+	if openPairPage(context.Background(), listener.Addr().String(), pairPageURL, func(context.Context, string) error {
 		return errors.New("injected opener failure")
-	}, &stderr)
-	if stderr.String() != "factoryctl: service installed; open "+pairPageURL+" to pair this browser\n" {
-		t.Fatalf("opener failure stderr = %q", stderr.String())
+	}) {
+		t.Fatal("a failed opener reported an opened browser")
+	}
+}
+
+// TestPairListenerWaitIsBoundedAndCancellable covers the two paths the happy
+// case never reaches: launchd's usual case, where factoryd binds a moment
+// after bootstrap returns, and a cancelled command, which must not sit out
+// the whole patience.
+func TestPairListenerWaitIsBoundedAndCancellable(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	late := make(chan net.Listener, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		listener, listenErr := net.Listen("tcp", address)
+		if listenErr != nil {
+			late <- nil
+			return
+		}
+		late <- listener
+	}()
+	if !listenerAccepts(context.Background(), address) {
+		t.Fatal("a listener that arrived late was not waited for")
+	}
+	if listener := <-late; listener != nil {
+		defer listener.Close()
+	} else {
+		t.Fatal("the late listener never bound")
+	}
+
+	// Nothing listens on the closed probe address, so only cancellation ends
+	// this wait; the whole patience would take it far past the test's own.
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddress := dead.Addr().String()
+	if err := dead.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if listenerAccepts(ctx, deadAddress) {
+		t.Fatal("a cancelled wait reported a listener")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("a cancelled wait took %s", elapsed)
 	}
 }
 
