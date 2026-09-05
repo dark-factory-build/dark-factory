@@ -7,12 +7,13 @@ import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdirSync, readFileSync, existsSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { createRemoteManager, MemoryRemoteStore } from "../../dist/src/index.js";
+import { BrowserSession, createRemoteManager, MemoryRemoteStore } from "../../dist/src/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(here, "..", "..", "..", "..", "..");
@@ -138,9 +139,44 @@ class Factory {
     await once(child, "exit");
   }
 
-  /** The link factoryctl prints, decomposed into the invitation the PWA parses. */
-  invitation() {
-    const link = this.control({}, "remote", "pair").split("\n")[0];
+  /**
+   * One invitation, minted the way the console mints one: the daemon's own
+   * pair page hands out a loopback pairing challenge, a real client session
+   * pairs with it and holds the full loopback grant, and its REMOTE_INVITE
+   * returns the link -- decomposed here into the invitation the PWA parses.
+   */
+  async invitation() {
+    // Node's fetch refuses to send a Sec-Fetch-* header, which the daemon's
+    // Fetch Metadata gate requires, so this is the browser's exact request
+    // sent through the stdlib client instead.
+    const response = await new Promise((resolve, reject) => {
+      const post = httpRequest(`http://${this.browserAddress}/pair`, {
+        method: "POST",
+        headers: { "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document", "Sec-Fetch-Site": "same-origin" },
+      }, resolve);
+      post.on("error", reject);
+      post.end();
+    });
+    response.resume();
+    const location = response.headers.location ?? "";
+    const challenge = location.split("#df_pair=")[1] ?? "";
+    assert.match(challenge, /^[0-9a-f]{64}$/, `${this.name} answered its own pair form with ${response.statusCode} ${location}`);
+    const session = new BrowserSession({
+      url: `ws://${this.browserAddress}/browser`,
+      host: this.browserAddress,
+      origin: PWA_ORIGIN,
+      challenge,
+      // This session pairs once and is closed, so nothing ever loads a key back.
+      keyStore: { load: async () => null, save: async () => {} },
+      socketFactory: (url) => new WebSocket(url, { origin: PWA_ORIGIN, perMessageDeflate: false }),
+    });
+    let link;
+    try {
+      await session.connect();
+      ({ link } = await session.inviteRemote());
+    } finally {
+      session.close();
+    }
     const fragment = link.slice(link.indexOf("#df_remote&") + "#df_remote&".length);
     const members = new URLSearchParams(fragment);
     // parseInvitation() refuses a ws:// relay, so a local relay cannot go
@@ -275,8 +311,8 @@ async function main() {
       beta.control({}, "dispatch", "on");
     });
 
-    const invitationA = alpha.invitation();
-    const invitationB = beta.invitation();
+    const invitationA = await alpha.invitation();
+    const invitationB = await beta.invitation();
     const nodeA = invitationA.node;
     const nodeB = invitationB.node;
     assert.notEqual(nodeA, nodeB, "the two homes minted the same node identity");
@@ -403,7 +439,7 @@ async function main() {
       const second = newManager();
       managers.push(second);
       await second.start();
-      await second.pair(alpha.invitation());
+      await second.pair(await alpha.invitation());
       await until(() => statusOf(second, nodeA) === "ready", "the second controller to reach ready");
       assert.equal(statusOf(manager, nodeA), "ready", "a second controller displaced the first");
       const secondClient = second.bindings()[0].clientId;
