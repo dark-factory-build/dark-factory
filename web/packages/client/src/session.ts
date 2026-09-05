@@ -1,6 +1,7 @@
 import {
   decodeServerControl,
   encodeAuthProve,
+  encodeClientControl,
   encodeHumanRequestCancelRun,
   encodeHumanRequestDetailGet,
   encodeHumanRequestReply,
@@ -9,6 +10,7 @@ import {
   encodeStateWatch,
   encodeTaskEnqueue,
   encodeTerminalTargetGet,
+  type AgentUpdateBody,
   type AuthResultFrame,
   type ErrorFrame,
   type HelloBody,
@@ -19,10 +21,12 @@ import {
   type StateChangedFrame,
   type StateSnapshotFrame,
   type TaskEnqueueResultBody,
+  type TaskUpdateBody,
   type TerminalTargetDescriptor,
+  type TopologyBody,
 } from "./control.js";
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
-import { CAPABILITIES, MAX_ARRAY_ITEMS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
+import { CAPABILITIES, MAX_AGENT_MODEL_BYTES, MAX_ARRAY_ITEMS, MAX_HUMAN_REPLY_BYTES, MAX_SQLITE_INTEGER, MAX_TASK_INSTRUCTION_BYTES, MAX_TASK_PRIORITY, MAX_TASK_TITLE_BYTES, type CapabilityMask, type ErrorCode } from "./manifest.js";
 import { snapshotView, type StateView } from "./state.js";
 import { createTerminalHandle, terminalControlFrame, type InternalTerminalHandle, type TerminalHandle, type TerminalOptions } from "./terminal_session.js";
 import { decodeTerminalServer } from "./terminal_session.js";
@@ -133,6 +137,11 @@ type HumanPending = {
   reject: (error: unknown) => void;
 };
 type TaskPending = { taskId: string; expectedAgentRevision: bigint; resolve: (value: { taskId: string; revision: bigint }) => void; reject: (error: unknown) => void };
+type ConsolePending = { kind: "AGENT_UPDATE_RESULT" | "TASK_UPDATE_RESULT" | "TOPOLOGY"; entityId: string; resolve: (value: never) => void; reject: (error: unknown) => void };
+
+export type AgentUpdateResult = Readonly<{ agentId: string; revision: bigint }>;
+export type TaskUpdateResult = Readonly<{ taskId: string; revision: bigint }>;
+export type TopologyView = Readonly<{ projectId: string; digest: string; sourceRevision: string; nodes: readonly TopologyBody["nodes"][number][] }>;
 
 export type HumanRequestCancelRunDescriptor = Readonly<{
   requestId: string;
@@ -204,6 +213,7 @@ export class BrowserSession {
   #terminalHandles = new Set<InternalTerminalHandle>();
   #humanPending = new Map<string, HumanPending>();
   #taskPending = new Map<string, TaskPending>();
+  #consolePending = new Map<string, ConsolePending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
   #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId: string }>();
   #generationToken: object = {};
@@ -235,6 +245,36 @@ export class BrowserSession {
     const result = new Promise<{ taskId: string; revision: bigint }>((resolve, reject) => this.#taskPending.set(id, { taskId, expectedAgentRevision: request.expectedAgentRevision, resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
+  }
+
+  /** Edit one agent's configuration. An omitted member is left alone. */
+  updateAgent(request: { agentId: string; expectedRevision: bigint; model?: string; reasoningEffort?: string; paused?: boolean }): Promise<AgentUpdateResult> {
+    const body: AgentUpdateBody = { agent_id: request.agentId, expected_revision: request.expectedRevision };
+    if (request.model !== undefined) body.model = request.model;
+    if (request.reasoningEffort !== undefined) body.reasoning_effort = request.reasoningEffort;
+    if (request.paused !== undefined) body.paused = request.paused;
+    if (bounded(request.model, MAX_AGENT_MODEL_BYTES) || bounded(request.reasoningEffort, MAX_AGENT_MODEL_BYTES)) return Promise.reject(new SessionError("invalid_request"));
+    return this.#consoleRequest("AGENT_UPDATE_RESULT", request.agentId, request.expectedRevision, "agent-update", (id) => encodeClientControl({ type: "AGENT_UPDATE", id, body }));
+  }
+
+  /** Edit one still-queued task: title, priority, assignment, or cancel it. */
+  updateTask(request: { taskId: string; expectedRevision: bigint; title?: string; priority?: number; assignedAgentId?: string; cancel?: boolean }): Promise<TaskUpdateResult> {
+    const body: TaskUpdateBody = { task_id: request.taskId, expected_revision: request.expectedRevision };
+    if (request.title !== undefined) body.title = request.title;
+    if (request.priority !== undefined) body.priority = request.priority;
+    if (request.assignedAgentId !== undefined) body.assigned_agent_id = request.assignedAgentId;
+    if (request.cancel === true) body.status = "cancelled";
+    if (
+      (request.title !== undefined && (request.title.length === 0 || bounded(request.title, MAX_TASK_TITLE_BYTES))) ||
+      (request.priority !== undefined && (!Number.isSafeInteger(request.priority) || Math.abs(request.priority) > MAX_TASK_PRIORITY)) ||
+      (request.assignedAgentId !== undefined && !validDynamicID(request.assignedAgentId))
+    ) return Promise.reject(new SessionError("invalid_request"));
+    return this.#consoleRequest("TASK_UPDATE_RESULT", request.taskId, request.expectedRevision, "task-update", (id) => encodeClientControl({ type: "TASK_UPDATE", id, body }));
+  }
+
+  /** The project's regenerable structure, computed on demand by the daemon. */
+  getTopology(projectId: string): Promise<TopologyView> {
+    return this.#consoleRequest("TOPOLOGY", projectId, 1n, "topology", (id) => encodeClientControl({ type: "TOPOLOGY_GET", id, body: { project_id: projectId } }));
   }
 
   resolveAgentTerminal(request: { agentId: string; expectedAgentRevision: bigint; expectedHead: bigint }): Promise<TerminalTarget | null> {
@@ -350,6 +390,7 @@ export class BrowserSession {
     this.#pending.clear();
     this.#closeTargetPending(new SessionError("closed"));
     this.#closeTaskPending(new SessionError("closed"));
+    this.#closeConsolePending(new SessionError("closed"));
     this.#closeHumanPending(new SessionError("closed"));
     for (const handle of this.#terminalHandles) handle.terminate(new SessionError("closed"));
     this.#terminalHandles.clear();
@@ -516,6 +557,10 @@ export class BrowserSession {
       this.#taskResult(frame.body, frame.id);
       return;
     }
+    if (frame.type === "AGENT_UPDATE_RESULT" || frame.type === "TASK_UPDATE_RESULT" || frame.type === "TOPOLOGY") {
+      this.#consoleResult(frame);
+      return;
+    }
     if (terminalControlFrame(frame)) {
       if (frame.type === "TERMINAL_EOF") { if (!this.#anyTerminal((handle) => handle.receiveEOF(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
       if (frame.type === "TERMINAL_EXIT") { if (!this.#anyTerminal((handle) => handle.receiveExit(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
@@ -602,6 +647,12 @@ export class BrowserSession {
       if (task !== undefined) {
         this.#taskPending.delete(id);
         task.reject(new SessionError(frame.body.code, frame.body.retryable));
+        return;
+      }
+      const console = this.#consolePending.get(id);
+      if (console !== undefined) {
+        this.#consolePending.delete(id);
+        console.reject(new SessionError(frame.body.code, frame.body.retryable));
         return;
       }
     }
@@ -720,6 +771,7 @@ export class BrowserSession {
     this.#pending.clear();
     this.#closeTargetPending(normalized);
     this.#closeTaskPending(normalized);
+    this.#closeConsolePending(normalized);
     this.#closeHumanPending(normalized);
     for (const handle of this.#terminalHandles) handle.terminate(normalized);
     this.#terminalHandles.clear();
@@ -802,6 +854,38 @@ export class BrowserSession {
   #closeTaskPending(error: SessionError | ProtocolError): void {
     for (const pending of this.#taskPending.values()) pending.reject(error);
     this.#taskPending.clear();
+  }
+
+  /** One shape for the three console request/result pairs. */
+  #consoleRequest<T>(kind: ConsolePending["kind"], entityId: string, expectedRevision: bigint, prefix: string, encode: (id: string) => string): Promise<T> {
+    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
+    if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
+    const capability = kind === "TOPOLOGY" ? CAPABILITIES.observe : CAPABILITIES.human_actions;
+    if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
+    if (!validDynamicID(entityId) || expectedRevision < 1n || expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
+    if (this.#consolePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    const id = this.#nextID(prefix);
+    let payload: string;
+    try { payload = encode(id); } catch (error) { return Promise.reject(error); }
+    const result = new Promise<T>((resolve, reject) => this.#consolePending.set(id, { kind, entityId, resolve: resolve as (value: never) => void, reject }));
+    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
+    return result;
+  }
+
+  #consoleResult(frame: Extract<ServerControlFrame, { type: "AGENT_UPDATE_RESULT" | "TASK_UPDATE_RESULT" | "TOPOLOGY" }>): void {
+    const pending = this.#consolePending.get(frame.id);
+    if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
+    const identity = frame.type === "AGENT_UPDATE_RESULT" ? frame.body.agent_id : frame.type === "TASK_UPDATE_RESULT" ? frame.body.task_id : frame.body.project_id;
+    if (identity !== pending.entityId) throw new ProtocolError("malformed");
+    this.#consolePending.delete(frame.id);
+    if (frame.type === "AGENT_UPDATE_RESULT") { pending.resolve(Object.freeze({ agentId: frame.body.agent_id, revision: frame.body.revision }) as never); return; }
+    if (frame.type === "TASK_UPDATE_RESULT") { pending.resolve(Object.freeze({ taskId: frame.body.task_id, revision: frame.body.revision }) as never); return; }
+    pending.resolve(Object.freeze({ projectId: frame.body.project_id, digest: frame.body.digest, sourceRevision: frame.body.source_revision, nodes: Object.freeze(frame.body.nodes.map((node) => Object.freeze({ ...node }))) }) as never);
+  }
+
+  #closeConsolePending(error: SessionError | ProtocolError): void {
+    for (const pending of this.#consolePending.values()) pending.reject(error);
+    this.#consolePending.clear();
   }
 
   #taskResult(body: TaskEnqueueResultBody, id: string): void {
@@ -965,6 +1049,7 @@ function reconnectDelay(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value >= 1 ? Math.min(Math.floor(value), 60_000) : fallback;
 }
 
+function bounded(value: string | undefined, maximum: number): boolean { return value !== undefined && new TextEncoder().encode(value).length > maximum; }
 function validDynamicID(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{32}$/.test(value) && !/^0+$/.test(value); }
 
 function notify<T extends readonly unknown[]>(callback: ((...args: T) => void) | undefined, ...args: T): void {
