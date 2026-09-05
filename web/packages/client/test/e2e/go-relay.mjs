@@ -144,9 +144,12 @@ class Factory {
     const fragment = link.slice(link.indexOf("#df_remote&") + "#df_remote&".length);
     const members = new URLSearchParams(fragment);
     // parseInvitation() refuses a ws:// relay, so a local relay cannot go
-    // through it; every other member is read exactly as it does.
+    // through it; every other member is read exactly as it does. The daemon
+    // omits `relay=` exactly when it is already dialing the origin it was
+    // started with, so an absent member falls back to that -- the same rule
+    // parseInvitation() applies with its own default relay.
     return Object.freeze({
-      relay: members.get("relay"),
+      relay: members.get("relay") ?? this.relayOrigin,
       node: members.get("node"),
       daemon: members.get("daemon"),
       host: members.get("host"),
@@ -168,7 +171,16 @@ const connections = [];
 
 class RelayWebSocket extends WebSocket {
   constructor(url, protocols) {
-    super(url, protocols, { origin: PWA_ORIGIN, perMessageDeflate: false, followRedirects: false });
+    try {
+      super(url, protocols, { origin: PWA_ORIGIN, perMessageDeflate: false, followRedirects: false });
+    } catch (error) {
+      // A malformed url (eg. a relay member that never got its default
+      // applied) throws here, before any record exists to carry it -- log it
+      // to the same place a real dial's outcome goes, or a future failure
+      // like this again shows only the generic error a rejected pairing carries.
+      connections.push({ url: String(url), node: String(url).split("/").pop(), sent: [], received: [], closed: `constructor threw: ${error.message}` });
+      throw error;
+    }
     this.record = { url: String(url), node: String(url).split("/").pop(), sent: [], received: [], closed: undefined };
     connections.push(this.record);
     this.on("message", (data, binary) => { this.record.received.push(binary ? "BINARY" : (JSON.parse(String(data)).type ?? "?")); });
