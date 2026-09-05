@@ -120,17 +120,18 @@ func TestPairPageAdmitsOnlyUserNavigationsAndItsOwnForm(t *testing.T) {
 				}
 				for key, want := range map[string]string{
 					"Content-Type":            "text/html; charset=utf-8",
-					"Content-Security-Policy": pairPolicy,
+					"Content-Security-Policy": server.pairPolicy,
 					"Cache-Control":           "no-store",
 					"Referrer-Policy":         "no-referrer",
+					"X-Content-Type-Options":  "nosniff",
 					"X-Frame-Options":         "DENY",
 				} {
 					if got := response.Header.Get(key); got != want {
 						t.Fatalf("%s=%q want %q", key, got, want)
 					}
 				}
-				if !strings.Contains(pairPolicy, "default-src 'none'") || !strings.Contains(pairPolicy, "style-src 'sha256-") || !strings.Contains(pairPolicy, "form-action 'self'") {
-					t.Fatalf("policy=%q", pairPolicy)
+				if !strings.HasPrefix(server.pairPolicy, "default-src 'none'; style-src 'sha256-") || !strings.HasSuffix(server.pairPolicy, "'; form-action 'self' "+devOrigin+" "+testOrigin+"; base-uri 'none'; frame-ancestors 'none'") {
+					t.Fatalf("policy=%q", server.pairPolicy)
 				}
 			case http.StatusSeeOther:
 				if got := response.Header.Get("Location"); got != pairLink {
