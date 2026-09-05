@@ -7,7 +7,9 @@ export type RemoteInvitePanelProps = {
   onDismiss?: () => void;
 };
 
-/** Pairing a phone from the console itself: one button, then the code it mints. */
+/** Pairing a phone from the console itself: one button, then the code it
+ * mints. The link is shown as text, not an anchor: opening it here would pair
+ * this desktop as a remote client and consume the phone's one-shot challenge. */
 export function RemoteInvitePanel({ invite, error, onInvite, onDismiss }: RemoteInvitePanelProps) {
   return (
     <section className="dfFactoryConsole__section dfFactoryConsole__pairPhone" aria-label="PAIR A PHONE">
@@ -16,7 +18,7 @@ export function RemoteInvitePanel({ invite, error, onInvite, onDismiss }: Remote
       ) : (
         <>
           <img alt="QR code: scan with your phone" src={`data:image/svg+xml;utf8,${encodeURIComponent(invite.svg)}`} />
-          <a href={invite.link}>{invite.link}</a>
+          <code>{invite.link}</code>
           <p>EXPIRES {new Date(Number(invite.expiresAtMs)).toISOString()}</p>
           <button type="button" disabled={onDismiss === undefined} onClick={onDismiss}>DISMISS</button>
         </>
