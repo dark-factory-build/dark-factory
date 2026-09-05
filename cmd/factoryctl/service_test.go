@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 
@@ -86,6 +87,60 @@ func TestParseServiceInstallRelayOriginIsInstallOnlyAndExact(t *testing.T) {
 		if _, _, ok := parse(args); ok {
 			t.Fatalf("invalid relay origin syntax accepted: %q", args)
 		}
+	}
+}
+
+// TestInstallOpensThePairPageExactlyOnce proves the three outcomes of the
+// post-install open: a service this command started opens the fixed pair URL
+// once, a repeat install that found the service already there opens nothing,
+// and an opener that fails only names the URL — the install still succeeded.
+func TestInstallOpensThePairPageExactlyOnce(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	for _, test := range []struct {
+		name     string
+		existing install.ServiceState
+		state    install.ServiceState
+		opens    bool
+	}{
+		{name: "fresh install", existing: install.ServiceAbsent, state: install.ServiceRunning, opens: true},
+		{name: "unknown prior state", state: install.ServiceRunning, opens: true},
+		{name: "already running", existing: install.ServiceRunning, state: install.ServiceRunning},
+		{name: "already installed", existing: install.ServiceInstalled, state: install.ServiceRunning},
+		{name: "installed but not started", existing: install.ServiceAbsent, state: install.ServiceInstalled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pairPageOpens(test.existing, test.state); got != test.opens {
+				t.Fatalf("pairPageOpens(%q, %q) = %t", test.existing, test.state, got)
+			}
+		})
+	}
+
+	opened := []string{}
+	var stderr bytes.Buffer
+	openPairPage(context.Background(), listener.Addr().String(), pairPageURL, func(_ context.Context, value string) error {
+		opened = append(opened, value)
+		return nil
+	}, &stderr)
+	if len(opened) != 1 || opened[0] != pairPageURL || stderr.Len() != 0 {
+		t.Fatalf("open = %q stderr %q", opened, stderr.String())
+	}
+	if pairPageURL != "http://127.0.0.1:43123/pair" {
+		t.Fatalf("pair page URL = %q", pairPageURL)
+	}
+
+	// An opener that fails is not an install failure: nothing is retried and
+	// the URL is named so the operator can open it themselves.
+	stderr.Reset()
+	openPairPage(context.Background(), listener.Addr().String(), pairPageURL, func(context.Context, string) error {
+		return errors.New("injected opener failure")
+	}, &stderr)
+	if stderr.String() != "factoryctl: service installed; open "+pairPageURL+" to pair this browser\n" {
+		t.Fatalf("opener failure stderr = %q", stderr.String())
 	}
 }
 
