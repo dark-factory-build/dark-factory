@@ -280,6 +280,111 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	return browserprotocol.TaskEnqueueResult{TaskID: result.Task.ID.String(), Revision: decimalRevision(result.Task.Revision), AgentRevision: decimalRevision(result.AgentRevision)}, nil
 }
 
+// The transport discovers the console half by type assertion, so a signature
+// that drifts would silently answer unauthorized instead of failing to build.
+var _ browser.ConsoleBackend = (*browserBackend)(nil)
+
+func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.AgentUpdate) (browserprotocol.AgentUpdateResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, err
+	}
+	defer release()
+	agentID, err := browserID(request.AgentID, kernel.AgentIDFromBytes)
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, browser.ErrStale
+	}
+	expected, err := browserDecimal(request.ExpectedRevision)
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, browser.ErrStale
+	}
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, mapBrowserError(err)
+	}
+	patch := kernel.AgentPatch{Model: request.Model, ReasoningEffort: request.ReasoningEffort}
+	if request.Paused != nil {
+		paused := bool(*request.Paused)
+		patch.Paused = &paused
+	}
+	agent, err := backend.store.UpdateAgent(ctx, agentID, expected, patch, at)
+	if err != nil {
+		return browserprotocol.AgentUpdateResult{}, mapBrowserError(err)
+	}
+	if backend.owner != nil {
+		backend.owner.notifyScheduler()
+	}
+	return browserprotocol.AgentUpdateResult{AgentID: agent.ID.String(), Revision: decimalRevision(agent.Revision)}, nil
+}
+
+func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, err
+	}
+	defer release()
+	taskID, err := browserID(request.TaskID, kernel.TaskIDFromBytes)
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, browser.ErrStale
+	}
+	expected, err := browserDecimal(request.ExpectedRevision)
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, browser.ErrStale
+	}
+	patch := kernel.TaskPatch{Title: request.Title, Priority: request.Priority, Cancel: request.Status != nil}
+	if request.AssignedAgentID != nil {
+		assigned, err := browserID(*request.AssignedAgentID, kernel.AgentIDFromBytes)
+		if err != nil {
+			return browserprotocol.TaskUpdateResult{}, browser.ErrStale
+		}
+		patch.AssignedAgentID = &assigned
+	}
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, mapBrowserError(err)
+	}
+	task, err := backend.store.UpdateTask(ctx, taskID, expected, patch, at)
+	if err != nil {
+		return browserprotocol.TaskUpdateResult{}, mapBrowserError(err)
+	}
+	if backend.owner != nil {
+		backend.owner.notifyScheduler()
+	}
+	return browserprotocol.TaskUpdateResult{TaskID: task.ID.String(), Revision: decimalRevision(task.Revision)}, nil
+}
+
+// Topology serves the regenerable project structure the daemon already caches
+// on disk. Nodes only: containment is implied by parent, so v1 has no edges.
+func (backend *browserBackend) Topology(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TopologyGet) (browserprotocol.Topology, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
+	if err != nil {
+		return browserprotocol.Topology{}, err
+	}
+	defer release()
+	if backend.owner == nil {
+		return browserprotocol.Topology{}, browser.ErrNotFound
+	}
+	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return browserprotocol.Topology{}, browser.ErrStale
+	}
+	snapshot, err := backend.owner.ProjectTopology(ctx, projectID)
+	if err != nil {
+		return browserprotocol.Topology{}, mapBrowserError(err)
+	}
+	result := browserprotocol.Topology{
+		ProjectID: request.ProjectID, Digest: snapshot.Digest, SourceRevision: snapshot.SourceRevision,
+		Nodes: make([]browserprotocol.TopologyNode, 0, len(snapshot.Nodes)),
+	}
+	for _, node := range snapshot.Nodes {
+		result.Nodes = append(result.Nodes, browserprotocol.TopologyNode{
+			ID: node.ID, ParentID: node.ParentID, Kind: string(node.Kind), Path: node.RelativePath,
+			Label: node.Label, Language: node.Language, SizeBucket: node.SizeBucket,
+		})
+	}
+	return result, nil
+}
+
 func (backend *browserBackend) authorize(ctx context.Context, rawID [browserprotocol.ClientIDSize]byte, capability kernel.BrowserCapabilityMask) (kernel.BrowserClientID, func(), kernel.BrowserClient, error) {
 	clientID, err := kernel.BrowserClientIDFromBytes(rawID[:])
 	if err != nil {
@@ -421,7 +526,7 @@ func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
 }
 
 func projectAgent(item kernel.AgentSummary) browserprotocol.AgentItem {
-	return browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Revision: decimalRevision(item.Revision)}
+	return browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Model: item.Model, ReasoningEffort: item.ReasoningEffort, Revision: decimalRevision(item.Revision)}
 }
 
 func projectTask(item kernel.TaskSummary) browserprotocol.TaskItem {

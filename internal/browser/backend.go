@@ -183,6 +183,17 @@ type TaskBackend interface {
 	EnqueueTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskEnqueue) (browserprotocol.TaskEnqueueResult, error)
 }
 
+// ConsoleBackend is the optional console half of browser v1: the bounded
+// configuration and queue edits plus the on-demand project topology. It is a
+// separate seam for the same reason TaskBackend is: the state-only backend
+// used by bootstrap and tests must stay small.
+type ConsoleBackend interface {
+	Backend
+	UpdateAgent(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AgentUpdate) (browserprotocol.AgentUpdateResult, error)
+	UpdateTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error)
+	Topology(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TopologyGet) (browserprotocol.Topology, error)
+}
+
 // TerminalBackend is the optional effect half of browser v1. Keeping it
 // separate preserves the small state backend seam used by bootstrap/tests;
 // production daemon backends implement both interfaces.

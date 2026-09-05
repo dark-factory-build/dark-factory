@@ -248,7 +248,7 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "public agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, Model: "PRIVATE_MODEL_SENTINEL", ToolBudgetLimit: 4}, adapterTime(t, 11))
+	agent, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agentID, ProjectID: project.ID, Name: "public agent", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderCodex, Model: "SERVED_MODEL_FACT", ToolBudgetLimit: 4}, adapterTime(t, 11))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,10 +267,14 @@ func TestBrowserAdapterPairsAuthenticatesSnapshotsAndReloadsRevocation(t *testin
 	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
 		t.Fatalf("one snapshot did not carry the whole Factory: %+v", snapshot)
 	}
-	for _, sentinel := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_MODEL_SENTINEL", "PRIVATE_BODY_SENTINEL"} {
+	for _, sentinel := range []string{"PRIVATE_ROOT_SENTINEL", "PRIVATE_BODY_SENTINEL"} {
 		if bytes.Contains(payload, []byte(sentinel)) {
 			t.Fatalf("public state leaked %q: %s", sentinel, payload)
 		}
+	}
+	// The launch controls the console edits are served facts, not leaks.
+	if !bytes.Contains(payload, []byte("SERVED_MODEL_FACT")) {
+		t.Fatalf("public state dropped the served model: %s", payload)
 	}
 
 	authenticated := fixture.authenticate(t)

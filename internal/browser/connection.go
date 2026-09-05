@@ -398,6 +398,65 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeTaskEnqueueResult(frame.ID, result)
+	case browserprotocol.AgentUpdate:
+		if current.server.consoleBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.consoleBackend.UpdateAgent(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.AgentID != body.AgentID || result.Revision <= body.ExpectedRevision {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeAgentUpdateResult(frame.ID, result)
+	case browserprotocol.TaskUpdate:
+		if current.server.consoleBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.consoleBackend.UpdateTask(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.TaskID != body.TaskID || result.Revision <= body.ExpectedRevision {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeTaskUpdateResult(frame.ID, result)
+	case browserprotocol.TopologyGet:
+		if current.server.consoleBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.consoleBackend.Topology(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.ProjectID != body.ProjectID {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		encoded, encodeErr := browserprotocol.EncodeTopology(frame.ID, result)
+		if encodeErr != nil {
+			// Topology shares the snapshot byte bound, so an oversized one is
+			// the same finite too_large answer a snapshot gives.
+			if errors.Is(encodeErr, browserprotocol.ErrOversized) {
+				err = ErrTooLarge
+				break
+			}
+			err = encodeErr
+			break
+		}
+		if current.writeSnapshot(encoded) != nil {
+			return false
+		}
+		return true
 	case browserprotocol.HumanRequestReply:
 		if current.server.terminalBackend == nil {
 			err = ErrUnauthorized
@@ -906,8 +965,9 @@ func (current *connection) write(payload []byte) error {
 	return current.ws.Write(ctx, websocket.MessageText, payload)
 }
 
-// writeSnapshot is the only outbound path allowed past MaxControlBytes. Every
-// other frame in either direction stays inside the 64 KiB control bound.
+// writeSnapshot is the only outbound path allowed past MaxControlBytes, and
+// STATE_SNAPSHOT and TOPOLOGY are its only frames. Every other frame in either
+// direction stays inside the 64 KiB control bound.
 func (current *connection) writeSnapshot(payload []byte) error {
 	if len(payload) == 0 || len(payload) > browserprotocol.MaxSnapshotBytes {
 		return fmt.Errorf("invalid outbound snapshot frame")
