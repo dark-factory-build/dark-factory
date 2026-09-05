@@ -80,6 +80,8 @@ export const CONTROL_MANIFEST = [
   { type: "TASK_UPDATE_RESULT", direction: "server", id: "required", fixture: "task_update_result.json" },
   { type: "TOPOLOGY_GET", direction: "client", id: "required", fixture: "topology_get.json" },
   { type: "TOPOLOGY", direction: "server", id: "required", fixture: "topology.json" },
+  { type: "RUN_PATHS_GET", direction: "client", id: "required", fixture: "run_paths_get.json" },
+  { type: "RUN_PATHS", direction: "server", id: "required", fixture: "run_paths.json" },
   { type: "ERROR", direction: "both", id: "optional", fixture: "error.json" },
 ] as const;
 export const CONTROL_TYPES = CONTROL_MANIFEST.map((entry) => entry.type);

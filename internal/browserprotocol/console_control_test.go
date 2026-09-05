@@ -66,4 +66,25 @@ func TestConsoleControlBounds(t *testing.T) {
 	if controlLimit(TypeTopology) != MaxSnapshotBytes {
 		t.Fatal("topology does not share the snapshot byte bound")
 	}
+	runPaths := func(runID, paths string) string {
+		return `{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"` + runID + `","paths":[` + paths + `]}}`
+	}
+	// No live run means no rooms, and the array keeps the generic item bound.
+	if _, err := DecodeServerControl([]byte(runPaths("", ""))); err != nil {
+		t.Fatalf("idle agent refused: %v", err)
+	}
+	rooms := make([]string, MaxJSONArray+1)
+	for index := range rooms {
+		rooms[index] = `"internal/kernel"`
+	}
+	for _, frame := range []string{
+		runPaths("", `"internal/kernel"`),
+		runPaths(task, `""`),
+		runPaths(task, strings.Join(rooms, ",")),
+		`{"type":"RUN_PATHS","id":"x","body":{"agent_id":"` + agent + `","run_id":"` + task + `","paths":null}}`,
+	} {
+		if _, err := DecodeServerControl([]byte(frame)); err != ErrMalformed {
+			t.Fatalf("%s accepted: %v", frame, err)
+		}
+	}
 }
