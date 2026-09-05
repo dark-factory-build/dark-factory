@@ -54,7 +54,14 @@ func (store *Store) UpdateAgent(ctx context.Context, id AgentID, expected Revisi
 	if patch.Paused != nil {
 		agent.Paused = *patch.Paused
 	}
-	if err := ValidateProviderLaunchControls(agent.Provider, agent.Model, agent.ReasoningEffort); err != nil {
+	// Only an edit that touches a launch control is held to the launch rules.
+	// A stored row may legitimately hold a combination new launches refuse
+	// (Claude ultra), and pausing such an agent must not be blocked by it.
+	if patch.Model != nil || patch.ReasoningEffort != nil {
+		if err := ValidateProviderLaunchControls(agent.Provider, agent.Model, agent.ReasoningEffort); err != nil {
+			return Agent{}, tx.Rollback(err)
+		}
+	} else if err := validateStoredProviderControls(agent.Provider, agent.Model, agent.ReasoningEffort); err != nil {
 		return Agent{}, tx.Rollback(err)
 	}
 	result, err := tx.connection.ExecContext(ctx, `UPDATE agents SET model = ?, reasoning_effort = ?, paused = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`,

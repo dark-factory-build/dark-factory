@@ -1,6 +1,7 @@
 package browserprotocol
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,16 @@ func TestConsoleControlBounds(t *testing.T) {
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","priority":1000001}}`,
 		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","title":""}}`,
 		`{"type":"TOPOLOGY_GET","id":"x","body":{"project_id":"0000000000000000000000000000000"}}`,
+		// An explicit null is not "absent". encoding/json would leave the
+		// pointer nil and report success with an advanced revision, while the
+		// browser's exact decoder refuses the same frame.
+		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","model":null}}`,
+		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","reasoning_effort":null}}`,
+		`{"type":"AGENT_UPDATE","id":"x","body":{"agent_id":"` + agent + `","expected_revision":"7","paused":null}}`,
+		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","title":null}}`,
+		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","priority":null}}`,
+		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","assigned_agent_id":null}}`,
+		`{"type":"TASK_UPDATE","id":"x","body":{"task_id":"` + task + `","expected_revision":"7","status":null}}`,
 	} {
 		if _, err := DecodeClientControl([]byte(frame)); err != ErrMalformed {
 			t.Fatalf("%s accepted: %v", frame, err)
@@ -54,16 +65,45 @@ func TestConsoleControlBounds(t *testing.T) {
 			t.Fatalf("%s accepted: %v", bad, err)
 		}
 	}
-	// TOPOLOGY is the second frame allowed past the control bound, and it is
-	// bounded by the snapshot entity count rather than the array limit.
-	wide := make([]string, MaxJSONArray+1)
-	for index := range wide {
-		wide[index] = strings.Replace(good, `"id":"`+node+`"`, `"id":"`+strings.Repeat("0", 31)+strings.Repeat("1", 33)+`"`, 1)
+}
+
+// TOPOLOGY is the second frame allowed past the 64 KiB control bound: a
+// repository graph does not fit in it. The bound it does have is the
+// snapshot's, and it still fails closed.
+func TestTopologyIsBoundedBySnapshotBytesNotControlBytes(t *testing.T) {
+	nodes := func(count, pathBytes int) []TopologyNode {
+		result := make([]TopologyNode, 0, count)
+		for index := 0; index < count; index++ {
+			result = append(result, TopologyNode{
+				ID: fmt.Sprintf("%064x", index+1), Kind: "directory", Path: strings.Repeat("p", pathBytes),
+				Label: "leaf", SizeBucket: "small",
+			})
+		}
+		return result
 	}
-	if _, err := DecodeServerControl([]byte(topology(strings.Join(wide, ",")))); err != nil {
-		t.Fatalf("topology array bound is the control bound: %v", err)
+	body := func(items []TopologyNode) Topology {
+		return Topology{ProjectID: "01010101010101010101010101010101", Digest: strings.Repeat("ab", 32), Nodes: items}
 	}
-	if controlLimit(TypeTopology) != MaxSnapshotBytes {
-		t.Fatal("topology does not share the snapshot byte bound")
+	wide, err := EncodeTopology("x", body(nodes(512, 128)))
+	if err != nil {
+		t.Fatalf("topology past the control bound: %v", err)
+	}
+	if len(wide) <= MaxControlBytes || len(wide) > MaxSnapshotBytes {
+		t.Fatalf("topology frame is %d bytes, want between %d and %d", len(wide), MaxControlBytes, MaxSnapshotBytes)
+	}
+	frame, err := DecodeServerControl(wide)
+	if err != nil || len(frame.Body.(Topology).Nodes) != 512 {
+		t.Fatalf("wide topology decode: %+v, %v", frame, err)
+	}
+	// The larger bound belongs to the server direction alone: a browser never
+	// sends this frame and cannot send one this size at all.
+	if _, err := DecodeClientControl(wide); err != ErrOversized {
+		t.Fatalf("topology crossed into the client decoder: %v", err)
+	}
+	if _, err := EncodeTopology("x", body(nodes(MaxSnapshotEntities, MaxTaskTitleBytes))); err != ErrOversized {
+		t.Fatalf("oversized topology encoded: %v", err)
+	}
+	if _, err := DecodeServerControl(make([]byte, MaxSnapshotBytes+1)); err != ErrOversized {
+		t.Fatalf("oversized frame decoded: %v", err)
 	}
 }
