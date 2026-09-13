@@ -494,3 +494,50 @@ func TestSchedulerTickEnqueuesStandingInstructions(t *testing.T) {
 		t.Fatalf("scheduler shutdown = %v", err)
 	}
 }
+
+func TestSchedulerCancellationDuringLimitPollJoinsOwners(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The clock is read inside enforceRunLimits, after the poll has been selected.
+	daemon.now = func() time.Time { cancel(); return time.UnixMilli(1000) }
+	polls := make(chan time.Time, 1)
+	polls <- time.Now()
+	joined := make(chan struct{})
+	spec := SupervisorSpec{
+		schedulerPoll: polls,
+		scheduledAttempt: func(ctx context.Context, _ SupervisorSpec) (kernel.Run, error) {
+			<-ctx.Done()
+			close(joined)
+			return kernel.Run{}, ctx.Err()
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- daemon.RunScheduler(ctx, spec) }()
+	if err := waitSchedulerDone(t, done); err != nil {
+		t.Fatalf("cancelled limit poll = %v", err)
+	}
+	select {
+	case <-joined:
+	default:
+		t.Fatal("scheduler did not join its owner")
+	}
+}
+
+func TestSchedulerCancellationDoesNotHideLimitPollFailure(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	daemon.now = func() time.Time { cancel(); return time.UnixMilli(-1) }
+	polls := make(chan time.Time, 1)
+	polls <- time.Now()
+	spec := SupervisorSpec{schedulerPoll: polls, scheduledAttempt: func(ctx context.Context, _ SupervisorSpec) (kernel.Run, error) {
+		<-ctx.Done()
+		return kernel.Run{}, ctx.Err()
+	}}
+	done := make(chan error, 1)
+	go func() { done <- daemon.RunScheduler(ctx, spec) }()
+	if err := waitSchedulerDone(t, done); !errors.Is(err, kernel.ErrInvalidValue) {
+		t.Fatalf("invalid clock during cancellation = %v", err)
+	}
+}

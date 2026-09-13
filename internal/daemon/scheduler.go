@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/ncruces/go-sqlite3"
 )
 
 const schedulerPollInterval = time.Second
@@ -114,7 +115,11 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				// on the tick ahead of the probe that admits them. A round that
 				// fails is retried next tick; the admission probe stays exact.
 				if err := daemon.enforceRunLimits(ownedCtx); err != nil {
-					resultErr = err
+					// Cancellation can interrupt the read before the Done arm runs.
+					// Preserve unrelated failures even when shutdown races with them.
+					if cancellation := ownedCtx.Err(); cancellation == nil || (!errors.Is(err, cancellation) && !errors.Is(err, sqlite3.INTERRUPT)) {
+						resultErr = err
+					}
 					stopping = true
 					cancel()
 				} else if at, err := daemon.timestamp(); err == nil {
