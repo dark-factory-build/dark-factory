@@ -302,7 +302,7 @@ func TestServicePlistIsOneFiniteAllowlist(t *testing.T) {
 	if sha256.Sum256(body) != digest || bytes.Count(body, []byte("<key>AbandonProcessGroup</key>")) != 1 || bytes.Count(body, []byte("<true/>")) != 2 {
 		t.Fatalf("plist identity or required keys invalid: %s", body)
 	}
-	for _, forbidden := range []string{"KeepAlive", "EnvironmentVariables", "Sockets", "NetworkState", "StandardOutPath", "--development-browser-address", "*"} {
+	for _, forbidden := range []string{"KeepAlive", "EnvironmentVariables", "Sockets", "NetworkState", "StandardOutPath", "ProcessType", "--development-browser-address", "*"} {
 		if bytes.Contains(body, []byte(forbidden)) {
 			t.Fatalf("plist contains forbidden %q", forbidden)
 		}

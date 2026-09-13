@@ -220,8 +220,6 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress string) ([
     <true/>
     <key>AbandonProcessGroup</key>
     <true/>
-    <key>ProcessType</key>
-    <string>Background</string>
     <key>Umask</key>
     <integer>63</integer>
 </dict>
