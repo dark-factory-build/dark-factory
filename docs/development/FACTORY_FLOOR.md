@@ -196,5 +196,5 @@ kernel to the hidden store endpoint retained the worker, question, Queue and
 detail routes. Full repository checks passed (435 web tests, zero skips), followed by a focused
 project-scoped dependency projection check. The log is
 `.tools/factory-floor-evidence/checkpoint4b-local-ci.log` in the main checkout.
-Production-line delta: +196 (+242/-46 outside tests, docs and fixtures).
+Production-line delta: +196 (+236/-40 outside tests, docs and fixtures).
 The checkpoint is committed for independent review; it is not yet merged.
