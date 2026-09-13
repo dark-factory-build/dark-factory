@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
@@ -9,6 +9,7 @@ import {
   type SceneWorker,
 } from "./scene.js";
 import { workerFrames } from "./appearance.js";
+import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
 export type {
@@ -29,6 +30,8 @@ export type FactorySceneProps = Readonly<{
   onSelectTask?: (taskId: string) => void;
   onOpenQueue?: () => void;
   onSelectHumanRequest?: (requestId: string) => void;
+  /** A dropped session reconciles to its latest snapshot instead of replaying local motion. */
+  connected?: boolean;
   /** Current changed locations omitted by the bounded room map. */
   omittedLocations?: number;
   /** The selected agent is highlighted without changing its deterministic placement. */
@@ -62,10 +65,120 @@ export function AgentSprite({ agent, activity }: AgentSpriteProps) {
   </svg>;
 }
 
+type MotionState = Readonly<{
+  placement: ReturnType<typeof placeWorkers>[number];
+  point: { x: number; y: number };
+  route?: ReturnType<typeof routeBetween>;
+  startedAt?: number;
+}>;
+
+const WALK_SPEED = 96;
+
+function now() { return typeof performance === "undefined" ? 0 : performance.now(); }
+
+function motionPoint(motion: MotionState, at: number) {
+  if (motion.route === undefined || motion.startedAt === undefined) return { point: motion.point, walking: false };
+  const travelled = Math.max(0, (at - motion.startedAt) / 1000 * WALK_SPEED);
+  if (travelled >= motion.route.length) return { point: pointOnRoute(motion.point, motion.route, motion.route.length), walking: false };
+  let previous = motion.point;
+  let remaining = travelled;
+  for (const point of motion.route.points) {
+    const length = Math.hypot(point.x - previous.x, point.y - previous.y);
+    if (remaining <= length) return { point: pointOnRoute(motion.point, motion.route, travelled), walking: true, direction: directionBetween(previous, point) };
+    remaining -= length;
+    previous = point;
+  }
+  return { point: motion.placement, walking: false };
+}
+
+function retargetRoute(layout: ReturnType<typeof layoutScene>, motion: MotionState, point: { x: number; y: number }, destination: ReturnType<typeof placeWorkers>[number], at: number) {
+  return routeFromCurrent(layout, point, destination);
+}
+
+/** One browser clock; source state only ever supplies the next local destination. */
+function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean) {
+  const motions = useRef(new Map<string, MotionState>());
+  const priorTopology = useRef<string | undefined>(undefined);
+  const priorConnected = useRef<boolean | undefined>(undefined);
+  const [clock, setClock] = useState(0);
+  const [reduced, setReduced] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduced(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    const at = now();
+    const hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
+    const topologyChanged = priorTopology.current !== undefined && priorTopology.current !== topologyDigest;
+    const reconnected = priorConnected.current === false && connected;
+    priorTopology.current = topologyDigest;
+    priorConnected.current = connected;
+    const previous = motions.current;
+    const next = new Map<string, MotionState>();
+    for (const placement of placements) {
+      const old = previous.get(placement.id);
+      if (old === undefined || reduced || hidden || topologyChanged || reconnected || !connected) {
+        next.set(placement.id, { placement, point: placement });
+        continue;
+      }
+      const current = motionPoint(old, at).point;
+      const unchanged = old.placement.area === placement.area && old.placement.roomId === placement.roomId && samePoint(old.placement, placement);
+      if (unchanged) {
+        next.set(placement.id, motionPoint(old, at).walking ? { ...old, point: old.point } : { placement, point: placement });
+        continue;
+      }
+      const route = retargetRoute(layout, old, current, placement, at);
+      next.set(placement.id, route === undefined || route.length === 0
+        ? { placement, point: placement }
+        : { placement, point: current, route, startedAt: at });
+    }
+    motions.current = next;
+    setClock(at);
+  }, [connected, layout, placements, reduced, topologyDigest]);
+
+  useEffect(() => {
+    if (!connected || reduced || typeof document !== "undefined" && document.visibilityState !== "visible" || typeof requestAnimationFrame !== "function") return;
+    const at = now();
+    if (![...motions.current.values()].some((motion) => motionPoint(motion, at).walking)) return;
+    let frame = requestAnimationFrame((time) => setClock(time));
+    return () => cancelAnimationFrame(frame);
+  }, [clock, connected, reduced]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const reconcile = () => {
+      motions.current = new Map([...motions.current].map(([id, motion]) => [id, { placement: motion.placement, point: motion.placement }]));
+      setClock(now());
+    };
+    document.addEventListener("visibilitychange", reconcile);
+    return () => document.removeEventListener("visibilitychange", reconcile);
+  }, []);
+
+  const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion }>>();
+  for (const placement of placements) {
+    const state = motions.current.get(placement.id);
+    const current = state === undefined ? { point: placement, walking: false } : motionPoint(state, clock);
+    output.set(placement.id, {
+      ...current.point,
+      motion: current.walking
+        ? { action: "walking", direction: current.direction!, frame: Math.floor(clock / 150) % 2 as 0 | 1 }
+        : { action: placement.area === "room" ? "interacting" : "still", frame: 0 },
+    });
+  }
+  return output;
+}
+
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ topology, workers, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest }: FactorySceneProps) {
-  const layout = layoutScene(topology);
-  const placements = placeWorkers(layout, workers);
+export function FactoryScene({ topology, workers, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
+  const layout = useMemo(() => layoutScene(topology), [topology]);
+  const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
+  const positions = useSceneMotion(layout, placements, topology.digest, connected);
   const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   const resting = placements.filter((placement) => placement.area === "resting");
@@ -165,6 +278,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
       {placements.map((placement) => {
         const worker = workerById.get(placement.id);
         if (worker === undefined) return null;
+        const position = positions.get(placement.id) ?? { ...placement, motion: { action: "still", frame: 0 } as WorkerMotion };
         const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
         const location = worker.location === "working"
           ? `representative location near observed changes${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? "at workstation" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
@@ -174,13 +288,14 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
         const personalTasks = tasks.filter((task) => task.agentId === worker.id && (placement.area === "resting" ? !["running", "queued"].includes(task.status) : task.status === "running" && !layout.rooms.some((room) => room.id === task.representativeRoomId)));
         const personalTask = personalTasks.find((task) => task.id === selectedTaskId) ?? personalTasks[0];
         const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
-        const frames = workerFrames(worker);
+        const frames = workerFrames(worker, position.motion);
         return (
           <g
             key={worker.id}
             data-worker-id={worker.id}
             data-worker-location={worker.location ?? "resting"}
-            transform={`translate(${placement.x} ${placement.y})`}
+            data-worker-action={position.motion.action}
+            transform={`translate(${position.x} ${position.y})`}
             className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
           >
             <g role="img" aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...(onSelectWorker === undefined ? {} : { onClick: () => onSelectWorker(worker.id), style: { cursor: "pointer" } })}>

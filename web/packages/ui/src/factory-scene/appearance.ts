@@ -1,6 +1,7 @@
 import type { SpriteAppearance } from "@dark-factory/client";
 import { spriteAtlas, spriteOptions } from "./sprites/sprites.generated.js";
 import type { SceneWorker } from "./scene.js";
+import type { WorkerMotion } from "./movement.js";
 
 export { spriteOptions };
 export type { SpriteAppearance };
@@ -39,7 +40,7 @@ export function resolvedAppearance(worker: Pick<SceneWorker, "id" | "role" | "ap
 }
 
 /** The aligned atlas layers for one worker; combinations grow additively. */
-export function workerFrames(worker: SceneWorker): readonly string[] {
+export function workerFrames(worker: SceneWorker, motion?: WorkerMotion): readonly string[] {
   const appearance = resolvedAppearance(worker);
   const role = worker.role === "orchestrator" ? "overseer" : "worker";
   const provider = worker.provider === "claude_code" || worker.provider === "codex" ? worker.provider : "shell";
@@ -54,6 +55,8 @@ export function workerFrames(worker: SceneWorker): readonly string[] {
     `person.headwear.${appearance.headwear}.${activity}`,
     `person.system.${role}.${provider}.${activity}`,
   ];
+  if (motion?.action === "walking" && motion.direction !== undefined) frames.push(`person.motion.walk.${motion.direction}.${motion.frame}`);
+  if (motion?.action === "interacting") frames.push(`person.motion.interact.${motion.frame}`);
   return frames;
 }
 
