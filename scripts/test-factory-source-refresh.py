@@ -35,7 +35,7 @@ class SourceRefreshTest(unittest.TestCase):
                     refresh.refresh(dict(self.config, journal='/private/tmp/other-journal'))
                 root.assert_not_called()
 
-    def test_pause_drain_refresh_restore_uses_exact_revisions(self):
+    def test_idle_refresh_restore_uses_exact_revisions(self):
         calls = []
         merged = [False]
         def command(argv, _env, _timeout=30, **_kwargs):
@@ -75,34 +75,20 @@ class SourceRefreshTest(unittest.TestCase):
         self.assertIn(['factoryctl', 'dispatch', 'on', '--revision', '8'], calls)
         self.assertTrue(any('merge' in call for call in calls))
 
-    def test_finishing_runs_advance_revision_without_losing_pause_ownership(self):
-        calls = []
-        merged = [False]
-        def command(argv, _env, _timeout=30, **_kwargs):
-            calls.append(argv)
-            if argv[1:3] == ['dispatch', 'off']:
-                return json.dumps({'revision': 8})
-            if argv[-1] == 'HEAD':
-                return ('a' * 40 if not merged[0] else 'b' * 40) + '\n'
-            if 'merge' in argv:
-                merged[0] = True
-            return ''
-        self.fetcher.return_value = 'b' * 40
-        with patch.object(refresh, 'root', return_value=Path('/project')), patch.object(refresh, 'validate_source', return_value='main'), \
-             patch.object(refresh, 'state', side_effect=[(True, 7, 2), (False, 8, 2), (False, 9, 1), (False, 10, 0), (False, 10, 0), (False, 10, 0), (True, 11, 0)]), patch.object(refresh, 'command', side_effect=command), patch.object(refresh.time, 'sleep'):
-            self.assertEqual({'refreshed': True}, refresh.refresh(self.config))
-        self.assertIn(['factoryctl', 'dispatch', 'off', '--revision', '7'], calls)
-        self.assertIn(['factoryctl', 'dispatch', 'on', '--revision', '10'], calls)
-        self.assertTrue(any('merge' in call for call in calls))
+    def test_active_runs_defer_without_pausing_or_merging(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), patch.object(refresh, 'root', return_value=Path('/project')), patch.object(refresh, 'validate_source', return_value='main'), \
+                 patch.object(refresh, 'state', return_value=(enabled, 7, 2)), patch.object(refresh, 'command', return_value='') as command:
+                self.assertEqual({'refreshed': False, 'reason': 'active_runs'}, refresh.refresh(self.config))
+                self.assertEqual([['git', '-C', '/project', 'rev-parse', 'HEAD']], [call.args[0] for call in command.call_args_list])
 
-    def test_extra_revision_during_drain_never_restores_dispatch(self):
+    def test_activity_after_pause_refuses_merge_and_restore(self):
         calls = []
         def command(argv, _env, _timeout=30, **_kwargs):
             calls.append(argv)
             return json.dumps({'revision': 8}) if argv[0] == 'factoryctl' else ''
         with patch.object(refresh, 'root', return_value=Path('/project')), patch.object(refresh, 'validate_source', return_value='main'), \
-             patch.object(refresh, 'state', side_effect=[(True, 7, 2), (False, 8, 2), (False, 10, 1), (False, 10, 1)]), \
-             patch.object(refresh, 'command', side_effect=command), patch.object(refresh.time, 'sleep'):
+             patch.object(refresh, 'state', side_effect=[(True, 7, 0), (False, 8, 1), (False, 8, 1)]), patch.object(refresh, 'command', side_effect=command):
             with self.assertRaisesRegex(refresh.RefreshError, 'operator_changed'):
                 refresh.refresh(self.config)
         self.assertFalse(any('merge' in call for call in calls))
