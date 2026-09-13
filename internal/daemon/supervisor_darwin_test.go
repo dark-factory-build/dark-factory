@@ -1973,7 +1973,9 @@ func (fixture *supervisorFixture) hardSafetyCleanup() {
 		if observation := runner.ObserveProcess(identity); observation.Presence != runner.Present {
 			continue
 		}
-		if err := unix.Kill(-identity.PGID, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+		// Darwin can return EPERM for a zombie-only group. The errno proves
+		// nothing: the bounded identity check below must still prove absence.
+		if err := unix.Kill(-identity.PGID, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) && !errors.Is(err, unix.EPERM) {
 			fixture.t.Errorf("hard safety kill %+v: %v", identity, err)
 		}
 	}

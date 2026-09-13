@@ -44,12 +44,15 @@ function harness(options = {}) {
   return { relay, factory, socket, messages, closes, relayCloses, tickets, errors };
 }
 
-test("a control dial offers exactly the subprotocol, the ticket and a fresh proof", async () => {
+test("a control dial offers exactly the subprotocol, the ticket and a fresh proof", { timeout: 5000 }, async () => {
   const keys = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
   const ticket = mintTicket({ node, purpose: "control", ticketId: base64urlEncode(bytes(16, 5)) });
   const { relay, socket, messages } = harness({ socket: { ticket, key: keys.privateKey } });
   assert.equal(socket.readyState, 0, "a control dial reports CONNECTING while it signs");
-  await settle();
+  await new Promise((resolve) => {
+    const receive = socket.onmessage;
+    socket.onmessage = (event) => { receive(event); resolve(); };
+  });
   const inner = relay.for(node)[0];
   assert.equal(inner.url, `${RELAY_ORIGIN}/controller/${node}`);
   assert.equal(inner.binaryType, "arraybuffer");

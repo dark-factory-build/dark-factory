@@ -7,6 +7,8 @@ export type SceneTopology = Readonly<{
 
 export type SceneNode = Readonly<{
   id: string;
+  /** Served parent identity; this is navigation data, never derived from text. */
+  parentId?: string;
   path: string;
   label: string;
   kind: "repository" | "module" | "package" | "directory";
@@ -67,7 +69,7 @@ export const ROOM_LEFT = PADDING + CORRIDOR;
 const FLOOR_TOP = 48;
 const WORKER_GAP = 24;
 
-/** Ordering for the floor: byte order over paths and ids, never a locale. */
+/** Ordering for the floor: byte order over served fields, never a locale. */
 export function compareText(left: string, right: string) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -77,7 +79,9 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
   const nodes = [...topology.nodes].sort((left, right) =>
     compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.project?.id ?? "", right.project?.id ?? "")
     || compareText(left.path, right.path) || compareText(left.id, right.id));
-  const columns = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(nodes.length))));
+  // Keep the established one-to-three-room geometry when one local child is
+  // added; larger scopes retain the existing bounded deterministic grid.
+  const columns = nodes.length <= 4 ? Math.max(1, Math.min(2, nodes.length)) : Math.min(4, Math.ceil(Math.sqrt(nodes.length)));
   const width = ROOM_LEFT + columns * ROOM_WIDTH + PADDING;
   const groups = new Map<string, SceneNode[]>();
   for (const node of nodes) groups.set(node.project?.id ?? "", [...(groups.get(node.project?.id ?? "") ?? []), node]);

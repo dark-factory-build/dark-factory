@@ -28,7 +28,15 @@ const fixtureReturnedState = {
   factory: { ...fixtureFloorState.factory, active_runs: 1 },
   tasks: new Map(fixtureFloorState.tasks).set(fixtureObservedRun.taskId, { ...fixtureFloorState.tasks.get(fixtureObservedRun.taskId)!, status: "succeeded" }),
 };
-const fixtureChangedTopologies = new Map(fixtureTopologies).set(fixtureFloorState.projects.keys().next().value!, {
+const fixtureHierarchyTopologies = new Map(fixtureTopologies).set([...fixtureFloorState.projects.keys()][1]!, {
+  projectId: [...fixtureFloorState.projects.keys()][1]!, digest: "hierarchy-fixture", sourceRevision: "",
+  nodes: [
+    { id: "f6".repeat(32), parent_id: "", kind: "repository", path: ".", label: "unrelated root label", language: "", size_bucket: "medium" },
+    { id: "g7".repeat(32), parent_id: "f6".repeat(32), kind: "directory", path: "does/not/describe/containment", label: "same label", language: "", size_bucket: "small" },
+    { id: "h8".repeat(32), parent_id: "g7".repeat(32), kind: "package", path: "also-flat", label: "same label", language: "", size_bucket: "tiny" },
+  ],
+});
+const fixtureChangedTopologies = new Map(fixtureHierarchyTopologies).set(fixtureFloorState.projects.keys().next().value!, {
   ...fixtureTopologies.values().next().value!,
   digest: "movement-topology",
   nodes: [...fixtureTopologies.values().next().value!.nodes, { id: "e5".repeat(32), parent_id: "a1".repeat(32), kind: "directory", path: "docs", label: "docs", language: "markdown", size_bucket: "tiny" }],
@@ -41,6 +49,7 @@ function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
   const crowded = fixture === "crowded";
   const movement = fixture === "movement";
+  const hierarchy = fixture === "hierarchy" || fixture === "movement";
   const [routeStep, setRouteStep] = useState(0);
   const [returned, setReturned] = useState(false);
   const [connected, setConnected] = useState(true);
@@ -56,6 +65,9 @@ function FixtureTour() {
       <p className="devFixtureBanner" role="note">
         FIXTURE TOUR — sample data, no daemon. Actions that need the factory are inert here.
       </p>
+      {!hierarchy ? null : <p className="devFixtureBanner" role="note">
+        HIERARCHY FIXTURE — North and South use different served nesting; labels and paths are deliberately misleading.
+      </p>}
       {!movement ? null : <p className="devFixtureBanner" role="note">
         <button type="button" onClick={() => setRouteStep((step) => (step + 1) % fixtureRapidRunPaths.length)}>NEXT RAPID RETARGET</button>{" "}
         <button type="button" onClick={() => setReturned((value) => !value)}>TOGGLE COMMON-SPACE ROUND TRIP</button>{" "}
@@ -67,7 +79,7 @@ function FixtureTour() {
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
         state={returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
-        topologies={changedTopology ? fixtureChangedTopologies : fixtureTopologies}
+        topologies={changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
         runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
         onView={setView}
