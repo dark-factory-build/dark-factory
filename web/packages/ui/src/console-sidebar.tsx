@@ -556,9 +556,6 @@ export function SettingsDialog({
   load.current = onLoadAccounts;
   useEffect(() => { load.current?.(); }, []);
   const close = () => dialog.current?.close();
-  const projects = state === undefined ? [] : [...state.projects.values()];
-  const allowance = projects.length === 0 ? "NOT LIMITED" : projects.map((project) => project.run_budget_limit === 0n ? `${project.name}: NOT LIMITED (${project.runs_used} USED)` : `${project.name}: ${project.run_budget_limit > project.runs_used ? project.run_budget_limit - project.runs_used : 0n} LEFT (${project.runs_used} USED)`).join(" · ");
-  const duration = projects.length === 0 ? "NOT LIMITED" : projects.map((project) => project.max_run_seconds === 0 ? `${project.name}: NOT LIMITED` : `${project.name}: ${project.max_run_seconds} SECONDS`).join(" · ");
   return (
     <dialog
       className="dfConsoleDialog"
@@ -579,8 +576,6 @@ export function SettingsDialog({
               <div><dt>DISPATCH</dt><dd>{state.factory.dispatch_enabled ? "ENABLED" : "PAUSED"}</dd></div>
               <div><dt>WORKER SLOTS</dt><dd>{String(state.factory.capacity)}</dd></div>
               <div><dt>ACTIVE RUNS</dt><dd>{`${state.factory.active_runs} TOTAL`}</dd></div>
-              <div><dt>RUN ALLOWANCE</dt><dd>{allowance}</dd></div>
-              <div><dt>PER-RUN LIMIT</dt><dd>{duration}</dd></div>
               <div><dt>REVISION</dt><dd>{state.factory.revision.toString()}</dd></div>
             </dl>
           )}
@@ -617,7 +612,6 @@ function ProjectLimitsSection({ state, edit, ready, onSave }: {
   const projects = state === undefined ? [] : [...state.projects.values()];
   return <div className="dfConsoleSidebar__section" aria-label="PROJECT LIMITS">
     <h3>PROJECT LIMITS</h3>
-    <p className="dfConsoleSidebar__inherit">AUTONOMOUS GITHUB ISSUE WORK REQUIRES BOTH LIMITS.</p>
     {projects.length === 0 ? <p className="dfFactoryConsole__empty">NO PROJECTS</p> : projects.map((project) => <ProjectLimitsForm key={`${project.id}:${project.revision}:${edit?.target === project.id && edit.error !== undefined ? "refused" : ""}`} project={project} edit={edit} ready={ready} onSave={onSave} />)}
   </div>;
 }
@@ -694,7 +688,7 @@ function AccountsSection({
   return (
     <div className="dfConsoleSidebar__section" aria-label="ACCOUNTS">
       <h3>ACCOUNTS</h3>
-      <p>The factory finds local logins in .codex* and .claude* folders in your home directory. Agent configuration chooses which linked login and model to use.</p>
+      <p>Choose each agent’s account in its configuration.</p>
       <details><summary>ADD ACCOUNT</summary><p>Sign in with your provider CLI on this Mac. For another login, use a separate profile directory named .codex-name or .claude-name in your home folder. Then refresh and link it below.</p></details>
       <button type="button" disabled={pending || onRefresh === undefined} onClick={onRefresh}>{pending ? "REFRESHING" : "REFRESH ACCOUNTS"}</button>
       {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{EDIT_ERRORS.get(error) ?? "THE FACTORY REFUSED THIS"}</p>}
@@ -714,13 +708,13 @@ function AccountsSection({
                   <button type="button" disabled={pending || onUpdate === undefined || !(labels[`${account.id}:${account.revision}`] ?? account.label).trim() || (labels[`${account.id}:${account.revision}`] ?? account.label) === account.label} onClick={() => onUpdate?.(account, { label: labels[`${account.id}:${account.revision}`] ?? account.label })}>SAVE LABEL</button>
                   <button type="button" disabled={pending || onUpdate === undefined || [...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id)} onClick={() => onUpdate?.(account, { remove: true })}>UNLINK</button>
                 </div>
-                {[...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id) ? <p className="dfConsoleSidebar__inherit">In use by an agent. Choose another account in its configuration before unlinking.</p> : null}
+                {[...(state?.agents.values() ?? [])].some((agent) => agent.account_id === account.id) ? <p className="dfConsoleSidebar__inherit">In use. Reassign its agents before unlinking.</p> : null}
               </li>
             );
           })}
         </ul>
       )}
-      <p className="dfConsoleSidebar__inherit">Unlinking removes the factory entry only; it keeps the provider login and credentials.</p>
+      <p className="dfConsoleSidebar__inherit">Unlinking keeps the provider login and credentials.</p>
       <h3>AVAILABLE TO LINK</h3>
       {accounts === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOOKING" : "NOT LOOKED YET"}</p>
         : unlinked.length === 0 ? <p className="dfFactoryConsole__empty">NO UNLINKED LOGINS FOUND</p> : (

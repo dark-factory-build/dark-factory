@@ -1016,8 +1016,13 @@ test("the settings modal carries the factory readout and a pairing mount point",
   assert.match(markup, /<dialog class="dfConsoleDialog" aria-label="Settings">/);
   assert.match(markup, /aria-label="BUILDING"/);
   assert.match(markup, /<dt>DISPATCH<\/dt><dd>ENABLED<\/dd>/);
-  assert.match(markup, /<dt>RUN ALLOWANCE<\/dt><dd>North Workshop: 7 LEFT \(5 USED\) · South Workshop: NOT LIMITED \(3 USED\)<\/dd>/);
-  assert.match(markup, /<dt>PER-RUN LIMIT<\/dt><dd>North Workshop: 900 SECONDS · South Workshop: NOT LIMITED<\/dd>/);
+  // Project values have one editable home, rather than duplicate narrow metrics.
+  assert.doesNotMatch(markup, /<dt>(RUN ALLOWANCE|PER-RUN LIMIT)<\/dt>/);
+  assert.equal((markup.match(/aria-label="Limits for North Workshop"/g) ?? []).length, 1);
+  assert.equal((markup.match(/aria-label="Limits for South Workshop"/g) ?? []).length, 1);
+  assert.match(markup, /5 RUNS USED · 7 FUTURE RUNS LEFT/);
+  assert.match(markup, /3 RUNS USED · UNLIMITED/);
+  assert.match(markup, /value="900"/);
   assert.match(markup, /<dt>REVISION<\/dt><dd>42<\/dd>/);
   assert.match(markup, /127\.0\.0\.1:43123/);
   assert.match(markup, /aria-label="PAIRING"/);
@@ -1040,7 +1045,7 @@ test("settings edits project limits as future runs with an explicit unlimited ch
   assert.match(markup, /UNLIMITED RUNS/);
   assert.match(markup, /value="0"/);
   assert.match(markup, /MAX SECONDS PER RUN \(0 = UNLIMITED\)/);
-  assert.match(markup, /AUTONOMOUS GITHUB ISSUE WORK REQUIRES BOTH LIMITS/);
+  assert.doesNotMatch(markup, /AUTONOMOUS GITHUB ISSUE WORK REQUIRES BOTH LIMITS/);
 });
 
 test("settings rejects a blank per-run duration before saving", async () => {
