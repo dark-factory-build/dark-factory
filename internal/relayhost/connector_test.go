@@ -596,7 +596,9 @@ func TestCloseIsIdempotentAndJoinsEverything(t *testing.T) {
 	if err := fixture.connector.Close(); err != nil {
 		t.Fatalf("second close: %v", err)
 	}
-	session.waitClosed(t)
+	if status := session.waitClosed(t); status != websocket.StatusGoingAway {
+		t.Fatalf("loopback close status = %d, want 1001", status)
+	}
 	if status := fixture.connector.Status(); status.Connected || status.Sessions != 0 {
 		t.Fatalf("status after close = %+v", status)
 	}

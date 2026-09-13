@@ -322,6 +322,10 @@ func (connector *Connector) connect(sequence uint64) (accepted bool, forbidden b
 // sessions opened on it. It returns only after every one of them has joined.
 func (connector *Connector) serve(relay *websocket.Conn) {
 	connectionContext, cancelConnection := context.WithCancel(connector.ctx)
+	// Loopback reads must survive relay cancellation until their close frames
+	// are sent. serve still owns cancellation and joins every session below.
+	sessionContext, cancelSessions := context.WithCancel(context.WithoutCancel(connector.ctx))
+	defer cancelSessions()
 	queue := newOutboundQueue()
 	pongs := make(chan struct{}, 1)
 
@@ -337,7 +341,7 @@ func (connector *Connector) serve(relay *websocket.Conn) {
 		connector.write(connectionContext, relay, queue, pongs, cancelConnection)
 	}()
 
-	connector.read(connectionContext, relay, queue, pongs)
+	connector.read(connectionContext, sessionContext, relay, queue, pongs)
 
 	// Relay loss ends every session at once. Each loopback socket is closed
 	// with 1001 before the context is cancelled so the daemon observes a
@@ -361,6 +365,7 @@ func (connector *Connector) serve(relay *websocket.Conn) {
 		}(current)
 	}
 	shutdown.Wait()
+	cancelSessions()
 	cancelConnection()
 	connector.sessionGroup.Wait()
 	queue.close()
@@ -369,7 +374,7 @@ func (connector *Connector) serve(relay *websocket.Conn) {
 }
 
 // read is the only reader of the relay connection.
-func (connector *Connector) read(ctx context.Context, relay *websocket.Conn, queue *outboundQueue, pongs chan struct{}) {
+func (connector *Connector) read(ctx, sessionContext context.Context, relay *websocket.Conn, queue *outboundQueue, pongs chan struct{}) {
 	for {
 		kind, message, err := relay.Read(ctx)
 		if err != nil {
@@ -393,7 +398,7 @@ func (connector *Connector) read(ctx context.Context, relay *websocket.Conn, que
 			return
 		}
 		for _, record := range records {
-			if err := connector.apply(ctx, record, queue); err != nil {
+			if err := connector.apply(sessionContext, record, queue); err != nil {
 				connector.fail(err)
 				return
 			}
