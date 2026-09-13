@@ -728,6 +728,11 @@ test("rejected input reports an input-only failure while the exact attached term
   context.callbacks().onOutputComplete();
   assert.equal(context.inputCalls.length, 2);
   context.inputCalls[1].result.resolve({ status: "accepted", accepted_bytes: 6n });
+  await context.inputCalls[1].result.promise;
+  assert.equal(context.controller.snapshot.error, undefined, "a successful retry clears the input rejection");
+  assert.equal(context.controller.snapshot.errorSource, undefined);
+  assert.equal(context.controller.snapshot.writable, true);
+  assert.equal(context.sessionCloses(), 0);
   await context.controller.close();
 });
 

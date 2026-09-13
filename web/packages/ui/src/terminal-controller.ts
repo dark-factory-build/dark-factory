@@ -368,6 +368,11 @@ class TerminalController {
           this.#publish();
           if (!this.#current(generation) || !this.#canEffect(handle)) return;
         }
+        if (result.status === "accepted" && this.#errorSource === "input") {
+          this.#error = undefined;
+          this.#errorSource = undefined;
+          this.#publish();
+        }
         inputSinceResize = true;
         continue;
       }

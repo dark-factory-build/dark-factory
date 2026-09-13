@@ -51,6 +51,7 @@ function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
   const crowded = fixture === "crowded";
   const terminalFixture = fixture === "terminal";
+  const [inputRefused, setInputRefused] = useState(true);
   const fixtureAgent = fixtureFloorState.agents.values().next().value!;
   const movement = fixture === "movement";
   const hierarchy = fixture === "hierarchy" || fixture === "movement";
@@ -78,6 +79,7 @@ function FixtureTour() {
         <button type="button" onClick={() => setConnected((value) => !value)}>TOGGLE CONNECTION</button>{" "}
         <button type="button" onClick={() => setChangedTopology((value) => !value)}>TOGGLE TOPOLOGY</button>
       </p>}
+      {!terminalFixture ? null : <p className="devFixtureBanner"><button type="button" onClick={() => setInputRefused((value) => !value)}>TOGGLE FIXTURE INPUT REFUSAL</button></p>}
       <FactoryConsole
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
@@ -93,8 +95,8 @@ function FixtureTour() {
         onToggleSettings={() => setSettingsOpen((open) => !open)}
         terminalContent={!terminalFixture ? undefined : <TerminalPanel terminal={{
           agentId: fixtureAgent.id, agentName: fixtureAgent.name, agentRevision: fixtureAgent.revision,
-          taskTitle: "Sanitised terminal input refusal", phase: "ready", writable: false,
-          error: new SessionError("connection"), errorSource: "input", hasOutputSurface: true,
+          taskTitle: "Sanitised terminal input refusal", phase: "ready", writable: !inputRefused,
+          error: inputRefused ? new SessionError("connection") : undefined, errorSource: inputRefused ? "input" : undefined, hasOutputSurface: true,
           paused: false, instructionPending: false, instructionDraft: "", historyPending: false,
           taskDetailPending: false, controlReady: false, queued: false, finishing: false,
           resets: 0, surfaceVersion: 0,
