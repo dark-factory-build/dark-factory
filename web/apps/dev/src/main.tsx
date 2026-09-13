@@ -5,6 +5,13 @@ import "@dark-factory/ui/styles.css";
 import "./styles.css";
 import { fixtureCrowdedRunPaths, fixtureCrowdedState, fixtureFloorState, fixtureRunPaths, fixtureTopologies } from "../../../fixtures/state.mjs";
 
+const [fixtureAgentId, fixtureObservedRun] = fixtureRunPaths.entries().next().value!;
+const fixtureTourRunPaths = new Map(fixtureRunPaths).set(fixtureAgentId, {
+  ...fixtureObservedRun,
+  paths: [...fixtureObservedRun.paths, "web/apps/dev/src/main.tsx"],
+});
+const fixtureTourCrowdedRunPaths = new Map([...fixtureCrowdedRunPaths, ...fixtureTourRunPaths]);
+
 // Fixture tour: sample data, no daemon, no authority. Reply/cancel and edit
 // handlers are deliberately absent so one-shot actions cannot pretend to
 // succeed.
@@ -13,6 +20,7 @@ function FixtureTour() {
   const [view, setView] = useState<FactoryConsoleProps["view"]>("floor");
   const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>("needs-you");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>();
   const [selectedHumanRequest, setSelectedHumanRequest] = useState<FactoryConsoleProps["selectedHumanRequest"]>();
   return (
@@ -21,10 +29,12 @@ function FixtureTour() {
         FIXTURE TOUR — sample data, no daemon. Actions that need the factory are inert here.
       </p>
       <FactoryConsole
+        selectedTaskId={selectedTaskId}
+        onSelectTask={setSelectedTaskId}
         status="ready"
         state={crowded ? fixtureCrowdedState : fixtureFloorState}
         topologies={fixtureTopologies}
-        runPaths={crowded ? fixtureCrowdedRunPaths : fixtureRunPaths}
+        runPaths={crowded ? fixtureTourCrowdedRunPaths : fixtureTourRunPaths}
         view={view}
         onView={setView}
         detail={detail}
@@ -38,6 +48,15 @@ function FixtureTour() {
           setSelectedHumanRequest(undefined);
           setSelectedAgent({ id: agent.id, name: agent.name, revision: agent.revision });
         }}
+        onLoadTaskDetail={(task) => Promise.resolve({
+          taskId: task.id,
+          revision: task.revision,
+          head: fixtureFloorState.head,
+          instruction: "Inspect the current fixture projection and report any mismatch.",
+          feedback: "Fixture-only review note; no daemon action was performed.",
+          ...(task.status === "succeeded" ? { outcome: "Fixture inspection completed." } : {}),
+          peerQuestions: [],
+        })}
         onSelectHumanRequest={(request) => {
           setDetail("needs-you");
           setSelectedHumanRequest({
