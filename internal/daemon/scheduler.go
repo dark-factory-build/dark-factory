@@ -164,7 +164,9 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 						resultErr = errors.Join(resultErr, event.err, fmt.Errorf("%w: attempt ended before admission was observed", kernel.ErrCorruptState))
 					}
 				} else if owner.admitted {
-					resultErr = errors.Join(resultErr, validateCompletion(event.run))
+					if completionErr := validateCompletion(event.run); completionErr != nil {
+						resultErr = errors.Join(resultErr, event.err, completionErr)
+					}
 				} else if event.run.ID != (kernel.RunID{}) || event.err == nil || !errors.Is(event.err, kernel.ErrConflict) {
 					resultErr = errors.Join(resultErr, event.err, fmt.Errorf("%w: invalid no-admission completion", kernel.ErrCorruptState))
 				}

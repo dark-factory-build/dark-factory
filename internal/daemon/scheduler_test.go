@@ -149,6 +149,24 @@ func TestSchedulerRejectsUnexpectedNoAdmissionResult(t *testing.T) {
 	}
 }
 
+func TestSchedulerPreservesUnsettledAttemptError(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	cause := errors.New("attempt settlement failed")
+	var calls atomic.Int64
+	spec := SupervisorSpec{scheduledAttempt: func(ctx context.Context, spec SupervisorSpec) (kernel.Run, error) {
+		if calls.Add(1) == 1 {
+			spec.admissionObserved(true)
+			return kernel.Run{}, kernel.NewOutcomeUnknownError(cause)
+		}
+		<-ctx.Done()
+		return kernel.Run{}, ctx.Err()
+	}}
+	err := daemon.RunScheduler(context.Background(), spec)
+	if !errors.Is(err, cause) || !schedulerOutcomeUnknown(err) {
+		t.Fatalf("unsettled attempt cause lost: %v", err)
+	}
+}
+
 func TestSchedulerStopsAndJoinsAfterNonterminalCompletion(t *testing.T) {
 	daemon := newSchedulerTestDaemon(t)
 	sentinel := errors.New("durable run remained nonterminal")
