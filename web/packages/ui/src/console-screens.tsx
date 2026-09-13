@@ -145,7 +145,12 @@ export function FactoryFloor({
     if (scopeId !== scene.navigation.scopeId) setScopeId(scene.navigation.scopeId);
   }, [scopeId, scene.navigation.scopeId]);
   return <div className="dfFactoryFloor">
-    <p className="dfFactoryFloor__provenance">Repository snapshot · observed changes are temporary.</p>
+    <details className="dfFactoryFloor__provenance">
+      <summary>Floor evidence</summary>
+      <p>Rooms describe a repository snapshot, not necessarily main-branch code. Room inspection shows the served structure and partial static relationships.</p>
+      <p>Changed areas are a bounded sample of directory modification times in a run's Change, not a full diff or current attention. Failed refreshes can retain an earlier observation.</p>
+      <p>Tasks and outcomes come from factory state. Select their objects for details. Task success does not establish tests, merge or deployment; movement is presentation.</p>
+    </details>
     <nav className="dfFactoryFloor__navigation" aria-label="Floor hierarchy">
       {scene.navigation.breadcrumbs.map((crumb, index) => <span key={crumb.id ?? "root"}>
         {index === 0 ? null : <span aria-hidden="true"> / </span>}

@@ -1653,3 +1653,11 @@ test("dependency projection keeps served identity, hidden endpoints and project 
     edges: [{ from: fixtureTopology.nodes[1].id, to: "foreign", weight: 1 }] } }]]);
   assert.deepEqual(floorScene(fixtureState, hostile, undefined, undefined, rootID).topology.nodes.find((node) => node.id === kernel.id).dependencies.links, []);
 });
+
+
+test("floor evidence distinguishes sampled modifications from attention and authoritative outcomes", () => {
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, view: "floor" }));
+  assert.match(markup, /<details class="dfFactoryFloor__provenance"><summary>Floor evidence<\/summary>/);
+  for (const fact of ["directory modification times", "not a full diff or current attention", "Failed refreshes", "not necessarily main-branch code", "does not establish tests, merge or deployment"]) assert.ok(markup.includes(fact), fact);
+  assert.equal(markup.includes('provenance" open'), false, "provenance is available without adding a permanent text block");
+});

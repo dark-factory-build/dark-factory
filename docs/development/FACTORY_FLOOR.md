@@ -11,8 +11,8 @@ labelled; local screenshots are not deployed or connected-state proof. No animat
 | 2 | Existing task work objects, all observed affected areas, queued counts, HumanRequest attention, truthful outcomes and provenance | Merged as `e2c3a147652c0adb653fa6a161aa8e82044af8ad` (PR661) |
 | 3 | Browser-local elapsed-time waypoint movement, one clock, layered sprites, retarget/reconnect/visibility reconciliation and reduced motion | Merged as `12a8ff4b5f178d08b8a403bd89a6c6097a77c85d` |
 | 4A | Bounded served-hierarchy navigation, breadcrumbs, discoverable off-scope activity and stable viewport | Merged PR675 as `85b114dc`; local and merge-group checks and desktop/phone inspection passed |
-| 4B | Bounded dependency evidence and compatibility; size-bucket footprints; evidenced contents | In progress from merged checkpoint4A; footprints implemented, relationships and contents pending |
-| 5 | Inspect the resulting experience; close only evidenced observation gaps and document unknowns | Pending checkpoint 4B merge |
+| 4B | Bounded dependency evidence and compatibility; size-bucket footprints; evidenced contents | Merged PR681 as `52c4de91`; independent review and local desktop/phone inspection passed |
+| 5 | Inspect the resulting experience; close only evidenced observation gaps and document unknowns | In progress: provenance disclosure and observation-gap audit; no new telemetry |
 
 For 4B, footprint means coarse size, contents mean evidenced composition or
 responsibility, and connections mean observed relationships. Use a small set
@@ -169,7 +169,7 @@ independent review5192119546 ALLOW on repaired head
 `dff30af3c01968c3458b4ff88fa34b158a77fc06`. Removed the redundant
 current-scope Enter action; its regression failed before the fix. Full local
 CI passed433web/zero skips, and merge-group workflow34780648143 passed.
-Actual labelled fixture inspected at1280x720 and390x844; current screenshot
+Actual labelled fixture inspected at 1280×720 and 390×844; current screenshot
 evidence is in the host conversation. Persistent logs are under the host's
 ignored `.tools/factory-floor-evidence/`; no hosted deployment claimed.
 Production delta remains+96.
@@ -198,3 +198,40 @@ project-scoped dependency projection check. The log is
 `.tools/factory-floor-evidence/checkpoint4b-local-ci.log` in the main checkout.
 Production-line delta: +196 (+236/-40 outside tests, docs and fixtures).
 The checkpoint is committed for independent review; it is not yet merged.
+
+
+## Checkpoint 5 observation audit
+
+Inspected merged checkpoint 4B (`52c4de91`) before choosing additions.
+
+- **Focus changes:** `internal/daemon/run_paths.go` samples regular-file mtimes
+  after run start/Change publication, returns at most 16 directories, walks at
+  most 50,000 entries, and caches for five seconds. Hidden/build/vendor trees
+  are skipped; missing/unreadable/truncated scans are not distinguishable on
+  the current wire. This supports a sampled work footprint, not a complete
+  diff or current attention. The floor now exposes that provenance through
+  one native disclosure, replacing the vague snapshot caption. No sampler or
+  observation limits increased.
+- **Handoffs and outcomes:** existing tasks, HumanRequests, selected task detail
+  and recent-work records provide the available evidence. The observed empty
+  overseer result is a separate CLI bug being repaired; it does not justify
+  creating browser history. No replay or persistent browser cache added.
+- **Build/test/review animation:** the current scene contract has no structured
+  observation proving these activities. Task names, terminal prose and attempt
+  success cannot establish them. Neutral animation remains intentional.
+- **Freshness:** the browser matches samples to task/revision/project/run and
+  may retain a last sample after a refused refresh. The disclosure says so.
+  Replacing this with live focus would require a supported bounded observation
+  at a provider-owned boundary; no such source was demonstrated in this pass.
+
+No new protocol/data surface is justified by these findings. Unknown location,
+partial dependency coverage, incomplete modification samples, and unavailable
+operational activity remain explicit limits. Checkpoint 5 validation and
+independent review are pending; this audit does not resolve the retained
+runtime identity/recovery or provider filesystem-enforcement bugs.
+
+Checkpoint 5 local validation: all 437 web checks passed with no skips. The actual
+labelled movement fixture was inspected at 1280×720 and 390×844 with the native
+evidence disclosure expanded; screenshots are in the task conversation.
+Production delta +5 (+7/-2), no new protocol fields or dependencies. Full
+repository validation and independent review remain pending.
