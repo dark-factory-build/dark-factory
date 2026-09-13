@@ -344,6 +344,10 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			_, err := client.SetDispatch(context.Background(), 3, true)
 			return err
 		}},
+		{name: "set capacity", response: mutationResponse(), request: `{"method":"set_capacity","params":{"expected_revision":3,"capacity":2}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.SetCapacity(context.Background(), 3, 2)
+			return err
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

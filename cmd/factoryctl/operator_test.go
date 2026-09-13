@@ -30,6 +30,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "dispatch on", args: []string{"dispatch", "on"}},
 		{name: "dispatch off", args: []string{"dispatch", "off"}},
 		{name: "dispatch guarded", args: []string{"dispatch", "on", "--revision", "7"}},
+		{name: "worker capacity", args: []string{"capacity", "--workers", "2", "--revision", "7"}},
 	}
 	for _, test := range valid {
 		t.Run(test.name, func(t *testing.T) {
@@ -78,6 +79,10 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"dispatch", "on", "--revision", "0"},
 		{"dispatch", "on", "--revision", "01"},
 		{"dispatch"},
+		{"capacity", "--workers", "0", "--revision", "1"},
+		{"capacity", "--workers", "1025", "--revision", "1"},
+		{"capacity", "--workers", "2"},
+		{"capacity", "--workers", "2", "--revision", "0"},
 		{"project", "make", "--name", "n", "--root", "/r"},
 	}
 	for _, args := range invalid {
@@ -314,6 +319,30 @@ func TestDispatchExplicitRevisionDoesNotRefreshOrOverrideTheGuard(t *testing.T) 
 	}
 	if exit == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not accepted") {
 		t.Fatalf("guarded stale dispatch = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestCapacityUsesExplicitRevisionAndNamesTheOverseerLane(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		revision, capacity, ok := call.Capacity()
+		if !ok || call.Kind() != api.CallSetCapacity || revision != 19 || capacity != 2 {
+			t.Errorf("capacity = kind=%v revision=%d workers=%d ok=%v", call.Kind(), revision, capacity, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 5, Revision: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"capacity", "--workers", "2", "--revision", "19"}, webEnvironment(fixture), &stdout, &stderr)
+	if result := awaitServer(t, done); result.err != nil {
+		t.Fatal(result.err)
+	}
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"workers":2`) || !strings.Contains(stdout.String(), `"overseer_lane":1`) {
+		t.Fatalf("capacity = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
 

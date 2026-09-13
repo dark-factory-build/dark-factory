@@ -27,6 +27,7 @@ const (
 	CallCreateAgent
 	CallEnqueueTask
 	CallSetDispatch
+	CallSetCapacity
 	CallAttemptTask
 	CallSucceed
 	CallBlock
@@ -93,6 +94,7 @@ type Call struct {
 	webAfter          string
 	expectedRevision  uint64
 	enabled           bool
+	capacity          uint16
 	text              string
 }
 
@@ -165,6 +167,10 @@ func (call Call) EnqueueTaskInput() (EnqueueTaskInput, bool) {
 
 func (call Call) Dispatch() (uint64, bool, bool) {
 	return call.expectedRevision, call.enabled, call.kind == CallSetDispatch
+}
+
+func (call Call) Capacity() (uint64, uint16, bool) {
+	return call.expectedRevision, call.capacity, call.kind == CallSetCapacity
 }
 
 func (call Call) Result() (string, bool) {
@@ -587,6 +593,15 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 		call.expectedRevision, call.enabled = input.ExpectedRevision, input.Enabled
+	case CallSetCapacity:
+		var input struct {
+			ExpectedRevision uint64 `json:"expected_revision"`
+			Capacity         uint16 `json:"capacity"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil || input.ExpectedRevision == 0 || input.Capacity < 1 || input.Capacity > kernel.MaxFactoryCapacity {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.expectedRevision, call.capacity = input.ExpectedRevision, input.Capacity
 	case CallSucceed:
 		var input struct {
 			Result string `json:"result"`
@@ -700,6 +715,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallEnqueueTask, operatorDomain
 	case "set_dispatch":
 		return CallSetDispatch, operatorDomain
+	case "set_capacity":
+		return CallSetCapacity, operatorDomain
 	case "task":
 		return CallAttemptTask, attemptDomain
 	case "succeed":
@@ -816,7 +833,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
 		return reply == replyOverseerSnapshot
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallEnqueueTask, CallSetDispatch, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus
