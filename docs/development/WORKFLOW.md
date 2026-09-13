@@ -45,11 +45,18 @@ that the exact branch tip is reachable from freshly fetched `origin/main`, the
 checkout has no tracked or untracked changes, and no active task, review, dev
 server or installed build still uses the path. Preserve dirty, unmerged, unknown
 or in-use worktrees and report the reason. Age alone is not evidence of disuse. A squash merge may not retain the branch
-tip as an ancestor; keep that branch until its exact PR head and incorporated
-changes have been verified separately. Do not force-delete it as a shortcut.
+tip as an ancestor. For that case, verify the merged PR's exact head equals the
+local branch tip, its recorded merge commit is reachable from `origin/main`, and
+its patch is incorporated. Keep the branch if any proof is missing.
 
-Run `git worktree remove <owned-path>` without force, then `git branch -d
-<owned-branch>`. Keep screenshots and reports in their existing artifact location.
+Run `git worktree remove <owned-path>` without force. If removal fails, stop and
+report any residual files; do not report cleanup complete. For an ancestor merge,
+use `git branch -d <owned-branch>`. For the separately verified squash case, use
+`git update-ref -d refs/heads/<owned-branch> <verified-head>`: the expected head
+makes deletion fail if the branch has moved. Remove that branch's local tracking
+configuration with `git config --remove-section branch.<owned-branch>` if present.
+Never apply this path to an active branch or a branch with unverified changes.
+Keep screenshots and reports in their existing artifact location.
 Do not delete retained daemon Changes or build directories used by an installed
 runtime. Remote branch deletion follows the existing merge workflow; do not bulk
 prune other people's branches. An overseer operating in a private runtime home
