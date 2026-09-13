@@ -89,6 +89,13 @@ prepared prompt is capped at 8 KiB:
 Every command below runs from the directory the session starts in, its
 private runtime home, with the clone at `repo` inside it.
 
+Read this runbook from that clone or the task-provided checkout. If neither
+is available, report the missing checkout. Scope searches to that checkout
+and the private runtime home; never search the operator’s home or personal
+folders for instructions or tools. Use `command -v` and the repository’s setup
+instructions for tools, and report unavailable prerequisites. These launch
+instructions guide agents; they do not add an OS filesystem sandbox.
+
 Everything below assumes that session: `--dangerously-skip-permissions`, the
 operator's own home and login, a private `TMPDIR`, no `gh` credential, git
 without any remote credential, and the Maintainer App as the one MCP server
