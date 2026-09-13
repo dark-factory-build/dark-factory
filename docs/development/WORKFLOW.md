@@ -37,6 +37,24 @@ file-binding, dependency, or toolchain changes. A whole-kernel race run is
 exceptional and uses `-timeout 1200s`. One memory-heavy Go run at a time avoids
 macOS resource exhaustion.
 
+## Finish and clean up
+
+After a confirmed merge, the repository agent that owns the checkout removes its
+completed worktree and local branch as part of finishing the task. First verify
+that the exact branch tip is reachable from freshly fetched `origin/main`, the
+checkout has no tracked or untracked changes, and no active task, review, dev
+server or installed build still uses the path. Preserve dirty, unmerged, unknown
+or in-use worktrees and report the reason. Age alone is not evidence of disuse. A squash merge may not retain the branch
+tip as an ancestor; keep that branch until its exact PR head and incorporated
+changes have been verified separately. Do not force-delete it as a shortcut.
+
+Run `git worktree remove <owned-path>` without force, then `git branch -d
+<owned-branch>`. Keep screenshots and reports in their existing artifact location.
+Do not delete retained daemon Changes or build directories used by an installed
+runtime. Remote branch deletion follows the existing merge workflow; do not bulk
+prune other people's branches. An overseer operating in a private runtime home
+reports operator-checkout candidates to its host instead of crossing that boundary.
+
 ## Shared local-CI lease
 
 `scripts/local-ci.sh` acquires one kernel-backed lease from the common Git
