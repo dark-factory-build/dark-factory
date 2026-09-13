@@ -50,6 +50,10 @@ export const fixtureTopology = {
   projectId: projectID,
   digest: "ab".repeat(32),
   sourceRevision: "c3".repeat(20),
+  dependencies: { source: "go-imports-package-manifests", omitted: 1, edges: [
+    { from: nodeID("c3"), to: nodeID("b2"), weight: 1 },
+    { from: nodeID("b2"), to: nodeID("d4"), weight: 2 },
+  ] },
   nodes: [
     { id: nodeID("a1"), parent_id: "", kind: "repository", path: ".", label: "north-workshop", language: "", size_bucket: "large" },
     { id: nodeID("b2"), parent_id: nodeID("a1"), kind: "package", path: "internal/kernel", label: "kernel", language: "go", size_bucket: "medium" },

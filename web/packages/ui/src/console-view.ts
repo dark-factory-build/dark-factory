@@ -335,14 +335,18 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
   // instead of manufacturing a containment edge from project text.
   if (roots.length !== 1) return { project, projectRoom: fallback, nodes: [fallback] };
   const root = roots[0]!;
-  const projectRoom: SceneNode = {
-    id: `${project.id}:${root.id}`,
-    path: root.path,
-    label: project.name,
-    kind: root.kind,
-    sizeBucket: root.size_bucket,
-    project: { id: project.id, name: project.name },
-  };
+  const childCounts = new Map<string, number>();
+  for (const node of served) childCounts.set(node.parent_id, (childCounts.get(node.parent_id) ?? 0) + 1);
+  const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number][]>();
+  for (const edge of topology?.dependencies?.edges ?? []) {
+    // Decoder owns endpoint validation; retain project scoping for direct projections too.
+    const from = servedByID.get(edge.from), to = servedByID.get(edge.to);
+    if (from === undefined || to === undefined) continue;
+    for (const [owner, target, direction] of [[from, to, "to"], [to, from, "from"]] as const) {
+      const entry = { nodeId: `${project.id}:${target.id}`, label: target.id === root.id ? project.name : target.label, path: target.path, direction, weight: edge.weight };
+      links.set(owner.id, [...(links.get(owner.id) ?? []), entry]);
+    }
+  }
   const nodes = served.map((node) => ({
     id: `${project.id}:${node.id}`,
     ...(node.parent_id === "" ? {} : { parentId: `${project.id}:${node.parent_id}` }),
@@ -350,7 +354,10 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
     label: node.id === root.id ? project.name : node.label,
     kind: node.kind,
     sizeBucket: node.size_bucket,
+    language: node.language,
+    childCount: childCounts.get(node.id) ?? 0,
+    ...(topology?.dependencies === undefined ? {} : { dependencies: { omitted: topology.dependencies.omitted, links: links.get(node.id) ?? [] } }),
     project: { id: project.id, name: project.name },
   }));
-  return { project, projectRoom, nodes };
+  return { project, projectRoom: nodes.find((node) => node.id === `${project.id}:${root.id}`)!, nodes };
 }

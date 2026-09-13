@@ -14,6 +14,12 @@ export type SceneNode = Readonly<{
   kind: "repository" | "module" | "package" | "directory";
   /** Absent when the room stands for a project rather than a served node. */
   sizeBucket?: "empty" | "tiny" | "small" | "medium" | "large";
+  language?: string;
+  childCount?: number;
+  dependencies?: Readonly<{
+    omitted: number;
+    links: readonly Readonly<{ nodeId: string; label: string; path: string; direction: "to" | "from"; weight: number }>[];
+  }>;
   /** The project this room belongs to: rooms sharing an id are laid out together under its name. */
   project?: Readonly<{ id: string; name: string }>;
 }>;
@@ -40,6 +46,7 @@ export type SceneRoomLayout = SceneRect & Readonly<{
   door: ScenePoint;
   workstation: ScenePoint;
   standing: ScenePoint;
+  furnishings: readonly (ScenePoint & Readonly<{ kind: "board" | "cabinet" | "connections"; label: string; standing: ScenePoint }>)[];
 }>;
 
 export type SceneHeading = Readonly<{ label: string; x: number; y: number }>;
@@ -61,8 +68,13 @@ export type SceneWorkerPlacement = Readonly<{
   y: number;
 }>;
 
-const ROOM_WIDTH = 160;
-const ROOM_HEIGHT = 112;
+// Bounded size buckets leave a fixed grid cell and a common doorway edge.
+const ROOM_WIDTH = 224;
+const ROOM_HEIGHT = 160;
+const FOOTPRINTS = {
+  empty: [128, 112], tiny: [128, 112], small: [160, 128],
+  medium: [192, 144], large: [224, 160],
+} as const;
 const CORRIDOR = 32;
 export const PADDING = 16;
 export const ROOM_LEFT = PADDING + CORRIDOR;
@@ -97,11 +109,20 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
     }
     members.forEach((node, index) => {
       const x = ROOM_LEFT + (index % columns) * ROOM_WIDTH;
-      const y = top + Math.floor(index / columns) * (ROOM_HEIGHT + CORRIDOR);
-      rooms.push({ id: node.id, x, y, width: ROOM_WIDTH, height: ROOM_HEIGHT,
-        door: { x: x + 80, y: y + ROOM_HEIGHT },
-        workstation: { x: x + 72, y: y + 48 }, standing: { x: x + 80, y: y + 80 } });
-      if (index % columns === 0) corridors.push({ x: PADDING, y: y + ROOM_HEIGHT, width: CORRIDOR + Math.min(columns, members.length - index) * ROOM_WIDTH, height: CORRIDOR });
+      const [width, height] = FOOTPRINTS[node.sizeBucket ?? "small"];
+      const bottom = top + Math.floor(index / columns) * (ROOM_HEIGHT + CORRIDOR) + ROOM_HEIGHT;
+      const y = bottom - height;
+      const center = x + width / 2;
+      const furnishings: SceneRoomLayout["furnishings"][number][] = [];
+      if ((node.childCount ?? 0) > 0 || node.language) furnishings.push({ kind: "board", x: x + 16, y: bottom - 64,
+        label: (node.childCount ?? 0) > 0 ? `${node.childCount} served subcomponents` : `${node.language} composition`, standing: { x: x + 24, y: bottom - 32 } });
+      if ((node.dependencies?.links.length ?? 0) > 0 || node.kind === "module" || node.kind === "package") furnishings.push({
+        kind: (node.dependencies?.links.length ?? 0) > 0 ? "connections" : "cabinet", x: x + width - 32, y: bottom - 64,
+        label: (node.dependencies?.links.length ?? 0) > 0 ? "Observed dependency endpoints" : `Served ${node.kind} boundary`, standing: { x: x + width - 24, y: bottom - 32 } });
+      rooms.push({ id: node.id, x, y, width, height, furnishings,
+        door: { x: center, y: bottom },
+        workstation: { x: center - 8, y: bottom - 64 }, standing: { x: center, y: bottom - 32 } });
+      if (index % columns === 0) corridors.push({ x: PADDING, y: bottom, width: CORRIDOR + Math.min(columns, members.length - index) * ROOM_WIDTH, height: CORRIDOR });
     });
     top += Math.ceil(members.length / columns) * (ROOM_HEIGHT + CORRIDOR) + 16;
   }

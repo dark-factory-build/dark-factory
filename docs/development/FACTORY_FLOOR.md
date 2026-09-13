@@ -10,8 +10,8 @@ labelled; local screenshots are not deployed or connected-state proof. No animat
 | 1 | Connected project buildings, corridors, open doors, neutral workstations and reachable standing points; fixed topology membership/coordinates despite worker changes | Merged as `5afd73a2`; local desktop/phone and merge-group checks verified |
 | 2 | Existing task work objects, all observed affected areas, queued counts, HumanRequest attention, truthful outcomes and provenance | Merged as `e2c3a147652c0adb653fa6a161aa8e82044af8ad` (PR661) |
 | 3 | Browser-local elapsed-time waypoint movement, one clock, layered sprites, retarget/reconnect/visibility reconciliation and reduced motion | Merged as `12a8ff4b5f178d08b8a403bd89a6c6097a77c85d` |
-| 4A | Bounded served-hierarchy navigation, breadcrumbs, discoverable off-scope activity and stable viewport | Implemented from checkpoint-3 merge `12a8ff4b5f178d08b8a403bd89a6c6097a77c85d`; host integration checked; exact-head review pending |
-| 4B | Bounded dependency evidence and compatibility; size-bucket footprints; contents from kind, language/composition, manifests, subcomponents and endpoints | Pending checkpoint 4A merge |
+| 4A | Bounded served-hierarchy navigation, breadcrumbs, discoverable off-scope activity and stable viewport | Merged PR675 as `85b114dc`; local and merge-group checks and desktop/phone inspection passed |
+| 4B | Bounded dependency evidence and compatibility; size-bucket footprints; evidenced contents | In progress from merged checkpoint4A; footprints implemented, relationships and contents pending |
 | 5 | Inspect the resulting experience; close only evidenced observation gaps and document unknowns | Pending checkpoint 4B merge |
 
 For 4B, footprint means coarse size, contents mean evidenced composition or
@@ -161,3 +161,40 @@ detail. Final sanitised screenshots: `/private/tmp/work-presence-linked-desktop.
 Connected hosted screenshots `.../work-presence-live-active-*.png` are private:
 they show the older hosted artifact with one worker plus its overseer, not two
 worker slots. Configured worker capacity remains one.
+
+### Checkpoint4A final review and merge
+
+Merged PR675 as `85b114dc74227d6220d00865f3b6973ac64f90a5` after
+independent review5192119546 ALLOW on repaired head
+`dff30af3c01968c3458b4ff88fa34b158a77fc06`. Removed the redundant
+current-scope Enter action; its regression failed before the fix. Full local
+CI passed433web/zero skips, and merge-group workflow34780648143 passed.
+Actual labelled fixture inspected at1280x720 and390x844; current screenshot
+evidence is in the host conversation. Persistent logs are under the host's
+ignored `.tools/factory-floor-evidence/`; no hosted deployment claimed.
+Production delta remains+96.
+
+Checkpoint4B now starts from that merged main in `codex/evidenced-rooms`.
+Host implementation is necessary while the sole worker slot remains held by
+a legacy finalizing run whose recorded filesystem device identity changed
+after restart. The overseer lane continues independent review/publication.
+No raw database rebinding or retained-directory deletion was performed.
+Four bounded footprints and mixed-size reachability checks are implemented;
+dependency projection and evidenced contents remain in progress.
+
+### Checkpoint 4B validation in progress
+
+The `codex/evidenced-rooms` worktree now uses bounded size footprints and
+shared furniture/standing geometry, with an optional bounded static-dependency
+contract. Existing labelled fixtures include observed and hidden endpoints;
+older daemon fixtures retain unavailable evidence. All 15 focused scene tests
+pass, including clear furniture access and bounded dependency navigation.
+Desktop (1280×720) and phone (390×844) screenshots were inspected through the
+actual dev component at `http://127.0.0.1:5190/?fixture=movement`; screenshots
+are in this conversation, not committed binary files. Phone navigation from
+kernel to the hidden store endpoint retained the worker, question, Queue and
+detail routes. Full repository checks passed (435 web tests, zero skips), followed by a focused
+project-scoped dependency projection check. The log is
+`.tools/factory-floor-evidence/checkpoint4b-local-ci.log` in the main checkout.
+Production-line delta: +196 (+236/-40 outside tests, docs and fixtures).
+The checkpoint is committed for independent review; it is not yet merged.

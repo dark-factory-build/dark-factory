@@ -104,7 +104,8 @@ export type TaskUpdateBody = { task_id: string; expected_revision: bigint; title
 export type TaskUpdateResultBody = { task_id: string; revision: bigint };
 export type TopologyGetBody = { project_id: string };
 export type TopologyNode = { id: string; parent_id: string; kind: "repository" | "module" | "package" | "directory"; path: string; label: string; language: string; size_bucket: "empty" | "tiny" | "small" | "medium" | "large" };
-export type TopologyBody = { project_id: string; digest: string; source_revision: string; nodes: TopologyNode[] };
+export type TopologyDependencies = { source: "go-imports-package-manifests"; edges: { from: string; to: string; weight: number }[]; omitted: number };
+export type TopologyBody = { project_id: string; digest: string; source_revision: string; nodes: TopologyNode[]; dependencies?: TopologyDependencies };
 export type RunPathsGetBody = { agent_id: string };
 export type RunPathsBody = { agent_id: string; run_id: string; paths: string[] };
 export type AccountsDiscoverBody = Record<string, never>;
@@ -438,7 +439,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "TASK_UPDATE": requireKeys(body, ["task_id", "expected_revision"], wire, ["title", "body", "priority", "assigned_agent_id", "status"]); { const result: TaskUpdateBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "title")) result.title = boundedText(body.title, 1, MAX_TASK_TITLE_BYTES); if (present(body, "body")) result.body = boundedText(body.body, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "priority")) result.priority = integer(body.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY); if (present(body, "assigned_agent_id")) result.assigned_agent_id = dynamicID(body.assigned_agent_id); if (present(body, "status")) { if (body.status !== "cancelled") malformed(); result.status = body.status; } return result; }
     case "TASK_UPDATE_RESULT": requireKeys(body, ["task_id", "revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true) };
     case "TOPOLOGY_GET": requireKeys(body, ["project_id"], wire); return { project_id: dynamicID(body.project_id) };
-    case "TOPOLOGY": requireKeys(body, ["project_id", "digest", "source_revision", "nodes"], wire); return { project_id: dynamicID(body.project_id), digest: fixedHex(body.digest, 32), source_revision: topologySource(body.source_revision), nodes: itemArray(body.nodes, (item) => topologyNode(item, wire)) };
+    case "TOPOLOGY": return topologyBody(body, wire);
     case "RUN_PATHS_GET": requireKeys(body, ["agent_id"], wire); return { agent_id: dynamicID(body.agent_id) };
     // No live run means no rooms, so an empty run identity carries no paths.
     case "RUN_PATHS": requireKeys(body, ["agent_id", "run_id", "paths"], wire); { if (!Array.isArray(body.paths) || body.paths.length > MAX_ARRAY_ITEMS) malformed(); if (body.run_id === "" && body.paths.length !== 0) malformed(); return { agent_id: dynamicID(body.agent_id), run_id: body.run_id === "" ? "" : dynamicID(body.run_id), paths: body.paths.map((item) => boundedText(item, 1, MAX_TASK_TITLE_BYTES)) }; }
@@ -566,6 +567,31 @@ const TOPOLOGY_KINDS = ["repository", "module", "package", "directory"] as const
 const TOPOLOGY_BUCKETS = ["empty", "tiny", "small", "medium", "large"] as const;
 /** Empty, or one canonical Git object name in either length Git itself uses. */
 function topologySource(value: unknown): string { if (typeof value !== "string" || value !== "" && !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) malformed(); return value; }
+function topologyBody(body: Record<string, unknown>, wire: boolean): TopologyBody {
+  requireKeys(body, ["project_id", "digest", "source_revision", "nodes"], wire, ["dependencies"]);
+  const nodes = itemArray(body.nodes, (item) => topologyNode(item, wire));
+  uniqueIDs(nodes);
+  let dependencies: TopologyDependencies | undefined;
+  if (present(body, "dependencies")) {
+    const value = body.dependencies;
+    if (!isObject(value)) malformed();
+    requireKeys(value, ["source", "edges", "omitted"], wire);
+    if (value.source !== "go-imports-package-manifests" || !Array.isArray(value.edges) || value.edges.length > 256) malformed();
+    const ids = new Set(nodes.map((node) => node.id));
+    const seen = new Set<string>();
+    const edges = value.edges.map((edge) => {
+      if (!isObject(edge)) malformed();
+      requireKeys(edge, ["from", "to", "weight"], wire);
+      const from = fixedHex(edge.from, 32), to = fixedHex(edge.to, 32);
+      const pair = `${from}:${to}`;
+      if (!ids.has(from) || !ids.has(to) || from === to || seen.has(pair)) malformed();
+      seen.add(pair);
+      return { from, to, weight: integer(edge.weight, 1, 0xffffffff) };
+    });
+    dependencies = { source: value.source, edges, omitted: integer(value.omitted, 0, 0xffffffff) };
+  }
+  return { project_id: dynamicID(body.project_id), digest: fixedHex(body.digest, 32), source_revision: topologySource(body.source_revision), nodes, ...(dependencies === undefined ? {} : { dependencies }) };
+}
 function topologyNode(value: unknown, wire: boolean): TopologyNode {
   if (!isObject(value)) malformed(); requireKeys(value, ["id", "parent_id", "kind", "path", "label", "language", "size_bucket"], wire);
   if (typeof value.kind !== "string" || !(TOPOLOGY_KINDS as readonly string[]).includes(value.kind)) malformed();

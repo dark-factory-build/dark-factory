@@ -68,12 +68,29 @@ type TopologyGet struct {
 // Topology is the regenerable project structure, computed on demand. It is not
 // durable state, so it carries no head and no revision; the digest is the only
 // identity a client needs to tell one computation from another. Containment is
-// implied by ParentID, so v1 has no edges.
+// implied by ParentID. Optional dependencies are bounded analyser observations.
 type Topology struct {
-	ProjectID      string         `json:"project_id"`
-	Digest         string         `json:"digest"`
-	SourceRevision string         `json:"source_revision"`
-	Nodes          []TopologyNode `json:"nodes"`
+	ProjectID      string                `json:"project_id"`
+	Digest         string                `json:"digest"`
+	SourceRevision string                `json:"source_revision"`
+	Nodes          []TopologyNode        `json:"nodes"`
+	Dependencies   *TopologyDependencies `json:"dependencies,omitempty"`
+}
+
+const MaxTopologyEdges = 256
+
+// Coverage is deliberately partial: only resolved project-local Go imports and
+// package-manifest dependencies are analysed. Absent support means unknown.
+type TopologyDependencies struct {
+	Source  string         `json:"source"`
+	Edges   []TopologyEdge `json:"edges"`
+	Omitted uint32         `json:"omitted"`
+}
+
+type TopologyEdge struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Weight uint32 `json:"weight"`
 }
 
 type RunPathsGet struct {
@@ -289,9 +306,24 @@ func validConsoleControl(kind MessageType, body any) error {
 			!validTopologySource(value.SourceRevision) || len(value.Nodes) > MaxSnapshotEntities {
 			return bad()
 		}
+		ids := make(map[string]bool, len(value.Nodes))
 		for _, node := range value.Nodes {
-			if !validTopologyNode(node) {
+			if !validTopologyNode(node) || ids[node.ID] {
 				return bad()
+			}
+			ids[node.ID] = true
+		}
+		if d := value.Dependencies; d != nil {
+			if d.Source != "go-imports-package-manifests" || d.Edges == nil || len(d.Edges) > MaxTopologyEdges {
+				return bad()
+			}
+			seen := make(map[[2]string]bool, len(d.Edges))
+			for _, edge := range d.Edges {
+				pair := [2]string{edge.From, edge.To}
+				if !ids[edge.From] || !ids[edge.To] || edge.From == edge.To || edge.Weight == 0 || seen[pair] {
+					return bad()
+				}
+				seen[pair] = true
 			}
 		}
 	case RunPathsGet:
