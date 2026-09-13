@@ -11,7 +11,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import time
 
 
 HERE = Path(__file__).resolve().parent
@@ -93,7 +92,9 @@ def refresh_locked(config):
     validate_source(path, config, env)
     if command(["git", "-C", str(path), "rev-parse", "HEAD"], env).strip() == target:
         return {"refreshed": False}
-    enabled, original, initial_active = state(home)
+    enabled, original, active = state(home)
+    if active:
+        return {"refreshed": False, "reason": "active_runs"}
     paused = None
     try:
         raw = command(["factoryctl", "dispatch", "off", "--revision", str(original)], env, 15)
@@ -102,21 +103,12 @@ def refresh_locked(config):
         if type(result.get("revision")) is not int or result["revision"] != expected:
             raise RefreshError("pause_unproven")
         paused = expected
-        # Each drained run advances the factory revision once. Other revision
-        # changes still invalidate our pause, including operator controls.
-        deadline = time.monotonic() + 300
-        while True:
-            current_enabled, revision, active = state(home)
-            if current_enabled or revision != paused + initial_active - active:
-                raise RefreshError("operator_changed")
-            if not active:
-                break
-            if time.monotonic() >= deadline:
-                raise RefreshError("drain_timeout")
-            time.sleep(1)
+        current_enabled, revision, active = state(home)
+        if current_enabled or revision != paused or active:
+            raise RefreshError("operator_changed")
         validate_source(path, config, env)
         current_enabled, revision, active = state(home)
-        if current_enabled or revision != paused + initial_active - active:
+        if current_enabled or revision != paused or active:
             raise RefreshError("operator_changed")
         with tempfile.TemporaryDirectory(prefix="factory-refresh-hooks-") as hooks:
             git = ["git", "-C", str(path), "-c", "core.hooksPath=" + hooks]
@@ -129,7 +121,7 @@ def refresh_locked(config):
     finally:
         if enabled and paused is not None:
             current_enabled, revision, active = state(home)
-            if not current_enabled and revision == paused + initial_active - active:
+            if not current_enabled and revision == paused and not active:
                 command(["factoryctl", "dispatch", "on", "--revision", str(revision)], env, 15)
                 restored, restored_revision, _ = state(home)
                 if not restored or restored_revision < revision + 1:
