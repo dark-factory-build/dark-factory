@@ -351,7 +351,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) == 2 {
 			return attemptCommand{kind: commandSucceed}, false, true
 		}
-		if len(args) == 4 && args[2] == "--result" {
+		if len(args) == 4 && args[2] == "--result" && strings.TrimSpace(args[3]) != "" {
 			return attemptCommand{kind: commandSucceed, text: args[3]}, false, true
 		}
 	case "block":
