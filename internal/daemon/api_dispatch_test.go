@@ -196,6 +196,21 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
+	_, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{
+		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
+		Title: "oversized", Body: strings.Repeat("x", 8193), Priority: 7,
+	})
+	var oversized *api.RemoteError
+	if !errors.As(err, &oversized) || oversized.Code() != api.RemoteInvalidRequest {
+		t.Fatalf("oversized Codex task must be refused before admission: %v", err)
+	}
+	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
+	if _, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3))); err != nil || found {
+		t.Fatalf("refused task was persisted: found=%v, err=%v", found, err)
+	}
+
+	done = fixture.serve(t)
 	taskResult, err := client.EnqueueTask(ctx, api.EnqueueTaskInput{
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "public title", Body: "private task body sentinel", Priority: 7,

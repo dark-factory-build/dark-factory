@@ -37,6 +37,12 @@ func prepareQueuedTaskPatch(ctx context.Context, store *kernel.Store, id kernel.
 	if patch.AssignedAgentID != nil {
 		task.AssignedAgentID = *patch.AssignedAgentID
 	}
+	return prepareNewTask(ctx, store, kernel.NewTask{ProjectID: task.ProjectID, AssignedAgentID: task.AssignedAgentID, Title: task.Title, Body: task.Body})
+}
+
+// Validate through the same provider preparation used at launch, before a task
+// enters the queue. The kernel still owns admission and project authority.
+func prepareNewTask(ctx context.Context, store *kernel.Store, task kernel.NewTask) error {
 	agent, found, err := store.Agent(ctx, task.AssignedAgentID)
 	if err != nil {
 		return err
