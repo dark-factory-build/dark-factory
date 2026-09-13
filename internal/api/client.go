@@ -213,6 +213,17 @@ func (client *OperatorClient) SetDispatch(ctx context.Context, expectedRevision 
 	return client.client.mutate(ctx, "set_dispatch", params)
 }
 
+func (client *OperatorClient) SetCapacity(ctx context.Context, expectedRevision uint64, capacity uint16) (MutationResult, error) {
+	if expectedRevision == 0 || capacity < 1 || capacity > kernel.MaxFactoryCapacity {
+		return MutationResult{}, ErrInvalidInput
+	}
+	params := struct {
+		ExpectedRevision uint64 `json:"expected_revision"`
+		Capacity         uint16 `json:"capacity"`
+	}{ExpectedRevision: expectedRevision, Capacity: capacity}
+	return client.client.mutate(ctx, "set_capacity", params)
+}
+
 func (client *AttemptClient) Succeed(ctx context.Context, result string) (MutationResult, error) {
 	if !validText(result, 0, 131072) {
 		return MutationResult{}, ErrInvalidInput

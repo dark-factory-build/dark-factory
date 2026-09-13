@@ -409,6 +409,40 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	}
 }
 
+func TestDaemonSetsWorkerCapacityWithRevisionGuard(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	done := fixture.serve(t)
+	updated, err := client.SetCapacity(ctx, 1, 3)
+	if err != nil || updated.Revision != 2 || updated.Head != 1 {
+		t.Fatalf("set worker capacity = %+v, %v", updated, err)
+	}
+	waitDispatch(t, done)
+
+	done = fixture.serve(t)
+	snapshot, err := client.Snapshot(ctx)
+	if err != nil || snapshot.Factory.Capacity != 3 || snapshot.Factory.Revision != updated.Revision {
+		t.Fatalf("worker capacity readback = %+v, %v", snapshot.Factory, err)
+	}
+	waitDispatch(t, done)
+
+	done = fixture.serve(t)
+	if _, err := client.SetCapacity(ctx, 1, 4); err == nil {
+		t.Fatal("stale worker capacity update succeeded")
+	} else {
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != api.RemoteRevisionConflict {
+			t.Fatalf("stale worker capacity error = %v", err)
+		}
+	}
+	waitDispatch(t, done)
+}
+
 func TestDaemonDispatchesHumanQuestionWithDurableIdempotency(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 31)

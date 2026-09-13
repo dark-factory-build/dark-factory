@@ -64,6 +64,8 @@ const (
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
   factoryctl dispatch on|off [--revision REVISION]
+  factoryctl capacity --workers N --revision REVISION
+    Worker slots only; the separate overseer lane remains available.
   factoryctl web status
   factoryctl web list-clients [--after CLIENT_ID]
   factoryctl web revoke CLIENT_ID --revision REVISION
@@ -109,6 +111,7 @@ const (
 	commandTaskAdd
 	commandTaskSendBack
 	commandDispatch
+	commandCapacity
 	commandStatus
 	commandOverseerStatus
 	commandOverseerTaskAdd
@@ -149,6 +152,7 @@ type attemptCommand struct {
 	body            string
 	bodySet         bool
 	toolBudget      uint64
+	capacity        uint16
 	maxRunSeconds   uint32
 	priority        int64
 	prioritySet     bool
@@ -212,7 +216,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandStatus {
+	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman {
@@ -304,7 +308,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 1 && args[0] == "service" {
 		return parseServiceCommand(args)
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -728,6 +732,16 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			revision, ok := parseRevision(args[3])
 			if ok {
 				return attemptCommand{kind: commandDispatch, enabled: args[1] == "on", expectedRevision: revision}, false, true
+			}
+		}
+		return attemptCommand{}, false, false
+	}
+	if args[0] == "capacity" {
+		if len(args) == 5 && args[1] == "--workers" && args[3] == "--revision" {
+			workers, workersOK := parseRevision(args[2])
+			revision, revisionOK := parseRevision(args[4])
+			if workersOK && workers >= 1 && workers <= uint64(kernel.MaxFactoryCapacity) && revisionOK {
+				return attemptCommand{kind: commandCapacity, capacity: uint16(workers), expectedRevision: revision}, false, true
 			}
 		}
 		return attemptCommand{}, false, false
@@ -1283,6 +1297,17 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Head     uint64 `json:"head"`
 			Revision uint64 `json:"revision"`
 		}{Enabled: command.enabled, Head: result.Head, Revision: result.Revision})
+	case commandCapacity:
+		result, callErr := client.SetCapacity(callContext, command.expectedRevision, command.capacity)
+		if callErr != nil {
+			return writeWebFailure(stderr, "capacity", callErr)
+		}
+		return writeJSON(stdout, struct {
+			Workers      uint64 `json:"workers"`
+			OverseerLane uint64 `json:"overseer_lane"`
+			Head         uint64 `json:"head"`
+			Revision     uint64 `json:"revision"`
+		}{Workers: uint64(command.capacity), OverseerLane: 1, Head: result.Head, Revision: result.Revision})
 	default:
 		return exitUsage
 	}
