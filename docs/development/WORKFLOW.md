@@ -49,7 +49,8 @@ tip as an ancestor. For that case, verify the merged PR's exact head equals the
 local branch tip, its recorded merge commit is reachable from `origin/main`, and
 its patch is incorporated. Keep the branch if any proof is missing.
 
-Run `git worktree remove <owned-path>` without force. If removal fails, stop and
+Run these commands from a surviving checkout of the same repository, never
+from the worktree being removed. Run `git worktree remove <owned-path>` without force. If removal fails, stop and
 report any residual files; do not report cleanup complete. For an ancestor merge,
 use `git branch -d <owned-branch>`. For the separately verified squash case, use
 `git update-ref -d refs/heads/<owned-branch> <verified-head>`: the expected head
