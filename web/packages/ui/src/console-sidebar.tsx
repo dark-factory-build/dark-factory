@@ -290,8 +290,9 @@ export function QueuePanel({
       : <>
         {running.length === 0 ? null : <section className="dfConsoleSidebar__section" aria-label="Running tasks">
           <h3>RUNNING</h3>
+          <p className="dfConsoleItem__meta">Open a task to inspect it. Briefs are editable while queued.</p>
           <ul className="dfConsoleItems">{running.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
-            <button type="button" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
+            <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
             <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · RUNNING</span>
           </div></li>)}</ul>
         </section>}
@@ -470,7 +471,7 @@ function QueuedTask({
     }
   };
   if (onEditTask === undefined) {
-    return <li className="dfConsoleItem"><button type="button" className="dfConsoleItem__summary" disabled={!ready || onSelectTask === undefined} aria-pressed={selected === true} onClick={() => onSelectTask?.(task.id)}>{task.title}</button></li>;
+    return <li className="dfConsoleItem"><button type="button" className="dfConsoleItem__summary dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selected === true} onClick={() => onSelectTask?.(task.id)}>{task.title}</button></li>;
   }
   return (
     <li>
