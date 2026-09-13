@@ -945,3 +945,70 @@ func mustIDBytes(t *testing.T, value string) []byte {
 	}
 	return decoded
 }
+
+func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 201)
+	ctx := context.Background()
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerID := testID(210)
+	done := fixture.serve(t)
+	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: workerID, ProjectID: active.run.ProjectID.String(), Name: "worker", Role: "worker", Provider: "codex", ToolBudgetLimit: 10}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	done = fixture.serve(t)
+	if _, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: testID(220), Name: "other", Root: filepath.Join(t.TempDir(), "other-source")}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	done = fixture.serve(t)
+	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: testID(221), ProjectID: testID(220), Name: "foreign", Role: "worker", Provider: "codex", ToolBudgetLimit: 10}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	// Simulate a task accepted by the old operator route before this check.
+	incarnation, _ := parseIncarnationID(testID(212))
+	spec := kernel.NewTask{ID: mustTaskID(t, testID(211)), ProjectID: active.run.ProjectID, AssignedAgentID: mustAgentID(t, workerID), IncarnationID: incarnation, Title: "legacy", Body: strings.Repeat("x", 8193)}
+	at, _ := kernel.NewUnixMillis(1000)
+	legacy, err := fixture.store.EnqueueTask(ctx, spec, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, overseer := range []bool{false, true} {
+		for _, mismatch := range []bool{false, true} {
+			body := spec.Body
+			if mismatch {
+				body += "x"
+			}
+			done = fixture.serve(t)
+			var result api.MutationResult
+			if overseer {
+				result, err = active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: spec.ID.String(), AssignedAgentID: workerID, IncarnationID: incarnation.String(), Title: spec.Title, Body: body})
+			} else {
+				result, err = operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: spec.ID.String(), ProjectID: spec.ProjectID.String(), AssignedAgentID: workerID, IncarnationID: incarnation.String(), Title: spec.Title, Body: body})
+			}
+			waitDispatch(t, done)
+			var remote *api.RemoteError
+			if mismatch {
+				if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+					t.Fatalf("mismatched replay, overseer=%v: %v", overseer, err)
+				}
+			} else if err != nil || result.Revision != uint64(legacy.Revision.Int64()) {
+				t.Fatalf("exact legacy replay, overseer=%v: %+v, %v", overseer, result, err)
+			}
+		}
+	}
+	for _, target := range []string{testID(250), testID(221), active.run.AgentID.String()} {
+		done = fixture.serve(t)
+		_, err := active.client.OverseerEnqueueTask(ctx, api.OverseerTaskCreateInput{ID: testID(213), AssignedAgentID: target, IncarnationID: testID(214), Title: "not authorized", Body: strings.Repeat("x", 8193)})
+		waitDispatch(t, done)
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+			t.Fatalf("unauthorized target %s returned %v", target, err)
+		}
+	}
+}

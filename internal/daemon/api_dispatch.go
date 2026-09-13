@@ -612,7 +612,7 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 		return newErrorReply(api.RemoteInternal)
 	}
 	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
-	if err := prepareNewTask(ctx, daemon.store, spec); err != nil {
+	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	task, err := daemon.store.EnqueueTask(ctx, spec, at)
@@ -901,7 +901,7 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 		return newErrorReply(api.RemoteInternal)
 	}
 	spec := kernel.NewTask{ID: id, ProjectID: authority.ProjectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
-	if err := prepareNewTask(ctx, daemon.store, spec); err != nil {
+	if err := prepareTaskEnqueue(ctx, daemon.store, spec, true); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	task, err := daemon.store.EnqueueTaskForOverseer(ctx, digest, spec, at)
