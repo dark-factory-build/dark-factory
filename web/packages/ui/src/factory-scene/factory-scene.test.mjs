@@ -11,7 +11,7 @@ import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { PADDING, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { resolvedAppearance, spriteOptions, workerFrames } from "../../dist/src/factory-scene/appearance.js";
-import { pointOnRoute, routeBetween, routeFromCurrent } from "../../dist/src/factory-scene/movement.js";
+import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
 const topology = {
@@ -74,6 +74,57 @@ function corridorReachability(layout) {
   return layout.rooms.every((room) => all.some((corridor, index) => seen.has(index)
     && room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width
     && room.door.y >= corridor.y && room.door.y <= corridor.y + corridor.height));
+}
+
+/** Verify the rendered 16px person stays on the floor and crosses walls only at doors. */
+function assertRouteGeometry(layout, start, route, message) {
+  const clearance = spriteAtlas.frame / 2;
+  const spine = layout.corridors.at(-1);
+  assert.ok(spine, `${message}: missing spine`);
+  const clearRect = (point, rect) => point.x - clearance >= rect.x && point.x + clearance <= rect.x + rect.width
+    && point.y - clearance >= rect.y && point.y + clearance <= rect.y + rect.height;
+  // The rendered resting/staging floor starts where the connected spine reaches
+  // it and continues to the fixed right edge of the scene.
+  const clearCommon = (point) => point.x - clearance >= PADDING && point.x + clearance <= layout.width - PADDING
+    && point.y - clearance >= layout.restingTop - 32;
+  const points = [start, ...route.points];
+  for (let index = 1; index < points.length; index++) {
+    const from = points[index - 1];
+    const to = points[index];
+    assert.ok(from.x === to.x || from.y === to.y, `${message}: diagonal segment ${index}`);
+    if (from.y === to.y) {
+      const wall = layout.rooms.find((room) => from.y === room.door.y
+        && Math.max(Math.min(from.x, to.x), room.x) <= Math.min(Math.max(from.x, to.x), room.x + room.width));
+      assert.equal(wall, undefined, `${message}: horizontal segment ${index} follows a room wall`);
+      const clearHorizontal = (rect) => from.y - clearance >= rect.y && from.y + clearance <= rect.y + rect.height
+        && Math.min(from.x, to.x) - clearance >= rect.x && Math.max(from.x, to.x) + clearance <= rect.x + rect.width;
+      const clearCommonHorizontal = () => Math.min(from.x, to.x) - clearance >= PADDING && Math.max(from.x, to.x) + clearance <= layout.width - PADDING
+        && from.y - clearance >= layout.restingTop - 32;
+      assert.ok(layout.rooms.some(clearHorizontal) || layout.corridors.some(clearHorizontal) || clearCommonHorizontal(), `${message}: horizontal segment ${index} leaves clear floor`);
+      continue;
+    }
+    const low = Math.min(from.y, to.y);
+    const high = Math.max(from.y, to.y);
+    const rowFor = (room) => layout.corridors.find((corridor) => corridor !== spine && corridor.y === room.door.y
+      && room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width);
+    const throughDoor = (room) => {
+      const row = rowFor(room);
+      return row !== undefined && Math.abs(from.x - room.door.x) + clearance <= row.height / 2
+        && ((low >= room.y + clearance && high <= room.door.y) || (low >= row.y && high <= row.y + row.height - clearance));
+    };
+    const boundaryRecovery = layout.corridors.some((corridor) => corridor !== spine && low === corridor.y && high <= corridor.y + corridor.height / 2
+      && from.x - clearance >= corridor.x && from.x + clearance <= corridor.x + corridor.width);
+    for (const room of layout.rooms) {
+      const touchesBottom = low <= room.door.y && high >= room.door.y;
+      if (touchesBottom && from.x >= room.x && from.x <= room.x + room.width) {
+        assert.ok(throughDoor(room) || boundaryRecovery, `${message}: vertical segment ${index} crosses ${room.id} outside its doorway`);
+      }
+    }
+    const clearVertical = (rect) => from.x - clearance >= rect.x && from.x + clearance <= rect.x + rect.width
+      && low >= rect.y + clearance && high <= rect.y + rect.height - clearance;
+    const spineOrCommon = from.x - clearance >= spine.x && from.x + clearance <= spine.x + spine.width && low >= spine.y + clearance;
+    assert.ok(layout.rooms.some(clearVertical) || layout.corridors.some(clearVertical) || layout.rooms.some(throughDoor) || boundaryRecovery || spineOrCommon || clearCommon({ x: from.x, y: low }), `${message}: vertical segment ${index} leaves clear floor`);
+  }
 }
 
 test("the pure scene model feeds a deterministic SVG renderer", () => {
@@ -333,7 +384,7 @@ test("every generated person layer is reachable, including fallbacks", () => {
   assert.deepEqual([...reached].sort(), personFrames.sort());
 });
 
-test("movement uses only room doors, corridors and standing points", () => {
+test("movement uses clear corridor lanes, doors and standing points", () => {
   const layout = layoutScene(topology);
   const placements = placeWorkers(layout, [
     { ...workers[0], id: "source", nodeId: "src" },
@@ -350,12 +401,19 @@ test("movement uses only room doors, corridors and standing points", () => {
   const destinationRoom = layout.rooms.find((room) => room.id === destination.roomId);
   const spine = layout.corridors.at(-1);
   assert.ok(sourceRoom && destinationRoom && spine);
-  assert.deepEqual(route.points.slice(0, 5), [
+  const sourceCorridor = layout.corridors.find((corridor) => corridor !== spine && corridor.y === sourceRoom.door.y && sourceRoom.door.x >= corridor.x && sourceRoom.door.x <= corridor.x + corridor.width);
+  const destinationCorridor = layout.corridors.find((corridor) => corridor !== spine && corridor.y === destinationRoom.door.y && destinationRoom.door.x >= corridor.x && destinationRoom.door.x <= corridor.x + corridor.width);
+  assert.ok(sourceCorridor && destinationCorridor);
+  const center = spine.x + spine.width / 2;
+  assert.deepEqual(route.points.slice(0, 7), [
     { x: sourceRoom.door.x, y: source.y }, sourceRoom.door,
-    { x: spine.x + spine.width / 2, y: sourceRoom.door.y },
-    { x: spine.x + spine.width / 2, y: destinationRoom.door.y }, destinationRoom.door,
+    { x: sourceRoom.door.x, y: sourceCorridor.y + sourceCorridor.height / 2 },
+    { x: center, y: sourceCorridor.y + sourceCorridor.height / 2 },
+    { x: center, y: destinationCorridor.y + destinationCorridor.height / 2 },
+    { x: destinationRoom.door.x, y: destinationCorridor.y + destinationCorridor.height / 2 }, destinationRoom.door,
   ]);
   assert.deepEqual(route.points.at(-1), { x: destination.x, y: destination.y });
+  assertRouteGeometry(layout, source, route, "room to room");
   // Every crowded standing slot uses the actual opening, never its own offset
   // x-coordinate through a bottom wall.
   for (const offset of [0, -24, 24, -48, 48]) {
@@ -365,6 +423,7 @@ test("movement uses only room doors, corridors and standing points", () => {
     assert.ok(crowdedRoute.points.some((point) => point.x === sourceRoom.door.x && point.y === sourceRoom.door.y));
     if (offset !== 0) assert.deepEqual(crowdedRoute.points.slice(0, 2), [{ x: sourceRoom.door.x, y: crowded.y }, sourceRoom.door]);
     assert.deepEqual(crowdedRoute.points.slice(-2), [destinationRoom.door, { x: destinationRoom.door.x, y: destination.y }]);
+    assertRouteGeometry(layout, crowded, crowdedRoute, `crowded source ${offset}`);
   }
   const [resting, staging] = placeWorkers(layout, [
     { ...workers[0], id: "resting", location: "resting", nodeId: undefined },
@@ -376,6 +435,7 @@ test("movement uses only room doors, corridors and standing points", () => {
     assert.ok(outbound && returned, `${common.area} is connected by the displayed common-space spine`);
     assert.deepEqual(pointOnRoute(common, outbound, outbound.length), { x: destination.x, y: destination.y });
     assert.deepEqual(pointOnRoute(destination, returned, returned.length), { x: common.x, y: common.y });
+    assertRouteGeometry(layout, destination, returned, `${common.area} return`);
   }
   assert.equal(routeBetween(layout, source, { ...destination, area: "outside" }), undefined, "omitted rooms never gain an invented route");
 });
@@ -401,7 +461,49 @@ test("rapid retargeting uses the room containing the rendered worker", () => {
     const route = routeFromCurrent(layout, enteredB, destination);
     assert.ok(route);
     assert.deepEqual(route.points[0], { x: enteredB.x, y: bRoom.door.y });
+    assertRouteGeometry(layout, enteredB, route, `rapid retarget to ${destination.id}`);
   }
+});
+
+test("retargets leave the current room or corridor through a clear lane", () => {
+  const layout = layoutScene({
+    digest: "retarget-lanes",
+    nodes: ["A", "B", "C", "D"].map((id) => ({ id, parentId: "", path: id, label: id, kind: "directory", sizeBucket: "tiny" })),
+  });
+  const placements = new Map(placeWorkers(layout, ["A", "B", "C", "D"].map((id) => ({ id, name: id, role: "worker", activity: "busy", location: "working", nodeId: id }))).map((placement) => [placement.id, placement]));
+  const source = placements.get("A");
+  const destination = placements.get("D");
+  assert.ok(source && destination);
+  const room = layout.rooms.find((candidate) => candidate.id === source.roomId);
+  const spine = layout.corridors.at(-1);
+  assert.ok(room && spine);
+  const row = layout.corridors.find((corridor) => corridor !== spine && corridor.y === room.door.y && room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width);
+  assert.ok(row);
+  const laneY = row.y + row.height / 2;
+  const center = spine.x + spine.width / 2;
+  const cases = [
+    ["room", source],
+    ["doorway", room.door],
+    // A render from the superseded wall-line route still escapes perpendicularly
+    // into this real corridor before it travels horizontally.
+    ["wall line", { x: room.door.x - row.height, y: room.door.y }],
+    ["row corridor", { x: room.door.x - row.height, y: laneY }],
+    ["spine", { x: center, y: row.y - row.height / 2 }],
+  ];
+  for (const [name, current] of cases) {
+    const route = routeFromCurrent(layout, current, destination);
+    assert.ok(route, `${name} has a current-state route`);
+    assertRouteGeometry(layout, current, route, `retarget from ${name}`);
+  }
+  const wallLine = routeFromCurrent(layout, cases[2][1], destination);
+  assert.ok(wallLine);
+  assert.deepEqual(wallLine.points.slice(0, 2), [
+    { x: room.door.x - row.height, y: laneY },
+    { x: center, y: laneY },
+  ]);
+  const fromSpine = routeFromSpine(layout, { x: center, y: row.y - row.height / 2 }, destination);
+  assert.ok(fromSpine);
+  assertRouteGeometry(layout, { x: center, y: row.y - row.height / 2 }, fromSpine, "direct spine route");
 });
 
 test("the production scene stops motion on disconnect and unmount", async () => {

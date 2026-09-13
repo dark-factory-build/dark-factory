@@ -8,8 +8,8 @@ labelled; local screenshots are not deployed or connected-state proof. No animat
 | Checkpoint | Scope | Status |
 | --- | --- | --- |
 | 1 | Connected project buildings, corridors, open doors, neutral workstations and reachable standing points; fixed topology membership/coordinates despite worker changes | Merged as `5afd73a2`; local desktop/phone and merge-group checks verified |
-| 2 | Existing task work objects, all observed affected areas, queued counts, HumanRequest attention, truthful outcomes and provenance | Implemented; local visual and required checks in progress |
-| 3 | Browser-local elapsed-time waypoint movement, one clock, layered sprites, retarget/reconnect/visibility reconciliation and reduced motion | Pending checkpoint 2 merge |
+| 2 | Existing task work objects, all observed affected areas, queued counts, HumanRequest attention, truthful outcomes and provenance | Merged as `e2c3a147652c0adb653fa6a161aa8e82044af8ad` (PR661) |
+| 3 | Browser-local elapsed-time waypoint movement, one clock, layered sprites, retarget/reconnect/visibility reconciliation and reduced motion | Clear row-corridor lane repair implemented; review/publication pending |
 | 4A | Bounded served-hierarchy navigation, breadcrumbs, discoverable off-scope activity and stable viewport | Pending checkpoint 3 merge |
 | 4B | Bounded dependency evidence and compatibility; size-bucket footprints; contents from kind, language/composition, manifests, subcomponents and endpoints | Pending checkpoint 4A merge |
 | 5 | Inspect the resulting experience; close only evidenced observation gaps and document unknowns | Pending checkpoint 4B merge |
@@ -109,7 +109,7 @@ workflow with zero active runs and a private backup. Web and relay are ready;
 schema remains version 10. Dispatch was already paused at preflight and was
 preserved. This runtime install does not deploy the hosted UI.
 
-Full gate, final local visual evidence, commit, review and merge are pending.
+Checkpoint 2 merged as `e2c3a147652c0adb653fa6a161aa8e82044af8ad` (PR661). Checkpoint 3 follows from its served source; its clear row-corridor lane repair remains subject to review and publication.
 
 ### Follow-up dogfooding work
 

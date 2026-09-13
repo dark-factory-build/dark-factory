@@ -24,6 +24,52 @@ function distance(left: ScenePoint, right: ScenePoint) {
   return Math.hypot(right.x - left.x, right.y - left.y);
 }
 
+function spine(layout: SceneLayout) {
+  return layout.corridors.at(-1);
+}
+
+/** The row rectangle is the source of both the doorway gap and its clear lane. */
+function rowCorridor(layout: SceneLayout, room: SceneLayout["rooms"][number]) {
+  const mainSpine = spine(layout);
+  return layout.corridors.find((corridor) => corridor !== mainSpine
+    && corridor.y === room.door.y
+    && room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width);
+}
+
+function corridorAt(layout: SceneLayout, point: ScenePoint) {
+  const mainSpine = spine(layout);
+  return layout.corridors.find((corridor) => corridor !== mainSpine
+    && point.x >= corridor.x && point.x <= corridor.x + corridor.width
+    && point.y >= corridor.y && point.y <= corridor.y + corridor.height);
+}
+
+function laneY(corridor: SceneLayout["corridors"][number]) {
+  return corridor.y + corridor.height / 2;
+}
+
+function leaveRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], from: ScenePoint, center: number) {
+  const corridor = rowCorridor(layout, room);
+  if (corridor === undefined) return undefined;
+  const clear = laneY(corridor);
+  return [
+    { x: room.door.x, y: from.y }, room.door,
+    { x: room.door.x, y: clear },
+    { x: center, y: clear },
+  ];
+}
+
+function enterRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], to: ScenePoint, center: number) {
+  const corridor = rowCorridor(layout, room);
+  if (corridor === undefined) return undefined;
+  const clear = laneY(corridor);
+  return [
+    { x: center, y: clear },
+    { x: room.door.x, y: clear },
+    room.door,
+    { x: room.door.x, y: to.y }, to,
+  ];
+}
+
 /**
  * The only moving route: leave a known room through its existing door, use the
  * corridor spine, then enter the next room beside its existing workstation.
@@ -41,21 +87,15 @@ export function routeBetween(
   const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
   if (from.area === "room" && source === undefined || to.area === "room" && destination === undefined) return undefined;
   if (source !== undefined && source.id === destination?.id) return route([from, to]);
-  const spine = layout.corridors.at(-1);
-  if (spine === undefined) return undefined;
-  const center = spine.x + spine.width / 2;
+  const mainSpine = spine(layout);
+  if (mainSpine === undefined) return undefined;
+  const center = mainSpine.x + mainSpine.width / 2;
+  const sourceRoute = source === undefined ? [{ x: center, y: from.y }] : leaveRoom(layout, source, from, center);
+  const destinationRoute = destination === undefined ? [{ x: center, y: to.y }, to] : enterRoom(layout, destination, to, center);
+  if (sourceRoute === undefined || destinationRoute === undefined) return undefined;
   const points = [
-    ...(source === undefined ? [{ x: center, y: from.y }] : [
-      { x: source.door.x, y: from.y },
-      source.door,
-      { x: center, y: source.door.y },
-    ]),
-    ...(destination === undefined ? [{ x: center, y: to.y }, to] : [
-      { x: center, y: destination.door.y },
-      destination.door,
-      { x: destination.door.x, y: to.y },
-      to,
-    ]),
+    ...sourceRoute,
+    ...destinationRoute,
   ];
   return route([from, ...points]);
 }
@@ -69,17 +109,16 @@ function route(points: readonly ScenePoint[]): Route {
 export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneWorkerPlacement): Route | undefined {
   if (to.area !== "room" && to.area !== "resting" && to.area !== "staging") return undefined;
   const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
-  const spine = layout.corridors.at(-1);
-  if (to.area === "room" && destination === undefined || spine === undefined) return undefined;
-  const center = spine.x + spine.width / 2;
+  const mainSpine = spine(layout);
+  if (to.area === "room" && destination === undefined || mainSpine === undefined) return undefined;
+  const center = mainSpine.x + mainSpine.width / 2;
+  const currentCorridor = corridorAt(layout, from);
+  const clear = currentCorridor === undefined ? undefined : laneY(currentCorridor);
+  const destinationRoute = destination === undefined ? [{ x: center, y: to.y }, to] : enterRoom(layout, destination, to, center);
+  if (destinationRoute === undefined) return undefined;
   return route([from,
-    { x: center, y: from.y },
-    ...(destination === undefined ? [{ x: center, y: to.y }, to] : [
-      { x: center, y: destination.door.y },
-      destination.door,
-      { x: destination.door.x, y: to.y },
-      to,
-    ]),
+    ...(clear === undefined ? [{ x: center, y: from.y }] : [{ x: from.x, y: clear }, { x: center, y: clear }]),
+    ...destinationRoute,
   ]);
 }
 
