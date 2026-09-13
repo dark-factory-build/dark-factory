@@ -234,8 +234,9 @@ Checkpoint 5 local validation: all 437 web checks passed with no skips. The actu
 labelled movement fixture was inspected at 1280×720 and 390×844 with the native
 evidence disclosure expanded; screenshots are in the task conversation.
 Production delta +5 (+7/-2), no new protocol fields or dependencies. Full
-`./scripts/local-ci.sh` passed at implementation head
-`2af5d64abb9d0530e7faa6c9e732749619276da0`; the exact-head receipt and log are
-`checkpoint5-checks.json` and `checkpoint5-local-ci.log` in the existing local
+`./scripts/local-ci.sh` passed for the implementation and its documentation
+correction. The PR records the current validated commit and its matching
+receipt; earlier implementation receipts remain historical evidence, not
+validation of later heads. Local receipts and logs live in the existing
 `.tools/factory-floor-evidence/` artifact directory. Independent review and
 merge remain pending.
