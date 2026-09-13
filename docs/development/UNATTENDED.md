@@ -19,12 +19,12 @@ The overseer may choose among these workers, pause, reorder, stop, and send
 work back; it cannot raise model, account, or project limits through its
 scoped controls.
 
-Set project limits before enabling intake:
+Set a finite per-run duration before enabling intake; zero run budget means unlimited:
 
 ```sh
 factoryctl status
 factoryctl project limits --project PROJECT_ID --revision REVISION \
-  --run-budget 30 --max-run-seconds 2700
+  --run-budget 0 --max-run-seconds 2700
 ```
 
 The allowance adds this many future admissions to the recorded count; it does

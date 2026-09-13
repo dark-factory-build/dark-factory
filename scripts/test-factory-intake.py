@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +42,24 @@ class IntakeTest(unittest.TestCase):
         task_id, incarnation = argv[argv.index("--task-id") + 1], argv[argv.index("--incarnation-id") + 1]
         self.states[task_id] = {"status": "queued", "id": task_id, "incarnation": incarnation}
         return json.dumps({"id": task_id, "incarnation_id": incarnation})
+
+    def test_unlimited_allowance_preserves_duration_and_finite_exhaustion_checks(self):
+        with sqlite3.connect(Path(self.config["factory_home"]) / "factory.sqlite3") as database:
+            database.executescript("CREATE TABLE projects (id BLOB, run_budget_limit INTEGER, runs_used INTEGER, max_run_seconds INTEGER); CREATE TABLE agents (id BLOB, project_id BLOB, role TEXT, provider TEXT);")
+            project = bytes.fromhex(self.config["project_id"])
+            database.execute("INSERT INTO projects VALUES (?, 0, 999, 2700)", (project,))
+            database.execute("INSERT INTO agents VALUES (?, ?, 'orchestrator', 'codex')", (bytes.fromhex(self.config["overseer_agent_id"]), project))
+            database.commit()
+            for limit, used, duration, error in [(0, 999, 2700, None), (2, 1, 2700, None), (2, 2, 2700, "exhausted"), (2, 3, 2700, "exhausted"), (0, 999, 0, "duration"), (2, 1, 0, "duration")]:
+                with self.subTest(limit=limit, used=used, duration=duration):
+                    database.execute("UPDATE projects SET run_budget_limit=?, runs_used=?, max_run_seconds=?", (limit, used, duration))
+                    database.commit()
+                    if error is None:
+                        INTAKE.validate_factory(self.config)
+                    else:
+                        with self.assertRaisesRegex(INTAKE.IntakeError, error):
+                            INTAKE.validate_factory(self.config)
+        self.assertEqual([], self.calls, "limit verification performs no provider or network action")
 
     def factory_calls(self):
         return [call for call in self.calls if call[0] == "factoryctl"]

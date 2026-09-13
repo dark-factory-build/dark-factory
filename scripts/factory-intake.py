@@ -114,9 +114,9 @@ def validate_factory(config: dict) -> None:
         raise IntakeError("cannot verify configured factory limits; install the matching runtime first") from exc
     if row is None or row[3:] != ("orchestrator", "codex"):
         raise IntakeError("configured project needs a Codex overseer")
-    if row[0] == 0 or row[2] == 0:
-        raise IntakeError("configure finite project run and duration limits before unattended intake")
-    if row[1] >= row[0]:
+    if row[2] == 0:
+        raise IntakeError("configure a finite per-run duration before unattended intake")
+    if row[0] != 0 and row[1] >= row[0]:
         raise IntakeError("project run allowance is exhausted")
 
 
