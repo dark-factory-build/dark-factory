@@ -166,6 +166,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.enqueueTask(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
+	case api.CallSetCapacity:
+		return daemon.setCapacity(ctx, call)
 	case api.CallAttemptTask:
 		return daemon.attemptTask(ctx, call)
 	case api.CallRequestHuman:
@@ -611,10 +613,11 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	task, err := daemon.store.EnqueueTask(ctx, kernel.NewTask{
-		ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID,
-		Title: input.Title, Body: input.Body, Priority: input.Priority,
-	}, at)
+	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
+	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	task, err := daemon.store.EnqueueTask(ctx, spec, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -642,6 +645,27 @@ func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply 
 	if enabled {
 		daemon.notifyScheduler()
 	}
+	return mutationReply(state.Head, state.Revision)
+}
+
+func (daemon *Daemon) setCapacity(ctx context.Context, call api.Call) api.Reply {
+	expected, capacity, ok := call.Capacity()
+	if !ok || expected > uint64(^uint64(0)>>1) {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	revision, err := kernel.NewRevision(int64(expected))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	state, err := daemon.store.SetCapacity(ctx, revision, capacity, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	daemon.notifyScheduler()
 	return mutationReply(state.Head, state.Revision)
 }
 
@@ -899,7 +923,11 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	task, err := daemon.store.EnqueueTaskForOverseer(ctx, digest, kernel.NewTask{ID: id, ProjectID: authority.ProjectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}, at)
+	spec := kernel.NewTask{ID: id, ProjectID: authority.ProjectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
+	if err := prepareTaskEnqueue(ctx, daemon.store, spec, true); err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	task, err := daemon.store.EnqueueTaskForOverseer(ctx, digest, spec, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}

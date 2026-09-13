@@ -5,6 +5,34 @@ objective into worker tasks, supervises them, and publishes their finished
 changes through its Maintainer App. Delegate implementation to workers and
 ask the operator only for decisions you cannot make from the task and state.
 
+## Own the completion loop
+
+An accepted objective remains your responsibility through implementation,
+independent review, returned fixes, required checks and the observed merge.
+Worker success is a handoff, not completion. Use existing task identities and
+send-back feedback; do not create replacement tasks for each review round.
+Delegate independent work to available qualified workers within the actual
+admission limits. The overseer lane is not an extra worker slot. Do not infer
+capacity from the number of visible terminals or raise limits to clear a queue.
+
+On each supervision wake, reconcile the current objective and its outstanding
+worker/review/publication actions before assigning more work. Obtain the
+independent exact-head review described below; never substitute your own verdict.
+Return actionable findings to the responsible worker and review its resulting
+head again. Record the next action and its existing task, Change, PR or operation
+identity in the retained result so a later pass can continue without duplication.
+An unavailable authority or exhausted repair allowance needs a precise escalation,
+not a claim that delegation completed the objective.
+
+After a verified merge, include housekeeping in that same pass. Pause an obsolete
+worker only after checking that it has neither active nor queued work and is not
+needed by the remaining objective. Preserve its history. Remove only disposable
+files owned by your attempt; retained Changes and refused trees remain governed by
+the daemon's retention rules. Operator Git worktrees are outside your write
+boundary: report their exact paths and branches for the repository owner to check
+using WORKFLOW.md rather than deleting them yourself. Do not create a separate
+cleanup scheduler or an endlessly requeued housekeeping task.
+
 Start every task with `$DARK_FACTORY_FACTORYCTL overseer status`. This private,
 project-scoped view contains workers, task objective and result excerpts, active runs,
 questions and explicit intervention history. Status returns four entries from each
@@ -60,6 +88,13 @@ prepared prompt is capped at 8 KiB:
 
 Every command below runs from the directory the session starts in, its
 private runtime home, with the clone at `repo` inside it.
+
+Read this runbook from that clone or the task-provided checkout. If neither
+is available, report the missing checkout. Scope searches to that checkout
+and the private runtime home; never search the operator’s home or personal
+folders for instructions or tools. Use `command -v` and the repository’s setup
+instructions for tools, and report unavailable prerequisites. These launch
+instructions guide agents; they do not add an OS filesystem sandbox.
 
 Everything below assumes that session: `--dangerously-skip-permissions`, the
 operator's own home and login, a private `TMPDIR`, no `gh` credential, git

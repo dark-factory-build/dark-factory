@@ -7,9 +7,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { PADDING, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { resolvedAppearance, spriteOptions, workerFrames } from "../../dist/src/factory-scene/appearance.js";
+import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
 const topology = {
@@ -74,6 +76,57 @@ function corridorReachability(layout) {
     && room.door.y >= corridor.y && room.door.y <= corridor.y + corridor.height));
 }
 
+/** Verify the rendered 16px person stays on the floor and crosses walls only at doors. */
+function assertRouteGeometry(layout, start, route, message) {
+  const clearance = spriteAtlas.frame / 2;
+  const spine = layout.corridors.at(-1);
+  assert.ok(spine, `${message}: missing spine`);
+  const clearRect = (point, rect) => point.x - clearance >= rect.x && point.x + clearance <= rect.x + rect.width
+    && point.y - clearance >= rect.y && point.y + clearance <= rect.y + rect.height;
+  // The rendered resting/staging floor starts where the connected spine reaches
+  // it and continues to the fixed right edge of the scene.
+  const clearCommon = (point) => point.x - clearance >= PADDING && point.x + clearance <= layout.width - PADDING
+    && point.y - clearance >= layout.restingTop - 32;
+  const points = [start, ...route.points];
+  for (let index = 1; index < points.length; index++) {
+    const from = points[index - 1];
+    const to = points[index];
+    assert.ok(from.x === to.x || from.y === to.y, `${message}: diagonal segment ${index}`);
+    if (from.y === to.y) {
+      const wall = layout.rooms.find((room) => from.y === room.door.y
+        && Math.max(Math.min(from.x, to.x), room.x) <= Math.min(Math.max(from.x, to.x), room.x + room.width));
+      assert.equal(wall, undefined, `${message}: horizontal segment ${index} follows a room wall`);
+      const clearHorizontal = (rect) => from.y - clearance >= rect.y && from.y + clearance <= rect.y + rect.height
+        && Math.min(from.x, to.x) - clearance >= rect.x && Math.max(from.x, to.x) + clearance <= rect.x + rect.width;
+      const clearCommonHorizontal = () => Math.min(from.x, to.x) - clearance >= PADDING && Math.max(from.x, to.x) + clearance <= layout.width - PADDING
+        && from.y - clearance >= layout.restingTop - 32;
+      assert.ok(layout.rooms.some(clearHorizontal) || layout.corridors.some(clearHorizontal) || clearCommonHorizontal(), `${message}: horizontal segment ${index} leaves clear floor`);
+      continue;
+    }
+    const low = Math.min(from.y, to.y);
+    const high = Math.max(from.y, to.y);
+    const rowFor = (room) => layout.corridors.find((corridor) => corridor !== spine && corridor.y === room.door.y
+      && room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width);
+    const throughDoor = (room) => {
+      const row = rowFor(room);
+      return row !== undefined && Math.abs(from.x - room.door.x) + clearance <= row.height / 2
+        && ((low >= room.y + clearance && high <= room.door.y) || (low >= row.y && high <= row.y + row.height - clearance));
+    };
+    const boundaryRecovery = layout.corridors.some((corridor) => corridor !== spine && low === corridor.y && high <= corridor.y + corridor.height / 2
+      && from.x - clearance >= corridor.x && from.x + clearance <= corridor.x + corridor.width);
+    for (const room of layout.rooms) {
+      const touchesBottom = low <= room.door.y && high >= room.door.y;
+      if (touchesBottom && from.x >= room.x && from.x <= room.x + room.width) {
+        assert.ok(throughDoor(room) || boundaryRecovery, `${message}: vertical segment ${index} crosses ${room.id} outside its doorway`);
+      }
+    }
+    const clearVertical = (rect) => from.x - clearance >= rect.x && from.x + clearance <= rect.x + rect.width
+      && low >= rect.y + clearance && high <= rect.y + rect.height - clearance;
+    const spineOrCommon = from.x - clearance >= spine.x && from.x + clearance <= spine.x + spine.width && low >= spine.y + clearance;
+    assert.ok(layout.rooms.some(clearVertical) || layout.corridors.some(clearVertical) || layout.rooms.some(throughDoor) || boundaryRecovery || spineOrCommon || clearCommon({ x: from.x, y: low }), `${message}: vertical segment ${index} leaves clear floor`);
+  }
+}
+
 test("the pure scene model feeds a deterministic SVG renderer", () => {
   const layout = layoutScene(topology);
   assert.deepEqual(layout, layoutScene({ ...topology, nodes: [...topology.nodes].reverse() }));
@@ -121,12 +174,19 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(first.includes(">STAGED</text>"), false);
   assert.match(first, /data-room-id="src"/);
   // The room subtitle carries the served size bucket, and nothing when the
-  // room stands for a project rather than a topology node.
+  // room stands for a project whose structure is unavailable.
   assert.match(first, />PACKAGE · MEDIUM</);
   assert.match(renderToStaticMarkup(createElement(FactoryScene, {
     topology: { digest: "d", nodes: [{ id: "p", parentId: "", path: "Project", label: "Project", kind: "repository" }] },
     workers: []
-  })), />REPOSITORY<\/text>/);
+  })), />STRUCTURE UNAVAILABLE<\/text>/);
+  const compact = renderToStaticMarkup(createElement(FactoryScene, {
+    topology: { digest: "compact", nodes: [{ id: "p", path: ".", label: "Project", kind: "repository", sizeBucket: "large" }] },
+    workers: [], omittedLocations: 1,
+  }));
+  assert.match(compact, /max-width:448px/, "a one-room scope stays legible without poster-sized sprites");
+  assert.match(compact, /current locations not shown in this view/);
+  assert.equal(compact.includes("omitted by the room cap"), false);
   assert.match(first, /&lt;Shared &amp; Library…/);
   assert.equal(first.includes("�"), false);
   assert.equal((first.match(/data-worker-id=/g) ?? []).length, workers.length);
@@ -139,7 +199,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     const rendered = first.slice(first.indexOf(`data-worker-id="${worker.id}"`));
     const frame = rendered.slice(0, rendered.indexOf("</g>")).match(/href="#df-frame-([^"]+)"/g)
       .map((match) => match.slice('href="#df-frame-'.length, -1));
-    assert.deepEqual(frame, workerFrames(worker));
+    assert.deepEqual(frame, worker.location === "working" ? workerFrames(worker, { action: "interacting", frame: 0 }) : workerFrames(worker));
     for (const name of frame) assert.ok(name in spriteAtlas.frames, name);
   }
   assert.equal(first.includes("dfFactoryScene__alternate"), false);
@@ -323,8 +383,167 @@ test("every generated person layer is reachable, including fallbacks", () => {
   const fallback = { id: idForIdentity(2), name: "Fallback", role: "worker", provider: "unknown", activity: "debugging" };
   assert.match(workerFrames(fallback).at(-1), /person\.system\.worker\.shell\.idle/);
   for (const frame of workerFrames(fallback)) reached.add(frame);
+  for (const direction of ["north", "south", "east", "west"]) for (const frame of [0, 1]) {
+    for (const name of workerFrames(fallback, { action: "walking", direction, frame })) reached.add(name);
+  }
+  for (const frame of [0, 1]) for (const name of workerFrames(fallback, { action: "interacting", frame })) reached.add(name);
   const personFrames = Object.keys(spriteAtlas.frames).filter((name) => name.startsWith("person."));
   assert.deepEqual([...reached].sort(), personFrames.sort());
+});
+
+test("movement uses clear corridor lanes, doors and standing points", () => {
+  const layout = layoutScene(topology);
+  const placements = placeWorkers(layout, [
+    { ...workers[0], id: "source", nodeId: "src" },
+    { ...workers[0], id: "destination", nodeId: "lib" },
+  ]);
+  const sourcePlacement = placements.find((placement) => placement.id === "source");
+  const destination = placements.find((placement) => placement.id === "destination");
+  assert.ok(sourcePlacement && destination);
+  const source = { ...sourcePlacement, x: sourcePlacement.x - 24 };
+  const route = routeBetween(layout, source, destination);
+  assert.ok(route !== undefined && route.length > 0);
+  assert.deepEqual(pointOnRoute({ x: source.x, y: source.y }, route, route.length), { x: destination.x, y: destination.y });
+  const sourceRoom = layout.rooms.find((room) => room.id === source.roomId);
+  const destinationRoom = layout.rooms.find((room) => room.id === destination.roomId);
+  const spine = layout.corridors.at(-1);
+  assert.ok(sourceRoom && destinationRoom && spine);
+  const sourceCorridor = layout.corridors.find((corridor) => corridor !== spine && corridor.y === sourceRoom.door.y && sourceRoom.door.x >= corridor.x && sourceRoom.door.x <= corridor.x + corridor.width);
+  const destinationCorridor = layout.corridors.find((corridor) => corridor !== spine && corridor.y === destinationRoom.door.y && destinationRoom.door.x >= corridor.x && destinationRoom.door.x <= corridor.x + corridor.width);
+  assert.ok(sourceCorridor && destinationCorridor);
+  const center = spine.x + spine.width / 2;
+  assert.deepEqual(route.points.slice(0, 7), [
+    { x: sourceRoom.door.x, y: source.y }, sourceRoom.door,
+    { x: sourceRoom.door.x, y: sourceCorridor.y + sourceCorridor.height / 2 },
+    { x: center, y: sourceCorridor.y + sourceCorridor.height / 2 },
+    { x: center, y: destinationCorridor.y + destinationCorridor.height / 2 },
+    { x: destinationRoom.door.x, y: destinationCorridor.y + destinationCorridor.height / 2 }, destinationRoom.door,
+  ]);
+  assert.deepEqual(route.points.at(-1), { x: destination.x, y: destination.y });
+  assertRouteGeometry(layout, source, route, "room to room");
+  // Every crowded standing slot uses the actual opening, never its own offset
+  // x-coordinate through a bottom wall.
+  for (const offset of [0, -24, 24, -48, 48]) {
+    const crowded = { ...source, x: sourceRoom.standing.x + offset };
+    const crowdedRoute = routeBetween(layout, crowded, destination);
+    assert.ok(crowdedRoute);
+    assert.ok(crowdedRoute.points.some((point) => point.x === sourceRoom.door.x && point.y === sourceRoom.door.y));
+    if (offset !== 0) assert.deepEqual(crowdedRoute.points.slice(0, 2), [{ x: sourceRoom.door.x, y: crowded.y }, sourceRoom.door]);
+    assert.deepEqual(crowdedRoute.points.slice(-2), [destinationRoom.door, { x: destinationRoom.door.x, y: destination.y }]);
+    assertRouteGeometry(layout, crowded, crowdedRoute, `crowded source ${offset}`);
+  }
+  const [resting, staging] = placeWorkers(layout, [
+    { ...workers[0], id: "resting", location: "resting", nodeId: undefined },
+    { ...workers[0], id: "staging", location: "unobserved", nodeId: undefined },
+  ]);
+  for (const common of [resting, staging]) {
+    const outbound = routeBetween(layout, common, destination);
+    const returned = routeBetween(layout, destination, common);
+    assert.ok(outbound && returned, `${common.area} is connected by the displayed common-space spine`);
+    assert.deepEqual(pointOnRoute(common, outbound, outbound.length), { x: destination.x, y: destination.y });
+    assert.deepEqual(pointOnRoute(destination, returned, returned.length), { x: common.x, y: common.y });
+    assertRouteGeometry(layout, destination, returned, `${common.area} return`);
+  }
+  assert.equal(routeBetween(layout, source, { ...destination, area: "outside" }), undefined, "omitted rooms never gain an invented route");
+});
+
+test("rapid retargeting uses the room containing the rendered worker", () => {
+  const layout = layoutScene({
+    digest: "rapid-retarget",
+    nodes: ["A", "B", "C", "D"].map((id) => ({ id, parentId: "", path: id, label: id, kind: "directory", sizeBucket: "tiny" })),
+  });
+  const placements = new Map(placeWorkers(layout, ["A", "B", "C", "D"].map((id) => ({ id, name: id, role: "worker", activity: "busy", location: "working", nodeId: id }))).map((placement) => [placement.id, placement]));
+  const a = placements.get("A");
+  const b = placements.get("B");
+  const c = placements.get("C");
+  const d = placements.get("D");
+  assert.ok(a && b && c && d);
+  const enteredB = pointOnRoute(a, routeBetween(layout, a, b), routeBetween(layout, a, b).length - 8);
+  const bRoom = layout.rooms.find((room) => room.id === "B");
+  assert.ok(bRoom && enteredB.y < bRoom.door.y, "sample is inside B after its door");
+
+  // B → C is replaced immediately by B → D. Both routes begin by leaving B,
+  // rather than reusing A's row from the route that originally reached B.
+  for (const destination of [c, d]) {
+    const route = routeFromCurrent(layout, enteredB, destination);
+    assert.ok(route);
+    assert.deepEqual(route.points[0], { x: enteredB.x, y: bRoom.door.y });
+    assertRouteGeometry(layout, enteredB, route, `rapid retarget to ${destination.id}`);
+  }
+});
+
+test("retargets leave the current room or corridor through a clear lane", () => {
+  const layout = layoutScene({
+    digest: "retarget-lanes",
+    nodes: ["A", "B", "C", "D"].map((id) => ({ id, parentId: "", path: id, label: id, kind: "directory", sizeBucket: "tiny" })),
+  });
+  const placements = new Map(placeWorkers(layout, ["A", "B", "C", "D"].map((id) => ({ id, name: id, role: "worker", activity: "busy", location: "working", nodeId: id }))).map((placement) => [placement.id, placement]));
+  const source = placements.get("A");
+  const destination = placements.get("D");
+  assert.ok(source && destination);
+  const room = layout.rooms.find((candidate) => candidate.id === source.roomId);
+  const spine = layout.corridors.at(-1);
+  assert.ok(room && spine);
+  const row = layout.corridors.find((corridor) => corridor !== spine && corridor.y === room.door.y && room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width);
+  assert.ok(row);
+  const laneY = row.y + row.height / 2;
+  const center = spine.x + spine.width / 2;
+  const cases = [
+    ["room", source],
+    ["doorway", room.door],
+    // A render from the superseded wall-line route still escapes perpendicularly
+    // into this real corridor before it travels horizontally.
+    ["wall line", { x: room.door.x - row.height, y: room.door.y }],
+    ["row corridor", { x: room.door.x - row.height, y: laneY }],
+    ["spine", { x: center, y: row.y - row.height / 2 }],
+  ];
+  for (const [name, current] of cases) {
+    const route = routeFromCurrent(layout, current, destination);
+    assert.ok(route, `${name} has a current-state route`);
+    assertRouteGeometry(layout, current, route, `retarget from ${name}`);
+  }
+  const wallLine = routeFromCurrent(layout, cases[2][1], destination);
+  assert.ok(wallLine);
+  assert.deepEqual(wallLine.points.slice(0, 2), [
+    { x: room.door.x - row.height, y: laneY },
+    { x: center, y: laneY },
+  ]);
+  const fromSpine = routeFromSpine(layout, { x: center, y: row.y - row.height / 2 }, destination);
+  assert.ok(fromSpine);
+  assertRouteGeometry(layout, { x: center, y: row.y - row.height / 2 }, fromSpine, "direct spine route");
+});
+
+test("the production scene stops motion on disconnect and unmount", async () => {
+  const requested = [];
+  const cancelled = [];
+  const requestAnimationFrame = globalThis.requestAnimationFrame;
+  const cancelAnimationFrame = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => { requested.push(callback); return requested.length; };
+  globalThis.cancelAnimationFrame = (id) => { cancelled.push(id); };
+  try {
+    let renderer;
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
+    const moved = [{ ...workers[0], nodeId: "lib" }, workers[1]];
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: true })); });
+    assert.ok(requested.length > 0, "one scene clock schedules the route");
+
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: false })); });
+    const destination = placeWorkers(layoutScene(topology), moved).find((placement) => placement.id === workers[0].id);
+    assert.ok(destination);
+    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props.transform, `translate(${destination.x} ${destination.y})`);
+    assert.ok(cancelled.length > 0, "disconnect cleans the pending animation frame");
+
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: false })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: true })); });
+    assert.equal(requested.length, cancelled.length, "reconnect snaps to its current snapshot instead of replaying the missed route");
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: true })); });
+    assert.ok(requested.length > cancelled.length, "a later observed change starts a fresh route");
+    await act(async () => { renderer.unmount(); });
+    assert.equal(cancelled.length, requested.length, "unmount cleans every scheduled scene frame");
+  } finally {
+    globalThis.requestAnimationFrame = requestAnimationFrame;
+    globalThis.cancelAnimationFrame = cancelAnimationFrame;
+  }
 });
 
 // Nothing else runs the generator, so the shipped module could drift from it.
@@ -375,4 +594,36 @@ test("the committed sprite module is exactly what the generator writes", () => {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+test("stationary tasks expose affected areas and link the existing queue and questions", () => {
+  const tasks = Array.from({ length: 11 }, (_, index) => ({
+    id: `task-${index}`, agentId: "worker-b", projectId: "project",
+    title: index === 0 ? "<script>unsafe & title</script>" : `Task ${index}`,
+    status: index === 0 ? "running" : "queued",
+    roomIds: index === 0 ? ["lib", "src", "outside"] : [],
+    ...(index === 0 ? { representativeRoomId: "src" } : {}),
+    humanRequestIds: index === 0 ? ["question-1"] : [],
+  }));
+  const markup = render({ tasks, onSelectTask() {}, onOpenQueue() {}, onSelectHumanRequest() {} });
+  assert.equal((markup.match(/data-floor-queue=/g) ?? []).length, 1);
+  assert.equal((markup.match(/data-work-footprint=/g) ?? []).length, 2);
+  assert.match(markup, /Open queue, 10 tasks/);
+  assert.match(markup, /data-workbench-task-id="task-0"/);
+  assert.match(markup, /data-human-request-id="question-1"/);
+  assert.match(markup, /aria-label="Question from Builder"/);
+  assert.doesNotMatch(markup, /Work order|data-work-order-id/);
+  assert.match(markup, /role="button" tabindex="0"/);
+  assert.match(markup, /&lt;script&gt;unsafe &amp; title&lt;\/script&gt;/);
+  assert.doesNotMatch(markup, /<script>/);
+  const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
+  assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
+});
+
+
+test("queue selection picks the exact task sharing a representative workstation", () => {
+  const tasks = ["first", "second"].map((id) => ({ id, agentId: "worker-b", projectId: "project", title: id, status: "running", roomIds: ["src"], representativeRoomId: "src", humanRequestIds: [] }));
+  const markup = render({ tasks, selectedTaskId: "second", onSelectTask() {} });
+  assert.match(markup, /data-workbench-task-id="second"/);
+  assert.doesNotMatch(markup, /data-workbench-task-id="first"/);
 });

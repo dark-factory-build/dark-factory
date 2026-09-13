@@ -315,6 +315,20 @@ for (const role of ['worker', 'overseer']) for (const [provider, colour] of Obje
   if (role === 'overseer') draw(pixels, ['yy'], 7, 8);
   if (activity === 'needs-you') draw(pixels, alert, 13, 0);
 });
+// Movement is one small overlay, not a new full appearance for every person.
+// The two steps make the local clock legible; direction markers keep the tiny
+// silhouette readable at the scene's normal three-pixel scale.
+for (const direction of ['north', 'south', 'east', 'west']) for (const step of [0, 1]) add(`person.motion.walk.${direction}.${step}`, pixels => {
+  const shift = step === 0 ? 0 : 2;
+  if (direction === 'east') draw(pixels, grid(`tt`), 12 + shift, 11);
+  if (direction === 'west') draw(pixels, grid(`tt`), 2 - shift, 11);
+  if (direction === 'north') draw(pixels, grid(`t`), 8, shift);
+  if (direction === 'south') draw(pixels, grid(`t`), 8, 15 - shift);
+});
+for (const step of [0, 1]) add(`person.motion.interact.${step}`, pixels => {
+  draw(pixels, keyboard, 2, 12);
+  draw(pixels, grid(step === 0 ? `t.t` : `ttt`), 5, 13);
+});
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const portrait = (activity, appearance = {}) => {
   const v = { skin: 1, hair: 0, hair_colour: 1, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0, ...appearance };

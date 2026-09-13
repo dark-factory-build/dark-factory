@@ -22,15 +22,16 @@ const (
 	// maintainerBridge is the Maintainer App's MCP bridge. An orchestrator
 	// launch names it to Claude, which is how an overseer publishes: the
 	// daemon itself exposes no repository or publication operation.
-	maintainerBridge     = "dark-factory-maintainer-mcp-bridge"
-	codexTool            = "codex"
-	maxPathBytes         = 4096
-	maxClaudePrompt      = 8 << 10
-	maxCodexTask         = 8 << 10
-	claudeConfigDir      = ".claude"
-	codexConfigDir       = ".codex"
-	claudeTaskLead       = "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
-	codexBootstrapPrompt = "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Peer collaboration is asynchronous: use \"$DARK_FACTORY_FACTORYCTL\" attempt peer status to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail."
+	maintainerBridge      = "dark-factory-maintainer-mcp-bridge"
+	codexTool             = "codex"
+	maxPathBytes          = 4096
+	maxClaudePrompt       = 8 << 10
+	maxCodexTask          = 8 << 10
+	claudeConfigDir       = ".claude"
+	codexConfigDir        = ".codex"
+	discoveryInstructions = "Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search."
+	claudeTaskLead        = discoveryInstructions + " " + "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
+	codexBootstrapPrompt  = "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Peer collaboration is asynchronous: use \"$DARK_FACTORY_FACTORYCTL\" attempt peer status to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail." + " " + discoveryInstructions
 )
 
 var (
@@ -296,7 +297,7 @@ func Build(request Request) (Launch, error) {
 		}
 		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
-			prompt += " You are the project overseer. Run \"$DARK_FACTORY_FACTORYCTL\" overseer status to inspect workers, tasks, questions and intervention history. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Run --help for flags. Read docs/development/OVERSEER.md before supervision; publish through your Maintainer App. Respect direct operator interventions. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
+			prompt += " You are the project overseer. Run \"$DARK_FACTORY_FACTORYCTL\" overseer status to inspect workers, tasks, questions and intervention history. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Run --help for flags. Read docs/development/OVERSEER.md inside the task checkout or the repository clone specified by the task; if neither is available, report the missing checkout; publish through your Maintainer App. Respect direct operator interventions. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
 		argv = append(argv, prompt)
 		return Launch{

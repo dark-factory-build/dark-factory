@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { AccountItem, AgentItem, ProjectItem, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView } from "@dark-factory/client";
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
-import { AgentPanel, HumanRequestPanel, QueuePanel, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type DiscoveredAccount, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
+import { AgentPanel, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type DiscoveredAccount, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters, stageOfTask } from "./console-view.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
@@ -13,6 +13,8 @@ export type ConsoleDetail = "needs-you" | "queue" | "agent";
 export type FactoryConsoleProps = FactoryAppSnapshot & {
   view?: ConsoleView;
   onView?: (view: ConsoleView) => void;
+  selectedTaskId?: string;
+  onSelectTask?: (taskId: string | undefined) => void;
   detail?: ConsoleDetail;
   onDetail?: (detail: ConsoleDetail) => void;
   agentPanel?: AgentPanelView;
@@ -94,6 +96,8 @@ export function FactoryConsole({
   onView,
   detail,
   onDetail,
+  selectedTaskId,
+  onSelectTask,
   agentPanel,
   onAgentPanel,
   settingsOpen,
@@ -137,6 +141,8 @@ export function FactoryConsole({
   pairing,
   terminalContent,
 }: FactoryConsoleProps) {
+  const selectedTask = selectedTaskId === undefined ? undefined : state?.tasks.get(selectedTaskId);
+  const selectTask = onSelectTask === undefined ? undefined : (id: string) => { onSelectTask(id); onDetail?.("queue"); };
   const ready = status === "ready";
   const counters = factoryCounters(state);
   const agent = selectedAgent === undefined ? undefined : state?.agents.get(selectedAgent.id);
@@ -194,7 +200,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={state} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} />
+              ? <FactoryFloor selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={state} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} connected={ready} />
               : <AgentList state={state} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -229,7 +235,13 @@ export function FactoryConsole({
                 ready={ready}
                 onEditTask={onEditTask}
                 onLoadTaskDetail={onLoadTaskDetail}
+                selectedTaskId={selectedTask?.id}
+                onSelectTask={ready ? selectTask : undefined}
               />
+              {selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <section className="dfConsoleSidebar__panel" aria-label="Task details">
+                <div className="dfConsoleSidebar__heading"><h2>TASK · {selectedTask.id.slice(0, 8)}</h2><button type="button" onClick={() => onSelectTask?.(undefined)}>CLOSE</button></div>
+                <TaskDetail key={`${selectedTask.id}:${selectedTask.revision}`} task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
+              </section>}
             </div>
             <div hidden={selectedDetail !== "agent"}>
               {agent === undefined ? <p className="dfFactoryConsole__empty">SELECT AN AGENT TO OPEN CONTROLS</p> : <AgentPanel

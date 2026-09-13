@@ -1,4 +1,5 @@
-import type { AgentItem, StateView, TopologyView } from "@dark-factory/client";
+import { useEffect, useState } from "react";
+import type { AgentItem, HumanRequestItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
 import {
   STAGE_SEQUENCE,
   agentStatus,
@@ -121,14 +122,10 @@ export function StageMeter({ stage }: { stage: TaskStage }) {
   );
 }
 
-/** The floor shows live work locations and annotates retained observations. */
+/** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
-  state,
-  topologies,
-  runPaths,
-  lastRunPaths,
-  selectedAgentId,
-  onSelectAgent,
+  state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true,
 }: {
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
@@ -136,19 +133,54 @@ export function FactoryFloor({
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
   selectedAgentId?: string;
   onSelectAgent?: (agent: AgentItem) => void;
+  onOpenQueue?: () => void;
+  selectedTaskId?: string;
+  onSelectTask?: (taskId: string) => void;
+  onSelectHumanRequest?: (request: HumanRequestItem) => void;
+  connected?: boolean;
 }) {
-  const scene = floorScene(state, topologies, runPaths, lastRunPaths);
+  const [scopeId, setScopeId] = useState<string | undefined>();
+  const scene = floorScene(state, topologies, runPaths, lastRunPaths, scopeId);
+  useEffect(() => {
+    if (scopeId !== scene.navigation.scopeId) setScopeId(scene.navigation.scopeId);
+  }, [scopeId, scene.navigation.scopeId]);
   return <div className="dfFactoryFloor">
+    <p className="dfFactoryFloor__provenance">Repository snapshot · observed changes are temporary.</p>
+    <nav className="dfFactoryFloor__navigation" aria-label="Floor hierarchy">
+      {scene.navigation.breadcrumbs.map((crumb, index) => <span key={crumb.id ?? "root"}>
+        {index === 0 ? null : <span aria-hidden="true"> / </span>}
+        <button type="button" aria-current={index === scene.navigation.breadcrumbs.length - 1 ? "page" : undefined} disabled={index === scene.navigation.breadcrumbs.length - 1} onClick={() => setScopeId(crumb.id)}>{crumb.label}</button>
+      </span>)}
+      {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>BACK</button>}
+    </nav>
+    {scene.navigation.omittedChildren === 0 && scene.navigation.outsideScopeActivity === 0 ? null : <p className="dfFactoryFloor__scopeSummary" role="status">
+      {scene.navigation.omittedChildren === 0 ? null : `${scene.navigation.omittedChildren} child spaces not shown in this view.`}
+      {scene.navigation.omittedChildren === 0 || scene.navigation.outsideScopeActivity === 0 ? "" : " "}
+      {scene.navigation.outsideScopeActivity === 0 ? null : `${scene.navigation.outsideScopeActivity} active task${scene.navigation.outsideScopeActivity === 1 ? "" : "s"} in rooms not displayed in this view; workers remain shown in OUTSIDE DISPLAYED ROOMS.`}
+    </p>}
+    <div className="dfFactoryFloor__scene">
     <FactoryScene
       selectedWorkerId={selectedAgentId}
+      selectedTaskId={selectedTaskId}
       topology={scene.topology}
       workers={scene.workers}
+      connected={connected}
+      tasks={scene.tasks}
       omittedLocations={scene.omittedLocations}
+      enterableRoomIds={scene.navigation.enterableIds}
+      onEnterRoom={setScopeId}
+      onSelectTask={onSelectTask}
+      onOpenQueue={onOpenQueue}
+      onSelectHumanRequest={onSelectHumanRequest === undefined || state === undefined ? undefined : (id) => {
+        const request = state.humanRequests.get(id);
+        if (request !== undefined) onSelectHumanRequest(request);
+      }}
       onSelectWorker={onSelectAgent === undefined || state === undefined ? undefined : (workerID) => {
         const agent = state.agents.get(workerID);
         if (agent !== undefined) onSelectAgent(agent);
       }}
     />
+    </div>
   </div>;
 }
 

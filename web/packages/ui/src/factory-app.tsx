@@ -23,6 +23,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
   const [detail, setDetail] = useState<ConsoleDetail>("needs-you");
   const [agentPanel, setAgentPanel] = useState<AgentPanelView>("terminal");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [appearanceAgentId, setAppearanceAgentId] = useState<string>();
   const browser = useMemo(() => browserEndpoint(browserPort), [browserPort]);
   const owner = useRef<FactoryAppController | undefined>(undefined);
@@ -106,6 +107,8 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
   );
   return (
     <FactoryConsole
+      selectedTaskId={selectedTaskId}
+      onSelectTask={setSelectedTaskId}
       {...snapshot}
       address={browser.host}
       view={view}

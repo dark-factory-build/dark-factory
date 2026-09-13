@@ -121,13 +121,38 @@ export function orderTasksForHome(state: StateView): readonly TaskItem[] {
   });
 }
 
-/** One floor holds this many rooms, shared out across every project. */
-const MAX_FLOOR_ROOMS = 24;
+/** One viewed hierarchy scope holds this many rooms. */
+export const MAX_SCOPE_ROOMS = 24;
 
 export type FloorScene = Readonly<{
   topology: SceneTopology;
   workers: readonly SceneWorker[];
+  tasks: readonly SceneTask[];
   omittedLocations: number;
+  navigation: FloorNavigation;
+}>;
+
+export type FloorNavigation = Readonly<{
+  /** Undefined is the all-projects landing scope. */
+  scopeId?: string;
+  /** The immediate ancestor for Back; breadcrumbs may jump further. */
+  backScopeId?: string;
+  breadcrumbs: readonly Readonly<{ id?: string; label: string }>[];
+  enterableIds: readonly string[];
+  omittedChildren: number;
+  outsideScopeActivity: number;
+}>;
+
+/** A served task and its observed footprint, without inferring any execution detail. */
+export type SceneTask = Readonly<{
+  id: string;
+  agentId: string;
+  projectId: string;
+  title: string;
+  status: TaskItem["status"];
+  roomIds: readonly string[];
+  representativeRoomId?: string;
+  humanRequestIds: readonly string[];
 }>;
 
 /** One changed-path sample is tied to the task and provider run that produced it. */
@@ -152,34 +177,59 @@ export function floorScene(
   topologies: ReadonlyMap<string, TopologyView> | undefined,
   runPaths?: ReadonlyMap<string, RunPathSample>,
   lastRunPaths?: ReadonlyMap<string, RunPathSample>,
+  scopeId?: string,
 ): FloorScene {
   const projects = state === undefined ? [] : [...state.projects.values()].sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
-  const blocks = projects.map((project) => projectBlock(project, topologies?.get(project.id)));
-  const blocksByProject = new Map(projects.map((project, index) => [project.id, blocks[index]]));
-  const allRooms = new Map(blocks.flat().map((room) => [room.id, room]));
-  // Topology alone chooses the bounded map: roots first, then served size.
-  const roots = blocks.map((block) => block[0]).filter((room): room is SceneNode => room !== undefined);
-  const remaining = blocks.flat().filter((room) => !roots.some((root) => root.id === room.id)).sort((left, right) =>
-    SIZE_BUCKETS.indexOf(left.sizeBucket ?? "empty") - SIZE_BUCKETS.indexOf(right.sizeBucket ?? "empty")
-    || compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.path, right.path) || compareText(left.id, right.id));
-  const rooms = [...roots, ...remaining].slice(0, MAX_FLOOR_ROOMS);
+  const hierarchies = projects.map((project) => projectHierarchy(project, topologies?.get(project.id)));
+  const blocksByProject = new Map(hierarchies.map((hierarchy) => [hierarchy.project.id, hierarchy.nodes]));
+  const roomByID = new Map(hierarchies.flatMap((hierarchy) => hierarchy.nodes).map((room) => [room.id, room]));
+  const children = new Map<string, SceneNode[]>();
+  for (const room of roomByID.values()) {
+    if (room.parentId !== undefined) children.set(room.parentId, [...(children.get(room.parentId) ?? []), room]);
+  }
+  for (const members of children.values()) members.sort((left, right) => compareText(left.id, right.id));
+  const validScope = scopeId !== undefined && roomByID.has(scopeId) ? scopeId : undefined;
+  const scope = validScope === undefined ? undefined : roomByID.get(validScope)!;
+  const scopeChildren = scope === undefined ? hierarchies.map((hierarchy) => hierarchy.projectRoom) : children.get(scope.id) ?? [];
+  const roomLimit = scope === undefined ? MAX_SCOPE_ROOMS : MAX_SCOPE_ROOMS - 1;
+  const rooms = scope === undefined ? scopeChildren.slice(0, roomLimit)
+    : [scope, ...scopeChildren.slice(0, roomLimit)];
   const liveRooms = new Set<string>();
   const kept = new Set(rooms.map((room) => room.id));
+  const tasks = state === undefined ? [] : [...state.tasks.values()]
+    .sort((left, right) => compareText(left.id, right.id))
+    .map((task) => {
+      const footprint = runFootprint(blocksByProject.get(task.project_id) ?? [], matchingRunSample(state, task, runPaths));
+      return {
+        id: task.id,
+        agentId: task.assigned_agent_id,
+        projectId: task.project_id,
+        title: task.title,
+        status: task.status,
+        roomIds: footprint.roomIds,
+        ...(footprint.representativeRoomId === undefined ? {} : { representativeRoomId: footprint.representativeRoomId }),
+        humanRequestIds: [...state.humanRequests.values()]
+          .filter((request) => request.task_id === task.id && request.agent_id === task.assigned_agent_id && request.project_id === task.project_id)
+          .sort((left, right) => compareText(left.id, right.id))
+          .map((request) => request.id),
+      };
+    });
+  const workByTask = new Map(tasks.map((order) => [order.id, order]));
   const workers = state === undefined ? [] : [...state.agents.values()].map((agent) => {
     const task = agentCurrentTask(agent, state);
     const block = blocksByProject.get(agent.project_id) ?? [];
-    const sample = runPaths?.get(agent.id);
-    const live = task === undefined || sample?.taskId !== task.id || sample.taskRevision !== task.revision || sample.projectId !== agent.project_id || sample.runId === "" ? undefined : roomOfRunPaths(block, sample.paths);
+    const live = task === undefined ? undefined : workByTask.get(task.id)?.representativeRoomId;
     const previous = lastRunPaths?.get(agent.id);
-    const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? roomOfRunPaths(block, previous.paths) : undefined;
+    const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? runFootprint(block, previous).representativeRoomId : undefined;
     if (live !== undefined) liveRooms.add(live);
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
-    const room = location === "working" ? allRooms.get(live!) : location === "last-observed" ? allRooms.get(last!) : undefined;
+    const room = location === "working" ? roomByID.get(live!) : location === "last-observed" ? roomByID.get(last!) : undefined;
     return {
       id: agent.id,
       name: agent.name,
       role: agent.role,
       provider: agent.provider,
+      ...(agent.appearance === undefined ? {} : { appearance: agent.appearance }),
       activity: agentActivity(agent, state),
       paused: agent.paused,
       location,
@@ -187,60 +237,120 @@ export function floorScene(
       ...(location === "working" && live !== undefined ? { nodeId: live } : {}),
     };
   });
-  const digest = projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ");
-  return { topology: { digest, nodes: rooms }, workers, omittedLocations: [...liveRooms].filter((id) => !kept.has(id)).length };
+  const crumbs: Array<{ id?: string; label: string }> = [{ label: "All projects" }];
+  if (scope !== undefined) {
+    const chain: SceneNode[] = [];
+    const seen = new Set<string>();
+    let current: SceneNode | undefined = scope;
+    // Topology frames validate node fields but containment still arrives from
+    // outside this projection. A malformed parent cycle degrades to the
+    // project fallback below; keep this bound as the final UI-side guard.
+    while (current !== undefined && !seen.has(current.id)) {
+      seen.add(current.id);
+      chain.unshift(current);
+      current = current.parentId === undefined ? undefined : roomByID.get(current.parentId);
+    }
+    crumbs.push(...chain.map((node) => ({ id: node.id, label: node.label })));
+  }
+  const outsideScopeActivity = tasks.filter((task) => task.status === "running" && task.representativeRoomId !== undefined && !kept.has(task.representativeRoomId)).length;
+  const digest = `${projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ")}:${validScope ?? "root"}`;
+  return {
+    topology: { digest, nodes: rooms }, workers, tasks,
+    omittedLocations: [...liveRooms].filter((id) => !kept.has(id)).length,
+    navigation: {
+      ...(validScope === undefined ? {} : { scopeId: validScope }),
+      ...(scope === undefined ? {} : { backScopeId: scope.parentId }),
+      breadcrumbs: crumbs,
+      enterableIds: rooms.filter((room) => room.id !== validScope && (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
+      omittedChildren: Math.max(0, scopeChildren.length - roomLimit),
+      outsideScopeActivity,
+    },
+  };
+}
+
+/** A live sample is evidence only for its exact running task and assigned agent. */
+function matchingRunSample(
+  state: StateView,
+  task: TaskItem,
+  runPaths: ReadonlyMap<string, RunPathSample> | undefined,
+): RunPathSample | undefined {
+  if (task.status !== "running") return undefined;
+  const project = state.projects.get(task.project_id);
+  if (project?.id !== task.project_id) return undefined;
+  const agent = state.agents.get(task.assigned_agent_id);
+  if (agent?.id !== task.assigned_agent_id || agent.project_id !== task.project_id) return undefined;
+  const sample = runPaths?.get(agent.id);
+  return sample?.taskId === task.id && sample.taskRevision === task.revision && sample.projectId === task.project_id && sample.runId !== ""
+    ? sample
+    : undefined;
 }
 
 /**
- * The room a live run's changed paths stand a worker in: each path picks the
- * deepest eligible room whose own path prefixes it (the root's "." prefixes
- * everything), and the room holding the most paths wins, ties going to the
- * room the floor sorts first. No paths means no answer and no move.
+ * Each changed path picks the deepest eligible room whose own path prefixes it
+ * (the root's "." prefixes everything). Every affected room is retained, while
+ * the room holding the most paths is the representative; ties use room order.
  */
-function roomOfRunPaths(rooms: readonly SceneNode[], paths: readonly string[]): string | undefined {
+function runFootprint(rooms: readonly SceneNode[], sample: RunPathSample | undefined): Readonly<{ roomIds: readonly string[]; representativeRoomId?: string }> {
   const counts = new Map<SceneNode, number>();
-  for (const path of paths) {
+  for (const path of sample?.paths ?? []) {
     const room = rooms
       .filter((candidate) => candidate.path === "." || path === candidate.path || path.startsWith(`${candidate.path}/`))
       .sort((left, right) => right.path.length - left.path.length)[0];
     if (room !== undefined) counts.set(room, (counts.get(room) ?? 0) + 1);
   }
-  return [...counts]
-    .sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || compareText(left.path, right.path))[0]?.[0].id;
+  const representativeRoomId = [...counts]
+    .sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || compareText(left.path, right.path) || compareText(left.id, right.id))[0]?.[0].id;
+  return {
+    roomIds: [...counts.keys()].sort((left, right) => compareText(left.path, right.path) || compareText(left.id, right.id)).map((room) => room.id),
+    ...(representativeRoomId === undefined ? {} : { representativeRoomId }),
+  };
 }
 
-/** Room size, largest first: past the cap the biggest rooms keep their tile. */
-const SIZE_BUCKETS = ["large", "medium", "small", "tiny", "empty"];
-
-/**
- * One project's rooms: the code its repository root holds, largest first. A Go
- * module or a JS package rooted at "." is the same place as the repository, not
- * a room of its own, so every node at "." is root and the rooms are their
- * children. The repository is always the first room, the one a project keeps when the cap bites; a
- * project the daemon has not served a structure for has only that room.
- */
-function projectBlock(project: { id: string; name: string }, topology: TopologyView | undefined): readonly SceneNode[] {
-  const root = topology?.nodes.find((node) => node.parent_id === "");
-  if (topology === undefined || root === undefined) {
-    return [{ id: project.id, path: project.name, label: project.name, kind: "repository", project: { id: project.id, name: project.name } }];
-  }
-  const roots = new Set(topology.nodes.filter((node) => node.path === ".").map((node) => node.id));
-  roots.add(root.id);
-  const children = topology.nodes
-    .filter((node) => node.path !== "." && roots.has(node.parent_id))
-    .sort((left, right) =>
-      SIZE_BUCKETS.indexOf(left.size_bucket) - SIZE_BUCKETS.indexOf(right.size_bucket)
-      || compareText(left.path, right.path));
-  return [root, ...children].map((node) => ({
-    // The daemon salts node ids with the project; the prefix keeps two rooms
-    // on one floor apart against a daemon that does not.
+/** All containment comes from served parent ids; paths and labels are display/activity data only. */
+function projectHierarchy(project: { id: string; name: string }, topology: TopologyView | undefined) {
+  const served = topology?.nodes ?? [];
+  const servedByID = new Map<string, typeof served[number]>();
+  const unique = served.every((node) => !servedByID.has(node.id) && (servedByID.set(node.id, node), true));
+  // ponytail: this walks at most the protocol's 4,096 served nodes per node;
+  // a future larger graph should validate containment once at decode time.
+  const valid = served.length > 0 && unique
+    && served.every((node) => node.parent_id === "" || servedByID.has(node.parent_id))
+    && served.every((node) => {
+      const seen = new Set<string>();
+      let current = node;
+      while (current.parent_id !== "") {
+        if (seen.has(current.id)) return false;
+        seen.add(current.id);
+        const parent = servedByID.get(current.parent_id);
+        if (parent === undefined) return false;
+        current = parent;
+      }
+      return true;
+    });
+  const fallback: SceneNode = { id: project.id, path: project.name, label: project.name, kind: "repository", project: { id: project.id, name: project.name } };
+  if (!valid) return { project, projectRoom: fallback, nodes: [fallback] };
+  const roots = served.filter((node) => node.parent_id === "");
+  // The daemon serves one repository root. If that root is unavailable or a
+  // malformed graph offers several roots, keep the honest unavailable room
+  // instead of manufacturing a containment edge from project text.
+  if (roots.length !== 1) return { project, projectRoom: fallback, nodes: [fallback] };
+  const root = roots[0]!;
+  const projectRoom: SceneNode = {
+    id: `${project.id}:${root.id}`,
+    path: root.path,
+    label: project.name,
+    kind: root.kind,
+    sizeBucket: root.size_bucket,
+    project: { id: project.id, name: project.name },
+  };
+  const nodes = served.map((node) => ({
     id: `${project.id}:${node.id}`,
+    ...(node.parent_id === "" ? {} : { parentId: `${project.id}:${node.parent_id}` }),
     path: node.path,
-    // Every repository is served the same fixed label, so on a floor of many
-    // projects only the project's own name tells its root room apart.
-    label: node.path === "." ? project.name : node.label,
+    label: node.id === root.id ? project.name : node.label,
     kind: node.kind,
     sizeBucket: node.size_bucket,
     project: { id: project.id, name: project.name },
   }));
+  return { project, projectRoom, nodes };
 }

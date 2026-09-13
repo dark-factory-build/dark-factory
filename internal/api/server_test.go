@@ -279,6 +279,12 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("dispatch = %d, %t, %t", revision, enabled, ok)
 			}
 		}},
+		{name: "set capacity", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"set_capacity","params":{"expected_revision":3,"capacity":2}}`, kind: CallSetCapacity, check: func(t *testing.T, call Call) {
+			revision, capacity, ok := call.Capacity()
+			if !ok || revision != 3 || capacity != 2 {
+				t.Fatalf("capacity = %d, %d, %t", revision, capacity, ok)
+			}
+		}},
 		{name: "task", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"task","params":{}}`, kind: CallAttemptTask},
 		{name: "succeed", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"succeed","params":{"result":"private-result-sentinel"}}`, kind: CallSucceed, check: func(t *testing.T, call Call) {
 			result, ok := call.Result()
@@ -452,6 +458,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "attempt bearer does not authorize operator", domain: operatorDomain, bearer: attemptBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteUnauthorized},
 		{name: "operator domain cannot invoke attempt", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"fail","params":{"detail":"x"}}`), code: RemoteForbidden},
 		{name: "operator domain cannot read attempt task", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"task","params":{}}`), code: RemoteForbidden},
+		{name: "attempt domain cannot set capacity", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"set_capacity","params":{"expected_revision":1,"capacity":2}}`), code: RemoteForbidden},
 		{name: "unknown method", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
 		{name: "null params", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":null}`), code: RemoteInvalidRequest},
 		{name: "array params", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":[]}`), code: RemoteInvalidRequest},
@@ -460,6 +467,8 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "casefold method", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","Method":"snapshot","params":{}}`), code: RemoteInvalidRequest},
 		{name: "nested duplicate", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"expected_revision":1,"expected_revision":2,"enabled":true}}`), code: RemoteInvalidRequest},
 		{name: "nested noncanonical", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_dispatch","params":{"Expected_revision":1,"enabled":true}}`), code: RemoteInvalidRequest},
+		{name: "capacity requires a positive bounded value", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_capacity","params":{"expected_revision":1,"capacity":0}}`), code: RemoteInvalidRequest},
+		{name: "capacity rejects values over the bound", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"set_capacity","params":{"expected_revision":1,"capacity":1025}}`), code: RemoteInvalidRequest},
 		{name: "removed shell-only create alias", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_shell_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
 		{name: "create agent requires provider", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
 		{name: "shell agent rejects model", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"create_agent","params":{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"shell","model":"private","tool_budget_limit":20}}`), code: RemoteInvalidRequest},
