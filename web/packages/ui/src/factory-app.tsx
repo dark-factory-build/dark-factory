@@ -158,9 +158,19 @@ export function TerminalPanel({
       {terminal.taskTitle === undefined ? null : <p className="dfFactoryConsole__terminalAgent">{terminal.taskTitle}</p>}
       {terminal.error === undefined ? null : (
         <p className="dfFactoryConsole__terminalError" role="alert">
-          {terminal.phase === "ready" && !terminal.writable && terminal.error.code === "stale"
+          {terminal.errorSource === "display"
+            ? terminal.hasOutputSurface ? "TERMINAL DISPLAY ERROR" : "TERMINAL DISPLAY UNAVAILABLE"
+            : terminal.errorSource === "input"
+              ? terminal.phase === "ready"
+                ? terminal.error.code === "stale" ? "TERMINAL OPEN ELSEWHERE" : terminal.error.code === "invalid_request"
+                  ? "INPUT REJECTED"
+                  : "INPUT UNAVAILABLE"
+                : terminal.error.code === "connection"
+                  ? "TERMINAL INPUT CONNECTION LOST"
+                  : "TERMINAL INPUT UNAVAILABLE"
+              : terminal.phase === "ready" && !terminal.writable && terminal.error.code === "stale"
             ? "TERMINAL OPEN ELSEWHERE"
-            : "TERMINAL UNAVAILABLE"}
+            : "TERMINAL ATTACH UNAVAILABLE"}
         </p>
       )}
       {!terminal.resets ? null : (

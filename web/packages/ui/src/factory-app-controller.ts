@@ -30,7 +30,7 @@ import {
 } from "@dark-factory/client";
 import type { RunPathSample } from "./console-view.js";
 import { FactorySettingsCoordinator, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
-import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalSurface } from "./terminal-controller.js";
+import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
 type BrowserEndpoint = Readonly<{ url: string; host: string }>;
 
@@ -80,6 +80,8 @@ export type FactoryTerminalView = Readonly<{
   phase: "idle" | "resolving" | "attaching" | "acquiring" | "ready" | "closing" | "closed";
   writable: boolean;
   error?: SessionError | ProtocolError;
+  /** Whether terminal attachment, input, or the mounted display reported the error. */
+  errorSource?: TerminalErrorSource;
   paused: boolean;
   instructionPending: boolean;
   instructionError?: SessionError | ProtocolError;
@@ -1518,6 +1520,7 @@ export class FactoryAppController {
         phase: this.#terminal?.snapshot.phase ?? "idle",
         writable: this.#terminal?.snapshot.writable ?? false,
         error: this.#terminal?.snapshot.error ?? this.#terminalDisplayError,
+        errorSource: this.#terminal?.snapshot.errorSource ?? (this.#terminalDisplayError === undefined ? undefined : "display"),
         paused: this.#selectedAgent.agent.paused,
         instructionPending: this.#selectedAgent.instructionPending,
         instructionError: this.#selectedAgent.instructionError,
