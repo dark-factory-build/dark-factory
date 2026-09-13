@@ -44,11 +44,31 @@ func prepareQueuedTaskPatch(ctx context.Context, store *kernel.Store, id kernel.
 	if !found || agent.ProjectID != task.ProjectID {
 		return kernel.ErrConflict
 	}
-	effectiveBody := task.Body
-	if effectiveBody == "" && agent.Provider != kernel.ProviderShell {
-		effectiveBody = task.Title
+	return prepareTaskText(agent.Provider, task.Title, task.Body)
+}
+
+// Existing IDs and unauthorized targets go straight to the kernel's canonical
+// replay and authority checks. Provider preparation applies only to new work.
+func prepareTaskEnqueue(ctx context.Context, store *kernel.Store, task kernel.NewTask, workerOnly bool) error {
+	if _, found, err := store.Task(ctx, task.ID); err != nil || found {
+		return err
 	}
-	if _, _, err := provider.PrepareTask(agent.Provider, []byte(effectiveBody)); err != nil {
+	agent, found, err := store.Agent(ctx, task.AssignedAgentID)
+	if err != nil {
+		return err
+	}
+	if !found || agent.ProjectID != task.ProjectID || (workerOnly && agent.Role != kernel.RoleWorker) {
+		return nil
+	}
+	return prepareTaskText(agent.Provider, task.Title, task.Body)
+}
+
+func prepareTaskText(kind kernel.Provider, title, body string) error {
+	effectiveBody := body
+	if effectiveBody == "" && kind != kernel.ProviderShell {
+		effectiveBody = title
+	}
+	if _, _, err := provider.PrepareTask(kind, []byte(effectiveBody)); err != nil {
 		return fmt.Errorf("%w: task does not fit provider", kernel.ErrInvalidValue)
 	}
 	return nil

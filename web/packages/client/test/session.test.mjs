@@ -881,12 +881,11 @@ test("successful pairing consumes challenge state and reconnects through AUTH af
   const sockets = [];
   const client = new BrowserClient({ url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10, reconnectMaxDelayMs: 20, socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; } });
   await client.connect();
-  await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(decodeClientControl(sockets[0].sent.find((wire) => decodeClientControl(wire).type === "PAIR_PROVE")).type, "PAIR_PROVE");
   sockets[0].close();
   assert.deepEqual(timer.delays, [10]);
   timer.advance(10);
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await client.session.connect();
   assert.equal(sockets.length, 2);
   assert.equal(decodeClientControl(sockets[1].sent[0]).type, "AUTH_PROVE");
   client.close();

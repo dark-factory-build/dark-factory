@@ -611,10 +611,11 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	task, err := daemon.store.EnqueueTask(ctx, kernel.NewTask{
-		ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID,
-		Title: input.Title, Body: input.Body, Priority: input.Priority,
-	}, at)
+	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
+	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	task, err := daemon.store.EnqueueTask(ctx, spec, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -899,7 +900,11 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	task, err := daemon.store.EnqueueTaskForOverseer(ctx, digest, kernel.NewTask{ID: id, ProjectID: authority.ProjectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}, at)
+	spec := kernel.NewTask{ID: id, ProjectID: authority.ProjectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
+	if err := prepareTaskEnqueue(ctx, daemon.store, spec, true); err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	task, err := daemon.store.EnqueueTaskForOverseer(ctx, digest, spec, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
