@@ -283,7 +283,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 8, 9, codexUntrustedProjectConfig(request.workingDirectory), "-c", `default_permissions="dark-factory"`, "-c", `approval_policy="never"`, "-c", permissions)
+				wantArgv = slices.Replace(wantArgv, 8, 9, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions)
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -679,6 +679,11 @@ func TestCodexPermissionsBoundReadsAndRejectOversizedPolicy(t *testing.T) {
 	}
 	if strings.Contains(policy, request.runtime.accountHome) || strings.Contains(policy, request.runtime.gitCeiling) {
 		t.Fatal("local commands were granted account or other Change access")
+	}
+	other := request.runtime
+	other.home += "-another-run"
+	if codexPermissionName(other) == codexPermissionName(request.runtime) {
+		t.Fatal("runtime profiles share a configuration name")
 	}
 	request.runtime.token = "/" + strings.Repeat(`"`, runner.MaxArgumentBytes)
 	if _, err := codexPermissions(request); !errors.Is(err, ErrInvalid) {

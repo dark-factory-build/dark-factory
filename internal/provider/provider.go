@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -292,7 +293,7 @@ func Build(request Request) (Launch, error) {
 		if err != nil {
 			return Launch{}, err
 		}
-		argv := []string{path, "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", `default_permissions="dark-factory"`, "-c", `approval_policy="never"`, "-c", permissions}
+		argv := []string{path, "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions=" + tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions}
 		if request.model != "" {
 			argv = append(argv, "--model", request.model)
 		}
@@ -324,13 +325,17 @@ func codexPermissions(request Request) (string, error) {
 	for _, path := range []string{request.installation.executable.Path(), request.runtime.factoryctl, request.runtime.token, request.runtime.socket} {
 		entries = append(entries, tomlBasicString(path)+`="read"`)
 	}
-	// Replace the whole named profile so a same-named account profile cannot
-	// add workspace roots or inherit a broader filesystem policy.
-	value := `permissions.dark-factory={filesystem={` + strings.Join(entries, ",") + `},network={enabled=true,unix_sockets={` + tomlBasicString(request.runtime.socket) + `="allow"}}}`
+	// Codex merges profile tables. Use the existing private runtime identity
+	// rather than a shared name that could inherit an account profile.
+	value := "permissions." + codexPermissionName(request.runtime) + `={filesystem={` + strings.Join(entries, ",") + `},network={enabled=true,unix_sockets={` + tomlBasicString(request.runtime.socket) + `="allow"}}}`
 	if len(value) > runner.MaxArgumentBytes {
 		return "", ErrInvalid
 	}
 	return value, nil
+}
+
+func codexPermissionName(runtime RuntimePaths) string {
+	return fmt.Sprintf("dark-factory-%x", sha256.Sum256([]byte(runtime.home)))
 }
 
 func codexUntrustedProjectConfig(path string) string {
