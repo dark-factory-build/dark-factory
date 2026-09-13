@@ -3,13 +3,14 @@ import { createRoot } from "react-dom/client";
 import { FactoryApp, FactoryConsole, type FactoryConsoleProps } from "@dark-factory/ui";
 import "@dark-factory/ui/styles.css";
 import "./styles.css";
-import { fixtureState, fixtureTopologies } from "../../../fixtures/state.mjs";
+import { fixtureCrowdedRunPaths, fixtureCrowdedState, fixtureFloorState, fixtureRunPaths, fixtureTopologies } from "../../../fixtures/state.mjs";
 
 // Fixture tour: sample data, no daemon, no authority. Reply/cancel and edit
 // handlers are deliberately absent so one-shot actions cannot pretend to
 // succeed.
 function FixtureTour() {
-  const [view, setView] = useState<FactoryConsoleProps["view"]>("agents");
+  const crowded = new URLSearchParams(window.location.search).get("fixture") === "crowded";
+  const [view, setView] = useState<FactoryConsoleProps["view"]>("floor");
   const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>("needs-you");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>();
@@ -21,8 +22,9 @@ function FixtureTour() {
       </p>
       <FactoryConsole
         status="ready"
-        state={fixtureState}
+        state={crowded ? fixtureCrowdedState : fixtureFloorState}
         topologies={fixtureTopologies}
+        runPaths={crowded ? fixtureCrowdedRunPaths : fixtureRunPaths}
         view={view}
         onView={setView}
         detail={detail}

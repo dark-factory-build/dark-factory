@@ -1,5 +1,6 @@
 import {
   PADDING,
+  ROOM_LEFT,
   layoutScene,
   placeWorkers,
   type SceneTopology,
@@ -56,15 +57,15 @@ export function AgentSprite({ agent, activity }: AgentSpriteProps) {
 
 /** A disposable SVG projection of topology and current factory state. */
 export function FactoryScene({ topology, workers, omittedLocations = 0, selectedWorkerId, onSelectWorker }: FactorySceneProps) {
-  const layout = layoutScene(topology, workers.filter((worker) => worker.location !== "working" && worker.location !== "control-room" && worker.location !== "unobserved").length);
+  const layout = layoutScene(topology);
   const placements = placeWorkers(layout, workers);
   const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   const resting = placements.filter((placement) => placement.area === "resting");
   const staging = placements.filter((placement) => placement.area === "staging");
   const overflow = placements.filter((placement) => placement.area === "overflow");
-  const occupied = new Set(placements.filter((placement) => placement.area === "room").map((placement) => placement.roomId));
-  const sceneHeight = Math.max(layout.height, ...placements.map((placement) => placement.y + 8)) + PADDING;
+  const outside = placements.filter((placement) => placement.area === "outside");
+  const sceneHeight = Math.max(layout.height, ...placements.map((placement) => placement.y + 24)) + PADDING;
   // A wide column must not blow 16px frames up to poster size: the scene stops
   // at three CSS pixels per sheet pixel and centres in whatever is left.
   const maxWidth = layout.width * 3;
@@ -75,7 +76,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
       role="group"
       aria-label="Dark Factory codebase floor"
       data-topology-digest={topology.digest}
-      style={{ display: "block", width: "100%", minWidth: Math.min(maxWidth, 864), maxWidth, height: "auto", margin: "0 auto", background: "#08131d" }}
+      style={{ display: "block", width: "100%", minWidth: layout.width, maxWidth, height: "auto", margin: "0 auto", background: "#08131d" }}
     >
       <title>Dark Factory codebase floor</title>
       <desc>{`${layout.rooms.length} topology spaces, ${workers.length} workers${omittedLocations === 0 ? "" : `, ${omittedLocations} current locations omitted by the room cap`}`}</desc>
@@ -102,6 +103,8 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
         FACTORY FLOOR · {layout.rooms.length} SPACES
       </text>
 
+      {layout.corridors.map((corridor, index) => <rect key={index} data-corridor="" {...corridor} fill="url(#df-floor)" />)}
+      <rect x={PADDING} y={layout.restingTop - 32} width={ROOM_LEFT - PADDING} height={sceneHeight - layout.restingTop + 32} fill="url(#df-floor)" />
       {layout.headings.map((heading) => (
         <text key={heading.y} data-floor-heading={heading.label} x={heading.x} y={heading.y + 11} fill="#b9cad5" fontFamily="ui-monospace, monospace" fontSize="9" fontWeight="700">
           {shortLabel(heading.label)}
@@ -112,11 +115,12 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
         const node = nodes.get(room.id);
         if (node === undefined) return null;
         return (
-          <g key={room.id} data-room-id={room.id} className={occupied.has(room.id) ? undefined : "dfFactoryScene__room--empty"}>
+          <g key={room.id} data-room-id={room.id}>
             <title>{node.path}</title>
-            <rect x={room.x} y={room.y} width={room.width} height={room.height} rx="3" fill="url(#df-floor)" stroke="#638095" />
+            <rect x={room.x} y={room.y} width={room.width} height={room.height} fill="url(#df-floor)" />
             <rect x={room.x} y={room.y} width={room.width} height={FRAME} fill="url(#df-wall)" />
-            <Frame name="tile.door" x={room.x + Math.floor(room.width / 2 / FRAME) * FRAME} y={room.y + room.height - FRAME} />
+            <path data-room-walls="" d={`M${room.door.x - 16},${room.door.y} H${room.x} V${room.y} H${room.x + room.width} V${room.door.y} H${room.door.x + 16}`} fill="none" stroke="#638095" strokeWidth="4" />
+            <Frame name="tile.workstation" x={room.workstation.x} y={room.workstation.y} />
             <text x={room.x + 8} y={room.y + 18} fill="#f2f6f8" fontFamily="ui-monospace, monospace" fontSize="11" fontWeight="700">
               {shortLabel(node.label)}
             </text>
@@ -127,25 +131,20 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
         );
       })}
 
-      {resting.length === 0 ? null : <Area label={`RESTING AREA · ${resting.length}`} width={layout.width - PADDING * 2} top={Math.min(...resting.map((placement) => placement.y)) - 28} bottom={Math.max(...resting.map((placement) => placement.y + 8)) + PADDING} />}
-      {staging.length === 0 ? null : <Area label={`WORKING · ${staging.length} LOCATION${staging.length === 1 ? "" : "S"} NOT YET OBSERVED`} width={layout.width - PADDING * 2} top={Math.min(...staging.map((placement) => placement.y)) - 28} bottom={Math.max(...staging.map((placement) => placement.y + 8)) + PADDING} />}
-      {overflow.length === 0 ? null : <Area label={omittedLocations === 0 ? `WORKER AREA AT CAPACITY · ${overflow.length}` : `ROOM MAP AT CAPACITY · ${omittedLocations} LOCATIONS NOT SHOWN`} width={layout.width - PADDING * 2} top={Math.min(...overflow.map((placement) => placement.y)) - 28} bottom={Math.max(...overflow.map((placement) => placement.y + 8)) + PADDING} />}
-
-      {layout.rooms.length === 0 ? (
-        <text x={layout.width / 2} y={resting.length === 0 ? 52 : Math.max(...resting.map((placement) => placement.y + 8)) + PADDING * 2} textAnchor="middle" fill="#7890a2" fontFamily="ui-monospace, monospace" fontSize="10">
-          EMPTY FLOOR
-        </text>
-      ) : null}
+      <Area label={`RESTING AREA · ${resting.length}`} width={layout.width - ROOM_LEFT - PADDING} top={layout.restingTop - 28} bottom={Math.max(layout.restingTop + 24, ...resting.map((placement) => placement.y + 24))} />
+      {staging.length === 0 ? null : <Area label={`UNKNOWN LOCATION · ${staging.length}`} width={layout.width - ROOM_LEFT - PADDING} top={staging[0]!.y - 28} bottom={Math.max(...staging.map((placement) => placement.y + 24))} />}
+      {outside.length === 0 ? null : <Area label={`OUTSIDE DISPLAYED ROOMS · ${outside.length}`} width={layout.width - ROOM_LEFT - PADDING} top={outside[0]!.y - 28} bottom={Math.max(...outside.map((placement) => placement.y + 24))} />}
+      {overflow.length === 0 ? null : <Area label={`WORKER AREA AT CAPACITY · ${overflow.length}`} width={layout.width - ROOM_LEFT - PADDING} top={overflow[0]!.y - 28} bottom={Math.max(...overflow.map((placement) => placement.y + 24))} />}
+      {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="38" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
       {placements.map((placement) => {
         const worker = workerById.get(placement.id);
         if (worker === undefined) return null;
         const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
         const location = worker.location === "working"
-          ? placement.area === "room" ? `working near observed changes in ${room?.label}` : worker.nodeId === undefined ? `working near observed changes in ${worker.locationLabel}; room map at capacity` : `working near observed changes in ${worker.locationLabel}; worker area at capacity`
-          : worker.location === "control-room" ? placement.area === "room" ? `supervising from assigned control room in ${room?.label}` : `supervising from assigned control room in ${worker.locationLabel}; room map at capacity`
+          ? `representative location near observed changes${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? "at workstation" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
           : worker.location === "unobserved" ? "working; location not yet observed"
-          : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}`
+          : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
           : worker.paused ? "paused in resting area" : "ready in resting area";
         const frames = workerFrames(worker);
         return (
@@ -158,6 +157,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
           >
             <g role="img" aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...(onSelectWorker === undefined ? {} : { onClick: () => onSelectWorker(worker.id), style: { cursor: "pointer" } })}>
               <title>{`${worker.name} · ${location}`}</title>
+              <rect x={-12} y={-12} width="24" height="24" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
               {frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
             </g>
@@ -172,8 +172,8 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
 function Area({ label, width, top, bottom }: { label: string; width: number; top: number; bottom: number }) {
   return (
     <g role="group" aria-label={label}>
-      <rect x={PADDING} y={top} width={width} height={bottom - top} rx="3" fill="#101f2b" stroke="#385164" />
-      <text x={PADDING + 6} y={top + 15} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
+      <rect x={ROOM_LEFT} y={top} width={width} height={bottom - top} fill="url(#df-floor)" />
+      <text x={ROOM_LEFT + 6} y={top + 15} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
     </g>
   );
 }

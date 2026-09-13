@@ -259,24 +259,6 @@ const wall = grid(`
   dddddddddddddddd
   oooooooooooooooo
 `);
-const door = grid(`
-  ..llllllllllll..
-  ..lmmmmmmmmmml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmooooooyoml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmooooooooml..
-  ..lmmmmmmmmmml..
-  ..oooooooooooo..
-`);
 const pad = grid(`
   ................
   .mmmmmmmmmmmmmm.
@@ -377,7 +359,24 @@ tile('tile.floor.0', floor);
 const floorVariant = tile('tile.floor.1', mirror(floor));
 draw(floorVariant, grid(`mmm`), 6, 1);
 tile('tile.wall', wall);
-tile('tile.door', door);
+tile('tile.workstation', grid(`
+  ................
+  ...oooooooooo...
+  ...ollllllllo...
+  ...ommmmmmmmo...
+  ...ommmmmmmmo...
+  ...oooooooooo...
+  .......ss.......
+  .oooooooooooooo.
+  .oppppppppppppo.
+  .owwwwwwwwwwwwo.
+  .oooooooooooooo.
+  ..oo........oo..
+  ..oo........oo..
+  ..oo........oo..
+  ................
+  ................
+`));
 tile('bay.free', pad);
 const staged = tile('bay.staged', pad);
 draw(staged, Array(5).fill('yyyyyyyyyy'), 3, 8);
