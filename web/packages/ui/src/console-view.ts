@@ -144,9 +144,8 @@ export type RunPathSample = Readonly<{
  * block of rooms taken from its own served topology, or the one room that
  * stands for a project whose structure the daemon has not served yet, and every
  * worker stands in the room of code its matching live run is changing. A
- * retained sample only annotates a resting worker; an active overseer without
- * an observed path uses its assigned project control room. The floor is a grid because served nodes carry no edges: it
- * shows what the code is, not what depends on what.
+ * retained sample only annotates a resting worker. Without an observed path,
+ * every role has an unknown location. Corridors show access, not dependencies.
  */
 export function floorScene(
   state: StateView | undefined,
@@ -158,29 +157,13 @@ export function floorScene(
   const blocks = projects.map((project) => projectBlock(project, topologies?.get(project.id)));
   const blocksByProject = new Map(projects.map((project, index) => [project.id, blocks[index]]));
   const allRooms = new Map(blocks.flat().map((room) => [room.id, room]));
-  const liveRooms = new Set<string>();
-  if (state !== undefined) for (const agent of state.agents.values()) {
-    const task = agentCurrentTask(agent, state);
-    const sample = runPaths?.get(agent.id);
-    if (task === undefined || sample?.taskId !== task.id || sample.taskRevision !== task.revision || sample.projectId !== agent.project_id || sample.runId === "") continue;
-    const nodeId = roomOfRunPaths(blocksByProject.get(agent.project_id) ?? [], sample.paths);
-    if (nodeId !== undefined) liveRooms.add(nodeId);
-  }
-  // A current observed location wins the shared cap. Project roots make the
-  // rest of the map stable; remaining rooms then fill by the served size rank.
+  // Topology alone chooses the bounded map: roots first, then served size.
   const roots = blocks.map((block) => block[0]).filter((room): room is SceneNode => room !== undefined);
-  const order = (rooms: readonly SceneNode[]) => [...rooms].sort((left, right) =>
-    compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.project?.id ?? "", right.project?.id ?? "") || compareText(left.path, right.path) || compareText(left.id, right.id));
-  const occupied = order([...liveRooms].map((id) => allRooms.get(id)).filter((room): room is SceneNode => room !== undefined));
-  const remaining = blocks.flat().filter((room) => !liveRooms.has(room.id) && !roots.some((root) => root.id === room.id)).sort((left, right) =>
+  const remaining = blocks.flat().filter((room) => !roots.some((root) => root.id === room.id)).sort((left, right) =>
     SIZE_BUCKETS.indexOf(left.sizeBucket ?? "empty") - SIZE_BUCKETS.indexOf(right.sizeBucket ?? "empty")
     || compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.path, right.path) || compareText(left.id, right.id));
-  const roomIDs = new Set<string>();
-  const rooms = [...occupied, ...order(roots), ...remaining].filter((room) => {
-    if (roomIDs.has(room.id)) return false;
-    roomIDs.add(room.id);
-    return true;
-  }).slice(0, MAX_FLOOR_ROOMS);
+  const rooms = [...roots, ...remaining].slice(0, MAX_FLOOR_ROOMS);
+  const liveRooms = new Set<string>();
   const kept = new Set(rooms.map((room) => room.id));
   const workers = state === undefined ? [] : [...state.agents.values()].map((agent) => {
     const task = agentCurrentTask(agent, state);
@@ -189,9 +172,9 @@ export function floorScene(
     const live = task === undefined || sample?.taskId !== task.id || sample.taskRevision !== task.revision || sample.projectId !== agent.project_id || sample.runId === "" ? undefined : roomOfRunPaths(block, sample.paths);
     const previous = lastRunPaths?.get(agent.id);
     const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? roomOfRunPaths(block, previous.paths) : undefined;
-    const controlRoom = agent.role === "orchestrator" && task !== undefined && live === undefined ? block[0] : undefined;
-    const location: "working" | "control-room" | "last-observed" | "unobserved" | "resting" = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : controlRoom === undefined ? "unobserved" : "control-room";
-    const room = location === "working" ? allRooms.get(live!) : location === "control-room" ? controlRoom : location === "last-observed" ? allRooms.get(last!) : undefined;
+    if (live !== undefined) liveRooms.add(live);
+    const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
+    const room = location === "working" ? allRooms.get(live!) : location === "last-observed" ? allRooms.get(last!) : undefined;
     return {
       id: agent.id,
       name: agent.name,
@@ -201,7 +184,7 @@ export function floorScene(
       paused: agent.paused,
       location,
       ...(room === undefined ? {} : { locationLabel: room.label }),
-      ...((location === "working" && live !== undefined && kept.has(live)) || (location === "control-room" && room !== undefined && kept.has(room.id)) ? { nodeId: location === "working" ? live! : room!.id } : {}),
+      ...(location === "working" && live !== undefined ? { nodeId: live } : {}),
     };
   });
   const digest = projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ");
@@ -210,7 +193,7 @@ export function floorScene(
 
 /**
  * The room a live run's changed paths stand a worker in: each path picks the
- * deepest displayed room whose own path prefixes it (the root's "." prefixes
+ * deepest eligible room whose own path prefixes it (the root's "." prefixes
  * everything), and the room holding the most paths wins, ties going to the
  * room the floor sorts first. No paths means no answer and no move.
  */
@@ -233,8 +216,7 @@ const SIZE_BUCKETS = ["large", "medium", "small", "tiny", "empty"];
  * One project's rooms: the code its repository root holds, largest first. A Go
  * module or a JS package rooted at "." is the same place as the repository, not
  * a room of its own, so every node at "." is root and the rooms are their
- * children. The repository is always the first room, the one a worker with no
- * path of its own stands in and the one a project keeps when the cap bites; a
+ * children. The repository is always the first room, the one a project keeps when the cap bites; a
  * project the daemon has not served a structure for has only that room.
  */
 function projectBlock(project: { id: string; name: string }, topology: TopologyView | undefined): readonly SceneNode[] {
@@ -249,7 +231,7 @@ function projectBlock(project: { id: string; name: string }, topology: TopologyV
     .sort((left, right) =>
       SIZE_BUCKETS.indexOf(left.size_bucket) - SIZE_BUCKETS.indexOf(right.size_bucket)
       || compareText(left.path, right.path));
-  return [root, ...children].slice(0, MAX_FLOOR_ROOMS).map((node) => ({
+  return [root, ...children].map((node) => ({
     // The daemon salts node ids with the project; the prefix keeps two rooms
     // on one floor apart against a daemon that does not.
     id: `${project.id}:${node.id}`,

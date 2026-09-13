@@ -800,14 +800,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfConsoleSidebar { position: static; max-height: none; }
 }
 
-.dfFactoryScene__room--empty > rect,
-.dfFactoryScene__room--empty > use { opacity: 0.45; }
 .dfFactoryFloor { overflow-x: auto; }
-.dfFactoryScene__worker { transition: transform 180ms ease-out; }
-
-@media (prefers-reduced-motion: reduce) {
-  .dfFactoryScene__worker { transition: none; }
-}
 
 .dfRecentWorkDialog { width: min(70rem, calc(100% - 2rem)); }
 .dfRecentWorkLayout { font-family: system-ui, sans-serif; display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(0, 2fr); gap: 1.5rem; margin-top: 1rem; }

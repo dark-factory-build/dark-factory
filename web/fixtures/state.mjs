@@ -7,6 +7,7 @@ const taskID = "31".repeat(16);
 const queuedTaskID = "32".repeat(16);
 const doneTaskID = "33".repeat(16);
 const failedTaskID = "34".repeat(16);
+const secondRunningTaskID = "35".repeat(16);
 const requestID = "41".repeat(16);
 const accountID = "51".repeat(16);
 
@@ -36,6 +37,12 @@ export const fixtureState = {
   ]),
 };
 
+export const fixtureFloorState = {
+  ...fixtureState,
+  agents: new Map(fixtureState.agents).set(secondAgentID, { ...fixtureState.agents.get(secondAgentID), paused: false }),
+  tasks: new Map(fixtureState.tasks).set(secondRunningTaskID, { id: secondRunningTaskID, project_id: secondProjectID, assigned_agent_id: secondAgentID, title: "Coordinate the release train", status: "running", priority: 9, revision: 16n }),
+};
+
 const nodeID = (prefix) => prefix.repeat(32);
 
 /** The first project's structure: a repository root and its direct children. */
@@ -53,3 +60,37 @@ export const fixtureTopology = {
 
 /** The floor takes one structure per project; the second one is unserved. */
 export const fixtureTopologies = new Map([[projectID, fixtureTopology]]);
+
+/** One observed live run; the other running agent deliberately stays unknown. */
+export const fixtureRunPaths = new Map([[agentID, {
+  taskId: taskID,
+  taskRevision: fixtureState.tasks.get(taskID).revision,
+  runId: "71".repeat(16),
+  projectId: projectID,
+  paths: ["internal/kernel/store", "internal/kernel/store/state.go"],
+}]]);
+
+const crowded = Array.from({ length: 18 }, (_, index) => {
+  const id = (96 + index).toString(16).padStart(2, "0").repeat(16);
+  const taskId = (128 + index).toString(16).padStart(2, "0").repeat(16);
+  return { id, taskId, index };
+});
+
+/** Optional same-room overflow fixture: ?fixture=crowded. */
+export const fixtureCrowdedState = {
+  ...fixtureFloorState,
+  factory: { ...fixtureFloorState.factory, active_runs: 12 },
+  agents: new Map([
+    ...fixtureFloorState.agents,
+    ...crowded.map(({ id, index }) => [id, { ...fixtureState.agents.get(thirdAgentID), id, name: `Overflow ${index + 1}`, revision: BigInt(50 + index) }]),
+  ]),
+  tasks: new Map([
+    ...fixtureFloorState.tasks,
+    ...crowded.slice(0, 10).map(({ id, taskId, index }) => [taskId, { id: taskId, project_id: projectID, assigned_agent_id: id, title: `Crowded build ${index + 1}`, status: "running", priority: 3, revision: BigInt(60 + index) }]),
+  ]),
+};
+
+export const fixtureCrowdedRunPaths = new Map([
+  ...fixtureRunPaths,
+  ...crowded.slice(0, 10).map(({ id, taskId, index }) => [id, { taskId, taskRevision: BigInt(60 + index), runId: (160 + index).toString(16).padStart(2, "0").repeat(16), projectId: projectID, paths: ["internal/kernel/store"] }]),
+]);

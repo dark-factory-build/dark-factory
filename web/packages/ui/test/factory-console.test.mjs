@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { MAX_TASK_PRIORITY, ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryApp, FactoryConsole, floorScene } from "../dist/src/index.js";
+import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
 import { fixtureState, fixtureTopologies, fixtureTopology } from "../../../fixtures/state.mjs";
 
@@ -58,10 +59,7 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\),[\s\S]*?\.dfConsoleSidebar :where\(h1, h2, h3, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
   assert.match(css, /\.dfFactoryConsole__error\s*\{[\s\S]*?margin: 0 auto 1\.25rem;/);
-  assert.match(css, /\.dfFactoryScene__room--empty > rect,[\s\S]*?\.dfFactoryScene__room--empty > use \{ opacity: 0\.45; \}/);
   assert.match(css, /\.dfFactoryFloor \{ overflow-x: auto; \}/);
-  assert.match(css, /\.dfFactoryScene__worker \{ transition: transform 180ms ease-out; \}/);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.dfFactoryScene__worker \{ transition: none; \}/);
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
 });
 
@@ -136,6 +134,7 @@ test("the roster stays visible while the optional floor opens and closes", () =>
 
 test("the floor maps topology to rooms and agents to workers deterministically", () => {
   const scene = floorScene(fixtureState, fixtureTopologies);
+  const baselineLayout = layoutScene(scene.topology);
   // The repository root and the code it holds become rooms, largest first, and
   // every project keeps its own room before any project keeps a second. The
   // root room carries the project's name: the served one names no project.
@@ -157,6 +156,13 @@ test("the floor maps topology to rooms and agents to workers deterministically",
     ["Dispatch Lead", "idle", "resting", undefined],
     ["Builder Two", "waiting", "resting", undefined],
   ]);
+
+  // Agent state and observed paths are overlays: they cannot reshuffle or
+  // re-coordinate the served rooms, including when a selection is changed.
+  const overlay = floorScene({ ...fixtureState, agents: new Map([...fixtureState.agents].reverse()) }, fixtureTopologies,
+    new Map([[ids.agent, runSample(ids.agent, ["web"])]])).topology;
+  assert.deepEqual(overlay.nodes, scene.topology.nodes);
+  assert.deepEqual(layoutScene(overlay).rooms, baselineLayout.rooms);
 
   // A live run stands its worker in the room of the code it is changing: the
   // deepest displayed room that prefixes a path, and the room most paths sit in.
@@ -219,6 +225,22 @@ test("the floor maps topology to rooms and agents to workers deterministically",
   assert.deepEqual(wide.topology.nodes.filter((node) => node.sizeBucket === "medium").map((node) => node.label),
     ["dir-0", "dir-1", "dir-2", "dir-3"]);
   assert.equal(wide.workers.find((worker) => worker.id === ids.agent).location, "unobserved");
+
+  // A live path in a child omitted by the cap stays a working observation and
+  // is placed outside displayed rooms; it must never fall back to the root.
+  const cappedTask = { ...fixtureState.tasks.get(ids.task), revision: 99n };
+  const cappedState = { ...fixtureState, tasks: new Map([[cappedTask.id, cappedTask]]) };
+  const omittedPath = "dir-29";
+  const cappedLive = floorScene(cappedState, served({
+    ...fixtureTopology,
+    nodes: [topRoom, ...Array.from({ length: 30 }, (_, index) => ({
+      id: `${index}`.padStart(64, "0"), parent_id: topRoom.id, kind: "directory",
+      path: `dir-${index}`, label: `dir-${index}`, language: "", size_bucket: index < 4 ? "medium" : "tiny",
+    }))],
+  }), new Map([[ids.agent, runSample(ids.agent, [omittedPath], cappedTask.id, cappedTask.revision)]]));
+  const omittedWorker = cappedLive.workers.find((worker) => worker.id === ids.agent);
+  assert.equal(omittedWorker.location, "working");
+  assert.notEqual(omittedWorker.nodeId, cappedLive.topology.nodes.find((node) => node.path === ".").id);
 });
 
 /**
@@ -255,15 +277,14 @@ const soloState = (projectId) => ({
   humanRequests: new Map(),
 });
 
-test("an active overseer without a path uses its assigned project control room", () => {
+test("an active overseer without a path remains unknown", () => {
   const overseer = { ...fixtureState.agents.get(ids.orchestrator), project_id: ids.project };
   const agents = new Map(fixtureState.agents);
   agents.set(overseer.id, overseer);
   const task = { ...fixtureState.tasks.get(ids.task), id: "35".repeat(16), project_id: ids.project, assigned_agent_id: overseer.id, title: "Supervise", status: "running" };
   const state = baseState({ agents, tasks: new Map([[task.id, task]]) });
   const worker = floorScene(state, fixtureTopologies).workers.find((item) => item.id === ids.orchestrator);
-  const root = floorScene(state, fixtureTopologies).topology.nodes.find((node) => node.project.id === ids.project && node.path === ".");
-  assert.deepEqual([worker.location, worker.nodeId, worker.locationLabel], ["control-room", root.id, "North Workshop"]);
+  assert.deepEqual([worker.location, worker.nodeId, worker.locationLabel], ["unobserved", undefined, undefined]);
   const observed = floorScene(state, fixtureTopologies, new Map([[ids.orchestrator, {
     taskId: task.id, taskRevision: task.revision, runId: "71".repeat(16), projectId: ids.project, paths: ["."],
   }]]))
