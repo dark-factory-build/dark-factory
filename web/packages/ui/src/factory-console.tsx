@@ -200,7 +200,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={state} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} />
+              ? <FactoryFloor selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={state} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} connected={ready} />
               : <AgentList state={state} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 

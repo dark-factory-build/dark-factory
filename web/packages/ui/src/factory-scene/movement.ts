@@ -27,47 +27,72 @@ function distance(left: ScenePoint, right: ScenePoint) {
 /**
  * The only moving route: leave a known room through its existing door, use the
  * corridor spine, then enter the next room beside its existing workstation.
- * Staging, resting and omitted-room locations deliberately have no invented
- * route through code rooms.
+ * The connected resting/staging common space is also reachable by that spine;
+ * omitted rooms never gain an invented route.
  */
 export function routeBetween(
   layout: SceneLayout,
   from: SceneWorkerPlacement,
   to: SceneWorkerPlacement,
 ): Route | undefined {
-  if (from.area !== "room" || to.area !== "room" || from.roomId === undefined || to.roomId === undefined) return undefined;
-  const source = layout.rooms.find((room) => room.id === from.roomId);
-  const destination = layout.rooms.find((room) => room.id === to.roomId);
-  if (source === undefined || destination === undefined) return undefined;
-  const points = from.roomId === to.roomId
-    ? [{ x: to.x, y: to.y }]
-    : [
-      { x: from.x, y: source.door.y },
-      { x: layout.corridors.at(-1)!.x + layout.corridors.at(-1)!.width / 2, y: source.door.y },
-      { x: layout.corridors.at(-1)!.x + layout.corridors.at(-1)!.width / 2, y: destination.door.y },
-      { x: to.x, y: destination.door.y },
-      { x: to.x, y: to.y },
-    ];
-  const compact = points.filter((point, index) => index === 0 || !samePoint(points[index - 1]!, point));
-  const all = [{ x: from.x, y: from.y }, ...compact];
-  return { points: compact, length: all.slice(1).reduce((total, point, index) => total + distance(all[index]!, point), 0) };
-}
-
-/** Continue from a point already in a corridor or the spine to a known room. */
-export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneWorkerPlacement): Route | undefined {
-  if (to.area !== "room" || to.roomId === undefined) return undefined;
-  const destination = layout.rooms.find((room) => room.id === to.roomId);
+  const common = (area: SceneWorkerPlacement["area"]) => area === "resting" || area === "staging";
+  if ((from.area !== "room" && !common(from.area)) || (to.area !== "room" && !common(to.area))) return undefined;
+  const source = from.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === from.roomId);
+  const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
+  if (from.area === "room" && source === undefined || to.area === "room" && destination === undefined) return undefined;
+  if (source !== undefined && source.id === destination?.id) return route([from, to]);
   const spine = layout.corridors.at(-1);
-  if (destination === undefined || spine === undefined) return undefined;
+  if (spine === undefined) return undefined;
   const center = spine.x + spine.width / 2;
   const points = [
+    ...(source === undefined ? [{ x: center, y: from.y }] : [
+      { x: source.door.x, y: from.y },
+      source.door,
+      { x: center, y: source.door.y },
+    ]),
+    ...(destination === undefined ? [{ x: center, y: to.y }, to] : [
+      { x: center, y: destination.door.y },
+      destination.door,
+      { x: destination.door.x, y: to.y },
+      to,
+    ]),
+  ];
+  return route([from, ...points]);
+}
+
+function route(points: readonly ScenePoint[]): Route {
+  const compact = points.filter((point, index) => index === 0 || !samePoint(points[index - 1]!, point));
+  return { points: compact.slice(1), length: compact.slice(1).reduce((total, point, index) => total + distance(compact[index]!, point), 0) };
+}
+
+/** Continue from a point already in a corridor or the spine to a known room or common space. */
+export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneWorkerPlacement): Route | undefined {
+  if (to.area !== "room" && to.area !== "resting" && to.area !== "staging") return undefined;
+  const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
+  const spine = layout.corridors.at(-1);
+  if (to.area === "room" && destination === undefined || spine === undefined) return undefined;
+  const center = spine.x + spine.width / 2;
+  return route([from,
     { x: center, y: from.y },
-    { x: center, y: destination.door.y },
-    { x: to.x, y: destination.door.y },
-    { x: to.x, y: to.y },
-  ].filter((point, index, all) => index === 0 || !samePoint(all[index - 1]!, point));
-  const all = [from, ...points];
-  return { points, length: all.slice(1).reduce((total, point, index) => total + distance(all[index]!, point), 0) };
+    ...(destination === undefined ? [{ x: center, y: to.y }, to] : [
+      { x: center, y: destination.door.y },
+      destination.door,
+      { x: destination.door.x, y: to.y },
+      to,
+    ]),
+  ]);
+}
+
+/** Retarget from the rendered point, never a previously intended room. */
+export function routeFromCurrent(layout: SceneLayout, from: ScenePoint, to: SceneWorkerPlacement): Route | undefined {
+  // A door belongs to its corridor: retaining it as a room edge would let a
+  // later route use a room that the worker has already left.
+  const room = layout.rooms.find((candidate) =>
+    from.x >= candidate.x && from.x <= candidate.x + candidate.width
+    && from.y >= candidate.y && from.y < candidate.y + candidate.height);
+  return room === undefined
+    ? routeFromSpine(layout, from, to)
+    : routeBetween(layout, { id: to.id, area: "room", roomId: room.id, ...from }, to);
 }
 
 export function pointOnRoute(start: ScenePoint, route: Route, travelled: number): ScenePoint {

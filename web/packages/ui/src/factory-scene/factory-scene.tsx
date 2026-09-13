@@ -9,7 +9,7 @@ import {
   type SceneWorker,
 } from "./scene.js";
 import { workerFrames } from "./appearance.js";
-import { directionBetween, pointOnRoute, routeBetween, routeFromSpine, samePoint, type WorkerMotion } from "./movement.js";
+import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
 export type {
@@ -30,6 +30,8 @@ export type FactorySceneProps = Readonly<{
   onSelectTask?: (taskId: string) => void;
   onOpenQueue?: () => void;
   onSelectHumanRequest?: (requestId: string) => void;
+  /** A dropped session reconciles to its latest snapshot instead of replaying local motion. */
+  connected?: boolean;
   /** Current changed locations omitted by the bounded room map. */
   omittedLocations?: number;
   /** The selected agent is highlighted without changing its deterministic placement. */
@@ -65,8 +67,6 @@ export function AgentSprite({ agent, activity }: AgentSpriteProps) {
 
 type MotionState = Readonly<{
   placement: ReturnType<typeof placeWorkers>[number];
-  /** The room the active route really began in, retained for a rapid retarget. */
-  source?: ReturnType<typeof placeWorkers>[number];
   point: { x: number; y: number };
   route?: ReturnType<typeof routeBetween>;
   startedAt?: number;
@@ -91,26 +91,15 @@ function motionPoint(motion: MotionState, at: number) {
   return { point: motion.placement, walking: false };
 }
 
-function routeProgress(motion: MotionState, at: number) {
-  return motion.route === undefined || motion.startedAt === undefined ? 0 : Math.min(motion.route.length, Math.max(0, (at - motion.startedAt) / 1000 * WALK_SPEED));
-}
-
 function retargetRoute(layout: ReturnType<typeof layoutScene>, motion: MotionState, point: { x: number; y: number }, destination: ReturnType<typeof placeWorkers>[number], at: number) {
-  if (motion.route === undefined || motion.source === undefined) return routeBetween(layout, { ...motion.placement, ...point }, destination);
-  const path = [motion.point, ...motion.route.points];
-  const lengths = path.slice(1).map((next, index) => Math.hypot(next.x - path[index]!.x, next.y - path[index]!.y));
-  const progress = routeProgress(motion, at);
-  const sourceSide = lengths.slice(0, 2).reduce((total, length) => total + length, 0);
-  const destinationRoom = lengths.slice(0, 4).reduce((total, length) => total + length, 0);
-  if (progress <= sourceSide) return routeBetween(layout, { ...motion.source, ...point }, destination);
-  if (progress >= destinationRoom) return routeBetween(layout, { ...motion.placement, ...point }, destination);
-  return routeFromSpine(layout, point, destination);
+  return routeFromCurrent(layout, point, destination);
 }
 
 /** One browser clock; source state only ever supplies the next local destination. */
-function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string) {
+function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean) {
   const motions = useRef(new Map<string, MotionState>());
   const priorTopology = useRef<string | undefined>(undefined);
+  const priorConnected = useRef<boolean | undefined>(undefined);
   const [clock, setClock] = useState(0);
   const [reduced, setReduced] = useState(false);
 
@@ -127,12 +116,14 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
     const at = now();
     const hidden = typeof document !== "undefined" && document.visibilityState !== "visible";
     const topologyChanged = priorTopology.current !== undefined && priorTopology.current !== topologyDigest;
+    const reconnected = priorConnected.current === false && connected;
     priorTopology.current = topologyDigest;
+    priorConnected.current = connected;
     const previous = motions.current;
     const next = new Map<string, MotionState>();
     for (const placement of placements) {
       const old = previous.get(placement.id);
-      if (old === undefined || reduced || hidden || topologyChanged) {
+      if (old === undefined || reduced || hidden || topologyChanged || reconnected || !connected) {
         next.set(placement.id, { placement, point: placement });
         continue;
       }
@@ -145,19 +136,19 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
       const route = retargetRoute(layout, old, current, placement, at);
       next.set(placement.id, route === undefined || route.length === 0
         ? { placement, point: placement }
-        : { placement, source: old.source ?? old.placement, point: current, route, startedAt: at });
+        : { placement, point: current, route, startedAt: at });
     }
     motions.current = next;
     setClock(at);
-  }, [layout, placements, reduced, topologyDigest]);
+  }, [connected, layout, placements, reduced, topologyDigest]);
 
   useEffect(() => {
-    if (reduced || typeof document !== "undefined" && document.visibilityState !== "visible" || typeof requestAnimationFrame !== "function") return;
+    if (!connected || reduced || typeof document !== "undefined" && document.visibilityState !== "visible" || typeof requestAnimationFrame !== "function") return;
     const at = now();
     if (![...motions.current.values()].some((motion) => motionPoint(motion, at).walking)) return;
     let frame = requestAnimationFrame((time) => setClock(time));
     return () => cancelAnimationFrame(frame);
-  }, [clock, reduced]);
+  }, [clock, connected, reduced]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -184,10 +175,10 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ topology, workers, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest }: FactorySceneProps) {
+export function FactoryScene({ topology, workers, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
   const layout = useMemo(() => layoutScene(topology), [topology]);
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
-  const positions = useSceneMotion(layout, placements, topology.digest);
+  const positions = useSceneMotion(layout, placements, topology.digest, connected);
   const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   const resting = placements.filter((placement) => placement.area === "resting");

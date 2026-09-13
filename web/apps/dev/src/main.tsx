@@ -15,7 +15,19 @@ const fixtureMovementRunPaths = new Map(fixtureRunPaths).set(fixtureAgentId, {
   ...fixtureObservedRun,
   paths: ["web/apps/dev/src/main.tsx"],
 });
-const fixtureMovementCrowdedRunPaths = new Map([...fixtureCrowdedRunPaths, ...fixtureMovementRunPaths]);
+const fixtureRapidRunPaths = [fixtureRunPaths, fixtureMovementRunPaths,
+  new Map(fixtureRunPaths).set(fixtureAgentId, { ...fixtureObservedRun, paths: ["internal/kernel"] }),
+  new Map(fixtureRunPaths).set(fixtureAgentId, { ...fixtureObservedRun, paths: ["README.md"] }),
+];
+const fixtureMovementCrowdedRunPaths = new Map([...fixtureCrowdedRunPaths].map(([id, run]) => [id, {
+  ...run,
+  paths: ["web/apps/dev/src/main.tsx"],
+}]));
+const fixtureReturnedState = {
+  ...fixtureFloorState,
+  factory: { ...fixtureFloorState.factory, active_runs: 1 },
+  tasks: new Map(fixtureFloorState.tasks).set(fixtureObservedRun.taskId, { ...fixtureFloorState.tasks.get(fixtureObservedRun.taskId)!, status: "succeeded" }),
+};
 const fixtureChangedTopologies = new Map(fixtureTopologies).set(fixtureFloorState.projects.keys().next().value!, {
   ...fixtureTopologies.values().next().value!,
   digest: "movement-topology",
@@ -29,7 +41,9 @@ function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
   const crowded = fixture === "crowded";
   const movement = fixture === "movement";
-  const [moved, setMoved] = useState(false);
+  const [routeStep, setRouteStep] = useState(0);
+  const [returned, setReturned] = useState(false);
+  const [connected, setConnected] = useState(true);
   const [changedTopology, setChangedTopology] = useState(false);
   const [view, setView] = useState<FactoryConsoleProps["view"]>("floor");
   const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>("needs-you");
@@ -43,16 +57,18 @@ function FixtureTour() {
         FIXTURE TOUR — sample data, no daemon. Actions that need the factory are inert here.
       </p>
       {!movement ? null : <p className="devFixtureBanner" role="note">
-        <button type="button" onClick={() => setMoved((value) => !value)}>TOGGLE OBSERVED ROUTE</button>{" "}
+        <button type="button" onClick={() => setRouteStep((step) => (step + 1) % fixtureRapidRunPaths.length)}>NEXT RAPID RETARGET</button>{" "}
+        <button type="button" onClick={() => setReturned((value) => !value)}>TOGGLE COMMON-SPACE ROUND TRIP</button>{" "}
+        <button type="button" onClick={() => setConnected((value) => !value)}>TOGGLE CONNECTION</button>{" "}
         <button type="button" onClick={() => setChangedTopology((value) => !value)}>TOGGLE TOPOLOGY</button>
       </p>}
       <FactoryConsole
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
-        status="ready"
-        state={crowded ? fixtureCrowdedState : fixtureFloorState}
+        status={connected ? "ready" : "closed"}
+        state={returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
         topologies={changedTopology ? fixtureChangedTopologies : fixtureTopologies}
-        runPaths={moved ? crowded ? fixtureMovementCrowdedRunPaths : fixtureMovementRunPaths : crowded ? fixtureTourCrowdedRunPaths : fixtureTourRunPaths}
+        runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
         onView={setView}
         detail={detail}

@@ -124,7 +124,7 @@ export function StageMeter({ stage }: { stage: TaskStage }) {
 /** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
   state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true,
 }: {
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
@@ -136,6 +136,7 @@ export function FactoryFloor({
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
+  connected?: boolean;
 }) {
   const scene = floorScene(state, topologies, runPaths, lastRunPaths);
   return <div className="dfFactoryFloor">
@@ -145,6 +146,7 @@ export function FactoryFloor({
       selectedTaskId={selectedTaskId}
       topology={scene.topology}
       workers={scene.workers}
+      connected={connected}
       tasks={scene.tasks}
       omittedLocations={scene.omittedLocations}
       onSelectTask={onSelectTask}

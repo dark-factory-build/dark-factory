@@ -7,10 +7,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { PADDING, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { resolvedAppearance, spriteOptions, workerFrames } from "../../dist/src/factory-scene/appearance.js";
-import { pointOnRoute, routeBetween } from "../../dist/src/factory-scene/movement.js";
+import { pointOnRoute, routeBetween, routeFromCurrent } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
 const topology = {
@@ -334,18 +335,106 @@ test("every generated person layer is reachable, including fallbacks", () => {
 
 test("movement uses only room doors, corridors and standing points", () => {
   const layout = layoutScene(topology);
-  const [source, destination] = placeWorkers(layout, [
+  const placements = placeWorkers(layout, [
     { ...workers[0], id: "source", nodeId: "src" },
     { ...workers[0], id: "destination", nodeId: "lib" },
   ]);
+  const sourcePlacement = placements.find((placement) => placement.id === "source");
+  const destination = placements.find((placement) => placement.id === "destination");
+  assert.ok(sourcePlacement && destination);
+  const source = { ...sourcePlacement, x: sourcePlacement.x - 24 };
   const route = routeBetween(layout, source, destination);
   assert.ok(route !== undefined && route.length > 0);
   assert.deepEqual(pointOnRoute({ x: source.x, y: source.y }, route, route.length), { x: destination.x, y: destination.y });
+  const sourceRoom = layout.rooms.find((room) => room.id === source.roomId);
+  const destinationRoom = layout.rooms.find((room) => room.id === destination.roomId);
   const spine = layout.corridors.at(-1);
-  assert.equal(route.points[1].x, spine.x + spine.width / 2);
-  assert.equal(route.points[2].x, spine.x + spine.width / 2);
-  assert.equal(routeBetween(layout, { ...source, area: "staging" }, destination), undefined, "unknown staging never routes through rooms");
+  assert.ok(sourceRoom && destinationRoom && spine);
+  assert.deepEqual(route.points.slice(0, 5), [
+    { x: sourceRoom.door.x, y: source.y }, sourceRoom.door,
+    { x: spine.x + spine.width / 2, y: sourceRoom.door.y },
+    { x: spine.x + spine.width / 2, y: destinationRoom.door.y }, destinationRoom.door,
+  ]);
+  assert.deepEqual(route.points.at(-1), { x: destination.x, y: destination.y });
+  // Every crowded standing slot uses the actual opening, never its own offset
+  // x-coordinate through a bottom wall.
+  for (const offset of [0, -24, 24, -48, 48]) {
+    const crowded = { ...source, x: sourceRoom.standing.x + offset };
+    const crowdedRoute = routeBetween(layout, crowded, destination);
+    assert.ok(crowdedRoute);
+    assert.ok(crowdedRoute.points.some((point) => point.x === sourceRoom.door.x && point.y === sourceRoom.door.y));
+    if (offset !== 0) assert.deepEqual(crowdedRoute.points.slice(0, 2), [{ x: sourceRoom.door.x, y: crowded.y }, sourceRoom.door]);
+    assert.deepEqual(crowdedRoute.points.slice(-2), [destinationRoom.door, { x: destinationRoom.door.x, y: destination.y }]);
+  }
+  const [resting, staging] = placeWorkers(layout, [
+    { ...workers[0], id: "resting", location: "resting", nodeId: undefined },
+    { ...workers[0], id: "staging", location: "unobserved", nodeId: undefined },
+  ]);
+  for (const common of [resting, staging]) {
+    const outbound = routeBetween(layout, common, destination);
+    const returned = routeBetween(layout, destination, common);
+    assert.ok(outbound && returned, `${common.area} is connected by the displayed common-space spine`);
+    assert.deepEqual(pointOnRoute(common, outbound, outbound.length), { x: destination.x, y: destination.y });
+    assert.deepEqual(pointOnRoute(destination, returned, returned.length), { x: common.x, y: common.y });
+  }
   assert.equal(routeBetween(layout, source, { ...destination, area: "outside" }), undefined, "omitted rooms never gain an invented route");
+});
+
+test("rapid retargeting uses the room containing the rendered worker", () => {
+  const layout = layoutScene({
+    digest: "rapid-retarget",
+    nodes: ["A", "B", "C", "D"].map((id) => ({ id, parentId: "", path: id, label: id, kind: "directory", sizeBucket: "tiny" })),
+  });
+  const placements = new Map(placeWorkers(layout, ["A", "B", "C", "D"].map((id) => ({ id, name: id, role: "worker", activity: "busy", location: "working", nodeId: id }))).map((placement) => [placement.id, placement]));
+  const a = placements.get("A");
+  const b = placements.get("B");
+  const c = placements.get("C");
+  const d = placements.get("D");
+  assert.ok(a && b && c && d);
+  const enteredB = pointOnRoute(a, routeBetween(layout, a, b), routeBetween(layout, a, b).length - 8);
+  const bRoom = layout.rooms.find((room) => room.id === "B");
+  assert.ok(bRoom && enteredB.y < bRoom.door.y, "sample is inside B after its door");
+
+  // B → C is replaced immediately by B → D. Both routes begin by leaving B,
+  // rather than reusing A's row from the route that originally reached B.
+  for (const destination of [c, d]) {
+    const route = routeFromCurrent(layout, enteredB, destination);
+    assert.ok(route);
+    assert.deepEqual(route.points[0], { x: enteredB.x, y: bRoom.door.y });
+  }
+});
+
+test("the production scene stops motion on disconnect and unmount", async () => {
+  const requested = [];
+  const cancelled = [];
+  const requestAnimationFrame = globalThis.requestAnimationFrame;
+  const cancelAnimationFrame = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => { requested.push(callback); return requested.length; };
+  globalThis.cancelAnimationFrame = (id) => { cancelled.push(id); };
+  try {
+    let renderer;
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
+    const moved = [{ ...workers[0], nodeId: "lib" }, workers[1]];
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: true })); });
+    assert.ok(requested.length > 0, "one scene clock schedules the route");
+
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: false })); });
+    const destination = placeWorkers(layoutScene(topology), moved).find((placement) => placement.id === workers[0].id);
+    assert.ok(destination);
+    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props.transform, `translate(${destination.x} ${destination.y})`);
+    assert.ok(cancelled.length > 0, "disconnect cleans the pending animation frame");
+
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: false })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: true })); });
+    assert.equal(requested.length, cancelled.length, "reconnect snaps to its current snapshot instead of replaying the missed route");
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: true })); });
+    assert.ok(requested.length > cancelled.length, "a later observed change starts a fresh route");
+    await act(async () => { renderer.unmount(); });
+    assert.equal(cancelled.length, requested.length, "unmount cleans every scheduled scene frame");
+  } finally {
+    globalThis.requestAnimationFrame = requestAnimationFrame;
+    globalThis.cancelAnimationFrame = cancelAnimationFrame;
+  }
 });
 
 // Nothing else runs the generator, so the shipped module could drift from it.
