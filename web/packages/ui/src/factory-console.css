@@ -786,6 +786,9 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfConsoleDialog::backdrop { background: rgb(7 10 9 / 0.8); }
 .dfConsoleDialog :where(h1, h2, h3, p, dl, ul) { margin: 0; }
 .dfConsoleDialog .dfFactoryConsole__section { margin: 0; }
+.dfConsoleDialog .dfFactoryConsole__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dfConsoleDialog .dfFactoryConsole__metrics dd { font-size: 1rem; }
+.dfConsoleDialog .dfConsoleSidebar__account { overflow-wrap: anywhere; }
 
 .dfAgentList { display: grid; gap: 1.5rem; }
 .dfAgentList__row { width: 100%; border: 1px solid var(--df-console-rule); }
