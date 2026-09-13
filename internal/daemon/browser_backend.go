@@ -636,7 +636,7 @@ func (backend *browserBackend) admitRemoteInvite() bool {
 	return true
 }
 
-// RunPaths places one live worker in the rooms it is editing. Like Topology it
+// RunPaths supplies sampled modified directories, not current worker attention. Like Topology it
 // is regenerable observation, so it carries no revision and no head.
 func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.RunPathsGet) (browserprotocol.RunPaths, error) {
 	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityObserve)
