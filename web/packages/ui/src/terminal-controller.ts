@@ -19,11 +19,14 @@ export type TerminalSurface = Readonly<{
 }>;
 
 export type TerminalPhase = "idle" | "resolving" | "attaching" | "acquiring" | "ready" | "closing" | "closed";
+export type TerminalErrorSource = "attach" | "input" | "display";
 
 export type TerminalControllerSnapshot = Readonly<{
   phase: TerminalPhase;
   writable: boolean;
   error?: SessionError | ProtocolError;
+  /** The terminal path that produced error; never contains terminal authority or output. */
+  errorSource?: TerminalErrorSource;
   /**
    * True when this controller ended because the server reset the replay
    * (retained output no longer covers the attachment). The protocol closes
@@ -73,6 +76,7 @@ class TerminalController {
   #phase: TerminalPhase = "idle";
   #writable = false;
   #error: SessionError | ProtocolError | undefined;
+  #errorSource: TerminalErrorSource | undefined;
   #target: TerminalTarget | undefined;
   #handle: TerminalHandle | undefined;
   #handleClosed = false;
@@ -117,7 +121,7 @@ class TerminalController {
     if (!(bytes instanceof Uint8Array) || bytes.length === 0 || !this.#writable || !this.#canEffect()) return false;
     const total = this.#inputInFlightBytes + this.#inputBuffer.length;
     if (bytes.length > MAX_TERMINAL_PAYLOAD || bytes.length > MAX_PENDING_INPUT_BYTES || total + bytes.length > MAX_PENDING_INPUT_BYTES) {
-      this.#fail(new SessionError("too_large"));
+      this.#fail(new SessionError("too_large"), "input");
       return false;
     }
     const next = new Uint8Array(this.#inputBuffer.length + bytes.length);
@@ -131,7 +135,7 @@ class TerminalController {
   resize(rows: number, cols: number): boolean {
     if (!this.#writable || !this.#canEffect()) return false;
     if (!Number.isSafeInteger(rows) || rows < 1 || rows > MAX_TERMINAL_ROWS || !Number.isSafeInteger(cols) || cols < 1 || cols > MAX_TERMINAL_COLS) {
-      this.#fail(new ProtocolError("malformed"));
+      this.#fail(new ProtocolError("malformed"), "input");
       return false;
     }
     this.#pendingResize = { rows, cols };
@@ -150,6 +154,7 @@ class TerminalController {
     }
     this.#writable = false;
     this.#error = undefined;
+    this.#errorSource = undefined;
     this.#detachRequested = true;
     this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
@@ -168,7 +173,7 @@ class TerminalController {
       this.#publish();
     }, (error: unknown) => {
       if (this.#handle !== handle) return;
-      this.#error = finiteError(error);
+      this.#setError(finiteError(error), "attach");
       this.#publish();
       void this.close();
       throw error;
@@ -188,7 +193,7 @@ class TerminalController {
     this.#pendingResize = undefined;
     this.#phase = "closing";
     this.#abortSurface();
-    try { this.#options.session.close(); } catch { if (this.#error === undefined) this.#error = new SessionError("connection"); }
+    try { this.#options.session.close(); } catch { if (this.#error === undefined) this.#setError(new SessionError("connection"), "attach"); }
     this.#publish();
     this.#phase = "closed";
     this.#publish();
@@ -293,7 +298,10 @@ class TerminalController {
         // display alive as a truthful read-only observer; the session/handle
         // still owns transport and terminal-end failures.
         if (this.#current(generation)) {
-          this.#error = finiteError(error);
+          // The observer is attached and can still receive output. Only the
+          // input lease failed, so callers must not describe this as an
+          // unavailable attachment.
+          this.#setError(finiteError(error), "input");
           this.#phase = "ready";
           this.#publish();
         }
@@ -316,7 +324,7 @@ class TerminalController {
     } catch {
       if (this.#detachRequested) return;
       const live = this.#current(generation) && this.#liveHandle();
-      if (live) this.#fail(new SessionError("internal"));
+      if (live) this.#fail(new SessionError("internal"), "display");
       throw new SessionError(live ? "internal" : "closed");
     }
     const stillLive = this.#handle !== undefined && !this.#handleClosed && !this.#closing;
@@ -346,19 +354,24 @@ class TerminalController {
           result = await handle.sendInput(payload);
         } catch (error) {
           this.#inputInFlightBytes = 0;
-          if (this.#current(generation)) this.#fail(finiteError(error));
+          if (this.#current(generation)) this.#fail(finiteError(error), "input");
           return;
         }
         this.#inputInFlightBytes = 0;
         if (!this.#current(generation) || !this.#canEffect(handle)) return;
         if (result.status === "partial" || result.status === "uncertain") {
-          this.#fail(new SessionError("connection"));
+          this.#fail(new SessionError("connection"), "input");
           return;
         }
         if (result.status === "rejected") {
-          this.#error = new SessionError("invalid_request");
+          this.#setError(new SessionError("invalid_request"), "input");
           this.#publish();
           if (!this.#current(generation) || !this.#canEffect(handle)) return;
+        }
+        if (result.status === "accepted" && this.#errorSource === "input") {
+          this.#error = undefined;
+          this.#errorSource = undefined;
+          this.#publish();
         }
         inputSinceResize = true;
         continue;
@@ -368,7 +381,7 @@ class TerminalController {
         this.#pendingResize = undefined;
         if (!this.#canEffect(handle)) return;
         try { await handle.resize(resize.rows, resize.cols); } catch (error) {
-          if (this.#current(generation)) this.#fail(finiteError(error));
+          if (this.#current(generation)) this.#fail(finiteError(error), "input");
           return;
         }
         if (!this.#current(generation) || !this.#canEffect(handle)) return;
@@ -387,7 +400,7 @@ class TerminalController {
   #outputFinished(task: Promise<void>): void {
     if (this.#outputTask === task) this.#outputTask = undefined;
   }
-  #handleEnded(error: SessionError | ProtocolError, retryDiscovery = false): void {
+  #handleEnded(error: SessionError | ProtocolError, retryDiscovery = false, errorSource: TerminalErrorSource = "attach"): void {
     if (this.#handleClosed) return;
     this.#handleClosed = true;
     this.#target = undefined;
@@ -399,15 +412,15 @@ class TerminalController {
     ++this.#generation;
     if (!this.#detachRequested && (error.code !== "closed" || !this.#options.retainOnCleanClose)) this.#abortSurface();
     if (!this.#closing && this.#phase !== "closed") {
-      this.#error = error;
+      this.#setError(error, errorSource);
       this.#phase = "closed";
       this.#publish();
     }
   }
 
-  #fail(error: SessionError | ProtocolError): void {
+  #fail(error: SessionError | ProtocolError, errorSource: TerminalErrorSource = "attach"): void {
     if (this.#closing || this.#phase === "closed") return;
-    this.#error = error;
+    this.#setError(error, errorSource);
     this.#writable = false;
     this.#inputBuffer = new Uint8Array(0);
     this.#pendingResize = undefined;
@@ -423,7 +436,7 @@ class TerminalController {
   #abortSurface(): void {
     if (this.#surfaceAborted) return;
     this.#surfaceAborted = true;
-    try { this.#options.surface.abort(); } catch { if (this.#error === undefined) this.#error = new SessionError("internal"); }
+    try { this.#options.surface.abort(); } catch { if (this.#error === undefined) this.#setError(new SessionError("internal"), "display"); }
   }
 
   #canEffect(handle = this.#handle): boolean {
@@ -442,7 +455,12 @@ class TerminalController {
   }
 
   #snapshot(): TerminalControllerSnapshot {
-    return { phase: this.#phase, writable: this.#writable, error: this.#error, reset: this.#reset, retryDiscovery: this.#retryDiscovery };
+    return { phase: this.#phase, writable: this.#writable, error: this.#error, errorSource: this.#errorSource, reset: this.#reset, retryDiscovery: this.#retryDiscovery };
+  }
+
+  #setError(error: SessionError | ProtocolError, errorSource: TerminalErrorSource): void {
+    this.#error = error;
+    this.#errorSource = errorSource;
   }
 
   #publish(): void {

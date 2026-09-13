@@ -706,7 +706,7 @@ test("fatal closing state is published before synchronous session close reentry"
   assert.equal(context.sessionCloses(), 1);
 });
 
-test("rejected input remains ready and writable without closing the session", async () => {
+test("rejected input reports an input-only failure while the exact attached terminal keeps streaming", async () => {
   const context = harness();
   await ready(context);
   assert.equal(context.controller.sendInput(new TextEncoder().encode("first")), true);
@@ -714,10 +714,25 @@ test("rejected input remains ready and writable without closing the session", as
   await tick();
   assert.equal(context.controller.snapshot.phase, "ready");
   assert.equal(context.controller.snapshot.writable, true);
+  assert.equal(context.controller.snapshot.error.code, "invalid_request");
+  assert.equal(context.controller.snapshot.errorSource, "input");
   assert.equal(context.sessionCloses(), 0);
+  const output = context.callbacks().onOutput({ sequence: 0n, payload: new Uint8Array([7]) });
+  // onOutput calls the surface before returning its completion promise. This
+  // is the causal delivery point; a timer here races the effect pump.
+  assert.deepEqual([...context.writes.at(-1)], [7]);
+  context.surfaceGate.resolve();
+  await output;
   assert.equal(context.controller.sendInput(new TextEncoder().encode("second")), true);
+  assert.equal(context.inputCalls.length, 1, "input waits for the session output-completion barrier");
+  context.callbacks().onOutputComplete();
   assert.equal(context.inputCalls.length, 2);
   context.inputCalls[1].result.resolve({ status: "accepted", accepted_bytes: 6n });
+  await context.inputCalls[1].result.promise;
+  assert.equal(context.controller.snapshot.error, undefined, "a successful retry clears the input rejection");
+  assert.equal(context.controller.snapshot.errorSource, undefined);
+  assert.equal(context.controller.snapshot.writable, true);
+  assert.equal(context.sessionCloses(), 0);
   await context.controller.close();
 });
 
@@ -733,14 +748,36 @@ test("lease refusal keeps an attached observer ready and read-only", async () =>
   await tick();
   assert.equal(context.controller.snapshot.phase, "ready");
   assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.controller.snapshot.error.code, "stale");
+  assert.equal(context.controller.snapshot.errorSource, "input");
   assert.equal(context.controller.sendInput(new Uint8Array([1])), false);
   assert.equal(context.inputCalls.length, 0);
   assert.equal(context.sessionCloses(), 0);
   const output = context.callbacks().onOutput({ sequence: 0n, payload: new Uint8Array([7]) });
-  await tick();
+  assert.deepEqual([...context.writes[0]], [7]);
   context.surfaceGate.resolve();
   await output;
-  assert.deepEqual([...context.writes[0]], [7]);
+  await context.controller.close();
+});
+
+test("non-stale lease refusal remains a read-only observer with live output", async () => {
+  const context = harness();
+  context.controller.start();
+  await tick();
+  context.targetGate.resolve(target);
+  await tick();
+  context.attachGate().resolve({ sessionId: "22".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
+  await tick();
+  context.acquireGate().reject(new SessionError("connection"));
+  await tick();
+  assert.equal(context.controller.snapshot.phase, "ready");
+  assert.equal(context.controller.snapshot.writable, false);
+  assert.equal(context.controller.snapshot.error.code, "connection");
+  assert.equal(context.controller.snapshot.errorSource, "input");
+  const output = context.callbacks().onOutput({ sequence: 0n, payload: new Uint8Array([8]) });
+  assert.deepEqual([...context.writes[0]], [8]);
+  context.surfaceGate.resolve();
+  await output;
   await context.controller.close();
 });
 

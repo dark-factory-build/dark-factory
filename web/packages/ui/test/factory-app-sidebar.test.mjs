@@ -159,9 +159,21 @@ test("crypto-unavailable preflight is definitively not sent", () => {
 test("exceptional input ownership and replay loss are concise", () => {
   const occupied = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "stale" } })));
   assert.match(occupied, /TERMINAL OPEN ELSEWHERE/);
+  assert.match(renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "stale" }, errorSource: "input" }))), /TERMINAL OPEN ELSEWHERE/);
   const unavailable = renderToStaticMarkup(panel(terminalView({ writable: false, error: { code: "connection" } })));
-  assert.match(unavailable, /TERMINAL UNAVAILABLE/);
+  assert.match(unavailable, /TERMINAL ATTACH UNAVAILABLE/);
   assert.equal(unavailable.includes("TERMINAL OPEN ELSEWHERE"), false);
+  const inputRejected = renderToStaticMarkup(panel(terminalView({ writable: true, hasOutputSurface: true, error: { code: "invalid_request" }, errorSource: "input" })));
+  assert.match(inputRejected, /INPUT REJECTED/);
+  assert.equal(inputRejected.includes("TERMINAL ATTACH UNAVAILABLE"), false);
+  const inputLeaseUnavailable = renderToStaticMarkup(panel(terminalView({ writable: false, hasOutputSurface: true, error: { code: "connection" }, errorSource: "input" })));
+  assert.match(inputLeaseUnavailable, /INPUT UNAVAILABLE/);
+  assert.equal(inputLeaseUnavailable.includes("TERMINAL ATTACH UNAVAILABLE"), false);
+  const inputConnectionLost = renderToStaticMarkup(panel(terminalView({ phase: "closed", writable: false, error: { code: "connection" }, errorSource: "input" })));
+  assert.match(inputConnectionLost, /TERMINAL INPUT CONNECTION LOST/);
+  assert.equal(inputConnectionLost.includes("ATTACHMENT REMAINS LIVE"), false);
+  const displayProblem = renderToStaticMarkup(panel(terminalView({ hasOutputSurface: true, error: { code: "internal" }, errorSource: "display" })));
+  assert.match(displayProblem, /TERMINAL DISPLAY ERROR/);
   const reset = renderToStaticMarkup(panel(terminalView({ resets: 1 })));
   assert.match(reset, /Earlier output is no longer retained/);
   const quiet = renderToStaticMarkup(panel());

@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { SessionError } from "@dark-factory/client";
+import { TerminalPanel } from "../../../packages/ui/dist/src/factory-app.js";
 import { createRoot } from "react-dom/client";
 import { FactoryApp, FactoryConsole, type FactoryConsoleProps } from "@dark-factory/ui";
 import "@dark-factory/ui/styles.css";
@@ -48,6 +50,9 @@ const fixtureChangedTopologies = new Map(fixtureHierarchyTopologies).set(fixture
 function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
   const crowded = fixture === "crowded";
+  const terminalFixture = fixture === "terminal";
+  const [inputRefused, setInputRefused] = useState(true);
+  const fixtureAgent = fixtureFloorState.agents.values().next().value!;
   const movement = fixture === "movement";
   const hierarchy = fixture === "hierarchy" || fixture === "movement";
   const [routeStep, setRouteStep] = useState(0);
@@ -55,10 +60,10 @@ function FixtureTour() {
   const [connected, setConnected] = useState(true);
   const [changedTopology, setChangedTopology] = useState(false);
   const [view, setView] = useState<FactoryConsoleProps["view"]>("floor");
-  const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>("needs-you");
+  const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>(terminalFixture ? "agent" : "needs-you");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>(terminalFixture ? { id: fixtureAgent.id, name: fixtureAgent.name, revision: fixtureAgent.revision } : undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
-  const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>();
   const [selectedHumanRequest, setSelectedHumanRequest] = useState<FactoryConsoleProps["selectedHumanRequest"]>();
   return (
     <>
@@ -74,6 +79,7 @@ function FixtureTour() {
         <button type="button" onClick={() => setConnected((value) => !value)}>TOGGLE CONNECTION</button>{" "}
         <button type="button" onClick={() => setChangedTopology((value) => !value)}>TOGGLE TOPOLOGY</button>
       </p>}
+      {!terminalFixture ? null : <p className="devFixtureBanner"><button type="button" onClick={() => setInputRefused((value) => !value)}>TOGGLE FIXTURE INPUT REFUSAL</button></p>}
       <FactoryConsole
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
@@ -87,6 +93,14 @@ function FixtureTour() {
         onDetail={setDetail}
         settingsOpen={settingsOpen}
         onToggleSettings={() => setSettingsOpen((open) => !open)}
+        terminalContent={!terminalFixture ? undefined : <TerminalPanel terminal={{
+          agentId: fixtureAgent.id, agentName: fixtureAgent.name, agentRevision: fixtureAgent.revision,
+          taskTitle: "Sanitised terminal input refusal", phase: "ready", writable: !inputRefused,
+          error: inputRefused ? new SessionError("connection") : undefined, errorSource: inputRefused ? "input" : undefined, hasOutputSurface: true,
+          paused: false, instructionPending: false, instructionDraft: "", historyPending: false,
+          taskDetailPending: false, controlReady: false, queued: false, finishing: false,
+          resets: 0, surfaceVersion: 0,
+        }}><pre className="devFixtureTerminal">{"FIXTURE OUTPUT — no provider connected\nRead-only output remains visible after input lease refusal."}</pre></TerminalPanel>}
         selectedAgent={selectedAgent}
         selectedHumanRequest={selectedHumanRequest}
         onSelectAgent={(agent) => {
