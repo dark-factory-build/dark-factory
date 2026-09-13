@@ -67,9 +67,9 @@ unsupported before a provider runs.
    provider availability becomes typed post-admission failure, never a stale
    scheduler filter.
 6. `dispatch_enabled` controls only new admission. An admitted run retains its
-   provider, optional model, and optional reasoning effort. V1 provider choice
-   is unrestricted interactive authority; no permission-profile field is
-   persisted or interpreted.
+   provider, optional model, and optional reasoning effort. Native providers retain operator account authority, while Codex local commands
+   use a launch-derived filesystem profile. No permission-profile field is
+   persisted or supplied by a task.
 7. No admitted attempt means no provider process or outcome request, and no
    writable source lease. A retry creates a new run and bearer; it never revives
    an old process or credential.

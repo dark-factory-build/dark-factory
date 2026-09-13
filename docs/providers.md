@@ -71,7 +71,7 @@ The native argv templates are:
 
 ```text
 claude --dangerously-skip-permissions [--model MODEL] [--effort EFFORT] --strict-mcp-config [--mcp-config '{"mcpServers":{"maintainer":{"command":"BRIDGE"}}}']
-codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen -c check_for_update_on_startup=false -c tool_output_token_limit=32768 -c 'projects={"CHANGE-DIRECTORY"={trust_level="untrusted"}}' [--model MODEL] [-c 'model_reasoning_effort="EFFORT"'] 'FIXED BOOTSTRAP INSTRUCTION'
+codex --strict-config --no-alt-screen -c check_for_update_on_startup=false -c tool_output_token_limit=32768 -c 'projects={"CHANGE-DIRECTORY"={trust_level="untrusted"}}' -c 'default_permissions="dark-factory"' -c 'approval_policy="never"' -c 'permissions.dark-factory=DERIVED-PROFILE' [--model MODEL] [-c 'model_reasoning_effort="EFFORT"'] 'FIXED BOOTSTRAP INSTRUCTION'
 ```
 
 Codex receives the daemon-authorized Change directory as an invocation-only
@@ -90,9 +90,23 @@ configuration explicitly:
 CODEX_HOME=<account-home>/.codex
 ```
 
-No provider API key is copied into the environment. The native process runs as
-the operator with unrestricted interactive authority and may use that account's
-normal configuration or Keychain access. Before a Claude Code launch the Change
+Codex local commands use a launch-derived permission profile: the Change,
+private runtime home and temp directory are writable; the exact provider
+executable, factoryctl, attempt token and socket are readable. Other file
+access is denied except Codex's minimal platform/runtime paths, including its
+temp exceptions. Command escalation is disabled. The whole named profile is
+replaced so an account profile cannot append extra workspace roots. The argv
+policy remains bounded by the runner's existing 8 KiB per-argument limit.
+
+This uses Codex permission-profile support tested with CLI0.154.0; strict config
+refuses unrecognized configuration rather than silently ignoring it. Account
+configuration and explicit model/effort choices remain intact. Network access
+is retained; this is a local-command filesystem boundary, not a network policy
+or a sandbox for the provider process, MCP servers or browser tools. Claude's
+existing launch has not gained this boundary.
+
+No provider API key is copied into the environment. The native process still
+runs as the operator and may use its normal account or Keychain access. Before a Claude Code launch the Change
 worker records the working directory as trusted in that account's
 `.claude.json`, the record the CLI's own folder-trust dialog writes; every
 Change is a path the CLI has never seen, and without the record the session

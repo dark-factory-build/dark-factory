@@ -288,7 +288,11 @@ func Build(request Request) (Launch, error) {
 			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryStartupTerminal,
 		}, nil
 	case kernel.ProviderCodex:
-		argv := []string{path, "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory)}
+		permissions, err := codexPermissions(request)
+		if err != nil {
+			return Launch{}, err
+		}
+		argv := []string{path, "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", `default_permissions="dark-factory"`, "-c", `approval_policy="never"`, "-c", permissions}
 		if request.model != "" {
 			argv = append(argv, "--model", request.model)
 		}
@@ -307,6 +311,26 @@ func Build(request Request) (Launch, error) {
 	default:
 		return Launch{}, ErrInvalid
 	}
+}
+
+// The provider keeps its account/model configuration, but local commands get
+// only the Change, disposable runtime paths and the attempt API inputs. Codex's
+// minimal platform profile still includes its documented system/temp exceptions.
+func codexPermissions(request Request) (string, error) {
+	entries := []string{`":root"="deny"`, `":minimal"="read"`}
+	for _, path := range []string{request.workingDirectory, request.runtime.home, request.runtime.temp} {
+		entries = append(entries, tomlBasicString(path)+`="write"`)
+	}
+	for _, path := range []string{request.installation.executable.Path(), request.runtime.factoryctl, request.runtime.token, request.runtime.socket} {
+		entries = append(entries, tomlBasicString(path)+`="read"`)
+	}
+	// Replace the whole named profile so a same-named account profile cannot
+	// add workspace roots or inherit a broader filesystem policy.
+	value := `permissions.dark-factory={filesystem={` + strings.Join(entries, ",") + `},network={enabled=true,unix_sockets={` + tomlBasicString(request.runtime.socket) + `="allow"}}}`
+	if len(value) > runner.MaxArgumentBytes {
+		return "", ErrInvalid
+	}
+	return value, nil
 }
 
 func codexUntrustedProjectConfig(path string) string {

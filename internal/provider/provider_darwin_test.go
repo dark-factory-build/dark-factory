@@ -261,7 +261,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Peer collaboration is asynchronous: use \"$DARK_FACTORY_FACTORYCTL\" attempt peer status to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail." + " " + discoveryInstructions},
+			wantArgv: []string{"/usr/bin/true", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Peer collaboration is asynchronous: use \"$DARK_FACTORY_FACTORYCTL\" attempt peer status to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail." + " " + discoveryInstructions},
 		},
 	}
 	for _, test := range tests {
@@ -279,7 +279,11 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			}
 			wantArgv := test.wantArgv
 			if test.kind == kernel.ProviderCodex {
-				wantArgv = slices.Replace(wantArgv, 8, 9, codexUntrustedProjectConfig(request.workingDirectory))
+				permissions, err := codexPermissions(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantArgv = slices.Replace(wantArgv, 8, 9, codexUntrustedProjectConfig(request.workingDirectory), "-c", `default_permissions="dark-factory"`, "-c", `approval_policy="never"`, "-c", permissions)
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -657,5 +661,27 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	}
 	if overseer.TaskDelivery() != TaskDeliveryAttemptAPI {
 		t.Fatal("overseer stopped reading the exact durable task")
+	}
+}
+
+func TestCodexPermissionsBoundReadsAndRejectOversizedPolicy(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
+	request.runtime.token += `-"quoted"`
+	policy, err := codexPermissions(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{`":root"="deny"`, `":minimal"="read"`, tomlBasicString(request.workingDirectory) + `="write"`, tomlBasicString(request.runtime.token) + `="read"`, tomlBasicString(request.runtime.socket) + `="allow"`} {
+		if !strings.Contains(policy, rule) {
+			t.Fatalf("policy omitted rule %q", rule)
+		}
+	}
+	if strings.Contains(policy, request.runtime.accountHome) || strings.Contains(policy, request.runtime.gitCeiling) {
+		t.Fatal("local commands were granted account or other Change access")
+	}
+	request.runtime.token = "/" + strings.Repeat(`"`, runner.MaxArgumentBytes)
+	if _, err := codexPermissions(request); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized policy error = %v", err)
 	}
 }
