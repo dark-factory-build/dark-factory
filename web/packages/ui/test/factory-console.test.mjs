@@ -567,6 +567,8 @@ test("Queue keeps running tasks visible without a second queue", () => {
   const markup = render({ detail: "queue" });
   assert.match(markup, /aria-label="Running tasks"/);
   assert.match(markup, /Briefs are editable while queued/);
+  const queuedOnly = baseState({ tasks: new Map([...fixtureState.tasks].filter(([, task]) => task.status === "queued")) });
+  assert.match(render({ detail: "queue", state: queuedOnly }), /Briefs are editable while queued/);
   assert.match(markup, /class="dfConsoleItem__taskTitle"/);
   assert.match(markup, /Review the state projection/);
   assert.equal((markup.match(/aria-label="Queue"/g) ?? []).length, 1, "one queue panel");
