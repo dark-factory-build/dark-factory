@@ -121,12 +121,12 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(first.includes(">STAGED</text>"), false);
   assert.match(first, /data-room-id="src"/);
   // The room subtitle carries the served size bucket, and nothing when the
-  // room stands for a project rather than a topology node.
+  // room stands for a project whose structure is unavailable.
   assert.match(first, />PACKAGE · MEDIUM</);
   assert.match(renderToStaticMarkup(createElement(FactoryScene, {
     topology: { digest: "d", nodes: [{ id: "p", parentId: "", path: "Project", label: "Project", kind: "repository" }] },
     workers: []
-  })), />REPOSITORY<\/text>/);
+  })), />STRUCTURE UNAVAILABLE<\/text>/);
   assert.match(first, /&lt;Shared &amp; Library…/);
   assert.equal(first.includes("�"), false);
   assert.equal((first.match(/data-worker-id=/g) ?? []).length, workers.length);
@@ -375,4 +375,36 @@ test("the committed sprite module is exactly what the generator writes", () => {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+test("stationary tasks expose affected areas and link the existing queue and questions", () => {
+  const tasks = Array.from({ length: 11 }, (_, index) => ({
+    id: `task-${index}`, agentId: "worker-b", projectId: "project",
+    title: index === 0 ? "<script>unsafe & title</script>" : `Task ${index}`,
+    status: index === 0 ? "running" : "queued",
+    roomIds: index === 0 ? ["lib", "src", "outside"] : [],
+    ...(index === 0 ? { representativeRoomId: "src" } : {}),
+    humanRequestIds: index === 0 ? ["question-1"] : [],
+  }));
+  const markup = render({ tasks, onSelectTask() {}, onOpenQueue() {}, onSelectHumanRequest() {} });
+  assert.equal((markup.match(/data-floor-queue=/g) ?? []).length, 1);
+  assert.equal((markup.match(/data-work-footprint=/g) ?? []).length, 2);
+  assert.match(markup, /Open queue, 10 tasks/);
+  assert.match(markup, /data-workbench-task-id="task-0"/);
+  assert.match(markup, /data-human-request-id="question-1"/);
+  assert.match(markup, /aria-label="Question from Builder"/);
+  assert.doesNotMatch(markup, /Work order|data-work-order-id/);
+  assert.match(markup, /role="button" tabindex="0"/);
+  assert.match(markup, /&lt;script&gt;unsafe &amp; title&lt;\/script&gt;/);
+  assert.doesNotMatch(markup, /<script>/);
+  const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
+  assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
+});
+
+
+test("queue selection picks the exact task sharing a representative workstation", () => {
+  const tasks = ["first", "second"].map((id) => ({ id, agentId: "worker-b", projectId: "project", title: id, status: "running", roomIds: ["src"], representativeRoomId: "src", humanRequestIds: [] }));
+  const markup = render({ tasks, selectedTaskId: "second", onSelectTask() {} });
+  assert.match(markup, /data-workbench-task-id="second"/);
+  assert.doesNotMatch(markup, /data-workbench-task-id="first"/);
 });

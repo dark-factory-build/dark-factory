@@ -202,7 +202,7 @@ test("the floor maps topology to rooms and agents to workers deterministically",
   assert.deepEqual(fallback.topology.nodes.map((node) => node.label), ["North Workshop", "South Workshop"]);
   assert.deepEqual(fallback.topology.nodes.map((node) => node.sizeBucket), [undefined, undefined]);
   assert.deepEqual(fallback.workers.map((worker) => worker.nodeId), [undefined, undefined, undefined]);
-  assert.deepEqual(floorScene(undefined, undefined), { topology: { digest: "", nodes: [] }, workers: [], omittedLocations: 0 });
+  assert.deepEqual(floorScene(undefined, undefined), { topology: { digest: "", nodes: [] }, workers: [], tasks: [], omittedLocations: 0 });
   // The size bucket, not a file count, is what the room subtitle carries.
   const markup = render({ topologies: fixtureTopologies });
   assert.match(markup, />kernel<\/text>/);
@@ -241,6 +241,105 @@ test("the floor maps topology to rooms and agents to workers deterministically",
   const omittedWorker = cappedLive.workers.find((worker) => worker.id === ids.agent);
   assert.equal(omittedWorker.location, "working");
   assert.notEqual(omittedWorker.nodeId, cappedLive.topology.nodes.find((node) => node.path === ".").id);
+  const omittedOrder = cappedLive.tasks.find((order) => order.id === cappedTask.id);
+  assert.deepEqual([omittedOrder.roomIds, omittedOrder.representativeRoomId], [[omittedWorker.nodeId], omittedWorker.nodeId]);
+  assert.equal(omittedOrder.roomIds.some((id) => cappedLive.topology.nodes.some((room) => room.id === id)), false);
+});
+
+test("floor tasks retain every served task and its exact observed footprint", () => {
+  const scene = floorScene(fixtureState, fixtureTopologies, new Map([[ids.agent, runSample(ids.agent, ["web", "internal/kernel/store"])]]));
+  const room = (path) => scene.topology.nodes.find((node) => node.path === path).id;
+  const kernel = room("internal/kernel");
+  const web = room("web");
+  assert.deepEqual(scene.tasks, [
+    {
+      id: ids.task,
+      agentId: ids.agent,
+      projectId: ids.project,
+      title: "Review the state projection",
+      status: "running",
+      roomIds: [kernel, web],
+      representativeRoomId: kernel,
+      humanRequestIds: [ids.request],
+    },
+    {
+      id: "32".repeat(16),
+      agentId: ids.idleAgent,
+      projectId: ids.secondProject,
+      title: "Tighten the queue ordering",
+      status: "queued",
+      roomIds: [],
+      humanRequestIds: [],
+    },
+    {
+      id: "33".repeat(16),
+      agentId: ids.idleAgent,
+      projectId: ids.project,
+      title: "Close the resize race",
+      status: "succeeded",
+      roomIds: [],
+      humanRequestIds: [],
+    },
+    {
+      id: "34".repeat(16),
+      agentId: ids.idleAgent,
+      projectId: ids.secondProject,
+      title: "Probe the flaky gate",
+      status: "failed",
+      roomIds: [],
+      humanRequestIds: [],
+    },
+  ]);
+  assert.deepEqual(scene.workers.find((worker) => worker.id === ids.agent).nodeId, kernel);
+});
+
+test("task footprints reject stale, retry, cancelled, terminal, and cross-project samples", () => {
+  const original = fixtureState.tasks.get(ids.task);
+  const sample = runSample(ids.agent, ["web"]);
+  const footprint = (task, candidate = sample) => floorScene(
+    baseState({ tasks: new Map([[task.id, task]]) }), fixtureTopologies, new Map([[ids.agent, candidate]]),
+  ).tasks[0];
+  for (const status of ["queued", "blocked", "succeeded", "failed", "cancelled"]) {
+    const order = footprint({ ...original, status });
+    assert.deepEqual([order.roomIds, order.representativeRoomId], [[], undefined], status);
+  }
+  const retry = { ...original, revision: original.revision + 1n };
+  assert.deepEqual([footprint(retry).roomIds, footprint(retry).representativeRoomId], [[], undefined]);
+  const crossProject = { ...original, project_id: ids.secondProject };
+  assert.deepEqual([footprint(crossProject, { ...sample, projectId: ids.secondProject }).roomIds, footprint(crossProject, { ...sample, projectId: ids.secondProject }).representativeRoomId], [[], undefined]);
+});
+
+test("tasks join requests only by exact task, agent, and project identity", () => {
+  const southTask = {
+    ...fixtureState.tasks.get(ids.task),
+    id: "30".repeat(16),
+    project_id: ids.secondProject,
+    assigned_agent_id: ids.orchestrator,
+    title: "Coordinate the south floor",
+    revision: 99n,
+  };
+  const request = fixtureState.humanRequests.get(ids.request);
+  const southRequest = { ...request, id: "40".repeat(16), task_id: southTask.id, agent_id: ids.orchestrator, project_id: ids.secondProject };
+  const requests = new Map([
+    [request.id, request],
+    [southRequest.id, southRequest],
+    ["42".repeat(16), { ...request, id: "42".repeat(16), task_id: southTask.id, agent_id: ids.agent, project_id: ids.secondProject }],
+    ["43".repeat(16), { ...request, id: "43".repeat(16), task_id: southTask.id, agent_id: ids.orchestrator, project_id: ids.project }],
+    ["44".repeat(16), { ...request, id: "44".repeat(16), task_id: ids.task, agent_id: ids.orchestrator, project_id: ids.project }],
+  ]);
+  const scene = floorScene(
+    baseState({ tasks: new Map([[ids.task, fixtureState.tasks.get(ids.task)], [southTask.id, southTask]]), humanRequests: requests }),
+    served(fixtureTopology, topologyFor(ids.secondProject, [["repository", ".", "large"]])),
+    new Map([
+      [ids.agent, runSample(ids.agent, ["web"])],
+      [ids.orchestrator, { taskId: southTask.id, taskRevision: southTask.revision, runId: "73".repeat(16), projectId: ids.secondProject, paths: ["."] }],
+    ]),
+  );
+  assert.deepEqual(scene.tasks.map((order) => [order.id, order.projectId, order.humanRequestIds]), [
+    [southTask.id, ids.secondProject, [southRequest.id]],
+    [ids.task, ids.project, [request.id]],
+  ]);
+  assert.deepEqual(scene.tasks[0].roomIds, [scene.topology.nodes.find((room) => room.project.id === ids.secondProject && room.path === ".").id]);
 });
 
 /**
@@ -719,7 +818,7 @@ test("the queued task row keeps served order and changes its exact priority", as
     const byLabel = (label) => buttons.find((button) => button.props["aria-label"] === label);
     const queueRows = renderer.root.findByProps({ "aria-label": "Queue" }).findAllByType("details").filter((row) => row.props.className === "dfConsoleItem");
     assert.deepEqual(queueRows.map((row) => row.findByType("strong").props.children), [queued.title, other.title], "the queue keeps the server's per-agent order, rather than re-sorting priority");
-    assert.ok(renderer.root.findAllByType("span").some((span) => (Array.isArray(span.props.children) ? span.props.children.join("") : String(span.props.children)).includes("2 TASKS · BY AGENT")));
+    assert.ok(renderer.root.findAllByType("p").some((paragraph) => paragraph.props.children === "Grouped by agent · no global start order"));
     assert.ok(renderer.root.findAllByType("span").some((span) => (Array.isArray(span.props.children) ? span.props.children.join("") : String(span.props.children)).includes("QUEUED · PRIORITY 2")));
     await act(async () => { byLabel(`Increase priority for ${queued.title}`).props.onClick(); });
     assert.deepEqual(edits.at(-1), [queued.id, { priority: queued.priority + 1 }]);
@@ -1235,7 +1334,8 @@ function expand(node, result = []) {
   }
   if (!isValidElement(node)) return result;
   if (typeof node.type === "function") {
-    if (node.type.name === "QueuePanel") return result;
+    // Stateful surfaces have their own renderer checks; this walk tests sibling intent callbacks.
+    if (["QueuePanel", "FactoryFloor"].includes(node.type.name)) return result;
     expand(node.type(node.props), result);
     return result;
   }
@@ -1521,4 +1621,63 @@ test("PAIRED DEVICES lists what the factory granted and revokes any device but t
   assert.match(empty, /PAIRED DEVICES/);
   assert.match(empty, /nothing paired/);
   assert.match(render({ settingsOpen: true, onToggleSettings: () => {}, remoteInviteAllowed: true, devicesError: "unauthorized" }), /DEVICES — UNAUTHORIZED/);
+});
+
+test("floor objects select the exact existing task detail and question route", async () => {
+  const loaded = [];
+  const questions = [];
+  const queueSelections = [];
+  const props = {
+    status: "ready", state: fixtureState, topologies: fixtureTopologies,
+    runPaths: new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/state.go"])]]),
+    onLoadTaskDetail: async (task) => {
+      loaded.push(task);
+      return { taskId: task.id, revision: task.revision, head: fixtureState.head, instruction: "Observed task detail", feedback: "", peerQuestions: [] };
+    },
+  };
+  function Harness({ state = fixtureState, editable = false }) {
+    const [selectedTaskId, setSelectedTaskId] = useState();
+    const [detail, setDetail] = useState("needs-you");
+    const [selectedHumanRequest, setSelectedHumanRequest] = useState();
+    return createElement(FactoryConsole, {
+      ...props,
+      state,
+      detail,
+      onDetail: setDetail,
+      selectedTaskId,
+      onSelectTask: (taskId) => { queueSelections.push(taskId); setSelectedTaskId(taskId); },
+      ...(editable ? { onEditTask: async () => true } : {}),
+      selectedHumanRequest,
+      onSelectHumanRequest: (request) => { questions.push(request); setSelectedHumanRequest(selectedRequest({ request, question: "Should the migration also cover the users table? The plan only names accounts." })); setDetail("needs-you"); },
+      onOpenQueue: () => setDetail("queue"),
+    });
+  }
+  let tree;
+  await act(async () => { tree = create(createElement(Harness)); });
+  const task = fixtureState.tasks.get(ids.task);
+  await act(async () => { tree.root.findByProps({ "data-workbench-task-id": task.id }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
+  assert.equal(loaded.length, 1);
+  assert.equal(loaded[0], task);
+  assert.deepEqual(queueSelections, [task.id]);
+  assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h2").children.join(""), `TASK · ${task.id.slice(0, 8)}`);
+  const running = tree.root.findByProps({ "aria-label": "Running tasks" }).findByType("button");
+  await act(async () => { running.props.onClick(); });
+  assert.deepEqual(queueSelections, [task.id, task.id]);
+  assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h2").children.join(""), `TASK · ${task.id.slice(0, 8)}`);
+  await act(async () => { tree.root.findByProps({ "data-floor-queue": "" }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Queue" }).length, 1, "queue remains one canonical panel");
+  assert.equal(tree.root.findAllByProps({ "data-floor-queue": "" }).length, 1);
+  const queuedTask = fixtureState.tasks.get("32".repeat(16));
+  await act(async () => { tree.update(createElement(Harness, { editable: true })); });
+  const queuedRow = tree.root.findAllByProps({ className: "dfConsoleItem__summary" }).find((row) => row.findAllByType("strong").some((strong) => strong.children.join("") === queuedTask.title));
+  await act(async () => { queuedRow.props.onClick({ preventDefault() {} }); });
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "editable queued work stays in its inline editor");
+  await act(async () => { tree.root.findByProps({ "data-human-request-id": ids.request }).props.onClick(); });
+  assert.equal(questions[0], fixtureState.humanRequests.get(ids.request));
+  assert.equal(tree.root.findByProps({ "aria-label": "Selected question" }).findByProps({ className: "dfFactoryConsole__question" }).children.join(""), "Should the migration also cover the users table? The plan only names accounts.");
+  const tasks = new Map(fixtureState.tasks);
+  tasks.delete(queuedTask.id);
+  await act(async () => { tree.update(createElement(Harness, { state: { ...fixtureState, tasks } })); });
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "removed work is not retained as invented history");
+  await act(async () => tree.unmount());
 });

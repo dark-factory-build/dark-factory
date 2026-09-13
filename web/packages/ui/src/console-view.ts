@@ -127,7 +127,20 @@ const MAX_FLOOR_ROOMS = 24;
 export type FloorScene = Readonly<{
   topology: SceneTopology;
   workers: readonly SceneWorker[];
+  tasks: readonly SceneTask[];
   omittedLocations: number;
+}>;
+
+/** A served task and its observed footprint, without inferring any execution detail. */
+export type SceneTask = Readonly<{
+  id: string;
+  agentId: string;
+  projectId: string;
+  title: string;
+  status: TaskItem["status"];
+  roomIds: readonly string[];
+  representativeRoomId?: string;
+  humanRequestIds: readonly string[];
 }>;
 
 /** One changed-path sample is tied to the task and provider run that produced it. */
@@ -165,13 +178,31 @@ export function floorScene(
   const rooms = [...roots, ...remaining].slice(0, MAX_FLOOR_ROOMS);
   const liveRooms = new Set<string>();
   const kept = new Set(rooms.map((room) => room.id));
+  const tasks = state === undefined ? [] : [...state.tasks.values()]
+    .sort((left, right) => compareText(left.id, right.id))
+    .map((task) => {
+      const footprint = runFootprint(blocksByProject.get(task.project_id) ?? [], matchingRunSample(state, task, runPaths));
+      return {
+        id: task.id,
+        agentId: task.assigned_agent_id,
+        projectId: task.project_id,
+        title: task.title,
+        status: task.status,
+        roomIds: footprint.roomIds,
+        ...(footprint.representativeRoomId === undefined ? {} : { representativeRoomId: footprint.representativeRoomId }),
+        humanRequestIds: [...state.humanRequests.values()]
+          .filter((request) => request.task_id === task.id && request.agent_id === task.assigned_agent_id && request.project_id === task.project_id)
+          .sort((left, right) => compareText(left.id, right.id))
+          .map((request) => request.id),
+      };
+    });
+  const workByTask = new Map(tasks.map((order) => [order.id, order]));
   const workers = state === undefined ? [] : [...state.agents.values()].map((agent) => {
     const task = agentCurrentTask(agent, state);
     const block = blocksByProject.get(agent.project_id) ?? [];
-    const sample = runPaths?.get(agent.id);
-    const live = task === undefined || sample?.taskId !== task.id || sample.taskRevision !== task.revision || sample.projectId !== agent.project_id || sample.runId === "" ? undefined : roomOfRunPaths(block, sample.paths);
+    const live = task === undefined ? undefined : workByTask.get(task.id)?.representativeRoomId;
     const previous = lastRunPaths?.get(agent.id);
-    const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? roomOfRunPaths(block, previous.paths) : undefined;
+    const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? runFootprint(block, previous).representativeRoomId : undefined;
     if (live !== undefined) liveRooms.add(live);
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
     const room = location === "working" ? allRooms.get(live!) : location === "last-observed" ? allRooms.get(last!) : undefined;
@@ -180,6 +211,7 @@ export function floorScene(
       name: agent.name,
       role: agent.role,
       provider: agent.provider,
+      ...(agent.appearance === undefined ? {} : { appearance: agent.appearance }),
       activity: agentActivity(agent, state),
       paused: agent.paused,
       location,
@@ -188,25 +220,45 @@ export function floorScene(
     };
   });
   const digest = projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ");
-  return { topology: { digest, nodes: rooms }, workers, omittedLocations: [...liveRooms].filter((id) => !kept.has(id)).length };
+  return { topology: { digest, nodes: rooms }, workers, tasks, omittedLocations: [...liveRooms].filter((id) => !kept.has(id)).length };
+}
+
+/** A live sample is evidence only for its exact running task and assigned agent. */
+function matchingRunSample(
+  state: StateView,
+  task: TaskItem,
+  runPaths: ReadonlyMap<string, RunPathSample> | undefined,
+): RunPathSample | undefined {
+  if (task.status !== "running") return undefined;
+  const project = state.projects.get(task.project_id);
+  if (project?.id !== task.project_id) return undefined;
+  const agent = state.agents.get(task.assigned_agent_id);
+  if (agent?.id !== task.assigned_agent_id || agent.project_id !== task.project_id) return undefined;
+  const sample = runPaths?.get(agent.id);
+  return sample?.taskId === task.id && sample.taskRevision === task.revision && sample.projectId === task.project_id && sample.runId !== ""
+    ? sample
+    : undefined;
 }
 
 /**
- * The room a live run's changed paths stand a worker in: each path picks the
- * deepest eligible room whose own path prefixes it (the root's "." prefixes
- * everything), and the room holding the most paths wins, ties going to the
- * room the floor sorts first. No paths means no answer and no move.
+ * Each changed path picks the deepest eligible room whose own path prefixes it
+ * (the root's "." prefixes everything). Every affected room is retained, while
+ * the room holding the most paths is the representative; ties use room order.
  */
-function roomOfRunPaths(rooms: readonly SceneNode[], paths: readonly string[]): string | undefined {
+function runFootprint(rooms: readonly SceneNode[], sample: RunPathSample | undefined): Readonly<{ roomIds: readonly string[]; representativeRoomId?: string }> {
   const counts = new Map<SceneNode, number>();
-  for (const path of paths) {
+  for (const path of sample?.paths ?? []) {
     const room = rooms
       .filter((candidate) => candidate.path === "." || path === candidate.path || path.startsWith(`${candidate.path}/`))
       .sort((left, right) => right.path.length - left.path.length)[0];
     if (room !== undefined) counts.set(room, (counts.get(room) ?? 0) + 1);
   }
-  return [...counts]
-    .sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || compareText(left.path, right.path))[0]?.[0].id;
+  const representativeRoomId = [...counts]
+    .sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || compareText(left.path, right.path) || compareText(left.id, right.id))[0]?.[0].id;
+  return {
+    roomIds: [...counts.keys()].sort((left, right) => compareText(left.path, right.path) || compareText(left.id, right.id)).map((room) => room.id),
+    ...(representativeRoomId === undefined ? {} : { representativeRoomId }),
+  };
 }
 
 /** Room size, largest first: past the cap the biggest rooms keep their tile. */

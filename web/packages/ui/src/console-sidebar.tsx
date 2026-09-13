@@ -208,14 +208,14 @@ function RecentWork({
             </li>)}</ol>
             {!hasMore ? null : <button type="button" disabled={pending} onClick={() => load(true)}>{pending ? "LOADING" : "SHOW MORE"}</button>}
           </nav>
-          {selected === undefined ? <p>{pending ? "Loading recent work…" : "No completed or blocked tasks."}</p> : <RecentWorkDetail key={`${selected.id}:${selected.revision}`} task={selected} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
+          {selected === undefined ? <p>{pending ? "Loading recent work…" : "No completed or blocked tasks."}</p> : <TaskDetail key={`${selected.id}:${selected.revision}`} task={selected} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
         </div>
       </div>
     </dialog>}
   </div>;
 }
 
-function RecentWorkDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
+export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
   task: TaskItem;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
@@ -265,7 +265,11 @@ export function QueuePanel({
   ready,
   onEditTask,
   onLoadTaskDetail,
+  selectedTaskId,
+  onSelectTask,
 }: {
+  selectedTaskId?: string;
+  onSelectTask?: (taskId: string) => void;
   state: StateView | undefined;
   edit?: FactoryEditView;
   ready: boolean;
@@ -281,19 +285,21 @@ export function QueuePanel({
     return assigned.length === 0 ? [] : [{ agent, tasks: assigned }];
   });
   return <section className="dfConsoleSidebar__panel" aria-label="Queue">
-    <div className="dfFactoryConsole__sectionHeading"><h2>QUEUE</h2><span>{state === undefined ? "—" : `${queued.reduce((count, group) => count + group.tasks.length, 0)} TASKS · BY AGENT`}</span></div>
+    <p className="dfConsoleItem__meta">Grouped by agent · no global start order</p>
     {state === undefined ? <p className="dfFactoryConsole__empty">WAITING FOR SNAPSHOT</p>
       : <>
         {running.length === 0 ? null : <section className="dfConsoleSidebar__section" aria-label="Running tasks">
           <h3>RUNNING</h3>
           <ul className="dfConsoleItems">{running.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
-            <span className="dfConsoleRow__title">{task.title}</span>
+            <button type="button" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
             <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · RUNNING</span>
           </div></li>)}</ul>
         </section>}
         {queued.length === 0 ? <p className="dfFactoryConsole__empty">THE QUEUE IS EMPTY</p> : <ul className="dfConsoleItems">{queued.flatMap(({ agent, tasks }) => {
           const peers = agents.filter((peer) => peer.project_id === agent.project_id);
           return tasks.map((task) => <QueuedTask
+              selected={selectedTaskId === task.id}
+              onSelectTask={onSelectTask}
               key={task.id}
               task={task}
               peers={peers}
@@ -418,6 +424,8 @@ function AgentConfig({
  */
 function QueuedTask({
   task,
+  selected,
+  onSelectTask,
   peers,
   pending,
   ready,
@@ -425,6 +433,8 @@ function QueuedTask({
   onLoadTaskDetail,
 }: {
   task: TaskItem;
+  selected?: boolean;
+  onSelectTask?: (taskId: string) => void;
   peers: readonly AgentItem[];
   pending: boolean;
   ready: boolean;
@@ -460,12 +470,12 @@ function QueuedTask({
     }
   };
   if (onEditTask === undefined) {
-    return <li className="dfConsoleItem"><p className="dfConsoleItem__summary">{task.title}</p></li>;
+    return <li className="dfConsoleItem"><button type="button" className="dfConsoleItem__summary" disabled={!ready || onSelectTask === undefined} aria-pressed={selected === true} onClick={() => onSelectTask?.(task.id)}>{task.title}</button></li>;
   }
   return (
     <li>
       <details className="dfConsoleItem" onToggle={(event) => { if (event.currentTarget.open && brief === undefined && !loading) void load(); }}>
-        <summary className="dfConsoleItem__summary"><strong>{task.title}</strong><span className="dfConsoleItem__meta">{peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
+        <summary className="dfConsoleItem__summary" onClick={() => onSelectTask?.(task.id)}><strong>{task.title}</strong><span className="dfConsoleItem__meta">{peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
         <div className="dfConsoleItem__detail">
         {open ? <>
           <label htmlFor={`df-title-${task.id}`}>TITLE</label>

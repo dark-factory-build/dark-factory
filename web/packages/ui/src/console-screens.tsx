@@ -1,4 +1,4 @@
-import type { AgentItem, StateView, TopologyView } from "@dark-factory/client";
+import type { AgentItem, HumanRequestItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
 import {
   STAGE_SEQUENCE,
   agentStatus,
@@ -121,14 +121,10 @@ export function StageMeter({ stage }: { stage: TaskStage }) {
   );
 }
 
-/** The floor shows live work locations and annotates retained observations. */
+/** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
-  state,
-  topologies,
-  runPaths,
-  lastRunPaths,
-  selectedAgentId,
-  onSelectAgent,
+  state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue,
 }: {
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
@@ -136,14 +132,27 @@ export function FactoryFloor({
   lastRunPaths?: ReadonlyMap<string, RunPathSample>;
   selectedAgentId?: string;
   onSelectAgent?: (agent: AgentItem) => void;
+  onOpenQueue?: () => void;
+  selectedTaskId?: string;
+  onSelectTask?: (taskId: string) => void;
+  onSelectHumanRequest?: (request: HumanRequestItem) => void;
 }) {
   const scene = floorScene(state, topologies, runPaths, lastRunPaths);
   return <div className="dfFactoryFloor">
+    <p className="dfFactoryFloor__provenance">Repository snapshot · observed changes are temporary.</p>
     <FactoryScene
       selectedWorkerId={selectedAgentId}
+      selectedTaskId={selectedTaskId}
       topology={scene.topology}
       workers={scene.workers}
+      tasks={scene.tasks}
       omittedLocations={scene.omittedLocations}
+      onSelectTask={onSelectTask}
+      onOpenQueue={onOpenQueue}
+      onSelectHumanRequest={onSelectHumanRequest === undefined || state === undefined ? undefined : (id) => {
+        const request = state.humanRequests.get(id);
+        if (request !== undefined) onSelectHumanRequest(request);
+      }}
       onSelectWorker={onSelectAgent === undefined || state === undefined ? undefined : (workerID) => {
         const agent = state.agents.get(workerID);
         if (agent !== undefined) onSelectAgent(agent);
