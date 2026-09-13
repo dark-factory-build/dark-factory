@@ -10,6 +10,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { PADDING, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { resolvedAppearance, spriteOptions, workerFrames } from "../../dist/src/factory-scene/appearance.js";
+import { pointOnRoute, routeBetween } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
 const topology = {
@@ -139,7 +140,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     const rendered = first.slice(first.indexOf(`data-worker-id="${worker.id}"`));
     const frame = rendered.slice(0, rendered.indexOf("</g>")).match(/href="#df-frame-([^"]+)"/g)
       .map((match) => match.slice('href="#df-frame-'.length, -1));
-    assert.deepEqual(frame, workerFrames(worker));
+    assert.deepEqual(frame, worker.location === "working" ? workerFrames(worker, { action: "interacting", frame: 0 }) : workerFrames(worker));
     for (const name of frame) assert.ok(name in spriteAtlas.frames, name);
   }
   assert.equal(first.includes("dfFactoryScene__alternate"), false);
@@ -323,8 +324,28 @@ test("every generated person layer is reachable, including fallbacks", () => {
   const fallback = { id: idForIdentity(2), name: "Fallback", role: "worker", provider: "unknown", activity: "debugging" };
   assert.match(workerFrames(fallback).at(-1), /person\.system\.worker\.shell\.idle/);
   for (const frame of workerFrames(fallback)) reached.add(frame);
+  for (const direction of ["north", "south", "east", "west"]) for (const frame of [0, 1]) {
+    for (const name of workerFrames(fallback, { action: "walking", direction, frame })) reached.add(name);
+  }
+  for (const frame of [0, 1]) for (const name of workerFrames(fallback, { action: "interacting", frame })) reached.add(name);
   const personFrames = Object.keys(spriteAtlas.frames).filter((name) => name.startsWith("person."));
   assert.deepEqual([...reached].sort(), personFrames.sort());
+});
+
+test("movement uses only room doors, corridors and standing points", () => {
+  const layout = layoutScene(topology);
+  const [source, destination] = placeWorkers(layout, [
+    { ...workers[0], id: "source", nodeId: "src" },
+    { ...workers[0], id: "destination", nodeId: "lib" },
+  ]);
+  const route = routeBetween(layout, source, destination);
+  assert.ok(route !== undefined && route.length > 0);
+  assert.deepEqual(pointOnRoute({ x: source.x, y: source.y }, route, route.length), { x: destination.x, y: destination.y });
+  const spine = layout.corridors.at(-1);
+  assert.equal(route.points[1].x, spine.x + spine.width / 2);
+  assert.equal(route.points[2].x, spine.x + spine.width / 2);
+  assert.equal(routeBetween(layout, { ...source, area: "staging" }, destination), undefined, "unknown staging never routes through rooms");
+  assert.equal(routeBetween(layout, source, { ...destination, area: "outside" }), undefined, "omitted rooms never gain an invented route");
 });
 
 // Nothing else runs the generator, so the shipped module could drift from it.
