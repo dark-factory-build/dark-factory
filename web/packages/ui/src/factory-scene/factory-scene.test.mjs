@@ -180,6 +180,13 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     topology: { digest: "d", nodes: [{ id: "p", parentId: "", path: "Project", label: "Project", kind: "repository" }] },
     workers: []
   })), />STRUCTURE UNAVAILABLE<\/text>/);
+  const compact = renderToStaticMarkup(createElement(FactoryScene, {
+    topology: { digest: "compact", nodes: [{ id: "p", path: ".", label: "Project", kind: "repository", sizeBucket: "large" }] },
+    workers: [], omittedLocations: 1,
+  }));
+  assert.match(compact, /max-width:448px/, "a one-room scope stays legible without poster-sized sprites");
+  assert.match(compact, /current locations not shown in this view/);
+  assert.equal(compact.includes("omitted by the room cap"), false);
   assert.match(first, /&lt;Shared &amp; Library…/);
   assert.equal(first.includes("�"), false);
   assert.equal((first.match(/data-worker-id=/g) ?? []).length, workers.length);

@@ -34,6 +34,10 @@ export type FactorySceneProps = Readonly<{
   connected?: boolean;
   /** Current changed locations omitted by the bounded room map. */
   omittedLocations?: number;
+  /** Served stable identities with children in the current hierarchy scope. */
+  enterableRoomIds?: readonly string[];
+  /** Presentation-only hierarchy navigation; it has no factory authority. */
+  onEnterRoom?: (roomId: string) => void;
   /** The selected agent is highlighted without changing its deterministic placement. */
   selectedWorkerId?: string;
   /** Pointer convenience only; the AGENTS list is the keyboard path. */
@@ -175,7 +179,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ topology, workers, omittedLocations = 0, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
+export function FactoryScene({ topology, workers, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
   const layout = useMemo(() => layoutScene(topology), [topology]);
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
   const positions = useSceneMotion(layout, placements, topology.digest, connected);
@@ -188,10 +192,11 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
   const boardTop = Math.max(layout.height, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneHeight = boardTop + (tasks.some((task) => task.status === "queued") ? 48 : 0) + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.roomIds.includes(room.id))]));
+  const enterable = new Set(enterableRoomIds);
   const queued = tasks.filter((order) => order.status === "queued").length;
-  // A wide column must not blow 16px frames up to poster size: the scene stops
-  // at three CSS pixels per sheet pixel and centres in whatever is left.
-  const maxWidth = layout.width * 3;
+  // A compact scope still needs room for readable labels, not poster-sized
+  // sprites; larger scopes retain their existing scrollable viewport.
+  const maxWidth = Math.min(640, layout.width * 2);
 
   return (
     <svg
@@ -202,7 +207,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
       style={{ display: "block", width: "100%", minWidth: layout.width, maxWidth, height: "auto", margin: "0 auto", background: "#08131d" }}
     >
       <title>Dark Factory codebase floor</title>
-      <desc>{`${layout.rooms.length} topology spaces, ${workers.length} workers${omittedLocations === 0 ? "" : `, ${omittedLocations} current locations omitted by the room cap`}`}</desc>
+      <desc>{`${layout.rooms.length} topology spaces, ${workers.length} workers${omittedLocations === 0 ? "" : `, ${omittedLocations} current locations not shown in this view`}`}</desc>
       <defs>
         {/* The sheet enters the document once; every frame is a window on it. */}
         <image id="df-sheet" href={spriteSheet} width={spriteSheetSize.width} height={spriteSheetSize.height} style={{ imageRendering: "pixelated" }} />
@@ -240,6 +245,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
         const footprint = affected.get(room.id) ?? [];
         const work = footprint.filter((order) => order.representativeRoomId === room.id);
         const task = work.find((order) => order.id === selectedTaskId) ?? work[0];
+        const canEnter = onEnterRoom !== undefined && enterable.has(room.id);
         return (
           <g key={room.id} data-room-id={room.id}>
             <title>{node.path}</title>
@@ -265,6 +271,10 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, selected
             <text x={room.x + 8} y={room.y + 34} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">
               {node.sizeBucket === undefined ? "STRUCTURE UNAVAILABLE" : `${node.kind.toUpperCase()} · ${node.sizeBucket.toUpperCase()}`}
             </text>
+            {!canEnter ? null : <g data-enter-room-id={room.id} {...sceneAction(() => onEnterRoom(room.id))} aria-label={`Enter ${node.label}`}>
+              <rect x={room.x + room.width - 48} y={room.y + room.height - 24} width="40" height="16" fill="#172b38" stroke="#80ddff" />
+              <text x={room.x + room.width - 28} y={room.y + room.height - 13} textAnchor="middle" fill="#80ddff" fontFamily="ui-monospace, monospace" fontSize="7">ENTER</text>
+            </g>}
           </g>
         );
       })}

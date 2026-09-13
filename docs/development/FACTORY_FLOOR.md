@@ -9,8 +9,8 @@ labelled; local screenshots are not deployed or connected-state proof. No animat
 | --- | --- | --- |
 | 1 | Connected project buildings, corridors, open doors, neutral workstations and reachable standing points; fixed topology membership/coordinates despite worker changes | Merged as `5afd73a2`; local desktop/phone and merge-group checks verified |
 | 2 | Existing task work objects, all observed affected areas, queued counts, HumanRequest attention, truthful outcomes and provenance | Merged as `e2c3a147652c0adb653fa6a161aa8e82044af8ad` (PR661) |
-| 3 | Browser-local elapsed-time waypoint movement, one clock, layered sprites, retarget/reconnect/visibility reconciliation and reduced motion | Clear row-corridor lane repair implemented; review/publication pending |
-| 4A | Bounded served-hierarchy navigation, breadcrumbs, discoverable off-scope activity and stable viewport | Pending checkpoint 3 merge |
+| 3 | Browser-local elapsed-time waypoint movement, one clock, layered sprites, retarget/reconnect/visibility reconciliation and reduced motion | Merged as `12a8ff4b5f178d08b8a403bd89a6c6097a77c85d` |
+| 4A | Bounded served-hierarchy navigation, breadcrumbs, discoverable off-scope activity and stable viewport | Implemented from checkpoint-3 merge `12a8ff4b5f178d08b8a403bd89a6c6097a77c85d`; host integration checked; exact-head review pending |
 | 4B | Bounded dependency evidence and compatibility; size-bucket footprints; contents from kind, language/composition, manifests, subcomponents and endpoints | Pending checkpoint 4A merge |
 | 5 | Inspect the resulting experience; close only evidenced observation gaps and document unknowns | Pending checkpoint 4B merge |
 
@@ -18,6 +18,32 @@ For 4B, footprint means coarse size, contents mean evidenced composition or
 responsibility, and connections mean observed relationships. Use a small set
 of deterministic footprints, never linear byte scaling or decoration that
 claims unmeasured quality, complexity or runtime activity.
+
+## Checkpoint 4A
+
+- Served source: checkpoint-3 merge `12a8ff4b5f178d08b8a403bd89a6c6097a77c85d`.
+- Replaces the root-plus-children projection with local, parent-ID-led project
+  and subsystem scopes. Breadcrumbs, Back and per-room Enter are browser-only;
+  selected task/detail routes, motion, atlas and geometry remain shared.
+- Each scope displays at most 24 rooms. Omitted children and active work beyond
+  the current scope are named; workers retain either their displayed location,
+  explicit outside-display placement, or unknown location.
+- Host inspected the actual production fixture at 1280×720 and 390×844:
+  repository landing, South's differently nested served IDs, one-level Back,
+  breadcrumbs and explicit off-screen work. Current screenshots are in the
+  task conversation. Saved `checkpoint4a-*.png` files include earlier revisions
+  and must not be presented as proof of this final revision.
+- Revision 3 reuses a valid served root as its project landing (only unavailable
+  structure gets the fallback room), rejects malformed parent cycles without
+  inventing links, makes Back one ancestor at a time, caps compact-scope scale,
+  and says activity is outside displayed rooms rather than outside a selected
+  hierarchy. `fixture=movement` now also carries the differently nested South
+  topology. The host replaced three skipped legacy tests with scope, identity,
+  worker-preservation and capacity assertions: all 433 web tests passed with
+  no skips, and full `local-ci.sh` passed. Logs are
+  `/private/tmp/subsystem-restored-{web-check,local-ci}.log`. A final cleanup
+  removes a duplicate room map and the obsolete synthetic-project branch;
+  its verification is recorded separately before publication.
 
 ## Checkpoint 1
 
@@ -109,7 +135,7 @@ workflow with zero active runs and a private backup. Web and relay are ready;
 schema remains version 10. Dispatch was already paused at preflight and was
 preserved. This runtime install does not deploy the hosted UI.
 
-Checkpoint 2 merged as `e2c3a147652c0adb653fa6a161aa8e82044af8ad` (PR661). Checkpoint 3 follows from its served source; its clear row-corridor lane repair remains subject to review and publication.
+Checkpoint 2 merged as `e2c3a147652c0adb653fa6a161aa8e82044af8ad` (PR661). Checkpoint 3, including the row-corridor clearance repair, merged as `12a8ff4b5f178d08b8a403bd89a6c6097a77c85d` (PR669).
 
 ### Follow-up dogfooding work
 
