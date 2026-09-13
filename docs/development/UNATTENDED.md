@@ -83,13 +83,6 @@ Needs You opens a sole request once; collapsing the row stays respected.
 Stop task ends its originating task. Keep the provider attempt alive for its
 answer. Ordinary terminal prose is not a human request.
 
-`scripts/factory-notify.py --once --home HOME --receipt RECEIPT` sends a
-content-free local macOS notification for new decisions and exhausted project
-allowances. macOS notification settings control presentation. The browser is
-the answer surface. A new automation failure also produces a content-free
-notification on the next scheduled observation; its private health receipt
-names the affected component. This does not send email, chat, or GitHub messages.
-
 ## Recovery and completion
 
 Run intake once before scheduling it. Its `--status` exposes durable receipts.
@@ -111,7 +104,7 @@ branch mismatch, and a five-minute drain timeout. It restores only its own
 pause through the same revision guard; an operator change wins. A failed
 refresh delays new source intake until the next successful pass.
 If a source supervisor reaches its duration limit while a human decision is
-unanswered, intake records `needs_operator_recovery` and sends one local alert.
+unanswered, intake records `needs_operator_recovery`.
 It does not repeat that task. Edit the source issue materially to create a new
 supervision event after resolving the decision.
 
@@ -121,7 +114,7 @@ from worker success, merge, a TCP socket, or an unchanged alias alone.
 
 ## Host scheduling and deployment
 
-`scripts/factory-autonomy.py CONFIG --once` runs attention checks and intake;
+`scripts/factory-autonomy.py CONFIG --once` runs source refresh and intake;
 optional `release_configs` paths run exact-default-head releases and enqueue
 one idempotent verified-delivery follow-up for the same project's overseer.
 Use `--plist` to generate a launchd StartInterval job. The generated job uses
@@ -131,7 +124,8 @@ serialize through a host lock, so their source-refresh and deployment hooks
 cannot overlap. Use the controller for scheduled work; direct maintenance
 hooks are operator tools.
 Each tick writes a mode-0600 `.autonomy.json` health receipt beside the intake
-journal, containing only component names and finite status codes.
+journal, containing only component names and finite status codes for bounded
+automation health diagnostics.
 For private repositories, optionally set `review_mirror_root` to an existing
 bare mirror at `ROOT/OWNER/REPOSITORY` whose `origin` is the configured HTTPS
 GitHub repository. Create it with `git clone --bare https://github.com/OWNER/REPOSITORY ROOT/OWNER/REPOSITORY` so it retains base history. The host fetches only the base and `refs/pull/N/head` into

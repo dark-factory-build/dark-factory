@@ -35,14 +35,12 @@ def validate_controller_config(config):
 
 def tick(config_path, config):
     scripts = Path(__file__).resolve().parent
-    # Notifications remain useful when GitHub or intake is unavailable.
     calls = [[sys.executable, str(scripts / 'factory-source-refresh.py'), str(config_path), '--once']]
     if 'review_mirror_root' in config:
         if not isinstance(config['review_mirror_root'], str) or not Path(config['review_mirror_root']).is_absolute():
             raise ValueError('review_mirror_root must be an absolute path')
         calls.append([sys.executable, str(scripts / 'factory-review-intake.py'), str(config_path), '--once'])
     calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
-    calls.append([sys.executable, str(scripts / 'factory-notify.py'), '--once', '--home', config['factory_home'], '--receipt', config['journal'] + '.notifications'])
     releases = config.get('release_configs', [])
     for release_config in releases:
         calls.append([sys.executable, str(scripts / 'factory-release.py'), release_config, '--latest', '--once'])

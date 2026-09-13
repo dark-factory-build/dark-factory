@@ -17,7 +17,6 @@ echo "local-ci: repository contract fixtures"
 node ./scripts/test-verification-profile.mjs
 ./scripts/test-cold-review.sh
 python3 ./scripts/test-factory-intake.py
-python3 ./scripts/test-factory-notify.py
 python3 ./scripts/test-factory-release.py
 python3 ./scripts/test-factory-autonomy.py
 python3 ./scripts/test-factory-delivery.py

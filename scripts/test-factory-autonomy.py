@@ -64,22 +64,21 @@ class AutonomyTest(unittest.TestCase):
             self.assertEqual([], list(home.iterdir()))
             self.assertFalse(Path(str(home.resolve()) + '.autonomy.lock').exists())
 
-    def test_notification_runs_even_if_intake_fails(self):
+    def test_intake_failure_is_retained_in_health(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
-        with patch.object(autonomy.subprocess, 'run', side_effect=[subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 1, '', 'GitHub unavailable'), subprocess.CompletedProcess([], 0, '{}', '')]) as run:
+        with patch.object(autonomy.subprocess, 'run', side_effect=[subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 1, '', 'GitHub unavailable')]) as run:
             result = autonomy.tick(Path('/private/tmp/config'), config)
         self.assertFalse(result[1]['ok'])
-        self.assertTrue(result[2]['ok'])
+        self.assertEqual(2, len(result))
         self.assertIn('factory-source-refresh.py', run.call_args_list[0].args[0][1])
 
     def test_launchd_results_do_not_retain_child_output(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
         secret = 'token=should-not-appear'
-        with patch.object(autonomy.subprocess, 'run', side_effect=[subprocess.CompletedProcess([], 1, secret, secret), subprocess.CompletedProcess([], 1, secret, secret)]):
+        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, secret, secret)):
             result = autonomy.tick(Path('/private/tmp/config'), config)
         self.assertEqual([{'component': 'factory-source-refresh', 'ok': False, 'error': 'exit_1'},
-                          {'component': 'factory-intake', 'ok': False, 'error': 'source_refresh_failed'},
-                          {'component': 'factory-notify', 'ok': False, 'error': 'exit_1'}], result)
+                          {'component': 'factory-intake', 'ok': False, 'error': 'source_refresh_failed'}], result)
 
     def test_health_receipt_is_private_and_finite(self):
         with tempfile.TemporaryDirectory() as directory:
