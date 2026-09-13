@@ -261,7 +261,7 @@ export function floorScene(
       ...(validScope === undefined ? {} : { scopeId: validScope }),
       ...(scope === undefined ? {} : { backScopeId: scope.parentId }),
       breadcrumbs: crumbs,
-      enterableIds: rooms.filter((room) => (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
+      enterableIds: rooms.filter((room) => room.id !== validScope && (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
       omittedChildren: Math.max(0, scopeChildren.length - roomLimit),
       outsideScopeActivity,
     },

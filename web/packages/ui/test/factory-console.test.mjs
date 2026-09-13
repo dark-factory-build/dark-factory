@@ -217,15 +217,17 @@ test("hierarchy navigation is bounded, identity-led, and leaves outside work dis
   const kernel = repositoryView.topology.nodes.find((node) => node.label === "kernel");
   assert.deepEqual(repositoryView.topology.nodes.map((node) => node.label), ["North Workshop", "kernel", "web"]);
   assert.ok(repositoryView.navigation.enterableIds.includes(kernel.id));
+  assert.ok(!repositoryView.navigation.enterableIds.includes(repository.id), "the current scope has no no-op Enter action");
   const nested = floorScene(fixtureState, fixtureTopologies, undefined, undefined, kernel.id);
   assert.deepEqual(nested.topology.nodes.map((node) => node.label), ["kernel", "store"]);
+  assert.ok(!nested.navigation.enterableIds.includes(kernel.id), "nested scopes also exclude their current room");
   assert.deepEqual(nested.navigation.breadcrumbs.map((crumb) => crumb.label), ["All projects", "North Workshop", "kernel"]);
   assert.equal(nested.navigation.backScopeId, repository.id, "Back is one level; breadcrumbs remain direct ancestor links");
 
   const misleading = served({ ...fixtureTopology, nodes: fixtureTopology.nodes.map((node) => ({ ...node, path: "unrelated", label: "same" })) });
   const misleadingRepository = floorScene(fixtureState, misleading, undefined, undefined,
     floorScene(fixtureState, misleading).topology.nodes.find((node) => node.project?.id === ids.project).id);
-  assert.equal(misleadingRepository.navigation.enterableIds.length, 2, "served parent ids, not labels or paths, make the room navigable");
+  assert.equal(misleadingRepository.navigation.enterableIds.length, 1, "served parent ids, not labels or paths, make the room navigable");
 
   const root = fixtureTopology.nodes[0];
   const topology = served({ ...fixtureTopology, nodes: [root, ...Array.from({ length: 30 }, (_, index) => ({ id: `${index}`.padStart(64, "0"), parent_id: root.id, kind: "directory", path: `path-${index}`, label: `Child ${index}`, language: "", size_bucket: "tiny" }))] });
