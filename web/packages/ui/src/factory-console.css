@@ -1071,3 +1071,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfRemote__factories { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dfRemote .dfConsoleStrip { flex-direction: row; align-items: center; }
 }
+
+.dfRoomDetails { margin-top: 1rem; padding: .75rem; border-top: 1px solid var(--df-border, #293c37); overflow-wrap: anywhere; font-size: .875rem; }
+.dfRoomDetails p, .dfRoomDetails ul { margin: .5rem 0; }
+.dfRoomDetails select { max-width: 100%; font: inherit; }
+.dfRoomDetails button { font: inherit; }

@@ -51,9 +51,9 @@ export type AgentSpriteProps = Readonly<{
 
 const FRAME = spriteAtlas.frame;
 
-function shortLabel(label: string) {
+function shortLabel(label: string, limit = 18) {
   const glyphs = [...label];
-  return glyphs.length > 18 ? `${glyphs.slice(0, 17).join("")}…` : label;
+  return glyphs.length > limit ? `${glyphs.slice(0, limit - 1).join("")}…` : label;
 }
 
 /** One 16px frame of the sheet, sized and placed in scene coordinates. */
@@ -180,6 +180,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
 
 /** A disposable SVG projection of topology and current factory state. */
 export function FactoryScene({ topology, workers, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
+  const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const layout = useMemo(() => layoutScene(topology), [topology]);
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
   const positions = useSceneMotion(layout, placements, topology.digest, connected);
@@ -194,11 +195,16 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.roomIds.includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
   const queued = tasks.filter((order) => order.status === "queued").length;
+  const selectedRoom = nodes.get(selectedRoomId ?? "");
+  const selectedGeometry = layout.rooms.find((room) => room.id === selectedRoom?.id);
+  const links = selectedRoom?.dependencies?.links ?? [];
+  const shownLinks = links.slice(0, 8);
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
   const maxWidth = Math.min(640, layout.width * 2);
 
   return (
+    <>
     <svg
       viewBox={`0 0 ${layout.width} ${sceneHeight}`}
       role="group"
@@ -239,6 +245,14 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
         </text>
       ))}
 
+      {selectedGeometry === undefined ? null : shownLinks.map((link) => {
+        const other = layout.rooms.find((room) => room.id === link.nodeId);
+        if (other === undefined) return null;
+        const source = link.direction === "to" ? selectedGeometry : other;
+        const target = link.direction === "to" ? other : selectedGeometry;
+        return <path key={`${link.direction}:${link.nodeId}`} data-static-dependency="" d={`M${source.x + source.width / 2},${source.y - 6} H${target.x + target.width / 2} V${target.y - 6}`} fill="none" stroke="#beacff" strokeWidth="1.5" strokeDasharray="4 4" pointerEvents="none"><title>{`Static dependency: ${nodes.get(source.id)?.label} → ${nodes.get(target.id)?.label}`}</title></path>;
+      })}
+
       {layout.rooms.map((room) => {
         const node = nodes.get(room.id);
         if (node === undefined) return null;
@@ -253,21 +267,27 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
             <rect x={room.x} y={room.y} width={room.width} height={FRAME} fill="url(#df-wall)" />
             <path data-room-walls="" d={`M${room.door.x - 16},${room.door.y} H${room.x} V${room.y} H${room.x + room.width} V${room.door.y} H${room.door.x + 16}`} fill="none" stroke="#638095" strokeWidth="4" />
             {footprint.length === 0 ? null : <rect data-work-footprint={room.id} x={room.x + 5} y={room.y + 39} width={room.width - 10} height={room.height - 46} fill="#d8a94c" fillOpacity="0.10" stroke={footprint.some((order) => order.id === selectedTaskId) ? "#80ddff" : "#d8a94c"} strokeDasharray="3 3"><title>{`Observed changed area for ${footprint.length} running task(s): ${footprint.map((order) => order.id.slice(0, 8)).join(", ")}`}</title></rect>}
-            {footprint.length === 0 ? null : <text x={room.x + room.width - 8} y={room.y + 52} textAnchor="end" fill="#f0c777" fontFamily="ui-monospace, monospace" fontSize="8">CHANGED</text>}
+            {footprint.length === 0 ? null : <text x={room.x + room.width - 8} y={room.y + 44} textAnchor="end" fill="#f0c777" fontFamily="ui-monospace, monospace" fontSize="8">CHANGED</text>}
             {work.length === 0 ? null : <g
               data-workbench-task-id={task!.id}
               {...sceneAction(onSelectTask === undefined ? undefined : () => onSelectTask(task!.id))}
               aria-label={`Task ${task!.id.slice(0, 8)}: ${task!.title}; representative area${work.length > 1 ? `; ${work.length - 1} more running tasks in the queue panel` : ""}`}
             >
               <title>{task!.title}</title>
-              <rect x={room.x + 8} y={room.y + 43} width="60" height="27" fill="#d9d2b5" stroke="#a6a087" />
-              <text x={room.x + 12} y={room.y + 54} fill="#253441" fontSize="8" fontFamily="ui-monospace, monospace">{task!.id.slice(0, 8)}</text>
-              <text x={room.x + 12} y={room.y + 65} fill="#253441" fontSize="7" fontFamily="ui-monospace, monospace">{work.length === 1 ? "RUNNING" : `+${work.length - 1} RUNNING`}</text>
+              <rect x={room.x + 8} y={room.door.y - 20} width="40" height="14" fill="#d9d2b5" stroke="#a6a087" />
+              <text x={room.x + 11} y={room.door.y - 10} fill="#253441" fontSize="6" fontFamily="ui-monospace, monospace">{task!.id.slice(0, 8)}</text>
             </g>}
             <Frame name="tile.workstation" x={room.workstation.x} y={room.workstation.y} />
+            {room.furnishings.map((item) => <g key={item.kind} data-room-content={item.kind}><title>{item.label}</title>
+              <Frame name={item.kind === "board" ? "tile.board" : "tile.cabinet"} x={item.x} y={item.y} />
+              {item.kind !== "connections" ? null : <text x={item.x + 8} y={item.y + 8} textAnchor="middle" fontSize="8" fill="#beacff">↔</text>}
+            </g>)}
+            <g {...sceneAction(() => setSelectedRoomId(room.id))} aria-label={`Inspect ${node.label}`}>
+
             <text x={room.x + 8} y={room.y + 18} fill="#f2f6f8" fontFamily="ui-monospace, monospace" fontSize="11" fontWeight="700">
-              {shortLabel(node.label)}
+              {shortLabel(node.label, Math.floor((room.width - 16) / 7))}
             </text>
+            </g>
             <text x={room.x + 8} y={room.y + 34} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">
               {node.sizeBucket === undefined ? "STRUCTURE UNAVAILABLE" : `${node.kind.toUpperCase()} · ${node.sizeBucket.toUpperCase()}`}
             </text>
@@ -278,6 +298,8 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
           </g>
         );
       })}
+
+
 
       <Area label={`RESTING AREA · ${resting.length}`} width={layout.width - ROOM_LEFT - PADDING} top={layout.restingTop - 28} bottom={Math.max(layout.restingTop + 24, ...resting.map((placement) => placement.y + 24))} />
       {staging.length === 0 ? null : <Area label={`UNKNOWN LOCATION · ${staging.length}`} width={layout.width - ROOM_LEFT - PADDING} top={staging[0]!.y - 28} bottom={Math.max(...staging.map((placement) => placement.y + 24))} />}
@@ -332,7 +354,27 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
       </g>}
 
     </svg>
-
+    <section className="dfRoomDetails" aria-label="Room details">
+      <label>Room <select aria-label="Inspect room" value={selectedRoom?.id ?? ""} onChange={(event) => setSelectedRoomId(event.target.value || undefined)}>
+        <option value="">Select a room</option>
+        {layout.rooms.map((room) => <option key={room.id} value={room.id}>{nodes.get(room.id)?.label}</option>)}
+      </select></label>
+      {selectedRoom === undefined ? null : <>
+        <p><strong>{selectedRoom.label}</strong> · {selectedRoom.path}</p>
+        <p>{selectedRoom.kind} · {selectedRoom.sizeBucket ?? "size unavailable"} · {selectedRoom.language || "composition unavailable"}{selectedRoom.childCount === undefined ? "" : ` · ${selectedRoom.childCount} served children`}</p>
+        <p>{selectedRoom.dependencies === undefined ? "Dependencies unavailable from this daemon." : "Partial static evidence: resolved local Go imports and package-manifest dependencies. Dashed lines are code relationships."}</p>
+        {selectedRoom.dependencies === undefined ? null : <>
+          {links.length === 0 ? <p>No relationships observed in the supplied sample.</p> : <ul>{shownLinks.map((link) => <li key={`${link.direction}:${link.nodeId}`}>
+            {link.direction === "to" ? "Depends on " : "Used by "}
+            <button type="button" disabled={onEnterRoom === undefined && !nodes.has(link.nodeId)} onClick={() => { setSelectedRoomId(link.nodeId); if (!nodes.has(link.nodeId)) onEnterRoom?.(link.nodeId); }}>{link.label}</button>
+            {nodes.has(link.nodeId) ? "" : " · outside view"} · {link.path}
+          </li>)}</ul>}
+          {links.length <= shownLinks.length ? null : <p>{links.length - shownLinks.length} more relationships in this room's supplied sample.</p>}
+          {selectedRoom.dependencies.omitted === 0 ? null : <p>{selectedRoom.dependencies.omitted} project relationships omitted from the supplied topology.</p>}
+        </>}
+      </>}
+    </section>
+    </>
   );
 }
 

@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -582,5 +583,36 @@ func TestBrowserClientsListNewestFirstAndRevokeOthersOnly(t *testing.T) {
 	}
 	if _, err := observer.backend.RevokeBrowserClient(ctx, rawBrowserClient(observer.client.ID), browserprotocol.BrowserClientRevoke{ClientID: phone.ID.String(), ExpectedRevision: 2}); !errors.Is(err, browser.ErrUnauthorized) {
 		t.Fatalf("revoke without administration = %v", err)
+	}
+}
+
+func TestProjectTopologyBoundsDependencyEvidence(t *testing.T) {
+	root := topology.Node{ID: strings.Repeat("a1", 32), Kind: topology.NodeRepository, RelativePath: ".", Label: "repository", SizeBucket: "small"}
+	snapshot := topology.Snapshot{Digest: strings.Repeat("ab", 32), Nodes: []topology.Node{root}}
+	for i := 0; i < browserprotocol.MaxTopologyEdges+4; i++ {
+		node := topology.Node{ID: fmt.Sprintf("%064x", i+1), ParentID: root.ID, Kind: topology.NodePackage, RelativePath: fmt.Sprintf("p%d", i), Label: "package", SizeBucket: "small"}
+		snapshot.Nodes = append(snapshot.Nodes, node)
+		snapshot.Edges = append(snapshot.Edges, topology.Edge{From: root.ID, To: node.ID, Kind: topology.EdgeImports, Weight: 2})
+	}
+	snapshot.Edges = append(snapshot.Edges, topology.Edge{From: root.ID, To: strings.Repeat("ff", 32), Kind: topology.EdgeImports, Weight: 1})
+	result := projectTopology("01010101010101010101010101010101", snapshot)
+	if result.Dependencies == nil || len(result.Dependencies.Edges) != browserprotocol.MaxTopologyEdges || result.Dependencies.Omitted != 5 {
+		t.Fatalf("bounded dependencies: %+v", result.Dependencies)
+	}
+	if _, err := browserprotocol.EncodeTopology("topology", result); err != nil {
+		t.Fatal(err)
+	}
+	edge := result.Dependencies.Edges[0]
+	result.Dependencies.Edges = append(result.Dependencies.Edges[:1:1], edge)
+	if _, err := browserprotocol.EncodeTopology("topology", result); err == nil {
+		t.Fatal("duplicate relationship accepted")
+	}
+	result.Dependencies.Edges = []browserprotocol.TopologyEdge{{From: root.ID, To: strings.Repeat("ff", 32), Weight: 1}}
+	if _, err := browserprotocol.EncodeTopology("topology", result); err == nil {
+		t.Fatal("foreign endpoint accepted")
+	}
+	result.Dependencies = nil
+	if _, err := browserprotocol.EncodeTopology("topology", result); err != nil {
+		t.Fatalf("legacy topology rejected: %v", err)
 	}
 }

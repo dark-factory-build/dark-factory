@@ -1634,3 +1634,22 @@ test("floor objects select the exact existing task detail and question route", a
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0, "removed work is not retained as invented history");
   await act(async () => tree.unmount());
 });
+
+test("dependency projection keeps served identity, hidden endpoints and project boundaries", () => {
+  const mirrored = new Map(fixtureTopologies).set(ids.secondProject, { ...fixtureTopology, projectId: ids.secondProject });
+  const rootID = `${ids.project}:${fixtureTopology.nodes[0].id}`;
+  const view = floorScene(fixtureState, mirrored, undefined, undefined, rootID);
+  const kernel = view.topology.nodes.find((node) => node.path === "internal/kernel");
+  assert.equal(kernel.language, "go");
+  assert.equal(kernel.childCount, 1);
+  assert.equal(kernel.dependencies.omitted, 1);
+  const store = kernel.dependencies.links.find((link) => link.direction === "to");
+  assert.equal(store.nodeId, `${ids.project}:${fixtureTopology.nodes[3].id}`);
+  assert.equal(view.topology.nodes.some((node) => node.id === store.nodeId), false, "hidden endpoints retain their exact identity");
+  assert.ok(kernel.dependencies.links.every((link) => link.nodeId.startsWith(`${ids.project}:`)), "matching node hashes in another project never cross-link");
+  const legacy = new Map([[ids.project, { ...fixtureTopology, dependencies: undefined }]]);
+  assert.equal(floorScene(fixtureState, legacy, undefined, undefined, rootID).topology.nodes[0].dependencies, undefined);
+  const hostile = new Map([[ids.project, { ...fixtureTopology, dependencies: { ...fixtureTopology.dependencies,
+    edges: [{ from: fixtureTopology.nodes[1].id, to: "foreign", weight: 1 }] } }]]);
+  assert.deepEqual(floorScene(fixtureState, hostile, undefined, undefined, rootID).topology.nodes.find((node) => node.id === kernel.id).dependencies.links, []);
+});

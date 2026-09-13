@@ -130,7 +130,7 @@ function assertRouteGeometry(layout, start, route, message) {
 test("the pure scene model feeds a deterministic SVG renderer", () => {
   const layout = layoutScene(topology);
   assert.deepEqual(layout, layoutScene({ ...topology, nodes: [...topology.nodes].reverse() }));
-  assert.deepEqual(Object.keys(layout.rooms[0]).sort(), ["door", "height", "id", "standing", "width", "workstation", "x", "y"]);
+  assert.equal(layout.rooms[0].furnishings.length, 0, "unknown composition does not invent room contents");
 
   for (const room of layout.rooms) {
     assert.ok(room.door.y === room.y + room.height && room.door.x > room.x && room.door.x < room.x + room.width);
@@ -140,7 +140,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     assert.ok(layout.corridors.some((corridor) => room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width && room.door.y >= corridor.y && room.door.y <= corridor.y + corridor.height), `door ${room.id} reaches a corridor`);
   }
   for (const count of [1, 4, 24]) {
-    const many = { digest: `${count}`, nodes: Array.from({ length: count }, (_, index) => ({ id: `room-${index}`, parentId: "", path: `room-${index}`, label: `Room ${index}`, kind: "directory", sizeBucket: "medium" })) };
+    const many = { digest: `${count}`, nodes: Array.from({ length: count }, (_, index) => ({ id: `room-${index}`, parentId: "", path: `room-${index}`, label: `Room ${index}`, kind: "directory", sizeBucket: ["empty", "tiny", "small", "medium", "large"][index % 5] })) };
     const connected = layoutScene(many);
     assert.equal(corridorReachability(connected), true, `${count} rooms remain reachable from the spine`);
     for (const room of connected.rooms) {
@@ -157,6 +157,14 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     project: { id: `p-${index % 2}`, name: `Project ${index % 2}` },
   })) });
   assert.equal(corridorReachability(multi), true, "multi-project rooms remain reachable from the spine");
+
+  const buckets = ["empty", "tiny", "small", "medium", "large"];
+  const sized = layoutScene({ digest: "sizes", nodes: buckets.map((sizeBucket) => ({ id: sizeBucket, path: sizeBucket, label: sizeBucket, kind: "directory", sizeBucket })) });
+  const areas = buckets.map((bucket) => { const room = sized.rooms.find((room) => room.id === bucket); return room.width * room.height; });
+  assert.equal(areas[0], areas[1], "empty and tiny rooms stay compact");
+  assert.ok(areas[1] < areas[2] && areas[2] < areas[3] && areas[3] < areas[4]);
+  assert.ok(areas[4] <= areas[0] * 3, "one large component cannot dominate the map");
+  assert.equal(corridorReachability(sized), true, "mixed footprints share reachable doorway edges");
 
   const placements = placeWorkers(layout, workers);
   assert.deepEqual(placements, placeWorkers(layout, [...workers].reverse()));
@@ -184,10 +192,11 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     topology: { digest: "compact", nodes: [{ id: "p", path: ".", label: "Project", kind: "repository", sizeBucket: "large" }] },
     workers: [], omittedLocations: 1,
   }));
-  assert.match(compact, /max-width:448px/, "a one-room scope stays legible without poster-sized sprites");
+  const compactWidth = Number(compact.match(/viewBox="0 0 (\d+)/)[1]);
+  assert.ok(Number(compact.match(/max-width:(\d+)px/)[1]) <= compactWidth * 2, "a one-room scope caps sprite magnification");
   assert.match(compact, /current locations not shown in this view/);
   assert.equal(compact.includes("omitted by the room cap"), false);
-  assert.match(first, /&lt;Shared &amp; Library…/);
+  assert.match(first, /&lt;Shared &amp; Library/);
   assert.equal(first.includes("�"), false);
   assert.equal((first.match(/data-worker-id=/g) ?? []).length, workers.length);
   assert.equal((first.match(/data-worker-location=/g) ?? []).length, workers.length);
@@ -626,4 +635,45 @@ test("queue selection picks the exact task sharing a representative workstation"
   const markup = render({ tasks, selectedTaskId: "second", onSelectTask() {} });
   assert.match(markup, /data-workbench-task-id="second"/);
   assert.doesNotMatch(markup, /data-workbench-task-id="first"/);
+});
+
+
+test("evidenced furnishings have clear interaction positions in every footprint", () => {
+  const rich = { digest: "contents", nodes: ["empty", "tiny", "small", "medium", "large"].map((sizeBucket) => ({
+    id: sizeBucket, parentId: "", path: sizeBucket, label: sizeBucket, kind: "package", sizeBucket,
+    language: "go", childCount: 2, dependencies: { omitted: 0, links: [{ nodeId: "other", label: "Other", path: "other", direction: "to", weight: 1 }] },
+  })) };
+  const layout = layoutScene(rich);
+  assert.equal(corridorReachability(layout), true);
+  for (const room of layout.rooms) {
+    assert.deepEqual(room.furnishings.map((item) => item.kind), ["board", "connections"]);
+    const objects = [room.workstation, ...room.furnishings].map((item) => ({ ...item, width: 16, height: 16 }));
+    for (const item of room.furnishings) {
+      const passage = { x: Math.min(item.standing.x, room.standing.x) - 8, y: room.standing.y - 8,
+        width: Math.abs(item.standing.x - room.standing.x) + 16, height: 16 };
+      assert.equal(item.standing.y, room.standing.y);
+      assert.ok(passage.x >= room.x + 4 && passage.x + passage.width <= room.x + room.width - 4);
+      assert.ok(objects.every((object) => !overlaps(object, passage)), "every interaction joins the doorway route without crossing furniture");
+    }
+  }
+});
+
+test("room inspection distinguishes bounded static evidence, hidden endpoints and unavailable support", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const links = Array.from({ length: 10 }, (_, index) => ({ nodeId: `hidden-${index}`, label: `Hidden ${index}`, path: `area-${index}`, direction: "to", weight: 1 }));
+  const evidenced = { ...topology, nodes: topology.nodes.map((node, index) => index === 0 ? { ...node, dependencies: { omitted: 3, links } } : node) };
+  const entered = [];
+  let renderer;
+  await act(async () => { renderer = create(createElement(FactoryScene, { topology: evidenced, workers: [], onEnterRoom: (id) => entered.push(id) })); });
+  const select = () => renderer.root.findByProps({ "aria-label": "Inspect room" });
+  await act(async () => { select().props.onChange({ target: { value: "repo" } }); });
+  const details = () => renderer.root.findByProps({ "aria-label": "Room details" });
+  assert.ok(details().findAllByType("p").some((p) => typeof p.props.children === "string" && p.props.children.startsWith("Partial static evidence")));
+  const buttons = details().findAllByType("button");
+  assert.equal(buttons.length, 8, "the selected neighbourhood remains bounded");
+  await act(async () => { buttons[0].props.onClick(); });
+  assert.deepEqual(entered, ["hidden-0"], "hidden endpoint navigation uses its served identity");
+  await act(async () => { select().props.onChange({ target: { value: "lib" } }); });
+  assert.ok(details().findAllByType("p").some((p) => p.props.children === "Dependencies unavailable from this daemon."));
+  await act(async () => { renderer.unmount(); });
 });

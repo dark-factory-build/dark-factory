@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -504,6 +505,32 @@ func projectTopology(projectID string, snapshot topology.Snapshot) browserprotoc
 			ID: node.ID, ParentID: node.ParentID, Kind: string(node.Kind), Path: node.RelativePath,
 			Label: node.Label, Language: node.Language, SizeBucket: node.SizeBucket,
 		})
+	}
+	dependencies := &browserprotocol.TopologyDependencies{Source: "go-imports-package-manifests", Edges: []browserprotocol.TopologyEdge{}}
+	for _, edge := range snapshot.Edges {
+		if edge.Kind == topology.EdgeImports {
+			dependencies.Omitted++
+		}
+	}
+	result.Dependencies = dependencies
+	// Reserve the control envelope; never grow the existing 1 MiB topology cap.
+	base, _ := json.Marshal(result)
+	remaining := browserprotocol.MaxSnapshotBytes - len(base) - 512
+	seen := make(map[[2]string]bool)
+	for _, edge := range snapshot.Edges {
+		pair := [2]string{edge.From, edge.To}
+		if edge.Kind != topology.EdgeImports || !servable(edge.From) || !servable(edge.To) || edge.From == edge.To || edge.Weight == 0 || seen[pair] {
+			continue
+		}
+		observed := browserprotocol.TopologyEdge{From: edge.From, To: edge.To, Weight: edge.Weight}
+		encoded, _ := json.Marshal(observed)
+		if len(dependencies.Edges) == browserprotocol.MaxTopologyEdges || len(encoded)+1 > remaining {
+			continue
+		}
+		dependencies.Edges = append(dependencies.Edges, observed)
+		dependencies.Omitted--
+		seen[pair] = true
+		remaining -= len(encoded) + 1
 	}
 	return result
 }

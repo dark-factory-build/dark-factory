@@ -380,6 +380,24 @@ test("console edits and topology carry exact bodies and correlate their results"
   const topology = await topologyPending;
   assert.equal(topology.digest, "ab".repeat(32));
   assert.deepEqual(topology.nodes, [node]);
+  assert.equal(topology.dependencies, undefined, "old daemon support remains unknown");
+  const child = { ...node, id: "cd".repeat(32), parent_id: node.id, path: "child", label: "child" };
+  const dependencies = { source: "go-imports-package-manifests", edges: [{ from: node.id, to: child.id, weight: 2 }], omitted: 3 };
+  const observedPending = session.getTopology(projectId);
+  const observedFrame = decodeClientControl(socket.sent.at(-1));
+  const observedBody = { project_id: projectId, digest: "ab".repeat(32), source_revision: "", nodes: [node, child], dependencies };
+  socket.reply(encodeServerControl({ type: "TOPOLOGY", id: observedFrame.id, body: observedBody }));
+  const observed = await observedPending;
+  assert.deepEqual(observed.dependencies, dependencies);
+  assert.ok(Object.isFrozen(observed.dependencies.edges[0]));
+  for (const invalid of [
+    { ...dependencies, edges: [{ from: node.id, to: "ef".repeat(32), weight: 1 }] },
+    { ...dependencies, edges: [dependencies.edges[0], dependencies.edges[0]] },
+    { ...dependencies, edges: Array.from({ length: 257 }, () => dependencies.edges[0]) },
+    { ...dependencies, omitted: -1 },
+    { ...dependencies, source: "runtime-traffic" },
+  ]) assert.throws(() => decodeServerControl(JSON.stringify({ type: "TOPOLOGY", id: "invalid", body: { ...observedBody, dependencies: invalid } })), "invalid relationship evidence is rejected");
+
 
   // An agent with no live run answers with no run identity and no rooms.
   const idlePending = session.getRunPaths(agentId);
