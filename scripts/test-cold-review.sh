@@ -141,7 +141,7 @@ grep -q '^exec$' "$args" || fail "default reviewer is not Codex exec"
 grep -q -- '--ephemeral' "$args" || fail "Codex review persists a session"
 grep -q -- '--ignore-user-config' "$args" || fail "Codex review inherits user MCP configuration"
 grep -q -- '--strict-config' "$args" || fail "Codex review permits an unsupported Maintainer allowlist"
-for feature in computer_use browser_use; do
+for feature in computer_use browser_use plugins; do
     awk -v feature="$feature" '$0 == feature && previous == "--disable" { found=1 } { previous=$0 } END { exit !found }' "$args" || fail "Codex review leaves $feature enabled"
 done
 approval_policy='approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=true,request_permissions=false,skill_approval=false}}'

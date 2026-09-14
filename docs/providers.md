@@ -102,8 +102,24 @@ This uses Codex permission-profile support tested with CLI0.154.0; strict config
 refuses unrecognized configuration rather than silently ignoring it. Account
 configuration and explicit model/effort choices remain intact. Network access
 is retained; this is a local-command filesystem boundary, not a network policy
-or a sandbox for the provider process, MCP servers or browser tools. Claude's
-existing launch has not gained this boundary.
+or a sandbox for the provider process or MCP servers. Factory Codex launches
+and cold reviews disable Codex computer use, browser use and inherited plugins:
+plugins can start desktop helpers even when the two built-in tools are disabled.
+This does not modify the operator's personal Codex configuration. Explicit MCP
+servers, including the Maintainer bridge, remain separate capabilities.
+Claude's existing launch has not gained the local-command filesystem boundary.
+
+Browser verification can run as ordinary project test code, independently of
+Codex desktop tools. Reuse the Playwright pattern in
+`scripts/verify-live-browser.mjs`: a dedicated browser profile, explicit target,
+and browser cleanup. Worker checks should use disposable profiles inside their
+private runtime and the checkout's installed test dependencies. They must not
+reuse personal browser profiles, scan the home directory for dependencies, or
+request desktop automation/media permissions. If browser binaries or dependencies
+are unavailable within the worker's readable paths, report that prerequisite to
+the host; the existing operator-owned browser check remains available. The hosted
+connected-console check pairs an authorized operator browser and is not authority
+for an arbitrary worker to access the live factory.
 
 No provider API key is copied into the environment. The native process still
 runs as the operator and may use its normal account or Keychain access. Before a Claude Code launch the Change
