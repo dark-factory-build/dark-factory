@@ -109,6 +109,10 @@ This does not modify the operator's personal Codex configuration. Explicit MCP
 servers, including the Maintainer bridge, remain separate capabilities.
 Claude's existing launch has not gained the local-command filesystem boundary.
 
+Codex launches also ignore personal configuration, including notification hooks;
+account authentication still uses the selected `CODEX_HOME`. Factory-owned MCP
+servers and command permissions are supplied explicitly at launch.
+
 ## Run-scoped browser tools
 
 An operator can install `scripts/dark-factory-browser-mcp.py` as the executable
