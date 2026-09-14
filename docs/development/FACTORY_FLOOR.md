@@ -81,3 +81,12 @@ scene tests and CI-environment tests pass. The follow-up PR records final
 exact-head CI and independent review.
 This follow-up has production delta +2; screenshots at 1280x720 and 390x844
 show the actual labelled fixture, not a deployed or connected factory.
+
+Browser follow-up (#705): local fixture proof uses the real component at
+1280x720 and 390x844 with two isolated Playwright MCP sessions. Evidence is in
+ignored `run-browser-current/`; no hosted or connected-factory claim. #704 merged
+as `87a2d2c5692336d030b86ff5ad128255ca078c04`, but its installed worker still
+started computer-use helpers through a personal Codex `notify` hook. The factory
+was stopped and dispatch disabled. #705 ignores personal Codex configuration,
+keeps the overseer's Maintainer explicit, and adds the optional run browser.
+Final installed-worker proof and restoration of supervision remain pending.
