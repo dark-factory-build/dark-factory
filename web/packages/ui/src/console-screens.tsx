@@ -11,7 +11,6 @@ import {
   selectFloor,
   projectFloor,
   stageMeterFill,
-  stageOfTask,
   type RunPathSample,
   type TaskStage,
 } from "./console-view.js";
@@ -48,9 +47,7 @@ export function AgentStrip({
         ) : (
           [...state.agents.values()].filter((agent) => !agent.archived).map((agent) => {
             const activity = agentStatus(agent, state);
-            const task = agentCurrentTask(agent, state);
-            const phase =
-              activity === "working" && task !== undefined ? stageOfTask(task) : activity;
+            const phase = activity;
             const cell = (
               <>
                 <span className="dfConsoleStrip__glyph" aria-hidden="true">
@@ -105,6 +102,7 @@ function Counter({ glyph, label, alert }: { glyph: string; label: string; alert?
 /** Segments fill only from durable task status. */
 export function StageMeter({ stage }: { stage: TaskStage }) {
   const filled = stageMeterFill(stage);
+  const marker = stage === "succeeded" ? "done" : stage;
   return (
     <span className="dfStageMeter" role="img" aria-label={`stage: ${stage}`}>
       {STAGE_SEQUENCE.map((name, index) => (
@@ -115,10 +113,10 @@ export function StageMeter({ stage }: { stage: TaskStage }) {
         />
       ))}
       <span
-        className={`dfStageMeter__terminal${stage === "blocked" ? " dfStageMeter__terminal--blocked" : ""}${stage === "done" ? " dfStageMeter__terminal--done" : ""}${stage === "failed" ? " dfStageMeter__terminal--failed" : ""}`}
+        className={`dfStageMeter__terminal${marker === "blocked" ? " dfStageMeter__terminal--blocked" : ""}${marker === "done" ? " dfStageMeter__terminal--done" : ""}${marker === "failed" ? " dfStageMeter__terminal--failed" : ""}`}
         aria-hidden="true"
       >
-        {stage === "blocked" ? "!" : stage === "done" ? "✓" : stage === "failed" ? "×" : ""}
+        {marker === "blocked" ? "!" : marker === "done" ? "✓" : marker === "failed" ? "×" : marker === "cancelled" ? "−" : ""}
       </span>
     </span>
   );
@@ -297,7 +295,7 @@ export function QueueScreen({ state }: { state: StateView | undefined }) {
   const queued =
     state === undefined
       ? undefined
-      : [...state.tasks.values()].filter((task) => stageOfTask(task) === "queued");
+      : [...state.tasks.values()].filter((task) => task.status === "queued");
   return (
     <section className="dfFactoryConsole__section" aria-label="Queue">
       <div className="dfFactoryConsole__sectionHeading">

@@ -1517,3 +1517,19 @@ test("archive and paused restore retain selection, draft and readable completed 
   assert.equal(context.calls.filter((call) => call.kind === "update-agent").length, 2);
   context.controller.close();
 });
+
+test("an archived selection keeps its configuration without resolving stale running work", async () => {
+  const archived = { ...agent, archived: true, paused: true };
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready(stateAt(fixtureState.head, { agents: new Map(fixtureState.agents).set(agent.id, archived) }));
+  context.controller.selectAgent(archived);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort() {} });
+  await flush();
+  assert.equal(context.latest().selectedAgent.id, archived.id);
+  assert.equal(context.latest().terminal.phase, "idle");
+  assert.equal(context.calls.some((call) => call.kind === "resolve"), false);
+  context.controller.close();
+});

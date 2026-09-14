@@ -5,7 +5,7 @@ import { createElement, isValidElement, useEffect, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { MAX_SNAPSHOT_ENTITIES, MAX_TASK_PRIORITY, ProtocolError, SessionError } from "@dark-factory/client";
-import { FactoryApp, FactoryConsole, floorScene } from "../dist/src/index.js";
+import { FactoryApp, FactoryConsole, StageMeter, floorScene } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { FactoryFloor } from "../dist/src/console-screens.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
@@ -1947,4 +1947,16 @@ test("oversized direct topology falls back before traversing any node", () => {
   const scene = floorScene(fixtureState, served({ ...fixtureTopology, nodes }));
   assert.equal(visited, 0);
   assert.deepEqual(scene.topology.nodes.filter((node) => node.project?.id === ids.project).map((node) => [node.id, node.parentId, node.sizeBucket]), [[ids.project, undefined, undefined]]);
+});
+
+test("public task meter accepts canonical statuses and keeps cancellation distinct", () => {
+  const meter = (stage) => renderToStaticMarkup(createElement(StageMeter, { stage }));
+  assert.match(meter("cancelled"), /stage: cancelled/);
+  assert.match(meter("cancelled"), /−/);
+  assert.doesNotMatch(meter("cancelled"), /terminal--failed/);
+  assert.match(meter("failed"), /terminal--failed/);
+  assert.match(meter("succeeded"), /terminal--done/);
+  assert.equal((meter("running").match(/segment--filled/g) ?? []).length, 2);
+  assert.equal(meter("building").replace("stage: building", "stage: running"), meter("running"));
+  assert.equal(meter("done").replace("stage: done", "stage: succeeded"), meter("succeeded"));
 });

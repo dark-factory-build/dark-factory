@@ -28,7 +28,7 @@ test("every durable task status maps to exactly one console stage", () => {
   assert.equal(stageOfTask(task("blocked")), "blocked");
   assert.equal(stageOfTask(task("succeeded")), "done");
   assert.equal(stageOfTask(task("failed")), "failed");
-  assert.equal(stageOfTask(task("cancelled")), "failed");
+  assert.equal(stageOfTask(task("cancelled")), "cancelled");
 });
 
 test("meter fill is monotonic along the stage sequence, full for done, empty for failed", () => {
@@ -40,6 +40,9 @@ test("meter fill is monotonic along the stage sequence, full for done, empty for
   }
   assert.equal(stageMeterFill("done"), STAGE_SEQUENCE.length);
   assert.equal(stageMeterFill("failed"), 0);
+  assert.equal(stageMeterFill("cancelled"), 0);
+  assert.equal(stageMeterFill("succeeded"), stageMeterFill("done"));
+  assert.equal(stageMeterFill("running"), stageMeterFill("building"));
 });
 
 test("agent activity precedence: an open question outranks work, pause outranks waiting", () => {
@@ -50,6 +53,7 @@ test("agent activity precedence: an open question outranks work, pause outranks 
   const noRequests = { ...state, humanRequests: new Map() };
   assert.equal(agentActivity(state.agents.get(agentID), noRequests), "busy");
   assert.equal(agentCurrentTask(state.agents.get(agentID), state)?.status, "running");
+  assert.equal(agentCurrentTask({ ...state.agents.get(agentID), archived: true }, state), undefined);
 
   const blockedTask = task("blocked");
   const blocked = { ...noRequests, tasks: new Map([[blockedTask.id, blockedTask]]) };
