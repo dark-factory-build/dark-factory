@@ -283,7 +283,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 10, 11, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true}`)
+				wantArgv = slices.Replace(wantArgv, 10, 11, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -372,7 +372,7 @@ func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
 				var found bool
 				for i, arg := range args {
 					if kind == kernel.ProviderCodex && strings.HasPrefix(arg, "mcp_servers.factory_browser=") {
-						found = strings.Contains(arg, tomlBasicString(runtime.temp)) && strings.Contains(arg, "required=true") && strings.Contains(arg, `env_vars=["DARK_FACTORY_FACTORYCTL","DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"]`)
+						found = strings.Contains(arg, tomlBasicString(runtime.temp)) && strings.Contains(arg, "required=true") && strings.Contains(arg, `env_vars=["DARK_FACTORY_FACTORYCTL","DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"]`) && strings.Contains(arg, `default_tools_approval_mode="approve"`)
 					}
 					if kind == kernel.ProviderClaudeCode && arg == "--mcp-config" {
 						var config struct {
@@ -710,8 +710,11 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal(err)
 	}
 	workerArgs, overseerArgs := worker.Argv(), overseer.Argv()
-	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.maintainer={command=") {
+	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.dark_factory_maintainer={command=") {
 		t.Fatal("overseer lost its explicit Maintainer tools")
+	}
+	if strings.Contains(strings.Join(workerArgs, " "), "mcp_servers.dark_factory_maintainer=") {
+		t.Fatal("worker was granted publication tool approvals")
 	}
 	if strings.Contains(workerArgs[len(workerArgs)-1], "overseer status") {
 		t.Fatal("worker was given overseer authority instructions")
@@ -724,6 +727,18 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	}
 	if overseer.TaskDelivery() != TaskDeliveryAttemptAPI {
 		t.Fatal("overseer stopped reading the exact durable task")
+	}
+}
+
+func TestCodexPermissionsDoNotRepeatSharedWorkingDirectory(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
+	for _, cwd := range []string{runtime.home, runtime.temp} {
+		request.workingDirectory = cwd
+		policy, err := codexPermissions(request)
+		if err != nil || strings.Count(policy, tomlBasicString(cwd)+`="write"`) != 1 {
+			t.Fatalf("duplicate working directory makes an invalid TOML table: %s (%v)", policy, err)
+		}
 	}
 }
 

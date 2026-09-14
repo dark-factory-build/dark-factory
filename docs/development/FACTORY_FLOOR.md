@@ -110,3 +110,19 @@ stdio tool exposes the existing attempt/overseer argv through the same parser
 and authenticated API, without operator commands or shell execution. Codex
 uses this tool for task retrieval and durable outcomes. No daemon wire protocol,
 authority, registry or provider observation changes. Installed proof is pending.
+
+#707 merged as `d36c2cb23bf8b4387af680bb791dbd5abd2848bb`; installed source
+`9bb51b6ed99487d837f59c0ef85e7c15f0550d2c` exposes the task tool. The real CLI
+requires explicit tool approval despite `approval_policy=never`; both workers
+were stopped after that refusal. The overseer also had duplicate TOML write
+keys because its working directory is its runtime home. The follow-up deduplicates
+those paths and authorizes only the factory tool, configured run browser and
+overseer Maintainer server. Codex reuses the established Maintainer server name.
+No broader filesystem or daemon authority is granted. Installed proof is pending.
+
+The process audit additionally found and closed one verified orphan shell from a
+cancelled worker. Its cleanup investigation is task `909f8419cd6147b7bd7bb53c6ea5a9af`,
+awaiting the tool-approval fix. `subsystem-visual` worktree removal was refused by
+filesystem permissions; residual files and its branch remain. See ignored
+`orphan-shell-closure.json` and `subsystem-cleanup-refusal.json`; do not claim
+all worktree cleanup or detached-command cleanup is complete.
