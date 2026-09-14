@@ -1700,13 +1700,13 @@ test("mobile navigation switches presentation without mutating work", () => {
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
   const buttons = expand(nav).filter((element) => element.type === "button");
   assert.equal(buttons[0].props["aria-pressed"], true);
-  buttons[1].props.onClick();
+  buttons[2].props.onClick();
   assert.deepEqual(calls, ["queue"]);
   assert.equal(elements.find((element) => element.type === "main").props["data-mobile-view"], "floor");
 });
 
 
-test("mobile Floor restores the floor after Agents and Tasks", async () => {
+test("mobile Floor and Agents tabs track both directions and restore after Tasks", async () => {
   let tree;
   function Harness() {
     const [view, setView] = useState("agents");
@@ -1720,6 +1720,15 @@ test("mobile Floor restores the floor after Agents and Tasks", async () => {
   assert.equal(tree.root.findByType(FactoryConsole).props.view, "floor");
   assert.equal(tree.root.findByType(FactoryConsole).props.detail, "floor");
   assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
+  await act(async () => { nav.findAllByType("button")[1].props.onClick(); });
+  assert.equal(tree.root.findByType(FactoryConsole).props.view, "agents");
+  assert.equal(nav.findAllByType("button")[0].props["aria-pressed"], false);
+  assert.equal(nav.findAllByType("button")[1].props["aria-pressed"], true);
+  await act(async () => { nav.findAllByType("button")[2].props.onClick(); });
+  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "detail");
+  await act(async () => { nav.findAllByType("button")[1].props.onClick(); });
+  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
+  assert.equal(nav.findAllByType("button")[1].props["aria-pressed"], true);
   await act(async () => tree.unmount());
 });
 
