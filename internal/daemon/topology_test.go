@@ -14,7 +14,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func TestProjectTopologyUsesProjectRootAndRegenerableProjectCache(t *testing.T) {
+func TestProjectTopologyUsesMemoryFreshnessWithoutDiskCache(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	writeTopologyFixture(t, root, "go.mod", "module example.com/project\n")
@@ -39,19 +39,20 @@ func TestProjectTopologyUsesProjectRootAndRegenerableProjectCache(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	cacheRoot := t.TempDir()
-	first, err := daemon.projectTopology(ctx, projectID, cacheRoot)
+	// A cache directory cannot be resolved, but topology remains available.
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	if _, err := os.UserCacheDir(); err == nil {
+		t.Fatal("fixture unexpectedly has a user cache directory")
+	}
+	first, err := daemon.ProjectTopology(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
-	}
-	cacheFile := filepath.Join(cacheRoot, "topology", projectID.String(), "snapshot.json")
-	if _, err := os.Stat(cacheFile); err != nil {
-		t.Fatalf("project-keyed cache: %v", err)
 	}
 	writeTopologyFixture(t, root, "two/two.go", "package two\n")
 	// Inside the freshness window the walk is not repeated, so the answer is
 	// the one already computed even though the tree moved underneath it.
-	held, err := daemon.projectTopology(ctx, projectID, cacheRoot)
+	held, err := daemon.ProjectTopology(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,7 @@ func TestProjectTopologyUsesProjectRootAndRegenerableProjectCache(t *testing.T) 
 		t.Fatal("topology re-walked the tree inside its freshness window")
 	}
 	clock = clock.Add(topologyFreshness)
-	second, err := daemon.projectTopology(ctx, projectID, cacheRoot)
+	second, err := daemon.ProjectTopology(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +75,7 @@ func TestProjectTopologyUsesProjectRootAndRegenerableProjectCache(t *testing.T) 
 		t.Fatal("topology request mutated authoritative state")
 	}
 	missing, _ := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x52}, kernel.IDBytes))
-	if _, err := daemon.projectTopology(ctx, missing, cacheRoot); !errors.Is(err, kernel.ErrNotFound) {
+	if _, err := daemon.ProjectTopology(ctx, missing); !errors.Is(err, kernel.ErrNotFound) {
 		t.Fatalf("missing project error = %v", err)
 	}
 }

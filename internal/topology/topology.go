@@ -50,8 +50,6 @@ type Snapshot struct {
 	SourceRevision string `json:"source_revision,omitempty"`
 	Nodes          []Node `json:"nodes"`
 	Edges          []Edge `json:"edges"`
-
-	fingerprint string
 }
 
 type Node struct {
@@ -78,16 +76,6 @@ type limits struct {
 
 var defaultLimits = limits{depth: maxDepth, files: maxFiles, nodes: maxNodes, edges: maxEdges, bytes: maxBytes}
 
-type fileFact struct {
-	Path string `json:"path"`
-	Size int64  `json:"size"`
-}
-
-type manifestFact struct {
-	Path string `json:"path"`
-	Body []byte `json:"body"`
-}
-
 type goPackage struct {
 	names, imports map[string]uint32
 }
@@ -101,8 +89,7 @@ type languageFile struct{ dir, language string }
 
 type discovery struct {
 	dirs      map[string]int64
-	files     []fileFact
-	manifests []manifestFact
+	files     int
 	modules   map[string]string
 	goPkgs    map[string]*goPackage
 	jsPkgs    map[string]jsPackage
@@ -121,12 +108,11 @@ type analysis struct {
 	imports  map[pathEdge]uint32
 }
 
-// Build scans root without running project commands. A previous snapshot from
-// this package is returned unchanged when its structural fingerprint matches.
+// Build scans root without running project commands.
 // project salts every node id, so two projects holding the same path are
 // never served the same id.
-func Build(ctx context.Context, root, project string, previous *Snapshot) (Snapshot, error) {
-	return build(ctx, root, project, previous, defaultLimits)
+func Build(ctx context.Context, root, project string) (Snapshot, error) {
+	return build(ctx, root, project, defaultLimits)
 }
 
 // NodeForPath returns the deepest topology node containing relativePath.
@@ -149,7 +135,7 @@ func NodeForPath(snapshot Snapshot, relativePath string) (Node, bool) {
 	return best, bestDepth >= 0
 }
 
-func build(ctx context.Context, root, project string, previous *Snapshot, bounds limits) (Snapshot, error) {
+func build(ctx context.Context, root, project string, bounds limits) (Snapshot, error) {
 	found, err := discover(ctx, root, bounds)
 	if err != nil {
 		return Snapshot{}, err
@@ -158,17 +144,13 @@ func build(ctx context.Context, root, project string, previous *Snapshot, bounds
 	if err != nil {
 		return Snapshot{}, err
 	}
-	fingerprint := fingerprint(found, analyzed)
 	revision := sourceRevision(root)
 	nodes, edges, err := graph(found, analyzed, project, bounds.nodes, bounds.edges)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	result := Snapshot{SourceRevision: revision, Nodes: nodes, Edges: edges, fingerprint: fingerprint}
+	result := Snapshot{SourceRevision: revision, Nodes: nodes, Edges: edges}
 	result.Digest = graphDigest(nodes, edges)
-	if previous != nil && previous.fingerprint == fingerprint && previous.SourceRevision == revision && previous.Digest == result.Digest && graphDigest(previous.Nodes, previous.Edges) == previous.Digest {
-		return *previous, nil
-	}
 	return result, nil
 }
 
@@ -248,14 +230,14 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 		if depth(rel) > bounds.depth {
 			return bound("depth", bounds.depth)
 		}
-		if len(result.files) == bounds.files {
+		if result.files == bounds.files {
 			return bound("file count", bounds.files)
 		}
 		if fileInfo.Size() > bounds.bytes-total {
 			return bound("byte count", bounds.bytes)
 		}
 		total += fileInfo.Size()
-		result.files = append(result.files, fileFact{rel, fileInfo.Size()})
+		result.files++
 		dir := path.Dir(rel)
 		result.dirs[dir] += fileInfo.Size()
 		switch strings.ToLower(path.Ext(rel)) {
@@ -280,12 +262,10 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 			return err
 		}
 		if base == "go.mod" {
-			result.manifests = append(result.manifests, manifestFact{rel, body})
 			result.modules[dir] = moduleName(body)
 			return nil
 		}
 		if base == "package.json" {
-			result.manifests = append(result.manifests, manifestFact{rel, body})
 			result.jsPkgs[dir] = parseJSPackage(body)
 			return nil
 		}
@@ -461,34 +441,6 @@ func graph(found *discovery, analyzed analysis, project string, nodeLimit, edgeL
 		return edges[i].From < edges[j].From || edges[i].From == edges[j].From && (edges[i].To < edges[j].To || edges[i].To == edges[j].To && edges[i].Kind < edges[j].Kind)
 	})
 	return nodes, edges, nil
-}
-
-func fingerprint(found *discovery, analyzed analysis) string {
-	type packageInput struct{ Path, Label, Language string }
-	type importInput struct {
-		From, To string
-		Weight   uint32
-	}
-	input := struct {
-		Directories []string
-		Files       []fileFact
-		Manifests   []manifestFact
-		Packages    []packageInput
-		Imports     []importInput
-	}{Directories: keys(found.dirs), Files: found.files, Manifests: found.manifests}
-	sort.Slice(input.Files, func(i, j int) bool { return input.Files[i].Path < input.Files[j].Path })
-	sort.Slice(input.Manifests, func(i, j int) bool { return input.Manifests[i].Path < input.Manifests[j].Path })
-	for dir, pkg := range analyzed.packages {
-		input.Packages = append(input.Packages, packageInput{dir, pkg.label, language(pkg)})
-	}
-	for edge, weight := range analyzed.imports {
-		input.Imports = append(input.Imports, importInput{edge.from, edge.to, weight})
-	}
-	sort.Slice(input.Packages, func(i, j int) bool { return input.Packages[i].Path < input.Packages[j].Path })
-	sort.Slice(input.Imports, func(i, j int) bool {
-		return input.Imports[i].From < input.Imports[j].From || input.Imports[i].From == input.Imports[j].From && input.Imports[i].To < input.Imports[j].To
-	})
-	return digest("dark-factory/topology/fingerprint/v1\x00", input)
 }
 
 func parseJSPackage(body []byte) jsPackage {

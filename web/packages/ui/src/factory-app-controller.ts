@@ -241,7 +241,6 @@ export class FactoryAppController {
   #terminalSurfaceToken: object | undefined;
   #terminalDisplayError: SessionError | undefined;
   #terminalSurfaceVersion = 0;
-  #terminalGeneration = 0;
   #terminalResetBurst = 0;
   #terminalRetry: { head: bigint; stale: boolean } | undefined;
   #terminalReplacement: TerminalReplacement | undefined;
@@ -1088,7 +1087,6 @@ export class FactoryAppController {
     const session = this.#client?.session;
     const stateAgent = selected === undefined ? undefined : this.#state?.agents.get(selected.agent.id);
     if (this.#closed || this.#status !== "ready" || selected === undefined || selected.task === undefined || selected.finishing || surface === undefined || session === undefined || stateAgent === undefined || stateAgent.revision !== selected.agent.revision || this.#state?.head !== selected.head || this.#terminalRetry?.head === selected.head || this.#terminal !== undefined) return;
-    const generation = ++this.#terminalGeneration;
     const controller = new TerminalController({
       session,
       agentId: selected.agent.id,
@@ -1097,14 +1095,14 @@ export class FactoryAppController {
       surface,
       resume: selected.resume,
       retainOnCleanClose: true,
-      onChange: (snapshot) => this.#receiveTerminalSnapshot(generation, controller, snapshot),
+      onChange: (snapshot) => this.#receiveTerminalSnapshot(controller, snapshot),
     });
     this.#terminal = controller;
     controller.start();
   }
 
-  #receiveTerminalSnapshot(generation: number, controller: TerminalController, snapshot: TerminalControllerSnapshot): void {
-    if (this.#closed || generation !== this.#terminalGeneration || controller !== this.#terminal) return;
+  #receiveTerminalSnapshot(controller: TerminalController, snapshot: TerminalControllerSnapshot): void {
+    if (this.#closed || controller !== this.#terminal) return;
     if (snapshot.phase === "closed") {
       if (this.#terminalReplacement !== undefined && snapshot.error !== undefined && snapshot.error.code !== "closed") {
         this.#disarmTerminal(snapshot.error);
@@ -1208,8 +1206,7 @@ export class FactoryAppController {
     if (this.#state !== undefined) this.#refreshTerminalTask(selected, this.#state);
     selected.head = this.#state?.head ?? selected.head;
     this.#terminal = undefined;
-    if (selected.task?.id !== current?.id) this.#dropPendingTerminalInput();
-    ++this.#terminalGeneration;
+    this.#dropPendingTerminalInput();
     this.#terminalRetry = undefined;
     this.#terminalSurface = undefined;
     this.#terminalSurfaceToken = undefined;
@@ -1443,7 +1440,6 @@ export class FactoryAppController {
     this.#terminal = undefined;
     this.#terminalResetBurst = 0;
     this.#terminalRetry = undefined;
-    ++this.#terminalGeneration;
     if (!keepSurface) {
       this.#terminalSurface = undefined;
       this.#terminalSurfaceToken = undefined;

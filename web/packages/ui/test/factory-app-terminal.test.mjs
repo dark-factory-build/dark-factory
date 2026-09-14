@@ -25,7 +25,7 @@ function stateAt(head, overrides = {}) {
   return { ...fixtureState, head: BigInt(head), ...overrides };
 }
 
-function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), detachImpl, acquireImpl, enqueueImpl, controlImpl, historyImpl, updateAgentImpl } = {}) {
+function terminalHarness({ closeStatus = false, fail, failError = new SessionError("connection"), attachImpl, detachImpl, acquireImpl, enqueueImpl, controlImpl, historyImpl, updateAgentImpl } = {}) {
   let attachReset = false;
   const snapshots = [];
   const calls = [];
@@ -77,7 +77,7 @@ function terminalHarness({ closeStatus = false, fail, failError = new SessionErr
       if (fail === "open") throw failError;
       handleOptions = options;
       const handle = {
-        attach: async () => { calls.push({ kind: "attach" }); if (fail === "attach") throw failError; if (attachReset) return { kind: "reset", freshAttachRequired: true, sessionId: "31".repeat(16), floor: 5n, head: 9n }; return options.afterSequence === 9n ? { sessionId: "31".repeat(16), floor: 8n, head: 12n, acknowledgedSequence: 9n, maxUnackedBytes: 65536n } : { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
+        attach: async () => { calls.push({ kind: "attach" }); if (attachImpl !== undefined) return attachImpl(); if (fail === "attach") throw failError; if (attachReset) return { kind: "reset", freshAttachRequired: true, sessionId: "31".repeat(16), floor: 5n, head: 9n }; return options.afterSequence === 9n ? { sessionId: "31".repeat(16), floor: 8n, head: 12n, acknowledgedSequence: 9n, maxUnackedBytes: 65536n } : { sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n }; },
         acquireInput: async () => { calls.push({ kind: "acquire" }); if (acquireImpl !== undefined) return acquireImpl(); if (fail === "acquire") throw failError; return { generation: 1n }; },
         sendInput: async (bytes) => { calls.push({ kind: "input", bytes }); if (fail === "input") throw failError; return { status: "accepted", accepted_bytes: BigInt(bytes.length) }; },
         resize: async (rows, cols) => { calls.push({ kind: "resize", rows, cols }); if (fail === "resize") throw failError; return { rows, cols }; },
@@ -1370,11 +1370,15 @@ test("a reset while holding control recovers and re-acquires through the normal 
   assert.equal(view.terminal.resets, 1);
 });
 
-test("a reset during attachment drops buffered input before the replacement becomes writable", async () => {
+test("a reset drops buffered input even when task and agent IDs coincide", async () => {
   const context = terminalHarness();
   context.setAttachReset(true);
   context.controller.start();
-  context.ready();
+  const running = [...fixtureState.tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
+  const tasks = new Map(fixtureState.tasks);
+  tasks.delete(running.id);
+  tasks.set(agent.id, { ...running, id: agent.id });
+  context.ready(stateAt(fixtureState.head, { tasks }));
   context.controller.selectAgent(agent);
   const token = {};
   context.controller.beginTerminalSurface(token);
@@ -1413,6 +1417,105 @@ test("a reset storm is bounded: past three recoveries the stale teardown stands"
   const view = context.latest();
   assert.equal(view.selectedAgent, undefined, "past the bound the ordinary teardown stands");
   assert.equal(view.error?.code, "stale");
+});
+
+test("agent switches during discovery or attachment fence late responses and buffered input", async (t) => {
+  for (const phase of ["resolving", "attaching"]) await t.test(phase, async () => {
+    const attached = deferred();
+    const context = terminalHarness({ attachImpl: () => attached.promise });
+    context.controller.start();
+    context.ready();
+    context.controller.selectAgent(agent);
+    const token = {};
+    context.controller.beginTerminalSurface(token);
+    context.controller.sendTerminalText(token, "old input");
+    context.controller.setTerminalSurface(token, { write: async () => {}, abort() {} });
+    const oldTarget = context.targetGates[0];
+    if (phase === "attaching") {
+      oldTarget.resolve(target);
+      await flush();
+    }
+    assert.equal(context.latest().terminal.phase, phase);
+    const oldCallbacks = context.handleOptions();
+    context.controller.selectAgent(secondAgent);
+    await flush();
+    oldTarget.resolve(target);
+    attached.resolve({ sessionId: "31".repeat(16), floor: 0n, head: 0n, acknowledgedSequence: 0n, maxUnackedBytes: 65536n });
+    await flush();
+    oldCallbacks?.onReset({ sessionId: "31".repeat(16), floor: 2n, head: 3n });
+    assert.equal(context.latest().selectedAgent.id, secondAgent.id);
+    assert.equal(context.calls.some((call) => call.kind === "acquire" || call.kind === "input"), false);
+    assert.equal(context.sessionCloses(), 0);
+    context.controller.close();
+  });
+});
+
+test("resize before attachment keeps only current surface geometry until writable", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  context.ready();
+  context.controller.selectAgent(agent);
+  const token = {};
+  context.controller.beginTerminalSurface(token);
+  context.controller.resizeTerminal(token, 24, 80);
+  context.controller.resizeTerminal(token, 40, 120);
+  context.controller.setTerminalSurface(token, { write: async () => {}, abort() {} });
+  assert.equal(context.calls.some((call) => call.kind === "resize"), false);
+  context.targetGates[0].resolve(target);
+  await flush();
+  assert.deepEqual(context.calls.filter((call) => call.kind === "resize"), [{ kind: "resize", rows: 40, cols: 120 }]);
+  context.controller.close();
+});
+
+test("disconnect during a durable control preserves its refusal without replay on reconnect", async () => {
+  const control = deferred();
+  const context = terminalHarness({ controlImpl: () => control.promise });
+  context.controller.start();
+  context.ready();
+  await openTerminal(context);
+  context.controller.setAgentInstructionDraft("keep my draft");
+  const pending = context.controller.controlAgent("message", "one message");
+  context.clientOptions().onStatus("closed");
+  control.reject(new SessionError("connection"));
+  assert.equal(await pending, false);
+  assert.equal(context.latest().terminal.instructionDraft, "keep my draft");
+  assert.equal(context.latest().terminal.controlError.code, "connection");
+  context.ready();
+  await flush();
+  assert.equal(context.calls.filter((call) => call.kind === "control").length, 1);
+  context.controller.close();
+});
+
+test("archive and paused restore retain selection, draft and readable completed history", async () => {
+  const entries = [{ operationId: "61".repeat(16), kind: "message", actor: "operator", body: "retained receipt", status: "delivered", createdAtMs: 1n }];
+  const context = terminalHarness({ historyImpl: async (taskId) => ({ taskId, entries }) });
+  const running = [...fixtureState.tasks.values()].find((task) => task.assigned_agent_id === agent.id && task.status === "running");
+  const completed = { ...running, status: "succeeded", revision: running.revision + 1n };
+  const tasks = new Map(fixtureState.tasks).set(completed.id, completed);
+  const agents = new Map(fixtureState.agents);
+  context.controller.start();
+  context.ready(stateAt(20, { tasks, agents }));
+  context.controller.selectAgent(agent);
+  context.controller.setAgentInstructionDraft("retained draft");
+  await context.controller.updateAgentConfig({ archived: true });
+  const archived = { ...agent, archived: true, paused: true, revision: agent.revision + 1n };
+  context.clientOptions().onState(stateAt(21, { tasks, agents: new Map(agents).set(agent.id, archived) }));
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.instructionDraft, "retained draft");
+  assert.deepEqual(await context.controller.taskHistory(completed), { taskId: completed.id, entries });
+  const restored = { ...archived, archived: false, revision: archived.revision + 1n };
+  await context.controller.updateAgentConfig({ archived: false });
+  context.clientOptions().onState(stateAt(22, { tasks, agents: new Map(agents).set(agent.id, restored) }));
+  assert.equal(context.latest().selectedAgent.id, agent.id);
+  assert.equal(context.latest().terminal.paused, true);
+  assert.deepEqual(await context.controller.taskHistory(completed), { taskId: completed.id, entries });
+  assert.equal(context.latest().terminal.instructionDraft, "retained draft");
+  assert.equal(context.calls.some((call) => call.kind === "resolve" || call.kind === "enqueue"), false);
+  assert.deepEqual(context.calls.filter((call) => call.kind === "update-agent").map((call) => call.value.archived), [true, false]);
+  context.clientOptions().onStatus("closed");
+  await context.controller.updateAgentConfig({ archived: true });
+  assert.equal(context.calls.filter((call) => call.kind === "update-agent").length, 2);
+  context.controller.close();
 });
 
 test("an archived selection keeps its configuration without resolving stale running work", async () => {
