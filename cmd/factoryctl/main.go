@@ -51,7 +51,7 @@ const (
   factoryctl overseer task add --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
   factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel]
   factoryctl overseer task send-back --task ID --note TEXT
-  factoryctl overseer agent pause|resume --agent ID --revision REVISION
+  factoryctl overseer agent pause|resume|archive|restore --agent ID --revision REVISION
   factoryctl overseer worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl overseer worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
   factoryctl overseer worker message --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --message TEXT
@@ -165,6 +165,8 @@ type attemptCommand struct {
 	runRevision     uint64
 	run             string
 	paused          bool
+	archived        bool
+	archiveSet      bool
 	cancel          bool
 }
 
@@ -927,6 +929,10 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 		command.kind, command.paused = commandOverseerAgentUpdate, true
 	case "agent resume":
 		command.kind = commandOverseerAgentUpdate
+	case "agent archive":
+		command.kind, command.archived, command.archiveSet = commandOverseerAgentUpdate, true, true
+	case "agent restore":
+		command.kind, command.archiveSet = commandOverseerAgentUpdate, true
 	case "worker stop":
 		command.kind = commandOverseerStopWorker
 	case "worker replace":
@@ -1372,7 +1378,13 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 	case commandOverseerTaskSendBack:
 		result, err = client.SendBack(callContext, api.SendBackInput{TaskID: command.id, Note: command.text})
 	case commandOverseerAgentUpdate:
-		result, err = client.OverseerUpdateAgent(callContext, api.OverseerAgentUpdateInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Paused: command.paused})
+		input := api.OverseerAgentUpdateInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision}
+		if command.archiveSet {
+			input.Archived = &command.archived
+		} else {
+			input.Paused = &command.paused
+		}
+		result, err = client.OverseerUpdateAgent(callContext, input)
 	case commandOverseerStopWorker:
 		result, err = client.OverseerStopRun(callContext, api.OverseerRunStopInput{OperationID: command.operationID, TaskID: command.id, ExpectedTaskRevision: command.taskRevision, RunID: command.run, ExpectedRunRevision: command.runRevision})
 	case commandOverseerReplaceWorker:

@@ -30,6 +30,26 @@ const fixtureReturnedState = {
   factory: { ...fixtureFloorState.factory, active_runs: 1 },
   tasks: new Map(fixtureFloorState.tasks).set(fixtureObservedRun.taskId, { ...fixtureFloorState.tasks.get(fixtureObservedRun.taskId)!, status: "succeeded" }),
 };
+const fixtureArchiveAgent = {
+  ...fixtureFloorState.agents.values().next().value!,
+  id: "24".repeat(16),
+  name: "Idle archive worker",
+  paused: false,
+  revision: 20n,
+};
+const fixtureArchiveTask = {
+  ...fixtureFloorState.tasks.values().next().value!,
+  id: "36".repeat(16),
+  assigned_agent_id: fixtureArchiveAgent.id,
+  title: "Completed archive fixture work",
+  status: "succeeded" as const,
+  revision: 21n,
+};
+const archiveFixtureState = (archived: boolean) => ({
+  ...fixtureFloorState,
+  agents: new Map(fixtureFloorState.agents).set(fixtureArchiveAgent.id, { ...fixtureArchiveAgent, archived, paused: archived }),
+  tasks: new Map(fixtureFloorState.tasks).set(fixtureArchiveTask.id, fixtureArchiveTask),
+});
 const fixtureHierarchyTopologies = new Map(fixtureTopologies).set([...fixtureFloorState.projects.keys()][1]!, {
   projectId: [...fixtureFloorState.projects.keys()][1]!, digest: "hierarchy-fixture", sourceRevision: "",
   nodes: [
@@ -44,15 +64,17 @@ const fixtureChangedTopologies = new Map(fixtureHierarchyTopologies).set(fixture
   nodes: [...fixtureTopologies.values().next().value!.nodes, { id: "e5".repeat(32), parent_id: "a1".repeat(32), kind: "directory", path: "docs", label: "docs", language: "markdown", size_bucket: "tiny" }],
 });
 
-// Fixture tour: sample data, no daemon, no authority. Reply/cancel and edit
-// handlers are deliberately absent so one-shot actions cannot pretend to
-// succeed.
+// Fixture tour: sample data, no daemon, no authority. Fixture-only state
+// toggles expose production components; no action reports a daemon result.
 function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
   const crowded = fixture === "crowded";
   const terminalFixture = fixture === "terminal";
+  const archiveFixture = fixture === "archive" || fixture === "archived";
   const [inputRefused, setInputRefused] = useState(true);
   const fixtureAgent = fixtureFloorState.agents.values().next().value!;
+  const [archivedWorker, setArchivedWorker] = useState(fixture === "archived");
+  const archiveAgent = { ...fixtureArchiveAgent, archived: archivedWorker };
   const movement = fixture === "movement";
   const hierarchy = fixture === "hierarchy" || fixture === "movement";
   const [routeStep, setRouteStep] = useState(0);
@@ -60,9 +82,9 @@ function FixtureTour() {
   const [connected, setConnected] = useState(true);
   const [changedTopology, setChangedTopology] = useState(false);
   const [view, setView] = useState<FactoryConsoleProps["view"]>("floor");
-  const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>(terminalFixture ? "agent" : "needs-you");
+  const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>(terminalFixture || archiveFixture ? "agent" : "needs-you");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>(terminalFixture ? { id: fixtureAgent.id, name: fixtureAgent.name, revision: fixtureAgent.revision } : undefined);
+  const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>(terminalFixture ? { id: fixtureAgent.id, name: fixtureAgent.name, revision: fixtureAgent.revision } : archiveFixture ? { id: archiveAgent.id, name: archiveAgent.name, revision: archiveAgent.revision } : undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [selectedHumanRequest, setSelectedHumanRequest] = useState<FactoryConsoleProps["selectedHumanRequest"]>();
   return (
@@ -80,11 +102,15 @@ function FixtureTour() {
         <button type="button" onClick={() => setChangedTopology((value) => !value)}>TOGGLE TOPOLOGY</button>
       </p>}
       {!terminalFixture ? null : <p className="devFixtureBanner"><button type="button" onClick={() => setInputRefused((value) => !value)}>TOGGLE FIXTURE INPUT REFUSAL</button></p>}
+      {!archiveFixture ? null : <p className="devFixtureBanner" role="note">
+        ARCHIVE FIXTURE — explicit sample state only. <button type="button" onClick={() => setArchivedWorker(false)}>SHOW IDLE WORKER</button>{" "}
+        <button type="button" onClick={() => setArchivedWorker(true)}>SHOW ARCHIVED WORKER</button>
+      </p>}
       <FactoryConsole
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
-        state={returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
+        state={archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
         topologies={changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
         runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
@@ -93,6 +119,7 @@ function FixtureTour() {
         onDetail={setDetail}
         settingsOpen={settingsOpen}
         onToggleSettings={() => setSettingsOpen((open) => !open)}
+        agentPanel={archiveFixture ? "config" : undefined}
         terminalContent={!terminalFixture ? undefined : <TerminalPanel terminal={{
           agentId: fixtureAgent.id, agentName: fixtureAgent.name, agentRevision: fixtureAgent.revision,
           taskTitle: "Sanitised terminal input refusal", phase: "ready", writable: !inputRefused,
@@ -102,6 +129,7 @@ function FixtureTour() {
           resets: 0, surfaceVersion: 0,
         }}><pre className="devFixtureTerminal">{"FIXTURE OUTPUT — no provider connected\nRead-only output remains visible after input lease refusal."}</pre></TerminalPanel>}
         selectedAgent={selectedAgent}
+        onSaveAgentConfig={archiveFixture ? () => {} : undefined}
         selectedHumanRequest={selectedHumanRequest}
         onSelectAgent={(agent) => {
           setDetail("agent");
@@ -117,6 +145,10 @@ function FixtureTour() {
           ...(task.status === "succeeded" ? { outcome: "Fixture inspection completed." } : {}),
           peerQuestions: [],
         })}
+        onLoadTaskList={archiveFixture ? (agentId) => {
+          const tasks = [fixtureArchiveTask].filter((task) => task.assigned_agent_id === agentId);
+          return Promise.resolve({ agentId, head: fixtureFloorState.head, total: BigInt(tasks.length), tasks, hasMore: false });
+        } : undefined}
         onSelectHumanRequest={(request) => {
           setDetail("needs-you");
           setSelectedHumanRequest({

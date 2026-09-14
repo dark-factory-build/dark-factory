@@ -37,6 +37,9 @@ no commit, push, pull-request, or repository-publication operation.
   is running, including startup and cleanup. Queued work alone is Ready with
   a queue/capacity hint. Pausing stops future tasks; an already-running task
   keeps Working with its queue marked paused.
+- Workers may be archived only when drained. Archive removes them from the
+  active floor and admission while retaining identity and history; Show
+  archived exposes their recent work, and Restore leaves them paused.
 - The overseer can inspect and control its project's workers through scoped
   `factoryctl overseer` commands, using its own attempt credential. Worker
   events and explicit interventions trigger bounded standing instructions,

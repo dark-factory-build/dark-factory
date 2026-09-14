@@ -253,7 +253,7 @@ export function FactoryConsole({
                 edit={edit}
                 ready={ready}
                 onSaveConfig={onSaveAgentConfig}
-                onEditAppearance={ready ? onEditAppearance : undefined}
+                onEditAppearance={ready && !agent.archived ? onEditAppearance : undefined}
                 onEditTask={onEditTask}
                 onLoadTaskDetail={onLoadTaskDetail}
                 onLoadTaskHistory={onLoadTaskHistory}

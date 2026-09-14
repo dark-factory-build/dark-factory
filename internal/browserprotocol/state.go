@@ -170,6 +170,7 @@ type AgentItem struct {
 	Provider   string           `json:"provider"`
 	Appearance SpriteAppearance `json:"appearance"`
 	Paused     Bool             `json:"paused"`
+	Archived   Bool             `json:"archived"`
 	// Model and ReasoningEffort are the operator-editable launch controls the
 	// console displays and AGENT_UPDATE edits. Empty means unset.
 	Model           string `json:"model"`

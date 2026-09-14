@@ -17,7 +17,7 @@ import (
 )
 
 func TestLegacyHomeMigratesAndKeepsEveryRow(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion} {
 		for _, persistWAL := range []bool{false, true} {
 			t.Run(fmt.Sprintf("v%d/wal=%v", version, persistWAL), func(t *testing.T) {
 				testLegacyHomeMigratesAndKeepsEveryRow(t, version, persistWAL)
@@ -76,6 +76,22 @@ func testLegacyHomeMigratesAndKeepsEveryRow(t *testing.T, version int, persistWA
 	}
 	if marked != 0 {
 		t.Fatalf("migration invented %d sent-back boundaries", marked)
+	}
+	var archived int
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM agents WHERE archived <> 0`).Scan(&archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived != 0 {
+		t.Fatalf("migration archived %d existing agents", archived)
+	}
+	if version == v10UserVersion {
+		var appearances int
+		if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM agents WHERE appearance = '1/2/3/4/5/6/7/8/9'`).Scan(&appearances); err != nil {
+			t.Fatal(err)
+		}
+		if appearances != 1 {
+			t.Fatalf("migration preserved %d v10 custom appearances, want 1", appearances)
+		}
 	}
 	// Loopback pairings (the ones with terminal_input) gained
 	// administration; the relay pairing did not. Every pending
@@ -257,8 +273,15 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			spec.Model = "opus"
 			spec.ReasoningEffort = "high"
 		}
-		if _, err := store.CreateAgent(ctx, spec, mustTime(t, 6)); err != nil {
+		created, err := store.CreateAgent(ctx, spec, mustTime(t, 6))
+		if err != nil {
 			t.Fatalf("create %s agent: %v", agent.provider, err)
+		}
+		if version == v10UserVersion && agent.seed == 20 {
+			appearance := AgentAppearance{Skin: 1, Hair: 2, HairColour: 3, Face: 4, Outfit: 5, ClothesColour: 6, Shoes: 7, Tool: 8, Headwear: 9}
+			if _, err := store.UpdateAgent(ctx, created.ID, created.Revision, AgentPatch{Appearance: &appearance}, mustTime(t, 6)); err != nil {
+				t.Fatalf("set v10 appearance: %v", err)
+			}
 		}
 	}
 	if _, err := store.SetDispatch(ctx, mustRevision(t, 1), true, mustTime(t, 7)); err != nil {
@@ -305,6 +328,8 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 	}
 	if version == v9UserVersion {
 		agentColumnsFor = v7AgentColumns
+	} else if version == v10UserVersion {
+		agentColumnsFor = v10AgentColumns
 	}
 	if version != legacyUserVersion {
 		if err := rebuildTable(ctx, connection, legacy, "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
@@ -416,6 +441,8 @@ const testAgentColumns = `id, project_id, name, role, provider, model, reasoning
 const testAgentColumnsV3 = `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
 
 const testAgentColumnsV4 = `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used`
+
+const v10AgentColumns = `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
 
 // testTaskColumns is the v4 task row, before a send-back boundary was stored.
 const testTaskColumns = `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms`
@@ -529,7 +556,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "af5c61224274d2c62e8b78036e911239aa98d8b40154811cb9c4788ad224a603"},
+		{"current", schemaStatements, "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
+		{"v10", v10SchemaStatements(), "af5c61224274d2c62e8b78036e911239aa98d8b40154811cb9c4788ad224a603"},
 		{"v9", v9SchemaStatements(), "049dc8ff317e31a86157fd5366579954581a4468caaca63c5dd95ee2958ab4cb"},
 		{"v8", v8SchemaStatements(), "45606d5fa2b054c4ccee79c55f20b184f25ee0860ec5817099c0582174df676b"},
 		{"v7", v7SchemaStatements(), "c6793e1552a878dfff3fb4efc4179ba6343a26f122337580b6ac558e8a6bfedf"},
@@ -550,7 +578,7 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 // that reaches inside the migration transaction: the two above are rejected by
 // the preflight, on its disposable copy, before any pool exists.
 func TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t, version)
 		})

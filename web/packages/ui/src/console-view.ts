@@ -36,6 +36,7 @@ export function stageMeterFill(stage: TaskStage): number {
 
 /** Tasks an agent is on right now (durable assignment, live statuses). */
 export function agentCurrentTask(agent: AgentItem, state: StateView): TaskItem | undefined {
+	if (agent.archived) return undefined;
   for (const task of state.tasks.values()) {
     if (
       task.assigned_agent_id === agent.id &&
@@ -69,6 +70,7 @@ export function agentActivity(agent: AgentItem, state: StateView): AgentActivity
 /** The overseer is the console's entry point; a worker is a usable fallback. */
 export function primaryAgent(state: StateView): AgentItem | undefined {
   return [...state.agents.values()]
+		.filter((agent) => !agent.archived)
     .sort((left, right) =>
       (left.role === right.role ? 0 : left.role === "orchestrator" ? -1 : 1)
       || (left.role === "orchestrator" && left.paused !== right.paused ? left.paused ? 1 : -1 : 0)
@@ -197,6 +199,7 @@ export function floorScene(
   const liveRooms = new Set<string>();
   const kept = new Set(rooms.map((room) => room.id));
   const tasks = state === undefined ? [] : [...state.tasks.values()]
+		.filter((task) => !state.agents.get(task.assigned_agent_id)?.archived)
     .sort((left, right) => compareText(left.id, right.id))
     .map((task) => {
       const footprint = runFootprint(blocksByProject.get(task.project_id) ?? [], matchingRunSample(state, task, runPaths));
@@ -215,7 +218,7 @@ export function floorScene(
       };
     });
   const workByTask = new Map(tasks.map((order) => [order.id, order]));
-  const workers = state === undefined ? [] : [...state.agents.values()].map((agent) => {
+  const workers = state === undefined ? [] : [...state.agents.values()].filter((agent) => !agent.archived).map((agent) => {
     const task = agentCurrentTask(agent, state);
     const block = blocksByProject.get(agent.project_id) ?? [];
     const live = task === undefined ? undefined : workByTask.get(task.id)?.representativeRoomId;

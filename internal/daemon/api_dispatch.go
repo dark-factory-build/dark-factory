@@ -996,12 +996,14 @@ func (daemon *Daemon) overseerUpdateAgent(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	paused := input.Paused
+	if input.Paused == nil && input.Archived == nil || input.Paused != nil && input.Archived != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
 	at, err := daemon.timestamp()
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	agent, err := daemon.store.UpdateAgentForOverseer(ctx, digest, id, expected, paused, at)
+	agent, err := daemon.store.UpdateAgentForOverseer(ctx, digest, id, expected, kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}

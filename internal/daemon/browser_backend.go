@@ -353,6 +353,10 @@ func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [brows
 		paused := bool(*request.Paused)
 		patch.Paused = &paused
 	}
+	if request.Archived != nil {
+		archived := bool(*request.Archived)
+		patch.Archived = &archived
+	}
 	if request.IdlePolicy != nil {
 		policy := kernel.IdlePolicy(*request.IdlePolicy)
 		patch.IdlePolicy = &policy
@@ -1011,7 +1015,7 @@ func projectAgent(item kernel.AgentSummary, configHome string, providerDefaults 
 	if item.Model != "" {
 		source = "agent"
 	}
-	projected := browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Appearance: browserprotocol.SpriteAppearance{Automatic: browserprotocol.Bool(item.Appearance.Automatic), Skin: item.Appearance.Skin, Hair: item.Appearance.Hair, HairColour: item.Appearance.HairColour, Face: item.Appearance.Face, Outfit: item.Appearance.Outfit, ClothesColour: item.Appearance.ClothesColour, Shoes: item.Appearance.Shoes, Tool: item.Appearance.Tool, Headwear: item.Appearance.Headwear}, Model: item.Model, ReasoningEffort: item.ReasoningEffort, EffectiveModel: effectiveModel, EffectiveReasoningEffort: effectiveEffort, ModelSource: source, Revision: decimalRevision(item.Revision),
+	projected := browserprotocol.AgentItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), Name: item.Name, Role: item.Role, Provider: item.Provider, Paused: browserprotocol.Bool(item.Paused), Archived: browserprotocol.Bool(item.Archived), Appearance: browserprotocol.SpriteAppearance{Automatic: browserprotocol.Bool(item.Appearance.Automatic), Skin: item.Appearance.Skin, Hair: item.Appearance.Hair, HairColour: item.Appearance.HairColour, Face: item.Appearance.Face, Outfit: item.Appearance.Outfit, ClothesColour: item.Appearance.ClothesColour, Shoes: item.Appearance.Shoes, Tool: item.Appearance.Tool, Headwear: item.Appearance.Headwear}, Model: item.Model, ReasoningEffort: item.ReasoningEffort, EffectiveModel: effectiveModel, EffectiveReasoningEffort: effectiveEffort, ModelSource: source, Revision: decimalRevision(item.Revision),
 		IdlePolicy: string(item.Idle.Policy), IdleAfterSeconds: item.Idle.AfterSeconds, IdleInstruction: item.Idle.Instruction, IdleRunBudget: item.Idle.RunBudget, IdleRunsUsed: item.Idle.RunsUsed}
 	if (item.AccountID != kernel.AccountID{}) {
 		projected.AccountID = item.AccountID.String()

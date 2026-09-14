@@ -349,6 +349,9 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 	if !found || agent.ProjectID != run.ProjectID || agent.Role != RoleWorker {
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
+	if agent.Archived {
+		return Task{}, tx.Rollback(ErrConflict)
+	}
 	existing, replay, err := taskCreationReplay(ctx, tx.connection, spec)
 	if err != nil {
 		return Task{}, tx.Rollback(err)

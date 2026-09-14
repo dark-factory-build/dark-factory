@@ -18,6 +18,7 @@ type AgentUpdate struct {
 	// selection back to that provider's default configuration directory.
 	AccountID *string `json:"account_id,omitempty"`
 	Paused    *Bool   `json:"paused,omitempty"`
+	Archived  *Bool   `json:"archived,omitempty"`
 	// The idle rule. A new budget starts the used count again.
 	IdlePolicy       *string `json:"idle_policy,omitempty"`
 	IdleAfterSeconds *uint32 `json:"idle_after_seconds,omitempty"`
