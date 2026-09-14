@@ -329,6 +329,13 @@ func Build(request Request) (Launch, error) {
 		if request.reasoningEffort != "" {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
+		if request.role == kernel.RoleOrchestrator {
+			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
+			if err != nil {
+				return Launch{}, err
+			}
+			argv = append(argv, "-c", "mcp_servers.maintainer={command="+tomlBasicString(bridge)+",enabled=true,required=true}")
+		}
 		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
 			prompt += " You are the project overseer. Run \"$DARK_FACTORY_FACTORYCTL\" overseer status to inspect workers, tasks, questions and intervention history. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Run --help for flags. Read docs/development/OVERSEER.md inside the task checkout or the repository clone specified by the task; if neither is available, report the missing checkout; publish through your Maintainer App. Respect direct operator interventions. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."

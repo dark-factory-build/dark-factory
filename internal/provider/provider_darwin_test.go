@@ -698,11 +698,21 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal(err)
 	}
 	request.role = kernel.RoleOrchestrator
+	if _, err := Build(request); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("overseer launched without its explicit Maintainer bridge")
+	}
+	bridge := filepath.Join(filepath.SplitList(runtime.toolPath)[0], maintainerBridge)
+	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	overseer, err := Build(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	workerArgs, overseerArgs := worker.Argv(), overseer.Argv()
+	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.maintainer={command=") {
+		t.Fatal("overseer lost its explicit Maintainer tools")
+	}
 	if strings.Contains(workerArgs[len(workerArgs)-1], "overseer status") {
 		t.Fatal("worker was given overseer authority instructions")
 	}
