@@ -352,6 +352,59 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 	}
 }
 
+func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, locator := nativeFixture(t, kind)
+			bridge := filepath.Join(filepath.Dir(locator), "dark-factory-browser-mcp")
+			for _, name := range []string{bridge, filepath.Join(filepath.Dir(locator), maintainerBridge)} {
+				if err := os.WriteFile(name, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
+				request := roleRequestFor(t, kind, installation, runtime, "", "", role)
+				launch, err := Build(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				args := launch.Argv()
+				var found bool
+				for i, arg := range args {
+					if kind == kernel.ProviderCodex && strings.HasPrefix(arg, "mcp_servers.factory_browser=") {
+						found = strings.Contains(arg, tomlBasicString(runtime.temp)) && strings.Contains(arg, "required=true")
+					}
+					if kind == kernel.ProviderClaudeCode && arg == "--mcp-config" {
+						var config struct {
+							Servers map[string]struct {
+								Command string   `json:"command"`
+								Args    []string `json:"args"`
+							} `json:"mcpServers"`
+						}
+						if err := json.Unmarshal([]byte(args[i+1]), &config); err != nil {
+							t.Fatal(err)
+						}
+						server := config.Servers["factory_browser"]
+						found = server.Command != "" && slices.Equal(server.Args, []string{"--runtime-dir", runtime.temp})
+						if role == kernel.RoleOrchestrator && config.Servers["maintainer"].Command == "" {
+							t.Fatal("lost Maintainer bridge")
+						}
+					}
+				}
+				if !found {
+					t.Fatal("browser bridge is missing or not scoped to this run")
+				}
+			}
+			if err := os.Chmod(bridge, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Build(roleRequestFor(t, kind, installation, runtime, "", "", kernel.RoleWorker)); !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("unsafe bridge: %v", err)
+			}
+		})
+	}
+}
+
 func TestCodexProjectTrustOverrideUsesExactTomlEncoding(t *testing.T) {
 	path := "/private/change.with dots/quote\"slash\\\b\t\n\f\r\x01\x1f\x7f\u0080é/working"
 	want := `"/private/change.with dots/quote\"slash\\\b\t\n\f\r\u0001\u001f\u007f\u0080é/working"`

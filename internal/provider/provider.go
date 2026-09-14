@@ -117,9 +117,9 @@ func resolveTool(toolPath, tool string) (runner.ExecutableCommitment, error) {
 // and it may be a script.
 var errBridgeUnfit = errors.New("provider: maintainer bridge is not a regular owner-only executable")
 
-// resolveBridge finds the Maintainer bridge on the fixed tool path.
-func resolveBridge(toolPath string) (string, error) {
-	resolved, err := walkToolPath(toolPath, maintainerBridge)
+// resolveBridge finds an operator-installed MCP bridge on the fixed tool path.
+func resolveBridge(toolPath string, tool string) (string, error) {
+	resolved, err := walkToolPath(toolPath, tool)
 	if err != nil {
 		return "", err
 	}
@@ -247,6 +247,21 @@ func Build(request Request) (Launch, error) {
 		return Launch{}, errors.Join(ErrUnavailable, err)
 	}
 	path := request.installation.executable.Path()
+	browser := ""
+	if request.provider != kernel.ProviderShell {
+		for _, directory := range filepath.SplitList(request.runtime.toolPath) {
+			if _, err := os.Lstat(filepath.Join(directory, "dark-factory-browser-mcp")); os.IsNotExist(err) {
+				continue
+			}
+			var err error
+			browser, err = resolveBridge(request.runtime.toolPath, "dark-factory-browser-mcp")
+			if err != nil {
+				return Launch{}, err
+			}
+			break
+		}
+	}
+	browserArgs := []string{"--runtime-dir", request.runtime.temp}
 	switch request.provider {
 	case kernel.ProviderShell:
 		if request.model != "" || request.reasoningEffort != "" || path != shellPath {
@@ -273,12 +288,19 @@ func Build(request Request) (Launch, error) {
 		// cannot do its job, so the launch is refused rather than started
 		// blind.
 		argv = append(argv, "--strict-mcp-config")
+		servers := map[string]any{}
+		if browser != "" {
+			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
+		}
 		if request.role == kernel.RoleOrchestrator {
-			bridge, err := resolveBridge(request.runtime.toolPath)
+			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
 			if err != nil {
 				return Launch{}, errors.Join(err, fmt.Errorf("%s on %s", maintainerBridge, request.runtime.toolPath))
 			}
-			config, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"maintainer": map[string]string{"command": bridge}}})
+			servers["maintainer"] = map[string]string{"command": bridge}
+		}
+		if len(servers) > 0 {
+			config, err := json.Marshal(map[string]any{"mcpServers": servers})
 			if err != nil || len(config) > runner.MaxArgumentBytes {
 				return Launch{}, ErrInvalid
 			}
@@ -294,6 +316,17 @@ func Build(request Request) (Launch, error) {
 			return Launch{}, err
 		}
 		argv := []string{path, "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions=" + tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins"}
+		if browser != "" {
+			args := make([]string, len(browserArgs))
+			for i, arg := range browserArgs {
+				args[i] = tomlBasicString(arg)
+			}
+			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],enabled=true,required=true}"
+			if len(config) > runner.MaxArgumentBytes {
+				return Launch{}, ErrInvalid
+			}
+			argv = append(argv, "-c", config)
+		}
 		if request.model != "" {
 			argv = append(argv, "--model", request.model)
 		}
