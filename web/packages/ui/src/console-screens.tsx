@@ -151,7 +151,7 @@ export function FactoryFloor({
   useEffect(() => {
     if (scopeId !== scene.navigation.scopeId || page !== scene.navigation.page) setView({ scopeId: scene.navigation.scopeId, page: scene.navigation.page });
   }, [scopeId, page, scene.navigation.scopeId, scene.navigation.page]);
-  const inventoryOmitted = [...(topologies?.values() ?? [])].reduce((count, topology) => count + (topology.inventoryOmitted ?? 0), 0);
+  const inventoryOmitted = [...(state?.projects.keys() ?? [])].reduce((count, id) => count + (topologies?.get(id)?.inventoryOmitted ?? 0), 0);
   return <div className="dfFactoryFloor">
     <nav className="dfFactoryFloor__navigation" aria-label="Floor hierarchy">
       {scene.navigation.breadcrumbs.map((crumb, index) => <span key={crumb.id ?? "root"}>
