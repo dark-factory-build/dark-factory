@@ -1823,6 +1823,11 @@ test("nested observed areas follow visible served ancestors without duplicating 
     assert.equal(scene.navigation.outsideScopeActivity, 0);
   }
   assert.deepEqual(landing.tasks[0].displayRoomIds, [root]);
+  const web = `${ids.project}:${fixtureTopology.nodes.find((node) => node.path === "web").id}`;
+  const otherObservedBranch = floorScene(fixtureState, fixtureTopologies, samples, undefined, web);
+  const webWorker = otherObservedBranch.workers.find((worker) => worker.id === ids.agent);
+  assert.deepEqual([webWorker.nodeId, webWorker.locationLabel, webWorker.locationWithin], [web, "web", false]);
+  assert.equal(otherObservedBranch.tasks[0].representativeRoomId, store, "global exact representative remains unchanged");
   const other = floorScene(fixtureState, fixtureTopologies, samples, undefined, ids.secondProject);
   assert.equal(other.navigation.outsideScopeActivity, 1);
   assert.equal(other.navigation.hiddenScopeActivity, 0);

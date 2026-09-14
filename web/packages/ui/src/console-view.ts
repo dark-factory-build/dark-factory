@@ -254,10 +254,13 @@ export function floorScene(
     const live = task === undefined ? undefined : workByTask.get(task.id)?.representativeRoomId;
     const previous = lastRunPaths?.get(agent.id);
     const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? runFootprint(block, previous).representativeRoomId : undefined;
-    const display = task === undefined ? undefined : workByTask.get(task.id)?.displayRoomId;
+    const work = task === undefined ? undefined : workByTask.get(task.id);
+    const display = work?.displayRoomId;
+    const displayedObservation = display === undefined || visibleAncestor(live) === display ? live
+      : work?.roomIds.find((id) => visibleAncestor(id) === display);
     if (live !== undefined) liveRooms.add(display ?? live);
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
-    const room = location === "working" ? roomByID.get(live!) : location === "last-observed" ? roomByID.get(last!) : undefined;
+    const room = location === "working" ? roomByID.get(displayedObservation!) : location === "last-observed" ? roomByID.get(last!) : undefined;
     return {
       id: agent.id,
       name: agent.name,
@@ -268,7 +271,7 @@ export function floorScene(
       paused: agent.paused,
       location,
       ...(room === undefined ? {} : { locationLabel: room.label }),
-      ...(location === "working" && live !== undefined ? { nodeId: display ?? live, locationWithin: display !== undefined && display !== live } : {}),
+      ...(location === "working" && live !== undefined ? { nodeId: display ?? live, locationWithin: display !== undefined && display !== displayedObservation } : {}),
     };
   });
   const crumbs: Array<{ id?: string; label: string }> = [{ label: "All projects" }];
