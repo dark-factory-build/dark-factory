@@ -90,3 +90,9 @@ started computer-use helpers through a personal Codex `notify` hook. The factory
 was stopped and dispatch disabled. #705 ignores personal Codex configuration,
 keeps the overseer's Maintainer explicit, and adds the optional run browser.
 Final installed-worker proof and restoration of supervision remain pending.
+
+#705 merged as `95d1febe490ae3913a20db0370a91102743cea69`. Installed attempts
+failed immediately because interactive Codex rejects the exec-only
+`--ignore-user-config` flag. Dispatch is disabled. The follow-up uses the
+supported `notify=[]` override for the observed personal notification hook;
+no blanket personal-configuration isolation is claimed.
