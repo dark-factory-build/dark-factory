@@ -106,9 +106,11 @@ This does not modify the operator's personal Codex configuration. Explicit MCP
 servers, including the Maintainer bridge, remain separate capabilities.
 Claude's existing launch has not gained the local-command filesystem boundary.
 
-Codex launches also ignore personal configuration, including notification hooks;
-account authentication still uses the selected `CODEX_HOME`. Factory-owned MCP
-servers and command permissions are supplied explicitly at launch.
+Interactive Codex workers override `notify=[]` so a personal notification command
+cannot launch desktop helpers. They retain account configuration and authentication
+through the selected `CODEX_HOME`; this is not blanket configuration isolation.
+The exec-only `--ignore-user-config` flag remains confined to cold reviews.
+Factory-owned MCP servers and command permissions are supplied explicitly at launch.
 
 ## Run-scoped browser tools
 
