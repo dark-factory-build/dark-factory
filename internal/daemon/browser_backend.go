@@ -517,9 +517,33 @@ func projectTopology(projectID string, snapshot topology.Snapshot) browserprotoc
 		}
 	}
 	result.Dependencies = dependencies
+	inventoryOmitted := uint32(len(result.Nodes))
+	result.InventoryOmitted = &inventoryOmitted
 	// Reserve the control envelope; never grow the existing 1 MiB topology cap.
 	base, _ := json.Marshal(result)
 	remaining := browserprotocol.MaxSnapshotBytes - len(base) - 512
+	// Optional summaries use only spare response capacity; dropping them is
+	// explicit, and never costs an otherwise servable topology node.
+	for i := range result.Nodes {
+		inventory := byID[result.Nodes[i].ID].Inventory
+		if inventory == nil {
+			inventoryOmitted--
+			continue
+		}
+		projected := &browserprotocol.TopologyInventory{
+			Direct:  browserprotocol.TopologyInventoryCounts(inventory.Direct),
+			Total:   browserprotocol.TopologyInventoryCounts(inventory.Total),
+			Samples: append([]string{}, inventory.Samples...), SamplesOmitted: inventory.SamplesOmitted,
+		}
+		encoded, _ := json.Marshal(projected)
+		cost := len(encoded) + len(`,"inventory":`)
+		if cost > remaining {
+			continue
+		}
+		result.Nodes[i].Inventory = projected
+		inventoryOmitted--
+		remaining -= cost
+	}
 	seen := make(map[[2]string]bool)
 	for _, edge := range snapshot.Edges {
 		pair := [2]string{edge.From, edge.To}

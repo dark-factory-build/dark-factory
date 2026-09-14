@@ -1,4 +1,4 @@
-import type { SpriteAppearance } from "@dark-factory/client";
+import type { SpriteAppearance, TopologyView } from "@dark-factory/client";
 
 export type SceneTopology = Readonly<{
   digest: string;
@@ -16,6 +16,7 @@ export type SceneNode = Readonly<{
   sizeBucket?: "empty" | "tiny" | "small" | "medium" | "large";
   language?: string;
   childCount?: number;
+  inventory?: TopologyView["nodes"][number]["inventory"];
   dependencies?: Readonly<{
     omitted: number;
     links: readonly Readonly<{ nodeId: string; label: string; path: string; direction: "to" | "from"; weight: number }>[];
