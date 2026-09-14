@@ -178,7 +178,7 @@ export function FactoryConsole({
         )}
 
         {onDetail === undefined ? null : <nav className="dfMobileNav dfConsoleViewToggle" aria-label="Console views">
-          <button type="button" aria-pressed={detail === "floor"} disabled={!ready} onClick={() => onDetail("floor")}>Floor</button>
+          <button type="button" aria-pressed={detail === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
         </nav>}

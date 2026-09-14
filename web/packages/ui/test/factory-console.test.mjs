@@ -1702,3 +1702,21 @@ test("mobile navigation switches presentation without mutating work", () => {
   assert.deepEqual(calls, ["queue"]);
   assert.equal(elements.find((element) => element.type === "main").props["data-mobile-view"], "floor");
 });
+
+
+test("mobile Floor restores the floor after Agents and Tasks", async () => {
+  let tree;
+  function Harness() {
+    const [view, setView] = useState("agents");
+    const [detail, setDetail] = useState("queue");
+    return createElement(FactoryConsole, { status: "ready", state: fixtureState, view, onView: setView, detail, onDetail: setDetail });
+  }
+  await act(async () => { tree = create(createElement(Harness)); });
+  assert.equal(tree.root.findByType(FactoryConsole).props.view, "agents");
+  const nav = tree.root.findByProps({ "aria-label": "Console views" });
+  await act(async () => { nav.findAllByType("button")[0].props.onClick(); });
+  assert.equal(tree.root.findByType(FactoryConsole).props.view, "floor");
+  assert.equal(tree.root.findByType(FactoryConsole).props.detail, "floor");
+  assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
+  await act(async () => tree.unmount());
+});
