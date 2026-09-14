@@ -236,6 +236,13 @@ unreaped leader child. After leader or runner loss, the finalizer only observes
 exact absence. Reused or weak identities remain unresolved and cannot authorize
 signalling, removal, or terminalization.
 
+Provider cleanup authority ends at that owned process group. A provider that
+detaches a child into another group has no supported cleanup path: neither a
+descendant census nor a stored PID/birth observation can grant a direct signal
+right. Providers must retain command children in the runner-owned group or
+offer an authenticated, provider-owned shutdown capability before such cleanup
+can be supported.
+
 ## Provider boundary
 
 `internal/provider.Build(Request) (Launch, error)` is the one closed provider

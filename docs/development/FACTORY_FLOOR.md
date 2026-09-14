@@ -126,3 +126,58 @@ awaiting the tool-approval fix. `subsystem-visual` worktree removal was refused 
 filesystem permissions; residual files and its branch remain. See ignored
 `orphan-shell-closure.json` and `subsystem-cleanup-refusal.json`; do not claim
 all worktree cleanup or detached-command cleanup is complete.
+
+The tool-approval candidate `632cfe1cf3f2d92cb11b84f7f8cc0d9182ad4b2c` passed
+full local CI and independent review (#708). Installed development proof observed
+two workers plus one overseer, successful task-tool calls, and an overseer-managed
+browser follow-up using the existing worker task. Factory-owned browser captures
+at 1280×720 and 390×844 were inspected; they show the labelled production-component
+fixture, not a connected factory. Evidence is under ignored
+`.tools/factory-floor-evidence/factory-browser-evidence/`. The browser run directory
+and observed helpers exited. No computer-use helper was observed.
+
+The process audit closed 22 obsolete processes, including the final fixture
+server after its evidence was retained. The cleanup worker produced retained
+Change `09b53fafb8ef81fe461b8f241b8be965`; its first host regression failed and
+was returned through the overseer. Independent factory review cannot read another
+retained Change through its current supported interfaces; host import/checks and
+the existing exact-head publication review remain required. No new Change-read
+service or filesystem permission expansion was added to bypass that boundary.
+
+Host review also refused the initial detached-process patch: rechecking a
+non-child PID's birth before `kill` does not pin it against reuse between those
+operations. The source snapshot and failed-test/safety findings remain in ignored
+`orphan-source-snapshot.json`, `orphan-host-check-failure.txt`, and
+`orphan-host-safety-block.txt`. The overseer was told not to publish that approach.
+
+Final publication: #708 merged as `a492763cac66f56560a0869c40cc148eea4548df`;
+the installed development source is its identical reviewed head. Both previously
+refused worktree remnants were removed after native cleanup of the checkout-local
+read-only Go module cache. Sixteen additional inactive clean worktrees were
+removed after exact merged-patch verification.
+
+The cleanup handoff now leaves production signal authority unchanged and adds a
+bounded FIFO reproduction of the unsupported detached-child case. Host focused
+runner checks and full local CI passed. The local-CI refusal fix uses a scrubbed, absolute Git preflight so a non-Git
+checkout fails without creating cache directories. Environment sanitization still
+precedes lease acquisition; an initial ordering change was rejected because
+inherited Git locators could redirect the lease. The focused shell check supplies
+hostile Git locators pointing at a real repository.
+
+Site #62 merged as `8fad739a4960f4bbdcad922b2f88ed9ef0f5ddb9` and deployed
+as `dpl_7qL6VucPEZjzgym7SpXvKcy6QKNC` to `app.darkfactory.build`. Both public
+packages derive from clean runtime source `a492763cac66f56560a0869c40cc148eea4548df`,
+which includes checkpoints 1, 2, 3, 4A, 4B and 5. Artifact verification, formatting,
+lint, types, 120 unit/render tests, production build/canary check, and 37 browser
+smokes passed (three suite-defined skips). The dedicated paired browser verified
+live topology, subsystem navigation, worker selection/configuration and phone
+settings. Captures: ignored `deployed-final-desktop.png`,
+`deployed-project-desktop.png`, `deployed-project-phone.png`, and
+`deployed-final-settings-phone.png`. Wait for topology separately from the state
+snapshot before capturing. This live factory was idle; moving/crowded scenarios
+remain the labelled fixture evidence above.
+
+Thirty obsolete task/build/site checkouts have been retired, with superseded
+dirty files preserved under ignored `retired-checkouts/`. The final handoff and
+its old CI-refusal checkout are retained until merge; unrelated operator edits
+in the primary runtime/site checkouts remain untouched.
