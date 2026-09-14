@@ -67,12 +67,9 @@ once and the direct Mach-O target is committed and reverified before exec. The
 Maintainer bridge an orchestrator is given is found on the same path but only
 checked, not committed, as described under agent creation.
 
-The native argv templates are:
-
-```text
-claude --dangerously-skip-permissions [--model MODEL] [--effort EFFORT] --strict-mcp-config [--mcp-config '{"mcpServers":{"maintainer":{"command":"BRIDGE"}}}']
-codex --strict-config --no-alt-screen -c check_for_update_on_startup=false -c tool_output_token_limit=32768 -c 'projects={"CHANGE-DIRECTORY"={trust_level="untrusted"}}' -c 'default_permissions="RUNTIME-PROFILE"' -c 'approval_policy="never"' -c 'permissions.RUNTIME-PROFILE=DERIVED-PROFILE' [--model MODEL] [-c 'model_reasoning_effort="EFFORT"'] 'FIXED BOOTSTRAP INSTRUCTION'
-```
+The launch arguments are defined in `internal/provider/provider.go` and guarded
+by the exact-argv checks in `internal/provider/provider_darwin_test.go`. The
+configuration and capability boundaries are described below.
 
 Codex receives the daemon-authorized Change directory as an invocation-only
 project override with `trust_level="untrusted"`. This suppresses Codex's
@@ -109,17 +106,69 @@ This does not modify the operator's personal Codex configuration. Explicit MCP
 servers, including the Maintainer bridge, remain separate capabilities.
 Claude's existing launch has not gained the local-command filesystem boundary.
 
-Browser verification can run as ordinary project test code, independently of
-Codex desktop tools. Reuse the Playwright pattern in
-`scripts/verify-live-browser.mjs`: a dedicated browser profile, explicit target,
-and browser cleanup. Worker checks should use disposable profiles inside their
-private runtime and the checkout's installed test dependencies. They must not
-reuse personal browser profiles, scan the home directory for dependencies, or
-request desktop automation/media permissions. If browser binaries or dependencies
-are unavailable within the worker's readable paths, report that prerequisite to
-the host; the existing operator-owned browser check remains available. The hosted
-connected-console check pairs an authorized operator browser and is not authority
-for an arbitrary worker to access the live factory.
+Codex launches also ignore personal configuration, including notification hooks;
+account authentication still uses the selected `CODEX_HOME`. Factory-owned MCP
+servers and command permissions are supplied explicitly at launch.
+
+## Run-scoped browser tools
+
+An operator can install `scripts/dark-factory-browser-mcp.py` as the executable
+`dark-factory-browser-mcp` on the daemon's existing tool path. Both Codex and
+Claude then receive the explicit `factory_browser` MCP server; an absent bridge
+leaves browser tools unavailable, and an unsafe installed bridge refuses launch.
+This reuses Playwright MCP, not Codex desktop control or a personal browser.
+The bridge authenticates the live attempt through `factoryctl attempt task`
+before starting the server. Chromium starts on the first browser action.
+
+Install a pinned `@playwright/mcp@0.0.80` separately from application dependencies
+(`npm install --prefix TOOL_DIRECTORY --ignore-scripts --save-exact
+@playwright/mcp@0.0.80`). Install the matching Chromium through Playwright's normal
+setup, or explicitly select an existing compatible testing binary. No package or
+browser is downloaded during a worker launch. Missing prerequisites fail clearly.
+
+Place a JSON file beside the resolved Python script, replacing `.py` with `.json`.
+Use canonical absolute paths to the installed Node executable, MCP `cli.js`, and
+browser executable. The script/configuration must be operator-owned and not
+writable by other users. For example:
+
+```json
+{
+  "command": ["/absolute/node", "/absolute/node_modules/@playwright/mcp/cli.js"],
+  "executable": "/absolute/testing-browser",
+  "origins": ["http://127.0.0.1:5196"],
+  "headless": true
+}
+```
+
+The initial configuration accepts at most eight exact HTTP development origins
+on `127.0.0.1`; the standard factory console port is excluded. No wildcard,
+personal profile, extension, remote CDP endpoint or saved storage is supplied.
+Set `headless` to false for a visible dedicated browser window. Screenshots and
+the MCP session record are under the run's private `tmp/browser-*/output`.
+Explicit screenshot filenames should use that output directory. Outputs are
+live-run evidence, removed with the runtime; this does not introduce permanent
+history. Copy only sanitized fixture evidence to the existing development
+artifact location before ending a verification run.
+
+The server and browser are provider descendants and use the existing runner
+cleanup; no browser process, scheduler, database entity or network listener is
+created by the daemon at admission. Retries receive fresh profiles. Browser
+helpers receive no provider login or factory credentials in their environment,
+and their initial file-access root is the private browser directory.
+
+Limits: Playwright's origin/file guards catch unintended access, but are not a
+security boundary; origin lists do not cover redirects or deliberate bypass.
+Explicit MCP servers and native providers still run as the operator. This is
+session separation, not hostile-code confinement or permission to operate the
+live factory. The existing operator-owned `verify-live-browser.mjs` remains the
+separate authorized connected-console route. No native desktop-control tool is
+provided here.
+
+Run `python3 scripts/test-factory-browser.py` for the configuration checks. With
+the real labelled dev fixture running on a configured origin, run
+`python3 scripts/test-factory-browser-live.py CONFIG URL OUTPUT_DIRECTORY` for
+two-session storage isolation, direct unlisted navigation refusal, independent
+closure and desktop/phone screenshots. Use a URL containing `?fixture`.
 
 No provider API key is copied into the environment. The native process still
 runs as the operator and may use its normal account or Keychain access. Before a Claude Code launch the Change

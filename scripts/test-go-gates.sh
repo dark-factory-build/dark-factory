@@ -331,7 +331,7 @@ for local_child in \
 done
 printf 'process.exit(0);\n' >"$local_fixture/scripts/test-verification-profile.mjs"
 
-for local_python in intake notify release autonomy delivery review-intake source-refresh; do
+for local_python in browser intake release autonomy delivery review-intake source-refresh; do
     printf 'pass\n' >"$local_fixture/scripts/test-factory-$local_python.py"
 done
 

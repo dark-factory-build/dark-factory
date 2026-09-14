@@ -261,7 +261,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Peer collaboration is asynchronous: use \"$DARK_FACTORY_FACTORYCTL\" attempt peer status to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail." + " " + discoveryInstructions},
+			wantArgv: []string{"/usr/bin/true", "--ignore-user-config", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Peer collaboration is asynchronous: use \"$DARK_FACTORY_FACTORYCTL\" attempt peer status to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail." + " " + discoveryInstructions},
 		},
 	}
 	for _, test := range tests {
@@ -283,7 +283,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 8, 9, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
+				wantArgv = slices.Replace(wantArgv, 9, 10, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -347,6 +347,59 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				if err := json.Unmarshal(payload[len(claudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
 					t.Fatalf("JSON task decoded as %q: %v", decoded, err)
 				}
+			}
+		})
+	}
+}
+
+func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, locator := nativeFixture(t, kind)
+			bridge := filepath.Join(filepath.Dir(locator), "dark-factory-browser-mcp")
+			for _, name := range []string{bridge, filepath.Join(filepath.Dir(locator), maintainerBridge)} {
+				if err := os.WriteFile(name, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
+				request := roleRequestFor(t, kind, installation, runtime, "", "", role)
+				launch, err := Build(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				args := launch.Argv()
+				var found bool
+				for i, arg := range args {
+					if kind == kernel.ProviderCodex && strings.HasPrefix(arg, "mcp_servers.factory_browser=") {
+						found = strings.Contains(arg, tomlBasicString(runtime.temp)) && strings.Contains(arg, "required=true") && strings.Contains(arg, `env_vars=["DARK_FACTORY_FACTORYCTL","DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"]`)
+					}
+					if kind == kernel.ProviderClaudeCode && arg == "--mcp-config" {
+						var config struct {
+							Servers map[string]struct {
+								Command string   `json:"command"`
+								Args    []string `json:"args"`
+							} `json:"mcpServers"`
+						}
+						if err := json.Unmarshal([]byte(args[i+1]), &config); err != nil {
+							t.Fatal(err)
+						}
+						server := config.Servers["factory_browser"]
+						found = server.Command != "" && slices.Equal(server.Args, []string{"--runtime-dir", runtime.temp})
+						if role == kernel.RoleOrchestrator && config.Servers["maintainer"].Command == "" {
+							t.Fatal("lost Maintainer bridge")
+						}
+					}
+				}
+				if !found {
+					t.Fatal("browser bridge is missing or not scoped to this run")
+				}
+			}
+			if err := os.Chmod(bridge, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Build(roleRequestFor(t, kind, installation, runtime, "", "", kernel.RoleWorker)); !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("unsafe bridge: %v", err)
 			}
 		})
 	}
@@ -645,11 +698,21 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal(err)
 	}
 	request.role = kernel.RoleOrchestrator
+	if _, err := Build(request); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("overseer launched without its explicit Maintainer bridge")
+	}
+	bridge := filepath.Join(filepath.SplitList(runtime.toolPath)[0], maintainerBridge)
+	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	overseer, err := Build(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	workerArgs, overseerArgs := worker.Argv(), overseer.Argv()
+	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.maintainer={command=") {
+		t.Fatal("overseer lost its explicit Maintainer tools")
+	}
 	if strings.Contains(workerArgs[len(workerArgs)-1], "overseer status") {
 		t.Fatal("worker was given overseer authority instructions")
 	}
