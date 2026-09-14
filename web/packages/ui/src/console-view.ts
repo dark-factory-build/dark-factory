@@ -1,4 +1,4 @@
-import type { AgentItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
+import { MAX_SNAPSHOT_ENTITIES, type AgentItem, type StateView, type TaskItem, type TopologyView } from "@dark-factory/client";
 import { compareText, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
 
 /** Canonical statuses, plus legacy display names accepted by the public meter. */
@@ -176,7 +176,12 @@ export function floorScene(
   scopeId?: string,
   requestedPage = 0,
 ): FloorScene {
-  const projects = state === undefined ? [] : [...state.projects.values()].sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
+  return projectFloor(state, selectFloor(prepareFloor(state?.projects, topologies), scopeId, requestedPage), runPaths, lastRunPaths);
+}
+
+/** Disposable hierarchy and dependency indexes, rebuilt only for new source facts. */
+export function prepareFloor(projectMap: StateView["projects"] | undefined, topologies: ReadonlyMap<string, TopologyView> | undefined) {
+  const projects = projectMap === undefined ? [] : [...projectMap.values()].sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
   const hierarchies = projects.map((project) => projectHierarchy(project, topologies?.get(project.id)));
   const blocksByProject = new Map(hierarchies.map((hierarchy) => [hierarchy.project.id, hierarchy.nodes]));
   const roomByID = new Map(hierarchies.flatMap((hierarchy) => hierarchy.nodes).map((room) => [room.id, room]));
@@ -185,6 +190,13 @@ export function floorScene(
     if (room.parentId !== undefined) children.set(room.parentId, [...(children.get(room.parentId) ?? []), room]);
   }
   for (const members of children.values()) members.sort((left, right) => compareText(left.id, right.id));
+  const digest = projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ");
+  return { hierarchies, blocksByProject, roomByID, children, digest };
+}
+
+/** Scope and page select a stable room map independently of live activity. */
+export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?: string, requestedPage = 0) {
+  const { hierarchies, blocksByProject, roomByID, children } = prepared;
   const validScope = scopeId !== undefined && roomByID.has(scopeId) ? scopeId : undefined;
   const scope = validScope === undefined ? undefined : roomByID.get(validScope)!;
   const scopeChildren = scope === undefined ? hierarchies.map((hierarchy) => hierarchy.projectRoom) : children.get(scope.id) ?? [];
@@ -194,7 +206,6 @@ export function floorScene(
   const page = scopeId !== validScope || !Number.isFinite(requestedPage) ? 0 : Math.max(0, Math.min(pageCount - 1, Math.floor(requestedPage)));
   const pageChildren = scopeChildren.slice(page * roomLimit, (page + 1) * roomLimit);
   const rooms = showScope ? [scope, ...pageChildren] : pageChildren;
-  const liveRooms = new Set<string>();
   const kept = new Set(rooms.map((room) => room.id));
   const visibleAncestor = (id: string | undefined): string | undefined => {
     let room = id === undefined ? undefined : roomByID.get(id);
@@ -207,6 +218,40 @@ export function floorScene(
     while (room !== undefined && room.id !== validScope) room = room.parentId === undefined ? undefined : roomByID.get(room.parentId);
     return room !== undefined;
   };
+  const crumbs: Array<{ id?: string; label: string }> = [{ label: "All projects" }];
+  if (scope !== undefined) {
+    const chain: SceneNode[] = [];
+    const seen = new Set<string>();
+    let current: SceneNode | undefined = scope;
+    // Topology frames validate node fields but containment still arrives from
+    // outside this projection. A malformed parent cycle degrades to the
+    // project fallback below; keep this bound as the final UI-side guard.
+    while (current !== undefined && !seen.has(current.id)) {
+      seen.add(current.id);
+      chain.unshift(current);
+      current = current.parentId === undefined ? undefined : roomByID.get(current.parentId);
+    }
+    crumbs.push(...chain.map((node) => ({ id: node.id, label: node.label })));
+  }
+  const digest = `${prepared.digest}:${validScope ?? "root"}:${page}`;
+  return {
+    blocksByProject, roomByID, kept, visibleAncestor, inScope,
+    topology: { digest, nodes: rooms },
+    navigation: {
+      ...(validScope === undefined ? {} : { scopeId: validScope }),
+      ...(scope === undefined ? {} : { backScopeId: scope.parentId }),
+      breadcrumbs: crumbs,
+      enterableIds: rooms.filter((room) => room.id !== validScope && (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
+      omittedChildren: Math.max(0, scopeChildren.length - pageChildren.length),
+      page, pageCount,
+    },
+  };
+}
+
+/** Live task and observed-path projection reuses the selected static hierarchy. */
+export function projectFloor(state: StateView | undefined, selected: ReturnType<typeof selectFloor>, runPaths?: ReadonlyMap<string, RunPathSample>, lastRunPaths?: ReadonlyMap<string, RunPathSample>): FloorScene {
+  const { blocksByProject, roomByID, kept, visibleAncestor, inScope } = selected;
+  const liveRooms = new Set<string>();
   const tasks = state === undefined ? [] : [...state.tasks.values()]
 		.filter((task) => !state.agents.get(task.assigned_agent_id)?.archived)
     .sort((left, right) => compareText(left.id, right.id))
@@ -261,36 +306,13 @@ export function floorScene(
       ...(location === "working" && live !== undefined ? { nodeId: display ?? live, locationWithin: display !== undefined && display !== displayedObservation } : {}),
     };
   });
-  const crumbs: Array<{ id?: string; label: string }> = [{ label: "All projects" }];
-  if (scope !== undefined) {
-    const chain: SceneNode[] = [];
-    const seen = new Set<string>();
-    let current: SceneNode | undefined = scope;
-    // Topology frames validate node fields but containment still arrives from
-    // outside this projection. A malformed parent cycle degrades to the
-    // project fallback below; keep this bound as the final UI-side guard.
-    while (current !== undefined && !seen.has(current.id)) {
-      seen.add(current.id);
-      chain.unshift(current);
-      current = current.parentId === undefined ? undefined : roomByID.get(current.parentId);
-    }
-    crumbs.push(...chain.map((node) => ({ id: node.id, label: node.label })));
-  }
   const observedTasks = tasks.filter((task) => task.status === "running" && task.roomIds.length > 0);
   const outsideScopeActivity = observedTasks.filter((task) => !task.roomIds.some(inScope)).length;
   const hiddenScopeActivity = observedTasks.filter((task) => task.roomIds.some(inScope) && task.displayRoomIds?.length === 0).length;
-  const digest = `${projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ")}:${validScope ?? "root"}:${page}`;
   return {
-    topology: { digest, nodes: rooms }, workers, tasks,
+    topology: selected.topology, workers, tasks,
     omittedLocations: [...liveRooms].filter((id) => !kept.has(id)).length,
-    navigation: {
-      ...(validScope === undefined ? {} : { scopeId: validScope }),
-      ...(scope === undefined ? {} : { backScopeId: scope.parentId }),
-      breadcrumbs: crumbs,
-      enterableIds: rooms.filter((room) => room.id !== validScope && (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
-      omittedChildren: Math.max(0, scopeChildren.length - pageChildren.length),
-      outsideScopeActivity, hiddenScopeActivity, page, pageCount,
-    },
+    navigation: { ...selected.navigation, outsideScopeActivity, hiddenScopeActivity },
   };
 }
 
@@ -336,7 +358,7 @@ function runFootprint(rooms: readonly SceneNode[], sample: RunPathSample | undef
 function projectHierarchy(project: { id: string; name: string }, topology: TopologyView | undefined) {
   const served = topology?.nodes ?? [];
   const servedByID = new Map<string, typeof served[number]>();
-  const unique = served.every((node) => !servedByID.has(node.id) && (servedByID.set(node.id, node), true));
+  const unique = served.length <= MAX_SNAPSHOT_ENTITIES && served.every((node) => !servedByID.has(node.id) && (servedByID.set(node.id, node), true));
   // ponytail: this walks at most the protocol's 4,096 served nodes per node;
   // a future larger graph should validate containment once at decode time.
   const valid = served.length > 0 && unique

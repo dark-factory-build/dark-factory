@@ -174,14 +174,60 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
   return output;
 }
 
+/** The animation clock updates worker elements without rerendering the floor or atlas. */
+function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+  layout: ReturnType<typeof layoutScene>;
+  placements: ReturnType<typeof placeWorkers>;
+  nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
+  tasks: readonly SceneTask[];
+  connected: boolean;
+}) {
+  // Inventory/dependency metadata may change without changing a route's geometry.
+  const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door, standing }) => [id, x, y, width, height, door, standing])]), [layout]);
+  const positions = useSceneMotion(layout, placements, geometryKey, connected);
+  const workerById = new Map(workers.map((worker) => [worker.id, worker]));
+  return <>{placements.map((placement) => {
+        const worker = workerById.get(placement.id);
+        if (worker === undefined) return null;
+        const position = positions.get(placement.id) ?? { ...placement, motion: { action: "still", frame: 0 } as WorkerMotion };
+        const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
+        const location = worker.location === "working"
+          ? `representative location${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? "at workstation" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
+          : worker.location === "unobserved" ? "working; location not yet observed"
+          : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
+          : worker.paused ? "paused in resting area" : "ready in resting area";
+
+        const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
+        const frames = workerFrames(worker, position.motion);
+        return (
+          <g
+            key={worker.id}
+            data-worker-id={worker.id}
+            data-worker-location={worker.location ?? "resting"}
+            data-worker-action={position.motion.action}
+            transform={`translate(${position.x} ${position.y})`}
+            className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
+          >
+            <g role="img" aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...(onSelectWorker === undefined ? {} : { onClick: () => onSelectWorker(worker.id), style: { cursor: "pointer" } })}>
+              <title>{`${worker.name} · ${location}`}</title>
+              <rect x={-12} y={-12} width="24" height="24" fill="transparent" />
+              {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
+              {frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
+            </g>
+            {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
+              <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
+            </g>}
+          </g>
+        );
+      })}</>;
+}
+
 /** A disposable SVG projection of topology and current factory state. */
 export function FactoryScene({ topology, workers, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
   const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const layout = useMemo(() => layoutScene(topology), [topology]);
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
-  const positions = useSceneMotion(layout, placements, topology.digest, connected);
   const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
-  const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   const resting = placements.filter((placement) => placement.area === "resting");
   const staging = placements.filter((placement) => placement.area === "staging");
   const overflow = placements.filter((placement) => placement.area === "overflow");
@@ -303,40 +349,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
       {overflow.length === 0 ? null : <Area label={`WORKER AREA AT CAPACITY · ${overflow.length}`} width={layout.width - ROOM_LEFT - PADDING} top={overflow[0]!.y - 28} bottom={Math.max(...overflow.map((placement) => placement.y + 24))} />}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="38" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      {placements.map((placement) => {
-        const worker = workerById.get(placement.id);
-        if (worker === undefined) return null;
-        const position = positions.get(placement.id) ?? { ...placement, motion: { action: "still", frame: 0 } as WorkerMotion };
-        const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
-        const location = worker.location === "working"
-          ? `representative location${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? "at workstation" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
-          : worker.location === "unobserved" ? "working; location not yet observed"
-          : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
-          : worker.paused ? "paused in resting area" : "ready in resting area";
-
-        const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
-        const frames = workerFrames(worker, position.motion);
-        return (
-          <g
-            key={worker.id}
-            data-worker-id={worker.id}
-            data-worker-location={worker.location ?? "resting"}
-            data-worker-action={position.motion.action}
-            transform={`translate(${position.x} ${position.y})`}
-            className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
-          >
-            <g role="img" aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...(onSelectWorker === undefined ? {} : { onClick: () => onSelectWorker(worker.id), style: { cursor: "pointer" } })}>
-              <title>{`${worker.name} · ${location}`}</title>
-              <rect x={-12} y={-12} width="24" height="24" fill="transparent" />
-              {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
-              {frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
-            </g>
-            {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
-              <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
-            </g>}
-          </g>
-        );
-      })}
+      <SceneWorkers layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
 
       {queued === 0 ? null : <g data-floor-queue="" {...sceneAction(onOpenQueue)} aria-label={`Open queue, ${queued} tasks`}>
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x={ROOM_LEFT + index * 3} y={boardTop + index * 3} width="24" height="28" fill="#d9d2b5" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
