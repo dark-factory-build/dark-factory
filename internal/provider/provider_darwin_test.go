@@ -372,7 +372,7 @@ func TestInstalledBrowserBridgeUsesOnlyRunPathsForBothProviders(t *testing.T) {
 				var found bool
 				for i, arg := range args {
 					if kind == kernel.ProviderCodex && strings.HasPrefix(arg, "mcp_servers.factory_browser=") {
-						found = strings.Contains(arg, tomlBasicString(runtime.temp)) && strings.Contains(arg, "required=true")
+						found = strings.Contains(arg, tomlBasicString(runtime.temp)) && strings.Contains(arg, "required=true") && strings.Contains(arg, `env_vars=["DARK_FACTORY_FACTORYCTL","DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"]`)
 					}
 					if kind == kernel.ProviderClaudeCode && arg == "--mcp-config" {
 						var config struct {

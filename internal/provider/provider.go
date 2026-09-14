@@ -115,7 +115,7 @@ func resolveTool(toolPath, tool string) (runner.ExecutableCommitment, error) {
 // executable by its owner and writable by nobody else; the commitment a CLI
 // gets is not asked of it, since Claude spawns the bridge itself much later
 // and it may be a script.
-var errBridgeUnfit = errors.New("provider: maintainer bridge is not a regular owner-only executable")
+var errBridgeUnfit = errors.New("provider: MCP bridge is not a regular owner-only executable")
 
 // resolveBridge finds an operator-installed MCP bridge on the fixed tool path.
 func resolveBridge(toolPath string, tool string) (string, error) {
@@ -281,12 +281,8 @@ func Build(request Request) (Launch, error) {
 		if request.reasoningEffort != "" {
 			argv = append(argv, "--effort", request.reasoningEffort)
 		}
-		// Only the servers named here reach the session: none for a worker,
-		// so neither the account's configuration nor a .mcp.json in the
-		// Change can add one; the Maintainer App alone for an orchestrator,
-		// which publishes through it. Without the bridge an orchestrator
-		// cannot do its job, so the launch is refused rather than started
-		// blind.
+		// Only the installed browser and orchestrator Maintainer servers are allowed;
+		// account configuration and Change-local .mcp.json cannot add servers.
 		argv = append(argv, "--strict-mcp-config")
 		servers := map[string]any{}
 		if browser != "" {
@@ -321,7 +317,7 @@ func Build(request Request) (Launch, error) {
 			for i, arg := range browserArgs {
 				args[i] = tomlBasicString(arg)
 			}
-			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],enabled=true,required=true}"
+			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],env_vars=[\"DARK_FACTORY_FACTORYCTL\",\"DARK_FACTORY_SOCKET\",\"DARK_FACTORY_ATTEMPT_TOKEN_FILE\"],enabled=true,required=true}"
 			if len(config) > runner.MaxArgumentBytes {
 				return Launch{}, ErrInvalid
 			}
