@@ -56,6 +56,18 @@ function render(props = {}) {
   return renderToStaticMarkup(createElement(FactoryScene, { topology, workers, ...props }));
 }
 
+test("single-room project headings omit duplicate copy without moving the building", () => {
+  const node = { ...topology.nodes[0], project: { id: "project-a", name: "Repository" } };
+  const landing = layoutScene({ digest: "landing", nodes: [node] });
+  const distinct = layoutScene({ digest: "landing", nodes: [{ ...node, label: "Subsystem" }] });
+  assert.deepEqual(landing.headings, []);
+  assert.equal(distinct.headings[0].label, "Repository");
+  assert.deepEqual(landing.rooms, distinct.rooms);
+  assert.deepEqual(landing.corridors, distinct.corridors);
+  const multiple = layoutScene({ digest: "children", nodes: [node, { ...node, id: "child", path: "child" }] });
+  assert.equal(multiple.headings[0].label, "Repository");
+});
+
 function overlaps(left, right) {
   return left.x <= right.x + right.width && right.x <= left.x + left.width
     && left.y <= right.y + right.height && right.y <= left.y + left.height;

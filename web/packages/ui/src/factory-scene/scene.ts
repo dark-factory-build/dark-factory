@@ -104,7 +104,7 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
   for (const members of groups.values()) {
     const project = members[0]!.project;
     if (project !== undefined) {
-      headings.push({ label: project.name, x: ROOM_LEFT, y: top });
+      if (members.length !== 1 || members[0]!.label !== project.name) headings.push({ label: project.name, x: ROOM_LEFT, y: top });
       top += 16;
     }
     members.forEach((node, index) => {

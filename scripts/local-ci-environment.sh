@@ -135,6 +135,8 @@ export npm_config_userconfig=/var/empty/.npmrc NPM_CONFIG_USERCONFIG=/var/empty/
 export npm_config_globalconfig=/var/empty/.npmrc-global NPM_CONFIG_GLOBALCONFIG=/var/empty/.npmrc-global
 export NETRC=/dev/null
 export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build" GOMODCACHE="$ci_cache_root/go-mod"
+# Keep disposable checkout caches removable by ordinary worktree cleanup.
+export GOFLAGS=-modcacherw
 export LC_ALL=C
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0
 if [ -n "$ci_have_df_gate_fault" ]; then export DF_GATE_FAULT="$ci_saved_df_gate_fault"; fi
