@@ -72,6 +72,8 @@ for forbidden in \
     fi
 done
 
+grep -F -x 'GOFLAGS=-modcacherw' "$child_environment" >/dev/null \
+    || fail "Go module cache directories would prevent worktree cleanup"
 grep -F -x 'HOME=/var/empty' "$child_environment" >/dev/null \
     || fail "safe isolated HOME was not installed"
 grep -F -x "DF_CI_CACHE_ROOT=$repository_root/.tools/local-ci" "$child_environment" >/dev/null \
