@@ -96,3 +96,17 @@ failed immediately because interactive Codex rejects the exec-only
 `--ignore-user-config` flag. Dispatch is disabled. The follow-up uses the
 supported `notify=[]` override for the observed personal notification hook;
 no blanket personal-configuration isolation is claimed.
+
+#706 merged as `94c2b80c34c32292365fce8cacd99a4258411063`; installed source
+`3302db773a11086f2be30a5b2cf6fb4c7e34b8d8` starts two concurrent workers without
+the personal computer-use notification helper. The dedicated test browser now
+connects successfully; hosted screenshots still show the older deployed floor.
+Six obsolete fixture servers and their helpers were closed (18 processes).
+
+The next real-run failure is task API access: the command sandbox permits the
+credential file but refuses the client's verified parent-directory walk. Keep
+that validation and the filesystem boundary. A small `factoryctl attempt mcp`
+stdio tool exposes the existing attempt/overseer argv through the same parser
+and authenticated API, without operator commands or shell execution. Codex
+uses this tool for task retrieval and durable outcomes. No daemon wire protocol,
+authority, registry or provider observation changes. Installed proof is pending.
