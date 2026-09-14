@@ -171,7 +171,7 @@ cd "$work"
 case "$provider" in
     codex)
         model=${DARK_FACTORY_REVIEW_MODEL:-gpt-5.6-sol}
-        DARK_FACTORY_REVIEW_CHECKOUT="$work/repo" codex exec --ephemeral --ignore-user-config --strict-config -c 'approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=true,request_permissions=false,skill_approval=false}}' -c 'approvals_reviewer="auto_review"' --sandbox read-only --ignore-rules --skip-git-repo-check --model "$model" \
+        DARK_FACTORY_REVIEW_CHECKOUT="$work/repo" codex exec --disable computer_use --disable browser_use --ephemeral --ignore-user-config --strict-config -c 'approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=true,request_permissions=false,skill_approval=false}}' -c 'approvals_reviewer="auto_review"' --sandbox read-only --ignore-rules --skip-git-repo-check --model "$model" \
             -c "mcp_servers.dark_factory_maintainer.command=\"$bridge\"" \
             -c 'mcp_servers.dark_factory_maintainer.enabled=true' \
             -c 'mcp_servers.dark_factory_maintainer.required=true' \

@@ -283,7 +283,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 8, 9, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions)
+				wantArgv = slices.Replace(wantArgv, 8, 9, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use")
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
