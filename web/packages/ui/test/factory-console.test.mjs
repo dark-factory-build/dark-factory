@@ -4,9 +4,11 @@ import test from "node:test";
 import { createElement, isValidElement, useEffect, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
-import { MAX_TASK_PRIORITY, ProtocolError, SessionError } from "@dark-factory/client";
+import { MAX_SNAPSHOT_ENTITIES, MAX_TASK_PRIORITY, ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryApp, FactoryConsole, floorScene } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
+import { FactoryFloor } from "../dist/src/console-screens.js";
+import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
 import { fixtureState, fixtureTopologies, fixtureTopology } from "../../../fixtures/state.mjs";
 
@@ -1885,4 +1887,64 @@ test("page controls and dependency links inspect an omitted leaf using the same 
   await act(async () => { tree.update(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: served({ ...fixtureTopology, nodes: [root] }), view: "floor" })); });
   assert.equal(tree.root.findAllByProps({ "data-room-id": rootID }).length, 1);
   await act(async () => tree.unmount());
+});
+
+
+test("floor preparation survives draft and live snapshot updates but invalidates source facts", async () => {
+  let reads = 0;
+  const topology = { ...fixtureTopology, get nodes() { reads += 1; return fixtureTopology.nodes; } };
+  let topologies = new Map(fixtureTopologies).set(ids.project, topology);
+  function DraftFloor({ state, connected = true }) {
+    const [draft, setDraft] = useState("");
+    return createElement("div", null,
+      createElement("input", { value: draft, onChange: (event) => setDraft(event.target.value) }),
+      createElement(FactoryFloor, { state, topologies, connected }));
+  }
+  let renderer;
+  await act(async () => { renderer = create(createElement(DraftFloor, { state: fixtureState })); });
+  const scene = () => renderer.root.findByType(FactoryScene);
+  const layout = () => renderer.root.find((node) => node.type.name === "SceneWorkers").props.layout;
+  const preparedReads = reads;
+  const originalTopology = scene().props.topology;
+  const originalLayout = layout();
+  assert.ok(preparedReads > 0);
+  await act(async () => { renderer.root.findByType("input").props.onChange({ target: { value: "draft typing" } }); });
+  assert.equal(reads, preparedReads);
+  assert.equal(scene().props.topology, originalTopology);
+  assert.equal(layout(), originalLayout);
+  const fresh = { ...fixtureState, head: fixtureState.head + 1n, projects: new Map([...fixtureState.projects].map(([id, project]) => [id, { ...project }])), tasks: new Map(fixtureState.tasks), humanRequests: new Map() };
+  fresh.tasks.set(ids.task, { ...fresh.tasks.get(ids.task), title: "Updated live task" });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh })); });
+  assert.equal(reads, preparedReads, "fresh snapshot project objects do not trigger topology validation");
+  assert.equal(scene().props.tasks.find((task) => task.id === ids.task).title, "Updated live task");
+  assert.equal(layout(), originalLayout);
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: false })); });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: fresh, connected: true })); });
+  assert.equal(reads, preparedReads);
+  assert.equal(layout(), originalLayout);
+  const roomId = originalTopology.nodes[0].id;
+  await act(async () => { scene().props.onEnterRoom(roomId); });
+  assert.equal(reads, preparedReads, "scope selection reuses prepared hierarchy");
+  assert.notEqual(layout(), originalLayout);
+  const renamed = { ...fresh, projects: new Map(fresh.projects).set(ids.project, { ...fresh.projects.get(ids.project), name: "Renamed workshop" }) };
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
+  assert.ok(reads > preparedReads);
+  assert.match(JSON.stringify(renderer.toJSON()), /Renamed workshop/);
+  // A new input with the same digest must still validate and discard bad containment.
+  topologies = new Map(topologies).set(ids.project, { ...fixtureTopology, nodes: [{ ...fixtureTopology.nodes[0], parent_id: "missing" }] });
+  await act(async () => { renderer.update(createElement(DraftFloor, { state: renamed })); });
+  assert.equal(scene().props.topology.nodes.some((node) => node.id === ids.project), true);
+  assert.equal(scene().props.topology.nodes.some((node) => node.id === roomId), false);
+  await act(async () => { renderer.unmount(); });
+});
+
+
+test("oversized direct topology falls back before traversing any node", () => {
+  let visited = 0;
+  const nodes = Array.from({ length: MAX_SNAPSHOT_ENTITIES + 1 }, () => ({
+    get id() { visited += 1; throw new Error("oversized topology was traversed"); },
+  }));
+  const scene = floorScene(fixtureState, served({ ...fixtureTopology, nodes }));
+  assert.equal(visited, 0);
+  assert.deepEqual(scene.topology.nodes.filter((node) => node.project?.id === ids.project).map((node) => [node.id, node.parentId, node.sizeBucket]), [[ids.project, undefined, undefined]]);
 });

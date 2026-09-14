@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { AgentItem, HumanRequestItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
 import {
   STAGE_SEQUENCE,
@@ -7,7 +7,9 @@ import {
   agentCurrentTask,
   agentGlyph,
   factoryCounters,
-  floorScene,
+  prepareFloor,
+  selectFloor,
+  projectFloor,
   stageMeterFill,
   stageOfTask,
   type RunPathSample,
@@ -141,7 +143,11 @@ export function FactoryFloor({
 }) {
   const [{ scopeId, page }, setView] = useState<{ scopeId?: string; page: number }>({ page: 0 });
   const setScopeId = (scopeId: string | undefined) => setView({ scopeId, page: 0 });
-  const scene = floorScene(state, topologies, runPaths, lastRunPaths, scopeId, page);
+  // Snapshot decoding replaces the projects Map even when only live work changed.
+  const projectsKey = JSON.stringify([...state?.projects.values() ?? []].map(({ id, name }) => [id, name]).sort(([left], [right]) => left!.localeCompare(right!)));
+  const prepared = useMemo(() => prepareFloor(state?.projects, topologies), [projectsKey, topologies]);
+  const selected = useMemo(() => selectFloor(prepared, scopeId, page), [prepared, scopeId, page]);
+  const scene = useMemo(() => projectFloor(state, selected, runPaths, lastRunPaths), [state, selected, runPaths, lastRunPaths]);
   useEffect(() => {
     if (scopeId !== scene.navigation.scopeId || page !== scene.navigation.page) setView({ scopeId: scene.navigation.scopeId, page: scene.navigation.page });
   }, [scopeId, page, scene.navigation.scopeId, scene.navigation.page]);
