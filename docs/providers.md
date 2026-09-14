@@ -67,12 +67,9 @@ once and the direct Mach-O target is committed and reverified before exec. The
 Maintainer bridge an orchestrator is given is found on the same path but only
 checked, not committed, as described under agent creation.
 
-The native argv templates are:
-
-```text
-claude --dangerously-skip-permissions [--model MODEL] [--effort EFFORT] --strict-mcp-config [--mcp-config '{"mcpServers":{"maintainer":{"command":"BRIDGE"}}}']
-codex --strict-config --no-alt-screen -c check_for_update_on_startup=false -c tool_output_token_limit=32768 -c 'projects={"CHANGE-DIRECTORY"={trust_level="untrusted"}}' -c 'default_permissions="RUNTIME-PROFILE"' -c 'approval_policy="never"' -c 'permissions.RUNTIME-PROFILE=DERIVED-PROFILE' [--model MODEL] [-c 'model_reasoning_effort="EFFORT"'] 'FIXED BOOTSTRAP INSTRUCTION'
-```
+The launch arguments are defined in `internal/provider/provider.go` and guarded
+by the exact-argv checks in `internal/provider/provider_darwin_test.go`. The
+configuration and capability boundaries are described below.
 
 Codex receives the daemon-authorized Change directory as an invocation-only
 project override with `trust_level="untrusted"`. This suppresses Codex's
