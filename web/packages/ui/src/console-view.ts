@@ -1,8 +1,8 @@
 import type { AgentItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
 import { compareText, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
 
-/** The task stages the daemon actually serves today. */
-export type TaskStage = "queued" | "building" | "blocked" | "done" | "failed";
+/** Canonical statuses, plus legacy display names accepted by the public meter. */
+export type TaskStage = TaskItem["status"] | "building" | "done";
 
 export const STAGE_SEQUENCE: readonly TaskStage[] = ["queued", "building"];
 
@@ -10,28 +10,14 @@ export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
 export type AgentStatus = "working" | "ready" | "needs-you" | "paused";
 
-/** The durable task status projected into the console stage vocabulary. */
+/** Retained public display helper; internal consumers use the canonical status. */
 export function stageOfTask(task: TaskItem): TaskStage {
-  switch (task.status) {
-    case "queued":
-      return "queued";
-    case "running":
-      return "building";
-    case "blocked":
-      return "blocked";
-    case "succeeded":
-      return "done";
-    case "failed":
-    case "cancelled":
-      return "failed";
-  }
+  return task.status === "running" ? "building" : task.status === "succeeded" ? "done" : task.status;
 }
 
-/** Segments filled by the durable stage; done fills the complete meter. */
+/** Legacy display names and canonical statuses fill the same two segments. */
 export function stageMeterFill(stage: TaskStage): number {
-  if (stage === "done") return STAGE_SEQUENCE.length;
-  if (stage === "blocked" || stage === "failed") return 0;
-  return STAGE_SEQUENCE.indexOf(stage) + 1;
+  return stage === "queued" ? 1 : stage === "running" || stage === "building" || stage === "succeeded" || stage === "done" ? STAGE_SEQUENCE.length : 0;
 }
 
 /** Tasks an agent is on right now (durable assignment, live statuses). */
@@ -103,22 +89,23 @@ export function factoryCounters(state: StateView | undefined): FactoryCounters {
   if (state === undefined) return { queued: undefined, needsYou: undefined };
   let queued = 0;
   for (const task of state.tasks.values()) {
-    if (stageOfTask(task) === "queued") queued += 1;
+    if (task.status === "queued") queued += 1;
   }
   return { queued, needsYou: state.humanRequests.size };
 }
 
 /** Active work first, then queued, then finished; priority breaks ties. */
 export function orderTasksForHome(state: StateView): readonly TaskItem[] {
-  const rank: Record<TaskStage, number> = {
-    building: 0,
+  const rank: Record<TaskItem["status"], number> = {
+    running: 0,
     queued: 1,
     blocked: 2,
-    done: 3,
+    succeeded: 3,
     failed: 4,
+    cancelled: 4,
   };
   return [...state.tasks.values()].sort((left, right) => {
-    const byStage = rank[stageOfTask(left)] - rank[stageOfTask(right)];
+    const byStage = rank[left.status] - rank[right.status];
     return byStage !== 0 ? byStage : right.priority - left.priority;
   });
 }

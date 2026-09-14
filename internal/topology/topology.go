@@ -43,10 +43,7 @@ const (
 
 type EdgeKind string
 
-const (
-	EdgeContains EdgeKind = "contains"
-	EdgeImports  EdgeKind = "imports"
-)
+const EdgeImports EdgeKind = "imports"
 
 type Snapshot struct {
 	Digest         string `json:"digest"`
@@ -453,16 +450,10 @@ func graph(found *discovery, analyzed analysis, project string, nodeLimit, edgeL
 	sort.Slice(nodes, func(i, j int) bool {
 		return nodes[i].RelativePath < nodes[j].RelativePath || nodes[i].RelativePath == nodes[j].RelativePath && nodes[i].Kind < nodes[j].Kind
 	})
-	containmentEdges := len(nodes) - 1
-	if containmentEdges > edgeLimit || len(analyzed.imports) > edgeLimit-containmentEdges {
+	if len(analyzed.imports) > edgeLimit {
 		return nil, nil, bound("edge count", edgeLimit)
 	}
-	edges := make([]Edge, 0, len(nodes)-1+len(analyzed.imports))
-	for _, node := range nodes {
-		if node.ParentID != "" {
-			edges = append(edges, Edge{node.ParentID, node.ID, EdgeContains, 1})
-		}
-	}
+	edges := make([]Edge, 0, len(analyzed.imports))
 	for edge, weight := range analyzed.imports {
 		edges = append(edges, Edge{nodeID(project, NodePackage, edge.from), nodeID(project, NodePackage, edge.to), EdgeImports, weight})
 	}

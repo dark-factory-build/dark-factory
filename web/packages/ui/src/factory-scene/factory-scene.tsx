@@ -95,10 +95,6 @@ function motionPoint(motion: MotionState, at: number) {
   return { point: motion.placement, walking: false };
 }
 
-function retargetRoute(layout: ReturnType<typeof layoutScene>, motion: MotionState, point: { x: number; y: number }, destination: ReturnType<typeof placeWorkers>[number], at: number) {
-  return routeFromCurrent(layout, point, destination);
-}
-
 /** One browser clock; source state only ever supplies the next local destination. */
 function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean) {
   const motions = useRef(new Map<string, MotionState>());
@@ -137,7 +133,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
         next.set(placement.id, motionPoint(old, at).walking ? { ...old, point: old.point } : { placement, point: placement });
         continue;
       }
-      const route = retargetRoute(layout, old, current, placement, at);
+      const route = routeFromCurrent(layout, current, placement);
       next.set(placement.id, route === undefined || route.length === 0
         ? { placement, point: placement }
         : { placement, point: current, route, startedAt: at });

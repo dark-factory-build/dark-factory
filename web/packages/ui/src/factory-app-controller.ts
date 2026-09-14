@@ -28,7 +28,7 @@ import {
   randomOperationID,
   type TopologyView,
 } from "@dark-factory/client";
-import type { RunPathSample } from "./console-view.js";
+import { agentCurrentTask, type RunPathSample } from "./console-view.js";
 import { FactorySettingsCoordinator, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
@@ -215,13 +215,6 @@ type TaskEditConfirmation = {
   previousRevision: bigint;
   revision: bigint;
 };
-
-function agentCurrentTask(agent: AgentItem, state: StateView) {
-  for (const task of state.tasks.values()) {
-    if (task.assigned_agent_id === agent.id && task.status === "running") return task;
-  }
-  return undefined;
-}
 
 function agentQueuedTask(agent: AgentItem, state: StateView) {
   for (const task of state.tasks.values()) {

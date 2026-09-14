@@ -4,7 +4,7 @@ import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type DiscoveredAccount, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
-import { factoryCounters, stageOfTask } from "./console-view.js";
+import { factoryCounters } from "./console-view.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
 
 export type ConsoleView = "floor" | "agents";

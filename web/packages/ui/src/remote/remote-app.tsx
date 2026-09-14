@@ -17,7 +17,6 @@ import {
   type StateView,
 } from "@dark-factory/client";
 import { AgentStrip, QueueScreen, StageMeter } from "../console-screens.js";
-import { stageOfTask } from "../console-view.js";
 import {
   FACTORY_UNREACHABLE,
   INVITATION_SPENT,
@@ -765,13 +764,12 @@ function ProjectsSection({ state }: { state: StateView | undefined }) {
               ) : (
                 <ul className="dfConsoleRows">
                   {group.tasks.map((task) => {
-                    const stage = stageOfTask(task);
                     return (
                       <li key={task.id}>
                         <div className="dfConsoleRow">
                           <span className="dfConsoleRow__title">{task.title}</span>
                           <span className="dfConsoleRow__agent">{entityName(state.agents, task.assigned_agent_id, "agent")}</span>
-                          <StageMeter stage={stage} />
+                          <StageMeter stage={task.status} />
                         </div>
                       </li>
                     );

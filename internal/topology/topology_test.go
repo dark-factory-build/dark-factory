@@ -269,7 +269,6 @@ func TestBuildBoundsFailClearly(t *testing.T) {
 		{"files", map[string]string{"a": "x", "b": "x"}, limits{depth: 2, files: 1, nodes: 10, bytes: 10}, "file count"},
 		{"nodes", map[string]string{"a/file": "x"}, limits{depth: 2, files: 10, nodes: 1, bytes: 10}, "node count"},
 		{"bytes", map[string]string{"file": "four"}, limits{depth: 2, files: 10, nodes: 10, bytes: 3}, "byte count"},
-		{"containment edges", map[string]string{"a/file": "x", "b/file": "x"}, limits{depth: 2, files: 10, nodes: 10, edges: 1, bytes: 10}, "edge count"},
 		{
 			"import edges",
 			map[string]string{
@@ -466,5 +465,46 @@ func TestNodeIDsAreMintedPerProject(t *testing.T) {
 	}
 	if len(first.Nodes) == 0 || first.Nodes[0].ID == second.Nodes[0].ID || first.Nodes[0].ID != again.Nodes[0].ID {
 		t.Fatalf("repository ids: a=%s b=%s a again=%s", first.Nodes[0].ID, second.Nodes[0].ID, again.Nodes[0].ID)
+	}
+}
+
+func TestContainmentUsesParentsWithoutSpendingImportEdges(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, map[string]string{
+		"go.mod":                 "module example.com/cart\n",
+		"app/main.go":            "package app\nimport \"example.com/cart/lib\"\n",
+		"lib/lib.go":             "package lib\n",
+		"docs/nested/readme.txt": "notes",
+	})
+	bounds := defaultLimits
+	bounds.edges = 1
+	snapshot, err := build(context.Background(), root, "project", nil, bounds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Edges) != 1 || snapshot.Edges[0].Kind != EdgeImports {
+		t.Fatalf("edges = %+v, want one import only", snapshot.Edges)
+	}
+	ids := make(map[string]bool)
+	for _, node := range snapshot.Nodes {
+		ids[node.ID] = true
+	}
+	for _, node := range snapshot.Nodes {
+		if node.Kind != NodeRepository && !ids[node.ParentID] {
+			t.Fatalf("node %s lost containment parent %s", node.ID, node.ParentID)
+		}
+	}
+	nodes := append([]Node(nil), snapshot.Nodes...)
+	for index := range nodes {
+		if nodes[index].Kind != NodeRepository {
+			nodes[index].ParentID = ""
+			break
+		}
+	}
+	if graphDigest(nodes, snapshot.Edges) == snapshot.Digest {
+		t.Fatal("parent change did not change graph digest")
+	}
+	if graphDigest(snapshot.Nodes, nil) == snapshot.Digest {
+		t.Fatal("import removal did not change graph digest")
 	}
 }
