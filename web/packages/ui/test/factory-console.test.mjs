@@ -493,6 +493,7 @@ test("transitional session statuses have stable live labels and offer no factory
   for (const status of ["idle", "connecting", "authenticating", "syncing", "closed"]) {
     const markup = render({ status, onSelectAgent: () => {}, onSelectHumanRequest: () => {}, onView: () => {}, onToggleSettings: () => {} });
     assert.match(markup, new RegExp(`>${status.toUpperCase()}<`));
+    assert.match(markup, /class="dfFactoryConsole__connection" aria-label="Connection status:/);
     // SETTINGS is the only button before the factory is ready; the floor is a
     // native disclosure, not a factory action.
     const live = (markup.match(/<button(?![^>]*disabled)/g) ?? []).length;
@@ -502,6 +503,7 @@ test("transitional session statuses have stable live labels and offer no factory
   const ready = render({ status: "ready" });
   assert.match(ready, /class="dfFactoryConsole__visuallyHidden"/);
   assert.match(ready, /role="status" aria-live="polite" aria-atomic="true"/);
+  assert.match(render({ status: "closed", error: new SessionError("connection") }), /class="dfFactoryConsole__visuallyHidden" aria-label="Connection status:/);
 });
 
 test("closed and pairing-uncertain errors have no ineffective action", () => {

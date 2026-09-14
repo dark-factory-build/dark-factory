@@ -161,7 +161,7 @@ export function FactoryConsole({
             <button type="button" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings}>Settings</button>
           </div>
           <div
-            className="dfFactoryConsole__visuallyHidden"
+            className={ready || error !== undefined ? "dfFactoryConsole__visuallyHidden" : "dfFactoryConsole__connection"}
             aria-label={`Connection status: ${STATUS_LABELS[status]}`}
           >
             <p className="dfFactoryConsole__status" role="status" aria-live="polite" aria-atomic="true">
