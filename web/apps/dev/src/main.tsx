@@ -71,11 +71,30 @@ const fixturePagedTopologies = new Map(fixtureHierarchyTopologies).set(fixtureOb
   }))],
 });
 
+const inventoryCounts = (counts: Partial<Record<"source" | "tests" | "documentation" | "configuration" | "assets" | "unclassified", number>>) => ({ source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0, ...counts });
+const inventory = (counts: ReturnType<typeof inventoryCounts>, names: string[] = []) => ({ direct: counts, total: counts, samples: names, samples_omitted: Math.max(0, Object.values(counts).reduce((sum, n) => sum + n, 0) - names.length) });
+const fixtureInventoryTopologies = new Map(fixtureHierarchyTopologies).set(fixtureObservedRun.projectId, {
+  ...fixtureTopologies.get(fixtureObservedRun.projectId)!, digest: "inventory-fixture",
+  nodes: [
+    { id: "a1".repeat(32), parent_id: "", kind: "repository", path: ".", label: "Workshop", language: "", size_bucket: "large", inventory: { ...inventory(inventoryCounts({ configuration: 3 }), ["package.json", "go.mod", "go.sum"]), total: inventoryCounts({ source: 206, tests: 140, documentation: 36, configuration: 13, assets: 98, unclassified: 4 }) } },
+    ...[
+      ["b2", "internal/kernel", "Source engine", "large", inventoryCounts({ source: 200, configuration: 4 }), ["store.go", "api.go", "run.go"]],
+      ["c3", "tests", "Test workshop", "large", inventoryCounts({ tests: 140, source: 4 }), ["session.test.ts", "store_test.go", "test_queue.py"]],
+      ["d4", "web", "Design studio", "large", inventoryCounts({ assets: 98, documentation: 36, configuration: 6 }), ["scene.svg", "README.md", "theme.json"]],
+      ["e5", "small", "Small component", "tiny", inventoryCounts({ source: 2, unclassified: 4 }), ["main.ts", "notes.bin", "data"]],
+      ["f6", "empty", "Empty component", "empty", inventoryCounts({}), []],
+    ].map(([id, path, label, size, counts, names]) => ({ id: String(id).repeat(32), parent_id: "a1".repeat(32), kind: "directory", path, label, language: "", size_bucket: size, inventory: inventory(counts as ReturnType<typeof inventoryCounts>, names as string[]) })),
+    { id: "07".repeat(32), parent_id: "a1".repeat(32), kind: "directory", path: "unavailable", label: "Unavailable inventory", language: "", size_bucket: "small" },
+  ],
+});
+const fixtureInventoryState = { ...fixtureFloorState, humanRequests: new Map() };
+
 // Fixture tour: sample data, no daemon, no authority. Fixture-only state
 // toggles expose production components; no action reports a daemon result.
 function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
   const crowded = fixture === "crowded";
+  const inventoryFixture = fixture === "inventory" || fixture === "inventory-idle";
   const terminalFixture = fixture === "terminal";
   const archiveFixture = fixture === "archive" || fixture === "archived";
   const [inputRefused, setInputRefused] = useState(true);
@@ -89,7 +108,7 @@ function FixtureTour() {
   const [connected, setConnected] = useState(true);
   const [changedTopology, setChangedTopology] = useState(false);
   const [view, setView] = useState<FactoryConsoleProps["view"]>("floor");
-  const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>(terminalFixture || archiveFixture ? "agent" : "needs-you");
+  const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>(inventoryFixture ? "floor" : terminalFixture || archiveFixture ? "agent" : "needs-you");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>(terminalFixture ? { id: fixtureAgent.id, name: fixtureAgent.name, revision: fixtureAgent.revision } : archiveFixture ? { id: archiveAgent.id, name: archiveAgent.name, revision: archiveAgent.revision } : undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
@@ -117,8 +136,8 @@ function FixtureTour() {
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
-        state={archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
-        topologies={fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
+        state={inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : fixtureInventoryState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
+        topologies={inventoryFixture ? fixtureInventoryTopologies : fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
         runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
         onView={setView}

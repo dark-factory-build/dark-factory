@@ -396,8 +396,9 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
   // instead of manufacturing a containment edge from project text.
   if (roots.length !== 1) return { project, projectRoom: fallback, nodes: [fallback] };
   const root = roots[0]!;
-  const childCounts = new Map<string, number>();
-  for (const node of served) childCounts.set(node.parent_id, (childCounts.get(node.parent_id) ?? 0) + 1);
+  const components = new Map<string, Array<{ id: string; label: string }>>();
+  for (const node of served) if (node.parent_id !== "") components.set(node.parent_id, [...(components.get(node.parent_id) ?? []), { id: `${project.id}:${node.id}`, label: node.label }]);
+  for (const children of components.values()) children.sort((a, b) => compareText(a.id, b.id));
   const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number][]>();
   for (const edge of topology?.dependencies?.edges ?? []) {
     // Decoder owns endpoint validation; retain project scoping for direct projections too.
@@ -416,7 +417,8 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
     kind: node.kind,
     sizeBucket: node.size_bucket,
     language: node.language,
-    childCount: childCounts.get(node.id) ?? 0,
+    childCount: components.get(node.id)?.length ?? 0,
+    components: components.get(node.id) ?? [],
     ...(node.inventory === undefined ? {} : { inventory: node.inventory }),
     ...(topology?.dependencies === undefined ? {} : { dependencies: { omitted: topology.dependencies.omitted, links: links.get(node.id) ?? [] } }),
     project: { id: project.id, name: project.name },
