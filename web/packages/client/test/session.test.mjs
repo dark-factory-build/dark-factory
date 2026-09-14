@@ -466,11 +466,18 @@ test("console edits and topology carry exact bodies and correlate their results"
   const dependencies = { source: "go-imports-package-manifests", edges: [{ from: node.id, to: child.id, weight: 2 }], omitted: 3 };
   const observedPending = session.getTopology(projectId);
   const observedFrame = decodeClientControl(socket.sent.at(-1));
-  const observedBody = { project_id: projectId, digest: "ab".repeat(32), source_revision: "", nodes: [node, child], dependencies };
+  const counts = { source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
+  const inventory = { direct: counts, total: counts, samples: [], samples_omitted: 0 };
+  const observedBody = { project_id: projectId, digest: "ab".repeat(32), source_revision: "", nodes: [{ ...node, inventory }, child], dependencies, inventory_omitted: 1 };
   socket.reply(encodeServerControl({ type: "TOPOLOGY", id: observedFrame.id, body: observedBody }));
   const observed = await observedPending;
   assert.deepEqual(observed.dependencies, dependencies);
   assert.ok(Object.isFrozen(observed.dependencies.edges[0]));
+  assert.equal(topology.inventoryOmitted, undefined);
+  assert.equal(observed.inventoryOmitted, 1);
+  assert.deepEqual(observed.nodes[0].inventory, inventory);
+  assert.ok(Object.isFrozen(observed.nodes[0].inventory.direct));
+  assert.ok(Object.isFrozen(observed.nodes[0].inventory.samples));
   for (const invalid of [
     { ...dependencies, edges: [{ from: node.id, to: "ef".repeat(32), weight: 1 }] },
     { ...dependencies, edges: [dependencies.edges[0], dependencies.edges[0]] },

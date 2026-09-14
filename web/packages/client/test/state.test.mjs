@@ -436,3 +436,17 @@ test("linked accounts and agent account selections decode under the closed rules
   assert.equal(accounts[1].linked_id, "");
   expectMalformed(() => decodeServerControl(fixture("accounts.json").replace('"provider":"codex"', '"provider":"shell"')));
 });
+
+test("topology inventory preserves unavailable versus zero and rejects malformed counts and samples", () => {
+ const body = JSON.parse(fixture("topology.json")).body;
+ assert.equal(decodeServerControl(JSON.stringify({ type: "TOPOLOGY", id: "inv", body })).body.nodes[0].inventory, undefined);
+ const zero = { source: 0, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
+ const valid = { direct: { ...zero, source: 2 }, total: { ...zero, source: 3 }, samples: ["a.go"], samples_omitted: 1 };
+ const decode = (inventory, extra = {}) => decodeServerControl(JSON.stringify({ type: "TOPOLOGY", id: "inv", body: { ...body, ...extra, nodes: [{ ...body.nodes[0], inventory }] } }));
+ assert.deepEqual(decode(valid, { inventory_omitted: 0 }).body.nodes[0].inventory, valid);
+ assert.deepEqual(decode({ direct: zero, total: zero, samples: [], samples_omitted: 0 }).body.nodes[0].inventory.direct, zero);
+ for (const inventory of [null, { ...valid, direct: { ...valid.direct, source: -1 } }, { ...valid, total: zero }, { ...valid, total: { ...zero, source: 50_001 } }, { ...valid, samples: null }, { ...valid, samples: ["../x"] }, { ...valid, samples: ["a".repeat(129)] }, { ...valid, samples: ["a", "a"], samples_omitted: 0 }, { ...valid, samples_omitted: 2 }, { ...valid, direct: { ...zero, Source: 2 } }]) expectMalformed(() => decode(inventory));
+ expectMalformed(() => decode(valid, { inventory_omitted: 2 }));
+ const future = { ...valid, future_detail: "additive" };
+ assert.deepEqual(decode(future).body.nodes[0].inventory, valid);
+});

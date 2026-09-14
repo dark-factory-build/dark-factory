@@ -595,3 +595,29 @@ func TestProjectTopologyBoundsDependencyEvidence(t *testing.T) {
 		t.Fatalf("legacy topology rejected: %v", err)
 	}
 }
+
+func TestProjectTopologyInventoryFitsExistingResponseBudget(t *testing.T) {
+	snapshot := topology.Snapshot{Digest: strings.Repeat("ab", 32)}
+	for i := 0; i < browserprotocol.MaxSnapshotEntities; i++ {
+		snapshot.Nodes = append(snapshot.Nodes, topology.Node{ID: fmt.Sprintf("%064x", i+1), Kind: topology.NodeDirectory, RelativePath: fmt.Sprintf("p%d", i), Label: "room", SizeBucket: "small", Inventory: &topology.Inventory{
+			Direct: topology.InventoryCounts{Source: 3}, Total: topology.InventoryCounts{Source: 3}, Samples: []string{strings.Repeat("a", 128), strings.Repeat("b", 128), strings.Repeat("c", 128)},
+		}})
+	}
+	result := projectTopology("01010101010101010101010101010101", snapshot)
+	omitted := uint32(0)
+	for _, node := range result.Nodes {
+		if node.Inventory == nil {
+			omitted++
+		}
+	}
+	if len(result.Nodes) != len(snapshot.Nodes) || omitted == 0 || omitted == uint32(len(result.Nodes)) || result.InventoryOmitted == nil || *result.InventoryOmitted != omitted {
+		t.Fatalf("inventory omissions = %d, reported %v", omitted, result.InventoryOmitted)
+	}
+	wire, err := browserprotocol.EncodeTopology("inventory", result)
+	if err != nil || len(wire) > browserprotocol.MaxSnapshotBytes {
+		t.Fatalf("bounded inventory wire: %d bytes, %v", len(wire), err)
+	}
+	if snapshot.Nodes[0].Inventory.SamplesOmitted != 0 || len(snapshot.Nodes[0].Inventory.Samples) != 3 {
+		t.Fatal("projection mutated cached inventory")
+	}
+}

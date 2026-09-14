@@ -1,6 +1,7 @@
 package browserprotocol
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -157,5 +158,62 @@ func TestProjectLimitsRequireExplicitValues(t *testing.T) {
 	}
 	if _, err := DecodeClientControl([]byte(prefix + `,"run_budget":"0","max_run_seconds":0}}`)); err != nil {
 		t.Fatalf("explicit unlimited refused: %v", err)
+	}
+}
+
+func TestTopologyInventoryOptionalAndBounded(t *testing.T) {
+	var body Topology
+	frame, err := DecodeServerControl(fixtureBytes(t, "topology.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = frame.Body.(Topology)
+	if body.Nodes[0].Inventory != nil || body.InventoryOmitted != nil {
+		t.Fatal("legacy absent inventory is not unavailable")
+	}
+	valid := TopologyInventory{Direct: TopologyInventoryCounts{Source: 2}, Total: TopologyInventoryCounts{Source: 3}, Samples: []string{"a.go"}, SamplesOmitted: 1}
+	for _, inventory := range []TopologyInventory{valid, {Samples: []string{}}} {
+		body.Nodes[0].Inventory = &inventory
+		encoded, err := EncodeTopology("inventory", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DecodeServerControl(encoded); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, mutate := range []func(*TopologyInventory){
+		func(v *TopologyInventory) { v.Total.Source = 1 }, func(v *TopologyInventory) { v.Total.Source = 50001 },
+		func(v *TopologyInventory) { v.Samples = nil },
+		func(v *TopologyInventory) {
+			v.Direct.Source = 4
+			v.Total.Source = 4
+			v.Samples = []string{"a", "b", "c", "d"}
+			v.SamplesOmitted = 0
+		}, func(v *TopologyInventory) { v.SamplesOmitted = 0 },
+		func(v *TopologyInventory) { v.Samples = []string{"a.go", "a.go"}; v.SamplesOmitted = 0 },
+		func(v *TopologyInventory) { v.Samples = []string{"../bad"} }, func(v *TopologyInventory) { v.Samples = []string{strings.Repeat("a", 129)} },
+	} {
+		inventory := valid
+		mutate(&inventory)
+		body.Nodes[0].Inventory = &inventory
+		wire, _ := json.Marshal(struct {
+			Type string   `json:"type"`
+			ID   string   `json:"id"`
+			Body Topology `json:"body"`
+		}{"TOPOLOGY", "inventory", body})
+		if _, err := DecodeServerControl(wire); err == nil {
+			t.Fatalf("invalid inventory accepted: %+v", inventory)
+		}
+	}
+	body.Nodes[0].Inventory = &valid
+	wire, err := EncodeTopology("inventory", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{strings.Replace(string(wire), `"source":2`, `"Source":2`, 1), strings.Replace(string(wire), `"source":2,`, ``, 1), strings.Replace(string(wire), `"source":2`, `"source":-1`, 1)} {
+		if _, err := DecodeServerControl([]byte(bad)); err == nil {
+			t.Fatalf("invalid shape accepted: %s", bad)
+		}
 	}
 }

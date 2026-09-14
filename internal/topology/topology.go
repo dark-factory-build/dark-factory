@@ -56,13 +56,14 @@ type Snapshot struct {
 }
 
 type Node struct {
-	ID           string   `json:"id"`
-	ParentID     string   `json:"parent_id"`
-	Kind         NodeKind `json:"kind"`
-	RelativePath string   `json:"relative_path"`
-	Label        string   `json:"label"`
-	Language     string   `json:"language"`
-	SizeBucket   string   `json:"size_bucket"`
+	ID           string     `json:"id"`
+	ParentID     string     `json:"parent_id"`
+	Kind         NodeKind   `json:"kind"`
+	RelativePath string     `json:"relative_path"`
+	Label        string     `json:"label"`
+	Language     string     `json:"language"`
+	SizeBucket   string     `json:"size_bucket"`
+	Inventory    *Inventory `json:"inventory,omitempty"`
 }
 
 type Edge struct {
@@ -92,6 +93,7 @@ type languageFile struct{ dir, language string }
 
 type discovery struct {
 	dirs      map[string]int64
+	inventory map[string]*Inventory
 	files     int
 	modules   map[string]string
 	goPkgs    map[string]*goPackage
@@ -189,7 +191,7 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 	}
 	defer rootFS.Close()
 	result := &discovery{
-		dirs: make(map[string]int64), modules: make(map[string]string),
+		dirs: make(map[string]int64), inventory: make(map[string]*Inventory), modules: make(map[string]string),
 		goPkgs: make(map[string]*goPackage), jsPkgs: make(map[string]jsPackage),
 	}
 	var total int64
@@ -218,6 +220,7 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 				return bound("node count", bounds.nodes)
 			}
 			result.dirs[rel] = 0
+			result.inventory[rel] = &Inventory{Samples: []string{}}
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -243,6 +246,14 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 		result.files++
 		dir := path.Dir(rel)
 		result.dirs[dir] += fileInfo.Size()
+		inventory := result.inventory[dir]
+		inventory.Direct.add(classify(rel))
+		sampleName := path.Base(rel)
+		if len(inventory.Samples) < 3 && len(sampleName) <= 128 && utf8.ValidString(sampleName) {
+			inventory.Samples = append(inventory.Samples, sampleName)
+		} else {
+			inventory.SamplesOmitted++
+		}
 		switch strings.ToLower(path.Ext(rel)) {
 		case ".js", ".jsx", ".mjs", ".cjs":
 			result.languages = append(result.languages, languageFile{dir, "javascript"})
@@ -302,7 +313,10 @@ func discover(ctx context.Context, root string, bounds limits) (*discovery, erro
 	dirs := keys(result.dirs)
 	sort.Slice(dirs, func(i, j int) bool { return depth(dirs[i]) > depth(dirs[j]) })
 	for _, dir := range dirs {
+		inventory := result.inventory[dir]
+		inventory.Total.plus(inventory.Direct)
 		if dir != "." {
+			result.inventory[path.Dir(dir)].Total.plus(inventory.Total)
 			result.dirs[path.Dir(dir)] += result.dirs[dir]
 		}
 	}
@@ -408,14 +422,14 @@ func graph(found *discovery, analyzed analysis, project string, nodeLimit, edgeL
 		pkg, isPackage := analyzed.packages[dir]
 		if module {
 			id := nodeID(project, NodeModule, dir)
-			if err := add(&nodes, Node{id, parent, NodeModule, dir, label(moduleName, dir, "module"), "go", bucket(found.dirs[dir])}); err != nil {
+			if err := add(&nodes, Node{ID: id, ParentID: parent, Kind: NodeModule, RelativePath: dir, Label: label(moduleName, dir, "module"), Language: "go", SizeBucket: bucket(found.dirs[dir])}); err != nil {
 				return nil, nil, err
 			}
 			primary[dir], parent = id, id
 		}
 		if isPackage {
 			id := nodeID(project, NodePackage, dir)
-			if err := add(&nodes, Node{id, parent, NodePackage, dir, pkg.label, language(pkg), bucket(found.dirs[dir])}); err != nil {
+			if err := add(&nodes, Node{ID: id, ParentID: parent, Kind: NodePackage, RelativePath: dir, Label: pkg.label, Language: language(pkg), SizeBucket: bucket(found.dirs[dir])}); err != nil {
 				return nil, nil, err
 			}
 			if !module {
@@ -424,11 +438,14 @@ func graph(found *discovery, analyzed analysis, project string, nodeLimit, edgeL
 		}
 		if dir != "." && !module && !isPackage {
 			id := nodeID(project, NodeDirectory, dir)
-			if err := add(&nodes, Node{id, parent, NodeDirectory, dir, path.Base(dir), "", bucket(found.dirs[dir])}); err != nil {
+			if err := add(&nodes, Node{ID: id, ParentID: parent, Kind: NodeDirectory, RelativePath: dir, Label: path.Base(dir), SizeBucket: bucket(found.dirs[dir])}); err != nil {
 				return nil, nil, err
 			}
 			primary[dir] = id
 		}
+	}
+	for i := range nodes {
+		nodes[i].Inventory = found.inventory[nodes[i].RelativePath]
 	}
 	sort.Slice(nodes, func(i, j int) bool {
 		return nodes[i].RelativePath < nodes[j].RelativePath || nodes[i].RelativePath == nodes[j].RelativePath && nodes[i].Kind < nodes[j].Kind
@@ -727,4 +744,78 @@ func keys[V any](values map[string]V) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// Inventory counts eligible scanned physical files. Total includes Direct and
+// descendants; nodes sharing a path describe the same inventory, never additive
+// child totals. Samples name at most three direct files in lexical order.
+type Inventory struct {
+	Direct         InventoryCounts `json:"direct"`
+	Total          InventoryCounts `json:"total"`
+	Samples        []string        `json:"samples"`
+	SamplesOmitted uint32          `json:"samples_omitted"`
+}
+type InventoryCounts struct {
+	Source        uint32 `json:"source"`
+	Tests         uint32 `json:"tests"`
+	Documentation uint32 `json:"documentation"`
+	Configuration uint32 `json:"configuration"`
+	Assets        uint32 `json:"assets"`
+	Unclassified  uint32 `json:"unclassified"`
+}
+
+func (counts *InventoryCounts) plus(other InventoryCounts) {
+	counts.Source += other.Source
+	counts.Tests += other.Tests
+	counts.Documentation += other.Documentation
+	counts.Configuration += other.Configuration
+	counts.Assets += other.Assets
+	counts.Unclassified += other.Unclassified
+}
+func (counts *InventoryCounts) add(category string) {
+	switch category {
+	case "source":
+		counts.Source++
+	case "tests":
+		counts.Tests++
+	case "documentation":
+		counts.Documentation++
+	case "configuration":
+		counts.Configuration++
+	case "assets":
+		counts.Assets++
+	default:
+		counts.Unclassified++
+	}
+}
+
+// Classification is filename-only, in precedence order: explicit test names
+// and test-directory source files, documentation, configuration, assets, source,
+// then unclassified. Ambiguous files remain unclassified; tests imply no result.
+func classify(relative string) string {
+	name := strings.ToLower(path.Base(relative))
+	extension := strings.ToLower(path.Ext(name))
+	source := strings.Contains("|.go|.js|.jsx|.mjs|.cjs|.ts|.tsx|.mts|.cts|.py|.rs|.c|.h|.cc|.cpp|.hpp|.java|.kt|.swift|.rb|.php|.sh|.sql|.css|.scss|.html|.vue|.svelte|", "|"+extension+"|") && extension != ""
+	testDir := false
+	for _, part := range strings.Split(strings.ToLower(relative), "/") {
+		if part == "test" || part == "tests" || part == "__tests__" {
+			testDir = true
+		}
+	}
+	if source && (testDir || strings.HasSuffix(name, "_test.go") || strings.Contains(name, ".test.") || strings.Contains(name, ".spec.") || strings.HasPrefix(name, "test_") || strings.HasSuffix(strings.TrimSuffix(name, extension), "_test")) {
+		return "tests"
+	}
+	if extension == ".md" || extension == ".mdx" || extension == ".rst" || extension == ".adoc" || name == "readme" || name == "license" || name == "licence" {
+		return "documentation"
+	}
+	if extension == ".json" || extension == ".yaml" || extension == ".yml" || extension == ".toml" || extension == ".ini" || extension == ".cfg" || extension == ".lock" || name == "go.mod" || name == "go.sum" || name == "makefile" || name == "dockerfile" || name == ".gitignore" || name == ".env" {
+		return "configuration"
+	}
+	if strings.Contains("|.png|.jpg|.jpeg|.gif|.webp|.svg|.ico|.avif|.woff|.woff2|.ttf|.otf|.mp3|.wav|.mp4|.webm|.pdf|", "|"+extension+"|") && extension != "" {
+		return "assets"
+	}
+	if source {
+		return "source"
+	}
+	return "unclassified"
 }
