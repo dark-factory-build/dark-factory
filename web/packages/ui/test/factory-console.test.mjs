@@ -1376,6 +1376,31 @@ test("archived workers stay selectable from the archived view and expose only re
   }
 });
 
+test("archive confirmation follows connection readiness and submits only the lifecycle change", async () => {
+  const worker = { ...fixtureState.agents.get(ids.agent), archived: false };
+  const state = baseState({ agents: new Map([[worker.id, worker]]) });
+  const saves = [];
+  const props = { state, selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision }, agentPanel: "config", onSaveAgentConfig: (edit) => saves.push(edit) };
+  let renderer;
+  const button = (label) => renderer.root.findAllByType("button").find((entry) => entry.props.children === label);
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { ...props, status: "closed" })); });
+    assert.equal(button("Archive worker").props.disabled, true);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
+    assert.equal(button("Archive worker").props.disabled, false);
+    await act(async () => { button("Archive worker").props.onClick(); });
+    assert.deepEqual(saves, []);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "closed" })); });
+    assert.equal(button("Confirm archive").props.disabled, true);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
+    assert.equal(button("Confirm archive").props.disabled, false);
+    await act(async () => { button("Confirm archive").props.onClick(); });
+    assert.deepEqual(saves, [{ archived: true }]);
+  } finally {
+    if (renderer) await act(async () => { renderer.unmount(); });
+  }
+});
+
 test("the config inputs stay the agent's own override and caption where it came from", () => {
   // Own: the served value is in the box and the caption names the agent.
   const own = withAgent(fixtureState.agents.get(ids.agent));

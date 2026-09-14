@@ -399,7 +399,7 @@ function AgentConfig({
         <input id={`df-paused-${agent.id}`} type="checkbox" checked={paused} disabled={pending} onChange={(event) => setPaused(event.currentTarget.checked)} />
         PAUSED
       </label>
-      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" autoFocus disabled={pending} onClick={() => onSave({ archived: true })}>Confirm archive</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>Keep worker</button></span> : <button type="button" disabled={pending} onClick={() => setArchiveConfirm(true)}>Archive worker</button>}
+      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>Confirm archive</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>Keep worker</button></span> : <button type="button" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>Archive worker</button>}
       <h3>{supervising ? "SUPERVISION" : "RULES"}</h3>
       <label htmlFor={`df-idle-${agent.id}`}>{supervising ? "WHEN WORK CHANGES" : "WHEN READY"}</label>
       <select id={`df-idle-${agent.id}`} value={idlePolicy} disabled={pending} onChange={(event) => setIdlePolicy(event.currentTarget.value as typeof idlePolicy)}>
