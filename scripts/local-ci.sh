@@ -2,11 +2,20 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
+# Refuse outside Git before creating cache state; inherited Git locators must
+# not turn another repository into the target of this preflight.
+/usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null TMPDIR=/tmp \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 \
+    /usr/bin/git rev-parse --git-common-dir >/dev/null 2>&1 || {
+    echo "local-ci: cannot resolve the git common directory" >&2
+    exit 1
+}
+. "$script_dir/local-ci-environment.sh"
 [ "$#" -eq 0 ] || { echo "usage: scripts/local-ci.sh" >&2; exit 2; }
 if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
     exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"
 fi
-. "$script_dir/local-ci-environment.sh"
 
 echo "local-ci: repository contract fixtures"
 ./scripts/check-toolchain-pins.sh

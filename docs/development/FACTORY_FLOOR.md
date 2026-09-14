@@ -158,9 +158,11 @@ removed after exact merged-patch verification.
 
 The cleanup handoff now leaves production signal authority unchanged and adds a
 bounded FIFO reproduction of the unsupported detached-child case. Host focused
-runner checks and full local CI passed. The remaining local-CI refusal fix moves
-cache setup after lease admission, so a non-Git checkout fails without creating
-cache directories; it uses the existing gate and adds one focused shell check.
+runner checks and full local CI passed. The local-CI refusal fix uses a scrubbed, absolute Git preflight so a non-Git
+checkout fails without creating cache directories. Environment sanitization still
+precedes lease acquisition; an initial ordering change was rejected because
+inherited Git locators could redirect the lease. The focused shell check supplies
+hostile Git locators pointing at a real repository.
 
 Site #62 merged as `8fad739a4960f4bbdcad922b2f88ed9ef0f5ddb9` and deployed
 as `dpl_7qL6VucPEZjzgym7SpXvKcy6QKNC` to `app.darkfactory.build`. Both public

@@ -272,7 +272,8 @@ non_git_fixture="$temporary/non-git"
     "$non_git_fixture/scripts/with-local-ci-lease.sh"
 set +e
 non_git_output=$(CDPATH= cd -- "$non_git_fixture" && \
-    DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 PATH=/usr/bin:/bin /bin/sh ./scripts/local-ci.sh 2>&1)
+    DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 GIT_DIR="$repository_root/.git" \
+    GIT_WORK_TREE="$repository_root" PATH=/usr/bin:/bin /bin/sh ./scripts/local-ci.sh 2>&1)
 non_git_status=$?
 set -e
 [ "$non_git_status" -ne 0 ] || fail "non-Git local-ci invocation passed"
@@ -283,6 +284,7 @@ printf '%s\n' "$non_git_output" | /usr/bin/grep -F \
     || fail "non-Git local-ci refusal created cache artifacts"
 local_fixture="$temporary/local"
 /bin/mkdir -p "$local_fixture/scripts" "$local_fixture/poison"
+/usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null /usr/bin/git init -q "$local_fixture"
 /bin/cp "$repository_root/scripts/local-ci.sh" "$local_fixture/scripts/local-ci.sh"
 /bin/cp "$repository_root/scripts/local-ci-environment.sh" "$local_fixture/scripts/local-ci-environment.sh"
 /bin/cat >"$local_fixture/scripts/stub" <<'EOF'
