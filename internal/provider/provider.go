@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -312,13 +313,13 @@ func Build(request Request) (Launch, error) {
 			return Launch{}, err
 		}
 		argv := []string{path, "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions=" + tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins"}
-		argv = append(argv, "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true}`)
+		argv = append(argv, "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
 			args := make([]string, len(browserArgs))
 			for i, arg := range browserArgs {
 				args[i] = tomlBasicString(arg)
 			}
-			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],env_vars=[\"DARK_FACTORY_FACTORYCTL\",\"DARK_FACTORY_SOCKET\",\"DARK_FACTORY_ATTEMPT_TOKEN_FILE\"],enabled=true,required=true}"
+			config := "mcp_servers.factory_browser={command=" + tomlBasicString(browser) + ",args=[" + strings.Join(args, ",") + "],env_vars=[\"DARK_FACTORY_FACTORYCTL\",\"DARK_FACTORY_SOCKET\",\"DARK_FACTORY_ATTEMPT_TOKEN_FILE\"],enabled=true,required=true,default_tools_approval_mode=\"approve\"}"
 			if len(config) > runner.MaxArgumentBytes {
 				return Launch{}, ErrInvalid
 			}
@@ -335,7 +336,7 @@ func Build(request Request) (Launch, error) {
 			if err != nil {
 				return Launch{}, err
 			}
-			argv = append(argv, "-c", "mcp_servers.maintainer={command="+tomlBasicString(bridge)+",enabled=true,required=true}")
+			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(bridge)+`,enabled=true,required=true,default_tools_approval_mode="approve"}`)
 		}
 		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
@@ -356,7 +357,11 @@ func Build(request Request) (Launch, error) {
 // minimal platform profile still includes its documented system/temp exceptions.
 func codexPermissions(request Request) (string, error) {
 	entries := []string{`":root"="deny"`, `":minimal"="read"`}
-	for _, path := range []string{request.workingDirectory, request.runtime.home, request.runtime.temp} {
+	writePaths := []string{request.workingDirectory, request.runtime.home, request.runtime.temp}
+	for i, path := range writePaths {
+		if slices.Contains(writePaths[:i], path) {
+			continue
+		}
 		entries = append(entries, tomlBasicString(path)+`="write"`)
 	}
 	for _, path := range []string{request.installation.executable.Path(), request.runtime.factoryctl, request.runtime.token, request.runtime.socket} {
