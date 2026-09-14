@@ -261,7 +261,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Peer collaboration is asynchronous: use \"$DARK_FACTORY_FACTORYCTL\" attempt peer status to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail." + " " + discoveryInstructions},
+			wantArgv: []string{"/usr/bin/true", "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, codexBootstrapPrompt},
 		},
 	}
 	for _, test := range tests {
@@ -283,7 +283,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 10, 11, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
+				wantArgv = slices.Replace(wantArgv, 10, 11, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true}`)
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -717,7 +717,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal("worker was given overseer authority instructions")
 	}
 	prompt := overseerArgs[len(overseerArgs)-1]
-	for _, command := range []string{"attempt task", "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App"} {
+	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App"} {
 		if !strings.Contains(prompt, command) {
 			t.Fatalf("overseer cannot discover %q", command)
 		}

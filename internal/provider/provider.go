@@ -32,7 +32,7 @@ const (
 	codexConfigDir        = ".codex"
 	discoveryInstructions = "Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search."
 	claudeTaskLead        = discoveryInstructions + " " + "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
-	codexBootstrapPrompt  = "Run \"$DARK_FACTORY_FACTORYCTL\" attempt task before doing anything else. The returned JSON task field is the exact task: complete only that task. Peer collaboration is asynchronous: use \"$DARK_FACTORY_FACTORYCTL\" attempt peer status to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with \"$DARK_FACTORY_FACTORYCTL\" attempt succeed, block, or fail." + " " + discoveryInstructions
+	codexBootstrapPrompt  = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool.` + " " + discoveryInstructions
 )
 
 var (
@@ -312,6 +312,7 @@ func Build(request Request) (Launch, error) {
 			return Launch{}, err
 		}
 		argv := []string{path, "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions=" + tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins"}
+		argv = append(argv, "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true}`)
 		if browser != "" {
 			args := make([]string, len(browserArgs))
 			for i, arg := range browserArgs {
@@ -338,7 +339,7 @@ func Build(request Request) (Launch, error) {
 		}
 		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
-			prompt += " You are the project overseer. Run \"$DARK_FACTORY_FACTORYCTL\" overseer status to inspect workers, tasks, questions and intervention history. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Run --help for flags. Read docs/development/OVERSEER.md inside the task checkout or the repository clone specified by the task; if neither is available, report the missing checkout; publish through your Maintainer App. Respect direct operator interventions. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
+			prompt += " You are the project overseer. Use the factory tool with overseer status to inspect workers, tasks, questions and intervention history. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool's description for flags. Read docs/development/OVERSEER.md inside the task checkout or the repository clone specified by the task; if neither is available, report the missing checkout; publish through your Maintainer App. Respect direct operator interventions. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
 		argv = append(argv, prompt)
 		return Launch{
