@@ -39,25 +39,33 @@ rendered screenshots. Images show labelled fixtures unless explicitly stated
 otherwise. Historical `/private/tmp` baseline files are no longer present;
 conversation images are historical evidence, not current installed-state proof.
 The baseline source was `0ba6ea5c21242f3ab9cd2dd201d24d3d7e0c28e5`.
-No floor UI deployment or local daemon upgrade is claimed by this ledger.
+No floor UI deployment is claimed by this ledger.
 
 Dogfooding: real factory workers performed implementation and independent review;
 a capacity-two shell barrier exercised simultaneous admission. The overseer
 reviewed and enqueued #698, and cancelled obsolete queued work with revision
 guards. #683 fixes terminal status; #690 settings; #692 Queue typography;
 #673 removes Mac notifications; #694 defers source refresh while runs are active.
-These source changes do not establish activation in the old installed runtime.
 
-Remaining runtime blocker: legacy retained resources lack sufficient identity
-proof after the filesystem device changed. HumanRequest
-`7bdb3121b4cb37e271230fe50369aa58` awaits operator disposition. Preserve the old
-home and orphan; do not rebind by inode, bypass installation gates or manufacture
-completion. Fresh-home migration requires explicit approval and re-pairing.
-#700 relay shutdown merged as `72f7b51d774a4fb67eaac914f53839daaee44b32`;
-#701 Codex local-command permissions merged as
-`c217767901f81399c8bba3079d40f9a7030207e7`, both after independent ALLOW reviews. Codex permissions do not constrain MCP/browser,
-provider-parent or Claude access, and native temporary-directory exceptions
-remain. Neither fix is installed. Privacy issue #678 remains open.
+Recovery (14 September): the operator approved a fresh home. The old service and
+automation are stopped and disabled, preserving the old home and its legacy orphan;
+no inode rebinding, database migration or fabricated completion occurred. The old
+HumanRequest `7bdb3121b4cb37e271230fe50369aa58` is stale. The recovered project
+preserves unlimited run admissions and the 2700-second per-run limit. Only two
+unfinished diagnostics were carried forward through the API. Browser pairing
+succeeded, but a connected hosted-console snapshot is not yet verified.
+
+#700 relay shutdown and #701 command permissions reached the replacement runtime.
+#703 merged as `8ee4ab1c709d3d41b00fd99080ef3a4b149fbda0`; its installed source
+`3c86e520b50b6eb056f870c3992ea29e235d0363` disabled Codex browser/computer tools,
+but a real worker still started Computer Use helpers through inherited plugins.
+The service is stopped pending #704's plugin isolation and real-launch check.
+Both interrupted verification attempts and the queued launchd diagnostic are
+preserved; overseer supervision has not yet been restored in the fresh home.
+See ignored `recovery-status.json`, `no-computer-use-live.json` and
+`plugin-isolation-checks.json` for bounded receipts. Privacy issue #678 remains
+open: local-command permissions do not constrain MCP servers, provider-parent
+or Claude access, and native temporary-directory exceptions remain.
 
 Cleanup: preserve dirty/in-use worktrees. Removal of the proven-merged
 `nonempty-attempt-result` checkout failed on permissions; its branch was restored
