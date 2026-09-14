@@ -192,7 +192,7 @@ export function floorScene(
   const scope = validScope === undefined ? undefined : roomByID.get(validScope)!;
   const scopeChildren = scope === undefined ? hierarchies.map((hierarchy) => hierarchy.projectRoom) : children.get(scope.id) ?? [];
   const roomLimit = scope === undefined ? MAX_SCOPE_ROOMS : MAX_SCOPE_ROOMS - 1;
-  const rooms = scope === undefined ? scopeChildren.slice(0, roomLimit)
+  const rooms = scope === undefined || (scope.kind === "module" && scopeChildren.length > 0) ? scopeChildren.slice(0, roomLimit)
     : [scope, ...scopeChildren.slice(0, roomLimit)];
   const liveRooms = new Set<string>();
   const kept = new Set(rooms.map((room) => room.id));

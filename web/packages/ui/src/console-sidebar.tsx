@@ -235,15 +235,16 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
     void historyLoader.current?.(task).then((loaded) => { if (live) setHistory(loaded); }).catch(() => { if (live) setHistoryError(true); });
     return () => { live = false; };
   }, [task.id, task.revision]);
+  const taskDate = dateLabel(task.updated_at_ms);
   const links = brief === undefined ? [] : pullRequests(`${brief.outcome ?? ""}\n${brief.feedback}`);
   return <article className="dfRecentWorkDetail" aria-label="Work details">
     <h3>{task.title}</h3>
-    <p>{task.status.replaceAll("_", " ")} · {dateLabel(task.updated_at_ms)}</p>
+    <p>{task.status.replaceAll("_", " ")}{taskDate === "DATE UNAVAILABLE" ? null : <> · <time title={taskDate}>{new Date(Number(task.updated_at_ms)).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC</time></>}</p>
     {detailError || onLoadTaskDetail === undefined ? <p role="alert">DETAIL UNAVAILABLE</p> : brief === undefined ? <p>LOADING DETAILS</p> : <>
-      <h4>OUTCOME</h4><p className="dfRecentWorkText">{brief.outcome || "No recorded outcome."}</p>
+      {brief.outcome ? <><h4>OUTCOME</h4><p className="dfRecentWorkText">{brief.outcome}</p></> : ["running", "queued"].includes(task.status) ? null : <p>No recorded outcome.</p>}
       {links.length === 0 ? null : <p>{links.map((link) => <a key={link.href} href={link.href} target="_blank" rel="noreferrer">PR · {link.label}</a>)}</p>}
-      {brief.instruction === "" ? null : <details><summary>ORIGINAL INSTRUCTION</summary><p className="dfRecentWorkText">{brief.instruction}</p></details>}
-      {brief.feedback === "" ? null : <details><summary>REVIEW FEEDBACK</summary><p className="dfRecentWorkText">{brief.feedback}</p></details>}
+      {brief.instruction === "" ? null : <details><summary>Instruction</summary><p className="dfRecentWorkText">{brief.instruction}</p></details>}
+      {brief.feedback === "" ? null : <details><summary>Review feedback</summary><p className="dfRecentWorkText">{brief.feedback}</p></details>}
       {brief.peerQuestions.length === 0 && brief.nextPeerOffset === undefined ? null : <TaskConversation brief={brief} pending={olderPending} onOlder={brief.nextPeerOffset === undefined ? undefined : () => {
         const load = detailLoader.current;
         if (load === undefined) return;
@@ -251,8 +252,8 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
         void load(task, brief.nextPeerOffset, brief.head).then(setBrief).catch(() => setDetailError(true)).finally(() => setOlderPending(false));
       }} />}
     </>}
-    <details><summary>INTERVENTION HISTORY</summary>
-      {historyError ? <p role="alert">THE FACTORY REFUSED THIS HISTORY</p> : onLoadTaskHistory === undefined ? <p>HISTORY UNAVAILABLE</p> : history === undefined ? <p>LOADING HISTORY</p> : history.entries.length === 0 ? <p>No durable controls.</p> : <ol>{history.entries.map((entry) => <li key={entry.operationId}><strong>{entry.kind} · {entry.status}</strong><p>{entry.actor}{entry.body === "" ? "" : ` · ${entry.body}`}</p><time>{dateLabel(entry.createdAtMs)}</time></li>)}</ol>}
+    <details><summary>History</summary>
+      {historyError ? <p role="alert">THE FACTORY REFUSED THIS HISTORY</p> : onLoadTaskHistory === undefined ? <p>HISTORY UNAVAILABLE</p> : history === undefined ? <p>LOADING HISTORY</p> : history.entries.length === 0 ? <p>No history.</p> : <ol>{history.entries.map((entry) => <li key={entry.operationId}><strong>{entry.kind} · {entry.status}</strong><p>{entry.actor}{entry.body === "" ? "" : ` · ${entry.body}`}</p><time>{dateLabel(entry.createdAtMs)}</time></li>)}</ol>}
       {history?.entries.length === 32 ? <p>Showing the newest 32 events.</p> : null}
     </details>
   </article>;
@@ -285,20 +286,18 @@ export function QueuePanel({
     return assigned.length === 0 ? [] : [{ agent, tasks: assigned }];
   });
   return <section className="dfConsoleSidebar__panel" aria-label="Queue">
-    <p className="dfConsoleItem__meta">Grouped by agent · no global start order</p>
-    <p className="dfConsoleItem__meta">Open a task to inspect it. Briefs are editable while queued.</p>
     {state === undefined ? <p className="dfFactoryConsole__empty">WAITING FOR SNAPSHOT</p>
       : <>
-        {running.length === 0 ? null : <section className="dfConsoleSidebar__section" aria-label="Running tasks">
-          <h3>RUNNING</h3>
+        {running.length === 0 || selectedTaskId !== undefined ? null : <section className="dfConsoleSidebar__section" aria-label="Running tasks">
+          <h3>Running <span>{running.length}</span></h3>
           <ul className="dfConsoleItems">{running.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
             <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
-            <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · RUNNING</span>
+            <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"}</span>
           </div></li>)}</ul>
         </section>}
-        {queued.length === 0 ? <p className="dfFactoryConsole__empty">THE QUEUE IS EMPTY</p> : <ul className="dfConsoleItems">{queued.flatMap(({ agent, tasks }) => {
+        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">NO QUEUED TASKS</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ agent, tasks }) => {
           const peers = agents.filter((peer) => peer.project_id === agent.project_id);
-          return tasks.map((task) => <QueuedTask
+          return tasks.filter((task) => selectedTaskId === undefined || task.id === selectedTaskId).map((task) => <QueuedTask
               selected={selectedTaskId === task.id}
               onSelectTask={onSelectTask}
               key={task.id}
@@ -309,7 +308,7 @@ export function QueuePanel({
               onEditTask={onEditTask}
               onLoadTaskDetail={onLoadTaskDetail}
             />);
-        })}</ul>}
+        })}</ul></>}
       </>}
   </section>;
 }
@@ -570,23 +569,10 @@ export function SettingsDialog({
           <h2>SETTINGS</h2>
           {onClose === undefined ? null : <button type="button" onClick={close}>CLOSE</button>}
         </div>
-        <div className="dfConsoleSidebar__section" aria-label="BUILDING">
-          <h3>BUILDING</h3>
-          {state === undefined ? <p className="dfFactoryConsole__empty">BUILDING STATE UNAVAILABLE</p> : (
-            <dl className="dfFactoryConsole__metrics">
-              <div><dt>DISPATCH</dt><dd>{state.factory.dispatch_enabled ? "ENABLED" : "PAUSED"}</dd></div>
-              <div><dt>WORKER SLOTS</dt><dd>{String(state.factory.capacity)}</dd></div>
-              <div><dt>ACTIVE RUNS</dt><dd>{`${state.factory.active_runs} TOTAL`}</dd></div>
-              <div><dt>REVISION</dt><dd>{state.factory.revision.toString()}</dd></div>
-            </dl>
-          )}
-        </div>
-        <div className="dfConsoleSidebar__section" aria-label="This factory">
-          <h3>THIS FACTORY</h3>
-          <p className="dfConsoleSidebar__address">{address}</p>
-        </div>
-        <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
-        <AccountsSection
+        <div className="dfConsoleSidebar__section" aria-label="PAIRING">
+          <h3>Devices &amp; pairing</h3>
+          {pairing ?? <p className="dfFactoryConsole__empty">Pairing unavailable</p>}
+        </div>        <AccountsSection
           state={state}
           accounts={accounts}
           pending={accountsPending === true}
@@ -595,10 +581,23 @@ export function SettingsDialog({
           onUpdate={onUpdateAccount}
           onRefresh={onLoadAccounts}
         />
-        <div className="dfConsoleSidebar__section" aria-label="PAIRING">
-          <h3>PAIRING</h3>
-          {pairing ?? <p className="dfFactoryConsole__empty">phone pairing arrives here</p>}
+        <div className="dfConsoleSidebar__section" aria-label="BUILDING">
+          <h3>Factory controls</h3>
+          {state === undefined ? <p className="dfFactoryConsole__empty">BUILDING STATE UNAVAILABLE</p> : (
+            <dl className="dfFactoryConsole__metrics">
+              <div><dt>DISPATCH</dt><dd>{state.factory.dispatch_enabled ? "ENABLED" : "PAUSED"}</dd></div>
+              <div><dt>WORKER SLOTS</dt><dd>{String(state.factory.capacity)}</dd></div>
+              <div><dt>ACTIVE RUNS</dt><dd>{`${state.factory.active_runs} TOTAL`}</dd></div>
+            </dl>
+          )}
         </div>
+        <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
+        <details className="dfConsoleSidebar__section" aria-label="This factory">
+          <summary>Diagnostics</summary>
+          <p className="dfConsoleSidebar__address">{address}</p>
+          {state === undefined ? null : <p>Revision {state.factory.revision.toString()}</p>}
+        </details>
+
       </div>
     </dialog>
   );
@@ -689,7 +688,6 @@ function AccountsSection({
   return (
     <div className="dfConsoleSidebar__section" aria-label="ACCOUNTS">
       <h3>ACCOUNTS</h3>
-      <p>Choose each agent’s account in its configuration.</p>
       <details><summary>ADD ACCOUNT</summary><p>Sign in with your provider CLI on this Mac. For another login, use a separate profile directory named .codex-name or .claude-name in your home folder. Then refresh and link it below.</p></details>
       <button type="button" disabled={pending || onRefresh === undefined} onClick={onRefresh}>{pending ? "REFRESHING" : "REFRESH ACCOUNTS"}</button>
       {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{EDIT_ERRORS.get(error) ?? "THE FACTORY REFUSED THIS"}</p>}
