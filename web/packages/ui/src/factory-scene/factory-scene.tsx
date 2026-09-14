@@ -329,7 +329,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
               <rect x={room.x + 8} y={room.door.y - 20} width="40" height="14" fill="#d9d2b5" stroke="#a6a087" />
               <text x={room.x + 11} y={room.door.y - 10} fill="#253441" fontSize="6" fontFamily="ui-monospace, monospace">{task!.id.slice(0, 8)}</text>
             </g>}
-            {contents.map((item) => <g key={item.key} data-room-content={item.kind} {...sceneAction(() => { setSelectedRoomId(item.targetId ?? room.id); if (item.targetId !== undefined) onEnterRoom?.(item.targetId); })}
+            {contents.map((item) => <g key={item.key} data-room-content={item.kind} {...sceneAction(item.targetId !== undefined && !nodes.has(item.targetId) && onEnterRoom === undefined ? undefined : () => { setSelectedRoomId(item.targetId ?? room.id); if (item.targetId !== undefined) onEnterRoom?.(item.targetId); })}
               aria-label={item.kind === "component" ? `Open component ${item.label}` : `Inspect ${item.count} ${item.label.toLowerCase()} files in ${node.label}`}>
               <title>{item.kind === "component" ? item.label : `${item.count} scanned ${item.label.toLowerCase()} files represented by this group`}</title>
               <Equipment item={item} />
