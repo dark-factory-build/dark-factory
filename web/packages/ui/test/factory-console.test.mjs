@@ -1722,3 +1722,18 @@ test("mobile Floor restores the floor after Agents and Tasks", async () => {
   assert.equal(tree.root.findByType("main").props["data-mobile-view"], "floor");
   await act(async () => tree.unmount());
 });
+
+
+test("breadcrumb-only modules use all 24 room slots and report overflow exactly", () => {
+  const root = fixtureTopology.nodes[0];
+  const module = { ...fixtureTopology.nodes[1], kind: "module" };
+  for (const count of [24, 25]) {
+    const children = Array.from({ length: count }, (_, index) => ({
+      id: String(index).padStart(64, "0"), parent_id: module.id, kind: "directory", path: `${module.path}/child-${index}`, label: `Child ${index}`, language: "", size_bucket: "tiny",
+    }));
+    const scene = floorScene(fixtureState, served({ ...fixtureTopology, nodes: [root, module, ...children] }), undefined, undefined, `${ids.project}:${module.id}`);
+    assert.equal(scene.topology.nodes.length, 24);
+    assert.equal(scene.navigation.omittedChildren, count - 24);
+    assert.equal(scene.topology.nodes.some((room) => room.id === `${ids.project}:${module.id}`), false);
+  }
+});
