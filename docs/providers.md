@@ -12,6 +12,12 @@ directory, task input, PTY, process group, output, wait, and cleanup. A provider
 cannot select a source path or lifecycle result, and there is no registry,
 plugin, fallback, or provider-owned supervision framework.
 
+Cleanup reaches only the runner-owned provider process group while its leader
+is unreaped. A provider must not detach command children into another group:
+the runtime has no authority to signal those PIDs, and process ancestry, cwd,
+or a matching birth record do not create that authority. Native Codex currently
+has no provider-owned shutdown capability exposed through this contract.
+
 Shell and Codex are proven end to end. The Claude Code launch path is
 fixture-proven in the current source; a live run against its
 signed-in CLI remains required before it is included in a release.

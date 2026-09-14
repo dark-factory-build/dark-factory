@@ -261,6 +261,26 @@ if grep -Eq 'rm -rf|cleanup_scratch|dark-factory-ci-home' \
     "$repository_root/scripts/local-ci-lease.sh"; then
     fail "gate boundary retained scratch cleanup logic"
 fi
+non_git_fixture="$temporary/non-git"
+/bin/mkdir -p "$non_git_fixture/scripts"
+/bin/cp "$repository_root/scripts/local-ci.sh" \
+    "$repository_root/scripts/local-ci-environment.sh" \
+    "$repository_root/scripts/with-local-ci-lease.sh" \
+    "$repository_root/scripts/local-ci-lease.sh" \
+    "$non_git_fixture/scripts/"
+/bin/chmod 755 "$non_git_fixture/scripts/local-ci.sh" \
+    "$non_git_fixture/scripts/with-local-ci-lease.sh"
+set +e
+non_git_output=$(CDPATH= cd -- "$non_git_fixture" && \
+    DARK_FACTORY_LOCAL_CI_LEASE_HELD=0 PATH=/usr/bin:/bin /bin/sh ./scripts/local-ci.sh 2>&1)
+non_git_status=$?
+set -e
+[ "$non_git_status" -ne 0 ] || fail "non-Git local-ci invocation passed"
+printf '%s\n' "$non_git_output" | /usr/bin/grep -F \
+    'local-ci: cannot resolve the git common directory' >/dev/null \
+    || fail "non-Git local-ci refusal was unclear: $non_git_output"
+[ ! -e "$non_git_fixture/.tools" ] && [ ! -L "$non_git_fixture/.tools" ] \
+    || fail "non-Git local-ci refusal created cache artifacts"
 local_fixture="$temporary/local"
 /bin/mkdir -p "$local_fixture/scripts" "$local_fixture/poison"
 /bin/cp "$repository_root/scripts/local-ci.sh" "$local_fixture/scripts/local-ci.sh"

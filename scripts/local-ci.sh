@@ -2,11 +2,11 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
-. "$script_dir/local-ci-environment.sh"
 [ "$#" -eq 0 ] || { echo "usage: scripts/local-ci.sh" >&2; exit 2; }
 if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
     exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"
 fi
+. "$script_dir/local-ci-environment.sh"
 
 echo "local-ci: repository contract fixtures"
 ./scripts/check-toolchain-pins.sh

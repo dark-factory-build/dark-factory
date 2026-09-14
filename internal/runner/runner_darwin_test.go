@@ -119,6 +119,12 @@ func TestMain(m *testing.M) {
 				os.Exit(92)
 			}
 			os.Exit(0)
+		case "detached-bounded":
+			if err := runDetachedBoundedDescendantHelper(os.Args[3]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(92)
+			}
+			os.Exit(0)
 		case "fifo-child":
 			if err := runFIFODescendantHelper(os.Args[3]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -222,6 +228,23 @@ func runTERMForkDescendantHelper(root string) error {
 	return errors.New("TERM signal channel closed")
 }
 
+func runDetachedBoundedDescendantHelper(root string) error {
+	release := filepath.Join(root, "detached.release")
+	_, descendant, err := startDetachedDescendantHelper("fifo-child", release)
+	if err != nil {
+		return err
+	}
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, unix.SIGTERM)
+	defer signal.Stop(term)
+	if err := os.WriteFile(filepath.Join(root, "descendant.pid"), []byte(strconv.Itoa(descendant.PID)), 0o600); err != nil {
+		return err
+	}
+	for range term {
+	}
+	return errors.New("TERM signal channel closed")
+}
+
 func startDescendantHelper(mode, argument string) (*exec.Cmd, Identity, error) {
 	readyReader, readyWriter, err := os.Pipe()
 	if err != nil {
@@ -265,6 +288,43 @@ func startDescendantHelper(mode, argument string) (*exec.Cmd, Identity, error) {
 		return nil, Identity{}, fmt.Errorf("descendant group identity=%+v parent_pgid=%d err=%v", identity, pgid, err)
 	}
 	cleanup = false
+	return command, identity, nil
+}
+
+func startDetachedDescendantHelper(mode, argument string) (*exec.Cmd, Identity, error) {
+	readyReader, readyWriter, err := os.Pipe()
+	if err != nil {
+		return nil, Identity{}, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		_ = readyReader.Close()
+		_ = readyWriter.Close()
+		return nil, Identity{}, err
+	}
+	command := exec.Command(executable, "--owned-descendant-helper", mode, argument)
+	command.ExtraFiles = []*os.File{readyWriter}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		_ = readyReader.Close()
+		_ = readyWriter.Close()
+		return nil, Identity{}, err
+	}
+	_ = readyWriter.Close()
+	if err := readyReader.SetReadDeadline(time.Now().Add(4 * time.Second)); err != nil {
+		_ = readyReader.Close()
+		return nil, Identity{}, err
+	}
+	var ready [1]byte
+	if _, err := io.ReadFull(readyReader, ready[:]); err != nil {
+		_ = readyReader.Close()
+		return nil, Identity{}, fmt.Errorf("detached descendant readiness: %w", err)
+	}
+	_ = readyReader.Close()
+	identity, err := readIdentity(command.Process.Pid)
+	if err != nil || identity.PGID != identity.PID {
+		return nil, Identity{}, fmt.Errorf("detached descendant identity=%+v err=%v", identity, err)
+	}
 	return command, identity, nil
 }
 
@@ -1936,6 +1996,62 @@ func TestTerminateGroupSignalCatchesDescendantForkedDuringTERMGrace(t *testing.T
 	waitExactAbsence(t, late)
 	assertWaitedAndAbsent(t, child)
 	cleanupDone()
+}
+
+func TestTerminateDoesNotClaimDetachedDescendantAbsence(t *testing.T) {
+	f := newFixture(t)
+	releasePath := filepath.Join(f.root, "detached.release")
+	if err := unix.Mkfifo(releasePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseFD, err := unix.Open(releasePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := os.NewFile(uintptr(releaseFD), "detached-release")
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			_, _ = release.Write([]byte{1})
+		}
+		_ = release.Close()
+	})
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := f.start(executable, []string{"--owned-descendant-helper", "detached-bounded", f.root}, nil, outputFile(t, filepath.Join(f.root, "out")))
+	if _, err := child.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(f.root, "descendant.pid")
+	waitFile(t, pidPath)
+	body, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detached, err := readIdentity(pid)
+	if err != nil || detached.PGID == child.Identity().PGID {
+		t.Fatalf("detached identity=%+v owner=%+v err=%v", detached, child.Identity(), err)
+	}
+	// The FIFO releases the detached child without granting PID signal authority.
+	exit, err := child.Terminate(50 * time.Millisecond)
+	if err != nil || exit.Signal != int(unix.SIGKILL) {
+		t.Fatalf("termination=%+v err=%v", exit, err)
+	}
+	assertWaitedAndAbsent(t, child)
+	if observation := ObserveProcess(detached); observation.Presence != Present {
+		t.Fatalf("owned-group cleanup claimed detached descendant absent: %+v", observation)
+	}
+	if _, err := release.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	released = true
+	waitExactAbsence(t, detached)
 }
 
 func TestGroupSignalRequiresExactUnreapedLeader(t *testing.T) {
