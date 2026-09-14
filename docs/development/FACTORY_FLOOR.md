@@ -181,3 +181,33 @@ Thirty obsolete task/build/site checkouts have been retired, with superseded
 dirty files preserved under ignored `retired-checkouts/`. The final handoff and
 its old CI-refusal checkout are retained until merge; unrelated operator edits
 in the primary runtime/site checkouts remain untouched.
+
+
+## Scanned inventory
+
+Optional topology-node `inventory` counts eligible regular files from the existing
+bounded scan. Missing inventory means unavailable; present zero counts mean an
+empty scanned inventory. Dot directories, dependency/build/cache exclusions,
+symlinks and special files remain excluded. This is not a count of every file on
+disk. `direct` counts files immediately in the node's physical path; `total`
+includes those files and descendants. Repository/module/package nodes may share
+a path and therefore share counts: never sum overlapping child totals.
+
+Classification uses case-insensitive filenames, with this precedence: recognized
+source files with explicit test names (`_test.go`, `.test.`, `.spec.`, `test_`,
+`_test`) or inside `test`, `tests`, `__tests__` directories are tests; Markdown,
+reStructuredText, AsciiDoc and bare README/LICENSE are documentation; JSON,
+YAML, TOML, INI, CFG, lock files and recognized build/configuration filenames are
+configuration; recognized image/font/audio/video/PDF extensions are assets;
+recognized programming/web source extensions are source; everything else stays
+unclassified. A JSON fixture in tests is configuration; unknown `.txt` or binary
+content is explicitly unclassified. Test presence means neither success nor
+coverage. Import and manifest observations retain their existing partial scope.
+
+`samples` contains up to three lexically ordered immediate filenames, each at
+most 128 UTF-8 bytes. `samples_omitted` counts remaining direct files, including
+names too long to transmit. No source text is sent. Optional summaries consume
+only remaining capacity under the existing response limit; `inventory_omitted`
+reports how many served nodes lost their summary to that bound. Missing counts
+must never be displayed as zero. The topology digest includes inventory while
+node identities remain tied to project, kind and path.

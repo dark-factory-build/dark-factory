@@ -382,6 +382,7 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
     sizeBucket: node.size_bucket,
     language: node.language,
     childCount: childCounts.get(node.id) ?? 0,
+    ...(node.inventory === undefined ? {} : { inventory: node.inventory }),
     ...(topology?.dependencies === undefined ? {} : { dependencies: { omitted: topology.dependencies.omitted, links: links.get(node.id) ?? [] } }),
     project: { id: project.id, name: project.name },
   }));

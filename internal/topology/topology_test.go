@@ -401,6 +401,86 @@ func TestNodeIDsAreMintedPerProject(t *testing.T) {
 	}
 }
 
+func TestInventoryCountsPhysicalPathsAndChangesDigest(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, root, map[string]string{
+		"go.mod": "module example.com/inventory\n", "main.go": "package main\n", "main_test.go": "package main\n",
+		"README.md": "docs", "image.svg": "asset", "unknown.bin": "?", "child/index.ts": "export {}", "child/tests/unit.ts": "test",
+		"node_modules/ignored.js": "ignored", ".hidden/ignored.go": "ignored",
+	})
+	first, err := Build(context.Background(), root, "inventory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDirect := InventoryCounts{Source: 1, Tests: 1, Documentation: 1, Configuration: 1, Assets: 1, Unclassified: 1}
+	wantTotal := wantDirect
+	wantTotal.Source++
+	wantTotal.Tests++
+	shared := 0
+	for _, node := range first.Nodes {
+		if node.RelativePath != "." {
+			continue
+		}
+		shared++
+		if node.Inventory == nil || node.Inventory.Direct != wantDirect || node.Inventory.Total != wantTotal {
+			t.Fatalf("%s inventory = %+v", node.Kind, node.Inventory)
+		}
+		if strings.Join(node.Inventory.Samples, ",") != "README.md,go.mod,image.svg" || node.Inventory.SamplesOmitted != 3 {
+			t.Fatalf("samples = %+v", node.Inventory)
+		}
+	}
+	if shared != 3 {
+		t.Fatalf("same-path nodes = %d, want repository, module, package", shared)
+	}
+	second, err := Build(context.Background(), root, "inventory")
+	if err != nil || second.Digest != first.Digest {
+		t.Fatalf("nondeterministic build: %v", err)
+	}
+	if err := os.Rename(filepath.Join(root, "image.svg"), filepath.Join(root, "art.svg")); err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := Build(context.Background(), root, "inventory")
+	if err != nil || renamed.Digest == first.Digest {
+		t.Fatalf("represented sample rename did not change digest: %v", err)
+	}
+	writeFixture(t, root, map[string]string{"zero.bin": ""})
+	changed, err := Build(context.Background(), root, "inventory")
+	if err != nil || changed.Digest == first.Digest {
+		t.Fatalf("zero-byte inventory change did not change digest: %v", err)
+	}
+	assertStableIDs(t, nodeIDs(first), changed)
+}
+
+func TestInventoryEmptySamplesAndClassification(t *testing.T) {
+	for name, want := range map[string]string{
+		"a.test.ts": "tests", "tests/tool.py": "tests", "tests/README.md": "documentation", "tests/data.json": "configuration",
+		"contest/unit.ts": "source", "test_main.py": "tests", "go.mod": "configuration", "icons/a.svg": "assets", "LICENSE": "documentation",
+		"opaque.data": "unclassified", "notes.txt": "unclassified", "Test/Example.go": "tests",
+	} {
+		if got := classify(name); got != want {
+			t.Errorf("classify(%q) = %s, want %s", name, got, want)
+		}
+	}
+	root := t.TempDir()
+	empty, err := Build(context.Background(), root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := empty.Nodes[0].Inventory
+	if inventory == nil || inventory.Direct != (InventoryCounts{}) || inventory.Total != (InventoryCounts{}) || inventory.Samples == nil || len(inventory.Samples) != 0 {
+		t.Fatalf("empty is unavailable: %+v", inventory)
+	}
+	writeFixture(t, root, map[string]string{strings.Repeat("a", 129): "", "b.md": "", "c.md": "", "d.md": "", "e.md": ""})
+	sampled, err := Build(context.Background(), root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory = sampled.Nodes[0].Inventory
+	if strings.Join(inventory.Samples, ",") != "b.md,c.md,d.md" || inventory.SamplesOmitted != 2 {
+		t.Fatalf("omitted samples = %+v", inventory)
+	}
+}
+
 func TestContainmentUsesParentsWithoutSpendingImportEdges(t *testing.T) {
 	root := t.TempDir()
 	writeFixture(t, root, map[string]string{

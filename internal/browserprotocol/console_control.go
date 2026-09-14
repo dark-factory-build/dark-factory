@@ -71,11 +71,12 @@ type TopologyGet struct {
 // identity a client needs to tell one computation from another. Containment is
 // implied by ParentID. Optional dependencies are bounded analyser observations.
 type Topology struct {
-	ProjectID      string                `json:"project_id"`
-	Digest         string                `json:"digest"`
-	SourceRevision string                `json:"source_revision"`
-	Nodes          []TopologyNode        `json:"nodes"`
-	Dependencies   *TopologyDependencies `json:"dependencies,omitempty"`
+	ProjectID        string                `json:"project_id"`
+	Digest           string                `json:"digest"`
+	SourceRevision   string                `json:"source_revision"`
+	Nodes            []TopologyNode        `json:"nodes"`
+	Dependencies     *TopologyDependencies `json:"dependencies,omitempty"`
+	InventoryOmitted *uint32               `json:"inventory_omitted,omitempty"`
 }
 
 const MaxTopologyEdges = 256
@@ -191,13 +192,14 @@ type BrowserClientRevokeResult struct {
 }
 
 type TopologyNode struct {
-	ID         string `json:"id"`
-	ParentID   string `json:"parent_id"`
-	Kind       string `json:"kind"`
-	Path       string `json:"path"`
-	Label      string `json:"label"`
-	Language   string `json:"language"`
-	SizeBucket string `json:"size_bucket"`
+	ID         string             `json:"id"`
+	ParentID   string             `json:"parent_id"`
+	Kind       string             `json:"kind"`
+	Path       string             `json:"path"`
+	Label      string             `json:"label"`
+	Language   string             `json:"language"`
+	SizeBucket string             `json:"size_bucket"`
+	Inventory  *TopologyInventory `json:"inventory,omitempty"`
 }
 
 func EncodeAgentUpdateResult(id string, value AgentUpdateResult) ([]byte, error) {
@@ -305,6 +307,9 @@ func validConsoleControl(kind MessageType, body any) error {
 	case Topology:
 		if validateDynamicID(value.ProjectID) != nil || !validTopologyDigest(value.Digest) ||
 			!validTopologySource(value.SourceRevision) || len(value.Nodes) > MaxSnapshotEntities {
+			return bad()
+		}
+		if value.InventoryOmitted != nil && *value.InventoryOmitted > uint32(len(value.Nodes)) {
 			return bad()
 		}
 		ids := make(map[string]bool, len(value.Nodes))
@@ -465,7 +470,7 @@ func validTopologyNode(node TopologyNode) bool {
 	default:
 		return false
 	}
-	return validateBoundedText(node.Path, 1, MaxTaskTitleBytes) == nil &&
+	return (node.Inventory == nil || validTopologyInventory(*node.Inventory)) && validateBoundedText(node.Path, 1, MaxTaskTitleBytes) == nil &&
 		validateBoundedText(node.Label, 1, MaxAgentNameBytes) == nil &&
 		validateBoundedText(node.Language, 0, MaxAgentNameBytes) == nil
 }
@@ -478,4 +483,44 @@ const (
 
 func validIdlePolicy(value string) bool {
 	return value == "wait" || value == "standing_instruction"
+}
+
+// Inventory is optional scanned-file evidence, not coverage or execution.
+type TopologyInventory struct {
+	Direct         TopologyInventoryCounts `json:"direct"`
+	Total          TopologyInventoryCounts `json:"total"`
+	Samples        []string                `json:"samples"`
+	SamplesOmitted uint32                  `json:"samples_omitted"`
+}
+type TopologyInventoryCounts struct {
+	Source        uint32 `json:"source"`
+	Tests         uint32 `json:"tests"`
+	Documentation uint32 `json:"documentation"`
+	Configuration uint32 `json:"configuration"`
+	Assets        uint32 `json:"assets"`
+	Unclassified  uint32 `json:"unclassified"`
+}
+
+func validTopologyInventory(value TopologyInventory) bool {
+	direct := [...]uint32{value.Direct.Source, value.Direct.Tests, value.Direct.Documentation, value.Direct.Configuration, value.Direct.Assets, value.Direct.Unclassified}
+	total := [...]uint32{value.Total.Source, value.Total.Tests, value.Total.Documentation, value.Total.Configuration, value.Total.Assets, value.Total.Unclassified}
+	var directCount, totalCount uint64
+	for i, count := range direct {
+		if count > total[i] {
+			return false
+		}
+		directCount += uint64(count)
+		totalCount += uint64(total[i])
+	}
+	if totalCount > 50000 || value.Samples == nil || len(value.Samples) > 3 || uint64(len(value.Samples))+uint64(value.SamplesOmitted) != directCount {
+		return false
+	}
+	seen := make(map[string]bool, len(value.Samples))
+	for _, name := range value.Samples {
+		if validateBoundedText(name, 1, 128) != nil || strings.ContainsAny(name, "/\x00") || name == "." || name == ".." || seen[name] {
+			return false
+		}
+		seen[name] = true
+	}
+	return true
 }
