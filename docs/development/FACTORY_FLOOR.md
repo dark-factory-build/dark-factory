@@ -211,3 +211,10 @@ only remaining capacity under the existing response limit; `inventory_omitted`
 reports how many served nodes lost their summary to that bound. Missing counts
 must never be displayed as zero. The topology digest includes inventory while
 node identities remain tied to project, kind and path.
+
+
+## Inventory equipment and activity
+
+Rooms project the optional scanned subtree inventory into at most six equipment groups: source racks, test benches, document drawers, configuration panels, asset displays and unclassified crates. Counts are partitioned between repeated groups, never one object per file. Direct and subtree counts remain separately inspectable; shared-path totals overlap. Equipment capacity omissions, direct filename sample omissions and missing summaries are explicit. Test benches indicate test-file presence, not success or coverage. Named child cabinets use the existing hierarchy navigation; remaining served siblings are reached by pages.
+
+Room geometry and the five worker standing slots remain independent of inventory contents. Only a busy worker with current observed work in a visible room runs the restrained interaction loop. Reduced motion, hidden tabs, disconnection and idle floors stop the animation clock; reconnection reconciles the current snapshot instead of replaying events. This is an activity projection, not command execution evidence.

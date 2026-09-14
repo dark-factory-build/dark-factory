@@ -9,7 +9,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
-import { PADDING, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
+import { PADDING, layoutScene, placeWorkers, roomContents } from "../../dist/src/factory-scene/scene.js";
 import { resolvedAppearance, spriteOptions, workerFrames } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
@@ -568,7 +568,7 @@ test("the production scene stops motion on disconnect and unmount", async () => 
 
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: false })); });
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: true })); });
-    assert.equal(requested.length, cancelled.length, "reconnect snaps to its current snapshot instead of replaying the missed route");
+    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "interacting", "reconnect snaps to current observed work instead of replaying the missed route");
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: true })); });
     assert.ok(requested.length > cancelled.length, "a later observed change starts a fresh route");
     await act(async () => { renderer.unmount(); });
@@ -692,7 +692,7 @@ test("room inspection distinguishes bounded static evidence, hidden endpoints an
   const select = () => renderer.root.findByProps({ "aria-label": "Inspect room" });
   await act(async () => { select().props.onChange({ target: { value: "repo" } }); });
   const details = () => renderer.root.findByProps({ "aria-label": "Room details" });
-  assert.equal(details().findByType("details").props.open, undefined);
+  assert.equal(details().findByType("details").props.open, true);
   assert.equal(details().findByType("summary").props.children, "Room info");
   assert.ok(details().findAllByType("p").some((p) => typeof p.props.children === "string" && p.props.children.startsWith("Dashed lines: sampled static")));
   const buttons = details().findAllByType("button");
@@ -702,4 +702,85 @@ test("room inspection distinguishes bounded static evidence, hidden endpoints an
   await act(async () => { select().props.onChange({ target: { value: "lib" } }); });
   assert.ok(details().findAllByType("p").some((p) => p.props.children === "Dependencies unavailable."));
   await act(async () => { renderer.unmount(); });
+});
+
+
+test("inventory equipment is bounded, counted once and clears standing lanes in every room size", () => {
+  const counts = { source: 200, tests: 140, documentation: 36, configuration: 6, assets: 98, unclassified: 4 };
+  for (const sizeBucket of ["tiny", "small", "medium", "large"]) {
+    const node = { ...topology.nodes[0], sizeBucket, inventory: { direct: counts, total: counts, samples: ["main.go"], samples_omitted: 483 }, components: [{ id: "a", label: "A" }, { id: "b", label: "B" }, { id: "c", label: "C" }] };
+    const room = layoutScene({ digest: "inventory", nodes: [node] }).rooms[0];
+    const contents = roomContents(node, room);
+    assert.ok(contents.length > 0 && contents.length <= 6);
+    assert.equal(new Set(contents.map((item) => item.key)).size, contents.length);
+    assert.deepEqual(contents, roomContents(node, room));
+    for (const item of contents) {
+      assert.ok(item.width >= 32 && item.height >= 24, "equipment is multi-tile, not tiny prop labels");
+      assert.ok(item.x >= room.x + 8 && item.x + item.width <= room.x + room.width - 8);
+      assert.ok(item.y >= room.y + 40 && item.y + item.height <= room.standing.y - 8, "all crowded standing slots and routes stay clear");
+    }
+    for (const kind of Object.keys(counts)) {
+      const group = contents.filter((item) => item.kind === kind);
+      if (group.length) assert.equal(group.reduce((sum, item) => sum + item.count, 0), counts[kind], "multiple equipment groups partition represented counts");
+    }
+    const plain = { ...node, components: [], inventory: undefined };
+    assert.deepEqual(roomContents(plain, room), [], "unavailable does not invent equipment");
+    assert.deepEqual(roomContents({ ...plain, inventory: { ...node.inventory, total: Object.fromEntries(Object.keys(counts).map((key) => [key, 0])) } }, room), [], "explicit zero inventory stays empty");
+  }
+});
+
+test("inventory inspection discloses actual omitted categories and cabinets", async () => {
+  const counts = { source: 2, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 4 };
+  const node = { ...topology.nodes[0], sizeBucket: "tiny", inventory: { direct: counts, total: counts, samples: ["main.go"], samples_omitted: 5 }, components: [{ id: "a", label: "A" }, { id: "b", label: "B" }] };
+  let renderer;
+  await act(async () => { renderer = create(createElement(FactoryScene, { topology: { digest: "inventory", nodes: [node] }, workers: [] })); });
+  await act(async () => { renderer.root.findByProps({ "aria-label": "Inspect room" }).props.onChange({ target: { value: node.id } }); });
+  const text = JSON.stringify(renderer.toJSON());
+  assert.match(text, /scanned files in other categories/);
+  assert.match(text, /subcomponents without pictured cabinets/);
+  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 2 && p.props.children[1].includes("subcomponents")));
+  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 2 && p.props.children[1].includes("scanned files")));
+  assert.match(text, /5 direct filenames omitted/);
+  await act(async () => renderer.unmount());
+});
+
+test("stationary active workers animate while idle, reduced, hidden and disconnected clocks stop", async () => {
+  const saved = { requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
+  const frames = new Map();
+  let next = 0, visibilityListener, mediaListener;
+  const media = { matches: false, addEventListener: (_event, listener) => { mediaListener = listener; }, removeEventListener() {} };
+  globalThis.window = { matchMedia: () => media };
+  globalThis.document = { visibilityState: "visible", addEventListener: (_event, listener) => { visibilityListener = listener; }, removeEventListener() {} };
+  globalThis.requestAnimationFrame = (callback) => { frames.set(++next, callback); return next; };
+  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
+    assert.equal(frames.size, 1);
+    const staticRoom = renderer.root.findByProps({ "data-room-id": "src" }).props;
+    const frameNames = () => renderer.root.findByProps({ "data-worker-id": workers[0].id }).findAllByType("use").map((node) => node.props.href);
+    await act(async () => { frames.values().next().value(900); });
+    const first = frameNames();
+    await act(async () => { frames.values().next().value(1350); });
+    assert.notDeepEqual(frameNames(), first, "stationary interaction frame advances");
+    assert.equal(renderer.root.findByProps({ "data-room-id": "src" }).props, staticRoom);
+    await act(async () => { globalThis.document.visibilityState = "hidden"; visibilityListener(); });
+    assert.equal(frames.size, 0);
+    await act(async () => { globalThis.document.visibilityState = "visible"; visibilityListener(); });
+    assert.equal(frames.size, 1);
+    await act(async () => { media.matches = true; mediaListener(); });
+    assert.equal(frames.size, 0);
+    await act(async () => { media.matches = false; mediaListener(); });
+    assert.equal(frames.size, 1);
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: false })); });
+    assert.equal(frames.size, 0);
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: true })); });
+    assert.equal(frames.size, 1);
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: workers.map((worker) => ({ ...worker, activity: "waiting", location: "resting" })), connected: false })); });
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: [], connected: true })); });
+    assert.equal(frames.size, 0, "idle floor leaves no continuous animation clock");
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
+  }
 });

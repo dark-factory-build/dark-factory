@@ -1096,3 +1096,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfFactoryConsole[data-mobile-view="floor"] .dfConsoleSidebar,
   .dfFactoryConsole[data-mobile-view] .dfConsoleSidebar > .dfConsoleViewToggle { display: none; }
 }
+
+.dfRoomDetails table { border-collapse: collapse; width: 100%; max-width: 30rem; margin: .75rem 0; font-variant-numeric: tabular-nums; }
+.dfRoomDetails th, .dfRoomDetails td { padding: .25rem .5rem; text-align: right; border-bottom: 1px solid var(--df-border, #293c37); }
+.dfRoomDetails th:first-child { text-align: left; }
+.dfRoomDetails caption { text-align: left; margin-bottom: .5rem; }

@@ -16,6 +16,7 @@ export type SceneNode = Readonly<{
   sizeBucket?: "empty" | "tiny" | "small" | "medium" | "large";
   language?: string;
   childCount?: number;
+  components?: readonly Readonly<{ id: string; label: string }>[];
   inventory?: TopologyView["nodes"][number]["inventory"];
   dependencies?: Readonly<{
     omitted: number;
@@ -164,4 +165,42 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     if (area === "resting" || areas[area].length > 0) top += Math.max(1, Math.ceil(areas[area].length / outsideColumns)) * WORKER_GAP + 40;
   }
   return placed.sort((left, right) => compareText(left.id, right.id));
+}
+
+
+export const inventoryLabels = { source: "Source", tests: "Tests", documentation: "Docs", configuration: "Config", assets: "Assets", unclassified: "Unclassified" } as const;
+type ContentKind = keyof typeof inventoryLabels | "component";
+export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string }>;
+
+/** Bounded equipment groups; file counts describe inventory, never execution. */
+export function roomContents(node: SceneNode, room: SceneRoomLayout): readonly RoomContent[] {
+  const columns = room.width >= 224 ? 3 : room.width >= 160 ? 2 : 1;
+  const rows = room.height >= 144 ? 2 : 1;
+  const capacity = columns * rows;
+  const groups: Array<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string }> =
+    (node.components ?? []).slice(0, Math.min(2, capacity - 1)).map((child) => ({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id }));
+  const counts = node.inventory?.total;
+  const kinds = (Object.keys(inventoryLabels) as Array<keyof typeof inventoryLabels>)
+    .filter((kind) => (counts?.[kind] ?? 0) > 0)
+    .sort((left, right) => counts![right] - counts![left] || compareText(left, right));
+  const available = capacity - groups.length;
+  const chosen = kinds.slice(0, available);
+  const copies = new Map(chosen.map((kind) => [kind, 1]));
+  let remaining = available - chosen.length;
+  for (const kind of chosen) {
+    const extra = Math.min(remaining, 2, Math.ceil(counts![kind] / 50) - 1);
+    copies.set(kind, 1 + extra);
+    remaining -= extra;
+  }
+  // Category order is stable; only additions/removals of represented groups move equipment.
+  for (const kind of chosen.sort((a, b) => compareText(a, b))) {
+    const parts = copies.get(kind)!;
+    for (let index = 0; index < parts; index++) groups.push({
+      key: `${kind}:${index}`, kind, label: inventoryLabels[kind],
+      count: Math.floor(counts![kind] / parts) + (index < counts![kind] % parts ? 1 : 0),
+    });
+  }
+  const width = (room.width - 24 - (columns - 1) * 8) / columns;
+  const height = rows === 2 ? (room.height >= 160 ? 32 : 24) : room.height >= 128 ? 32 : 24;
+  return groups.map((group, index) => ({ ...group, x: room.x + 12 + index % columns * (width + 8), y: room.y + 44 + Math.floor(index / columns) * (height + 4), width, height }));
 }

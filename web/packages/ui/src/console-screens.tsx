@@ -151,6 +151,7 @@ export function FactoryFloor({
   useEffect(() => {
     if (scopeId !== scene.navigation.scopeId || page !== scene.navigation.page) setView({ scopeId: scene.navigation.scopeId, page: scene.navigation.page });
   }, [scopeId, page, scene.navigation.scopeId, scene.navigation.page]);
+  const inventoryOmitted = [...(state?.projects.keys() ?? [])].reduce((count, id) => count + (topologies?.get(id)?.inventoryOmitted ?? 0), 0);
   return <div className="dfFactoryFloor">
     <nav className="dfFactoryFloor__navigation" aria-label="Floor hierarchy">
       {scene.navigation.breadcrumbs.map((crumb, index) => <span key={crumb.id ?? "root"}>
@@ -159,6 +160,7 @@ export function FactoryFloor({
       </span>)}
       {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>BACK</button>}
     </nav>
+    {inventoryOmitted === 0 ? null : <p role="status">{inventoryOmitted} room inventories omitted from the served projects; those rooms show inventory unavailable.</p>}
     {scene.navigation.pageCount <= 1 ? null : <nav aria-label="Floor pages">
       <button type="button" disabled={scene.navigation.page === 0} onClick={() => setView({ scopeId, page: scene.navigation.page - 1 })}>Previous spaces</button>
       <span> Page {scene.navigation.page + 1} of {scene.navigation.pageCount} · {scene.navigation.omittedChildren} spaces on other pages </span>
