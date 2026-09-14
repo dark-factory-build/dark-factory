@@ -143,6 +143,9 @@ export type FloorNavigation = Readonly<{
   enterableIds: readonly string[];
   omittedChildren: number;
   outsideScopeActivity: number;
+  hiddenScopeActivity: number;
+  page: number;
+  pageCount: number;
 }>;
 
 /** A served task and its observed footprint, without inferring any execution detail. */
@@ -154,6 +157,10 @@ export type SceneTask = Readonly<{
   status: TaskItem["status"];
   roomIds: readonly string[];
   representativeRoomId?: string;
+  /** Derived display only; exact observed rooms above remain unchanged. */
+  displayRoomIds?: readonly string[];
+  displayRoomId?: string;
+  observation?: Readonly<{ taskRevision: bigint; runId: string }>;
   humanRequestIds: readonly string[];
 }>;
 
@@ -180,6 +187,7 @@ export function floorScene(
   runPaths?: ReadonlyMap<string, RunPathSample>,
   lastRunPaths?: ReadonlyMap<string, RunPathSample>,
   scopeId?: string,
+  requestedPage = 0,
 ): FloorScene {
   const projects = state === undefined ? [] : [...state.projects.values()].sort((left, right) => compareText(left.name, right.name) || compareText(left.id, right.id));
   const hierarchies = projects.map((project) => projectHierarchy(project, topologies?.get(project.id)));
@@ -195,14 +203,31 @@ export function floorScene(
   const scopeChildren = scope === undefined ? hierarchies.map((hierarchy) => hierarchy.projectRoom) : children.get(scope.id) ?? [];
   const showScope = scope !== undefined && (scope.kind !== "module" || scopeChildren.length === 0);
   const roomLimit = MAX_SCOPE_ROOMS - (showScope ? 1 : 0);
-  const rooms = showScope ? [scope, ...scopeChildren.slice(0, roomLimit)] : scopeChildren.slice(0, roomLimit);
+  const pageCount = Math.max(1, Math.ceil(scopeChildren.length / roomLimit));
+  const page = scopeId !== validScope || !Number.isFinite(requestedPage) ? 0 : Math.max(0, Math.min(pageCount - 1, Math.floor(requestedPage)));
+  const pageChildren = scopeChildren.slice(page * roomLimit, (page + 1) * roomLimit);
+  const rooms = showScope ? [scope, ...pageChildren] : pageChildren;
   const liveRooms = new Set<string>();
   const kept = new Set(rooms.map((room) => room.id));
+  const visibleAncestor = (id: string | undefined): string | undefined => {
+    let room = id === undefined ? undefined : roomByID.get(id);
+    while (room !== undefined && !kept.has(room.id)) room = room.parentId === undefined ? undefined : roomByID.get(room.parentId);
+    return room?.id;
+  };
+  const inScope = (id: string): boolean => {
+    if (validScope === undefined) return true;
+    let room = roomByID.get(id);
+    while (room !== undefined && room.id !== validScope) room = room.parentId === undefined ? undefined : roomByID.get(room.parentId);
+    return room !== undefined;
+  };
   const tasks = state === undefined ? [] : [...state.tasks.values()]
 		.filter((task) => !state.agents.get(task.assigned_agent_id)?.archived)
     .sort((left, right) => compareText(left.id, right.id))
     .map((task) => {
-      const footprint = runFootprint(blocksByProject.get(task.project_id) ?? [], matchingRunSample(state, task, runPaths));
+      const sample = matchingRunSample(state, task, runPaths);
+      const footprint = runFootprint(blocksByProject.get(task.project_id) ?? [], sample);
+      const displayRoomIds = [...new Set(footprint.roomIds.map(visibleAncestor).filter((id): id is string => id !== undefined))];
+      const displayRoomId = visibleAncestor(footprint.representativeRoomId) ?? displayRoomIds[0];
       return {
         id: task.id,
         agentId: task.assigned_agent_id,
@@ -211,6 +236,11 @@ export function floorScene(
         status: task.status,
         roomIds: footprint.roomIds,
         ...(footprint.representativeRoomId === undefined ? {} : { representativeRoomId: footprint.representativeRoomId }),
+        ...(sample === undefined ? {} : {
+          observation: { taskRevision: sample.taskRevision, runId: sample.runId },
+          displayRoomIds,
+          ...(displayRoomId === undefined ? {} : { displayRoomId }),
+        }),
         humanRequestIds: [...state.humanRequests.values()]
           .filter((request) => request.task_id === task.id && request.agent_id === task.assigned_agent_id && request.project_id === task.project_id)
           .sort((left, right) => compareText(left.id, right.id))
@@ -224,9 +254,13 @@ export function floorScene(
     const live = task === undefined ? undefined : workByTask.get(task.id)?.representativeRoomId;
     const previous = lastRunPaths?.get(agent.id);
     const last = previous?.projectId === agent.project_id && previous.paths.length > 0 ? runFootprint(block, previous).representativeRoomId : undefined;
-    if (live !== undefined) liveRooms.add(live);
+    const work = task === undefined ? undefined : workByTask.get(task.id);
+    const display = work?.displayRoomId;
+    const displayedObservation = display === undefined || visibleAncestor(live) === display ? live
+      : work?.roomIds.find((id) => visibleAncestor(id) === display);
+    if (live !== undefined) liveRooms.add(display ?? live);
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
-    const room = location === "working" ? roomByID.get(live!) : location === "last-observed" ? roomByID.get(last!) : undefined;
+    const room = location === "working" ? roomByID.get(displayedObservation!) : location === "last-observed" ? roomByID.get(last!) : undefined;
     return {
       id: agent.id,
       name: agent.name,
@@ -237,7 +271,7 @@ export function floorScene(
       paused: agent.paused,
       location,
       ...(room === undefined ? {} : { locationLabel: room.label }),
-      ...(location === "working" && live !== undefined ? { nodeId: live } : {}),
+      ...(location === "working" && live !== undefined ? { nodeId: display ?? live, locationWithin: display !== undefined && display !== displayedObservation } : {}),
     };
   });
   const crumbs: Array<{ id?: string; label: string }> = [{ label: "All projects" }];
@@ -255,8 +289,10 @@ export function floorScene(
     }
     crumbs.push(...chain.map((node) => ({ id: node.id, label: node.label })));
   }
-  const outsideScopeActivity = tasks.filter((task) => task.status === "running" && task.representativeRoomId !== undefined && !kept.has(task.representativeRoomId)).length;
-  const digest = `${projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ")}:${validScope ?? "root"}`;
+  const observedTasks = tasks.filter((task) => task.status === "running" && task.roomIds.length > 0);
+  const outsideScopeActivity = observedTasks.filter((task) => !task.roomIds.some(inScope)).length;
+  const hiddenScopeActivity = observedTasks.filter((task) => task.roomIds.some(inScope) && task.displayRoomIds?.length === 0).length;
+  const digest = `${projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ")}:${validScope ?? "root"}:${page}`;
   return {
     topology: { digest, nodes: rooms }, workers, tasks,
     omittedLocations: [...liveRooms].filter((id) => !kept.has(id)).length,
@@ -265,8 +301,8 @@ export function floorScene(
       ...(scope === undefined ? {} : { backScopeId: scope.parentId }),
       breadcrumbs: crumbs,
       enterableIds: rooms.filter((room) => room.id !== validScope && (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
-      omittedChildren: Math.max(0, scopeChildren.length - roomLimit),
-      outsideScopeActivity,
+      omittedChildren: Math.max(0, scopeChildren.length - pageChildren.length),
+      outsideScopeActivity, hiddenScopeActivity, page, pageCount,
     },
   };
 }

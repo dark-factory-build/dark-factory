@@ -35,6 +35,8 @@ export type SceneWorker = Readonly<{
   /** Live work is placed in a room; retained samples annotate the resting area. */
   location?: "working" | "last-observed" | "unobserved" | "resting";
   locationLabel?: string;
+  /** The displayed room contains the more specific observed area. */
+  locationWithin?: boolean;
   nodeId?: string;
 }>;
 

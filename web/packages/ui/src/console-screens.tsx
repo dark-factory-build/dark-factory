@@ -139,11 +139,12 @@ export function FactoryFloor({
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
 }) {
-  const [scopeId, setScopeId] = useState<string | undefined>();
-  const scene = floorScene(state, topologies, runPaths, lastRunPaths, scopeId);
+  const [{ scopeId, page }, setView] = useState<{ scopeId?: string; page: number }>({ page: 0 });
+  const setScopeId = (scopeId: string | undefined) => setView({ scopeId, page: 0 });
+  const scene = floorScene(state, topologies, runPaths, lastRunPaths, scopeId, page);
   useEffect(() => {
-    if (scopeId !== scene.navigation.scopeId) setScopeId(scene.navigation.scopeId);
-  }, [scopeId, scene.navigation.scopeId]);
+    if (scopeId !== scene.navigation.scopeId || page !== scene.navigation.page) setView({ scopeId: scene.navigation.scopeId, page: scene.navigation.page });
+  }, [scopeId, page, scene.navigation.scopeId, scene.navigation.page]);
   return <div className="dfFactoryFloor">
     <nav className="dfFactoryFloor__navigation" aria-label="Floor hierarchy">
       {scene.navigation.breadcrumbs.map((crumb, index) => <span key={crumb.id ?? "root"}>
@@ -152,10 +153,14 @@ export function FactoryFloor({
       </span>)}
       {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>BACK</button>}
     </nav>
-    {scene.navigation.omittedChildren === 0 && scene.navigation.outsideScopeActivity === 0 ? null : <p className="dfFactoryFloor__scopeSummary" role="status">
-      {scene.navigation.omittedChildren === 0 ? null : `${scene.navigation.omittedChildren} more spaces.`}
-      {scene.navigation.omittedChildren === 0 || scene.navigation.outsideScopeActivity === 0 ? "" : " "}
-      {scene.navigation.outsideScopeActivity === 0 ? null : `${scene.navigation.outsideScopeActivity} active task${scene.navigation.outsideScopeActivity === 1 ? "" : "s"} outside this view.`}
+    {scene.navigation.pageCount <= 1 ? null : <nav aria-label="Floor pages">
+      <button type="button" disabled={scene.navigation.page === 0} onClick={() => setView({ scopeId, page: scene.navigation.page - 1 })}>Previous spaces</button>
+      <span> Page {scene.navigation.page + 1} of {scene.navigation.pageCount} · {scene.navigation.omittedChildren} spaces on other pages </span>
+      <button type="button" disabled={scene.navigation.page + 1 === scene.navigation.pageCount} onClick={() => setView({ scopeId, page: scene.navigation.page + 1 })}>Next spaces</button>
+    </nav>}
+    {scene.navigation.outsideScopeActivity === 0 && scene.navigation.hiddenScopeActivity === 0 ? null : <p className="dfFactoryFloor__scopeSummary" role="status">
+      {scene.navigation.outsideScopeActivity === 0 ? null : `${scene.navigation.outsideScopeActivity} active tasks outside this scope. `}
+      {scene.navigation.hiddenScopeActivity === 0 ? null : `${scene.navigation.hiddenScopeActivity} active tasks within this scope, outside displayed rooms.`}
     </p>}
     <div className="dfFactoryFloor__scene">
     <FactoryScene
