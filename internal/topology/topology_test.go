@@ -52,7 +52,7 @@ func TestBuildDiscoversGenericGoAndJavaScriptTopologies(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			writeFixture(t, root, test.files)
-			snapshot, err := Build(context.Background(), root, "", nil)
+			snapshot, err := Build(context.Background(), root, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,7 +84,7 @@ func TestBuildIsStableAndRegeneratesForStructuralChanges(t *testing.T) {
 		"lib/lib.go": "package lib\n",
 		"alt/alt.go": "package alt\n",
 	})
-	first, err := Build(context.Background(), root, "", nil)
+	first, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestBuildIsStableAndRegeneratesForStructuralChanges(t *testing.T) {
 		t.Fatalf("source revision = %q", first.SourceRevision)
 	}
 	firstJSON, _ := json.Marshal(first)
-	second, err := Build(context.Background(), root, "", &first)
+	second, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestBuildIsStableAndRegeneratesForStructuralChanges(t *testing.T) {
 		t.Fatal("unchanged build was not byte-for-byte stable")
 	}
 	writeFixture(t, root, map[string]string{".git/HEAD": strings.Repeat("b", 40) + "\n"})
-	revised, err := Build(context.Background(), root, "", &second)
+	revised, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestBuildIsStableAndRegeneratesForStructuralChanges(t *testing.T) {
 	originalIDs := nodeIDs(first)
 
 	writeFixture(t, root, map[string]string{"app/app.go": "package app\nimport \"example.com/cart/alt\"\n"})
-	changedImport, err := Build(context.Background(), root, "", &second)
+	changedImport, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestBuildIsStableAndRegeneratesForStructuralChanges(t *testing.T) {
 	assertStableIDs(t, originalIDs, changedImport)
 
 	writeFixture(t, root, map[string]string{"new/new.go": "package new\n"})
-	added, err := Build(context.Background(), root, "", &changedImport)
+	added, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestBuildIsStableAndRegeneratesForStructuralChanges(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(root, "new")); err != nil {
 		t.Fatal(err)
 	}
-	removed, err := Build(context.Background(), root, "", &added)
+	removed, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestNodeForPathReturnsDeepestKnownNode(t *testing.T) {
 		"root.go":    "package cart\n",
 		"app/app.go": "package app\n",
 	})
-	snapshot, err := Build(context.Background(), root, "", nil)
+	snapshot, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestBuildIgnoresExcludedAndSymlinkedTreesAndRunsNothing(t *testing.T) {
 	if err := os.Symlink(root, filepath.Join(root, "src", "loop")); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := Build(context.Background(), root, "", nil)
+	snapshot, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestBuildSkipsDotDirectoriesAndOversizeAnalyzerFiles(t *testing.T) {
 		"app/app.go":  "package builder\n",
 		"app/huge.go": oversize,
 	})
-	snapshot, err := Build(context.Background(), root, "", nil)
+	snapshot, err := Build(context.Background(), root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestBuildBoundsFailClearly(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			writeFixture(t, root, test.files)
-			_, err := build(context.Background(), root, "", nil, test.bounds)
+			_, err := build(context.Background(), root, "", test.bounds)
 			if !errors.Is(err, ErrBounds) || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want clear %s bound", err, test.want)
 			}
@@ -302,75 +302,8 @@ func TestBuildStopsWhenTheCallerGivesUp(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := Build(ctx, root, "", nil); !errors.Is(err, context.Canceled) {
+	if _, err := Build(ctx, root, ""); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled walk error = %v", err)
-	}
-	if _, err := BuildCached(ctx, root, "", filepath.Join(t.TempDir(), "snapshot.json")); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled cached walk error = %v", err)
-	}
-}
-
-func TestBuildCachedRegeneratesWithoutRewritingUnchangedCache(t *testing.T) {
-	root := t.TempDir()
-	writeFixture(t, root, map[string]string{"go.mod": "module example.com/cache\n", "one/one.go": "package one\n"})
-	cache := filepath.Join(t.TempDir(), "topology", "project", "snapshot.json")
-	first, err := BuildCached(context.Background(), root, "", cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstBytes, err := os.ReadFile(cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstInfo, err := os.Stat(cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := BuildCached(context.Background(), root, "", cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondBytes, _ := os.ReadFile(cache)
-	secondInfo, err := os.Stat(cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Digest != second.Digest || !bytes.Equal(firstBytes, secondBytes) {
-		t.Fatal("unchanged cache was not returned byte-for-byte")
-	}
-	if !os.SameFile(firstInfo, secondInfo) {
-		t.Fatal("unchanged cache was rewritten")
-	}
-	var forged cacheRecord
-	if err := json.Unmarshal(firstBytes, &forged); err != nil {
-		t.Fatal(err)
-	}
-	forged.Snapshot.Nodes[0].Label = "forged"
-	forged.Snapshot.Digest = graphDigest(forged.Snapshot.Nodes, forged.Snapshot.Edges)
-	forgedBytes, err := json.Marshal(forged)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cache, forgedBytes, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	repaired, err := BuildCached(context.Background(), root, "", cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if repaired.Digest != first.Digest || repaired.Nodes[0].Label == "forged" {
-		t.Fatal("self-consistent but stale cache graph was trusted")
-	}
-	writeFixture(t, root, map[string]string{"two/two.go": "package two\n"})
-	third, err := BuildCached(context.Background(), root, "", cache)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if third.Digest == second.Digest {
-		t.Fatal("cached build did not regenerate after package addition")
-	}
-	if matches, _ := filepath.Glob(filepath.Join(filepath.Dir(cache), ".snapshot-*")); len(matches) != 0 {
-		t.Fatalf("temporary cache files remain: %v", matches)
 	}
 }
 
@@ -452,15 +385,15 @@ func equalPairs(left, right [][2]string) bool {
 // the project is part of every node id, and only the project.
 func TestNodeIDsAreMintedPerProject(t *testing.T) {
 	root := t.TempDir()
-	first, err := Build(context.Background(), root, "project-a", nil)
+	first, err := Build(context.Background(), root, "project-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Build(context.Background(), root, "project-b", nil)
+	second, err := Build(context.Background(), root, "project-b")
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := Build(context.Background(), root, "project-a", nil)
+	again, err := Build(context.Background(), root, "project-a")
 	if err != nil {
 		t.Fatal(err)
 	}
