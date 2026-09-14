@@ -38,7 +38,7 @@ try {
   // remains the keyboard-reachable terminal entry.
   const agentRow = () => renderer.root.findAllByType("button").find((button) => typeof button.props.className === "string" && button.props.className.includes("dfAgentList__row"));
   const open = async () => {
-    const agents = renderer.root.findAllByType("button").find((button) => button.props.children === "AGENTS");
+    const agents = renderer.root.findAllByType("button").find((button) => button.props.children === "Agents");
     assert.ok(agents, "public FactoryApp must expose the Agents view");
     await act(async () => { agents.props.onClick(); });
     const row = agentRow();

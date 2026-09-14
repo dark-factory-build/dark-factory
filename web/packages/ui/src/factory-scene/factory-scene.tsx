@@ -302,7 +302,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
 
 
       <Area label={`RESTING AREA · ${resting.length}`} width={layout.width - ROOM_LEFT - PADDING} top={layout.restingTop - 28} bottom={Math.max(layout.restingTop + 24, ...resting.map((placement) => placement.y + 24))} />
-      {staging.length === 0 ? null : <Area label={`UNKNOWN LOCATION · ${staging.length}`} width={layout.width - ROOM_LEFT - PADDING} top={staging[0]!.y - 28} bottom={Math.max(...staging.map((placement) => placement.y + 24))} />}
+      {staging.length === 0 ? null : <Area label={`STAGING · ${staging.length}`} width={layout.width - ROOM_LEFT - PADDING} top={staging[0]!.y - 28} bottom={Math.max(...staging.map((placement) => placement.y + 24))} />}
       {outside.length === 0 ? null : <Area label={`OUTSIDE DISPLAYED ROOMS · ${outside.length}`} width={layout.width - ROOM_LEFT - PADDING} top={outside[0]!.y - 28} bottom={Math.max(...outside.map((placement) => placement.y + 24))} />}
       {overflow.length === 0 ? null : <Area label={`WORKER AREA AT CAPACITY · ${overflow.length}`} width={layout.width - ROOM_LEFT - PADDING} top={overflow[0]!.y - 28} bottom={Math.max(...overflow.map((placement) => placement.y + 24))} />}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="38" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
@@ -317,8 +317,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
           : worker.location === "unobserved" ? "working; location not yet observed"
           : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
           : worker.paused ? "paused in resting area" : "ready in resting area";
-        const personalTasks = tasks.filter((task) => task.agentId === worker.id && (placement.area === "resting" ? !["running", "queued"].includes(task.status) : task.status === "running" && !layout.rooms.some((room) => room.id === task.representativeRoomId)));
-        const personalTask = personalTasks.find((task) => task.id === selectedTaskId) ?? personalTasks[0];
+
         const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
         const frames = workerFrames(worker, position.motion);
         return (
@@ -336,11 +335,6 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
               {frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
             </g>
-            {personalTask === undefined ? null : <g data-worker-task-id={personalTask.id} {...sceneAction(onSelectTask === undefined ? undefined : () => onSelectTask(personalTask.id))} aria-label={`Task: ${personalTask.title}, ${personalTask.status}${personalTasks.length > 1 ? `; ${personalTasks.length} served tasks for this agent` : ""}`}>
-              <title>{`${personalTask.title} · ${personalTask.status}`}</title>
-              <rect x="-8" y="12" width="16" height="12" fill="#d9d2b5" stroke="#a6a087" />
-              <text x="0" y="22" textAnchor="middle" fontSize="11" fill="#253441">{personalTask.status === "running" ? "▤" : personalTask.status === "succeeded" ? "✓" : personalTask.status === "blocked" ? "!" : "×"}</text>
-            </g>}
             {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
               <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
             </g>}
@@ -359,12 +353,13 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
         <option value="">Select a room</option>
         {layout.rooms.map((room) => <option key={room.id} value={room.id}>{nodes.get(room.id)?.label}</option>)}
       </select></label>
-      {selectedRoom === undefined ? null : <>
-        <p><strong>{selectedRoom.label}</strong> · {selectedRoom.path}</p>
-        <p>{selectedRoom.kind} · {selectedRoom.sizeBucket ?? "size unavailable"} · {selectedRoom.language || "composition unavailable"}{selectedRoom.childCount === undefined ? "" : ` · ${selectedRoom.childCount} served children`}</p>
-        <p>{selectedRoom.dependencies === undefined ? "Dependencies unavailable from this daemon." : "Partial static evidence: resolved local Go imports and package-manifest dependencies. Dashed lines are code relationships."}</p>
+      {selectedRoom === undefined ? null : <details key={selectedRoom.id}>
+        <summary>Room info</summary>
+        {selectedRoom.path === selectedRoom.label ? null : <p>{selectedRoom.path}</p>}
+        <p>{selectedRoom.kind} · {selectedRoom.sizeBucket ?? "size unavailable"}{selectedRoom.language ? ` · ${selectedRoom.language}` : ""}{selectedRoom.childCount === undefined ? "" : ` · ${selectedRoom.childCount} subcomponents`}</p>
+        <p>{selectedRoom.dependencies === undefined ? "Dependencies unavailable." : "Dashed lines: sampled static imports and manifest dependencies."}</p>
         {selectedRoom.dependencies === undefined ? null : <>
-          {links.length === 0 ? <p>No relationships observed in the supplied sample.</p> : <ul>{shownLinks.map((link) => <li key={`${link.direction}:${link.nodeId}`}>
+          {links.length === 0 ? <p>No relationships in this sample.</p> : <ul>{shownLinks.map((link) => <li key={`${link.direction}:${link.nodeId}`}>
             {link.direction === "to" ? "Depends on " : "Used by "}
             <button type="button" disabled={onEnterRoom === undefined && !nodes.has(link.nodeId)} onClick={() => { setSelectedRoomId(link.nodeId); if (!nodes.has(link.nodeId)) onEnterRoom?.(link.nodeId); }}>{link.label}</button>
             {nodes.has(link.nodeId) ? "" : " · outside view"} · {link.path}
@@ -372,7 +367,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
           {links.length <= shownLinks.length ? null : <p>{links.length - shownLinks.length} more relationships in this room's supplied sample.</p>}
           {selectedRoom.dependencies.omitted === 0 ? null : <p>{selectedRoom.dependencies.omitted} project relationships omitted from the supplied topology.</p>}
         </>}
-      </>}
+      </details>}
     </section>
     </>
   );

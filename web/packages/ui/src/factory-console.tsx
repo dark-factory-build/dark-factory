@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import type { AccountItem, AgentItem, ProjectItem, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView } from "@dark-factory/client";
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
@@ -8,7 +8,7 @@ import { factoryCounters, stageOfTask } from "./console-view.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
 
 export type ConsoleView = "floor" | "agents";
-export type ConsoleDetail = "needs-you" | "queue" | "agent";
+export type ConsoleDetail = "needs-you" | "queue" | "agent" | "floor";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
   view?: ConsoleView;
@@ -146,26 +146,22 @@ export function FactoryConsole({
   const ready = status === "ready";
   const counters = factoryCounters(state);
   const agent = selectedAgent === undefined ? undefined : state?.agents.get(selectedAgent.id);
-  const selectedDetail = detail ?? (selectedAgent === undefined ? "needs-you" : "agent");
+  const selectedDetail = (detail === "floor" ? "needs-you" : detail) ?? (selectedAgent === undefined ? "needs-you" : "agent");
   const appearanceAgent = appearanceAgentId === undefined ? undefined : state?.agents.get(appearanceAgentId);
   const editError = edit !== undefined && state?.projects.has(edit.target) ? undefined : editErrorCopy(edit);
 
   return (
     <div className="dfConsoleShell">
-      <main className="dfFactoryConsole" aria-label="Factory operator console">
+      <main className="dfFactoryConsole" aria-label="Factory operator console" data-mobile-view={onDetail === undefined ? undefined : detail === "floor" ? "floor" : "detail"}>
         <header className="dfFactoryConsole__header">
           <div>
-            <p className="dfFactoryConsole__eyebrow">OPERATOR VIEW</p>
             <h1>DARK FACTORY</h1>
           </div>
-          <dl className="dfConsoleBar__counters" aria-label="Factory counters">
-            <Counter label="ACTIVE RUNS" value={state === undefined ? "—" : String(state.factory.active_runs)} />
-          </dl>
           <div className="dfConsoleBar__actions">
-            <button type="button" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings}>SETTINGS</button>
+            <button type="button" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings}>Settings</button>
           </div>
           <div
-            className={`dfFactoryConsole__connection${ready ? " dfFactoryConsole__visuallyHidden" : ""}`}
+            className={ready || error !== undefined ? "dfFactoryConsole__visuallyHidden" : "dfFactoryConsole__connection"}
             aria-label={`Connection status: ${STATUS_LABELS[status]}`}
           >
             <p className="dfFactoryConsole__status" role="status" aria-live="polite" aria-atomic="true">
@@ -181,10 +177,16 @@ export function FactoryConsole({
           </p>
         )}
 
+        {onDetail === undefined ? null : <nav className="dfMobileNav dfConsoleViewToggle" aria-label="Console views">
+          <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
+          <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
+          <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
+          <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
+        </nav>}
         <div className="dfConsoleLayout">
           <section className="dfConsoleLayout__left dfFactoryConsole__section" aria-label={view === "floor" ? "Factory floor" : "Agents"}>
             <div className="dfFactoryConsole__sectionHeading">
-              <h2>{view === "floor" ? "FACTORY FLOOR" : "AGENTS"}</h2>
+              <h2 className="dfFactoryConsole__visuallyHidden">{view === "floor" ? "FACTORY FLOOR" : "AGENTS"}</h2>
               <div className="dfConsoleViewToggle" role="group" aria-label="Left view">
                 {(["floor", "agents"] as const).map((option) => (
                   <button
@@ -194,7 +196,7 @@ export function FactoryConsole({
                     disabled={!ready || onView === undefined}
                     onClick={() => onView?.(option)}
                   >
-                    {option === "floor" ? "FACTORY" : "AGENTS"}
+                    {option === "floor" ? "Floor" : "Agents"}
                   </button>
                 ))}
               </div>
@@ -206,9 +208,9 @@ export function FactoryConsole({
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
-              <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>NEEDS YOU <span>{counters.needsYou ?? "—"}</span></button>
-              <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>QUEUE <span>{counters.queued ?? "—"}</span></button>
-              <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>AGENT</button>
+              <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <span>{counters.needsYou ?? "—"}</span></button>
+              <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</button>
+              <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</button>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
             <div hidden={selectedDetail !== "needs-you"}>
@@ -229,7 +231,8 @@ export function FactoryConsole({
               />
             </div>
             <div hidden={selectedDetail !== "queue"}>
-              <QueuePanel
+              {selectedTask === undefined ? null : <TaskBack key={selectedTask.id} onBack={() => onSelectTask?.(undefined)} />}
+              <div hidden={selectedTask !== undefined && !(selectedTask.status === "queued" && onEditTask !== undefined)}><QueuePanel
                 state={state}
                 edit={edit}
                 ready={ready}
@@ -237,9 +240,8 @@ export function FactoryConsole({
                 onLoadTaskDetail={onLoadTaskDetail}
                 selectedTaskId={selectedTask?.id}
                 onSelectTask={ready ? selectTask : undefined}
-              />
+              /></div>
               {selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <section className="dfConsoleSidebar__panel" aria-label="Task details">
-                <div className="dfConsoleSidebar__heading"><h2>TASK · {selectedTask.id.slice(0, 8)}</h2><button type="button" onClick={() => onSelectTask?.(undefined)}>CLOSE</button></div>
                 <TaskDetail key={`${selectedTask.id}:${selectedTask.revision}`} task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
               </section>}
             </div>
@@ -284,15 +286,6 @@ export function FactoryConsole({
         />
       )}
       {appearanceAgent === undefined || onSaveAgentAppearance === undefined || onCloseAppearance === undefined ? null : <SpriteEditor agent={appearanceAgent} pending={edit?.target === appearanceAgent.id && edit.pending} error={edit?.target === appearanceAgent.id ? editError : undefined} onSave={(appearance) => onSaveAgentAppearance(appearanceAgent.id, appearance)} onClose={onCloseAppearance} />}
-    </div>
-  );
-}
-
-function Counter({ label, value, alert }: { label: string; value: string; alert?: boolean }) {
-  return (
-    <div className={alert === true ? "dfConsoleBar__counter dfConsoleBar__counter--alert" : "dfConsoleBar__counter"}>
-      <dt>{label}</dt>
-      <dd>{value}</dd>
     </div>
   );
 }
@@ -354,4 +347,10 @@ function entityLabel(entities: ReadonlyMap<string, { name?: string; title?: stri
 
 function shortID(value: string): string {
   return value.slice(0, 8);
+}
+
+function TaskBack({ onBack }: { onBack: () => void }) {
+  const button = useRef<HTMLButtonElement>(null);
+  useEffect(() => { button.current?.focus(); }, []);
+  return <button ref={button} type="button" className="dfTaskBack" onClick={onBack}>Back to tasks</button>;
 }

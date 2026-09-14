@@ -145,12 +145,6 @@ export function FactoryFloor({
     if (scopeId !== scene.navigation.scopeId) setScopeId(scene.navigation.scopeId);
   }, [scopeId, scene.navigation.scopeId]);
   return <div className="dfFactoryFloor">
-    <details className="dfFactoryFloor__provenance">
-      <summary>Floor evidence</summary>
-      <p>Rooms describe a repository snapshot, not necessarily main-branch code. Room inspection shows the served structure and partial static relationships.</p>
-      <p>Changed areas are a bounded sample of directory modification times in a run's Change, not a full diff or current attention. Failed refreshes can retain an earlier observation.</p>
-      <p>Tasks and outcomes come from factory state. Select their objects for details. Task success does not establish tests, merge or deployment; movement is presentation.</p>
-    </details>
     <nav className="dfFactoryFloor__navigation" aria-label="Floor hierarchy">
       {scene.navigation.breadcrumbs.map((crumb, index) => <span key={crumb.id ?? "root"}>
         {index === 0 ? null : <span aria-hidden="true"> / </span>}
@@ -159,9 +153,9 @@ export function FactoryFloor({
       {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>BACK</button>}
     </nav>
     {scene.navigation.omittedChildren === 0 && scene.navigation.outsideScopeActivity === 0 ? null : <p className="dfFactoryFloor__scopeSummary" role="status">
-      {scene.navigation.omittedChildren === 0 ? null : `${scene.navigation.omittedChildren} child spaces not shown in this view.`}
+      {scene.navigation.omittedChildren === 0 ? null : `${scene.navigation.omittedChildren} more spaces.`}
       {scene.navigation.omittedChildren === 0 || scene.navigation.outsideScopeActivity === 0 ? "" : " "}
-      {scene.navigation.outsideScopeActivity === 0 ? null : `${scene.navigation.outsideScopeActivity} active task${scene.navigation.outsideScopeActivity === 1 ? "" : "s"} in rooms not displayed in this view; workers remain shown in OUTSIDE DISPLAYED ROOMS.`}
+      {scene.navigation.outsideScopeActivity === 0 ? null : `${scene.navigation.outsideScopeActivity} active task${scene.navigation.outsideScopeActivity === 1 ? "" : "s"} outside this view.`}
     </p>}
     <div className="dfFactoryFloor__scene">
     <FactoryScene

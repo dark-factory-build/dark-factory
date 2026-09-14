@@ -227,8 +227,9 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.match(first, /data-corridor/);
   assert.equal(first.includes("<animate"), false);
   const unobserved = render({ workers: [{ ...workers[0], location: "unobserved", nodeId: undefined }] });
-  assert.match(unobserved, /UNKNOWN LOCATION · 1/);
+  assert.match(unobserved, /STAGING · 1/);
   assert.match(unobserved, /working; location not yet observed/);
+  assert.doesNotMatch(unobserved, /data-worker-task-id/);
   assert.match(first, /RESTING AREA · 1/);
   const restingY = Number(first.match(/data-worker-id="worker-a"[^>]*transform="translate\([^ ]+ ([0-9.]+)\)"/)[1]);
   const roomYs = [...first.matchAll(/data-room-id="[^"]+"[^>]*>[\s\S]*?<rect x="[^"]+" y="([0-9.]+)"/g)].map((match) => Number(match[1]));
@@ -313,7 +314,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     topology: { digest: "empty", nodes: [] },
     workers: [...emptyWorkers, { ...workers[0], location: "unobserved", nodeId: undefined }],
   });
-  const stagingArea = emptyWithStaging.match(/aria-label="UNKNOWN LOCATION · 1"><rect x="[^"]+" y="([0-9.]+)"/);
+  const stagingArea = emptyWithStaging.match(/aria-label="STAGING · 1"><rect x="[^"]+" y="([0-9.]+)"/);
   const stagingLabel = emptyWithStaging.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
   assert.ok(stagingArea !== null && stagingLabel !== null);
   assert.ok(Number(stagingLabel[1]) + PADDING <= Number(stagingArea[1]), "empty-floor label clears the staging area");
@@ -680,12 +681,14 @@ test("room inspection distinguishes bounded static evidence, hidden endpoints an
   const select = () => renderer.root.findByProps({ "aria-label": "Inspect room" });
   await act(async () => { select().props.onChange({ target: { value: "repo" } }); });
   const details = () => renderer.root.findByProps({ "aria-label": "Room details" });
-  assert.ok(details().findAllByType("p").some((p) => typeof p.props.children === "string" && p.props.children.startsWith("Partial static evidence")));
+  assert.equal(details().findByType("details").props.open, undefined);
+  assert.equal(details().findByType("summary").props.children, "Room info");
+  assert.ok(details().findAllByType("p").some((p) => typeof p.props.children === "string" && p.props.children.startsWith("Dashed lines: sampled static")));
   const buttons = details().findAllByType("button");
   assert.equal(buttons.length, 8, "the selected neighbourhood remains bounded");
   await act(async () => { buttons[0].props.onClick(); });
   assert.deepEqual(entered, ["hidden-0"], "hidden endpoint navigation uses its served identity");
   await act(async () => { select().props.onChange({ target: { value: "lib" } }); });
-  assert.ok(details().findAllByType("p").some((p) => p.props.children === "Dependencies unavailable from this daemon."));
+  assert.ok(details().findAllByType("p").some((p) => p.props.children === "Dependencies unavailable."));
   await act(async () => { renderer.unmount(); });
 });
