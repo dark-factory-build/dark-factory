@@ -548,6 +548,17 @@ test("the production scene stops motion on disconnect and unmount", async () => 
     const moved = [{ ...workers[0], nodeId: "lib" }, workers[1]];
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: true })); });
     assert.ok(requested.length > 0, "one scene clock schedules the route");
+    const staticRoomProps = renderer.root.findByProps({ "data-room-id": "lib" }).props;
+    const atlasProps = renderer.root.findByType("defs").props;
+    const layoutBeforeTick = renderer.root.find((node) => node.type.name === "SceneWorkers").props.layout;
+    const workerBeforeTick = renderer.root.findByProps({ "data-worker-id": workers[0].id }).props.transform;
+    await act(async () => { requested.at(-1)(performance.now() + 50); });
+    assert.equal(renderer.root.findByProps({ "data-room-id": "lib" }).props, staticRoomProps, "RAF does not recreate static room elements");
+    assert.equal(renderer.root.findByType("defs").props, atlasProps, "RAF does not recreate the sprite atlas");
+    assert.equal(renderer.root.find((node) => node.type.name === "SceneWorkers").props.layout, layoutBeforeTick);
+    assert.notEqual(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props.transform, workerBeforeTick);
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology: { ...topology, digest: "metadata-only", nodes: topology.nodes.map((node) => ({ ...node, dependencies: { omitted: 1, links: [] } })) }, workers: moved, connected: true })); });
+    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "walking", "a metadata-only digest change preserves the route");
 
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: moved, connected: false })); });
     const destination = placeWorkers(layoutScene(topology), moved).find((placement) => placement.id === workers[0].id);
