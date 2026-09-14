@@ -192,7 +192,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
   const outside = placements.filter((placement) => placement.area === "outside");
   const boardTop = Math.max(layout.height, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneHeight = boardTop + (tasks.some((task) => task.status === "queued") ? 48 : 0) + PADDING;
-  const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.roomIds.includes(room.id))]));
+  const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
   const queued = tasks.filter((order) => order.status === "queued").length;
   const selectedRoom = nodes.get(selectedRoomId ?? "");
@@ -257,7 +257,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
         const node = nodes.get(room.id);
         if (node === undefined) return null;
         const footprint = affected.get(room.id) ?? [];
-        const work = footprint.filter((order) => order.representativeRoomId === room.id);
+        const work = footprint.filter((order) => (order.displayRoomId ?? order.representativeRoomId) === room.id);
         const task = work.find((order) => order.id === selectedTaskId) ?? work[0];
         const canEnter = onEnterRoom !== undefined && enterable.has(room.id);
         return (
@@ -266,8 +266,8 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
             <rect x={room.x} y={room.y} width={room.width} height={room.height} fill="url(#df-floor)" />
             <rect x={room.x} y={room.y} width={room.width} height={FRAME} fill="url(#df-wall)" />
             <path data-room-walls="" d={`M${room.door.x - 16},${room.door.y} H${room.x} V${room.y} H${room.x + room.width} V${room.door.y} H${room.door.x + 16}`} fill="none" stroke="#638095" strokeWidth="4" />
-            {footprint.length === 0 ? null : <rect data-work-footprint={room.id} x={room.x + 5} y={room.y + 39} width={room.width - 10} height={room.height - 46} fill="#d8a94c" fillOpacity="0.10" stroke={footprint.some((order) => order.id === selectedTaskId) ? "#80ddff" : "#d8a94c"} strokeDasharray="3 3"><title>{`Observed changed area for ${footprint.length} running task(s): ${footprint.map((order) => order.id.slice(0, 8)).join(", ")}`}</title></rect>}
-            {footprint.length === 0 ? null : <text x={room.x + room.width - 8} y={room.y + 44} textAnchor="end" fill="#f0c777" fontFamily="ui-monospace, monospace" fontSize="8">CHANGED</text>}
+            {footprint.length === 0 ? null : <rect data-work-footprint={room.id} x={room.x + 5} y={room.y + 39} width={room.width - 10} height={room.height - 46} fill="#d8a94c" fillOpacity="0.10" stroke={footprint.some((order) => order.id === selectedTaskId) ? "#80ddff" : "#d8a94c"} strokeDasharray="3 3"><title>{`Observed changes ${footprint.some((order) => !order.roomIds.includes(room.id)) ? "within this component" : "in this area"} for ${footprint.length} running task(s): ${footprint.map((order) => order.id.slice(0, 8)).join(", ")}`}</title></rect>}
+            {footprint.length === 0 ? null : <text x={room.x + room.width - 8} y={room.y + 44} textAnchor="end" fill="#f0c777" fontFamily="ui-monospace, monospace" fontSize="8">{footprint.some((order) => !order.roomIds.includes(room.id)) ? "CHANGES WITHIN" : "CHANGED"}</text>}
             {work.length === 0 ? null : <g
               data-workbench-task-id={task!.id}
               {...sceneAction(onSelectTask === undefined ? undefined : () => onSelectTask(task!.id))}
@@ -313,7 +313,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
         const position = positions.get(placement.id) ?? { ...placement, motion: { action: "still", frame: 0 } as WorkerMotion };
         const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
         const location = worker.location === "working"
-          ? `representative location near observed changes${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? "at workstation" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
+          ? `representative location${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? "at workstation" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
           : worker.location === "unobserved" ? "working; location not yet observed"
           : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
           : worker.paused ? "paused in resting area" : "ready in resting area";

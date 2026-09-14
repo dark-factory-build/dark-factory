@@ -171,6 +171,9 @@ test("floor tasks retain every served task and its exact observed footprint", ()
       status: "running",
       roomIds: [store, web],
       representativeRoomId: store,
+      displayRoomIds: [room("internal/kernel"), web],
+      displayRoomId: room("internal/kernel"),
+      observation: { taskRevision: fixtureState.tasks.get(ids.task).revision, runId: "71".repeat(16) },
       humanRequestIds: [ids.request],
     },
     {
@@ -201,7 +204,7 @@ test("floor tasks retain every served task and its exact observed footprint", ()
       humanRequestIds: [],
     },
   ]);
-  assert.deepEqual(scene.workers.find((worker) => worker.id === ids.agent).nodeId, store);
+  assert.deepEqual(scene.workers.find((worker) => worker.id === ids.agent).nodeId, room("internal/kernel"));
 });
 
 test("hierarchy navigation is bounded, identity-led, and leaves outside work discoverable", () => {
@@ -235,7 +238,7 @@ test("hierarchy navigation is bounded, identity-led, and leaves outside work dis
   const scene = floorScene({ ...fixtureState, tasks: new Map([[task.id, task]]) }, topology,
     new Map([[ids.agent, runSample(ids.agent, ["path-29"], task.id, task.revision)]]), undefined, scope.id);
   assert.equal(scene.topology.nodes.length, 24);
-  assert.deepEqual([scene.navigation.omittedChildren, scene.navigation.outsideScopeActivity, scene.omittedLocations], [7, 1, 1]);
+  assert.deepEqual([scene.navigation.omittedChildren, scene.navigation.outsideScopeActivity, scene.omittedLocations], [7, 0, 0]);
   assert.equal(scene.workers.find((worker) => worker.id === ids.agent).location, "working");
 
   const before = layoutScene(repositoryView.topology);
@@ -1740,7 +1743,8 @@ test("a viewed module is a breadcrumb, not a room beside its children", () => {
     new Map([[ids.agent, runSample(ids.agent, [module.path + "/go.mod"], task.id, task.revision)]]), undefined, scope);
   assert.deepEqual(working.topology, scene.topology);
   assert.equal(working.workers.find((worker) => worker.id === ids.agent).nodeId, scope);
-  assert.equal(working.navigation.outsideScopeActivity, 1);
+  assert.equal(working.navigation.outsideScopeActivity, 0);
+  assert.equal(working.navigation.hiddenScopeActivity, 1);
   assert.equal(working.workers.length, scene.workers.length);
   const leaf = `${ids.project}:${fixtureTopology.nodes[2].id}`;
   assert.deepEqual(floorScene(fixtureState, topology, undefined, undefined, leaf).topology.nodes.map((node) => node.id), [leaf]);
@@ -1798,4 +1802,82 @@ test("breadcrumb-only modules use all 24 room slots and report overflow exactly"
     assert.equal(scene.navigation.omittedChildren, count - 24);
     assert.equal(scene.topology.nodes.some((room) => room.id === `${ids.project}:${module.id}`), false);
   }
+});
+
+
+test("nested observed areas follow visible served ancestors without duplicating tasks or workers", () => {
+  const samples = new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/store/a.go", "web/app.ts"])]]);
+  const root = `${ids.project}:${fixtureTopology.nodes[0].id}`;
+  const kernel = `${ids.project}:${fixtureTopology.nodes.find((node) => node.path === "internal/kernel").id}`;
+  const store = `${ids.project}:${fixtureTopology.nodes.find((node) => node.path === "internal/kernel/store").id}`;
+  const landing = floorScene(fixtureState, fixtureTopologies, samples);
+  const project = floorScene(fixtureState, fixtureTopologies, samples, undefined, root);
+  const nested = floorScene(fixtureState, fixtureTopologies, samples, undefined, kernel);
+  for (const [scene, target, within] of [[landing, root, true], [project, kernel, true], [nested, store, false]]) {
+    assert.equal(scene.tasks.filter((task) => task.id === ids.task).length, 1);
+    assert.equal(scene.workers.filter((worker) => worker.id === ids.agent).length, 1);
+    assert.deepEqual(scene.tasks[0].roomIds, landing.tasks[0].roomIds);
+    assert.deepEqual(scene.tasks[0].observation, landing.tasks[0].observation);
+    assert.equal(scene.workers.find((worker) => worker.id === ids.agent).nodeId, target);
+    assert.equal(scene.workers.find((worker) => worker.id === ids.agent).locationWithin, within);
+    assert.equal(scene.navigation.outsideScopeActivity, 0);
+  }
+  assert.deepEqual(landing.tasks[0].displayRoomIds, [root]);
+  const other = floorScene(fixtureState, fixtureTopologies, samples, undefined, ids.secondProject);
+  assert.equal(other.navigation.outsideScopeActivity, 1);
+  assert.equal(other.navigation.hiddenScopeActivity, 0);
+  assert.equal(other.workers.find((worker) => worker.id === ids.agent).location, "working");
+  const stale = new Map([[ids.agent, { ...samples.get(ids.agent), taskRevision: 0n }]]);
+  const unknown = floorScene(fixtureState, fixtureTopologies, stale, samples);
+  assert.equal(unknown.tasks[0].observation, undefined);
+  assert.equal(unknown.workers.find((worker) => worker.id === ids.agent).location, "unobserved");
+  const archived = { ...fixtureState, agents: new Map(fixtureState.agents).set(ids.agent, { ...fixtureState.agents.get(ids.agent), archived: true }) };
+  assert.equal(floorScene(archived, fixtureTopologies, samples).workers.some((worker) => worker.id === ids.agent), false);
+  assert.equal(floorScene(archived, fixtureTopologies, samples).tasks.some((task) => task.id === ids.task), false);
+});
+
+test("paging reaches all served siblings and leaf inspection; stale scopes and pages reconcile", () => {
+  const root = fixtureTopology.nodes[0];
+  const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
+  const topology = served({ ...fixtureTopology, nodes: [root, ...children] });
+  const scope = `${ids.project}:${root.id}`;
+  const first = floorScene(fixtureState, topology, undefined, undefined, scope, 0);
+  const second = floorScene(fixtureState, topology, undefined, undefined, scope, 1);
+  assert.equal(first.navigation.pageCount, 2);
+  assert.equal(first.topology.nodes.length, 24);
+  assert.equal(second.topology.nodes.length, 8);
+  assert.equal(new Set([...first.topology.nodes, ...second.topology.nodes].map((node) => node.id)).size, 31);
+  assert.deepEqual(floorScene(fixtureState, served({ ...fixtureTopology, nodes: [root, ...children.reverse()] }), undefined, undefined, scope, 1).topology, second.topology);
+  const leaf = second.topology.nodes.at(-1).id;
+  assert.deepEqual(floorScene(fixtureState, topology, undefined, undefined, leaf).topology.nodes.map((node) => node.id), [leaf]);
+  assert.equal(floorScene(fixtureState, topology, undefined, undefined, scope, 999).navigation.page, 1);
+  assert.equal(floorScene(fixtureState, topology, undefined, undefined, scope, NaN).navigation.page, 0);
+  assert.equal(floorScene(fixtureState, topology, undefined, undefined, "deleted", 1).navigation.page, 0);
+  assert.equal(floorScene(fixtureState, topology, undefined, undefined, "deleted").navigation.scopeId, undefined);
+  const shrunk = served({ ...fixtureTopology, nodes: [root] });
+  assert.equal(floorScene(fixtureState, shrunk, undefined, undefined, scope, 1).navigation.page, 0);
+});
+
+
+test("page controls and dependency links inspect an omitted leaf using the same scope navigation", async () => {
+  const root = fixtureTopology.nodes[0];
+  const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
+  const topology = served({ ...fixtureTopology, nodes: [root, ...children], dependencies: { edges: [{ from: root.id, to: children[29].id, weight: 1 }], omitted: 0 } });
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: topology, view: "floor" })); });
+  const rootID = `${ids.project}:${root.id}`;
+  await act(async () => { tree.root.findByProps({ "data-enter-room-id": rootID }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
+  const next = () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Next spaces");
+  await act(async () => { next().props.onClick(); });
+  assert.equal(next().props.disabled, true);
+  assert.ok(tree.root.findAllByType("option").some((option) => option.children.join("") === "Child 29"));
+  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Previous spaces").props.onClick(); });
+  await act(async () => { tree.root.findByProps({ "aria-label": "Inspect room" }).props.onChange({ target: { value: rootID } }); });
+  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Child 29").props.onClick(); });
+  assert.equal(tree.root.findByProps({ "aria-label": "Inspect room" }).props.value, `${ids.project}:${children[29].id}`);
+  assert.equal(tree.root.findAllByProps({ "data-room-id": `${ids.project}:${children[29].id}` }).length, 1);
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Floor pages" }).length, 0);
+  await act(async () => { tree.update(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: served({ ...fixtureTopology, nodes: [root] }), view: "floor" })); });
+  assert.equal(tree.root.findAllByProps({ "data-room-id": rootID }).length, 1);
+  await act(async () => tree.unmount());
 });

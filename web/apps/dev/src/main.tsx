@@ -64,6 +64,13 @@ const fixtureChangedTopologies = new Map(fixtureHierarchyTopologies).set(fixture
   nodes: [...fixtureTopologies.values().next().value!.nodes, { id: "e5".repeat(32), parent_id: "a1".repeat(32), kind: "directory", path: "docs", label: "docs", language: "markdown", size_bucket: "tiny" }],
 });
 
+const fixturePagedTopologies = new Map(fixtureHierarchyTopologies).set(fixtureObservedRun.projectId, {
+  ...fixtureTopologies.get(fixtureObservedRun.projectId)!, digest: "paging-fixture",
+  nodes: [...fixtureTopologies.get(fixtureObservedRun.projectId)!.nodes, ...Array.from({ length: 30 }, (_, index) => ({
+    id: index.toString(16).padStart(64, "0"), parent_id: "a1".repeat(32), kind: "directory", path: `component-${index}`, label: `Component ${index}`, language: "", size_bucket: "tiny",
+  }))],
+});
+
 // Fixture tour: sample data, no daemon, no authority. Fixture-only state
 // toggles expose production components; no action reports a daemon result.
 function FixtureTour() {
@@ -111,7 +118,7 @@ function FixtureTour() {
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
         state={archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
-        topologies={changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
+        topologies={fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
         runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
         onView={setView}
