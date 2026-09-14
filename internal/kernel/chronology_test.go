@@ -407,6 +407,22 @@ func TestOrchestratorAttemptSendsBackAWorkerTask(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("worker task = %+v, found=%v, %v", task, found, err)
 	}
+	worker, found, err := store.Agent(ctx, task.AssignedAgentID)
+	if err != nil || !found {
+		t.Fatalf("worker = %+v, found=%v, %v", worker, found, err)
+	}
+	archive := true
+	archived, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{Archived: &archive}, mustTime(t, 102))
+	if err != nil || !archived.Archived {
+		t.Fatalf("archive terminal worker = %+v, %v", archived, err)
+	}
+	if _, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "archived", mustTime(t, 102)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("orchestrator send-back archived worker = %v", err)
+	}
+	restore := false
+	if _, err := store.UpdateAgent(ctx, archived.ID, archived.Revision, AgentPatch{Archived: &restore}, mustTime(t, 102)); err != nil {
+		t.Fatal(err)
+	}
 	sent, err := store.SendBackTaskForAttempt(ctx, keys.AttemptDigest, terminal.TaskID, "five findings", mustTime(t, 102))
 	if err != nil || sent.Status != TaskQueued || sent.WorkRevision.Int64() != 2 || sent.Body != SentBackBody(task, "five findings") {
 		t.Fatalf("orchestrator send-back = %+v, %v", sent, err)

@@ -372,13 +372,14 @@ export class BrowserSession {
   }
 
   /** Edit one agent's configuration. An omitted member is left alone. */
-  updateAgent(request: { agentId: string; expectedRevision: bigint; appearance?: SpriteAppearance; model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; idlePolicy?: IdlePolicy; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }): Promise<AgentUpdateResult> {
+  updateAgent(request: { agentId: string; expectedRevision: bigint; appearance?: SpriteAppearance; model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: IdlePolicy; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }): Promise<AgentUpdateResult> {
     const body: AgentUpdateBody = { agent_id: request.agentId, expected_revision: request.expectedRevision };
     if (request.appearance !== undefined) body.appearance = request.appearance;
     if (request.model !== undefined) body.model = request.model;
     if (request.reasoningEffort !== undefined) body.reasoning_effort = request.reasoningEffort;
     if (request.accountId !== undefined) body.account_id = request.accountId;
     if (request.paused !== undefined) body.paused = request.paused;
+    if (request.archived !== undefined) body.archived = request.archived;
     if (request.idlePolicy !== undefined) body.idle_policy = request.idlePolicy;
     if (request.idleAfterSeconds !== undefined) body.idle_after_seconds = request.idleAfterSeconds;
     if (request.idleInstruction !== undefined) body.idle_instruction = request.idleInstruction;

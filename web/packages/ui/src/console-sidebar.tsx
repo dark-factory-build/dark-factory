@@ -6,7 +6,7 @@ import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
-export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
+export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
 
 /** One discovered login and the account row it is linked to, if any. */
 export type DiscoveredAccount = Readonly<{
@@ -83,7 +83,8 @@ export function AgentPanel({
   const panel = panelProp ?? localPanel;
   const selectPanel = onPanel ?? setLocalPanel;
   const errorCopy = edit?.target === agent.id ? editErrorCopy(edit) : undefined;
-  const queueHint = agent.paused
+  const archived = agent.archived === true;
+  const queueHint = !archived && agent.paused
     ? "QUEUE PAUSED"
     : current === undefined && queued.length > 0
       ? "QUEUED · WAITING FOR CAPACITY"
@@ -98,7 +99,7 @@ export function AgentPanel({
   return (
     <section className="dfConsoleSidebar__panel" aria-label={`Agent ${agent.name}`}>
       <div className="dfConsoleSidebar__heading">
-        <button type="button" className="dfAgentSpriteEdit" aria-label={`Edit appearance for ${agent.name}`} onClick={() => onEditAppearance?.(agent)} disabled={onEditAppearance === undefined}>
+        <button type="button" className="dfAgentSpriteEdit" aria-label={`Edit appearance for ${agent.name}`} onClick={() => onEditAppearance?.(agent)} disabled={archived || onEditAppearance === undefined}>
           <AgentSprite agent={agent} activity={state === undefined ? "waiting" : agentActivity(agent, state)} />
           <svg className="dfAgentSpriteEdit__icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 11.5 10.5 4 12 5.5 4.5 13 2 14Zm7-8L11.5 2 14 4.5 12.5 6Z" /></svg>
         </button>
@@ -108,18 +109,18 @@ export function AgentPanel({
         </div>
       </div>
 
-      <p className="dfConsoleSidebar__status">{activity === "needs-you" ? "! needs you" : activity}</p>
+      <p className="dfConsoleSidebar__status">{archived ? "archived" : activity === "needs-you" ? "! needs you" : activity}</p>
       {queueHint === undefined ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
 
-      <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
+      {archived ? null : <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
         <button type="button" aria-pressed={panel === "terminal"} onClick={() => selectPanel("terminal")}>TERMINAL</button>
         <button type="button" aria-pressed={panel === "config"} onClick={() => selectPanel("config")}>CONFIG</button>
-      </div>
-      <section className="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal" hidden={panel !== "terminal"}>
+      </div>}
+      {archived ? null : <section className="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal" hidden={panel !== "terminal"}>
         {terminalContent ?? <p className="dfFactoryConsole__empty">OPENING TERMINAL</p>}
-      </section>
+      </section>}
 
-      <section className="dfConsoleSidebar__section" aria-label="Agent configuration" hidden={panel !== "config"}>
+      <section className="dfConsoleSidebar__section" aria-label="Agent configuration" hidden={!archived && panel !== "config"}>
         <AgentConfig key={formKey(agent.id, agent.revision)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} />
       </section>
 
@@ -341,12 +342,16 @@ function AgentConfig({
   const [reasoningEffort, setReasoningEffort] = useState(agent.reasoning_effort);
   const [accountId, setAccountId] = useState(agent.account_id);
   const [paused, setPaused] = useState(agent.paused);
+  const [archiveConfirm, setArchiveConfirm] = useState(false);
   const [idlePolicy, setIdlePolicy] = useState(agent.idle_policy);
   const [idleAfterSeconds, setIdleAfterSeconds] = useState(String(agent.idle_after_seconds));
   const [idleInstruction, setIdleInstruction] = useState(agent.idle_instruction);
   const [idleRunBudget, setIdleRunBudget] = useState(String(agent.idle_run_budget));
   const [budgetTyped, setBudgetTyped] = useState(false);
   if (onSave === undefined) return null;
+  if (agent.archived) return <div className="dfConsoleSidebar__config">
+    <button type="button" disabled={pending || !ready} onClick={() => onSave({ archived: false })}>Restore paused</button>
+  </div>;
   // Sending a control the operator did not touch would make the daemon
   // revalidate it, so a stored pair it no longer accepts could not be paused.
   const idleAfter = Math.max(0, Math.floor(Number(idleAfterSeconds) || 0));
@@ -394,6 +399,7 @@ function AgentConfig({
         <input id={`df-paused-${agent.id}`} type="checkbox" checked={paused} disabled={pending} onChange={(event) => setPaused(event.currentTarget.checked)} />
         PAUSED
       </label>
+      {agent.role !== "worker" || agent.archived === undefined ? null : archiveConfirm ? <span><button type="button" autoFocus disabled={pending || !ready} onClick={() => onSave({ archived: true })}>Confirm archive</button><button type="button" disabled={pending} onClick={() => setArchiveConfirm(false)}>Keep worker</button></span> : <button type="button" disabled={pending || !ready} onClick={() => setArchiveConfirm(true)}>Archive worker</button>}
       <h3>{supervising ? "SUPERVISION" : "RULES"}</h3>
       <label htmlFor={`df-idle-${agent.id}`}>{supervising ? "WHEN WORK CHANGES" : "WHEN READY"}</label>
       <select id={`df-idle-${agent.id}`} value={idlePolicy} disabled={pending} onChange={(event) => setIdlePolicy(event.currentTarget.value as typeof idlePolicy)}>
@@ -502,7 +508,7 @@ function QueuedTask({
             disabled={disabled}
             onChange={(event) => { void onEditTask(task, { assignedAgentId: event.currentTarget.value }); }}
           >
-            {peers.map((peer) => <option key={peer.id} value={peer.id}>{peer.name}</option>)}
+            {peers.filter((peer) => !peer.archived).map((peer) => <option key={peer.id} value={peer.id}>{peer.name}</option>)}
           </select>
           <button type="button" disabled={disabled} onClick={() => { void onEditTask(task, { cancel: true }); }}>CANCEL</button>
         </div>

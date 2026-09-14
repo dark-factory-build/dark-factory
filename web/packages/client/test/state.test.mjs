@@ -204,9 +204,11 @@ test("only a server snapshot may exceed the control bound, and never the snapsho
 
 test("every JSON boolean rejects null exactly", () => {
   const wire = encodeStateSnapshot("boolean", snapshotBody());
+  const archivedWire = encodeStateSnapshot("archived-boolean", snapshotBody({ agents: [{ ...agentItem(), archived: false }] }));
   const samples = [
     [wire, '"dispatch_enabled":true'],
     [wire, '"paused":false'],
+    [archivedWire, '"archived":false'],
     [wire, '"can_reply":true'],
     [encodeServerControl({ type: "ERROR", id: "boolean", body: { code: "invalid_request", retryable: false } }), '"retryable":false'],
   ];

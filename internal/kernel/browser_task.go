@@ -49,7 +49,7 @@ func (store *Store) EnqueueTaskForBrowserAgentMode(ctx context.Context, clientID
 	if !found {
 		return BrowserTaskEnqueue{}, tx.Rollback(ErrNotFound)
 	}
-	if agent.Revision != expectedAgentRevision || agent.Paused && !queue {
+	if agent.Revision != expectedAgentRevision || agent.Archived || agent.Paused && !queue {
 		return BrowserTaskEnqueue{}, tx.Rollback(ErrRevisionConflict)
 	}
 	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Direct instruction", Body: instruction, Priority: 0}

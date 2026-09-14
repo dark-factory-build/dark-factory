@@ -747,7 +747,9 @@ test("the queued task row keeps served order and changes its exact priority", as
     const detailReads = [];
     const queued = { ...fixtureState.tasks.get([...fixtureState.tasks.keys()][1]), title: "Served first", priority: 2 };
     const other = { ...queued, id: "39".repeat(16), title: "Higher but served second", priority: 9, revision: 20n };
+    const archivedPeer = { ...fixtureState.agents.get("23".repeat(16)), id: "24".repeat(16), name: "Retired Builder", archived: true, paused: true };
     const state = baseState({
+      agents: new Map([...fixtureState.agents, [archivedPeer.id, archivedPeer]]),
       tasks: new Map([[queued.id, { ...queued, assigned_agent_id: ids.agent }], [other.id, { ...other, assigned_agent_id: ids.agent }]]),
     });
     const props = {
@@ -802,7 +804,8 @@ test("the queued task row keeps served order and changes its exact priority", as
     assert.deepEqual(detailReads, [queued.id], "reopening a cached row does not overwrite the brief");
 
     const assign = renderer.root.findAllByType("select").find((select) => select.props.id === `df-assign-${queued.id}`);
-    // Reassignment offers only agents in the same project.
+    // Reassignment offers only active agents in the same project. Retired
+    // names remain on historical rows, but cannot receive new queued work.
     assert.deepEqual(assign.props.children.map((option) => option.props.children), ["Builder One", "Builder Two"]);
     await act(async () => { assign.props.onChange({ currentTarget: { value: "23".repeat(16) } }); });
     assert.deepEqual(edits.at(-1), [queued.id, { assignedAgentId: "23".repeat(16) }]);
@@ -1241,26 +1244,25 @@ test("request, reply, cancel, and summary collapse forward only presentation int
   assert.deepEqual(calls.slice(1), [["change", "Proceed."], ["reply"], ["cancel"], ["close"]]);
 });
 
-test("agent and question terminal actions expose only current public intent", () => {
+test("agent and question terminal actions expose only current public intent", async () => {
   const request = fixtureState.humanRequests.get(ids.request);
   // Oversight is listed first, so the first row is the orchestrator's.
   const agent = fixtureState.agents.get(ids.orchestrator);
   const calls = [];
-  const elements = expand(FactoryConsole({
-    status: "ready",
-    state: baseState(),
-    view: "agents",
-    selectedHumanRequest: selectedRequest(),
+  let renderer;
+  await act(async () => { renderer = create(createElement(FactoryConsole, {
+    status: "ready", state: baseState(), view: "agents", selectedHumanRequest: selectedRequest(),
     onSelectAgent: (value) => calls.push(["agent", value]),
     onOpenTerminalForHumanRequest: (value) => calls.push(["request", value]),
-  }));
-  const row = elements.find((element) => element.type === "button" && typeof element.props.className === "string" && element.props.className.includes("dfAgentList__row"));
-  row.props.onClick();
-  elements.filter((element) => element.type === "button" && element.props.children === "OPEN TERMINAL").at(-1).props.onClick();
+  })); });
+  const row = renderer.root.findAllByType("button").find((element) => typeof element.props.className === "string" && element.props.className.includes("dfAgentList__row"));
+  await act(async () => { row.props.onClick(); });
+  await act(async () => { renderer.root.findAllByType("button").filter((element) => element.props.children === "OPEN TERMINAL").at(-1).props.onClick(); });
   assert.equal(calls[0][0], "agent");
   assert.equal(calls[0][1].id, agent.id);
   assert.equal(calls[0][1].revision, agent.revision);
   assert.deepEqual(calls[1], ["request", request]);
+  await act(async () => { renderer.unmount(); });
 
   const markup = render({ selectedAgent: agentSelection(), terminalContent: createElement("div", null, "<raw-output>") });
   assert.match(markup, /&lt;raw-output&gt;/);
@@ -1346,6 +1348,57 @@ test("the console shows the model an agent will actually run with", () => {
   assert.match(withAgent(inheritingAgent()), /Builder Two[\s\S]*?codex · gpt-6-astra/);
   // The provider with no model says nothing extra rather than a dangling dot.
   assert.match(withAgent(shellAgent), /Shell Hand[\s\S]*?shell/);
+});
+
+test("archived workers stay selectable from the archived view and expose only restore", async () => {
+  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const worker = { ...fixtureState.agents.get(ids.agent), archived: true, paused: true };
+  const state = baseState({ agents: new Map([[worker.id, worker]]) });
+  try {
+    let renderer;
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, view: "agents", onSelectAgent() {} })); });
+    assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), false);
+    const archived = renderer.root.findByType("input");
+    await act(async () => { archived.props.onChange({ currentTarget: { checked: true } }); });
+    assert.equal(renderer.root.findAllByType("button").some((button) => String(button.props.className).includes("dfAgentList__row")), true);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { status: "ready", state, view: "agents", selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision }, onSaveAgentConfig() {} })); });
+    const text = JSON.stringify(renderer.toJSON());
+    assert.match(text, /archived/);
+    assert.match(text, /Restore paused/);
+    assert.equal(text.includes("Archive worker"), false);
+    assert.equal(text.includes("TERMINAL"), false);
+    assert.equal(text.includes("QUEUE PAUSED"), false);
+    assert.equal(renderer.root.findByProps({ className: "dfAgentSpriteEdit" }).props.disabled, true);
+    await act(async () => { renderer.unmount(); });
+  } finally {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
+  }
+});
+
+test("archive confirmation follows connection readiness and submits only the lifecycle change", async () => {
+  const worker = { ...fixtureState.agents.get(ids.agent), archived: false };
+  const state = baseState({ agents: new Map([[worker.id, worker]]) });
+  const saves = [];
+  const props = { state, selectedAgent: { id: worker.id, name: worker.name, revision: worker.revision }, agentPanel: "config", onSaveAgentConfig: (edit) => saves.push(edit) };
+  let renderer;
+  const button = (label) => renderer.root.findAllByType("button").find((entry) => entry.props.children === label);
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { ...props, status: "closed" })); });
+    assert.equal(button("Archive worker").props.disabled, true);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
+    assert.equal(button("Archive worker").props.disabled, false);
+    await act(async () => { button("Archive worker").props.onClick(); });
+    assert.deepEqual(saves, []);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "closed" })); });
+    assert.equal(button("Confirm archive").props.disabled, true);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
+    assert.equal(button("Confirm archive").props.disabled, false);
+    await act(async () => { button("Confirm archive").props.onClick(); });
+    assert.deepEqual(saves, [{ archived: true }]);
+  } finally {
+    if (renderer) await act(async () => { renderer.unmount(); });
+  }
 });
 
 test("the config inputs stay the agent's own override and caption where it came from", () => {

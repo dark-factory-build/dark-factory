@@ -44,7 +44,7 @@ export function AgentStrip({
         ) : state.agents.size === 0 ? (
           <li className="dfConsoleStrip__empty">no agents</li>
         ) : (
-          [...state.agents.values()].map((agent) => {
+          [...state.agents.values()].filter((agent) => !agent.archived).map((agent) => {
             const activity = agentStatus(agent, state);
             const task = agentCurrentTask(agent, state);
             const phase =
@@ -200,11 +200,13 @@ export function AgentList({
   ready: boolean;
   onSelectAgent?: (agent: AgentItem) => void;
 }) {
+  const [showArchived, setShowArchived] = useState(false);
   if (state === undefined) return <p className="dfFactoryConsole__empty">waiting for the factory</p>;
-  const agents = [...state.agents.values()];
-  if (agents.length === 0) return <p className="dfFactoryConsole__empty">no agents</p>;
+  const agents = [...state.agents.values()].filter((agent) => showArchived || !agent.archived);
   return (
     <div className="dfAgentList">
+      <label><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.currentTarget.checked)} /> Show archived</label>
+      {agents.length === 0 ? <p className="dfFactoryConsole__empty">no agents</p> : null}
       {(["orchestrator", "worker"] as const).map((role) => {
         const members = agents.filter((agent) => agent.role === role);
         if (members.length === 0) return null;
@@ -257,7 +259,7 @@ function AgentRow({
       <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
       <span className="dfConsoleRow__title">{agent.name}</span>
       <span className="dfAgentList__provider">{agent.effective_model === "" ? agent.provider : `${agent.provider} · ${agent.effective_model}`}</span>
-      <span className="dfAgentList__activity">{activity === "needs-you" ? "! needs you" : activity}</span>
+      <span className="dfAgentList__activity">{agent.archived ? "archived" : activity === "needs-you" ? "! needs you" : activity}</span>
       <span className="dfConsoleRow__agent">{task?.title ?? "no current task"}</span>
       <span className="dfAgentList__count">{queued} queued</span>
     </>

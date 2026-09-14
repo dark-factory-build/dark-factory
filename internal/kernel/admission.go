@@ -50,7 +50,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
 			LEFT JOIN delivered_successors AS d ON d.successor_task_id = t.id
 			WHERE t.status = 'queued'
-			  AND a.paused = 0
+			  AND a.paused = 0 AND a.archived = 0
 			  AND a.tool_calls_used < a.tool_budget_limit
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
@@ -83,7 +83,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM tasks AS t
 			JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
-			WHERE t.status = 'queued' AND a.paused = 0 AND a.tool_calls_used < a.tool_budget_limit
+			WHERE t.status = 'queued' AND a.paused = 0 AND a.archived = 0 AND a.tool_calls_used < a.tool_budget_limit
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') >= ?)

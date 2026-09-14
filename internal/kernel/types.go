@@ -571,6 +571,7 @@ type Agent struct {
 	ReasoningEffort string
 	AccountID       AccountID
 	Paused          bool
+	Archived        bool
 	Appearance      AgentAppearance
 	Idle            IdleRule
 	ToolBudgetLimit uint64
@@ -622,6 +623,7 @@ type AgentSummary struct {
 	// invalidates correctly.
 	Provider   string
 	Paused     bool
+	Archived   bool
 	Appearance AgentAppearance
 	// Model and ReasoningEffort are public launch controls by owner decision
 	// on 5 September 2026: the console displays and edits them.

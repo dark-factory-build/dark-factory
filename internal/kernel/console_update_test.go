@@ -37,6 +37,93 @@ func TestUpdateAgentPauseWithholdsTheAgentFromAdmission(t *testing.T) {
 	}
 }
 
+func TestArchiveWorkerIsDrainedAndRestoreStaysPaused(t *testing.T) {
+	store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	ctx := context.Background()
+	archive := true
+	updated, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{Archived: &archive}, mustTime(t, 6))
+	if err != nil || !updated.Archived || !updated.Paused {
+		t.Fatalf("archive = %+v, %v", updated, err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 45), ProjectID: project.ID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 46), Title: "history remains"}, mustTime(t, 7)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("archived enqueue = %v", err)
+	}
+	if result, err := store.AdmitNext(ctx, admissionKeys(t, 47, nil), mustTime(t, 8)); err != nil || result.Admitted() {
+		t.Fatalf("archived admission = %+v, %v", result, err)
+	}
+	restore := false
+	restored, err := store.UpdateAgent(ctx, worker.ID, updated.Revision, AgentPatch{Archived: &restore}, mustTime(t, 9))
+	if err != nil || restored.Archived || !restored.Paused {
+		t.Fatalf("restore = %+v, %v", restored, err)
+	}
+	if _, err := store.UpdateAgent(ctx, worker.ID, updated.Revision, AgentPatch{Paused: &restore}, mustTime(t, 10)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale archive revision = %v", err)
+	}
+}
+
+func TestArchiveWorkerRefusesOutstandingWorkAndUnauthorizedOverseers(t *testing.T) {
+	t.Run("queued", func(t *testing.T) {
+		store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
+		defer store.Close()
+		if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 48), ProjectID: project.ID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 49), Title: "do not discard"}, mustTime(t, 5)); err != nil {
+			t.Fatal(err)
+		}
+		archive := true
+		if _, err := store.UpdateAgent(context.Background(), worker.ID, worker.Revision, AgentPatch{Archived: &archive}, mustTime(t, 6)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("archive queued worker = %v", err)
+		}
+	})
+	t.Run("live run and human request", func(t *testing.T) {
+		store, worker, overseer, _ := runningWorkerAndOverseer(t)
+		defer store.Close()
+		archive := true
+		agent, found, err := store.Agent(context.Background(), worker.AgentID)
+		if err != nil || !found {
+			t.Fatalf("worker agent = %+v, found=%v, err=%v", agent, found, err)
+		}
+		if _, err := store.UpdateAgentForOverseer(context.Background(), overseer.CredentialDigest, agent.ID, agent.Revision, AgentPatch{Archived: &archive}, mustTime(t, 51)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("archive live worker = %v", err)
+		}
+		if _, err := store.CreateHumanQuestionForAttempt(context.Background(), worker.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(50), QuestionText: "unresolved"}, mustTime(t, 52)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.UpdateAgentForOverseer(context.Background(), overseer.CredentialDigest, agent.ID, agent.Revision, AgentPatch{Archived: &archive}, mustTime(t, 53)); !errors.Is(err, ErrConflict) {
+			t.Fatalf("archive worker with unresolved request = %v", err)
+		}
+	})
+	t.Run("authority", func(t *testing.T) {
+		store, worker, overseer, _ := runningWorkerAndOverseer(t)
+		defer store.Close()
+		archive := true
+		agent, found, err := store.Agent(context.Background(), worker.AgentID)
+		if err != nil || !found {
+			t.Fatalf("worker agent = %+v, found=%v, err=%v", agent, found, err)
+		}
+		if _, err := store.UpdateAgentForOverseer(context.Background(), worker.CredentialDigest, agent.ID, agent.Revision, AgentPatch{Archived: &archive}, mustTime(t, 51)); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("worker archive authority = %v", err)
+		}
+		overseerAgent, found, err := store.Agent(context.Background(), overseer.AgentID)
+		if err != nil || !found {
+			t.Fatalf("overseer agent = %+v, found=%v, err=%v", overseerAgent, found, err)
+		}
+		if _, err := store.UpdateAgentForOverseer(context.Background(), overseer.CredentialDigest, overseerAgent.ID, overseerAgent.Revision, AgentPatch{Archived: &archive}, mustTime(t, 52)); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("orchestrator target archive = %v", err)
+		}
+		foreign, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 53), Name: "foreign", Root: "/foreign"}, mustTime(t, 53))
+		if err != nil {
+			t.Fatal(err)
+		}
+		foreignWorker, err := store.CreateAgent(context.Background(), NewAgent{ID: agentID(t, 54), ProjectID: foreign.ID, Name: "foreign worker", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 54))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.UpdateAgentForOverseer(context.Background(), overseer.CredentialDigest, foreignWorker.ID, foreignWorker.Revision, AgentPatch{Archived: &archive}, mustTime(t, 55)); !errors.Is(err, ErrUnauthorized) {
+			t.Fatalf("cross-project archive = %v", err)
+		}
+	})
+}
+
 func TestUpdateAgentValidatesLaunchControlsAtTheObservedRevision(t *testing.T) {
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -197,7 +284,7 @@ func TestUpdateTaskForOverseerTargetsOnlyWorkers(t *testing.T) {
 	}
 }
 
-func TestUpdateAgentForOverseerOnlyPausesWorkers(t *testing.T) {
+func TestUpdateAgentForOverseerOnlyControlsWorkerLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
 	defer store.Close()
@@ -214,9 +301,31 @@ func TestUpdateAgentForOverseerOnlyPausesWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := store.UpdateAgentForOverseer(ctx, keys.AttemptDigest, configured.ID, configured.Revision, true, mustTime(t, 43))
-	if err != nil || !updated.Paused || updated.Model != configured.Model || updated.ReasoningEffort != configured.ReasoningEffort || updated.AccountID != configured.AccountID || updated.Idle != configured.Idle {
-		t.Fatalf("overseer pause = %+v, %v", updated, err)
+	pause := true
+	paused, err := store.UpdateAgentForOverseer(ctx, keys.AttemptDigest, configured.ID, configured.Revision, AgentPatch{Paused: &pause}, mustTime(t, 43))
+	if err != nil || !paused.Paused || paused.Archived {
+		t.Fatalf("overseer pause = %+v, %v", paused, err)
+	}
+	resume := false
+	resumed, err := store.UpdateAgentForOverseer(ctx, keys.AttemptDigest, paused.ID, paused.Revision, AgentPatch{Paused: &resume}, mustTime(t, 44))
+	if err != nil || resumed.Paused || resumed.Archived {
+		t.Fatalf("overseer resume = %+v, %v", resumed, err)
+	}
+	archive := true
+	updated, err := store.UpdateAgentForOverseer(ctx, keys.AttemptDigest, resumed.ID, resumed.Revision, AgentPatch{Archived: &archive}, mustTime(t, 45))
+	if err != nil || !updated.Archived || !updated.Paused || updated.Model != configured.Model || updated.ReasoningEffort != configured.ReasoningEffort || updated.AccountID != configured.AccountID || updated.Idle != configured.Idle {
+		t.Fatalf("overseer archive = %+v, %v", updated, err)
+	}
+	restore := false
+	restored, err := store.UpdateAgentForOverseer(ctx, keys.AttemptDigest, updated.ID, updated.Revision, AgentPatch{Archived: &restore}, mustTime(t, 46))
+	if err != nil || restored.Archived || !restored.Paused {
+		t.Fatalf("overseer restore = %+v, %v", restored, err)
+	}
+	if _, err := store.UpdateAgentForOverseer(ctx, keys.AttemptDigest, restored.ID, restored.Revision, AgentPatch{Archived: &archive, Paused: &restore}, mustTime(t, 47)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("overseer mixed archive update = %v", err)
+	}
+	if _, err := store.UpdateAgent(ctx, restored.ID, restored.Revision, AgentPatch{Archived: &archive, Paused: &restore}, mustTime(t, 47)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("operator mixed archive update = %v", err)
 	}
 }
 

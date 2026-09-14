@@ -171,6 +171,9 @@ func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note str
 	if !found {
 		return Task{}, ErrCorruptState
 	}
+	if agent.Archived {
+		return Task{}, ErrConflict
+	}
 	if agent.Provider == ProviderShell {
 		return Task{}, fmt.Errorf("%w: a shell task is a program and takes no note", ErrInvalidValue)
 	}

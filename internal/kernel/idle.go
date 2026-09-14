@@ -59,7 +59,7 @@ func (store *Store) EnqueueIdleInstructions(ctx context.Context, at UnixMillis) 
 	}
 	defer tx.Close()
 	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents
-	WHERE role = 'worker' AND idle_policy = 'standing_instruction' AND paused = 0 AND idle_runs_used < idle_run_budget AND tool_calls_used < tool_budget_limit
+	WHERE role = 'worker' AND idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0 AND idle_runs_used < idle_run_budget AND tool_calls_used < tool_budget_limit
 		  AND NOT EXISTS (SELECT 1 FROM tasks WHERE assigned_agent_id = agents.id AND status IN ('queued', 'running'))
 		  AND MAX(updated_at_ms, COALESCE((SELECT MAX(terminal_at_ms) FROM runs WHERE agent_id = agents.id), 0)) + idle_after_seconds * 1000 <= ?
 		ORDER BY id`, at.Int64())

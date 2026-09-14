@@ -209,6 +209,7 @@ type AgentSummary struct {
 	Role      string `json:"role"`
 	Provider  string `json:"provider"`
 	Paused    bool   `json:"paused"`
+	Archived  bool   `json:"archived"`
 	Revision  uint64 `json:"revision"`
 }
 
@@ -343,7 +344,8 @@ type OverseerTaskUpdateInput struct {
 type OverseerAgentUpdateInput struct {
 	AgentID          string `json:"agent_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
-	Paused           bool   `json:"paused"`
+	Paused           *bool  `json:"paused,omitempty"`
+	Archived         *bool  `json:"archived,omitempty"`
 }
 
 type OverseerRunStopInput struct {

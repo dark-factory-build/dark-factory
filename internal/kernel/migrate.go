@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Schema history. A home is recognised by comparing its schema text literally
@@ -33,6 +34,7 @@ const (
 	v7UserVersion       = 7
 	v8UserVersion       = 8
 	v9UserVersion       = 9
+	v10UserVersion      = 10
 	v8HumanRequests     = `CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
@@ -288,6 +290,17 @@ func v9SchemaStatements() []string {
 	return statements
 }
 
+// v10 predates worker archiving.
+func v10SchemaStatements() []string {
+	statements := append([]string(nil), schemaStatements...)
+	for i, statement := range statements {
+		if _, name := schemaObjectIdentity(statement); name == "agents" {
+			statements[i] = strings.Replace(statement, "\tarchived INTEGER NOT NULL CHECK (archived IN (0, 1)),\n", "", 1)
+		}
+	}
+	return statements
+}
+
 // priorSchemaStatements is the exact v3 schema: v4 with the frozen agents
 // definition substituted. Every other statement is read live from
 // schemaStatements, so editing any of them silently changes what this claims
@@ -380,6 +393,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v8SchemaStatements(), true
 	case v9UserVersion:
 		return v9SchemaStatements(), true
+	case v10UserVersion:
+		return v10SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -405,7 +420,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -426,6 +441,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[7:]
 	case v9UserVersion:
 		steps = all[8:]
+	case v10UserVersion:
+		steps = all[9:]
 	default:
 		return connection.Close()
 	}
@@ -642,8 +659,22 @@ func migrateV9Transaction(ctx context.Context, connection *sql.Conn) error {
 	if err := validateSchemaVersion(ctx, connection, v9UserVersion, v9SchemaStatements()); err != nil {
 		return err
 	}
-	target := expectedSchemaOf(schemaStatements)
+	target := expectedSchemaOf(v10SchemaStatements())
 	if err := rebuildTable(ctx, connection, target, "agents", v7AgentColumns, "agents_id_project_unique", "appearance", "''"); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v10UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v10UserVersion, v10SchemaStatements())
+}
+
+func migrateV10Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v10UserVersion, v10SchemaStatements()); err != nil {
+		return err
+	}
+	columns := `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "agents", columns, "agents_id_project_unique", "archived", "0"); err != nil {
 		return err
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
