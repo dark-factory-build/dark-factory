@@ -1,4 +1,4 @@
-import type { AgentItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
+import { MAX_SNAPSHOT_ENTITIES, type AgentItem, type StateView, type TaskItem, type TopologyView } from "@dark-factory/client";
 import { compareText, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
 
 /** The task stages the daemon actually serves today. */
@@ -371,7 +371,7 @@ function runFootprint(rooms: readonly SceneNode[], sample: RunPathSample | undef
 function projectHierarchy(project: { id: string; name: string }, topology: TopologyView | undefined) {
   const served = topology?.nodes ?? [];
   const servedByID = new Map<string, typeof served[number]>();
-  const unique = served.every((node) => !servedByID.has(node.id) && (servedByID.set(node.id, node), true));
+  const unique = served.length <= MAX_SNAPSHOT_ENTITIES && served.every((node) => !servedByID.has(node.id) && (servedByID.set(node.id, node), true));
   // ponytail: this walks at most the protocol's 4,096 served nodes per node;
   // a future larger graph should validate containment once at decode time.
   const valid = served.length > 0 && unique

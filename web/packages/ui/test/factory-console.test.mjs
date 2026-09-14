@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement, isValidElement, useEffect, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
-import { MAX_TASK_PRIORITY, ProtocolError, SessionError } from "@dark-factory/client";
+import { MAX_SNAPSHOT_ENTITIES, MAX_TASK_PRIORITY, ProtocolError, SessionError } from "@dark-factory/client";
 import { FactoryApp, FactoryConsole, floorScene } from "../dist/src/index.js";
 import { layoutScene } from "../dist/src/factory-scene/scene.js";
 import { FactoryFloor } from "../dist/src/console-screens.js";
@@ -1936,4 +1936,15 @@ test("floor preparation survives draft and live snapshot updates but invalidates
   assert.equal(scene().props.topology.nodes.some((node) => node.id === ids.project), true);
   assert.equal(scene().props.topology.nodes.some((node) => node.id === roomId), false);
   await act(async () => { renderer.unmount(); });
+});
+
+
+test("oversized direct topology falls back before traversing any node", () => {
+  let visited = 0;
+  const nodes = Array.from({ length: MAX_SNAPSHOT_ENTITIES + 1 }, () => ({
+    get id() { visited += 1; throw new Error("oversized topology was traversed"); },
+  }));
+  const scene = floorScene(fixtureState, served({ ...fixtureTopology, nodes }));
+  assert.equal(visited, 0);
+  assert.deepEqual(scene.topology.nodes.filter((node) => node.project?.id === ids.project).map((node) => [node.id, node.parentId, node.sizeBucket]), [[ids.project, undefined, undefined]]);
 });
