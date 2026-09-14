@@ -111,6 +111,22 @@ and authenticated API, without operator commands or shell execution. Codex
 uses this tool for task retrieval and durable outcomes. No daemon wire protocol,
 authority, registry or provider observation changes. Installed proof is pending.
 
+#707 merged as `d36c2cb23bf8b4387af680bb791dbd5abd2848bb`; installed source
+`9bb51b6ed99487d837f59c0ef85e7c15f0550d2c` exposes the task tool. The real CLI
+requires explicit tool approval despite `approval_policy=never`; both workers
+were stopped after that refusal. The overseer also had duplicate TOML write
+keys because its working directory is its runtime home. The follow-up deduplicates
+those paths and authorizes only the factory tool, configured run browser and
+overseer Maintainer server. Codex reuses the established Maintainer server name.
+No broader filesystem or daemon authority is granted. Installed proof is pending.
+
+The process audit additionally found and closed one verified orphan shell from a
+cancelled worker. Its cleanup investigation is task `909f8419cd6147b7bd7bb53c6ea5a9af`,
+awaiting the tool-approval fix. `subsystem-visual` worktree removal was refused by
+filesystem permissions; residual files and its branch remain. See ignored
+`orphan-shell-closure.json` and `subsystem-cleanup-refusal.json`; do not claim
+all worktree cleanup or detached-command cleanup is complete.
+
 The tool-approval candidate `632cfe1cf3f2d92cb11b84f7f8cc0d9182ad4b2c` passed
 full local CI and independent review (#708). Installed development proof observed
 two workers plus one overseer, successful task-tool calls, and an overseer-managed
@@ -145,3 +161,21 @@ bounded FIFO reproduction of the unsupported detached-child case. Host focused
 runner checks and full local CI passed. The remaining local-CI refusal fix moves
 cache setup after lease admission, so a non-Git checkout fails without creating
 cache directories; it uses the existing gate and adds one focused shell check.
+
+Site #62 merged as `8fad739a4960f4bbdcad922b2f88ed9ef0f5ddb9` and deployed
+as `dpl_7qL6VucPEZjzgym7SpXvKcy6QKNC` to `app.darkfactory.build`. Both public
+packages derive from clean runtime source `a492763cac66f56560a0869c40cc148eea4548df`,
+which includes checkpoints 1, 2, 3, 4A, 4B and 5. Artifact verification, formatting,
+lint, types, 120 unit/render tests, production build/canary check, and 37 browser
+smokes passed (three suite-defined skips). The dedicated paired browser verified
+live topology, subsystem navigation, worker selection/configuration and phone
+settings. Captures: ignored `deployed-final-desktop.png`,
+`deployed-project-desktop.png`, `deployed-project-phone.png`, and
+`deployed-final-settings-phone.png`. Wait for topology separately from the state
+snapshot before capturing. This live factory was idle; moving/crowded scenarios
+remain the labelled fixture evidence above.
+
+Thirty obsolete task/build/site checkouts have been retired, with superseded
+dirty files preserved under ignored `retired-checkouts/`. The final handoff and
+its old CI-refusal checkout are retained until merge; unrelated operator edits
+in the primary runtime/site checkouts remain untouched.
