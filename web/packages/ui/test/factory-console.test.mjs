@@ -1960,3 +1960,24 @@ test("public task meter accepts canonical statuses and keeps cancellation distin
   assert.equal(meter("building").replace("stage: building", "stage: running"), meter("running"));
   assert.equal(meter("done").replace("stage: done", "stage: succeeded"), meter("succeeded"));
 });
+
+
+test("same-path observed roots choose package then module independent of served order", () => {
+  const node = (id, kind, parent_id) => ({ id, kind, parent_id, path: ".", label: kind, language: "go", size_bucket: "tiny" });
+  const root = node("a".repeat(64), "repository", "");
+  const module = node("b".repeat(64), "module", root.id);
+  const pkg = node("c".repeat(64), "package", module.id);
+  const samples = new Map([[ids.agent, runSample(ids.agent, ["main.go"])]]);
+  for (const nodes of [[root, module, pkg], [pkg, root, module], [module, pkg, root], [root, module], [module, root]]) {
+    const topologies = served({ ...fixtureTopology, nodes });
+    const exact = `${ids.project}:${nodes.includes(pkg) ? pkg.id : module.id}`;
+    for (const [scope, display] of [[undefined, root.id], [`${ids.project}:${root.id}`, module.id], [`${ids.project}:${module.id}`, nodes.includes(pkg) ? pkg.id : module.id]]) {
+      const scene = floorScene(fixtureState, topologies, samples, undefined, scope);
+      const task = scene.tasks.find((task) => task.id === ids.task);
+      assert.deepEqual(task.roomIds, [exact]);
+      assert.equal(task.representativeRoomId, exact);
+      assert.equal(task.displayRoomId, `${ids.project}:${display}`);
+      assert.equal(scene.workers.find((worker) => worker.id === ids.agent).nodeId, task.displayRoomId);
+    }
+  }
+});

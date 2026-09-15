@@ -621,3 +621,46 @@ func TestProjectTopologyInventoryFitsExistingResponseBudget(t *testing.T) {
 		t.Fatal("projection mutated cached inventory")
 	}
 }
+
+func TestProjectTopologyPrioritizesDependenciesAndCountsOverFilenames(t *testing.T) {
+	snapshot := topology.Snapshot{Digest: strings.Repeat("ab", 32)}
+	for i := 0; i < browserprotocol.MaxSnapshotEntities; i++ {
+		snapshot.Nodes = append(snapshot.Nodes, topology.Node{ID: fmt.Sprintf("%064x", i+1), Kind: topology.NodeDirectory, RelativePath: fmt.Sprintf("p%d", i), Label: "room", SizeBucket: "small", Inventory: &topology.Inventory{
+			Direct: topology.InventoryCounts{Source: 3}, Total: topology.InventoryCounts{Source: 3}, Samples: []string{strings.Repeat("a", 128), strings.Repeat("b", 128), strings.Repeat("c", 128)},
+		}})
+		if i > 0 && i <= browserprotocol.MaxTopologyEdges {
+			snapshot.Edges = append(snapshot.Edges, topology.Edge{From: snapshot.Nodes[0].ID, To: snapshot.Nodes[i].ID, Kind: topology.EdgeImports, Weight: 1})
+		}
+	}
+	projectID := "01010101010101010101010101010101"
+	result := projectTopology(projectID, snapshot)
+	if len(result.Dependencies.Edges) != len(snapshot.Edges) || result.Dependencies.Omitted != 0 {
+		t.Fatalf("filenames crowded out dependencies: served %d of %d, omitted %d", len(result.Dependencies.Edges), len(snapshot.Edges), result.Dependencies.Omitted)
+	}
+	wire, err := browserprotocol.EncodeTopology("budget", result)
+	if err != nil || len(wire) > browserprotocol.MaxSnapshotBytes {
+		t.Fatalf("combined response: %d bytes, %v", len(wire), err)
+	}
+	for _, node := range result.Nodes {
+		if inventory := node.Inventory; inventory != nil && len(inventory.Samples)+int(inventory.SamplesOmitted) != 3 {
+			t.Fatalf("inexact sample omission: %+v", inventory)
+		}
+	}
+	small := projectTopology(projectID, topology.Snapshot{Digest: snapshot.Digest, Nodes: snapshot.Nodes[:1]})
+	if len(small.Nodes[0].Inventory.Samples) != 3 || small.Nodes[0].Inventory.SamplesOmitted != 0 {
+		t.Fatal("filenames were omitted despite available response capacity")
+	}
+	for i := range snapshot.Nodes {
+		snapshot.Nodes[i].Inventory.Samples = nil
+		snapshot.Nodes[i].Inventory.SamplesOmitted = 3
+	}
+	countsOnly := projectTopology(projectID, snapshot)
+	if *result.InventoryOmitted != *countsOnly.InventoryOmitted {
+		t.Fatalf("filenames crowded out counts: omitted %d versus %d without filenames", *result.InventoryOmitted, *countsOnly.InventoryOmitted)
+	}
+	again, _ := browserprotocol.EncodeTopology("budget", projectTopology(projectID, snapshot))
+	expected, _ := browserprotocol.EncodeTopology("budget", countsOnly)
+	if !bytes.Equal(again, expected) {
+		t.Fatal("projection is not deterministic")
+	}
+}

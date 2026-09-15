@@ -335,15 +335,17 @@ function matchingRunSample(
 
 /**
  * Each changed path picks the deepest eligible room whose own path prefixes it
- * (the root's "." prefixes everything). Every affected room is retained, while
+ * (the root's "." prefixes everything). Same-path kinds follow daemon NodeForPath
+ * precedence; stable ids settle equivalent rooms. Every affected room is retained, while
  * the room holding the most paths is the representative; ties use room order.
  */
 function runFootprint(rooms: readonly SceneNode[], sample: RunPathSample | undefined): Readonly<{ roomIds: readonly string[]; representativeRoomId?: string }> {
+  const kindOrder = { repository: 0, directory: 1, module: 2, package: 3 };
   const counts = new Map<SceneNode, number>();
   for (const path of sample?.paths ?? []) {
     const room = rooms
       .filter((candidate) => candidate.path === "." || path === candidate.path || path.startsWith(`${candidate.path}/`))
-      .sort((left, right) => right.path.length - left.path.length)[0];
+      .sort((left, right) => right.path.length - left.path.length || kindOrder[right.kind] - kindOrder[left.kind] || compareText(left.id, right.id))[0];
     if (room !== undefined) counts.set(room, (counts.get(room) ?? 0) + 1);
   }
   const representativeRoomId = [...counts]
