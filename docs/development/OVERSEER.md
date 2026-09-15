@@ -102,7 +102,10 @@ Everything below assumes the launch-scoped private runtime home and `TMPDIR`,
 no `gh` credential, git without any remote credential, and the Maintainer App
 as the one MCP server (`maintainer`). A Codex overseer has no daemon database,
 Changes-parent, or operator-home access; its only retained-source access is
-the exact same-project tree the daemon selected at launch.
+the exact eligible same-project target requested by the admitted task and
+selected by the daemon at launch. Retained history is not a broad launch
+grant: the one-tree bound keeps the Codex permission argument below its fixed
+limit.
 
 ## What you may and may not do
 
@@ -127,17 +130,36 @@ For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 ## 1. Find what a worker finished
 
 Never read the daemon SQLite database, the whole daemon home, or the Changes
-parent. Run `overseer status --task TASK_ID` for the task you are handling.
-Its `retained_change_handoffs` entry is the supported source handoff: it names
-the Change ID, base commit, task ID, task work revision, current retained
-Change revision, and the daemon-derived `source_path` for that exact tree.
-Match every identity value to the selected task, then read only that
-already-authorized `source_path`. The daemon derives this read grant from the
-current retained handoff at launch; never construct a `$home/changes/...` path,
-read `factory.sqlite3`, or infer source from a published branch. If the task
-was sent back or any task/work/Change revision changed, discard the old
-handoff, refresh status and use a newly launched reviewer. A status record
-without its launch-scoped tree access is not a source handoff.
+parent. Run `overseer status --task TASK_ID` as reviewer preflight for the task
+you are handling. It must either refuse or return exactly one usable receipt;
+an accepted response without a receipt is not an assignment and must be
+relaunched, never worked around.
+Status is task state only. To inspect a retained tree, explicitly run
+`factoryctl attempt source --task TASK_ID`; its receipt names the Change ID,
+base commit, target task ID, task work revision, current retained Change
+revision, and daemon-derived `source_path` for that exact tree. Match every
+identity value to the requested task, then read only that returned path. The
+daemon verifies and materializes the target into the reader's private runtime;
+never construct a `$home/changes/...` path, read `factory.sqlite3`, or infer
+source from a published branch. If the task was sent back or any task/work/
+Change revision changed, the request is refused and must use exact current
+task state.
+The daemon verifies the selected retained root and manifest commitment before
+copying, then verifies the private copy again; a changed, mixed, symlinked or
+escaped tree is refused rather than attached to the old receipt. The old
+snapshot is not the reopened Change, so an overseer can send back the task it
+reviewed without cancelling itself. A status record without its
+launch-scoped tree access still reports ordinary task state, but is not a
+source handoff.
+
+An independently delegated Codex reviewer uses the same explicit source
+request. It must match Change ID, base commit, target task ID, task work
+revision and Change revision before reading `source_path`; the readable
+retained tree is deliberately Git-free, so it is evidence of the worker Change
+rather than a substitute published branch. A reviewer is not an overseer and
+cannot use `overseer status` to discover a tree. No receipt, a changed
+identity, or a path outside that launch's read permission is a refusal, not a
+candidate for path reconstruction.
 
 A change is finished when its `enqueue-HEAD8`
 operation (step 5) for its current head is `completed` in the App journal
@@ -395,8 +417,8 @@ and 5 when it could not prepare the checkout, and leaves
   the pull request number and head:
 
   ```sh
-  # task_id is the matching retained_change_handoffs.task_id from section 1.
-  # Refresh `overseer status --task "$task_id"` and require the same Change
+  # task_id is the reviewed target task from the explicit source receipt.
+  # Refresh `attempt source --task "$task_id"` and require the same Change
   # ID, task work revision and Change revision before this mutation.
   note="Pull request https://github.com/OWNER/REPO/pull/$PR (head $HEAD_SHA) was blocked by its cold review with must-change findings. Read them with: curl -s https://api.github.com/repos/OWNER/REPO/pulls/$PR/reviews | python3 -c 'import json,sys; [print(r[\"body\"]) for r in json.load(sys.stdin)]' and fix each in the tree you left; the pull request stays open."
   "$DARK_FACTORY_FACTORYCTL" attempt send-back --task "$task_id" --note "$note"

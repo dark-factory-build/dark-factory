@@ -56,10 +56,6 @@ type Config struct {
 	StagingName        string
 	AttemptSocket      string
 	Retained           *Result
-	// RetainedSourceIDs are daemon-derived retained Change names that this
-	// same-project native run may inspect read-only. They are identifiers, not
-	// paths, so a provider cannot escape ChangeParent.
-	RetainedSourceIDs []string
 	// ProviderTask selects and verifies the provider's closed delivery path.
 	// Shell seals it on fd 11 and Claude receives a terminal-safe prompt. It is
 	// empty for Codex, whose task remains in the daemon behind the attempt API.
@@ -78,6 +74,12 @@ type Result struct {
 	EntryCount uint64
 	BlobBytes  uint64
 	Tree       change.StageIdentity
+}
+
+// RetainedSource is one narrowly scoped retained-tree read grant.
+type RetainedSource struct {
+	ID     string
+	Result Result
 }
 
 func (Result) String() string   { return "Change worker result (private)" }
@@ -118,7 +120,6 @@ type configWire struct {
 	StagingName          string       `json:"staging_name"`
 	AttemptSocket        string       `json:"attempt_socket"`
 	Retained             *resultWire  `json:"retained,omitempty"`
-	RetainedSourceIDs    []string     `json:"retained_source_ids"`
 	ProviderTask         []byte       `json:"provider_task"`
 }
 
@@ -132,7 +133,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName, StagingName: config.StagingName,
-		AttemptSocket: config.AttemptSocket, RetainedSourceIDs: append([]string(nil), config.RetainedSourceIDs...), ProviderTask: bytes.Clone(config.ProviderTask),
+		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask),
 	}
 	if config.Retained != nil {
 		retained := resultToWire(*config.Retained)
@@ -172,7 +173,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName, StagingName: wire.StagingName,
-		AttemptSocket: wire.AttemptSocket, Retained: retained, RetainedSourceIDs: append([]string(nil), wire.RetainedSourceIDs...), ProviderTask: bytes.Clone(wire.ProviderTask),
+		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -212,16 +213,6 @@ func validateConfig(config Config) error {
 		if validateResult(*config.Retained) != nil {
 			return invalidContract(nil)
 		}
-	}
-	seenSources := map[string]struct{}{}
-	for _, id := range config.RetainedSourceIDs {
-		if len(id) != 32 || id != strings.ToLower(id) || strings.Trim(id, "0123456789abcdef") != "" {
-			return invalidContract(nil)
-		}
-		if _, duplicate := seenSources[id]; duplicate {
-			return invalidContract(nil)
-		}
-		seenSources[id] = struct{}{}
 	}
 	return nil
 }

@@ -246,10 +246,12 @@ type liveAttempt struct {
 	runID      kernel.RunID
 	sessionID  kernel.TerminalSessionID
 	controller *runner.AttemptController
-	// sourceHandoffs is the immutable launch-time source authority for an
-	// orchestrator. Status can name only one of these exact tuples; a later
-	// work or Change revision must receive a fresh launch profile.
-	sourceHandoffs []kernel.RetainedChangeHandoff
+	// sourceSnapshots binds explicitly requested immutable source identities to
+	// private per-run materializations. A later work or Change revision cannot
+	// reuse an older grant; no live run reads the shared Changes parent.
+	sourceSnapshots map[kernel.RetainedChangeHandoff]string
+	sourceRoot      string
+	sourceMu        sync.Mutex
 
 	commands chan liveAttemptCommand
 	wake     chan struct{}

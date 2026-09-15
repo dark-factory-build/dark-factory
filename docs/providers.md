@@ -37,14 +37,18 @@ rejected for `shell`. Claude Code accepts `low`, `medium`, `high`, `xhigh`, or
 
 `--role orchestrator` names an overseer. A worker's run materializes a Change
 of the project and works there; an orchestrator's run binds no Change and is
-given its private runtime home as its working directory. It discovers a worker
-  tree through `overseer status --task TASK_ID`, which returns the Change ID,
-  base commit, task ID, task work revision, current Change revision and its
-  daemon-derived `source_path` for an eligible retained tree. A Codex launch receives read access only to those
-same-project retained tree paths selected by the daemon at launch; it does not
-receive the daemon database, the Changes parent, or the daemon home. A later
-work revision or Change revision must be rediscovered and gets a fresh launch
-profile. The
+given its private runtime home as its working directory. It requests a worker
+tree explicitly with `factoryctl attempt source --task TASK_ID`. The daemon
+checks that target task in the authenticated attempt's same project, requires
+its current successful retained Change, materializes one private read-only
+snapshot, and returns the Change ID, base commit, target task ID, task work
+revision, current Change revision and daemon-derived `source_path`. An accepted
+response without that receipt is unusable; never reconstruct a path or select a
+project-latest tree. A Codex launch receives read access only to the private
+per-run retained-source root, while the daemon creates only the requested exact
+child. It does not receive the daemon database, the Changes parent, or the
+daemon home. A later work revision or Change revision is refused against an
+older materialization and requires a fresh launch profile. The
 overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
 with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
 the fixed tool path, as its one MCP server; a Claude Code worker is launched
@@ -218,7 +222,8 @@ write of the text fails the attempt and is never replayed.
 Codex starts from a fixed, non-secret positional instruction to run
 `factoryctl attempt task` first. That command authenticates with the attempt's
 private credential and returns the exact effective task as terminal-safe JSON;
-body wins, with title used only when a native task has no body. Codex task text
+body wins, with title
+used only when a native task has no body. Codex task text
 is absent from argv, environment, and Change-worker configuration, and is
 bounded to 8 KiB so the configured 32,768-token tool-result budget cannot
 truncate it even under worst-case control-character escaping. The attempt API

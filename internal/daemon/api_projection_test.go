@@ -9,8 +9,8 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func TestProjectOverseerSnapshotPublishesOnlyTheDaemonDerivedExactTree(t *testing.T) {
-	parent := t.TempDir()
+func projectionHandoff(t *testing.T) (kernel.RetainedChangeHandoff, kernel.ProjectID, kernel.EventSequence) {
+	t.Helper()
 	changeID, err := kernel.ChangeIDFromBytes(bytes.Repeat([]byte{2}, kernel.IDBytes))
 	if err != nil {
 		t.Fatal(err)
@@ -31,29 +31,45 @@ func TestProjectOverseerSnapshotPublishesOnlyTheDaemonDerivedExactTree(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(parent, changeID.String()), 0o700); err != nil {
+	return kernel.RetainedChangeHandoff{ChangeID: changeID, BaseCommit: "0123456789abcdef0123456789abcdef01234567", TaskID: taskID, TaskWorkRevision: work, ChangeRevision: work}, projectID, head
+}
+
+func TestProjectOverseerSnapshotUsesOnlyPrivateSourceSnapshot(t *testing.T) {
+	handoff, projectID, head := projectionHandoff(t)
+	runtime := t.TempDir()
+	source := filepath.Join(runtime, "retained-source", handoff.ChangeID.String())
+	if err := os.MkdirAll(source, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	handoff := kernel.RetainedChangeHandoff{ChangeID: changeID, BaseCommit: "0123456789abcdef0123456789abcdef01234567", TaskID: taskID, TaskWorkRevision: work, ChangeRevision: work}
-	projected, err := projectOverseerSnapshot(kernel.OverseerSnapshot{ProjectID: projectID, Head: head, Handoffs: []kernel.RetainedChangeHandoff{handoff}}, parent, []kernel.RetainedChangeHandoff{handoff})
-	if err != nil || len(projected.Handoffs) != 1 || projected.Handoffs[0].SourcePath != filepath.Join(parent, changeID.String()) {
-		t.Fatalf("projected handoff = %+v, %v", projected.Handoffs, err)
+	projected, err := projectOverseerSnapshot(kernel.OverseerSnapshot{ProjectID: projectID, Head: head, Handoffs: []kernel.RetainedChangeHandoff{handoff}}, map[kernel.RetainedChangeHandoff]string{handoff: source})
+	if err != nil || len(projected.Handoffs) != 1 || projected.Handoffs[0].SourcePath != source {
+		t.Fatalf("projected handoff = %+v, %v", projected, err)
 	}
-	if err := os.Remove(filepath.Join(parent, changeID.String())); err != nil {
+}
+
+func TestProjectOverseerTargetedSnapshotKeepsTaskStateWithoutSourceGrant(t *testing.T) {
+	handoff, projectID, head := projectionHandoff(t)
+	snapshot := kernel.OverseerSnapshot{ProjectID: projectID, Head: head, Tasks: []kernel.OverseerTask{{ID: handoff.TaskID, ProjectID: projectID, Title: "state"}}, Handoffs: []kernel.RetainedChangeHandoff{handoff}}
+	projected, err := projectOverseerSnapshot(snapshot, nil)
+	if err != nil || len(projected.Tasks) != 1 || len(projected.Handoffs) != 0 {
+		t.Fatalf("ungranted task state = %+v, %v", projected, err)
+	}
+}
+
+func TestProjectRetainedChangeHandoffsRejectsMissingAndEscapingSnapshots(t *testing.T) {
+	handoff, _, _ := projectionHandoff(t)
+	if _, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: "/private/factory/changes/" + handoff.ChangeID.String()}); err == nil {
+		t.Fatal("shared Changes path accepted")
+	}
+	source := filepath.Join(t.TempDir(), "retained-source", handoff.ChangeID.String())
+	if _, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: source}); err == nil {
+		t.Fatal("missing snapshot accepted")
+	}
+	if err := os.MkdirAll(source, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := projectOverseerSnapshot(kernel.OverseerSnapshot{Handoffs: []kernel.RetainedChangeHandoff{{ChangeID: changeID}}}, parent, []kernel.RetainedChangeHandoff{{ChangeID: changeID}}); err == nil {
-		t.Fatal("missing retained tree was projected")
-	}
-	if projected, err := projectOverseerSnapshot(kernel.OverseerSnapshot{Handoffs: []kernel.RetainedChangeHandoff{handoff}}, parent, nil); err != nil || len(projected.Handoffs) != 0 {
-		t.Fatalf("ungranted handoff = %+v, %v", projected.Handoffs, err)
-	}
-	stale := handoff
-	stale.ChangeRevision, err = kernel.NewRevision(2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if projected, err := projectOverseerSnapshot(kernel.OverseerSnapshot{Handoffs: []kernel.RetainedChangeHandoff{stale}}, parent, []kernel.RetainedChangeHandoff{handoff}); err != nil || len(projected.Handoffs) != 0 {
-		t.Fatalf("stale handoff = %+v, %v", projected.Handoffs, err)
+	projected, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: source})
+	if err != nil || len(projected) != 1 || projected[0].SourcePath != source {
+		t.Fatalf("projected snapshot = %+v, %v", projected, err)
 	}
 }

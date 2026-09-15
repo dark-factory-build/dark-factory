@@ -1660,6 +1660,27 @@ func TestRemoveRecordedRuntimeUsesFixedBoundedGrammar(t *testing.T) {
 		}
 		t.Fatal("readonly bounded removal did not converge")
 	})
+
+	t.Run("retained source tree", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		source := filepath.Join(path, runtimeRetainedSourceName, "22222222222222222222222222222222")
+		if err := os.MkdirAll(filepath.Join(source, "nested"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(source, "nested", "payload"), []byte("snapshot"), 0o400); err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if done, err := RemoveRecordedRuntime(context.Background(), parent, runtimeTestName, identity); err != nil || !done {
+			t.Fatalf("retained source removal = %v, %v", done, err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runtime with retained source remains: %v", err)
+		}
+	})
 }
 
 func TestRemoveRecordedRuntimeUnlinksAnyNameAndRejectsAuthorityChanges(t *testing.T) {

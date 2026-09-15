@@ -252,6 +252,22 @@ func (client *AttemptClient) Task(ctx context.Context) (AttemptTask, error) {
 	return result, nil
 }
 
+func (client *AttemptClient) Source(ctx context.Context, taskID string) (RetainedChangeHandoff, error) {
+	if !validID(taskID) {
+		return RetainedChangeHandoff{}, ErrInvalidInput
+	}
+	var result RetainedChangeHandoff
+	if err := client.client.call(ctx, "source", struct {
+		TaskID string `json:"task_id"`
+	}{TaskID: taskID}, &result); err != nil {
+		return RetainedChangeHandoff{}, err
+	}
+	if !validRetainedChangeHandoff(result) {
+		return RetainedChangeHandoff{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *AttemptClient) Block(ctx context.Context, detail string) (MutationResult, error) {
 	if !validText(detail, 1, 4096) {
 		return MutationResult{}, ErrInvalidInput
@@ -885,7 +901,7 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 		return false
 	}
 	for _, handoff := range snapshot.Handoffs {
-		if !validID(handoff.ChangeID) || !validID(handoff.TaskID) || (len(handoff.BaseCommit) != 40 && len(handoff.BaseCommit) != 64) || handoff.TaskWorkRevision == 0 || handoff.ChangeRevision == 0 || !validHandoffSourcePath(handoff.SourcePath, handoff.ChangeID) {
+		if !validRetainedChangeHandoff(handoff) {
 			return false
 		}
 	}
@@ -927,7 +943,7 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 }
 
 func validHandoffSourcePath(value, changeID string) bool {
-	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID
+	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID && filepath.Base(filepath.Dir(value)) == "retained-source"
 }
 
 func validOverseerSnapshotInput(input OverseerSnapshotInput) bool {

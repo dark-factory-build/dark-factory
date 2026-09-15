@@ -151,19 +151,19 @@ func TestRetainedChangeHandoffsIgnoreIneligibleRetainedHistory(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			handoffs, err := store.RetainedChangeHandoffsForProject(context.Background(), terminal.ProjectID)
+			direct, directFound, err := store.RetainedChangeHandoffForTask(context.Background(), terminal.ProjectID, terminal.TaskID)
 			if err != nil {
-				t.Fatalf("handoffs = %v", err)
+				t.Fatalf("direct handoff = %v", err)
 			}
 			if !test.want {
-				if len(handoffs) != 0 {
-					t.Fatalf("ineligible handoffs = %+v", handoffs)
+				if directFound {
+					t.Fatalf("ineligible handoff = %+v", direct)
 				}
 				return
 			}
 			change, found, err := store.Change(context.Background(), *terminal.ChangeID)
-			if err != nil || !found || len(handoffs) != 1 || handoffs[0].ChangeID != change.ID || handoffs[0].TaskID != terminal.TaskID || handoffs[0].TaskWorkRevision != terminal.AdmittedTaskWorkRevision || handoffs[0].ChangeRevision != change.Revision {
-				t.Fatalf("current handoff = %+v, change=%+v, found=%v, err=%v", handoffs, change, found, err)
+			if err != nil || !found || !directFound || direct.ChangeID != change.ID || direct.TaskID != terminal.TaskID || direct.TaskWorkRevision != terminal.AdmittedTaskWorkRevision || direct.ChangeRevision != change.Revision {
+				t.Fatalf("direct current handoff = %+v, found=%v, err=%v", direct, directFound, err)
 			}
 		})
 	}

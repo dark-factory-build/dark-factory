@@ -179,6 +179,7 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "attempt help", args: []string{"attempt", "-h"}, help: true},
 		{name: "verb help", args: []string{"attempt", "block", "--help"}, help: true},
 		{name: "task", args: []string{"attempt", "task"}, command: attemptCommand{kind: commandAttemptTask}},
+		{name: "source", args: []string{"attempt", "source", "--task", "0123456789abcdef0123456789abcdef"}, command: attemptCommand{kind: commandAttemptSource, id: "0123456789abcdef0123456789abcdef"}},
 		{name: "empty success", args: []string{"attempt", "succeed"}, command: attemptCommand{kind: commandSucceed}},
 		{name: "success", args: []string{"attempt", "succeed", "--result", "done"}, command: attemptCommand{kind: commandSucceed, text: "done"}},
 		{name: "block", args: []string{"attempt", "block", "--detail", "waiting"}, command: attemptCommand{kind: commandBlock, text: "waiting"}},
@@ -510,7 +511,7 @@ func TestAttemptTaskUsesExactTypedCallAndWritesJSON(t *testing.T) {
 	if !ok || digest.Bytes() != wantDigest {
 		t.Fatalf("attempt digest = %x, %t", digest.Bytes(), ok)
 	}
-	if stdout.String() != "{\"task\":\"private\\u007f\\u009btask-sentinel\"}\n" || stderr.Len() != 0 {
+	if stdout.String() != "{\"task\":\"private\\u007f\\u009btask-sentinel\",\"retained_change_handoffs\":[]}\n" || stderr.Len() != 0 {
 		t.Fatalf("output = stdout %q, stderr %q", stdout.String(), stderr.String())
 	}
 	if strings.Contains(stdout.String(), "\u007f") || strings.Contains(stdout.String(), "\u009b") {

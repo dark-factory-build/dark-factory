@@ -23,7 +23,7 @@ type OverseerSnapshot struct {
 }
 
 // RetainedChangeHandoff is the complete identity an overseer or delegated
-// reviewer must match before reading a daemon-retained worker tree.  It is
+// reviewer must match before reading a daemon-retained worker tree. It is
 // deliberately an identity, not a caller-supplied pathname.
 type RetainedChangeHandoff struct {
 	ChangeID         ChangeID
@@ -34,6 +34,10 @@ type RetainedChangeHandoff struct {
 }
 
 const OverseerSnapshotPageSize = 4
+
+// RetainedChangeHandoffLaunchLimit is deliberately one. An attempt receives
+// only the exact retained tree for its explicit target task.
+const RetainedChangeHandoffLaunchLimit = 1
 
 type OverseerSnapshotRequest struct {
 	TaskID       *TaskID
@@ -317,39 +321,16 @@ func retainedChangeHandoff(ctx context.Context, connection *sql.Conn, projectID 
 	return RetainedChangeHandoff{ChangeID: change.ID, BaseCommit: hex.EncodeToString(change.Selection.Commit().Bytes()), TaskID: task.ID, TaskWorkRevision: task.WorkRevision, ChangeRevision: change.Revision}, true, nil
 }
 
-// RetainedChangeHandoffsForProject is the launch-time authority source for
-// Codex source reads. It returns only current, succeeded retained trees, never
-// a path or a stale work revision.
-func (store *Store) RetainedChangeHandoffsForProject(ctx context.Context, projectID ProjectID) ([]RetainedChangeHandoff, error) {
+// RetainedChangeHandoffForTask returns the current handoff identity for one
+// project task. It is used before a send-back makes that identity stale, so a
+// daemon can revoke launch-time filesystem grants before reopening the Change.
+func (store *Store) RetainedChangeHandoffForTask(ctx context.Context, projectID ProjectID, taskID TaskID) (RetainedChangeHandoff, bool, error) {
 	read, err := store.beginRead(ctx)
 	if err != nil {
-		return nil, err
+		return RetainedChangeHandoff{}, false, err
 	}
 	defer read.Close()
-	rows, err := read.connection.QueryContext(ctx, `SELECT task_id FROM changes WHERE project_id = ? AND phase = 'retained' ORDER BY id`, projectID.Bytes())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := []RetainedChangeHandoff{}
-	for rows.Next() {
-		var rawTaskID []byte
-		if err := rows.Scan(&rawTaskID); err != nil {
-			return nil, err
-		}
-		taskID, err := TaskIDFromBytes(rawTaskID)
-		if err != nil {
-			return nil, ErrCorruptState
-		}
-		handoff, found, err := retainedChangeHandoff(ctx, read.connection, projectID, taskID)
-		if err != nil {
-			return nil, err
-		}
-		if found {
-			result = append(result, handoff)
-		}
-	}
-	return result, rows.Err()
+	return retainedChangeHandoff(ctx, read.connection, projectID, taskID)
 }
 
 func overseerTaskText(value string, overview bool, offset uint64) (string, bool, bool) {

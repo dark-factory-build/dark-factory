@@ -147,7 +147,8 @@ type OverseerInterventionResult struct {
 // AttemptTask is the exact private task text visible only to the authenticated
 // live attempt that owns it.
 type AttemptTask struct {
-	Task string `json:"task"`
+	Task     string                  `json:"task"`
+	Handoffs []RetainedChangeHandoff `json:"retained_change_handoffs"`
 }
 
 func (AttemptTask) String() string   { return "AttemptTask(<redacted>)" }
@@ -164,7 +165,17 @@ func (task AttemptTask) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	handoffs := task.Handoffs
+	if handoffs == nil {
+		handoffs = []RetainedChangeHandoff{}
+	}
+	encodedHandoffs, err := json.Marshal(handoffs)
+	if err != nil {
+		return nil, err
+	}
 	encoded := append([]byte(`{"task":`), terminalSafeJSON(nil, quoted)...)
+	encoded = append(encoded, `,"retained_change_handoffs":`...)
+	encoded = append(encoded, encodedHandoffs...)
 	return append(encoded, '}'), nil
 }
 
@@ -183,7 +194,15 @@ func terminalSafeJSON(dst, encoded []byte) []byte {
 }
 
 func validAttemptTask(task AttemptTask) bool {
-	return validText(task.Task, 0, 131072)
+	if !validText(task.Task, 0, 131072) || len(task.Handoffs) > kernel.RetainedChangeHandoffLaunchLimit {
+		return false
+	}
+	for _, handoff := range task.Handoffs {
+		if !validRetainedChangeHandoff(handoff) {
+			return false
+		}
+	}
+	return true
 }
 
 type FactorySummary struct {
@@ -265,6 +284,10 @@ type RetainedChangeHandoff struct {
 	// describes. It is usable only when the launch profile granted that exact
 	// path; consumers must refresh status after any revision change.
 	SourcePath string `json:"source_path"`
+}
+
+func validRetainedChangeHandoff(handoff RetainedChangeHandoff) bool {
+	return validID(handoff.ChangeID) && validID(handoff.TaskID) && (len(handoff.BaseCommit) == 40 || len(handoff.BaseCommit) == 64) && handoff.TaskWorkRevision != 0 && handoff.ChangeRevision != 0 && validHandoffSourcePath(handoff.SourcePath, handoff.ChangeID)
 }
 
 type OverseerIntervention struct {

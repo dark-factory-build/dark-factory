@@ -65,6 +65,9 @@ func TestOpenRecoveredRuntimeAcceptsRootBeforeTokenPublicationWithoutMutation(t 
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(path, runtimeRetainedSourceName, "22222222222222222222222222222222"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	before := snapshotRuntimeGraph(t, path)
 	recovered, err := OpenRecoveredRuntime(context.Background(), parent, runtimeTestName, identity)
 	if err != nil {

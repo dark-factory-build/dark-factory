@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -172,6 +173,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.setCapacity(ctx, call)
 	case api.CallAttemptTask:
 		return daemon.attemptTask(ctx, call)
+	case api.CallAttemptSource:
+		return daemon.attemptSource(ctx, call)
 	case api.CallRequestHuman:
 		return daemon.requestHuman(ctx, call)
 	case api.CallPeerStatus:
@@ -269,7 +272,70 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	reply, err := api.NewAttemptTaskReply(api.AttemptTask{Task: authority.Task()})
+	daemon.attemptMu.Lock()
+	live := daemon.attempts[authority.RunID]
+	var snapshots map[kernel.RetainedChangeHandoff]string
+	if live != nil {
+		snapshots = maps.Clone(live.sourceSnapshots)
+	}
+	daemon.attemptMu.Unlock()
+	if live == nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	handoffs, err := projectRetainedChangeHandoffs(snapshots)
+	if err != nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	reply, err := api.NewAttemptTaskReply(api.AttemptTask{Task: authority.Task(), Handoffs: handoffs})
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
+}
+
+func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Reply {
+	digest, ok := call.AttemptDigest()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	kDigest, err := attemptDigest(digest)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	authority, err := daemon.store.AuthenticateAttempt(ctx, kDigest)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	taskIDText, ok := call.AttemptSourceTaskID()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	targetTaskID, err := parseTaskID(taskIDText)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	daemon.attemptMu.Lock()
+	live := daemon.attempts[authority.RunID]
+	daemon.attemptMu.Unlock()
+	if live == nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	handoff, found, err := daemon.store.RetainedChangeHandoffForTask(ctx, authority.ProjectID, targetTaskID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	path, err := daemon.materializeAttemptSource(ctx, live, handoff)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	projected, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: path})
+	if err != nil || len(projected) != 1 {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	reply, err := api.NewAttemptSourceReply(projected[0])
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -920,21 +986,17 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	parent := daemon.changeParent.Load()
-	if parent == nil {
-		return newErrorReply(api.RemoteUnavailable)
-	}
 	daemon.attemptMu.Lock()
 	live := daemon.attempts[authority.RunID]
-	var allowed []kernel.RetainedChangeHandoff
+	var snapshots map[kernel.RetainedChangeHandoff]string
 	if live != nil {
-		allowed = append([]kernel.RetainedChangeHandoff(nil), live.sourceHandoffs...)
+		snapshots = maps.Clone(live.sourceSnapshots)
 	}
 	daemon.attemptMu.Unlock()
 	if live == nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
-	projected, err := projectOverseerSnapshot(snapshot, *parent, allowed)
+	projected, err := projectOverseerSnapshot(snapshot, snapshots)
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}

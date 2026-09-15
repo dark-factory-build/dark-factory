@@ -39,6 +39,7 @@ const (
 
 	usage = `usage:
   factoryctl attempt task
+  factoryctl attempt source --task ID
   factoryctl attempt succeed [--result TEXT]
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
@@ -96,6 +97,7 @@ const (
 	commandPeerAnswer
 	commandSendBack
 	commandAttemptTask
+	commandAttemptSource
 	commandWebStatus
 	commandWebListClients
 	commandWebRevoke
@@ -258,6 +260,14 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		}
 		return writeJSON(stdout, result)
 	}
+	if command.kind == commandAttemptSource {
+		result, sourceErr := client.Source(callContext, command.id)
+		if sourceErr != nil {
+			writeFailure(stderr, command.kind, sourceErr)
+			return exitFailure
+		}
+		return writeJSON(stdout, result)
+	}
 	if command.kind == commandPeerStatus {
 		result, statusErr := client.PeerStatusPage(callContext, command.offset, command.textOffset, command.head)
 		if statusErr != nil {
@@ -338,7 +348,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) == 3 && helpFlag(args[2]) {
 		switch args[1] {
-		case "task", "succeed", "block", "fail", "request-human", "send-back", "peer":
+		case "task", "source", "succeed", "block", "fail", "request-human", "send-back", "peer":
 			return attemptCommand{}, true, true
 		case "status", "list-clients", "revoke":
 			if args[0] == "web" {
@@ -356,6 +366,10 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	case "task":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandAttemptTask}, false, true
+		}
+	case "source":
+		if len(args) == 4 && args[2] == "--task" && validHumanRequestKey(args[3]) {
+			return attemptCommand{kind: commandAttemptSource, id: args[3]}, false, true
 		}
 	case "succeed":
 		if len(args) == 2 {
@@ -1196,6 +1210,8 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 	subject, input := "outcome request", "attempt input"
 	if kind == commandAttemptTask {
 		subject = "task request"
+	} else if kind == commandAttemptSource {
+		subject, input = "source request", "source request input"
 	} else if kind == commandRequestHuman {
 		subject, input = "human request", "human request input"
 	} else if kind == commandPeerStatus || kind == commandPeerAsk || kind == commandPeerAnswer {
