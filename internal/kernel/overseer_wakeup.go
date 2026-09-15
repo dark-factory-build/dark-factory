@@ -82,6 +82,10 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			if err != nil {
 				return nil, tx.Rollback(err)
 			}
+			if prior == nil {
+				fullReconciliation = true
+				targets = nil
+			}
 			body, fits := overseerWakeInstruction(agent.Provider, agent.Idle.Instruction, targets, prior, fullReconciliation)
 			if !fits {
 				// Retaining every causal identity would exceed the exact task-delivery
@@ -121,7 +125,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID AgentID) (*TaskID, error) {
 	var raw []byte
 	err := connection.QueryRowContext(ctx, `SELECT t.id FROM runs AS r JOIN tasks AS t ON t.id = r.task_id
-		WHERE r.agent_id = ? AND r.role = 'orchestrator' AND r.phase = 'terminal'
+		WHERE r.agent_id = ? AND r.role = 'orchestrator' AND r.phase = 'terminal' AND t.status = 'succeeded' AND t.result IS NOT NULL AND length(trim(t.result)) > 0
 		ORDER BY r.terminal_at_ms DESC, r.id DESC LIMIT 1`, agentID.Bytes()).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return nil, nil

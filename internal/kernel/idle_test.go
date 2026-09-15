@@ -177,7 +177,7 @@ func TestOverseerWakeupConsumesWorkerEventsAndLeavesEventsDuringItsRunPending(t 
 	if err != nil || len(first) != 1 {
 		t.Fatalf("worker wake = %+v, %v", first, err)
 	}
-	if want := "Factory causal wake: mode=targeted; task_ids=" + workerTaskID.String() + "; prior_task_id=. Read prior_task_id first when present, then each named task, without --head"; !strings.Contains(first[0].Body, want) {
+	if want := "Factory causal wake: mode=full; task_ids=; prior_task_id=. Read prior_task_id first when present, then each named task, without --head"; !strings.Contains(first[0].Body, want) {
 		t.Fatalf("causal wake lost its fixed target: %q, want %q", first[0].Body, want)
 	}
 	keys := admissionKeys(t, 85, nil)
