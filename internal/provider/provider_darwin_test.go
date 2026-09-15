@@ -782,6 +782,9 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(policy, `"/System/Library/OpenSSL/openssl.cnf"="read"`) || strings.Contains(policy, `"/System/Library/OpenSSL"="read"`) {
+		t.Fatal("OpenSSL configuration permission must name only the file")
+	}
 	for _, root := range filepath.SplitList(runtime.toolchainReadRoots) {
 		if !strings.Contains(policy, tomlBasicString(root)+`="read"`) || strings.Contains(policy, tomlBasicString(root)+`="write"`) {
 			t.Fatalf("software root permissions: %s", policy)
@@ -891,8 +894,9 @@ func TestCodexToolchainSandbox(t *testing.T) {
 		if !install.ValidToolPath(request.runtime.toolPath) {
 			t.Fatal("set exact DARK_FACTORY_TEST_TOOL_PATH")
 		}
-		// Task-local settings avoid loading operator Go/OpenSSL configuration.
-		out, err := run("/bin/sh", "-c", `set -eu; export OPENSSL_CONF=/dev/null GOENV=off GOTOOLCHAIN=local; node --version; corepack --version; corepack pnpm@11.19.0 --version; go version; printf 'package main\nfunc main() {}\n' > main.go; go run main.go`)
+		// Keep Go local, but exercise Node with the actual launch environment.
+		// Overriding OPENSSL_CONF here would hide a production permission failure.
+		out, err := run("/bin/sh", "-c", `set -eu; export GOENV=off GOTOOLCHAIN=local; node --version; corepack --version; corepack pnpm@11.19.0 --version; go version; printf 'package main\nfunc main() {}\n' > main.go; go run main.go`)
 		if err != nil {
 			t.Fatalf("installed toolchain: %v\n%s", err, out)
 		}
