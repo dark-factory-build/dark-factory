@@ -67,7 +67,8 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   const css = readFileSync(new URL("../src/factory-console.css", import.meta.url), "utf8");
   assert.match(css, /\.dfFactoryConsole :where\(h1, h2, p, dl, ul\),[\s\S]*?\.dfConsoleSidebar :where\(h1, h2, h3, p, dl, ul\)\s*\{\s*margin: 0;\s*\}/);
   assert.match(css, /\.dfFactoryConsole__error\s*\{[\s\S]*?margin: 0 auto 1\.25rem;/);
-  assert.match(css, /\.dfFactoryFloor__scene \{ overflow-x: auto; \}/);
+  assert.match(css, /\.dfFactoryFloor__map \{ overflow: auto; max-height: 70vh;/);
+  assert.match(render(), /class="dfFactoryFloor__map" role="region" aria-label="Scrollable codebase floor" tabindex="0"/);
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
 });
 
@@ -381,7 +382,7 @@ test("served hierarchy remains navigable across different repository shapes", ()
       const children = topology.nodes.filter((node) => node.parent_id === parent.id);
       const view = floorScene(state, topologies, undefined, undefined, `${ids.project}:${parent.id}`);
       assert.deepEqual(new Set(view.topology.nodes.map((node) => node.id)),
-        new Set((parent.kind === "module" && children.length > 0 ? children : [parent, ...children]).map((node) => `${ids.project}:${node.id}`)));
+        new Set((children.some((child) => child.path === parent.path) ? children : [parent, ...children]).map((node) => `${ids.project}:${node.id}`)));
       assert.equal(view.navigation.omittedChildren, 0);
     }
   }
@@ -1799,17 +1800,24 @@ test("mobile Floor and Agents tabs track both directions and restore after Tasks
 });
 
 
-test("breadcrumb-only modules use all 24 room slots and report overflow exactly", () => {
+test("same-path breadcrumb modules and direct-content modules account for page capacity", () => {
   const root = fixtureTopology.nodes[0];
   const module = { ...fixtureTopology.nodes[1], kind: "module" };
-  for (const count of [24, 25]) {
+  for (const samePath of [false, true]) for (const count of [24, 25]) {
     const children = Array.from({ length: count }, (_, index) => ({
-      id: String(index).padStart(64, "0"), parent_id: module.id, kind: "directory", path: `${module.path}/child-${index}`, label: `Child ${index}`, language: "", size_bucket: "tiny",
+      id: String(index).padStart(64, "0"), parent_id: module.id, kind: index === 0 && samePath ? "package" : "directory", path: index === 0 && samePath ? module.path : `${module.path}/child-${index}`, label: `Child ${index}`, language: "", size_bucket: "tiny",
     }));
-    const scene = floorScene(fixtureState, served({ ...fixtureTopology, nodes: [root, module, ...children] }), undefined, undefined, `${ids.project}:${module.id}`);
+    const topologies = served({ ...fixtureTopology, nodes: [root, module, ...children] });
+    const scope = `${ids.project}:${module.id}`;
+    const scene = floorScene(fixtureState, topologies, undefined, undefined, scope);
+    const capacity = samePath ? 24 : 23;
     assert.equal(scene.topology.nodes.length, 24);
-    assert.equal(scene.navigation.omittedChildren, count - 24);
-    assert.equal(scene.topology.nodes.some((room) => room.id === `${ids.project}:${module.id}`), false);
+    assert.equal(scene.navigation.omittedChildren, count - capacity);
+    assert.equal(scene.topology.nodes.some((room) => room.id === scope), !samePath);
+    assert.equal(scene.navigation.breadcrumbs.at(-1).id, scope);
+    const pages = Array.from({ length: scene.navigation.pageCount }, (_, page) => floorScene(fixtureState, topologies, undefined, undefined, scope, page));
+    const visible = new Set(pages.flatMap((page) => page.topology.nodes.map((node) => node.id)));
+    for (const child of children) assert.ok(visible.has(`${ids.project}:${child.id}`), "every child remains accessible across pages");
   }
 });
 
