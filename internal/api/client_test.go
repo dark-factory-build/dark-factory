@@ -374,6 +374,21 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 	}
 }
 
+func TestOperatorDiscoverAccountsRejectsForwardJump(t *testing.T) {
+	bearer := testCredential('A')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireOperatorDomain, successResponse(`{"accounts":[{"provider":"codex","home":"/Users/operator/.codex","label":"codex"}],"next_offset":2}`))
+	})
+	client, err := NewOperatorClient(fixture.socket, fixture.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.DiscoverAccounts(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("forward cursor error = %v, want protocol error", err)
+	}
+	fixture.wait(t)
+}
+
 func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) {
 	attemptBearer := testCredential('A')
 	operatorBearer := testCredential('O')

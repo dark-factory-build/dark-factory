@@ -1255,8 +1255,8 @@ func (current *connection) write(payload []byte) error {
 }
 
 // writeSnapshot is the only outbound path allowed past MaxControlBytes, and
-// STATE_SNAPSHOT and TOPOLOGY are its only frames. Every other frame in either
-// direction stays inside the 64 KiB control bound.
+// STATE_SNAPSHOT, TOPOLOGY and ACCOUNTS are the frames allowed past the
+// control bound. Every other frame in either direction stays inside 64 KiB.
 func (current *connection) writeSnapshot(payload []byte) error {
 	if len(payload) == 0 || len(payload) > browserprotocol.MaxSnapshotBytes {
 		return fmt.Errorf("invalid outbound snapshot frame")

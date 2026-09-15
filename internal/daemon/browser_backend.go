@@ -733,18 +733,9 @@ func (backend *browserBackend) DiscoverAccounts(ctx context.Context, rawClient [
 		return browserprotocol.Accounts{}, mapBrowserError(err)
 	}
 	found := backend.owner.listedAccounts(home, linked)
-	start := int(request.Offset)
-	if start > len(found) {
+	result, err := browserprotocol.PageAccounts(found, request.Offset)
+	if err != nil {
 		return browserprotocol.Accounts{}, browser.ErrStale
-	}
-	end := start + browserprotocol.MaxSnapshotEntities
-	if end > len(found) {
-		end = len(found)
-	}
-	result := browserprotocol.Accounts{Accounts: found[start:end]}
-	if end < len(found) {
-		next := uint32(end)
-		result.NextOffset = &next
 	}
 	return result, nil
 }

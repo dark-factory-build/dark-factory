@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
@@ -517,21 +518,17 @@ func (daemon *Daemon) discoverOperatorAccounts(ctx context.Context, offset uint3
 		return newErrorReply(remoteErrorCode(err))
 	}
 	found := daemon.listedAccounts(home, linked)
-	start := int(offset)
-	if start > len(found) {
+	protocolFound := make([]browserprotocol.DiscoveredAccount, 0, len(found))
+	for _, candidate := range found {
+		protocolFound = append(protocolFound, browserprotocol.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort, LinkedID: candidate.LinkedID, UnavailableReason: candidate.UnavailableReason})
+	}
+	page, err := browserprotocol.PageAccounts(protocolFound, offset)
+	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	end := start + 4096
-	if end > len(found) {
-		end = len(found)
-	}
-	accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, 0, end-start)}
-	for _, candidate := range found[start:end] {
+	accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, 0, len(page.Accounts)), NextOffset: page.NextOffset}
+	for _, candidate := range page.Accounts {
 		accounts.Accounts = append(accounts.Accounts, api.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort, LinkedID: candidate.LinkedID, UnavailableReason: candidate.UnavailableReason})
-	}
-	if end < len(found) {
-		next := uint32(end)
-		accounts.NextOffset = &next
 	}
 	reply, err := api.NewAccountsReply(accounts)
 	if err != nil {

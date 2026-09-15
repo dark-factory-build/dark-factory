@@ -183,7 +183,7 @@ func (client *OperatorClient) DiscoverAccounts(ctx context.Context) (Accounts, e
 		if page.NextOffset == nil {
 			return Accounts{Accounts: accounts}, nil
 		}
-		if *page.NextOffset <= offset {
+		if uint64(*page.NextOffset) != uint64(offset)+uint64(len(page.Accounts)) || len(page.Accounts) == 0 {
 			return Accounts{}, ErrProtocol
 		}
 		offset = *page.NextOffset

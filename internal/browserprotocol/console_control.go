@@ -1,6 +1,7 @@
 package browserprotocol
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -137,6 +138,62 @@ type DiscoveredAccount struct {
 type Accounts struct {
 	Accounts   []DiscoveredAccount `json:"accounts"`
 	NextOffset *uint32             `json:"next_offset,omitempty"`
+}
+
+// PageAccounts returns one complete, byte-bounded account page. The offset is
+// cumulative; it is never a per-page entity number.
+func PageAccounts(all []DiscoveredAccount, offset uint32) (Accounts, error) {
+	if uint64(offset) > uint64(len(all)) {
+		return Accounts{}, ErrMalformed
+	}
+	// Account entries are independent JSON values. Track their exact encoded
+	// bytes instead of repeatedly encoding the growing page (which is
+	// quadratic for a large observation). The maximum cursor allowance covers
+	// every uint32 cursor; the finished page is still encoded and validated.
+	maximumCursor := uint32(^uint32(0))
+	withCursor, err := EncodeAccounts("accounts", Accounts{Accounts: []DiscoveredAccount{}, NextOffset: &maximumCursor})
+	if err != nil {
+		return Accounts{}, err
+	}
+	baseBytes := len(withCursor)
+	page := Accounts{Accounts: make([]DiscoveredAccount, 0, MaxSnapshotEntities)}
+	entryBytes := 0
+	for index := int(offset); index < len(all) && len(page.Accounts) < MaxSnapshotEntities; index++ {
+		if err := ValidDiscoveredAccount(all[index]); err != nil {
+			return Accounts{}, err
+		}
+		encoded, err := json.Marshal(all[index])
+		if err != nil {
+			return Accounts{}, fmt.Errorf("%w: account: %v", ErrMalformed, err)
+		}
+		separator := 0
+		if len(page.Accounts) != 0 {
+			separator = 1
+		}
+		// Leave room for the local API response envelope too. The browser
+		// frame and the API frame must both carry the same complete page.
+		if baseBytes+entryBytes+separator+len(encoded)+1024 > MaxSnapshotBytes {
+			if len(page.Accounts) == 0 {
+				return Accounts{}, ErrOversized
+			}
+			break
+		}
+		page.Accounts = append(page.Accounts, all[index])
+		entryBytes += separator + len(encoded)
+	}
+	end := int(offset) + len(page.Accounts)
+	if end < len(all) {
+		next := uint32(end)
+		page.NextOffset = &next
+	}
+	encoded, err := EncodeAccounts("accounts", page)
+	if err != nil {
+		return Accounts{}, err
+	}
+	if len(encoded)+1024 > MaxSnapshotBytes {
+		return Accounts{}, ErrOversized
+	}
+	return page, nil
 }
 
 // AccountLink registers one login that already exists. Starting a new CLI

@@ -518,8 +518,8 @@ func TestBrowserAccountsPagesAccumulatedUnavailableProjection(t *testing.T) {
 	accountHomeFixture(t, fixture)
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
-	seen := make(map[string]bool, browserprotocol.MaxSnapshotEntities)
-	for index := 0; index < browserprotocol.MaxSnapshotEntities-1; index++ {
+	seen := make(map[string]bool, browserprotocol.MaxSnapshotEntities*2+1)
+	for index := 0; index < browserprotocol.MaxSnapshotEntities*2; index++ {
 		raw := make([]byte, kernel.IDBytes)
 		binary.BigEndian.PutUint32(raw[len(raw)-4:], uint32(index+1))
 		id, err := kernel.AccountIDFromBytes(raw)
@@ -535,42 +535,66 @@ func TestBrowserAccountsPagesAccumulatedUnavailableProjection(t *testing.T) {
 		}
 		seen[account.ID.String()] = true
 	}
-	accounts, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
-	if err != nil || len(accounts.Accounts) != browserprotocol.MaxSnapshotEntities {
-		t.Fatalf("fitting projection = %d accounts, %v", len(accounts.Accounts), err)
+	expectedIDs := make(map[string]bool, len(seen))
+	for id := range seen {
+		expectedIDs[id] = true
 	}
-	for _, account := range accounts.Accounts {
-		if !seen[account.LinkedID] {
-			continue
+	readAll := func() map[string]bool {
+		read := make(map[string]bool)
+		remaining := make(map[string]bool, len(expectedIDs))
+		for id := range expectedIDs {
+			remaining[id] = true
 		}
-		if account.UnavailableReason != "login is no longer discoverable" {
-			t.Fatalf("unavailable account = %+v", account)
+		var offset uint32
+		for {
+			page, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{Offset: offset})
+			if err != nil {
+				t.Fatalf("discover page at %d: %v", offset, err)
+			}
+			wire, err := browserprotocol.EncodeAccounts("accounts", page)
+			if err != nil || len(wire) > browserprotocol.MaxSnapshotBytes {
+				t.Fatalf("page at %d exceeds bound: %d bytes, %v", offset, len(wire), err)
+			}
+			for _, account := range page.Accounts {
+				if expected, ok := remaining[account.LinkedID]; ok && expected {
+					if account.UnavailableReason != "login is no longer discoverable" {
+						t.Fatalf("unavailable account = %+v", account)
+					}
+					delete(remaining, account.LinkedID)
+				}
+				read[account.Home] = true
+			}
+			if page.NextOffset == nil {
+				if len(remaining) != 0 {
+					t.Fatalf("page sequence omitted %d unavailable identities", len(remaining))
+				}
+				return read
+			}
+			if *page.NextOffset != offset+uint32(len(page.Accounts)) || len(page.Accounts) == 0 {
+				t.Fatalf("non-contiguous cursor at %d: page=%d next=%d", offset, len(page.Accounts), *page.NextOffset)
+			}
+			offset = *page.NextOffset
 		}
-		delete(seen, account.LinkedID)
 	}
-	if len(seen) != 0 {
-		t.Fatalf("unavailable identities were omitted: %d", len(seen))
+	before := readAll()
+	if len(before) != browserprotocol.MaxSnapshotEntities*2+1 {
+		t.Fatalf("before adding row omitted %d identities or read %d accounts", len(seen), len(before))
 	}
 
 	raw := make([]byte, kernel.IDBytes)
-	binary.BigEndian.PutUint32(raw[len(raw)-4:], browserprotocol.MaxSnapshotEntities)
+	binary.BigEndian.PutUint32(raw[len(raw)-4:], browserprotocol.MaxSnapshotEntities*2+1)
 	id, err := kernel.AccountIDFromBytes(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: kernel.ProviderCodex, Home: "/Users/operator/.codex-missing-overflow", Label: "missing-overflow"}, adapterTime(t, 10_000)); err != nil {
+	account, err := fixture.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: kernel.ProviderCodex, Home: "/Users/operator/.codex-missing-overflow", Label: "missing-overflow"}, adapterTime(t, 10_000))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if accounts.NextOffset != nil {
-		t.Fatal("fitting projection unexpectedly paged")
-	}
-	first, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
-	if err != nil || first.NextOffset == nil || len(first.Accounts) != browserprotocol.MaxSnapshotEntities {
-		t.Fatalf("overflow first page = %+v, %v", first, err)
-	}
-	last, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{Offset: *first.NextOffset})
-	if err != nil || len(last.Accounts) != 1 || last.NextOffset != nil {
-		t.Fatalf("overflow continuation = %+v, %v", last, err)
+	expectedIDs[account.ID.String()] = true
+	after := readAll()
+	if len(after) != browserprotocol.MaxSnapshotEntities*2+2 {
+		t.Fatalf("after adding row omitted %d identities or read %d accounts", len(seen), len(after))
 	}
 }
 

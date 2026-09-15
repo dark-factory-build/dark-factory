@@ -426,7 +426,7 @@ export class BrowserSession {
       const page = await this.#accountRequest<AccountsBody>("ACCOUNTS", CAPABILITIES.administration, "accounts", (id) => encodeClientControl({ type: "ACCOUNTS_DISCOVER", id, body: offset === 0 ? {} : { offset } }));
       accounts.push(...page.accounts);
       if (page.next_offset === undefined) return Object.freeze(accounts.map((account) => Object.freeze({ ...account })));
-      if (page.next_offset <= offset) throw new ProtocolError("malformed");
+      if (page.accounts.length === 0 || page.next_offset !== offset + page.accounts.length) throw new ProtocolError("malformed");
       offset = page.next_offset;
     }
   }
