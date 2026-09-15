@@ -166,12 +166,18 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?:
   const validScope = scopeId !== undefined && roomByID.has(scopeId) ? scopeId : undefined;
   const scope = validScope === undefined ? undefined : roomByID.get(validScope)!;
   const scopeChildren = scope === undefined ? hierarchies.map((hierarchy) => hierarchy.projectRoom) : children.get(scope.id) ?? [];
-  const showScope = scope !== undefined && (scope.kind !== "module" || scopeChildren.length === 0);
+  const showScope = scope !== undefined && !scopeChildren.some((child) => child.path === scope.path);
   const roomLimit = MAX_SCOPE_ROOMS - (showScope ? 1 : 0);
   const pageCount = Math.max(1, Math.ceil(scopeChildren.length / roomLimit));
   const page = scopeId !== validScope || !Number.isFinite(requestedPage) ? 0 : Math.max(0, Math.min(pageCount - 1, Math.floor(requestedPage)));
   const pageChildren = scopeChildren.slice(page * roomLimit, (page + 1) * roomLimit);
-  const rooms = showScope ? [scope, ...pageChildren] : pageChildren;
+  // Counts belong to physical paths. A same-path child represents a hidden
+  // wrapper's direct files when its sibling subtrees are displayed separately.
+  const splitContents = scope !== undefined && scopeChildren.some((child) => child.path !== scope.path);
+  const rooms: SceneNode[] = (showScope ? [scope, ...pageChildren] : pageChildren).map((room) => ({
+    ...room,
+    inventoryScope: splitContents && room.path === scope?.path ? "direct" : "subtree",
+  }));
   const kept = new Set(rooms.map((room) => room.id));
   const visibleAncestor = (id: string | undefined): string | undefined => {
     let room = id === undefined ? undefined : roomByID.get(id);

@@ -1738,12 +1738,13 @@ test("floor omits the global evidence essay", () => {
 });
 
 
-test("a viewed module is a breadcrumb, not a room beside its children", () => {
+test("a viewed module shows direct contents beside distinct child subtrees", () => {
   const module = { ...fixtureTopology.nodes[1], kind: "module", label: "example.org/workshop/core" };
   const topology = served({ ...fixtureTopology, nodes: fixtureTopology.nodes.map((node) => node.id === module.id ? module : node) });
   const scope = `${ids.project}:${module.id}`;
   const scene = floorScene(fixtureState, topology, undefined, undefined, scope);
-  assert.deepEqual(scene.topology.nodes.map((node) => node.label), ["store"]);
+  assert.deepEqual(scene.topology.nodes.map((node) => node.label), [module.label, "store"]);
+  assert.deepEqual(scene.topology.nodes.map((node) => node.inventoryScope), ["direct", "subtree"]);
   assert.equal(scene.navigation.breadcrumbs.at(-1).label, module.label);
   assert.equal(scene.navigation.backScopeId, `${ids.project}:${module.parent_id}`);
   const task = fixtureState.tasks.get(ids.task);
@@ -1752,7 +1753,7 @@ test("a viewed module is a breadcrumb, not a room beside its children", () => {
   assert.deepEqual(working.topology, scene.topology);
   assert.equal(working.workers.find((worker) => worker.id === ids.agent).nodeId, scope);
   assert.equal(working.navigation.outsideScopeActivity, 0);
-  assert.equal(working.navigation.hiddenScopeActivity, 1);
+  assert.equal(working.navigation.hiddenScopeActivity, 0);
   assert.equal(working.workers.length, scene.workers.length);
   const leaf = `${ids.project}:${fixtureTopology.nodes[2].id}`;
   assert.deepEqual(floorScene(fixtureState, topology, undefined, undefined, leaf).topology.nodes.map((node) => node.id), [leaf]);
@@ -1984,4 +1985,35 @@ test("same-path observed roots choose package then module independent of served 
       assert.equal(scene.workers.find((worker) => worker.id === ids.agent).nodeId, task.displayRoomId);
     }
   }
+});
+
+test("same-path wrappers retain navigation without overlapping displayed physical inventory", () => {
+  const counts = (source) => ({ source, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 });
+  const inventory = { direct: counts(1), total: counts(7), samples: [], samples_omitted: 1 };
+  const root = { ...fixtureTopology.nodes[0], inventory };
+  const module = { ...root, id: "e1".repeat(32), parent_id: root.id, kind: "module", label: "root module" };
+  const pkg = { ...root, id: "e2".repeat(32), parent_id: module.id, kind: "package", label: "root package" };
+  const child = { ...root, id: "e3".repeat(32), parent_id: module.id, kind: "directory", path: "src", label: "source subtree", inventory: { direct: counts(6), total: counts(6), samples: [], samples_omitted: 6 } };
+  const topologies = served({ ...fixtureTopology, nodes: [root, module, pkg, child] });
+  const id = (node) => `${ids.project}:${node.id}`;
+  const overview = floorScene(fixtureState, topologies);
+  assert.equal(overview.topology.nodes.find((node) => node.id === id(root)).inventoryScope, "subtree");
+  const repository = floorScene(fixtureState, topologies, undefined, undefined, id(root));
+  assert.deepEqual(repository.topology.nodes.map((node) => [node.id, node.inventoryScope]), [[id(module), "subtree"]]);
+  assert.ok(repository.navigation.enterableIds.includes(id(module)));
+  const selected = floorScene(fixtureState, topologies, undefined, undefined, id(module));
+  assert.deepEqual(selected.topology.nodes.map((node) => [node.id, node.inventoryScope]), [[id(pkg), "direct"], [id(child), "subtree"]]);
+  assert.equal(selected.topology.nodes.reduce((sum, node) => sum + node.inventory[node.inventoryScope === "direct" ? "direct" : "total"].source, 0), 7);
+  assert.deepEqual(selected.navigation.breadcrumbs.map((crumb) => crumb.id), [undefined, id(root), id(module)]);
+  assert.equal(selected.navigation.backScopeId, id(root));
+  for (const node of [root, module, pkg, child]) {
+    const entered = floorScene(fixtureState, topologies, undefined, undefined, id(node));
+    assert.equal(entered.navigation.scopeId, id(node));
+    assert.equal(entered.navigation.breadcrumbs.at(-1).id, id(node));
+  }
+  const prepared = prepareFloor(fixtureState.projects, topologies);
+  assert.equal(prepared.roomByID.get(id(module)).parentId, id(root));
+  assert.equal(prepared.roomByID.get(id(pkg)).parentId, id(module));
+  assert.equal(prepared.roomByID.get(id(child)).parentId, id(module));
+  assert.equal(prepared.roomByID.get(id(root)).inventoryScope, undefined, "selection does not mutate prepared source facts");
 });
