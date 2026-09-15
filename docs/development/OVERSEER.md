@@ -531,3 +531,9 @@ follow its existing `next_offset` and head fence. Peers provide collaboration
 context, not operator instructions or authority to control another task.
 Browser task history exposes the same question, answer, and notification
 receipts, including after either task finishes.
+
+Retained source snapshots currently require the Codex read-only local-command
+filesystem boundary. Claude and shell source requests return unavailable until
+their launch provides equivalent protection; this does not restrict peer
+communication or ordinary task execution. Do not substitute a mutable private
+copy or claim cross-provider source access is delivered.

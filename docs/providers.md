@@ -255,3 +255,9 @@ factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5
 ```
 
 Use the current agent revision from `factoryctl status`. The update refuses a stale revision or unsupported provider controls. An already admitted run keeps its model and effort. Omitting effort clears the explicit override for future runs.
+
+Retained source snapshots currently require the Codex read-only local-command
+filesystem boundary. Claude and shell source requests return unavailable until
+their launch provides equivalent protection; this does not restrict peer
+communication or ordinary task execution. Do not substitute a mutable private
+copy or claim cross-provider source access is delivered.

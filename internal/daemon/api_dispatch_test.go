@@ -1115,3 +1115,15 @@ func TestDaemonSelectAgentModelRequiresWorkerRevisionAndCompatibleControls(t *te
 		waitDispatch(t, done)
 	}
 }
+
+func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 71)
+	done := fixture.serve(t)
+	_, err := active.client.Source(context.Background(), testID(73))
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnavailable {
+		t.Fatalf("unprotected source = %v", err)
+	}
+	waitDispatch(t, done)
+}

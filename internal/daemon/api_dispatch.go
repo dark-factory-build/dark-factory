@@ -309,6 +309,12 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	// Only the Codex launch currently enforces a read-only local-command
+	// boundary for this private snapshot. Claude and shell must not receive a
+	// mutable path described as an immutable source handoff.
+	if authority.Provider != kernel.ProviderCodex {
+		return newErrorReply(api.RemoteUnavailable)
+	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
