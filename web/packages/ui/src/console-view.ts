@@ -1,24 +1,9 @@
 import { MAX_SNAPSHOT_ENTITIES, type AgentItem, type StateView, type TaskItem, type TopologyView } from "@dark-factory/client";
 import { compareText, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
 
-/** Canonical statuses, plus legacy display names accepted by the public meter. */
-export type TaskStage = TaskItem["status"] | "building" | "done";
-
-export const STAGE_SEQUENCE: readonly TaskStage[] = ["queued", "building"];
-
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
 export type AgentStatus = "working" | "ready" | "needs-you" | "paused";
-
-/** Retained public display helper; internal consumers use the canonical status. */
-export function stageOfTask(task: TaskItem): TaskStage {
-  return task.status === "running" ? "building" : task.status === "succeeded" ? "done" : task.status;
-}
-
-/** Legacy display names and canonical statuses fill the same two segments. */
-export function stageMeterFill(stage: TaskStage): number {
-  return stage === "queued" ? 1 : stage === "running" || stage === "building" || stage === "succeeded" || stage === "done" ? STAGE_SEQUENCE.length : 0;
-}
 
 /** Tasks an agent is on right now (durable assignment, live statuses). */
 export function agentCurrentTask(agent: AgentItem, state: StateView): TaskItem | undefined {
@@ -159,25 +144,6 @@ export type RunPathSample = Readonly<{
   projectId: string;
   paths: readonly string[];
 }>;
-
-/**
- * The floor is a projection, never a second source of truth: every project is a
- * block of rooms taken from its own served topology, or the one room that
- * stands for a project whose structure the daemon has not served yet, and every
- * worker stands in the room of code its matching live run is changing. A
- * retained sample only annotates a resting worker. Without an observed path,
- * every role has an unknown location. Corridors show access, not dependencies.
- */
-export function floorScene(
-  state: StateView | undefined,
-  topologies: ReadonlyMap<string, TopologyView> | undefined,
-  runPaths?: ReadonlyMap<string, RunPathSample>,
-  lastRunPaths?: ReadonlyMap<string, RunPathSample>,
-  scopeId?: string,
-  requestedPage = 0,
-): FloorScene {
-  return projectFloor(state, selectFloor(prepareFloor(state?.projects, topologies), scopeId, requestedPage), runPaths, lastRunPaths);
-}
 
 /** Disposable hierarchy and dependency indexes, rebuilt only for new source facts. */
 export function prepareFloor(projectMap: StateView["projects"] | undefined, topologies: ReadonlyMap<string, TopologyView> | undefined) {

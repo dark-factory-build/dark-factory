@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  STAGE_SEQUENCE,
   agentActivity,
   agentStatus,
   agentCurrentTask,
@@ -9,8 +8,6 @@ import {
   factoryCounters,
   orderTasksForHome,
   primaryAgent,
-  stageMeterFill,
-  stageOfTask,
 } from "../dist/src/console-view.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
 
@@ -21,29 +18,6 @@ const idleAgentID = [...fixtureState.agents.keys()][2];
 function task(status, id = "77".repeat(16)) {
   return { id, project_id: "11".repeat(16), assigned_agent_id: agentID, title: "t", status, priority: 1, revision: 1n };
 }
-
-test("every durable task status maps to exactly one console stage", () => {
-  assert.equal(stageOfTask(task("queued")), "queued");
-  assert.equal(stageOfTask(task("running")), "building");
-  assert.equal(stageOfTask(task("blocked")), "blocked");
-  assert.equal(stageOfTask(task("succeeded")), "done");
-  assert.equal(stageOfTask(task("failed")), "failed");
-  assert.equal(stageOfTask(task("cancelled")), "cancelled");
-});
-
-test("meter fill is monotonic along the stage sequence, full for done, empty for failed", () => {
-  let previous = 0;
-  for (const stage of STAGE_SEQUENCE) {
-    const fill = stageMeterFill(stage);
-    assert.ok(fill > previous, stage);
-    previous = fill;
-  }
-  assert.equal(stageMeterFill("done"), STAGE_SEQUENCE.length);
-  assert.equal(stageMeterFill("failed"), 0);
-  assert.equal(stageMeterFill("cancelled"), 0);
-  assert.equal(stageMeterFill("succeeded"), stageMeterFill("done"));
-  assert.equal(stageMeterFill("running"), stageMeterFill("building"));
-});
 
 test("agent activity precedence: an open question outranks work, pause outranks waiting", () => {
   const state = fixtureState;

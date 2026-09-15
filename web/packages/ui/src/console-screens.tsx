@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AgentItem, HumanRequestItem, StateView, TaskItem, TopologyView } from "@dark-factory/client";
 import {
-  STAGE_SEQUENCE,
   agentStatus,
   agentActivity,
   agentCurrentTask,
@@ -10,9 +9,7 @@ import {
   prepareFloor,
   selectFloor,
   projectFloor,
-  stageMeterFill,
   type RunPathSample,
-  type TaskStage,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
 
@@ -100,12 +97,11 @@ function Counter({ glyph, label, alert }: { glyph: string; label: string; alert?
 }
 
 /** Segments fill only from durable task status. */
-export function StageMeter({ stage }: { stage: TaskStage }) {
-  const filled = stageMeterFill(stage);
-  const marker = stage === "succeeded" ? "done" : stage;
+export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
+  const filled = stage === "queued" ? 1 : stage === "running" || stage === "succeeded" ? 2 : 0;
   return (
     <span className="dfStageMeter" role="img" aria-label={`stage: ${stage}`}>
-      {STAGE_SEQUENCE.map((name, index) => (
+      {["queued", "running"].map((name, index) => (
         <span
           key={name}
           className={`dfStageMeter__segment${index < filled ? " dfStageMeter__segment--filled" : ""}`}
@@ -113,10 +109,10 @@ export function StageMeter({ stage }: { stage: TaskStage }) {
         />
       ))}
       <span
-        className={`dfStageMeter__terminal${marker === "blocked" ? " dfStageMeter__terminal--blocked" : ""}${marker === "done" ? " dfStageMeter__terminal--done" : ""}${marker === "failed" ? " dfStageMeter__terminal--failed" : ""}`}
+        className={`dfStageMeter__terminal${stage === "blocked" ? " dfStageMeter__terminal--blocked" : ""}${stage === "succeeded" ? " dfStageMeter__terminal--done" : ""}${stage === "failed" ? " dfStageMeter__terminal--failed" : ""}`}
         aria-hidden="true"
       >
-        {marker === "blocked" ? "!" : marker === "done" ? "✓" : marker === "failed" ? "×" : marker === "cancelled" ? "−" : ""}
+        {stage === "blocked" ? "!" : stage === "succeeded" ? "✓" : stage === "failed" ? "×" : stage === "cancelled" ? "−" : ""}
       </span>
     </span>
   );
