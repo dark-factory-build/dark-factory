@@ -329,7 +329,7 @@ func TestUpdateAgentForOverseerOnlyControlsWorkerLifecycle(t *testing.T) {
 	}
 }
 
-func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrIncomplete(t *testing.T) {
+func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
 	store, _, _, worker := newAdmissionStore(t, RoleWorker, 2)
 	defer store.Close()
 	ctx := context.Background()
@@ -341,8 +341,9 @@ func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrIncomplete(t *testing.T)
 	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget}, mustTime(t, 7)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale policy = %v", err)
 	}
-	if _, err := store.UpdateAgent(ctx, worker.ID, updated.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after}, mustTime(t, 8)); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("incomplete policy = %v", err)
+	emptyInstruction := ""
+	if _, err := store.UpdateAgent(ctx, worker.ID, updated.Revision, AgentPatch{IdleInstruction: &emptyInstruction}, mustTime(t, 8)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("empty standing instruction = %v", err)
 	}
 }
 
