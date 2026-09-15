@@ -99,6 +99,10 @@ func (store *Store) EnqueueIdleInstructions(ctx context.Context, at UnixMillis) 
 }
 
 func enqueueStandingTask(ctx context.Context, connection *sql.Conn, agent Agent, at UnixMillis) (Task, error) {
+	return enqueueStandingTaskWithBody(ctx, connection, agent, agent.Idle.Instruction, at)
+}
+
+func enqueueStandingTaskWithBody(ctx context.Context, connection *sql.Conn, agent Agent, body string, at UnixMillis) (Task, error) {
 	var ids [2][IDBytes]byte
 	for index := range ids {
 		if _, err := rand.Read(ids[index][:]); err != nil || ids[index] == [IDBytes]byte{} {
@@ -110,7 +114,7 @@ func enqueueStandingTask(ctx context.Context, connection *sql.Conn, agent Agent,
 	}
 	taskID, _ := TaskIDFromBytes(ids[0][:])
 	incarnationID, _ := IncarnationIDFromBytes(ids[1][:])
-	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Standing instruction", Body: agent.Idle.Instruction, Priority: 0}
+	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Standing instruction", Body: body, Priority: 0}
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, err
 	}
