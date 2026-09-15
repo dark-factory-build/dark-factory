@@ -1990,7 +1990,9 @@ test("same-path observed roots choose package then module independent of served 
       assert.deepEqual(task.roomIds, [exact]);
       assert.equal(task.representativeRoomId, exact);
       assert.equal(task.displayRoomId, `${ids.project}:${display}`);
-      assert.equal(scene.workers.find((worker) => worker.id === ids.agent).nodeId, task.displayRoomId);
+      const worker = scene.workers.find((worker) => worker.id === ids.agent);
+      assert.equal(worker.nodeId, task.displayRoomId);
+      assert.equal(worker.observedBayId, scope === `${ids.project}:${root.id}` && nodes.includes(pkg) ? exact : undefined, "only an exact direct child is placed in a pictured bay");
     }
   }
 });

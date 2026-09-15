@@ -275,7 +275,13 @@ export function projectFloor(state: StateView | undefined, selected: ReturnType<
       paused: agent.paused,
       location,
       ...(room === undefined ? {} : { locationLabel: room.label }),
-      ...(location === "working" && live !== undefined ? { nodeId: display ?? live, locationWithin: display !== undefined && display !== displayedObservation } : {}),
+      ...(location === "working" && live !== undefined ? {
+        nodeId: display ?? live,
+        locationWithin: display !== undefined && display !== displayedObservation,
+        // An ancestor summary is not evidence that an arbitrary descendant is
+        // pictured. Only its exact direct child may receive a named bay.
+        ...(display !== undefined && roomByID.get(live)?.parentId === display ? { observedBayId: live } : {}),
+      } : {}),
     };
   });
   const observedTasks = tasks.filter((task) => task.status === "running" && task.roomIds.length > 0);
