@@ -29,9 +29,13 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 		})
 	}
 	for _, agent := range snapshot.Agents {
+		accountID := ""
+		if agent.AccountID != (kernel.AccountID{}) {
+			accountID = agent.AccountID.String()
+		}
 		result.Agents = append(result.Agents, api.AgentSummary{
 			ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
-			Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64()),
+			Role: agent.Role, Provider: agent.Provider, AccountID: accountID, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64()),
 		})
 	}
 	for _, task := range snapshot.Tasks {
@@ -118,6 +122,14 @@ func parseAgentID(value string) (kernel.AgentID, error) {
 		return kernel.AgentID{}, err
 	}
 	return kernel.AgentIDFromBytes(decoded)
+}
+
+func parseAccountID(value string) (kernel.AccountID, error) {
+	decoded, err := parseID(value)
+	if err != nil {
+		return kernel.AccountID{}, err
+	}
+	return kernel.AccountIDFromBytes(decoded)
 }
 
 func parseTaskID(value string) (kernel.TaskID, error) {

@@ -166,6 +166,38 @@ func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, 
 	return result, nil
 }
 
+func (client *OperatorClient) DiscoverAccounts(ctx context.Context) (Accounts, error) {
+	var result Accounts
+	if err := client.client.call(ctx, "accounts_discover", struct{}{}, &result); err != nil {
+		return Accounts{}, err
+	}
+	if !validAccounts(result) {
+		return Accounts{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) LinkAccount(ctx context.Context, input AccountLinkInput) (MutationResult, error) {
+	if !validAccountLinkInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "account_link", input)
+}
+
+func (client *OperatorClient) SelectAgentAccount(ctx context.Context, input AgentAccountSelectInput) (MutationResult, error) {
+	if !validAgentAccountSelectInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "agent_select_account", input)
+}
+
+func (client *OperatorClient) SelectAgentModel(ctx context.Context, input AgentModelSelectInput) (MutationResult, error) {
+	if !validAgentModelSelectInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "agent_select_model", input)
+}
+
 func (client *OperatorClient) CreateProject(ctx context.Context, input CreateProjectInput) (MutationResult, error) {
 	if !validID(input.ID) || !validText(input.Name, 1, 128) || !validText(input.Root, 1, 4096) {
 		return MutationResult{}, ErrInvalidInput
@@ -849,7 +881,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		}
 	}
 	for _, agent := range snapshot.Agents {
-		if !validID(agent.ID) || !validID(agent.ProjectID) || !validText(agent.Name, 1, 128) || agent.Role != "worker" && agent.Role != "orchestrator" || !validProvider(agent.Provider) || agent.Revision == 0 {
+		if !validID(agent.ID) || !validID(agent.ProjectID) || !validText(agent.Name, 1, 128) || agent.Role != "worker" && agent.Role != "orchestrator" || !validProvider(agent.Provider) || agent.AccountID != "" && !validID(agent.AccountID) || agent.Revision == 0 {
 			return false
 		}
 	}

@@ -62,6 +62,12 @@ const (
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
   factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT --run-budget N
+
+  factoryctl account discover
+  factoryctl account list
+  factoryctl account link --provider claude_code|codex --home ABSOLUTE --label TEXT
+  factoryctl agent select-account --agent ID --revision REVISION --account ID
+  factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
   factoryctl task add --project ID --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
@@ -111,6 +117,11 @@ const (
 	commandProjectLimits
 	commandAgentCreate
 	commandAgentIdlePolicy
+	commandAccountsDiscover
+	commandAccountsList
+	commandAccountLink
+	commandAgentSelectAccount
+	commandAgentSelectModel
 	commandTaskAdd
 	commandTaskSendBack
 	commandDispatch
@@ -318,7 +329,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 1 && args[0] == "service" {
 		return parseServiceCommand(args)
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -742,7 +753,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 3 && helpFlag(args[2]) {
 		switch args[0] + " " + args[1] {
-		case "project create", "project limits", "agent create", "agent idle-policy", "task add", "task send-back":
+		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-account", "agent select-model", "account link", "task add", "task send-back":
 			return attemptCommand{}, true, true
 		}
 	}
@@ -768,6 +779,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 		return attemptCommand{}, false, false
 	}
+	if len(args) == 2 && args[0] == "account" && args[1] == "discover" {
+		return attemptCommand{kind: commandAccountsDiscover}, false, true
+	}
+	if len(args) == 2 && args[0] == "account" && args[1] == "list" {
+		return attemptCommand{kind: commandAccountsList}, false, true
+	}
 	if len(args) < 2 {
 		return attemptCommand{}, false, false
 	}
@@ -781,6 +798,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandAgentCreate
 	case "agent idle-policy":
 		command.kind = commandAgentIdlePolicy
+	case "agent select-account":
+		command.kind = commandAgentSelectAccount
+	case "agent select-model":
+		command.kind = commandAgentSelectModel
+	case "account link":
+		command.kind = commandAccountLink
 	case "task add":
 		command.kind = commandTaskAdd
 	case "task send-back":
@@ -823,8 +846,26 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.maxRunSeconds = uint32(seconds)
-		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy) && validHumanRequestKey(value):
+		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel) && validHumanRequestKey(value):
 			command.agent = value
+		case name == "--revision" && (command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel):
+			revision, ok := parseRevision(value)
+			if !ok {
+				return attemptCommand{}, false, false
+			}
+			command.expectedRevision = revision
+		case name == "--account" && command.kind == commandAgentSelectAccount && validHumanRequestKey(value):
+			command.account = value
+		case name == "--model" && command.kind == commandAgentSelectModel && validOperatorText(value, 1, 128):
+			command.model = value
+		case name == "--reasoning-effort" && command.kind == commandAgentSelectModel:
+			command.reasoningEffort = value
+		case name == "--provider" && command.kind == commandAccountLink && (value == "claude_code" || value == "codex"):
+			command.provider = value
+		case name == "--home" && command.kind == commandAccountLink && validHomeArg(value) && validOperatorText(value, 1, 1024):
+			command.root = value
+		case name == "--label" && command.kind == commandAccountLink && validOperatorText(value, 1, 128):
+			command.label = value
 		case name == "--role" && command.kind == commandAgentCreate && (value == "worker" || value == "orchestrator"):
 			command.role = value
 		case name == "--provider" && command.kind == commandAgentCreate:
@@ -896,6 +937,18 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandAgentIdlePolicy:
 		if command.agent == "" || command.expectedRevision == 0 || (command.provider != "wait" && command.provider != "standing_instruction") || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "" || command.toolBudget == 0)) {
+			return attemptCommand{}, false, false
+		}
+	case commandAgentSelectAccount:
+		if command.agent == "" || command.account == "" || command.expectedRevision == 0 {
+			return attemptCommand{}, false, false
+		}
+	case commandAgentSelectModel:
+		if command.agent == "" || command.model == "" || command.expectedRevision == 0 || !validReasoningEffort(command.reasoningEffort) {
+			return attemptCommand{}, false, false
+		}
+	case commandAccountLink:
+		if command.provider == "" || command.root == "" || command.label == "" {
 			return attemptCommand{}, false, false
 		}
 	case commandTaskAdd:
@@ -1133,6 +1186,15 @@ func validOperatorText(value string, minimum, maximum int) bool {
 	return len(value) >= minimum && len(value) <= maximum && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
 
+func validReasoningEffort(value string) bool {
+	switch value {
+	case "", "low", "medium", "high", "xhigh", "max", "ultra":
+		return true
+	default:
+		return false
+	}
+}
+
 func validBrowserClientID(value string) bool { return validHumanRequestKey(value) }
 
 func parseRevision(value string) (uint64, bool) {
@@ -1256,6 +1318,62 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "status", callErr)
 		}
 		return writeJSON(stdout, snapshot)
+	case commandAccountsDiscover:
+		accounts, callErr := client.DiscoverAccounts(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "account discover", callErr)
+		}
+		return writeJSON(stdout, accounts)
+	case commandAccountsList:
+		accounts, callErr := client.DiscoverAccounts(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "account list", callErr)
+		}
+		snapshot, callErr := client.Snapshot(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "account list", callErr)
+		}
+		type item struct {
+			api.DiscoveredAccount
+			State      string   `json:"state"`
+			Reason     string   `json:"reason"`
+			SelectedBy []string `json:"selected_by,omitempty"`
+		}
+		result := make([]item, 0, len(accounts.Accounts))
+		for _, account := range accounts.Accounts {
+			entry := item{DiscoveredAccount: account, State: "available", Reason: "not linked"}
+			if account.LinkedID != "" {
+				entry.State, entry.Reason = "linked", "linked but no idle worker selects it"
+				for _, agent := range snapshot.Agents {
+					if agent.AccountID == account.LinkedID {
+						entry.SelectedBy = append(entry.SelectedBy, agent.ID)
+					}
+				}
+				if len(entry.SelectedBy) != 0 {
+					entry.State, entry.Reason = "selected", "selected by existing worker"
+				}
+			}
+			result = append(result, entry)
+		}
+		return writeJSON(stdout, result)
+	case commandAccountLink:
+		result, callErr := client.LinkAccount(callContext, api.AccountLinkInput{Provider: command.provider, Home: command.root, Label: command.label})
+		if callErr != nil {
+			return writeWebFailure(stderr, "account link", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandAgentSelectAccount:
+		result, callErr := client.SelectAgentAccount(callContext, api.AgentAccountSelectInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, AccountID: command.account})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent select-account", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandAgentSelectModel:
+		result, callErr := client.SelectAgentModel(callContext, api.AgentModelSelectInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Model: command.model, ReasoningEffort: command.reasoningEffort})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent select-model", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandProjectCreate:
 		id, err := newOperatorID()
 		if err != nil {

@@ -123,6 +123,66 @@ type MutationResult struct {
 	HumanReply   *OverseerHumanReplyResult   `json:"human_reply,omitempty"`
 }
 
+// DiscoveredAccount is a non-secret identity published by a provider login.
+// It deliberately carries neither credentials nor credential-derived tokens.
+type DiscoveredAccount struct {
+	Provider               string `json:"provider"`
+	Home                   string `json:"home"`
+	Label                  string `json:"label"`
+	Email                  string `json:"email,omitempty"`
+	Organization           string `json:"organization,omitempty"`
+	DefaultModel           string `json:"default_model,omitempty"`
+	DefaultReasoningEffort string `json:"default_reasoning_effort,omitempty"`
+	LinkedID               string `json:"linked_id,omitempty"`
+}
+
+type Accounts struct {
+	Accounts []DiscoveredAccount `json:"accounts"`
+}
+
+type AccountLinkInput struct {
+	Provider string `json:"provider"`
+	Home     string `json:"home"`
+	Label    string `json:"label"`
+}
+type AgentAccountSelectInput struct {
+	AgentID          string `json:"agent_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	AccountID        string `json:"account_id"`
+}
+type AgentModelSelectInput struct {
+	AgentID          string `json:"agent_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Model            string `json:"model"`
+	ReasoningEffort  string `json:"reasoning_effort"`
+}
+
+func validDiscoveredAccount(value DiscoveredAccount) bool {
+	provider, err := kernel.ParseProvider(value.Provider)
+	return err == nil && provider != kernel.ProviderShell && validText(value.Home, 1, 1024) && value.Home[0] == '/' && validText(value.Label, 1, 128) &&
+		validText(value.Email, 0, 128) && validText(value.Organization, 0, 128) && validText(value.DefaultModel, 0, 128) && validText(value.DefaultReasoningEffort, 0, 128) && (value.LinkedID == "" || validID(value.LinkedID))
+}
+func validAccounts(value Accounts) bool {
+	if len(value.Accounts) > 4096 {
+		return false
+	}
+	for _, account := range value.Accounts {
+		if !validDiscoveredAccount(account) {
+			return false
+		}
+	}
+	return true
+}
+func validAccountLinkInput(value AccountLinkInput) bool {
+	return validDiscoveredAccount(DiscoveredAccount{Provider: value.Provider, Home: value.Home, Label: value.Label})
+}
+func validAgentAccountSelectInput(value AgentAccountSelectInput) bool {
+	return validID(value.AgentID) && validID(value.AccountID) && value.ExpectedRevision != 0
+}
+func validAgentModelSelectInput(value AgentModelSelectInput) bool {
+	return validID(value.AgentID) && value.ExpectedRevision != 0 && validText(value.Model, 1, 128) && validText(value.ReasoningEffort, 0, 128)
+}
+
 type OverseerHumanReplyResult struct {
 	RequestID string `json:"request_id"`
 	State     string `json:"state"`
@@ -208,6 +268,7 @@ type AgentSummary struct {
 	Name      string `json:"name"`
 	Role      string `json:"role"`
 	Provider  string `json:"provider"`
+	AccountID string `json:"account_id"`
 	Paused    bool   `json:"paused"`
 	Archived  bool   `json:"archived"`
 	Revision  uint64 `json:"revision"`

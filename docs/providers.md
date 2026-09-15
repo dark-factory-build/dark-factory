@@ -35,6 +35,16 @@ factoryctl agent create --project PROJECT_ID --name worker --provider codex --mo
 rejected for `shell`. Claude Code accepts `low`, `medium`, `high`, `xhigh`, or
 `max`; Codex additionally accepts `ultra`.
 
+An operator may set the model for an existing worker with its observed
+revision:
+
+```sh
+factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5.6-luna --reasoning-effort medium
+```
+
+The same provider validation applies. An admitted run retains its immutable
+model and effort, so the selection affects only future admissions.
+
 `--role orchestrator` names an overseer. A worker's run materializes a Change
 of the project and works there; an orchestrator's run binds no Change and is
 given its private runtime home as its working directory, from which it reads

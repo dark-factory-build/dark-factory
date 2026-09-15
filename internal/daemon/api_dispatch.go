@@ -170,6 +170,14 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.setDispatch(ctx, call)
 	case api.CallSetCapacity:
 		return daemon.setCapacity(ctx, call)
+	case api.CallAccountsDiscover:
+		return daemon.discoverOperatorAccounts(ctx)
+	case api.CallAccountLink:
+		return daemon.linkOperatorAccount(ctx, call)
+	case api.CallAgentSelectAccount:
+		return daemon.selectAgentAccount(ctx, call)
+	case api.CallAgentSelectModel:
+		return daemon.selectAgentModel(ctx, call)
 	case api.CallAttemptTask:
 		return daemon.attemptTask(ctx, call)
 	case api.CallRequestHuman:
@@ -493,6 +501,154 @@ func (daemon *Daemon) snapshot(ctx context.Context) api.Reply {
 		return newErrorReply(api.RemoteInternal)
 	}
 	return reply
+}
+
+// discoverOperatorAccounts uses the same bounded discovery boundary as the
+// browser: it names existing provider logins without reading token contents.
+func (daemon *Daemon) discoverOperatorAccounts(ctx context.Context) api.Reply {
+	home, err := operatorHome()
+	if err != nil {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	linked, err := daemon.store.ListAccounts(ctx)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	found := daemon.discoverAccounts(home)
+	accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, 0, len(found))}
+	for _, candidate := range found {
+		item := api.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort}
+		for _, account := range linked {
+			if account.Provider.String() == item.Provider && account.Home == item.Home {
+				item.LinkedID = account.ID.String()
+				item.Label = account.Label
+				break
+			}
+		}
+		accounts.Accounts = append(accounts.Accounts, item)
+	}
+	reply, err := api.NewAccountsReply(accounts)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
+}
+
+func (daemon *Daemon) linkOperatorAccount(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AccountLinkInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	provider, err := kernel.ParseProvider(input.Provider)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	home, err := operatorHome()
+	if err != nil {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	present := false
+	for _, candidate := range daemon.discoverAccounts(home) {
+		if candidate.Provider == input.Provider && candidate.Home == input.Home {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	var raw [kernel.IDBytes]byte
+	if _, err := rand.Read(raw[:]); err != nil || raw == ([kernel.IDBytes]byte{}) {
+		return newErrorReply(api.RemoteInternal)
+	}
+	id, err := kernel.AccountIDFromBytes(raw[:])
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	account, err := daemon.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: provider, Home: input.Home, Label: input.Label}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.mutation(ctx, account.Revision)
+}
+
+func (daemon *Daemon) selectAgentAccount(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AgentAccountSelectInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agentID, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	accountID, err := parseAccountID(input.AccountID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agent, found, err := daemon.store.Agent(ctx, agentID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	if agent.Role != kernel.RoleWorker || agent.Archived {
+		return newErrorReply(api.RemoteConflict)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	updated, err := daemon.store.UpdateAgent(ctx, agentID, expected, kernel.AgentPatch{AccountID: &accountID}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.mutation(ctx, updated.Revision)
+}
+
+// selectAgentModel stores the next admission's native-provider controls. An
+// admitted run already holds its own immutable model and effort, so it remains
+// unaffected while this update is committed for future runs.
+func (daemon *Daemon) selectAgentModel(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AgentModelSelectInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agentID, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agent, found, err := daemon.store.Agent(ctx, agentID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	if agent.Role != kernel.RoleWorker {
+		return newErrorReply(api.RemoteConflict)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	updated, err := daemon.store.UpdateAgent(ctx, agentID, expected, kernel.AgentPatch{Model: &input.Model, ReasoningEffort: &input.ReasoningEffort}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.mutation(ctx, updated.Revision)
 }
 
 func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Reply {

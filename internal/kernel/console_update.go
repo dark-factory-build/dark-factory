@@ -116,6 +116,13 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 		agent.ReasoningEffort = *patch.ReasoningEffort
 	}
 	if patch.AccountID != nil {
+		var live bool
+		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE agent_id = ? AND phase <> 'terminal')`, agent.ID.Bytes()).Scan(&live); err != nil {
+			return Agent{}, tx.Rollback(err)
+		}
+		if live && agent.AccountID != *patch.AccountID {
+			return Agent{}, tx.Rollback(ErrConflict)
+		}
 		agent.AccountID = *patch.AccountID
 		if err := requireAccountForProvider(ctx, tx.connection, agent.Provider, agent.AccountID); err != nil {
 			return Agent{}, tx.Rollback(err)
