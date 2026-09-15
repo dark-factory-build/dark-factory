@@ -25,7 +25,7 @@ func TestSupervisorKeepsAdmittedIdentityOnRuntimeFailure(t *testing.T) {
 	if readErr != nil || !found || current.TaskID != fixture.taskID {
 		t.Fatalf("returned identity does not bind admitted task: found=%t err=%v", found, readErr)
 	}
-	if run.Phase != current.Phase {
-		t.Fatalf("invented run phase: got %s want %s", run.Phase, current.Phase)
+	if run.Phase.String() != "" || run.Revision.Int64() != 0 {
+		t.Fatal("uncertain result must carry identity without stale phase or revision")
 	}
 }

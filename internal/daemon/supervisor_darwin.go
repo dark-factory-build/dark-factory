@@ -168,15 +168,15 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	// Keep only a proven admission identity when an uncertain operation
 	// returns no row. The scheduler rereads durable state before acting.
-	var admittedRun kernel.Run
+	var admittedRunID kernel.RunID
 	defer func() {
 		if resultRun.ID == (kernel.RunID{}) {
-			resultRun = admittedRun
+			resultRun = kernel.Run{ID: admittedRunID}
 		}
 	}()
 	admission, err := daemon.store.AdmitNext(ctx, admissionKeys, at)
 	if err == nil && admission.Admitted() {
-		admittedRun = *admission.Run
+		admittedRunID = admission.Run.ID
 	}
 	admissionObserved := false
 	if err == nil && spec.admissionObserved != nil {
@@ -204,7 +204,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 				continue
 			}
 			if reconciled.Admitted() {
-				admittedRun = *reconciled.Run
+				admittedRunID = reconciled.Run.ID
 				if !admissionObserved && spec.admissionObserved != nil {
 					spec.admissionObserved(true)
 				}
