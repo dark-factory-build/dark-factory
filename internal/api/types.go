@@ -348,6 +348,24 @@ type OverseerAgentUpdateInput struct {
 	Archived         *bool  `json:"archived,omitempty"`
 }
 
+// AgentIdlePolicyInput is the operator-only standing supervision edit. It
+// deliberately contains no provider, account, lifecycle, or appearance fields.
+type AgentIdlePolicyInput struct {
+	AgentID          string `json:"agent_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Policy           string `json:"policy"`
+	AfterSeconds     uint32 `json:"after_seconds"`
+	Instruction      string `json:"instruction"`
+	RunBudget        uint64 `json:"run_budget"`
+}
+
+func validAgentIdlePolicyInput(input AgentIdlePolicyInput) bool {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || input.RunBudget > uint64(kernel.MaxIdleRunBudget) || !validText(input.Instruction, 0, 32768) {
+		return false
+	}
+	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != "" && input.RunBudget > 0
+}
+
 type OverseerRunStopInput struct {
 	OperationID          string `json:"operation_id"`
 	TaskID               string `json:"task_id"`

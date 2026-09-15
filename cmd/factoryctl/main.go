@@ -60,6 +60,8 @@ const (
   factoryctl project create --name TEXT --root ABSOLUTE
   factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
+  factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
+  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT --run-budget N
   factoryctl task add --project ID --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
@@ -108,6 +110,7 @@ const (
 	commandProjectCreate
 	commandProjectLimits
 	commandAgentCreate
+	commandAgentIdlePolicy
 	commandTaskAdd
 	commandTaskSendBack
 	commandDispatch
@@ -223,7 +226,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
+	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman {
@@ -739,7 +742,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 3 && helpFlag(args[2]) {
 		switch args[0] + " " + args[1] {
-		case "project create", "project limits", "agent create", "task add", "task send-back":
+		case "project create", "project limits", "agent create", "agent idle-policy", "task add", "task send-back":
 			return attemptCommand{}, true, true
 		}
 	}
@@ -776,6 +779,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandProjectLimits
 	case "agent create":
 		command.kind = commandAgentCreate
+	case "agent idle-policy":
+		command.kind = commandAgentIdlePolicy
 	case "task add":
 		command.kind = commandTaskAdd
 	case "task send-back":
@@ -800,7 +805,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.root = value
 		case name == "--project" && (command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd) && validHumanRequestKey(value):
 			command.project = value
-		case name == "--revision" && command.kind == commandProjectLimits:
+		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy):
 			revision, ok := parseRevision(value)
 			if !ok {
 				return attemptCommand{}, false, false
@@ -818,7 +823,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.maxRunSeconds = uint32(seconds)
-		case name == "--agent" && command.kind == commandTaskAdd && validHumanRequestKey(value):
+		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy) && validHumanRequestKey(value):
 			command.agent = value
 		case name == "--role" && command.kind == commandAgentCreate && (value == "worker" || value == "orchestrator"):
 			command.role = value
@@ -833,6 +838,22 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		case name == "--tool-budget" && command.kind == commandAgentCreate:
 			budget, err := strconv.ParseUint(value, 10, 64)
 			if err != nil || value != strconv.FormatUint(budget, 10) || budget < 1 || budget > 1_000_000_000 {
+				return attemptCommand{}, false, false
+			}
+			command.toolBudget = budget
+		case name == "--policy" && command.kind == commandAgentIdlePolicy && (value == "wait" || value == "standing_instruction"):
+			command.provider = value
+		case name == "--after-seconds" && command.kind == commandAgentIdlePolicy:
+			seconds, err := strconv.ParseUint(value, 10, 32)
+			if err != nil || value != strconv.FormatUint(seconds, 10) || seconds > uint64(kernel.MaxIdleAfterSeconds) {
+				return attemptCommand{}, false, false
+			}
+			command.maxRunSeconds = uint32(seconds)
+		case name == "--instruction" && command.kind == commandAgentIdlePolicy && validOperatorText(value, 1, 32768):
+			command.text = value
+		case name == "--run-budget" && command.kind == commandAgentIdlePolicy:
+			budget, err := strconv.ParseUint(value, 10, 32)
+			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(kernel.MaxIdleRunBudget) {
 				return attemptCommand{}, false, false
 			}
 			command.toolBudget = budget
@@ -871,6 +892,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	case commandAgentCreate:
 		provider, err := kernel.ParseProvider(command.provider)
 		if command.project == "" || command.name == "" || command.toolBudget == 0 || err != nil || kernel.ValidateProviderLaunchControls(provider, command.model, command.reasoningEffort) != nil {
+			return attemptCommand{}, false, false
+		}
+	case commandAgentIdlePolicy:
+		if command.agent == "" || command.expectedRevision == 0 || (command.provider != "wait" && command.provider != "standing_instruction") || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "" || command.toolBudget == 0)) {
 			return attemptCommand{}, false, false
 		}
 	case commandTaskAdd:
@@ -1269,6 +1294,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Head     uint64 `json:"head"`
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
+	case commandAgentIdlePolicy:
+		result, callErr := client.SetAgentIdlePolicy(callContext, api.AgentIdlePolicyInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Policy: command.provider, AfterSeconds: command.maxRunSeconds, Instruction: command.text, RunBudget: command.toolBudget})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent idle-policy", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandTaskAdd:
 		id, incarnation := command.id, command.run
 		if id == "" {

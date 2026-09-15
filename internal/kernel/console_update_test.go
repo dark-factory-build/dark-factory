@@ -329,6 +329,24 @@ func TestUpdateAgentForOverseerOnlyControlsWorkerLifecycle(t *testing.T) {
 	}
 }
 
+func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
+	store, _, _, worker := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	ctx := context.Background()
+	policy, after, instruction, budget := IdleStandingInstruction, uint32(60), "review retained changes", uint32(3)
+	updated, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget}, mustTime(t, 6))
+	if err != nil || updated.Idle.Policy != policy || updated.Idle.AfterSeconds != after || updated.Idle.Instruction != instruction || updated.Idle.RunBudget != budget || updated.Idle.RunsUsed != 0 {
+		t.Fatalf("standing policy = %+v, %v", updated.Idle, err)
+	}
+	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget}, mustTime(t, 7)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale policy = %v", err)
+	}
+	emptyInstruction := ""
+	if _, err := store.UpdateAgent(ctx, worker.ID, updated.Revision, AgentPatch{IdleInstruction: &emptyInstruction}, mustTime(t, 8)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("empty standing instruction = %v", err)
+	}
+}
+
 // A task re-queued after a terminal run is the second shape cancellation can
 // reach: work revision 2, with a run history stopping one revision behind it.
 // The run-topology invariant admitted only a queued task there.

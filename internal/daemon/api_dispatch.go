@@ -162,6 +162,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.setProjectLimits(ctx, call)
 	case api.CallCreateAgent:
 		return daemon.createAgent(ctx, call)
+	case api.CallAgentIdlePolicy:
+		return daemon.setAgentIdlePolicy(ctx, call)
 	case api.CallEnqueueTask:
 		return daemon.enqueueTask(ctx, call)
 	case api.CallSetDispatch:
@@ -585,6 +587,33 @@ func (daemon *Daemon) createAgent(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	return daemon.mutation(ctx, agent.Revision)
+}
+
+func (daemon *Daemon) setAgentIdlePolicy(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AgentIdlePolicyInput()
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	policy := kernel.IdlePolicy(input.Policy)
+	budget := uint32(input.RunBudget)
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	agent, err := daemon.store.UpdateAgent(ctx, id, expected, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &input.AfterSeconds, IdleInstruction: &input.Instruction, IdleRunBudget: &budget}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	daemon.notifyScheduler()
 	return daemon.mutation(ctx, agent.Revision)
 }
 
