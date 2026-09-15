@@ -1,5 +1,5 @@
 import type { SpriteAppearance } from "@dark-factory/client";
-import { spriteAtlas, spriteOptions } from "./sprites/sprites.generated.js";
+import { spriteOptions } from "./sprites/sprites.generated.js";
 import type { SceneWorker } from "./scene.js";
 import type { WorkerMotion } from "./movement.js";
 

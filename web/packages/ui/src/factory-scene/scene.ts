@@ -45,14 +45,14 @@ export type SceneWorker = Readonly<{
 
 export type ScenePoint = Readonly<{ x: number; y: number }>;
 
-export type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
+type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type SceneRoomLayout = SceneRect & Readonly<{
   id: string;
   door: ScenePoint;
   contents: readonly RoomContent[];
 }>;
 
-export type SceneHeading = Readonly<{ label: string; x: number; y: number }>;
+type SceneHeading = Readonly<{ label: string; x: number; y: number }>;
 
 export type SceneLayout = Readonly<{
   width: number;
