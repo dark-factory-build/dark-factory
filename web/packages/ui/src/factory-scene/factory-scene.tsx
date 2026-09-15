@@ -184,7 +184,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
-  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, placements, layout]);
+  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && (placement.bayId !== undefined || layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface)))).map((worker) => worker.id)), [workers, placements, layout]);
   const positions = useSceneMotion(layout, placements, geometryKey, connected, active);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   return <>{placements.map((placement) => {
@@ -194,7 +194,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
         const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
         const picturedSurface = layout.rooms.find((candidate) => candidate.id === placement.roomId)?.contents.some((item) => item.workSurface);
         const location = worker.location === "working"
-          ? `representative location${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? picturedSurface ? "at the pictured work surface" : "at a general work position; inventory unavailable or empty" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
+          ? `${placement.bayId === undefined ? "representative location" : "exact observed direct child"}${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? placement.bayId === undefined ? picturedSurface ? "at the shared pictured workbench" : "at a general work position; inventory unavailable or empty" : "at the pictured child bay" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
           : worker.location === "unobserved" ? "working; location not yet observed"
           : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
           : worker.paused ? "paused in resting area" : "ready in resting area";
@@ -311,7 +311,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
         const task = work.find((order) => order.id === selectedTaskId) ?? work[0];
         const canEnter = onEnterRoom !== undefined && enterable.has(room.id);
         return (
-          <g key={room.id} data-room-id={room.id}>
+          <g key={room.id} data-room-id={room.id} data-room-arrangement={room.arrangement}>
             <title>{node.path}</title>
             <rect x={room.x} y={room.y} width={room.width} height={room.height} fill="#17252f" />
             <path d={`M${room.x + 4} ${room.y + 40}H${room.x + room.width - 4}`} stroke="#31434d" strokeWidth="2" />

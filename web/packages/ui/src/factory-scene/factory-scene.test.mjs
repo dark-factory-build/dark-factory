@@ -814,3 +814,19 @@ test("direct rooms picture only direct counts while subtree rooms retain descend
   assert.deepEqual(displayed("direct").map(({ kind, count }) => ({ kind, count })), [{ kind: "source", count: 1 }]);
   assert.equal(displayed("subtree").find((item) => item.kind === "source").count, fileCounts.source);
 });
+
+test("named direct-child bays are bounded and only exact observations occupy them", () => {
+  const node = { ...inventoryTopology.nodes[0], components: Array.from({ length: 8 }, (_, index) => ({ id: `child-${index}`, label: `Child ${index}` })) };
+  const room = layoutScene({ digest: "bays", nodes: [node] }).rooms[0];
+  const bays = room.contents.filter((item) => item.kind === "component");
+  assert.equal(room.arrangement, "hall");
+  assert.ok(bays.length > 0 && bays.length <= 6);
+  assert.deepEqual(bays.map((item) => item.targetId), ["child-0", "child-1", "child-2", "child-3"]);
+  const exact = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [{ ...workers[0], nodeId: node.id, observedBayId: "child-1" }])[0];
+  const representative = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [{ ...workers[0], nodeId: node.id, observedBayId: "not-pictured" }])[0];
+  assert.equal(exact.bayId, "child-1");
+  assert.equal(representative.bayId, undefined);
+  assert.notDeepEqual({ x: exact.x, y: exact.y }, { x: representative.x, y: representative.y });
+  assert.equal(layoutScene({ digest: "parent", nodes: [{ ...node, id: "parent", parentId: "root" }] }).rooms[0].arrangement, "parent");
+  assert.equal(layoutScene({ digest: "leaf", nodes: [{ ...node, id: "leaf", parentId: "root", components: [] }] }).rooms[0].arrangement, "bench");
+});
