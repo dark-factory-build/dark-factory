@@ -18,8 +18,11 @@ const (
 	// MaxProviderTaskBytes is the outer bound on exact provider task material.
 	// Individual delivery paths may impose a smaller bound.
 	MaxProviderTaskBytes = 128 << 10
-	ProviderTaskPath     = "/dev/fd/11"
-	providerTaskFD       = 11
+	// MaxCodexTaskBytes is the smaller bound imposed by Codex's attempt-API
+	// delivery path. Keep producers of Codex tasks on the same exact ceiling.
+	MaxCodexTaskBytes = 8 << 10
+	ProviderTaskPath  = "/dev/fd/11"
+	providerTaskFD    = 11
 
 	// MaxEnvironmentEntryBytes is shared with producers of exact environment
 	// entries so a value accepted before admission cannot fail only after a

@@ -33,14 +33,23 @@ boundary: report their exact paths and branches for the repository owner to chec
 using WORKFLOW.md rather than deleting them yourself. Do not create a separate
 cleanup scheduler or an endlessly requeued housekeeping task.
 
-Start every task with `$DARK_FACTORY_FACTORYCTL overseer status`. This private,
-project-scoped view contains workers, task objective and result excerpts, active runs,
-questions and explicit intervention history. Status returns four entries from each
-collection. When `next_offset` is set, continue with `overseer status --offset N
---head HEAD`; reuse the returned head exactly or refresh from the first page. Use
-`overseer status --task ID` for one task. Its objective and result arrive in
-4,096-rune chunks; continue with `--text-offset N --head HEAD` while
-`next_text_offset` is set. Use the `overseer` commands to
+On the initial inspection, recovery, a stale or uncertain cursor, an omission, or a
+causal event that cannot be resolved narrowly, run
+`$DARK_FACTORY_FACTORYCTL overseer status` and reconcile every page at its returned
+fixed head. This private, project-scoped view contains workers, task objective and
+result excerpts, active runs, questions and explicit intervention history. On an
+ordinary causal wake, the standing task appends a `Factory causal wake` record
+with affected worker task IDs and, after the first run, the prior overseer task
+identity. Read that prior task first, then each named worker task, with
+`overseer status --task ID` and no `--head`: admission itself appends journal
+events, so an enqueue-time head is not a valid read fence. Retain the first
+returned current head for related text/history reads. `mode=full` is the
+explicit initial/pruned-cursor recovery signal. Do not reconstruct an unchanged
+project merely because the overseer woke. Status returns four entries from each collection. When
+`next_offset` is set, continue with `overseer status --offset N --head HEAD`; reuse
+the returned head exactly. A stale head restarts at page one. Use `overseer status
+--task ID` for one task. Its objective and result arrive in 4,096-rune chunks;
+continue with `--text-offset N --head HEAD` while `next_text_offset` is set. Use the `overseer` commands to
 assign or reorder queued work, message or interrupt a worker, answer its
 question, stop or replace its objective, send work back, and pause or resume
 future admission. These commands use your attempt credential; an operator
@@ -200,6 +209,13 @@ on to the next step, which for a multi-commit publication is the next commit,
 not the pull request. Never received or `planned` means it has not happened.
 `executing` or `indeterminate` means stop and raise a human request with the
 id.
+
+Every successful Maintainer MCP reply carries the authoritative typed result in
+`structuredContent`; its short text `content` is only an acknowledgement. Consume
+that structured result on the first successful reply. Do not repeat the identical
+read merely to obtain another representation, and never replay a write after an
+acknowledgement. If a write response is ambiguous, observe its existing operation
+id and resume from that observation.
 
 ## 3. Publish the change as a branch
 
