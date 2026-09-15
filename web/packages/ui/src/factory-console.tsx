@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DiscoveredAccount, AccountItem, AgentItem, ProjectItem, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView } from "@dark-factory/client";
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
@@ -7,6 +7,7 @@ import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters } from "./console-view.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
+import { DEFAULT_FLOOR_APPEARANCE, loadFloorAppearance, resetFloorAppearance, saveFloorAppearance, type FloorAppearance } from "./floor-appearance.js";
 
 export type ConsoleView = "floor" | "agents";
 export type ConsoleDetail = "needs-you" | "queue" | "agent" | "floor";
@@ -146,6 +147,22 @@ export function FactoryConsole({
   pairing,
   terminalContent,
 }: FactoryConsoleProps) {
+  // This is browser presentation only: it deliberately shares neither the
+  // controller nor its durable/runtime settings path.
+  const [floorAppearance, setFloorAppearance] = useState<FloorAppearance>(DEFAULT_FLOOR_APPEARANCE);
+  const floorAppearanceLoaded = useRef(false);
+  useEffect(() => {
+    setFloorAppearance(loadFloorAppearance());
+    floorAppearanceLoaded.current = true;
+  }, []);
+  const changeFloorAppearance = (appearance: FloorAppearance) => {
+    setFloorAppearance(appearance);
+    if (floorAppearanceLoaded.current) saveFloorAppearance(appearance);
+  };
+  const resetAppearance = () => {
+    resetFloorAppearance();
+    setFloorAppearance(DEFAULT_FLOOR_APPEARANCE);
+  };
   const selectedTask = selectedTaskId === undefined ? undefined : state?.tasks.get(selectedTaskId);
   const selectTask = onSelectTask === undefined ? undefined : (id: string) => { onSelectTask(id); onDetail?.("queue"); };
   const ready = status === "ready";
@@ -207,7 +224,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={state} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} connected={ready} />
+              ? <FactoryFloor floorAppearance={floorAppearance} onFloorAppearanceChange={changeFloorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={state} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} connected={ready} />
               : <AgentList state={state} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -274,6 +291,9 @@ export function FactoryConsole({
       </main>
       {settingsOpen !== true ? null : (
         <SettingsDialog
+          floorAppearance={floorAppearance}
+          onFloorAppearanceChange={changeFloorAppearance}
+          onResetFloorAppearance={resetAppearance}
           state={state}
           ready={ready}
           address={address}

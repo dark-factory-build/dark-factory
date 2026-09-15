@@ -5,6 +5,7 @@ import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js";
 import { AnswerControls } from "./console-interactions.js";
+import type { FloorAppearance } from "./floor-appearance.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
 export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
@@ -513,6 +514,9 @@ function QueuedTask({
  * focus trap and focus return, so every exit goes through close().
  */
 export function SettingsDialog({
+  floorAppearance,
+  onFloorAppearanceChange,
+  onResetFloorAppearance,
   state,
   ready,
   address,
@@ -527,6 +531,9 @@ export function SettingsDialog({
   pairing,
   onClose,
 }: {
+  floorAppearance: FloorAppearance;
+  onFloorAppearanceChange: (appearance: FloorAppearance) => void;
+  onResetFloorAppearance: () => void;
   state: StateView | undefined;
   ready: boolean;
   address: string;
@@ -580,10 +587,28 @@ export function SettingsDialog({
           <summary>Run limits</summary>
           <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
         </details>
+        <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} />
 
       </div>
     </dialog>
   );
+}
+
+function FloorAppearanceSection({ appearance, onChange, onReset }: {
+  appearance: FloorAppearance;
+  onChange: (appearance: FloorAppearance) => void;
+  onReset: () => void;
+}) {
+  return <section className="dfConsoleSidebar__section" aria-label="FLOOR APPEARANCE">
+    <h3>Floor appearance</h3>
+    <p>Saved in this browser. Does not change how the factory runs.</p>
+    <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
+    <label>Dependency links<select value={appearance.dependencyLinks} onChange={(event) => onChange({ ...appearance, dependencyLinks: event.currentTarget.value as FloorAppearance["dependencyLinks"] })}><option value="selected-room">Selected room</option><option value="overview">Overview</option><option value="off">Off</option></select></label>
+    <label>Labels<select value={appearance.labels} onChange={(event) => onChange({ ...appearance, labels: event.currentTarget.value as FloorAppearance["labels"] })}><option value="names">Names</option><option value="names-and-counts">Names and counts</option></select></label>
+    <label>Task props<select value={appearance.taskProps ? "on" : "off"} onChange={(event) => onChange({ ...appearance, taskProps: event.currentTarget.value === "on" })}><option value="on">On</option><option value="off">Off</option></select></label>
+    <label>Animation<select value={appearance.animation} onChange={(event) => onChange({ ...appearance, animation: event.currentTarget.value as FloorAppearance["animation"] })}><option value="follow-device">Follow device</option><option value="off">Off</option></select></label>
+    <button type="button" onClick={onReset}>Reset floor appearance</button>
+  </section>;
 }
 
 function ProjectLimitsSection({ state, edit, ready, onSave }: {
