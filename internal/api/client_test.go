@@ -307,7 +307,7 @@ func id(character byte) string { return strings.Repeat(string(character), 32) }
 
 func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 	bearer := testCredential('O')
-	snapshotJSON := `{"head":8,"factory":{"dispatch_enabled":true,"capacity":4,"active_runs":1,"revision":3},"projects":[{"id":"` + id('1') + `","name":"project","revision":1}],"agents":[{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","paused":false,"revision":2}],"tasks":[{"id":"` + id('3') + `","project_id":"` + id('1') + `","assigned_agent_id":"` + id('2') + `","title":"task","status":"queued","priority":7,"revision":3}]}`
+	snapshotJSON := `{"head":8,"factory":{"dispatch_enabled":true,"capacity":4,"active_runs":1,"revision":3},"projects":[{"id":"` + id('1') + `","name":"project","revision":1}],"agents":[{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","paused":false,"revision":2}],"tasks":[{"id":"` + id('3') + `","project_id":"` + id('1') + `","assigned_agent_id":"` + id('2') + `","incarnation_id":"` + id('4') + `","work_revision":1,"title":"task","status":"queued","priority":7,"revision":3}]}`
 	tests := []struct {
 		name     string
 		response string
