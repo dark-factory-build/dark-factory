@@ -24,15 +24,12 @@ const (
 	// maintainerBridge is the Maintainer App's MCP bridge. An orchestrator
 	// launch names it to Claude, which is how an overseer publishes: the
 	// daemon itself exposes no repository or publication operation.
-	maintainerBridge      = "dark-factory-maintainer-mcp-bridge"
-	codexTool             = "codex"
-	maxPathBytes          = 4096
-	maxClaudePrompt       = 8 << 10
-	claudeConfigDir       = ".claude"
-	codexConfigDir        = ".codex"
-	discoveryInstructions = "Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search."
-	claudeTaskLead        = discoveryInstructions + " " + "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
-	codexBootstrapPrompt  = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool.` + " " + discoveryInstructions
+	maintainerBridge     = "dark-factory-maintainer-mcp-bridge"
+	codexTool            = "codex"
+	maxPathBytes         = 4096
+	claudeConfigDir      = ".claude"
+	codexConfigDir       = ".codex"
+	codexBootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool.` + " " + runner.DiscoveryInstructions
 )
 
 var (
@@ -416,7 +413,7 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 	case kernel.ProviderShell:
 		return TaskDeliveryFD11, bytes.Clone(task), nil
 	case kernel.ProviderClaudeCode:
-		encoded, err := claudeTaskInput(task)
+		encoded, err := runner.PrepareClaudeTask(task)
 		if err != nil {
 			return 0, nil, ErrInvalid
 		}
@@ -540,35 +537,6 @@ func readClaudeConfig(path string) ([]byte, error) {
 
 func unavailable(kind kernel.Provider) error {
 	return fmt.Errorf("%w: %s", ErrUnavailable, kind.String())
-}
-
-func claudeTaskInput(task []byte) ([]byte, error) {
-	quoted, err := json.Marshal(string(task))
-	if err != nil {
-		return nil, ErrInvalid
-	}
-	payload := make([]byte, 0, len(claudeTaskLead)+len(quoted)+1)
-	payload = append(payload, claudeTaskLead...)
-	payload = appendTerminalSafeJSON(payload, quoted)
-	payload = append(payload, '\r')
-	if len(payload) > maxClaudePrompt {
-		return nil, ErrInvalid
-	}
-	return payload, nil
-}
-
-func appendTerminalSafeJSON(dst, quoted []byte) []byte {
-	const hex = "0123456789abcdef"
-	for len(quoted) > 0 {
-		value, width := utf8.DecodeRune(quoted)
-		if value >= 0x7f && value <= 0x9f {
-			dst = append(dst, '\\', 'u', '0', '0', hex[value>>4], hex[value&0xf])
-		} else {
-			dst = append(dst, quoted[:width]...)
-		}
-		quoted = quoted[width:]
-	}
-	return dst
 }
 
 func (runtime RuntimePaths) valid() bool {

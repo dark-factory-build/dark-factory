@@ -331,3 +331,35 @@ func TestFullOverseerWakePreservesMaximumCodexInstruction(t *testing.T) {
 		t.Fatal("full recovery must preserve an already-valid instruction at the delivery ceiling")
 	}
 }
+
+func TestOverseerWakeInstructionUsesClaudeEncodedDeliveryCeiling(t *testing.T) {
+	emptyBody, fits := overseerWakeInstruction(ProviderClaudeCode, "", nil, nil, true)
+	if !fits {
+		t.Fatal("empty Claude wake did not fit")
+	}
+	emptyPayload, err := runner.PrepareClaudeTask([]byte(emptyBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructionBytes := runner.MaxClaudePrompt - len(emptyPayload)
+	if instructionBytes < 1 {
+		t.Fatalf("unexpected Claude wake overhead: %d", len(emptyBody))
+	}
+	instruction := strings.Repeat("x", instructionBytes)
+	body, fits := overseerWakeInstruction(ProviderClaudeCode, instruction, nil, nil, true)
+	if !fits {
+		t.Fatalf("legal encoded Claude wake rejected: body=%d payload=%d instruction=%d", len(body), len(emptyPayload), instructionBytes)
+	}
+	body, fits = overseerWakeInstruction(ProviderClaudeCode, instruction+"x", nil, nil, true)
+	if !fits || body != instruction+"x" {
+		t.Fatal("Claude wake failed to preserve its legal instruction after context overflow")
+	}
+}
+
+func TestOverseerWakeInstructionPreservesLegalClaudeInstruction(t *testing.T) {
+	instruction := strings.Repeat("x", runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-3)
+	body, fits := overseerWakeInstruction(ProviderClaudeCode, instruction, nil, nil, true)
+	if !fits || body != instruction {
+		t.Fatalf("Claude instruction was not preserved when wake context overflowed: fits=%t body=%d", fits, len(body))
+	}
+}

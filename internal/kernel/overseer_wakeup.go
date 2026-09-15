@@ -224,6 +224,14 @@ func overseerWakeInstruction(provider Provider, instruction string, targets []Ta
 		priorID = prior.String()
 	}
 	body := instruction + "\n\nFactory causal wake: mode=" + mode + "; task_ids=" + strings.Join(identities, ",") + "; prior_task_id=" + priorID + ". Read prior_task_id first when present, then each named task, without --head; retain the first returned head for related paging/text reads. mode=full requires fixed-head reconciliation."
+	if provider == ProviderClaudeCode {
+		_, err := runner.PrepareClaudeTask([]byte(body))
+		if err == nil || !full {
+			return body, err == nil
+		}
+		_, err = runner.PrepareClaudeTask([]byte(instruction))
+		return instruction, err == nil
+	}
 	limit := runner.MaxProviderTaskBytes
 	if provider == ProviderCodex {
 		limit = runner.MaxCodexTaskBytes

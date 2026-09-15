@@ -337,7 +337,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatalf("Codex task bytes escaped attempt API delivery: %q", payload)
 				}
 			} else {
-				want := claudeTaskLead + `"PRIVATE_TASK_SENTINEL\nline 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
+				want := runner.ClaudeTaskLead + `"PRIVATE_TASK_SENTINEL\nline 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
 				if string(payload) != want {
 					t.Fatalf("startup payload=%q, want %q", payload, want)
 				}
@@ -345,7 +345,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatalf("startup payload contains raw terminal control: %q", payload)
 				}
 				var decoded string
-				if err := json.Unmarshal(payload[len(claudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
+				if err := json.Unmarshal(payload[len(runner.ClaudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
 					t.Fatalf("JSON task decoded as %q: %v", decoded, err)
 				}
 			}
@@ -527,7 +527,7 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 	if _, _, err := PrepareTask(kernel.ProviderShell, append(shellMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Shell over-limit task error=%v, want ErrInvalid", err)
 	}
-	claudeMaximum := bytes.Repeat([]byte{'x'}, maxClaudePrompt-len(claudeTaskLead)-3)
+	claudeMaximum := bytes.Repeat([]byte{'x'}, runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-3)
 	if delivery, _, err := PrepareTask(kernel.ProviderClaudeCode, claudeMaximum); err != nil || delivery != TaskDeliveryStartupTerminal {
 		t.Fatalf("Claude exact startup bound rejected: %v", err)
 	}
@@ -540,6 +540,10 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 	}
 	if _, _, err := PrepareTask(kernel.ProviderCodex, append(codexMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Codex over-limit task error=%v, want ErrInvalid", err)
+	}
+	jsonExpanding := []byte(strings.Repeat("x", runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-5) + "\u0085")
+	if _, _, err := PrepareTask(kernel.ProviderClaudeCode, jsonExpanding); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Claude expanded valid UTF-8 must exceed the encoded ceiling: %v", err)
 	}
 	if _, _, err := PrepareTask(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
