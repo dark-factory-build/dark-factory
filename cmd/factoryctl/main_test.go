@@ -511,7 +511,7 @@ func TestAttemptTaskUsesExactTypedCallAndWritesJSON(t *testing.T) {
 	if !ok || digest.Bytes() != wantDigest {
 		t.Fatalf("attempt digest = %x, %t", digest.Bytes(), ok)
 	}
-	if stdout.String() != "{\"task\":\"private\\u007f\\u009btask-sentinel\",\"retained_change_handoffs\":[]}\n" || stderr.Len() != 0 {
+	if stdout.String() != "{\"task\":\"private\\u007f\\u009btask-sentinel\"}\n" || stderr.Len() != 0 {
 		t.Fatalf("output = stdout %q, stderr %q", stdout.String(), stderr.String())
 	}
 	if strings.Contains(stdout.String(), "\u007f") || strings.Contains(stdout.String(), "\u009b") {

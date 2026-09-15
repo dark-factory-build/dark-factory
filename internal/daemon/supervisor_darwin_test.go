@@ -146,7 +146,11 @@ func runSupervisorCodexFixture() error {
 	// project-latest tree.
 	target, overseer := "", false
 	if target, overseer = strings.CutPrefix(task.Task, "handoff "); !overseer {
-		target, _ = strings.CutPrefix(task.Task, "review handoff ")
+		var reviewer bool
+		target, reviewer = strings.CutPrefix(task.Task, "review handoff ")
+		if !reviewer {
+			target = ""
+		}
 	}
 	if target != "" {
 		expected := strings.Fields(target)

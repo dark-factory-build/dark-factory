@@ -35,10 +35,6 @@ type RetainedChangeHandoff struct {
 
 const OverseerSnapshotPageSize = 4
 
-// RetainedChangeHandoffLaunchLimit is deliberately one. An attempt receives
-// only the exact retained tree for its explicit target task.
-const RetainedChangeHandoffLaunchLimit = 1
-
 type OverseerSnapshotRequest struct {
 	TaskID       *TaskID
 	Offset       uint64

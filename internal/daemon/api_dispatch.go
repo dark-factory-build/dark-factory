@@ -274,21 +274,7 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	daemon.attemptMu.Lock()
-	live := daemon.attempts[authority.RunID]
-	var snapshots map[kernel.RetainedChangeHandoff]string
-	if live != nil {
-		snapshots = maps.Clone(live.sourceSnapshots)
-	}
-	daemon.attemptMu.Unlock()
-	if live == nil {
-		return newErrorReply(api.RemoteUnavailable)
-	}
-	handoffs, err := projectRetainedChangeHandoffs(snapshots)
-	if err != nil {
-		return newErrorReply(api.RemoteUnavailable)
-	}
-	reply, err := api.NewAttemptTaskReply(api.AttemptTask{Task: authority.Task(), Handoffs: handoffs})
+	reply, err := api.NewAttemptTaskReply(api.AttemptTask{Task: authority.Task()})
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -992,7 +978,9 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	live := daemon.attempts[authority.RunID]
 	var snapshots map[kernel.RetainedChangeHandoff]string
 	if live != nil {
+		live.sourceMu.Lock()
 		snapshots = maps.Clone(live.sourceSnapshots)
+		live.sourceMu.Unlock()
 	}
 	daemon.attemptMu.Unlock()
 	if live == nil {

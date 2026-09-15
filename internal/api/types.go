@@ -147,8 +147,7 @@ type OverseerInterventionResult struct {
 // AttemptTask is the exact private task text visible only to the authenticated
 // live attempt that owns it.
 type AttemptTask struct {
-	Task     string                  `json:"task"`
-	Handoffs []RetainedChangeHandoff `json:"retained_change_handoffs"`
+	Task string `json:"task"`
 }
 
 func (AttemptTask) String() string   { return "AttemptTask(<redacted>)" }
@@ -165,17 +164,7 @@ func (task AttemptTask) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	handoffs := task.Handoffs
-	if handoffs == nil {
-		handoffs = []RetainedChangeHandoff{}
-	}
-	encodedHandoffs, err := json.Marshal(handoffs)
-	if err != nil {
-		return nil, err
-	}
 	encoded := append([]byte(`{"task":`), terminalSafeJSON(nil, quoted)...)
-	encoded = append(encoded, `,"retained_change_handoffs":`...)
-	encoded = append(encoded, encodedHandoffs...)
 	return append(encoded, '}'), nil
 }
 
@@ -194,15 +183,7 @@ func terminalSafeJSON(dst, encoded []byte) []byte {
 }
 
 func validAttemptTask(task AttemptTask) bool {
-	if !validText(task.Task, 0, 131072) || len(task.Handoffs) > kernel.RetainedChangeHandoffLaunchLimit {
-		return false
-	}
-	for _, handoff := range task.Handoffs {
-		if !validRetainedChangeHandoff(handoff) {
-			return false
-		}
-	}
-	return true
+	return validText(task.Task, 0, 131072)
 }
 
 type FactorySummary struct {
