@@ -115,10 +115,9 @@ type RunPaths struct {
 // carries no selector and no revision.
 type AccountsDiscover struct{}
 
-// DiscoveredAccount is one CLI login the daemon found, or a linked login whose
-// identity file is no longer discoverable. Identity comes from the login's own
-// files; the tokens that prove it never leave the daemon and have no field
-// here. LinkedID is empty until the operator links it.
+// DiscoveredAccount is one CLI login the daemon found. Identity comes from the
+// login's own files; the tokens that prove it never leave the daemon and have
+// no field here. LinkedID is empty until the operator links it.
 type DiscoveredAccount struct {
 	Provider               string `json:"provider"`
 	Home                   string `json:"home"`
@@ -128,7 +127,9 @@ type DiscoveredAccount struct {
 	DefaultModel           string `json:"default_model"`
 	DefaultReasoningEffort string `json:"default_reasoning_effort"`
 	LinkedID               string `json:"linked_id"`
-	UnavailableReason      string `json:"unavailable_reason,omitempty"`
+	// UnavailableReason is optional so older daemons can still describe a
+	// login without claiming why it cannot serve a particular selection.
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 type Accounts struct {

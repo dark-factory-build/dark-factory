@@ -736,9 +736,14 @@ func TestAccountWireRulesAreClosed(t *testing.T) {
 // ACCOUNTS and ACCOUNT_LINK carry the same closed rules, and no field on a
 // discovered login is wide enough to smuggle a credential through.
 func TestDiscoveredAccountAndLinkRulesAreClosed(t *testing.T) {
-	good := DiscoveredAccount{Provider: "codex", Home: accountHomePath, Label: "codex", Email: "operator@example.com", DefaultModel: "gpt-6-astra", DefaultReasoningEffort: "high"}
-	if _, err := EncodeAccounts("x", Accounts{Accounts: []DiscoveredAccount{good}}); err != nil {
+	good := DiscoveredAccount{Provider: "codex", Home: accountHomePath, Label: "codex", Email: "operator@example.com", DefaultModel: "gpt-6-astra", DefaultReasoningEffort: "high", UnavailableReason: "not selected"}
+	encoded, err := EncodeAccounts("x", Accounts{Accounts: []DiscoveredAccount{good}})
+	if err != nil {
 		t.Fatalf("valid discovered account refused: %v", err)
+	}
+	frame, err := DecodeServerControl(encoded)
+	if err != nil || frame.Body.(Accounts).Accounts[0].UnavailableReason != good.UnavailableReason {
+		t.Fatalf("unavailable reason did not round-trip: %+v, %v", frame, err)
 	}
 	token := strings.Repeat("t", MaxAgentNameBytes+1)
 	for _, broken := range []struct {
@@ -756,6 +761,7 @@ func TestDiscoveredAccountAndLinkRulesAreClosed(t *testing.T) {
 		{"token-sized organization", func(a *DiscoveredAccount) { a.Organization = token }},
 		{"token-sized default model", func(a *DiscoveredAccount) { a.DefaultModel = strings.Repeat("m", MaxAgentModelBytes+1) }},
 		{"token-sized default effort", func(a *DiscoveredAccount) { a.DefaultReasoningEffort = strings.Repeat("e", MaxAgentModelBytes+1) }},
+		{"oversized unavailable reason", func(a *DiscoveredAccount) { a.UnavailableReason = strings.Repeat("r", MaxAgentNameBytes+1) }},
 		{"malformed linked identity", func(a *DiscoveredAccount) { a.LinkedID = "nope" }},
 	} {
 		item := good
