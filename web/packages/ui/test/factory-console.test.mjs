@@ -1497,6 +1497,7 @@ test("settings asks the daemon for logins on open and links the one the operator
       default_model: "gpt-6-astra",
       default_reasoning_effort: "high",
       linked_id: "",
+      unavailable_reason: "",
     };
     const asked = [];
     const linkings = [];
@@ -1544,6 +1545,22 @@ test("settings asks the daemon for logins on open and links the one the operator
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
   }
+});
+
+test("settings keeps an unavailable linked account visible with recovery guidance", () => {
+  const account = [...baseState().accounts.values()][0];
+  const markup = render({ settingsOpen: true, accounts: [{
+    provider: account.provider,
+    home: account.home,
+    label: account.label,
+    email: "",
+    organization: "",
+    default_model: "",
+    default_reasoning_effort: "",
+    linked_id: account.id,
+    unavailable_reason: "login is no longer discoverable",
+  }] });
+  assert.match(markup, /ACCOUNT UNAVAILABLE · login is no longer discoverable\. Sign in again in this directory, then refresh\./);
 });
 
 test("the RULES block saves an idle rule and sends only what changed", async () => {

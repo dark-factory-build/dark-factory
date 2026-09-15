@@ -115,9 +115,10 @@ type RunPaths struct {
 // carries no selector and no revision.
 type AccountsDiscover struct{}
 
-// DiscoveredAccount is one CLI login the daemon found. Identity comes from the
-// login's own files; the tokens that prove it never leave the daemon and have
-// no field here. LinkedID is empty until the operator links it.
+// DiscoveredAccount is one CLI login the daemon found, or a linked login whose
+// identity file is no longer discoverable. Identity comes from the login's own
+// files; the tokens that prove it never leave the daemon and have no field
+// here. LinkedID is empty until the operator links it.
 type DiscoveredAccount struct {
 	Provider               string `json:"provider"`
 	Home                   string `json:"home"`
@@ -127,6 +128,7 @@ type DiscoveredAccount struct {
 	DefaultModel           string `json:"default_model"`
 	DefaultReasoningEffort string `json:"default_reasoning_effort"`
 	LinkedID               string `json:"linked_id"`
+	UnavailableReason      string `json:"unavailable_reason,omitempty"`
 }
 
 type Accounts struct {
@@ -413,6 +415,7 @@ func ValidDiscoveredAccount(value DiscoveredAccount) error {
 		validateBoundedText(value.Organization, 0, MaxAgentNameBytes) != nil ||
 		validateBoundedText(value.DefaultModel, 0, MaxAgentModelBytes) != nil ||
 		validateBoundedText(value.DefaultReasoningEffort, 0, MaxAgentModelBytes) != nil ||
+		validateBoundedText(value.UnavailableReason, 0, MaxAgentNameBytes) != nil ||
 		value.LinkedID != "" && validateDynamicID(value.LinkedID) != nil {
 		return fmt.Errorf("%w: discovered account", ErrMalformed)
 	}

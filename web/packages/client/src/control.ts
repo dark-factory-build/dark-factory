@@ -111,7 +111,7 @@ export type TopologyBody = { project_id: string; digest: string; source_revision
 export type RunPathsGetBody = { agent_id: string };
 export type RunPathsBody = { agent_id: string; run_id: string; paths: string[] };
 export type AccountsDiscoverBody = Record<string, never>;
-export type DiscoveredAccount = { provider: "claude_code" | "codex"; home: string; label: string; email: string; organization: string; default_model: string; default_reasoning_effort: string; linked_id: string };
+export type DiscoveredAccount = { provider: "claude_code" | "codex"; home: string; label: string; email: string; organization: string; default_model: string; default_reasoning_effort: string; linked_id: string; unavailable_reason: string };
 export type AccountsBody = { accounts: DiscoveredAccount[] };
 export type AccountLinkBody = { provider: "claude_code" | "codex"; home: string; label: string };
 export type AccountLinkResultBody = { account_id: string; revision: bigint };
@@ -557,12 +557,16 @@ function accountItem(value: unknown, wire: boolean): AccountItem {
   return { id: dynamicID(value.id), provider: accountProvider(value.provider), home: accountHome(value.home), label: boundedText(value.label, 1, MAX_AGENT_NAME_BYTES), revision: decimal(value.revision, wire, true) };
 }
 function discoveredAccount(value: unknown, wire: boolean): DiscoveredAccount {
-  if (!isObject(value)) malformed(); requireKeys(value, ["provider", "home", "label", "email", "organization", "default_model", "default_reasoning_effort", "linked_id"], wire);
+  // unavailable_reason is additive: an already-deployed browser ignores it
+  // from a newer daemon, while this browser still accepts an older daemon
+  // that has not started serving it.
+  if (!isObject(value)) malformed(); requireKeys(value, ["provider", "home", "label", "email", "organization", "default_model", "default_reasoning_effort", "linked_id"], wire, ["unavailable_reason"]);
   return {
     provider: accountProvider(value.provider), home: accountHome(value.home), label: boundedText(value.label, 1, MAX_AGENT_NAME_BYTES),
     email: boundedText(value.email, 0, MAX_AGENT_NAME_BYTES), organization: boundedText(value.organization, 0, MAX_AGENT_NAME_BYTES),
     default_model: boundedText(value.default_model, 0, MAX_AGENT_MODEL_BYTES), default_reasoning_effort: boundedText(value.default_reasoning_effort, 0, MAX_AGENT_MODEL_BYTES),
     linked_id: value.linked_id === "" ? "" : dynamicID(value.linked_id),
+    unavailable_reason: present(value, "unavailable_reason") ? boundedText(value.unavailable_reason, 0, MAX_AGENT_NAME_BYTES) : "",
   };
 
 }

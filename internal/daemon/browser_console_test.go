@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -481,6 +482,34 @@ func TestBrowserAccountsLinkOnlyWhatDiscoveryFound(t *testing.T) {
 	accounts, err := fixture.store.ListAccounts(ctx)
 	if err != nil || len(accounts) != 1 {
 		t.Fatalf("accounts after relink = %d, err=%v", len(accounts), err)
+	}
+}
+
+func TestBrowserAccountsKeepLinkedLoginWhenDiscoveryBecomesUnavailable(t *testing.T) {
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityAdministration, consoleRoot(t))
+	home := accountHomeFixture(t, fixture)
+	ctx := context.Background()
+	client := rawBrowserClient(fixture.client.ID)
+	login := filepath.Join(home, ".codex")
+	linked, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "codex", Home: login, Label: "dogfood"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
+		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), AccountID: &linked.AccountID,
+	}); err != nil {
+		t.Fatalf("select linked account: %v", err)
+	}
+	if err := os.Remove(filepath.Join(login, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := fixture.backend.DiscoverAccounts(ctx, client)
+	if err != nil || len(accounts.Accounts) != 1 {
+		t.Fatalf("accounts after identity removal = %+v, %v", accounts, err)
+	}
+	got := accounts.Accounts[0]
+	if got.Provider != "codex" || got.Home != login || got.Label != "dogfood" || got.LinkedID != linked.AccountID || got.UnavailableReason != "login is no longer discoverable" {
+		t.Fatalf("unavailable linked account = %+v", got)
 	}
 }
 

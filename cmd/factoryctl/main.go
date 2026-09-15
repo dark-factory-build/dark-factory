@@ -1342,14 +1342,19 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result := make([]item, 0, len(accounts.Accounts))
 		for _, account := range accounts.Accounts {
 			entry := item{DiscoveredAccount: account, State: "available", Reason: "not linked"}
+			if account.UnavailableReason != "" {
+				entry.State, entry.Reason = "unavailable", account.UnavailableReason
+			}
 			if account.LinkedID != "" {
-				entry.State, entry.Reason = "linked", "linked but no idle worker selects it"
+				if account.UnavailableReason == "" {
+					entry.State, entry.Reason = "linked", "linked but no idle worker selects it"
+				}
 				for _, agent := range snapshot.Agents {
 					if agent.AccountID == account.LinkedID {
 						entry.SelectedBy = append(entry.SelectedBy, agent.ID)
 					}
 				}
-				if len(entry.SelectedBy) != 0 {
+				if account.UnavailableReason == "" && len(entry.SelectedBy) != 0 {
 					entry.State, entry.Reason = "selected", "selected by existing worker"
 				}
 			}

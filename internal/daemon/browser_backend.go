@@ -732,16 +732,7 @@ func (backend *browserBackend) DiscoverAccounts(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.Accounts{}, mapBrowserError(err)
 	}
-	found := backend.owner.discoverAccounts(home)
-	for index, candidate := range found {
-		for _, account := range linked {
-			if account.Provider.String() == candidate.Provider && account.Home == candidate.Home {
-				found[index].LinkedID = account.ID.String()
-				found[index].Label = account.Label
-				break
-			}
-		}
-	}
+	found := backend.owner.listedAccounts(home, linked)
 	return browserprotocol.Accounts{Accounts: found}, nil
 }
 

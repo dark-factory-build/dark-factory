@@ -18,6 +18,7 @@ export type DiscoveredAccount = Readonly<{
   default_model: string;
   default_reasoning_effort: string;
   linked_id: string;
+  unavailable_reason: string;
 }>;
 
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean }>;
@@ -707,6 +708,7 @@ function AccountsSection({
                 <p className="dfConsoleRow__title">{account.label} · {account.provider}</p>
                 <p>{identity === "" ? account.home : identity}</p>
                 {login?.default_model ? <p className="dfConsoleSidebar__inherit">CLI default: {login.default_model}</p> : null}
+                {login?.unavailable_reason === "" || login === undefined ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again in this directory, then refresh.</p>}
                 <div className="dfConsoleSidebar__taskActions">
                   <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-linked-account-${account.id}`}>Label for {account.label}</label>
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />

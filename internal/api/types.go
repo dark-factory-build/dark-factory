@@ -134,6 +134,7 @@ type DiscoveredAccount struct {
 	DefaultModel           string `json:"default_model,omitempty"`
 	DefaultReasoningEffort string `json:"default_reasoning_effort,omitempty"`
 	LinkedID               string `json:"linked_id,omitempty"`
+	UnavailableReason      string `json:"unavailable_reason,omitempty"`
 }
 
 type Accounts struct {
@@ -160,7 +161,7 @@ type AgentModelSelectInput struct {
 func validDiscoveredAccount(value DiscoveredAccount) bool {
 	provider, err := kernel.ParseProvider(value.Provider)
 	return err == nil && provider != kernel.ProviderShell && validText(value.Home, 1, 1024) && value.Home[0] == '/' && validText(value.Label, 1, 128) &&
-		validText(value.Email, 0, 128) && validText(value.Organization, 0, 128) && validText(value.DefaultModel, 0, 128) && validText(value.DefaultReasoningEffort, 0, 128) && (value.LinkedID == "" || validID(value.LinkedID))
+		validText(value.Email, 0, 128) && validText(value.Organization, 0, 128) && validText(value.DefaultModel, 0, 128) && validText(value.DefaultReasoningEffort, 0, 128) && validText(value.UnavailableReason, 0, 128) && (value.LinkedID == "" || validID(value.LinkedID))
 }
 func validAccounts(value Accounts) bool {
 	if len(value.Accounts) > 4096 {

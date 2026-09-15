@@ -514,17 +514,10 @@ func (daemon *Daemon) discoverOperatorAccounts(ctx context.Context) api.Reply {
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	found := daemon.discoverAccounts(home)
+	found := daemon.listedAccounts(home, linked)
 	accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, 0, len(found))}
 	for _, candidate := range found {
-		item := api.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort}
-		for _, account := range linked {
-			if account.Provider.String() == item.Provider && account.Home == item.Home {
-				item.LinkedID = account.ID.String()
-				item.Label = account.Label
-				break
-			}
-		}
+		item := api.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort, LinkedID: candidate.LinkedID, UnavailableReason: candidate.UnavailableReason}
 		accounts.Accounts = append(accounts.Accounts, item)
 	}
 	reply, err := api.NewAccountsReply(accounts)

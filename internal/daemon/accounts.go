@@ -74,6 +74,55 @@ func (daemon *Daemon) discoverAccounts(home string) []browserprotocol.Discovered
 	return result
 }
 
+// listedAccounts joins the current, read-only login discovery with durable
+// links. A link remains meaningful to the scheduler even when its login's
+// identity file disappears, so the operator must still be able to see it.
+// Such a row is not eligible to be linked again: LinkAccount continues to use
+// discoverAccounts directly as its authorization boundary.
+func (daemon *Daemon) listedAccounts(home string, linked []kernel.Account) []browserprotocol.DiscoveredAccount {
+	found := daemon.discoverAccounts(home)
+	present := make(map[string]browserprotocol.DiscoveredAccount, len(found))
+	for index := range found {
+		present[found[index].Provider+"\x00"+found[index].Home] = found[index]
+	}
+	// Linked rows take the fixed response budget first. They are durable
+	// operator choices, unlike a fresh discovery, so clipping the combined
+	// lexical sort must never make one disappear when discovery fills a frame.
+	result := make([]browserprotocol.DiscoveredAccount, 0, min(maxDiscoveredAccounts, len(found)+len(linked)))
+	for _, account := range linked {
+		key := account.Provider.String() + "\x00" + account.Home
+		if candidate, ok := present[key]; ok {
+			candidate.LinkedID = account.ID.String()
+			candidate.Label = account.Label
+			result = append(result, candidate)
+		} else {
+			result = append(result, browserprotocol.DiscoveredAccount{
+				Provider: account.Provider.String(), Home: account.Home, Label: account.Label, LinkedID: account.ID.String(),
+				UnavailableReason: "login is no longer discoverable",
+			})
+		}
+	}
+	sort.Slice(result, func(left, right int) bool {
+		if result[left].Home == result[right].Home {
+			return result[left].Provider < result[right].Provider
+		}
+		return result[left].Home < result[right].Home
+	})
+	linkedIDs := make(map[string]struct{}, len(linked))
+	for _, account := range linked {
+		linkedIDs[account.Provider.String()+"\x00"+account.Home] = struct{}{}
+	}
+	for _, candidate := range found {
+		if len(result) == maxDiscoveredAccounts {
+			break
+		}
+		if _, linked := linkedIDs[candidate.Provider+"\x00"+candidate.Home]; !linked {
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
 func (daemon *Daemon) describeAccount(kind kernel.Provider, home, directory, name string) (browserprotocol.DiscoveredAccount, bool) {
 	account := browserprotocol.DiscoveredAccount{Provider: kind.String(), Home: directory, Label: boundedLabel(name)}
 	switch kind {

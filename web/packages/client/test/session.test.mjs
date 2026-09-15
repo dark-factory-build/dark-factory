@@ -1958,6 +1958,7 @@ test("account discovery and linking correlate by request id and gate on capabili
     default_model: "gpt-6-astra",
     default_reasoning_effort: "high",
     linked_id: "",
+    unavailable_reason: "",
   };
   const pending = session.discoverAccounts();
   const ask = decodeClientControl(socket.sent.at(-1));
@@ -1967,6 +1968,13 @@ test("account discovery and linking correlate by request id and gate on capabili
   const accounts = await pending;
   assert.deepEqual([...accounts], [discovered]);
   assert.equal(Object.isFrozen(accounts[0]), true);
+
+  // The required old shape above stays valid; this is the new daemon field.
+  const unavailable = { ...discovered, linked_id: "5b".repeat(16), unavailable_reason: "login is no longer discoverable" };
+  const pendingUnavailable = session.discoverAccounts();
+  const unavailableAsk = decodeClientControl(socket.sent.at(-1));
+  socket.reply(encodeServerControl({ type: "ACCOUNTS", id: unavailableAsk.id, body: { accounts: [unavailable] } }));
+  assert.deepEqual([...await pendingUnavailable], [unavailable]);
 
   const accountId = "5a".repeat(16);
   const linking = session.linkAccount({ provider: "codex", home: discovered.home, label: "dogfood" });
