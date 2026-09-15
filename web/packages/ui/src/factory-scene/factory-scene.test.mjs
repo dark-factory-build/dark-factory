@@ -9,7 +9,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
-import { PADDING, layoutScene, placeWorkers, roomContents } from "../../dist/src/factory-scene/scene.js";
+import { PADDING, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { resolvedAppearance, spriteOptions, workerFrames } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
@@ -22,6 +22,11 @@ const topology = {
     { id: "src", parentId: "lib", path: "packages/lib/src", label: "Source", kind: "directory", sizeBucket: "small" },
   ],
 };
+
+const fileCounts = { source: 200, tests: 140, documentation: 36, configuration: 6, assets: 98, unclassified: 4 };
+const inventoryTopology = { ...topology, nodes: topology.nodes.map((node) => ({ ...node,
+  inventory: { direct: fileCounts, total: fileCounts, samples: [], samples_omitted: 484 },
+})) };
 
 const workers = [
   { id: "worker-b", name: "Builder", role: "worker", provider: "codex", activity: "busy", location: "working", nodeId: "src" },
@@ -142,13 +147,10 @@ function assertRouteGeometry(layout, start, route, message) {
 test("the pure scene model feeds a deterministic SVG renderer", () => {
   const layout = layoutScene(topology);
   assert.deepEqual(layout, layoutScene({ ...topology, nodes: [...topology.nodes].reverse() }));
-  assert.equal(layout.rooms[0].furnishings.length, 0, "unknown composition does not invent room contents");
+  assert.equal(layout.rooms[0].contents.length, 0, "unknown composition does not invent room contents");
 
   for (const room of layout.rooms) {
     assert.ok(room.door.y === room.y + room.height && room.door.x > room.x && room.door.x < room.x + room.width);
-    assert.ok(room.workstation.x >= room.x && room.workstation.x < room.x + room.width);
-    assert.ok(room.standing.x >= room.x && room.standing.x < room.x + room.width);
-    assert.ok(room.standing.y > room.workstation.y + 16, `standing slot clears workstation in ${room.id}`);
     assert.ok(layout.corridors.some((corridor) => room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width && room.door.y >= corridor.y && room.door.y <= corridor.y + corridor.height), `door ${room.id} reaches a corridor`);
   }
   for (const count of [1, 4, 24]) {
@@ -156,12 +158,11 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     const connected = layoutScene(many);
     assert.equal(corridorReachability(connected), true, `${count} rooms remain reachable from the spine`);
     for (const room of connected.rooms) {
-      const furniture = { x: room.workstation.x, y: room.workstation.y, width: 16, height: 16 };
-      const person = { x: room.standing.x - 8, y: room.standing.y - 8, width: 16, height: 16 };
-      assert.equal(overlaps(furniture, person), false, `standing slot clears furniture in ${room.id}`);
-      const walkway = { x: room.standing.x - 8, y: room.standing.y - 8, width: 16, height: room.door.y - room.standing.y + 8 };
-      assert.ok(walkway.x >= room.x && walkway.x + walkway.width <= room.x + room.width && walkway.y >= room.y && walkway.y + walkway.height <= room.y + room.height, `standing path stays inside ${room.id}`);
-      assert.equal(overlaps(furniture, walkway), false, `standing path clears furniture in ${room.id}`);
+      const placement = placeWorkers(connected, [{ ...workers[0], nodeId: room.id }])[0];
+      assert.equal(room.contents.length, 0);
+      const route = routeFromSpine(connected, { x: connected.corridors.at(-1).x + connected.corridors.at(-1).width / 2, y: connected.restingTop }, placement);
+      assert.ok(route);
+      assertRouteGeometry(connected, { x: connected.corridors.at(-1).x + connected.corridors.at(-1).width / 2, y: connected.restingTop }, route, room.id);
     }
   }
   const multi = layoutScene({ digest: "multi", nodes: Array.from({ length: 4 }, (_, index) => ({
@@ -193,9 +194,8 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.match(first, /data-topology-digest="fixture-1"/);
   assert.equal(first.includes(">STAGED</text>"), false);
   assert.match(first, /data-room-id="src"/);
-  // The room subtitle carries the served size bucket, and nothing when the
-  // room stands for a project whose structure is unavailable.
-  assert.match(first, />PACKAGE · MEDIUM</);
+  // The subtitle identifies the inventory scope; absent structure stays explicit.
+  assert.match(first, />PACKAGE · SUBTREE</);
   assert.match(renderToStaticMarkup(createElement(FactoryScene, {
     topology: { digest: "d", nodes: [{ id: "p", parentId: "", path: "Project", label: "Project", kind: "repository" }] },
     workers: []
@@ -220,7 +220,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     const rendered = first.slice(first.indexOf(`data-worker-id="${worker.id}"`));
     const frame = rendered.slice(0, rendered.indexOf("</g>")).match(/href="#df-frame-([^"]+)"/g)
       .map((match) => match.slice('href="#df-frame-'.length, -1));
-    assert.deepEqual(frame, worker.location === "working" ? workerFrames(worker, { action: "interacting", frame: 0 }) : workerFrames(worker));
+    assert.deepEqual(frame, workerFrames(worker));
     for (const name of frame) assert.ok(name in spriteAtlas.frames, name);
   }
   assert.equal(first.includes("dfFactoryScene__alternate"), false);
@@ -262,14 +262,14 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   const densePlacements = placeWorkers(layout, denseWorkers);
   assert.equal(new Set(densePlacements.map(({ x, y }) => `${x},${y}`)).size, denseWorkers.length);
   const srcRoom = layout.rooms.find((room) => room.id === "src");
-  assert.deepEqual(densePlacements[0], { id: "worker-0", area: "room", roomId: "src", x: srcRoom.standing.x, y: srcRoom.standing.y });
+  assert.deepEqual(densePlacements[0], { id: "worker-0", area: "room", roomId: "src", x: srcRoom.door.x, y: srcRoom.door.y - 32 });
   for (const placement of densePlacements.filter(({ y }) => y < layout.height)) {
     assert.ok(placement.x - 8 >= srcRoom.x && placement.x + 8 <= srcRoom.x + srcRoom.width);
     assert.ok(placement.y - 8 >= srcRoom.y && placement.y + 8 <= srcRoom.y + srcRoom.height);
     assert.ok(placement.y - 8 >= srcRoom.y + 40, "room workers stay below the title and kind");
   }
   const denseSvg = render({ workers: denseWorkers });
-  assert.match(denseSvg, /WORKER AREA AT CAPACITY · 95/);
+  assert.match(denseSvg, /WORKER AREA AT CAPACITY · 99/);
   const denseHeight = Number(denseSvg.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
   assert.ok(denseHeight > Math.max(...densePlacements.map(({ y }) => y + 8)));
 
@@ -446,7 +446,7 @@ test("movement uses clear corridor lanes, doors and standing points", () => {
   // Every crowded standing slot uses the actual opening, never its own offset
   // x-coordinate through a bottom wall.
   for (const offset of [0, -24, 24, -48, 48]) {
-    const crowded = { ...source, x: sourceRoom.standing.x + offset };
+    const crowded = { ...source, x: sourcePlacement.x + offset };
     const crowdedRoute = routeBetween(layout, crowded, destination);
     assert.ok(crowdedRoute);
     assert.ok(crowdedRoute.points.some((point) => point.x === sourceRoom.door.x && point.y === sourceRoom.door.y));
@@ -536,6 +536,7 @@ test("retargets leave the current room or corridor through a clear lane", () => 
 });
 
 test("the production scene stops motion on disconnect and unmount", async () => {
+  const topology = inventoryTopology;
   const requested = [];
   const cancelled = [];
   const requestAnimationFrame = globalThis.requestAnimationFrame;
@@ -662,23 +663,28 @@ test("queue selection picks the exact task sharing a representative workstation"
 });
 
 
-test("evidenced furnishings have clear interaction positions in every footprint", () => {
-  const rich = { digest: "contents", nodes: ["empty", "tiny", "small", "medium", "large"].map((sizeBucket) => ({
-    id: sizeBucket, parentId: "", path: sizeBucket, label: sizeBucket, kind: "package", sizeBucket,
-    language: "go", childCount: 2, dependencies: { omitted: 0, links: [{ nodeId: "other", label: "Other", path: "other", direction: "to", weight: 1 }] },
-  })) };
-  const layout = layoutScene(rich);
-  assert.equal(corridorReachability(layout), true);
-  for (const room of layout.rooms) {
-    assert.deepEqual(room.furnishings.map((item) => item.kind), ["board", "connections"]);
-    const objects = [room.workstation, ...room.furnishings].map((item) => ({ ...item, width: 16, height: 16 }));
-    for (const item of room.furnishings) {
-      const passage = { x: Math.min(item.standing.x, room.standing.x) - 8, y: room.standing.y - 8,
-        width: Math.abs(item.standing.x - room.standing.x) + 16, height: 16 };
-      assert.equal(item.standing.y, room.standing.y);
-      assert.ok(passage.x >= room.x + 4 && passage.x + passage.width <= room.x + room.width - 4);
-      assert.ok(objects.every((object) => !overlaps(object, passage)), "every interaction joins the doorway route without crossing furniture");
+test("pictured contents and occupied surface slots leave door routes clear in every footprint", () => {
+  for (const sizeBucket of ["empty", "tiny", "small", "medium", "large"]) {
+    const node = { ...inventoryTopology.nodes[0], sizeBucket };
+    const layout = layoutScene({ digest: "contents", nodes: [node] });
+    const room = layout.rooms[0];
+    assert.equal(corridorReachability(layout), true);
+    const surface = room.contents.find((item) => item.workSurface);
+    assert.ok(surface);
+    const placements = placeWorkers(layout, Array.from({ length: 12 }, (_, index) => ({ ...workers[0], id: `person-${index}`, nodeId: node.id })));
+    const occupied = placements.filter((item) => item.area === "room");
+    assert.ok(occupied.length > 0 && occupied.length < placements.length);
+    assert.equal(occupied[0].x, surface.x + surface.width / 2);
+    assert.equal(occupied[0].y, surface.y + surface.height + 8);
+    for (const person of occupied) {
+      assert.ok(person.x - 8 >= surface.x && person.x + 8 <= surface.x + surface.width);
+      const lane = { x: Math.min(person.x, room.door.x) - 8, y: person.y - 8, width: Math.abs(person.x - room.door.x) + 16, height: 16 };
+      for (const object of room.contents) assert.ok(object.y + object.height <= lane.y || !overlaps(object, lane), "route never crosses pictured content interiors");
+      const route = routeFromSpine(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, person);
+      assert.ok(route);
+      assertRouteGeometry(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, route, sizeBucket);
     }
+    for (let index = 0; index < room.contents.length; index++) for (const other of room.contents.slice(index + 1)) assert.equal(overlaps(room.contents[index], other), false);
   }
 });
 
@@ -710,26 +716,31 @@ test("inventory equipment is bounded, counted once and clears standing lanes in 
   for (const sizeBucket of ["tiny", "small", "medium", "large"]) {
     const node = { ...topology.nodes[0], sizeBucket, inventory: { direct: counts, total: counts, samples: ["main.go"], samples_omitted: 483 }, components: [{ id: "a", label: "A" }, { id: "b", label: "B" }, { id: "c", label: "C" }] };
     const room = layoutScene({ digest: "inventory", nodes: [node] }).rooms[0];
-    const contents = roomContents(node, room);
+    const contents = room.contents;
     assert.ok(contents.length > 0 && contents.length <= 6);
     assert.equal(new Set(contents.map((item) => item.key)).size, contents.length);
-    assert.deepEqual(contents, roomContents(node, room));
+    for (let index = 0; index < contents.length; index++) for (const other of contents.slice(index + 1)) assert.equal(overlaps(contents[index], other), false, "plans and equipment have distinct occupied rectangles");
+    assert.deepEqual(contents, layoutScene({ digest: "inventory", nodes: [node] }).rooms[0].contents);
+    const increased = { ...node, inventory: { ...node.inventory, direct: { ...counts, source: 201 }, total: { ...counts, source: 201 } } };
+    const incremented = layoutScene({ digest: "increment", nodes: [increased] }).rooms[0].contents;
+    assert.deepEqual(incremented.map(({ count, ...item }) => item), contents.map(({ count, ...item }) => item), "one more file updates a count, not repeated arithmetic equipment");
+    assert.equal(incremented.find((item) => item.kind === "source").count, 201);
     for (const item of contents) {
       assert.ok(item.width >= 32 && item.height >= 24, "equipment is multi-tile, not tiny prop labels");
       assert.ok(item.x >= room.x + 8 && item.x + item.width <= room.x + room.width - 8);
-      assert.ok(item.y >= room.y + 40 && item.y + item.height <= room.standing.y - 8, "all crowded standing slots and routes stay clear");
+      assert.ok(item.y >= room.y + 40 && item.y + item.height <= room.door.y - 32, "all crowded standing slots and routes stay clear");
     }
     for (const kind of Object.keys(counts)) {
       const group = contents.filter((item) => item.kind === kind);
       if (group.length) assert.equal(group.reduce((sum, item) => sum + item.count, 0), counts[kind], "multiple equipment groups partition represented counts");
     }
     const plain = { ...node, components: [], inventory: undefined };
-    assert.deepEqual(roomContents(plain, room), [], "unavailable does not invent equipment");
-    assert.deepEqual(roomContents({ ...plain, inventory: { ...node.inventory, total: Object.fromEntries(Object.keys(counts).map((key) => [key, 0])) } }, room), [], "explicit zero inventory stays empty");
+    assert.deepEqual(layoutScene({ digest: "plain", nodes: [plain] }).rooms[0].contents, [], "unavailable does not invent equipment");
+    assert.deepEqual(layoutScene({ digest: "zero", nodes: [{ ...plain, inventory: { ...node.inventory, total: Object.fromEntries(Object.keys(counts).map((key) => [key, 0])) } }] }).rooms[0].contents, [], "explicit zero inventory stays empty");
   }
 });
 
-test("inventory inspection discloses actual omitted categories and cabinets", async () => {
+test("inventory inspection discloses actual omitted categories and plans", async () => {
   const counts = { source: 2, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 4 };
   const node = { ...topology.nodes[0], sizeBucket: "tiny", inventory: { direct: counts, total: counts, samples: ["main.go"], samples_omitted: 5 }, components: [{ id: "a", label: "A" }, { id: "b", label: "B" }] };
   let renderer;
@@ -737,16 +748,22 @@ test("inventory inspection discloses actual omitted categories and cabinets", as
   await act(async () => { renderer.root.findByProps({ "aria-label": "Inspect room" }).props.onChange({ target: { value: node.id } }); });
   const text = JSON.stringify(renderer.toJSON());
   assert.match(text, /scanned files in other categories/);
-  assert.match(text, /subcomponents without pictured cabinets/);
-  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 2 && p.props.children[1].includes("subcomponents")));
+  assert.match(text, /subcomponents without pictured plans/);
+  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 1 && p.props.children[1].includes("subcomponents")));
   assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 2 && p.props.children[1].includes("scanned files")));
   assert.match(text, /5 direct filenames omitted/);
   await act(async () => renderer.unmount());
 });
 
 test("stationary active workers animate while idle, reduced, hidden and disconnected clocks stop", async () => {
-  const saved = { requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
+  const topology = inventoryTopology;
+  const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
   const frames = new Map();
+  const timers = new Map();
+  let clock = 0;
+  globalThis.performance = { now: () => clock };
+  globalThis.setTimeout = (callback, delay) => { assert.equal(delay, 450); timers.set(++next, callback); return next; };
+  globalThis.clearTimeout = (id) => timers.delete(id);
   let next = 0, visibilityListener, mediaListener;
   const media = { matches: false, addEventListener: (_event, listener) => { mediaListener = listener; }, removeEventListener() {} };
   globalThis.window = { matchMedia: () => media };
@@ -756,31 +773,44 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
   let renderer;
   try {
     await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
-    assert.equal(frames.size, 1);
+    assert.equal(timers.size, 1);
     const staticRoom = renderer.root.findByProps({ "data-room-id": "src" }).props;
     const frameNames = () => renderer.root.findByProps({ "data-worker-id": workers[0].id }).findAllByType("use").map((node) => node.props.href);
-    await act(async () => { frames.values().next().value(900); });
+    assert.equal(frames.size, 0, "stationary work never schedules RAF");
+    await act(async () => { clock = 900; timers.values().next().value(); });
     const first = frameNames();
-    await act(async () => { frames.values().next().value(1350); });
+    await act(async () => { clock = 1350; timers.values().next().value(); });
     assert.notDeepEqual(frameNames(), first, "stationary interaction frame advances");
     assert.equal(renderer.root.findByProps({ "data-room-id": "src" }).props, staticRoom);
-    await act(async () => { globalThis.document.visibilityState = "hidden"; visibilityListener(); });
-    assert.equal(frames.size, 0);
-    await act(async () => { globalThis.document.visibilityState = "visible"; visibilityListener(); });
-    assert.equal(frames.size, 1);
+    await act(async () => { clock += 1; globalThis.document.visibilityState = "hidden"; visibilityListener(); });
+    assert.equal(timers.size, 0);
+    await act(async () => { clock += 1; globalThis.document.visibilityState = "visible"; visibilityListener(); });
+    assert.equal(timers.size, 1);
     await act(async () => { media.matches = true; mediaListener(); });
-    assert.equal(frames.size, 0);
+    assert.equal(timers.size, 0);
     await act(async () => { media.matches = false; mediaListener(); });
-    assert.equal(frames.size, 1);
+    assert.equal(timers.size, 1);
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: false })); });
-    assert.equal(frames.size, 0);
+    assert.equal(timers.size, 0);
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: true })); });
-    assert.equal(frames.size, 1);
+    assert.equal(timers.size, 1);
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: workers.map((worker) => ({ ...worker, activity: "waiting", location: "resting" })), connected: false })); });
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: [], connected: true })); });
-    assert.equal(frames.size, 0, "idle floor leaves no continuous animation clock");
+    assert.equal(timers.size, 0, "idle floor leaves no continuous animation clock");
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology: { ...topology, nodes: topology.nodes.map(({ inventory, ...node }) => node) }, workers, connected: true })); });
+    assert.equal(timers.size, 0, "unknown inventory cannot invent an active work surface");
+    assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "still");
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
   }
+});
+
+
+test("direct rooms picture only direct counts while subtree rooms retain descendants", () => {
+  const direct = { source: 1, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 0 };
+  const node = { ...inventoryTopology.nodes[0], inventory: { ...inventoryTopology.nodes[0].inventory, direct } };
+  const displayed = (inventoryScope) => layoutScene({ digest: "scope", nodes: [{ ...node, inventoryScope }] }).rooms[0].contents;
+  assert.deepEqual(displayed("direct").map(({ kind, count }) => ({ kind, count })), [{ kind: "source", count: 1 }]);
+  assert.equal(displayed("subtree").find((item) => item.kind === "source").count, fileCounts.source);
 });

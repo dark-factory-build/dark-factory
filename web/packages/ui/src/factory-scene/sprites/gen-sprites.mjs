@@ -259,24 +259,6 @@ const wall = grid(`
   dddddddddddddddd
   oooooooooooooooo
 `);
-const pad = grid(`
-  ................
-  .mmmmmmmmmmmmmm.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .m............m.
-  .mmmmmmmmmmmmmm.
-  ................
-`);
 
 const sprites = new Map();
 const providers = { claude_code: 'c', codex: 't', shell: 's' };
@@ -326,8 +308,17 @@ for (const direction of ['north', 'south', 'east', 'west']) for (const step of [
   if (direction === 'south') draw(pixels, grid(`t`), 8, 15 - shift);
 });
 for (const step of [0, 1]) add(`person.motion.interact.${step}`, pixels => {
-  draw(pixels, keyboard, 2, 12);
-  draw(pixels, grid(step === 0 ? `t.t` : `ttt`), 5, 13);
+  // Raised forearms reach the pictured surface north of the worker.
+  draw(pixels, grid(`os
+os
+os
+os`), 2, 3);
+  draw(pixels, grid(`so
+so
+so
+so`), 12, 3);
+  draw(pixels, grid(`ll`), 2, step === 0 ? 1 : 2);
+  draw(pixels, grid(`ll`), 12, step === 0 ? 2 : 1);
 });
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const portrait = (activity, appearance = {}) => {
@@ -373,65 +364,6 @@ tile('tile.floor.0', floor);
 const floorVariant = tile('tile.floor.1', mirror(floor));
 draw(floorVariant, grid(`mmm`), 6, 1);
 tile('tile.wall', wall);
-tile('tile.workstation', grid(`
-  ................
-  ...oooooooooo...
-  ...ollllllllo...
-  ...ommmmmmmmo...
-  ...ommmmmmmmo...
-  ...oooooooooo...
-  .......ss.......
-  .oooooooooooooo.
-  .oppppppppppppo.
-  .owwwwwwwwwwwwo.
-  .oooooooooooooo.
-  ..oo........oo..
-  ..oo........oo..
-  ..oo........oo..
-  ................
-  ................
-`));
-tile('tile.board', grid(`
-................
-.oooooooooooooo.
-.ollllllllllllo.
-.olmmmmmmmmmmlo.
-.ollllllllllllo.
-.olmmmmmmlllllo.
-.ollllllllllllo.
-.olmmmmmmmmlllo.
-.ollllllllllllo.
-.oooooooooooooo.
-...oo......oo...
-...oo......oo...
-...oo......oo...
-..oooo....oooo..
-................
-................
-`));
-tile('tile.cabinet', grid(`
-................
-...oooooooooo...
-...oppppppppo...
-...owwwwwwwwo...
-...opppmppppo...
-...oooooooooo...
-...oppppppppo...
-...owwwwwwwwo...
-...opppmppppo...
-...oooooooooo...
-...oppppppppo...
-...oppppppppo...
-...oooooooooo...
-....oo....oo....
-................
-................
-`));
-tile('bay.free', pad);
-const staged = tile('bay.staged', pad);
-draw(staged, Array(5).fill('yyyyyyyyyy'), 3, 8);
-const ready = tile('bay.ready', pad);
-draw(ready, Array(10).fill('kkkkkkkkkk'), 3, 3);
 
 const frame = 16;
 const width = 8 * frame;

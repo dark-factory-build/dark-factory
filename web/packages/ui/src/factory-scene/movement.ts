@@ -1,10 +1,9 @@
 import type { SceneLayout, ScenePoint, SceneWorkerPlacement } from "./scene.js";
 
-export type MotionAction = "still" | "walking" | "interacting";
-export type WalkingDirection = "north" | "south" | "east" | "west";
+type WalkingDirection = "north" | "south" | "east" | "west";
 
 export type WorkerMotion = Readonly<{
-  action: MotionAction;
+  action: "still" | "walking" | "interacting";
   direction?: WalkingDirection;
   frame: 0 | 1;
 }>;
@@ -72,7 +71,7 @@ function enterRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], to: 
 
 /**
  * The only moving route: leave a known room through its existing door, use the
- * corridor spine, then enter the next room beside its existing workstation.
+ * corridor spine, then enter the next room beside its pictured work surface.
  * The connected resting/staging common space is also reachable by that spine;
  * omitted rooms never gain an invented route.
  */

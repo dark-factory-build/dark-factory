@@ -17,6 +17,7 @@ export type SceneNode = Readonly<{
   language?: string;
   childCount?: number;
   components?: readonly Readonly<{ id: string; label: string }>[];
+  inventoryScope: "direct" | "subtree";
   inventory?: TopologyView["nodes"][number]["inventory"];
   dependencies?: Readonly<{
     omitted: number;
@@ -44,16 +45,14 @@ export type SceneWorker = Readonly<{
 
 export type ScenePoint = Readonly<{ x: number; y: number }>;
 
-export type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
+type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type SceneRoomLayout = SceneRect & Readonly<{
   id: string;
   door: ScenePoint;
-  workstation: ScenePoint;
-  standing: ScenePoint;
-  furnishings: readonly (ScenePoint & Readonly<{ kind: "board" | "cabinet" | "connections"; label: string; standing: ScenePoint }>)[];
+  contents: readonly RoomContent[];
 }>;
 
-export type SceneHeading = Readonly<{ label: string; x: number; y: number }>;
+type SceneHeading = Readonly<{ label: string; x: number; y: number }>;
 
 export type SceneLayout = Readonly<{
   width: number;
@@ -73,11 +72,11 @@ export type SceneWorkerPlacement = Readonly<{
 }>;
 
 // Bounded size buckets leave a fixed grid cell and a common doorway edge.
-const ROOM_WIDTH = 224;
-const ROOM_HEIGHT = 160;
+const ROOM_WIDTH = 240;
+const ROOM_HEIGHT = 224;
 const FOOTPRINTS = {
-  empty: [128, 112], tiny: [128, 112], small: [160, 128],
-  medium: [192, 144], large: [224, 160],
+  empty: [128, 152], tiny: [128, 152], small: [160, 184],
+  medium: [192, 216], large: [224, 224],
 } as const;
 const CORRIDOR = 32;
 export const PADDING = 16;
@@ -117,15 +116,9 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
       const bottom = top + Math.floor(index / columns) * (ROOM_HEIGHT + CORRIDOR) + ROOM_HEIGHT;
       const y = bottom - height;
       const center = x + width / 2;
-      const furnishings: SceneRoomLayout["furnishings"][number][] = [];
-      if ((node.childCount ?? 0) > 0 || node.language) furnishings.push({ kind: "board", x: x + 16, y: bottom - 64,
-        label: (node.childCount ?? 0) > 0 ? `${node.childCount} served subcomponents` : `${node.language} composition`, standing: { x: x + 24, y: bottom - 32 } });
-      if ((node.dependencies?.links.length ?? 0) > 0 || node.kind === "module" || node.kind === "package") furnishings.push({
-        kind: (node.dependencies?.links.length ?? 0) > 0 ? "connections" : "cabinet", x: x + width - 32, y: bottom - 64,
-        label: (node.dependencies?.links.length ?? 0) > 0 ? "Observed dependency endpoints" : `Served ${node.kind} boundary`, standing: { x: x + width - 24, y: bottom - 32 } });
-      rooms.push({ id: node.id, x, y, width, height, furnishings,
-        door: { x: center, y: bottom },
-        workstation: { x: center - 8, y: bottom - 64 }, standing: { x: center, y: bottom - 32 } });
+      const rectangle = { x, y, width, height };
+      rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle),
+        door: { x: center, y: bottom } });
       if (index % columns === 0) corridors.push({ x: PADDING, y: bottom, width: CORRIDOR + Math.min(columns, members.length - index) * ROOM_WIDTH, height: CORRIDOR });
     });
     top += Math.ceil(members.length / columns) * (ROOM_HEIGHT + CORRIDOR) + 16;
@@ -150,11 +143,10 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     const room = worker.nodeId === undefined ? undefined : rooms.get(worker.nodeId);
     if (room === undefined) { areas.outside.push(worker); continue; }
     const slot = roomCounts.get(room.id) ?? 0;
-    // Five unobstructed standing slots; extra people stay explicitly at capacity.
-    if (slot >= 5) { areas.overflow.push(worker); continue; }
+    const positions = workPositions(room);
+    if (slot >= positions.length) { areas.overflow.push(worker); continue; }
     roomCounts.set(room.id, slot + 1);
-    placed.push({ id: worker.id, area: "room", roomId: room.id,
-      x: room.standing.x + [0, -24, 24, -48, 48][slot]!, y: room.standing.y });
+    placed.push({ id: worker.id, area: "room", roomId: room.id, ...positions[slot]! });
   }
   let top = layout.restingTop;
   for (const area of ["resting", "staging", "outside", "overflow"] as const) {
@@ -168,39 +160,43 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
 }
 
 
+/** Pictured surface slots also determine standing destinations; no parallel workstation map. */
+export function workPositions(room: SceneRoomLayout): readonly ScenePoint[] {
+  const surface = room.contents.find((item) => item.workSurface);
+  if (surface === undefined) return [{ x: room.door.x, y: room.door.y - 32 }];
+  const offsets = surface.width >= 120 ? [0, -24, 24, -48, 48] : surface.width >= 88 ? [0, -24, 24] : [0, -24];
+  return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + 8 }));
+}
+
 export const inventoryLabels = { source: "Source", tests: "Tests", documentation: "Docs", configuration: "Config", assets: "Assets", unclassified: "Unclassified" } as const;
 type ContentKind = keyof typeof inventoryLabels | "component";
-export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string }>;
+export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string; workSurface?: boolean }>;
 
-/** Bounded equipment groups; file counts describe inventory, never execution. */
-export function roomContents(node: SceneNode, room: SceneRoomLayout): readonly RoomContent[] {
-  const columns = room.width >= 224 ? 3 : room.width >= 160 ? 2 : 1;
-  const rows = room.height >= 144 ? 2 : 1;
-  const capacity = columns * rows;
-  const groups: Array<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string }> =
-    (node.components ?? []).slice(0, Math.min(2, capacity - 1)).map((child) => ({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id }));
-  const counts = node.inventory?.total;
+/** One installation per category, with named component plans on the back wall. */
+function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
+  const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
   const kinds = (Object.keys(inventoryLabels) as Array<keyof typeof inventoryLabels>)
     .filter((kind) => (counts?.[kind] ?? 0) > 0)
     .sort((left, right) => counts![right] - counts![left] || compareText(left, right));
-  const available = capacity - groups.length;
-  const chosen = kinds.slice(0, available);
-  const copies = new Map(chosen.map((kind) => [kind, 1]));
-  let remaining = available - chosen.length;
-  for (const kind of chosen) {
-    const extra = Math.min(remaining, 2, Math.ceil(counts![kind] / 50) - 1);
-    copies.set(kind, 1 + extra);
-    remaining -= extra;
-  }
-  // Category order is stable; only additions/removals of represented groups move equipment.
-  for (const kind of chosen.sort((a, b) => compareText(a, b))) {
-    const parts = copies.get(kind)!;
-    for (let index = 0; index < parts; index++) groups.push({
-      key: `${kind}:${index}`, kind, label: inventoryLabels[kind],
-      count: Math.floor(counts![kind] / parts) + (index < counts![kind] % parts ? 1 : 0),
-    });
-  }
-  const width = (room.width - 24 - (columns - 1) * 8) / columns;
-  const height = rows === 2 ? (room.height >= 160 ? 32 : 24) : room.height >= 128 ? 32 : 24;
-  return groups.map((group, index) => ({ ...group, x: room.x + 12 + index % columns * (width + 8), y: room.y + 44 + Math.floor(index / columns) * (height + 4), width, height }));
+  const primary = kinds[0];
+  const contents: RoomContent[] = [];
+  const planWidth = room.width >= 192 ? (room.width - 32) / 2 : room.width - 24;
+  const children = [...(node.components ?? [])].sort((a, b) => compareText(a.label, b.label) || compareText(a.id, b.id));
+  children.slice(0, room.width >= 192 ? 2 : 1).forEach((child, index) => contents.push({
+    key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id,
+    x: room.x + 12 + index * (planWidth + 8), y: room.y + 46, width: planWidth, height: 28,
+  }));
+  if (primary === undefined) return contents;
+  const width = Math.max(room.width >= 160 ? 112 : 80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary]));
+  const height = room.height >= 184 ? 64 : 32;
+  contents.push({ key: primary, kind: primary, label: inventoryLabels[primary], count: counts![primary], workSurface: true,
+    x: room.x + (room.width - width) / 2, y: room.y + room.height - height - 40, width, height });
+  // Tests retain a supporting place even beside a much larger source installation.
+  const secondary = kinds.filter((kind) => kind !== primary).sort((a, b) => Number(b === "tests") - Number(a === "tests") || compareText(a, b));
+  const slots = children.length === 0 ? (room.width >= 192 ? 3 : 2) : room.height >= 208 ? 2 : 0;
+  secondary.slice(0, slots).forEach((kind, index) => contents.push({
+    key: kind, kind, label: inventoryLabels[kind], count: counts![kind],
+    x: room.x + 12 + index * 56, y: room.y + (children.length === 0 ? 46 : 78), width: 48, height: 28,
+  }));
+  return contents;
 }

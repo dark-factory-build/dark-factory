@@ -806,7 +806,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   .dfConsoleSidebar { position: static; max-height: none; }
 }
 
-.dfFactoryFloor__scene { overflow-x: auto; }
+.dfFactoryFloor__map { overflow: auto; max-height: 70vh; scrollbar-color: #638095 #17252f; }
+.dfFactoryFloor__mapHint { color: #9db1be; font-size: .75rem; margin: .5rem 0; }
 
 .dfRecentWorkDialog { width: min(70rem, calc(100% - 2rem)); }
 .dfRecentWorkLayout { font-family: inherit; display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(0, 2fr); gap: 1.5rem; margin-top: 1rem; }

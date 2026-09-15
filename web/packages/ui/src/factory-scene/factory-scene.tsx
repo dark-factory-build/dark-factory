@@ -5,7 +5,7 @@ import {
   ROOM_LEFT,
   layoutScene,
   placeWorkers,
-  roomContents,
+  workPositions,
   inventoryLabels,
   type RoomContent,
   type SceneRoomLayout,
@@ -16,15 +16,7 @@ import { workerFrames } from "./appearance.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
-export type {
-  SceneHeading,
-  SceneLayout,
-  SceneNode,
-  SceneRoomLayout,
-  SceneTopology,
-  SceneWorker,
-  SceneWorkerPlacement,
-} from "./scene.js";
+
 
 export type FactorySceneProps = Readonly<{
   topology: SceneTopology;
@@ -149,9 +141,13 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
   useEffect(() => {
     if (!connected || reduced || typeof document !== "undefined" && document.visibilityState !== "visible" || typeof requestAnimationFrame !== "function") return;
     const at = now();
-    if (active.size === 0 && ![...motions.current.values()].some((motion) => motionPoint(motion, at).walking)) return;
-    let frame = requestAnimationFrame((time) => setClock(time));
-    return () => cancelAnimationFrame(frame);
+    if ([...motions.current.values()].some((motion) => motionPoint(motion, at).walking)) {
+      const frame = requestAnimationFrame((time) => setClock(time));
+      return () => cancelAnimationFrame(frame);
+    }
+    if (active.size === 0) return;
+    const timer = setTimeout(() => setClock(now()), 450);
+    return () => clearTimeout(timer);
   }, [clock, connected, reduced, active]);
 
   useEffect(() => {
@@ -187,8 +183,8 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
   connected: boolean;
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
-  const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door, standing }) => [id, x, y, width, height, door, standing])]), [layout]);
-  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room")).map((worker) => worker.id)), [workers, placements]);
+  const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
+  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, placements, layout]);
   const positions = useSceneMotion(layout, placements, geometryKey, connected, active);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   return <>{placements.map((placement) => {
@@ -196,8 +192,9 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
         if (worker === undefined) return null;
         const position = positions.get(placement.id) ?? { ...placement, motion: { action: "still", frame: 0 } as WorkerMotion };
         const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
+        const picturedSurface = layout.rooms.find((candidate) => candidate.id === placement.roomId)?.contents.some((item) => item.workSurface);
         const location = worker.location === "working"
-          ? `representative location${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? "at workstation" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
+          ? `representative location${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? picturedSurface ? "at the pictured work surface" : "at a general work position; inventory unavailable or empty" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
           : worker.location === "unobserved" ? "working; location not yet observed"
           : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
           : worker.paused ? "paused in resting area" : "ready in resting area";
@@ -213,11 +210,14 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
             transform={`translate(${position.x} ${position.y})`}
             className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
           >
-            <g role="img" aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...(onSelectWorker === undefined ? {} : { onClick: () => onSelectWorker(worker.id), style: { cursor: "pointer" } })}>
+            <g role="img" aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
               <title>{`${worker.name} · ${location}`}</title>
               <rect x={-12} y={-12} width="24" height="24" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
-              <g data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined} transform={position.motion.action === "interacting" && position.motion.frame === 1 ? "translate(1 -1)" : undefined}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
+              <g data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
+              {position.motion.action !== "interacting" ? null : <g aria-hidden="true" fill="none" stroke="#8b9d9d" strokeWidth="2">
+                <path d={`M-5 -3L-8 -9L-5 ${position.motion.frame === 0 ? -16 : -14} M5 -3L8 -9L5 ${position.motion.frame === 0 ? -14 : -16}`} />
+              </g>}</g>
             </g>
             {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
               <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
@@ -252,6 +252,8 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
 
   return (
     <>
+    <p className="dfFactoryFloor__mapHint">Scroll the floor to explore · choose a room below for details</p>
+    <div className="dfFactoryFloor__map" role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
       viewBox={`0 0 ${layout.width} ${sceneHeight}`}
       role="group"
@@ -304,14 +306,15 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
         const node = nodes.get(room.id);
         if (node === undefined) return null;
         const footprint = affected.get(room.id) ?? [];
-        const contents = roomContents(node, room);
+        const contents = room.contents;
         const work = footprint.filter((order) => (order.displayRoomId ?? order.representativeRoomId) === room.id);
         const task = work.find((order) => order.id === selectedTaskId) ?? work[0];
         const canEnter = onEnterRoom !== undefined && enterable.has(room.id);
         return (
           <g key={room.id} data-room-id={room.id}>
             <title>{node.path}</title>
-            <rect x={room.x} y={room.y} width={room.width} height={room.height} fill="url(#df-floor)" />
+            <rect x={room.x} y={room.y} width={room.width} height={room.height} fill="#17252f" />
+            <path d={`M${room.x + 4} ${room.y + 40}H${room.x + room.width - 4}`} stroke="#31434d" strokeWidth="2" />
             <rect x={room.x} y={room.y} width={room.width} height={FRAME} fill="url(#df-wall)" />
             <path data-room-walls="" d={`M${room.door.x - 16},${room.door.y} H${room.x} V${room.y} H${room.x + room.width} V${room.door.y} H${room.door.x + 16}`} fill="none" stroke="#638095" strokeWidth="4" />
             {footprint.length === 0 ? null : <rect data-work-footprint={room.id} x={room.x + 5} y={room.y + 39} width={room.width - 10} height={room.height - 46} fill="#d8a94c" fillOpacity="0.10" stroke={footprint.some((order) => order.id === selectedTaskId) ? "#80ddff" : "#d8a94c"} strokeDasharray="3 3"><title>{`Observed changes ${footprint.some((order) => !order.roomIds.includes(room.id)) ? "within this component" : "in this area"} for ${footprint.length} running task(s): ${footprint.map((order) => order.id.slice(0, 8)).join(", ")}`}</title></rect>}
@@ -328,20 +331,21 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
             {contents.map((item) => <g key={item.key} data-room-content={item.kind} {...sceneAction(item.targetId !== undefined && !nodes.has(item.targetId) && onEnterRoom === undefined ? undefined : () => { setSelectedRoomId(item.targetId ?? room.id); if (item.targetId !== undefined) onEnterRoom?.(item.targetId); })}
               aria-label={item.kind === "component" ? `Open component ${item.label}` : `Inspect ${item.count} ${item.label.toLowerCase()} files in ${node.label}`}>
               <title>{item.kind === "component" ? item.label : `${item.count} scanned ${item.label.toLowerCase()} files represented by this group`}</title>
-              <Equipment item={item} />
+              <Equipment item={item} positions={item.workSurface ? workPositions(room) : []} />
             </g>)}
             {node.inventory === undefined ? <text x={room.x + 12} y={room.y + room.height - 52} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">INVENTORY UNAVAILABLE</text> : contents.length === 0 ? <text x={room.x + 12} y={room.y + 62} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">NO SCANNED FILES</text> : null}
             {(node.dependencies?.links.length ?? 0) === 0 ? null : <g {...sceneAction(() => setSelectedRoomId(room.id))} aria-label={`Inspect static dependencies of ${node.label}`}>
+              <rect x={room.x + room.width - 28} y={room.y + 18} width="24" height="24" fill="transparent" />
               <rect x={room.x + room.width - 24} y={room.y + 20} width="16" height="10" fill="#493d68" stroke="#beacff" /><text x={room.x + room.width - 16} y={room.y + 28} textAnchor="middle" fill="#e4dafa" fontSize="9">↔</text>
             </g>}
             <g {...sceneAction(() => setSelectedRoomId(room.id))} aria-label={`Inspect ${node.label}`}>
-
+            <rect x={room.x + 4} y={room.y} width={room.width - 8} height="24" fill="transparent" />
             <text x={room.x + 8} y={room.y + 18} fill="#f2f6f8" fontFamily="ui-monospace, monospace" fontSize="11" fontWeight="700">
               {shortLabel(node.label, Math.floor((room.width - 16) / 7))}
             </text>
             </g>
             <text x={room.x + 8} y={room.y + 34} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">
-              {node.sizeBucket === undefined ? "STRUCTURE UNAVAILABLE" : `${node.kind.toUpperCase()} · ${node.sizeBucket.toUpperCase()}`}
+              {node.sizeBucket === undefined ? "STRUCTURE UNAVAILABLE" : `${node.kind.toUpperCase()} · ${(node.inventoryScope === "direct" ? "DIRECT CONTENTS" : "SUBTREE")}`}
             </text>
             {!canEnter ? null : <g data-enter-room-id={room.id} {...sceneAction(() => onEnterRoom(room.id))} aria-label={`Enter ${node.label}`}>
               <rect x={room.x + room.width - 48} y={room.y + room.height - 24} width="40" height="16" fill="#172b38" stroke="#80ddff" />
@@ -367,6 +371,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
       </g>}
 
     </svg>
+    </div>
     <section className="dfRoomDetails" aria-label="Room details">
       <label>Room <select aria-label="Inspect room" value={selectedRoom?.id ?? ""} onChange={(event) => setSelectedRoomId(event.target.value || undefined)}>
         <option value="">Select a room</option>
@@ -409,48 +414,109 @@ function Area({ label, width, top, bottom }: { label: string; width: number; top
 }
 
 
-/** A few multi-tile silhouettes in the existing SVG, rather than one object per file. */
-function Equipment({ item }: { item: RoomContent }) {
-  const storage = item.kind === "documentation" || item.kind === "component";
+/** Native SVG dimensions keep equipment on the workers’ pixel scale. */
+function Equipment({ item, positions }: { item: RoomContent; positions: readonly { x: number; y: number }[] }) {
+  const { width, height, kind, workSurface } = item;
+  const ink = "#101b24";
+  if (kind === "component") return <g transform={`translate(${item.x} ${item.y})`}>
+    <rect x="2" y="3" width={width} height={height} fill={ink} opacity=".6" />
+    <rect width={width} height={height} fill="#384e5a" stroke="#8197a0" strokeWidth="2" />
+    <path d={`M4 4h${width - 8}v${height - 8}H4Z`} fill="#263b47" stroke="#5f7681" />
+    <path d="M8 8h12v10H8Z M20 13h8" fill="none" stroke="#9cb9bf" strokeWidth="2" />
+    <text x="6" y={height - 5} fill="#e0e4d7" fontSize="9" fontFamily="ui-monospace, monospace">{shortLabel(item.label.split("/").at(-1) || item.label, Math.floor((width - 10) / 5.4))}</text>
+  </g>;
+  const tint = kind === "tests" ? "#c5ae78" : kind === "documentation" ? "#c5ac88" : kind === "assets" ? "#b7a4ca" : kind === "source" ? "#8db2bd" : "#acaa9c";
+  const objectX = workSurface ? width - 36 : 4;
+  const rich = workSurface && height === 64;
+  const front = height - 12;
   return <g transform={`translate(${item.x} ${item.y})`}>
-    <svg width={item.width} height={item.height - 8} viewBox="0 0 48 32" preserveAspectRatio="none" aria-hidden="true">
-      <rect x="2" y="4" width="46" height="28" rx="2" fill="#02090e" fillOpacity=".7" />
-      {item.kind === "source" ? <>
-        <rect x="1" y="1" width="20" height="29" fill="#314959" stroke="#7894a5" /><rect x="25" y="1" width="20" height="29" fill="#263c4c" stroke="#7894a5" />
-        {[7, 14, 21].map((y) => <g key={y}><path d={`M4 ${y}H18 M28 ${y}H42`} stroke="#9ac9d5" strokeWidth="3" /><path d={`M5 ${y}h2 M29 ${y}h2`} stroke="#182733" strokeWidth="3" /></g>)}
-      </> : item.kind === "tests" ? <>
-        <path d="M2 18H45V23H2Z M5 23V31 M41 23V31" fill="#a98768" stroke="#cbb391" strokeWidth="2" />
-        <rect x="5" y="2" width="23" height="15" fill="#344252" stroke="#9babb7" /><path d="M8 11h4l3-6 4 9 3-5h3" fill="none" stroke="#e6c575" strokeWidth="2" /><path d="M34 4v11h8V4 M32 4h12" fill="#796d97" stroke="#c4b3df" strokeWidth="2" />
-      </> : storage ? <>
-        <rect x="3" y="1" width="40" height="29" fill={item.kind === "component" ? "#445967" : "#8b694a"} stroke="#b9a48a" />
-        {[4, 13, 22].map((y) => <g key={y}><rect x="6" y={y} width="34" height="6" fill={item.kind === "component" ? "#8194a0" : "#dfcfab"} /><path d={`M20 ${y + 3}h7`} stroke="#3c4346" strokeWidth="2" /></g>)}
-      </> : item.kind === "configuration" ? <>
-        <path d="M4 7L10 1H41L45 24H4Z" fill="#8a614c" stroke="#d3a77d" /><path d="M8 11H40" stroke="#e9c39e" />
-        {[12, 24, 36].map((x) => <g key={x}><circle cx={x} cy="17" r="4" fill="#222f38" stroke="#dcc2a1" /><path d={`M${x} 17v-3`} stroke="#a9c8d2" /></g>)}<path d="M9 25v6 M39 25v6" stroke="#717d82" strokeWidth="3" />
-      </> : item.kind === "assets" ? <>
-        <rect x="2" y="1" width="43" height="24" rx="2" fill="#384058" stroke="#aaa7d1" /><rect x="5" y="4" width="37" height="18" fill="#64668b" /><circle cx="34" cy="8" r="3" fill="#dec79c" /><path d="M6 21L17 8l8 10 6-6 10 9" fill="#b5a6cf" /><path d="M23 26v4 M15 31h17" stroke="#97a5b4" strokeWidth="2" />
+    <rect x="3" y="5" width={width} height={height - 3} fill={ink} opacity=".6" />
+    {workSurface ? <>
+      <path d={`M0 ${front}H${width}v7H0Z`} fill={kind === "source" || kind === "tests" ? "#526674" : "#896f57"} stroke={kind === "source" || kind === "tests" ? "#99adb3" : "#c1a68a"} strokeWidth="2" />
+      <path d={`M4 ${front + 8}v4 M${width - 6} ${front + 8}v4`} stroke="#455866" strokeWidth="4" />
+      <path d={`M6 ${front + 4}H${width - 6}`} stroke="#5a493d" strokeWidth="2" />
+
+    </> : <path d={`M0 19H${width}v4H0Z`} fill="#455967" stroke="#71838a" strokeWidth="2" />}
+    {!rich ? null : <g stroke={ink} strokeWidth="2">
+      {kind === "source" ? <>
+        <rect x="4" y="2" width="88" height="42" fill="#263c48" stroke="#6a8894" />
+        {[8, 36, 64].map((x) => <g key={x}><rect x={x} y="6" width="24" height="34" fill="#3d5a68" />
+          {[12, 22, 32].map((y) => <path key={y} d={`M${x + 3} ${y}h18`} stroke="#8babb1" strokeWidth="4" />)}
+        </g>)}
+        <path d="M8 46h80" stroke="#4a626d" strokeWidth="4" />
+      </> : kind === "tests" ? <>
+        <path d="M4 28h90v18H4Z" fill="#52616a" stroke="#87979a" />
+        {[10, 48].map((x) => <g key={x}><rect x={x} y="4" width="32" height="24" fill="#243740" stroke="#97a6a3" /><path d={`M${x + 5} 10h8 M${x + 5} 16h20 M${x + 5} 22h14`} stroke="#c4b786" /></g>)}
+        <path d="M10 34h24 M50 34h24 M10 40h24 M50 40h24" stroke="#b8b29a" />
+      </> : kind === "documentation" ? <>
+        <rect x="4" y="2" width="64" height="44" fill="#594b3e" stroke="#b09a7b" />
+        {[6, 26].map((y) => <g key={y}><path d={`M8 ${y + 16}h56`} stroke="#c2a27e" />{[8, 18, 28, 42, 52].map((x) => <rect key={x} x={x} y={y} width="6" height="14" fill={x % 3 === 0 ? "#a58b6b" : "#d0c2a0"} stroke="none" />)}</g>)}
+        <path d="M76 28l12-4 12 4v18l-12-4-12 4Z M88 24v18" fill="#d7ceb0" stroke="#968c73" />
+      </> : kind === "assets" ? <>
+        <path d="M10 4h64v40H10Z" fill="#675d78" stroke="#b6a2c6" />
+        <path d="M16 34l14-18 12 9 10-15 16 24Z" fill="#b3a4c4" stroke="none" />
+        <rect x="17" y="10" width="8" height="6" fill="#dcc697" stroke="none" />
+        <path d="M8 46h70 M18 44v6 M66 44v6" stroke="#8c7f86" strokeWidth="3" />
+        <path d="M86 8h8v38h-8Z M98 18h6v28h-6Z" fill="#c5b9a3" stroke="#867d77" />
+      </> : kind === "configuration" ? <>
+        <rect x="4" y="2" width="76" height="44" fill="#77604b" stroke="#c1a283" />
+        {[16, 36, 56].map((x) => <g key={x}><path d={`M${x} 10v28`} stroke="#2d3d43" strokeWidth="4" /><path d={`M${x - 5} ${x / 2 + 6}h10`} stroke="#d2c3a3" strokeWidth="4" /></g>)}
       </> : <>
-        <rect x="3" y="6" width="40" height="24" fill="#746958" stroke="#c3b39b" /><path d="M3 6l8-5h25l7 5 M8 9l30 18 M38 9L8 27" fill="none" stroke="#b9a482" strokeWidth="2" /><text x="23" y="23" textAnchor="middle" fill="#ede2c9" fontSize="16">?</text>
+        <path d="M4 12l10-8h50l8 8v34H4Z" fill="#80745e" stroke="#b8a98b" />
+        <path d="M4 12h68 M12 18l52 22 M64 18L12 40" stroke="#b8a98b" />
       </>}
-    </svg>
-    <text x={item.width / 2} y={item.height} textAnchor="middle" fill="#d0dae0" fontFamily="ui-monospace, monospace" fontSize="7">{shortLabel(item.kind === "component" ? item.label : `${item.label} ${item.count}`, Math.floor(item.width / 4))}</text>
+    </g>}
+    <g transform={`translate(${objectX} ${rich ? 32 : 0})`} stroke={ink} strokeWidth="2">
+      {kind === "source" ? <>
+        <path d="M0 0h30v18H0Z" fill="#405d6c" stroke="#87a6af" />
+        <path d="M4 5h22 M4 10h22 M4 15h22" stroke="#9ab9bd" />
+        <path d="M8 3v14 M20 3v14" stroke="#263d4a" />
+      </> : kind === "tests" ? <>
+        <rect width="22" height="16" fill="#43535c" stroke="#9eafb4" />
+        <path d="M5 5h4 M5 10h4 M13 5h4 M13 10h4" stroke="#c7b984" />
+        <path d="M27 4h4v12h-4Z" fill="#b6a578" /><path d="M26 2h6" stroke="#c9bc97" />
+      </> : kind === "documentation" ? <>
+        <path d="M0 2h6v17H0Z M8 0h7v19H8Z M18 5h12v14H18Z" fill="#b49a74" stroke="#d6c1a0" />
+        <path d="M2 7h2 M10 5h3 M21 9h6 M21 13h6" stroke="#5a554a" />
+      </> : kind === "assets" ? <>
+        <rect width="30" height="18" fill="#615b78" stroke="#ab9dbf" />
+        <path d="M4 14l6-7 5 4 5-6 6 9Z" fill="#b3a5c7" stroke="none" />
+        <rect x="4" y="3" width="4" height="3" fill="#d6c29c" stroke="none" />
+      </> : kind === "configuration" ? <>
+        <rect width="30" height="18" fill="#7c6853" stroke="#c2a484" />
+        <path d="M5 4v10 M15 4v10 M25 4v10" stroke="#343c3f" />
+        <path d="M2 8h6 M12 5h6 M22 11h6" stroke="#d3c2a1" />
+      </> : <>
+        <path d="M0 4h30v14H0Z" fill="#817968" stroke="#c1b79e" />
+        <path d="M2 6l26 10 M28 6L2 16" stroke="#aa9e84" />
+      </>}
+    </g>
+    {positions.map((point) => <g key={point.x} transform={`translate(${point.x - item.x} ${front - 2})`} aria-hidden="true">
+      <path d="M-8 0H8v6H-8Z" fill="#30424c" stroke="#a9b8b6" strokeWidth="1" />
+      <path d="M-5 2h10 M-5 4h10" stroke="#829696" strokeWidth="1" />
+    </g>)}
+    {!workSurface ? null : <g>
+      <rect x={rich ? width - 80 : 4} y={rich ? 2 : front + 2} width={rich ? 76 : width - 8} height="10" fill="#d4cbb0" stroke="#746e5f" />
+      <text x={rich ? width - 76 : 8} y={rich ? 10 : front + 10} fill="#27353a" fontSize="8" fontFamily="ui-monospace, monospace">{kind === "unclassified" ? "Other" : item.label} {item.count}</text>
+    </g>}
+    {workSurface ? null : <text x="0" y={height} fill={tint} fontSize="8" fontFamily="ui-monospace, monospace">{item.label} {item.count}</text>}
   </g>;
 }
 
 function InventoryInfo({ node, room }: { node: SceneTopology["nodes"][number]; room: SceneRoomLayout }) {
   const inventory = node.inventory;
-  const groups = roomContents(node, room);
+  const groups = room.contents;
   const omittedComponents = (node.components?.length ?? 0) - groups.filter((group) => group.kind === "component").length;
-  const omittedFiles = inventory === undefined ? 0 : Object.values(inventory.total).reduce((sum, count) => sum + count, 0) - groups.filter((group) => group.kind !== "component").reduce((sum, group) => sum + group.count, 0);
+  const omittedFiles = inventory === undefined ? 0 : Object.values(inventory[node.inventoryScope === "direct" ? "direct" : "total"]).reduce((sum, count) => sum + count, 0) - groups.filter((group) => group.kind !== "component").reduce((sum, group) => sum + group.count, 0);
   return <>
     {inventory === undefined ? <p>Scanned inventory unavailable.</p> : <>
     <table><caption>Scanned files · subtree includes direct contents</caption><thead><tr><th>Kind</th><th>Direct</th><th>Subtree</th></tr></thead><tbody>
       {Object.entries(inventoryLabels).map(([kind, label]) => <tr key={kind}><th>{label}</th><td>{inventory.direct[kind as keyof typeof inventoryLabels]}</td><td>{inventory.total[kind as keyof typeof inventoryLabels]}</td></tr>)}
     </tbody></table>
-    <p>Equipment groups represent subtree inventory. Shared-path components overlap; do not add their totals. Test files do not show test success or coverage.</p>
+    <p>Equipment represents {node.inventoryScope === "direct" ? "direct files in this component" : "this component’s subtree"}. Test inventory does not indicate test results.</p>
     <p>{inventory.samples.length === 0 ? "No direct filenames in this sample." : `Direct filename sample: ${inventory.samples.join(", ")}.`}{inventory.samples_omitted === 0 ? "" : ` ${inventory.samples_omitted} direct filenames omitted.`}</p>
     {omittedFiles === 0 ? null : <p>{omittedFiles} scanned files in other categories are not pictured; all served counts are in the table.</p>}
     </>}
-    {omittedComponents === 0 ? null : <p>{omittedComponents} subcomponents without pictured cabinets; enter this room and use its pages to reach them.</p>}
+    {omittedComponents === 0 ? null : <p>{omittedComponents} subcomponents without pictured plans; enter this room and use its pages to reach them.</p>}
   </>;
 }
