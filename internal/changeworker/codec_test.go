@@ -227,6 +227,9 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { v.FactoryctlExecutable = "/private/factoryctl\x00foreign" },
 		func(v *Config) { v.FactoryctlExecutable = "/" + strings.Repeat("f", maximumLocatorBytes) },
 		func(v *Config) { v.ToolPath = "relative:/usr/bin" },
+		func(v *Config) { v.ToolchainReadRoots = v.RuntimePath },
+		func(v *Config) { v.ToolchainReadRoots = v.AccountHome },
+		func(v *Config) { v.ToolchainReadRoots = v.RepositoryRoot },
 		func(v *Config) { v.Provider, v.ReasoningEffort = kernel.ProviderCodex, "speculative" },
 		func(v *Config) { v.FinalName = ".GiT" },
 		func(v *Config) { v.StagingName = v.FinalName },
@@ -260,7 +263,7 @@ func configFixture(t testing.TB) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", AccountHome: "/private/account", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", ProviderTask: []byte("printf exact")}
+	return Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", ToolchainReadRoots: "/opt/software/node:/opt/software/go", AccountHome: "/private/account", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", ProviderTask: []byte("printf exact")}
 }
 
 func resultFixture(t testing.TB) Result {

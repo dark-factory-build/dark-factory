@@ -307,3 +307,20 @@ func TestServiceStatusCLIRefusesMissingHomeOrNonAbsentProjection(t *testing.T) {
 		})
 	}
 }
+
+func TestServiceToolchainFlagsAreInstallOnly(t *testing.T) {
+	flags := []string{"--tool-path", "/opt/software/node/bin:/usr/bin:/bin", "--toolchain-read-roots", "/opt/software/node"}
+	command, help, ok := parse(append([]string{"service", "install", "--home", "/private/factory/home"}, flags...))
+	if !ok || help {
+		t.Fatal("toolchain install flags refused")
+	}
+	config := serviceConfigFor(command)
+	if config.ToolPath != flags[1] || config.ToolchainReadRoots != flags[3] {
+		t.Fatalf("lost toolchain configuration: %+v", config)
+	}
+	for _, verb := range []string{"status", "uninstall"} {
+		if _, _, ok := parse(append([]string{"service", verb, "--home", "/private/factory/home"}, flags...)); ok {
+			t.Fatalf("%s accepted install authority", verb)
+		}
+	}
+}

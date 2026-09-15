@@ -76,12 +76,17 @@ type ServiceConfig struct {
 	// DevelopmentBrowserAddress, when set, adds factoryd's existing
 	// --development-browser-address argument to the installed job.
 	DevelopmentBrowserAddress string
+	ToolPath                  string
+	ToolchainReadRoots        string
 }
 
 // DefaultServiceConfig is the production configuration.
 func DefaultServiceConfig() ServiceConfig { return ServiceConfig{Label: DefaultServiceLabel} }
 
 func (config ServiceConfig) valid() bool {
+	if config.ToolPath != "" && !ValidToolPath(config.ToolPath) || !ValidToolchainReadRoots(config.ToolchainReadRoots) {
+		return false
+	}
 	if !validServiceLabel(config.Label) || !validServiceRelayOrigin(config.RelayOrigin) || !ValidDevelopmentBrowserAddress(config.DevelopmentBrowserAddress) {
 		return false
 	}
@@ -174,7 +179,7 @@ func ServiceUninstall(ctx context.Context, home string, config ServiceConfig) (S
 // ServicePlist renders the one Go-v1 launchd job. Exact byte comparison is the
 // parser: accepting a plist means accepting precisely this finite allowlist.
 // Empty optional arguments render no extra factoryd flags.
-func ServicePlist(home, label, relayOrigin, developmentBrowserAddress string) ([]byte, [sha256.Size]byte, error) {
+func ServicePlist(home, label, relayOrigin, developmentBrowserAddress, toolPath, toolchainReadRoots string) ([]byte, [sha256.Size]byte, error) {
 	if !validServicePath(home) || filepath.Base(home) == string(filepath.Separator) {
 		return nil, [sha256.Size]byte{}, fmt.Errorf("%w: home path", ErrServicePlist)
 	}
@@ -183,6 +188,9 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress string) ([
 	}
 	if !validServiceRelayOrigin(relayOrigin) || !ValidDevelopmentBrowserAddress(developmentBrowserAddress) {
 		return nil, [sha256.Size]byte{}, fmt.Errorf("%w: arguments", ErrServicePlist)
+	}
+	if toolPath != "" && !ValidToolPath(toolPath) || !ToolchainReadRootsAllowed(toolchainReadRoots, "", home) {
+		return nil, [sha256.Size]byte{}, ErrServicePlist
 	}
 	program := serviceProgramPath(home)
 	stderrPath := serviceStderrPath(home)
@@ -200,6 +208,15 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress string) ([
 	if developmentBrowserAddress != "" {
 		address = "\n        <string>--development-browser-address</string>\n        <string>" + developmentBrowserAddress + "</string>"
 	}
+	toolchain := ""
+	for _, argument := range [][2]string{{"--tool-path", toolPath}, {"--toolchain-read-roots", toolchainReadRoots}} {
+		if argument[1] == "" {
+			continue
+		}
+		var escaped bytes.Buffer
+		escapeXML(&escaped, argument[1])
+		toolchain += "\n        <string>" + argument[0] + "</string>\n        <string>" + escaped.String() + "</string>"
+	}
 	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -210,7 +227,7 @@ func ServicePlist(home, label, relayOrigin, developmentBrowserAddress string) ([
     <array>
         <string>` + escapedProgram.String() + `</string>
         <string>--home</string>
-        <string>` + escapedHome.String() + `</string>` + relay + address + `
+        <string>` + escapedHome.String() + `</string>` + relay + address + toolchain + `
     </array>
     <key>WorkingDirectory</key>
     <string>` + escapedHome.String() + `</string>
@@ -244,16 +261,18 @@ type serviceReceipt struct {
 	// DevelopmentBrowserAddress is the exact development-only browser address
 	// the installed plist requested. It is omitted for production installs.
 	DevelopmentBrowserAddress string `json:"development_browser_address,omitempty"`
+	ToolPath                  string `json:"tool_path,omitempty"`
+	ToolchainReadRoots        string `json:"toolchain_read_roots,omitempty"`
 }
 
 const (
 	serviceReceiptName     = "receipt"
 	serviceReceiptVersion  = 1
-	serviceReceiptMaxBytes = 8192
+	serviceReceiptMaxBytes = 16384
 )
 
 func (receipt serviceReceipt) valid() bool {
-	return receipt.Version == serviceReceiptVersion && validServiceLabel(receipt.Label) &&
+	return (receipt.ToolPath == "" || ValidToolPath(receipt.ToolPath)) && ValidToolchainReadRoots(receipt.ToolchainReadRoots) && receipt.Version == serviceReceiptVersion && validServiceLabel(receipt.Label) &&
 		validServicePath(receipt.PlistPath) && filepath.Base(receipt.PlistPath) == receipt.Label+".plist" &&
 		validDigestHex(receipt.PlistDigest) && validDigestHex(receipt.ProgramDigest) &&
 		validServiceRelayOrigin(receipt.RelayOrigin) && ValidDevelopmentBrowserAddress(receipt.DevelopmentBrowserAddress)

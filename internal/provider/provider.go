@@ -171,14 +171,15 @@ type RuntimePaths struct {
 	// accountConfig is one linked provider login's own configuration
 	// directory. Empty means the provider's default, which is what every
 	// launch used before accounts existed.
-	accountConfig string
+	accountConfig      string
+	toolchainReadRoots string
 }
 
-func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig string) (RuntimePaths, error) {
+func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
 	runtime := RuntimePaths{
 		home: home, temp: temp, socket: socket, token: token,
 		factoryctl: factoryctl, gitCeiling: gitCeiling, toolPath: toolPath, accountHome: accountHome,
-		accountConfig: accountConfig,
+		accountConfig: accountConfig, toolchainReadRoots: toolchainReadRoots,
 	}
 	if !runtime.valid() {
 		return RuntimePaths{}, ErrInvalid
@@ -366,6 +367,9 @@ func codexPermissions(request Request) (string, error) {
 	}
 	for _, path := range []string{request.installation.executable.Path(), request.runtime.factoryctl, request.runtime.token, request.runtime.socket} {
 		entries = append(entries, tomlBasicString(path)+`="read"`)
+	}
+	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
+		entries = append(entries, tomlBasicString(root)+`="read"`)
 	}
 	// Codex merges profile tables. Use the existing private runtime identity
 	// rather than a shared name that could inherit an account profile.
@@ -575,7 +579,7 @@ func (runtime RuntimePaths) valid() bool {
 			return false
 		}
 	}
-	return len(runtime.socket) <= install.MaxSocketPathBytes && runtime.home != runtime.temp &&
+	return install.ToolchainReadRootsAllowed(runtime.toolchainReadRoots, runtime.accountHome, runtime.accountConfig, runtime.gitCeiling, runtime.home, runtime.temp) && len(runtime.socket) <= install.MaxSocketPathBytes && runtime.home != runtime.temp &&
 		validGitCeiling(runtime.gitCeiling) && validToolPath(runtime.toolPath) &&
 		validAbsolute(runtime.accountHome, maxPathBytes-len("/"+codexConfigDir)) &&
 		runtime.accountHome != runtime.home && runtime.accountHome != runtime.temp &&
@@ -604,7 +608,13 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 		if runtime.accountConfig != "" {
 			codexHome = runtime.accountConfig
 		}
-		environment = append(environment, "CODEX_HOME="+codexHome)
+		environment = append(environment, "CODEX_HOME="+codexHome,
+			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
+			"GOPATH="+filepath.Join(runtime.home, "go"),
+			"GOMODCACHE="+filepath.Join(runtime.home, "go", "pkg", "mod"),
+			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
+			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
+			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
 	case kernel.ProviderClaudeCode:
 		// Only a directory beside the default one is named. The default is
 		// what the CLI already reaches through HOME, and its OAuth account
@@ -635,22 +645,7 @@ func validAbsolute(value string, limit int) bool {
 	return validValue(value, limit) && filepath.IsAbs(value) && filepath.Clean(value) == value && value != string(filepath.Separator)
 }
 
-func validToolPath(value string) bool {
-	if !validValue(value, runner.MaxEnvironmentEntryBytes-len("PATH=")) {
-		return false
-	}
-	seen := make(map[string]struct{})
-	for _, component := range filepath.SplitList(value) {
-		if !validAbsolute(component, maxPathBytes) {
-			return false
-		}
-		if _, duplicate := seen[component]; duplicate {
-			return false
-		}
-		seen[component] = struct{}{}
-	}
-	return len(seen) > 0
-}
+func validToolPath(value string) bool { return install.ValidToolPath(value) }
 
 // ValidateToolPath lets the daemon freeze one bounded startup-owned PATH and
 // lets the worker codec reject drift without reimplementing its grammar.

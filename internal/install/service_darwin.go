@@ -113,7 +113,8 @@ type serviceInspection struct {
 	relayOrigin string
 	// developmentBrowserAddress is the receipt-bound requested address, which
 	// may be port zero even though the live listener chose another port.
-	developmentBrowserAddress string
+	developmentBrowserAddress    string
+	toolPath, toolchainReadRoots string
 }
 
 func inspectServiceForAccount(ctx context.Context, home string, config ServiceConfig, launchctl launchctlRun) (status ServiceStatus, resultErr error) {
@@ -184,6 +185,8 @@ func inspectServiceWithCapabilityAt(ctx context.Context, home, userHome string, 
 	if receiptErr == nil && receiptPresent {
 		renderedOrigin = receipt.RelayOrigin
 		renderedDevelopmentBrowserAddress = receipt.DevelopmentBrowserAddress
+		config.ToolPath = receipt.ToolPath
+		config.ToolchainReadRoots = receipt.ToolchainReadRoots
 	}
 	plist, err := inspectServicePlist(userDirectory, home, config, renderedOrigin, renderedDevelopmentBrowserAddress)
 	if err != nil {
@@ -238,11 +241,11 @@ func inspectServiceWithCapabilityAt(ctx context.Context, home, userHome string, 
 	if err == nil && receiptPresent && plist.present {
 		if matchErr := receiptMatchesInstallation(receipt, home, config, plistPath); matchErr == nil {
 			if observation.present && observation.pid > 0 {
-				return serviceInspection{status: ServiceStatus{State: ServiceRunning, PID: observation.pid}, observation: observation, relayOrigin: renderedOrigin, developmentBrowserAddress: renderedDevelopmentBrowserAddress}, nil
+				return serviceInspection{status: ServiceStatus{State: ServiceRunning, PID: observation.pid}, observation: observation, relayOrigin: renderedOrigin, developmentBrowserAddress: renderedDevelopmentBrowserAddress, toolPath: config.ToolPath, toolchainReadRoots: config.ToolchainReadRoots}, nil
 			}
 			// A loaded-but-idle job and an unloaded plist are both restartable
 			// installations; neither grants process authority.
-			return serviceInspection{status: ServiceStatus{State: ServiceInstalled}, observation: observation, relayOrigin: renderedOrigin, developmentBrowserAddress: renderedDevelopmentBrowserAddress}, nil
+			return serviceInspection{status: ServiceStatus{State: ServiceInstalled}, observation: observation, relayOrigin: renderedOrigin, developmentBrowserAddress: renderedDevelopmentBrowserAddress, toolPath: config.ToolPath, toolchainReadRoots: config.ToolchainReadRoots}, nil
 		} else {
 			return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, matchErr)
 		}
@@ -922,7 +925,7 @@ func inspectServicePlist(userHome *serviceDirectory, home string, config Service
 	if err := unix.Fstat(fd, &before); err != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Mode&0o7777 != 0o600 || before.Uid != uint32(os.Geteuid()) || before.Nlink != 1 || before.Size <= 0 || before.Size > launchctlOutputLimit {
 		return servicePlistObservation{}, fmt.Errorf("%w: plist metadata", ErrServicePlist)
 	}
-	expected, _, err := ServicePlist(home, config.Label, relayOrigin, developmentBrowserAddress)
+	expected, _, err := ServicePlist(home, config.Label, relayOrigin, developmentBrowserAddress, config.ToolPath, config.ToolchainReadRoots)
 	if err != nil || int64(len(expected)) != before.Size {
 		return servicePlistObservation{}, fmt.Errorf("%w: plist size", ErrServicePlist)
 	}

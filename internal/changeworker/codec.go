@@ -43,6 +43,7 @@ type Config struct {
 	GitExecutable        string
 	FactoryctlExecutable string
 	ToolPath             string
+	ToolchainReadRoots   string
 	AccountHome          string
 	// AccountConfigDir is the linked provider login this run launches with.
 	// Empty means the provider's own default configuration directory.
@@ -102,6 +103,7 @@ type configWire struct {
 	GitExecutable        string       `json:"git_executable"`
 	FactoryctlExecutable string       `json:"factoryctl_executable"`
 	ToolPath             string       `json:"tool_path"`
+	ToolchainReadRoots   string       `json:"toolchain_read_roots,omitempty"`
 	AccountHome          string       `json:"account_home"`
 	AccountConfigDir     string       `json:"account_config_dir"`
 	RepositoryRoot       string       `json:"repository_root"`
@@ -122,7 +124,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	wire := configWire{
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
-		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
+		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName, StagingName: config.StagingName,
 		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask),
@@ -162,7 +164,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	config := Config{
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
-		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
+		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName, StagingName: wire.StagingName,
 		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
@@ -184,7 +186,7 @@ func validateConfig(config Config) error {
 		return invalidContract(nil)
 	}
 	if len(config.AttemptSocket) > install.MaxSocketPathBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
-		kernel.ValidateProviderLaunchControls(config.Provider, config.Model, config.ReasoningEffort) != nil || provider.ValidateToolPath(config.ToolPath) != nil ||
+		kernel.ValidateProviderLaunchControls(config.Provider, config.Model, config.ReasoningEffort) != nil || provider.ValidateToolPath(config.ToolPath) != nil || !install.ToolchainReadRootsAllowed(config.ToolchainReadRoots, config.AccountHome, config.AccountConfigDir, config.RuntimePath, config.RepositoryRoot, config.ChangeParent) ||
 		!validText(config.Revision, maximumRevisionBytes) || config.Role.String() == "" {
 		return invalidContract(nil)
 	}

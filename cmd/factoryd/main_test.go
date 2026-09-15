@@ -848,3 +848,15 @@ func TestSchedulerDrivesQueuedTaskAndJoinsBeforeDaemonClose(t *testing.T) {
 	}
 	assertReleased(t, home, address)
 }
+
+func TestParseToolchainReadRoots(t *testing.T) {
+	config, help, ok := parse([]string{"--home", "/private/factory/home", "--toolchain-read-roots", "/opt/software/node:/opt/software/go"})
+	if !ok || help || config.toolchainReadRoots != "/opt/software/node:/opt/software/go" {
+		t.Fatalf("lost toolchain roots: %+v", config)
+	}
+	for _, roots := range []string{"", "/", "/Users/operator", "relative"} {
+		if _, _, ok := parse([]string{"--home", "/private/factory/home", "--toolchain-read-roots", roots}); ok {
+			t.Fatalf("accepted roots %q", roots)
+		}
+	}
+}

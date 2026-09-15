@@ -73,7 +73,7 @@ const (
   factoryctl init --home ABSOLUTE
   factoryctl doctor --home ABSOLUTE
   factoryctl service status --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
-  factoryctl service install --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE] [--relay-origin WSS_ORIGIN] [--development-browser-address LOOPBACK]
+  factoryctl service install --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE] [--relay-origin WSS_ORIGIN] [--development-browser-address LOOPBACK] [--tool-path PATH] [--toolchain-read-roots PATH_LIST]
   factoryctl service start --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl service stop --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl service uninstall --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
@@ -126,6 +126,8 @@ const (
 )
 
 type attemptCommand struct {
+	toolPath, toolchainReadRoots string
+
 	kind             commandKind
 	home             string
 	idempotencyKey   string
@@ -489,6 +491,16 @@ func parseServiceCommand(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.relayOrigin = value
+		case "--tool-path":
+			if command.kind != commandServiceInstall || !install.ValidToolPath(value) {
+				return attemptCommand{}, false, false
+			}
+			command.toolPath = value
+		case "--toolchain-read-roots":
+			if command.kind != commandServiceInstall || value == "" || !install.ValidToolchainReadRoots(value) {
+				return attemptCommand{}, false, false
+			}
+			command.toolchainReadRoots = value
 		case "--development-browser-address":
 			if command.kind != commandServiceInstall || !install.ValidDevelopmentBrowserAddress(value) || value == "" {
 				return attemptCommand{}, false, false
@@ -511,6 +523,8 @@ func serviceConfigFor(command attemptCommand) install.ServiceConfig {
 	}
 	config.PlistDirectory = command.plistDir
 	config.RelayOrigin = command.relayOrigin
+	config.ToolPath = command.toolPath
+	config.ToolchainReadRoots = command.toolchainReadRoots
 	config.DevelopmentBrowserAddress = command.browserAddress
 	return config
 }

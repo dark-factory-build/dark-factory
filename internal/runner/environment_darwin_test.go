@@ -19,6 +19,7 @@ var providerEnvironmentNames = []string{
 	"DARK_FACTORY_ATTEMPT_TOKEN_FILE",
 	"DARK_FACTORY_FACTORYCTL",
 	"CODEX_HOME",
+	"GOCACHE", "GOPATH", "GOMODCACHE", "COREPACK_HOME", "npm_config_cache", "XDG_CACHE_HOME",
 	"CLAUDE_CONFIG_DIR",
 	"HOME",
 	"TMPDIR",
