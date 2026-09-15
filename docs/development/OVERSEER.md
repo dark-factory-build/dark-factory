@@ -139,20 +139,18 @@ For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 ## 1. Find what a worker finished
 
 Never read the daemon SQLite database, the whole daemon home, or the Changes
-parent. Run `overseer status --task TASK_ID` as reviewer preflight for the task
-you are handling. It must either refuse or return exactly one usable receipt;
-an accepted response without a receipt is not an assignment and must be
-relaunched, never worked around.
-Status is task state only. To inspect a retained tree, explicitly run
-`factoryctl attempt source --task TASK_ID`; its receipt names the Change ID,
-base commit, target task ID, task work revision, current retained Change
-revision, and daemon-derived `source_path` for that exact tree. Match every
-identity value to the requested task, then read only that returned path. The
-daemon verifies and materializes the target into the reader's private runtime;
-never construct a `$home/changes/...` path, read `factory.sqlite3`, or infer
-source from a published branch. If the task was sent back or any task/work/
-Change revision changed, the request is refused and must use exact current
-task state.
+parent. As overseer, run `overseer status --task TASK_ID` for the task
+you are handling. This may return task-only status: the retained tree is not
+materialized by status. After the task-only response, explicitly run
+`factoryctl attempt source --task TASK_ID`; its response must contain exactly
+one usable receipt naming the Change ID, base commit, target task ID, task work
+revision, current retained Change revision, and daemon-derived `source_path`
+for that exact tree. Match every identity value to the requested task and
+status, then read only that returned path. The daemon verifies and materializes
+the target into the reader's private runtime; never construct a
+`$home/changes/...` path, read `factory.sqlite3`, or infer source from a
+published branch. If the task was sent back or any task/work/Change revision
+changed, the source request is refused and must use exact current task state.
 Source requests are lifetime-bound to the live attempt: shutdown first refuses
 new requests and waits for admitted materialization to finish before runtime
 cleanup removes the private snapshot.
