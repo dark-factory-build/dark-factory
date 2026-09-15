@@ -778,7 +778,7 @@ test("inventory inspection discloses actual omitted categories and plans", async
   assert.match(text, /scanned files in other categories/);
   assert.match(text, /subcomponents without pictured plans/);
   assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 1 && p.props.children[1].includes("subcomponents")));
-  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 2 && p.props.children[1].includes("scanned files")));
+  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 4 && p.props.children[1].includes("scanned files")));
   assert.match(text, /5 direct filenames omitted/);
   await act(async () => renderer.unmount());
 });
