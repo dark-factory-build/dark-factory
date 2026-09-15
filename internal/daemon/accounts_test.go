@@ -102,9 +102,9 @@ func TestListedAccountsRetainsLinkedLoginWhenDiscoveryBecomesUnavailable(t *test
 	}
 }
 
-func TestListedAccountsPrioritizesLinkedLoginOverFullDiscovery(t *testing.T) {
+func TestListedAccountsPreservesLinkedAndDiscoveredLoginsForPaging(t *testing.T) {
 	home := t.TempDir()
-	for index := 0; index < maxDiscoveredAccounts; index++ {
+	for index := 0; index < 4096; index++ {
 		writeFile(t, filepath.Join(home, fmt.Sprintf(".codex-%04d", index), "auth.json"), `{"tokens":{"account_id":"acct"}}`)
 	}
 	id, err := kernel.AccountIDFromBytes(bytes.Repeat([]byte{8}, kernel.IDBytes))
@@ -113,8 +113,8 @@ func TestListedAccountsPrioritizesLinkedLoginOverFullDiscovery(t *testing.T) {
 	}
 	linked := kernel.Account{ID: id, Provider: kernel.ProviderCodex, Home: filepath.Join(home, ".codex-retained"), Label: "retained"}
 	accounts := discoveryDaemon().listedAccounts(home, []kernel.Account{linked})
-	if len(accounts) != maxDiscoveredAccounts {
-		t.Fatalf("listed %d accounts, want frame bound %d", len(accounts), maxDiscoveredAccounts)
+	if len(accounts) != 4097 {
+		t.Fatalf("listed %d accounts, want complete inventory %d", len(accounts), 4097)
 	}
 	if accounts[0].LinkedID != id.String() || accounts[0].Home != linked.Home || accounts[0].UnavailableReason != "login is no longer discoverable" {
 		t.Fatalf("linked account was clipped or misprojected: %+v", accounts[0])

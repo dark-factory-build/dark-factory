@@ -10,7 +10,7 @@ export const TERMINAL_HEADER_BYTES = 40;
 export const MAX_JSON_DEPTH = 16;
 export const MAX_ARRAY_ITEMS = 32;
 export const MAX_OBJECT_MEMBERS = 32;
-/** Only a server STATE_SNAPSHOT may exceed MAX_CONTROL_BYTES. */
+/** Only bounded server observations may exceed MAX_CONTROL_BYTES. */
 export const MAX_SNAPSHOT_BYTES = 1024 * 1024;
 export const MAX_SNAPSHOT_ENTITIES = 4096;
 export const MAX_PROJECT_NAME_BYTES = 128;

@@ -112,8 +112,10 @@ type RunPaths struct {
 
 // AccountsDiscover asks what provider logins exist on this machine. It is an
 // observation of the operator's own home directory, not durable state, so it
-// carries no selector and no revision.
-type AccountsDiscover struct{}
+// carries no revision. Offset continues a bounded observation.
+type AccountsDiscover struct {
+	Offset uint32 `json:"offset,omitempty"`
+}
 
 // DiscoveredAccount is one CLI login the daemon found. Identity comes from the
 // login's own files; the tokens that prove it never leave the daemon and have
@@ -133,7 +135,8 @@ type DiscoveredAccount struct {
 }
 
 type Accounts struct {
-	Accounts []DiscoveredAccount `json:"accounts"`
+	Accounts   []DiscoveredAccount `json:"accounts"`
+	NextOffset *uint32             `json:"next_offset,omitempty"`
 }
 
 // AccountLink registers one login that already exists. Starting a new CLI
@@ -354,7 +357,7 @@ func validConsoleControl(kind MessageType, body any) error {
 		}
 	case AccountsDiscover:
 	case Accounts:
-		if value.Accounts == nil || len(value.Accounts) > MaxJSONArray {
+		if value.Accounts == nil || len(value.Accounts) > MaxSnapshotEntities || value.NextOffset != nil && *value.NextOffset == 0 {
 			return bad()
 		}
 		for _, account := range value.Accounts {

@@ -1186,15 +1186,6 @@ func validOperatorText(value string, minimum, maximum int) bool {
 	return len(value) >= minimum && len(value) <= maximum && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
 }
 
-func validReasoningEffort(value string) bool {
-	switch value {
-	case "", "low", "medium", "high", "xhigh", "max", "ultra":
-		return true
-	default:
-		return false
-	}
-}
-
 func validBrowserClientID(value string) bool { return validHumanRequestKey(value) }
 
 func parseRevision(value string) (uint64, bool) {

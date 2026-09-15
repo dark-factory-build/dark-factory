@@ -100,10 +100,10 @@ type Call struct {
 	webAfter          string
 	expectedRevision  uint64
 	enabled           bool
-	modelSelection    AgentModelSelectInput
 	capacity          uint16
 	account           AccountLinkInput
 	selection         AgentAccountSelectInput
+	accountsOffset    uint32
 	modelSelection    AgentModelSelectInput
 	text              string
 }
@@ -193,10 +193,6 @@ func (call Call) AccountLinkInput() (AccountLinkInput, bool) {
 
 func (call Call) AgentAccountSelectInput() (AgentAccountSelectInput, bool) {
 	return call.selection, call.kind == CallAgentSelectAccount
-}
-
-func (call Call) AgentModelSelectInput() (AgentModelSelectInput, bool) {
-	return call.modelSelection, call.kind == CallAgentSelectModel
 }
 
 func (call Call) Result() (string, bool) {
@@ -588,10 +584,18 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		call.digest = digestAttemptCredential(bearer)
 	}
 	switch kind {
-	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallRemoteStatus, CallAccountsDiscover:
+	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallRemoteStatus:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallAccountsDiscover:
+		var input struct {
+			Offset uint32 `json:"offset,omitempty"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.accountsOffset = input.Offset
 	case CallOverseerSnapshot:
 		if err := decodeExact(request.Params, &call.overseerSnapshot); err != nil || !validOverseerSnapshotInput(call.overseerSnapshot) {
 			return Call{}, RemoteInvalidRequest
@@ -777,8 +781,6 @@ func methodKind(method string) (CallKind, byte) {
 		return CallAccountLink, operatorDomain
 	case "agent_select_account":
 		return CallAgentSelectAccount, operatorDomain
-	case "agent_select_model":
-		return CallAgentSelectModel, operatorDomain
 	case "task":
 		return CallAttemptTask, attemptDomain
 	case "agent_select_model":
@@ -1031,4 +1033,8 @@ func (connection *Connection) Close() error {
 
 func (call Call) AgentModelSelectInput() (AgentModelSelectInput, bool) {
 	return call.modelSelection, call.kind == CallAgentSelectModel
+}
+
+func (call Call) AccountsOffset() (uint32, bool) {
+	return call.accountsOffset, call.kind == CallAccountsDiscover
 }

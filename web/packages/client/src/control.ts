@@ -312,8 +312,8 @@ function wireValue(value: unknown): unknown {
   return value;
 }
 
-/** Only the server's whole-state snapshot and project topology may exceed the 64 KiB control bound. */
-function controlLimit(type: ControlType): number { return type === "STATE_SNAPSHOT" || type === "TOPOLOGY" ? MAX_SNAPSHOT_BYTES : MAX_CONTROL_BYTES; }
+/** Only bounded server observations may exceed the 64 KiB control bound. */
+function controlLimit(type: ControlType): number { return type === "STATE_SNAPSHOT" || type === "TOPOLOGY" || type === "ACCOUNTS" ? MAX_SNAPSHOT_BYTES : MAX_CONTROL_BYTES; }
 
 function decodeControl(data: string | Uint8Array, role: "client" | "server"): ClientControlFrame | ServerControlFrame {
   let text: string;
@@ -445,8 +445,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "RUN_PATHS_GET": requireKeys(body, ["agent_id"], wire); return { agent_id: dynamicID(body.agent_id) };
     // No live run means no rooms, so an empty run identity carries no paths.
     case "RUN_PATHS": requireKeys(body, ["agent_id", "run_id", "paths"], wire); { if (!Array.isArray(body.paths) || body.paths.length > MAX_ARRAY_ITEMS) malformed(); if (body.run_id === "" && body.paths.length !== 0) malformed(); return { agent_id: dynamicID(body.agent_id), run_id: body.run_id === "" ? "" : dynamicID(body.run_id), paths: body.paths.map((item) => boundedText(item, 1, MAX_TASK_TITLE_BYTES)) }; }
-    case "ACCOUNTS_DISCOVER": requireKeys(body, [], wire); return {};
-    case "ACCOUNTS": requireKeys(body, ["accounts"], wire); { if (!Array.isArray(body.accounts) || body.accounts.length > MAX_ARRAY_ITEMS) malformed(); return { accounts: body.accounts.map((item) => discoveredAccount(item, wire)) }; }
+    case "ACCOUNTS_DISCOVER": requireKeys(body, [], wire, ["offset"]); { const offset = present(body, "offset") ? integer(body.offset, 0, MAX_SNAPSHOT_ENTITIES) : undefined; return offset === undefined ? {} : { offset }; }
+    case "ACCOUNTS": requireKeys(body, ["accounts"], wire, ["next_offset"]); { if (!Array.isArray(body.accounts) || body.accounts.length > MAX_SNAPSHOT_ENTITIES) malformed(); const next_offset = present(body, "next_offset") ? integer(body.next_offset, 1, Number.MAX_SAFE_INTEGER) : undefined; return { accounts: body.accounts.map((item) => discoveredAccount(item, wire)), ...(next_offset === undefined ? {} : { next_offset }) }; }
     case "ACCOUNT_LINK": requireKeys(body, ["provider", "home", "label"], wire); return { provider: accountProvider(body.provider), home: accountHome(body.home), label: boundedText(body.label, 1, MAX_AGENT_NAME_BYTES) };
     case "ACCOUNT_LINK_RESULT": requireKeys(body, ["account_id", "revision"], wire); return { account_id: dynamicID(body.account_id), revision: decimal(body.revision, wire, true) };
     case "ACCOUNT_UPDATE": requireKeys(body, ["account_id", "expected_revision"], wire, ["label", "remove"]); { const hasLabel = present(body, "label"); const hasRemove = present(body, "remove"); if (hasLabel === hasRemove || hasRemove && body.remove !== true) malformed(); return { account_id: dynamicID(body.account_id), expected_revision: decimal(body.expected_revision, wire, true), ...(hasLabel ? { label: boundedText(body.label, 1, MAX_AGENT_NAME_BYTES) } : { remove: true }) }; }

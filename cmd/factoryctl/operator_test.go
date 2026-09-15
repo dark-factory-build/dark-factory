@@ -255,31 +255,6 @@ func TestTaskAddMintsDistinctTaskAndIncarnationIdentities(t *testing.T) {
 	}
 }
 
-func TestAgentSelectModelCarriesRevisionCheckedControls(t *testing.T) {
-	fixture := newAPIFixture(t)
-	defer fixture.close(t)
-	agentID := strings.Repeat("22", 16)
-	var received api.AgentModelSelectInput
-	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
-		var ok bool
-		received, ok = call.AgentModelSelectInput()
-		if !ok || call.Kind() != api.CallAgentSelectModel {
-			t.Errorf("call = %v, input = %+v, ok = %v", call.Kind(), received, ok)
-		}
-		reply, err := api.NewMutationReply(api.MutationResult{Head: 10, Revision: 8})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return reply
-	})
-	var stdout, stderr bytes.Buffer
-	exit := run(context.Background(), []string{"agent", "select-model", "--agent", agentID, "--revision", "7", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium"}, webEnvironment(fixture), &stdout, &stderr)
-	awaitServer(t, done)
-	if exit != 0 || stderr.Len() != 0 || received != (api.AgentModelSelectInput{AgentID: agentID, ExpectedRevision: 7, Model: "gpt-5.6-luna", ReasoningEffort: "medium"}) {
-		t.Fatalf("select model = exit %d stderr %q received %+v", exit, stderr.String(), received)
-	}
-}
-
 func TestTaskSendBackCarriesTaskAndNote(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)
@@ -455,5 +430,59 @@ func TestAgentSelectModelCarriesRevisionCheckedControls(t *testing.T) {
 	awaitServer(t, done)
 	if exit != 0 || stderr.Len() != 0 || received != (api.AgentModelSelectInput{AgentID: agentID, ExpectedRevision: 7, Model: "gpt-5.6-luna", ReasoningEffort: "medium"}) {
 		t.Fatalf("select model = exit %d stderr %q received %+v", exit, stderr.String(), received)
+	}
+}
+
+func TestAccountDiscoverCLICollectsPagesAndRejectsRepeatedCursor(t *testing.T) {
+	for _, repeated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "repeated cursor"}[repeated], func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			served := make(chan struct{})
+			go func() {
+				defer close(served)
+				for page := 0; page < 2; page++ {
+					done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+						offset, ok := call.AccountsOffset()
+						if !ok || offset != uint32(page*4096) {
+							t.Errorf("page %d offset=%d valid=%t", page, offset, ok)
+						}
+						count := 4096
+						if page == 1 {
+							count = 1
+						}
+						accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, count)}
+						for index := range accounts.Accounts {
+							accounts.Accounts[index] = api.DiscoveredAccount{Provider: "codex", Home: "/private/account", Label: "linked", LinkedID: strings.Repeat("ab", 16), UnavailableReason: "login is no longer discoverable"}
+						}
+						if page == 0 || repeated {
+							next := uint32(4096)
+							accounts.NextOffset = &next
+						}
+						reply, err := api.NewAccountsReply(accounts)
+						if err != nil {
+							t.Errorf("page reply: %v", err)
+						}
+						return reply
+					})
+					if result := <-done; result.err != nil {
+						t.Errorf("page server: %v", result.err)
+					}
+				}
+			}()
+			var stdout, stderr bytes.Buffer
+			exit := run(context.Background(), []string{"account", "discover"}, webEnvironment(fixture), &stdout, &stderr)
+			<-served
+			if repeated {
+				if exit == 0 {
+					t.Fatal("repeated cursor accepted")
+				}
+				return
+			}
+			var result api.Accounts
+			if exit != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil || len(result.Accounts) != 4097 || result.NextOffset != nil || result.Accounts[4096].UnavailableReason == "" {
+				t.Fatalf("CLI discovery exit=%d count=%d stderr=%q", exit, len(result.Accounts), stderr.String())
+			}
+		})
 	}
 }

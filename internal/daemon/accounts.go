@@ -22,7 +22,8 @@ import (
 // tokens beside that identity are never read into a returned value, and the
 // JWT that carries a Codex e-mail is decoded, never verified: it is a display
 // label, not authority.
-const maxDiscoveredAccounts = browserprotocol.MaxJSONArray
+// Account discovery also projects linked logins whose directories have since
+// disappeared. Callers page this complete projection at the wire boundary.
 
 // accountProviders is the closed set of providers that have logins at all.
 // Their configuration directory names come from internal/provider, which is
@@ -68,38 +69,27 @@ func (daemon *Daemon) discoverAccounts(home string) []browserprotocol.Discovered
 		result = append(result, account)
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].Home < result[right].Home })
-	if len(result) > maxDiscoveredAccounts {
-		result = result[:maxDiscoveredAccounts]
-	}
 	return result
 }
 
-// listedAccounts joins the current, read-only login discovery with durable
-// links. A link remains meaningful to the scheduler even when its login's
-// identity file disappears, so the operator must still be able to see it.
-// Such a row is not eligible to be linked again: LinkAccount continues to use
-// discoverAccounts directly as its authorization boundary.
+// listedAccounts keeps durable links visible after a local login disappears.
+// LinkAccount still authorizes solely against fresh discovery.
 func (daemon *Daemon) listedAccounts(home string, linked []kernel.Account) []browserprotocol.DiscoveredAccount {
 	found := daemon.discoverAccounts(home)
 	present := make(map[string]browserprotocol.DiscoveredAccount, len(found))
-	for index := range found {
-		present[found[index].Provider+"\x00"+found[index].Home] = found[index]
+	for _, item := range found {
+		present[item.Provider+"\x00"+item.Home] = item
 	}
-	// Linked rows take the fixed response budget first. They are durable
-	// operator choices, unlike a fresh discovery, so clipping the combined
-	// lexical sort must never make one disappear when discovery fills a frame.
-	result := make([]browserprotocol.DiscoveredAccount, 0, min(maxDiscoveredAccounts, len(found)+len(linked)))
+	result := make([]browserprotocol.DiscoveredAccount, 0, len(found)+len(linked))
+	linkedKeys := make(map[string]struct{}, len(linked))
 	for _, account := range linked {
 		key := account.Provider.String() + "\x00" + account.Home
-		if candidate, ok := present[key]; ok {
-			candidate.LinkedID = account.ID.String()
-			candidate.Label = account.Label
-			result = append(result, candidate)
+		linkedKeys[key] = struct{}{}
+		if item, ok := present[key]; ok {
+			item.LinkedID, item.Label = account.ID.String(), account.Label
+			result = append(result, item)
 		} else {
-			result = append(result, browserprotocol.DiscoveredAccount{
-				Provider: account.Provider.String(), Home: account.Home, Label: account.Label, LinkedID: account.ID.String(),
-				UnavailableReason: "login is no longer discoverable",
-			})
+			result = append(result, browserprotocol.DiscoveredAccount{Provider: account.Provider.String(), Home: account.Home, Label: account.Label, LinkedID: account.ID.String(), UnavailableReason: "login is no longer discoverable"})
 		}
 	}
 	sort.Slice(result, func(left, right int) bool {
@@ -108,16 +98,9 @@ func (daemon *Daemon) listedAccounts(home string, linked []kernel.Account) []bro
 		}
 		return result[left].Home < result[right].Home
 	})
-	linkedIDs := make(map[string]struct{}, len(linked))
-	for _, account := range linked {
-		linkedIDs[account.Provider.String()+"\x00"+account.Home] = struct{}{}
-	}
-	for _, candidate := range found {
-		if len(result) == maxDiscoveredAccounts {
-			break
-		}
-		if _, linked := linkedIDs[candidate.Provider+"\x00"+candidate.Home]; !linked {
-			result = append(result, candidate)
+	for _, item := range found {
+		if _, linked := linkedKeys[item.Provider+"\x00"+item.Home]; !linked {
+			result = append(result, item)
 		}
 	}
 	return result

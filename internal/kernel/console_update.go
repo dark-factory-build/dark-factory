@@ -116,11 +116,11 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 		agent.ReasoningEffort = *patch.ReasoningEffort
 	}
 	if patch.AccountID != nil {
-		var live bool
+		var live int
 		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE agent_id = ? AND phase <> 'terminal')`, agent.ID.Bytes()).Scan(&live); err != nil {
 			return Agent{}, tx.Rollback(err)
 		}
-		if live && agent.AccountID != *patch.AccountID {
+		if live != 0 {
 			return Agent{}, tx.Rollback(ErrConflict)
 		}
 		agent.AccountID = *patch.AccountID

@@ -770,8 +770,9 @@ func TestDiscoveredAccountAndLinkRulesAreClosed(t *testing.T) {
 			t.Fatalf("discovered account %s accepted", broken.name)
 		}
 	}
-	// More logins than one frame may carry is malformed, never a trimmed list.
-	many := make([]DiscoveredAccount, MaxJSONArray+1)
+	// More durable logins than the bounded server observation may carry is
+	// malformed, never a trimmed list.
+	many := make([]DiscoveredAccount, MaxSnapshotEntities+1)
 	for index := range many {
 		item := good
 		item.Home = fmt.Sprintf("/Users/operator/.codex-%d", index)

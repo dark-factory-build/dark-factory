@@ -560,12 +560,18 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			err = ErrUnauthorized
 			break
 		}
-		result, backendErr := current.server.consoleBackend.DiscoverAccounts(ctx, current.principal.ClientID)
+		result, backendErr := current.server.consoleBackend.DiscoverAccounts(ctx, current.principal.ClientID, body)
 		if backendErr != nil {
 			err = backendErr
 			break
 		}
-		payload, err = browserprotocol.EncodeAccounts(frame.ID, result)
+		if payload, err = browserprotocol.EncodeAccounts(frame.ID, result); errors.Is(err, browserprotocol.ErrOversized) {
+			err = ErrTooLarge
+		}
+		if err != nil {
+			break
+		}
+		return current.writeSnapshot(payload) == nil
 	case browserprotocol.AccountLink:
 		if current.server.consoleBackend == nil {
 			err = ErrUnauthorized

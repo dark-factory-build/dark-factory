@@ -29,14 +29,14 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 		})
 	}
 	for _, agent := range snapshot.Agents {
-		accountID := ""
-		if agent.AccountID != (kernel.AccountID{}) {
-			accountID = agent.AccountID.String()
-		}
-		result.Agents = append(result.Agents, api.AgentSummary{
+		item := api.AgentSummary{
 			ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
-			Role: agent.Role, Provider: agent.Provider, AccountID: accountID, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64()),
-		})
+			Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64()),
+		}
+		if agent.AccountID != (kernel.AccountID{}) {
+			item.AccountID = agent.AccountID.String()
+		}
+		result.Agents = append(result.Agents, item)
 	}
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.TaskSummary{
@@ -53,7 +53,11 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) api.OverseerSnaps
 		Agents: []api.AgentSummary{}, Tasks: []api.OverseerTask{}, Runs: []api.OverseerRun{}, Questions: []api.OverseerQuestion{}, PeerQuestions: []api.PeerQuestion{}, History: []api.OverseerIntervention{},
 	}
 	for _, agent := range snapshot.Agents {
-		result.Agents = append(result.Agents, api.AgentSummary{ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name, Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64())})
+		item := api.AgentSummary{ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name, Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64())}
+		if agent.AccountID != (kernel.AccountID{}) {
+			item.AccountID = agent.AccountID.String()
+		}
+		result.Agents = append(result.Agents, item)
 	}
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.OverseerTask{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(), Title: task.Title, Objective: task.Objective, ObjectiveTruncated: task.ObjectiveTruncated, Status: task.Status.String(), Priority: task.Priority, BlockedReason: task.BlockedReason, Result: task.Result, ResultTruncated: task.ResultTruncated, Revision: uint64(task.Revision.Int64())})

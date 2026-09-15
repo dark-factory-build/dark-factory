@@ -6,9 +6,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -378,7 +378,7 @@ func TestBrowserAccountsNeedAdministration(t *testing.T) {
 	home := accountHomeFixture(t, fixture)
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
-	if _, err := fixture.backend.DiscoverAccounts(ctx, client); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{}); !errors.Is(err, browser.ErrUnauthorized) {
 		t.Fatalf("discovery without administration = %v", err)
 	}
 	if _, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "codex", Home: filepath.Join(home, ".codex"), Label: "dogfood"}); !errors.Is(err, browser.ErrUnauthorized) {
@@ -413,7 +413,7 @@ func TestBrowserAccountsLinkOnlyWhatDiscoveryFound(t *testing.T) {
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
 
-	discovered, err := fixture.backend.DiscoverAccounts(ctx, client)
+	discovered, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestBrowserAccountsLinkOnlyWhatDiscoveryFound(t *testing.T) {
 	if _, err := fixture.backend.UpdateAccount(ctx, client, browserprotocol.AccountUpdate{AccountID: result.AccountID, ExpectedRevision: result.Revision, Label: &renameLabel}); !errors.Is(err, browser.ErrStale) {
 		t.Fatalf("stale rename = %v, want stale", err)
 	}
-	again, err := fixture.backend.DiscoverAccounts(ctx, client)
+	again, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
 	if err != nil || len(again.Accounts) != 1 {
 		t.Fatalf("second discovery = %+v, %v", again.Accounts, err)
 	}
@@ -485,40 +485,12 @@ func TestBrowserAccountsLinkOnlyWhatDiscoveryFound(t *testing.T) {
 	}
 }
 
-func TestBrowserAccountsKeepLinkedLoginWhenDiscoveryBecomesUnavailable(t *testing.T) {
-	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityAdministration, consoleRoot(t))
-	home := accountHomeFixture(t, fixture)
-	ctx := context.Background()
-	client := rawBrowserClient(fixture.client.ID)
-	login := filepath.Join(home, ".codex")
-	linked, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "codex", Home: login, Label: "dogfood"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
-		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision), AccountID: &linked.AccountID,
-	}); err != nil {
-		t.Fatalf("select linked account: %v", err)
-	}
-	if err := os.Remove(filepath.Join(login, "auth.json")); err != nil {
-		t.Fatal(err)
-	}
-	accounts, err := fixture.backend.DiscoverAccounts(ctx, client)
-	if err != nil || len(accounts.Accounts) != 1 {
-		t.Fatalf("accounts after identity removal = %+v, %v", accounts, err)
-	}
-	got := accounts.Accounts[0]
-	if got.Provider != "codex" || got.Home != login || got.Label != "dogfood" || got.LinkedID != linked.AccountID || got.UnavailableReason != "login is no longer discoverable" {
-		t.Fatalf("unavailable linked account = %+v", got)
-	}
-}
-
 func TestBrowserAccountsUnlinkUnused(t *testing.T) {
 	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityAdministration, consoleRoot(t))
 	home := accountHomeFixture(t, fixture)
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
-	discovered, err := fixture.backend.DiscoverAccounts(ctx, client)
+	discovered, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
 	if err != nil || len(discovered.Accounts) != 1 {
 		t.Fatalf("discovery = %+v, %v", discovered.Accounts, err)
 	}
@@ -534,6 +506,71 @@ func TestBrowserAccountsUnlinkUnused(t *testing.T) {
 	accounts, err := fixture.store.ListAccounts(ctx)
 	if err != nil || len(accounts) != 0 {
 		t.Fatalf("accounts after unlink = %d, err=%v", len(accounts), err)
+	}
+}
+
+// Linked account rows outlive an operator removing a provider profile. The
+// discovery result must show every such durable identity or refuse the whole
+// observation; silently trimming the oldest unavailable rows would make them
+// impossible to manage.
+func TestBrowserAccountsPagesAccumulatedUnavailableProjection(t *testing.T) {
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityAdministration, consoleRoot(t))
+	accountHomeFixture(t, fixture)
+	ctx := context.Background()
+	client := rawBrowserClient(fixture.client.ID)
+	seen := make(map[string]bool, browserprotocol.MaxSnapshotEntities)
+	for index := 0; index < browserprotocol.MaxSnapshotEntities-1; index++ {
+		raw := make([]byte, kernel.IDBytes)
+		binary.BigEndian.PutUint32(raw[len(raw)-4:], uint32(index+1))
+		id, err := kernel.AccountIDFromBytes(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		account, err := fixture.store.LinkAccount(ctx, kernel.NewAccount{
+			ID: id, Provider: kernel.ProviderCodex,
+			Home: fmt.Sprintf("/Users/operator/.codex-missing-%04d", index), Label: fmt.Sprintf("missing-%04d", index),
+		}, adapterTime(t, int64(100+index)))
+		if err != nil {
+			t.Fatalf("link unavailable %d: %v", index, err)
+		}
+		seen[account.ID.String()] = true
+	}
+	accounts, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
+	if err != nil || len(accounts.Accounts) != browserprotocol.MaxSnapshotEntities {
+		t.Fatalf("fitting projection = %d accounts, %v", len(accounts.Accounts), err)
+	}
+	for _, account := range accounts.Accounts {
+		if !seen[account.LinkedID] {
+			continue
+		}
+		if account.UnavailableReason != "login is no longer discoverable" {
+			t.Fatalf("unavailable account = %+v", account)
+		}
+		delete(seen, account.LinkedID)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("unavailable identities were omitted: %d", len(seen))
+	}
+
+	raw := make([]byte, kernel.IDBytes)
+	binary.BigEndian.PutUint32(raw[len(raw)-4:], browserprotocol.MaxSnapshotEntities)
+	id, err := kernel.AccountIDFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: kernel.ProviderCodex, Home: "/Users/operator/.codex-missing-overflow", Label: "missing-overflow"}, adapterTime(t, 10_000)); err != nil {
+		t.Fatal(err)
+	}
+	if accounts.NextOffset != nil {
+		t.Fatal("fitting projection unexpectedly paged")
+	}
+	first, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
+	if err != nil || first.NextOffset == nil || len(first.Accounts) != browserprotocol.MaxSnapshotEntities {
+		t.Fatalf("overflow first page = %+v, %v", first, err)
+	}
+	last, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{Offset: *first.NextOffset})
+	if err != nil || len(last.Accounts) != 1 || last.NextOffset != nil {
+		t.Fatalf("overflow continuation = %+v, %v", last, err)
 	}
 }
 

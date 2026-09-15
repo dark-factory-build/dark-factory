@@ -171,7 +171,11 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	case api.CallSetCapacity:
 		return daemon.setCapacity(ctx, call)
 	case api.CallAccountsDiscover:
-		return daemon.discoverOperatorAccounts(ctx)
+		offset, ok := call.AccountsOffset()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		return daemon.discoverOperatorAccounts(ctx, offset)
 	case api.CallAccountLink:
 		return daemon.linkOperatorAccount(ctx, call)
 	case api.CallAgentSelectAccount:
@@ -503,9 +507,7 @@ func (daemon *Daemon) snapshot(ctx context.Context) api.Reply {
 	return reply
 }
 
-// discoverOperatorAccounts uses the same bounded discovery boundary as the
-// browser: it names existing provider logins without reading token contents.
-func (daemon *Daemon) discoverOperatorAccounts(ctx context.Context) api.Reply {
+func (daemon *Daemon) discoverOperatorAccounts(ctx context.Context, offset uint32) api.Reply {
 	home, err := operatorHome()
 	if err != nil {
 		return newErrorReply(api.RemoteNotFound)
@@ -515,10 +517,21 @@ func (daemon *Daemon) discoverOperatorAccounts(ctx context.Context) api.Reply {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	found := daemon.listedAccounts(home, linked)
-	accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, 0, len(found))}
-	for _, candidate := range found {
-		item := api.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort, LinkedID: candidate.LinkedID, UnavailableReason: candidate.UnavailableReason}
-		accounts.Accounts = append(accounts.Accounts, item)
+	start := int(offset)
+	if start > len(found) {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	end := start + 4096
+	if end > len(found) {
+		end = len(found)
+	}
+	accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, 0, end-start)}
+	for _, candidate := range found[start:end] {
+		accounts.Accounts = append(accounts.Accounts, api.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort, LinkedID: candidate.LinkedID, UnavailableReason: candidate.UnavailableReason})
+	}
+	if end < len(found) {
+		next := uint32(end)
+		accounts.NextOffset = &next
 	}
 	reply, err := api.NewAccountsReply(accounts)
 	if err != nil {
@@ -610,39 +623,6 @@ func (daemon *Daemon) selectAgentAccount(ctx context.Context, call api.Call) api
 // selectAgentModel stores the next admission's native-provider controls. An
 // admitted run already holds its own immutable model and effort, so it remains
 // unaffected while this update is committed for future runs.
-func (daemon *Daemon) selectAgentModel(ctx context.Context, call api.Call) api.Reply {
-	input, ok := call.AgentModelSelectInput()
-	if !ok {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	agentID, err := parseAgentID(input.AgentID)
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
-	if err != nil {
-		return newErrorReply(api.RemoteInvalidRequest)
-	}
-	agent, found, err := daemon.store.Agent(ctx, agentID)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	if !found {
-		return newErrorReply(api.RemoteNotFound)
-	}
-	if agent.Role != kernel.RoleWorker {
-		return newErrorReply(api.RemoteConflict)
-	}
-	at, err := daemon.timestamp()
-	if err != nil {
-		return newErrorReply(api.RemoteInternal)
-	}
-	updated, err := daemon.store.UpdateAgent(ctx, agentID, expected, kernel.AgentPatch{Model: &input.Model, ReasoningEffort: &input.ReasoningEffort}, at)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	return daemon.mutation(ctx, updated.Revision)
-}
 
 func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Reply {
 	input, ok := call.CreateProjectInput()

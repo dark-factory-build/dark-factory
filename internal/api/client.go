@@ -167,16 +167,28 @@ func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, 
 }
 
 func (client *OperatorClient) DiscoverAccounts(ctx context.Context) (Accounts, error) {
-	var result Accounts
-	if err := client.client.call(ctx, "accounts_discover", struct{}{}, &result); err != nil {
-		return Accounts{}, err
+	accounts := make([]DiscoveredAccount, 0)
+	for offset := uint32(0); ; {
+		var page Accounts
+		params := struct {
+			Offset uint32 `json:"offset,omitempty"`
+		}{Offset: offset}
+		if err := client.client.call(ctx, "accounts_discover", params, &page); err != nil {
+			return Accounts{}, err
+		}
+		if !validAccounts(page) {
+			return Accounts{}, ErrProtocol
+		}
+		accounts = append(accounts, page.Accounts...)
+		if page.NextOffset == nil {
+			return Accounts{Accounts: accounts}, nil
+		}
+		if *page.NextOffset <= offset {
+			return Accounts{}, ErrProtocol
+		}
+		offset = *page.NextOffset
 	}
-	if !validAccounts(result) {
-		return Accounts{}, ErrProtocol
-	}
-	return result, nil
 }
-
 func (client *OperatorClient) LinkAccount(ctx context.Context, input AccountLinkInput) (MutationResult, error) {
 	if !validAccountLinkInput(input) {
 		return MutationResult{}, ErrInvalidInput
@@ -189,13 +201,6 @@ func (client *OperatorClient) SelectAgentAccount(ctx context.Context, input Agen
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "agent_select_account", input)
-}
-
-func (client *OperatorClient) SelectAgentModel(ctx context.Context, input AgentModelSelectInput) (MutationResult, error) {
-	if !validAgentModelSelectInput(input) {
-		return MutationResult{}, ErrInvalidInput
-	}
-	return client.client.mutate(ctx, "agent_select_model", input)
 }
 
 func (client *OperatorClient) CreateProject(ctx context.Context, input CreateProjectInput) (MutationResult, error) {

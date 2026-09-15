@@ -420,8 +420,15 @@ export class BrowserSession {
 
   /** The provider logins present on the daemon's machine. A linked one
    * carries the account identity an agent selects; nothing secret is served. */
-  discoverAccounts(): Promise<readonly DiscoveredAccountView[]> {
-    return this.#accountRequest("ACCOUNTS", CAPABILITIES.administration, "accounts", (id) => encodeClientControl({ type: "ACCOUNTS_DISCOVER", id, body: {} }));
+  async discoverAccounts(): Promise<readonly DiscoveredAccountView[]> {
+    const accounts: DiscoveredAccountView[] = [];
+    for (let offset = 0;;) {
+      const page = await this.#accountRequest<AccountsBody>("ACCOUNTS", CAPABILITIES.administration, "accounts", (id) => encodeClientControl({ type: "ACCOUNTS_DISCOVER", id, body: offset === 0 ? {} : { offset } }));
+      accounts.push(...page.accounts);
+      if (page.next_offset === undefined) return Object.freeze(accounts.map((account) => Object.freeze({ ...account })));
+      if (page.next_offset <= offset) throw new ProtocolError("malformed");
+      offset = page.next_offset;
+    }
   }
 
   /** Registers one already-existing login so agents can be pointed at it. */
@@ -1162,7 +1169,7 @@ export class BrowserSession {
       pending.resolve(Object.freeze({ clientId: frame.body.client_id, revision: frame.body.revision }) as never);
       return;
     }
-    if (frame.type === "ACCOUNTS") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze(frame.body.accounts.map((account) => Object.freeze({ ...account }))) as never); return; }
+    if (frame.type === "ACCOUNTS") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze({ accounts: frame.body.accounts.map((account) => Object.freeze({ ...account })), ...(frame.body.next_offset === undefined ? {} : { next_offset: frame.body.next_offset }) }) as never); return; }
     if (frame.type === "ACCOUNT_UPDATE_RESULT" && (pending.accountId !== frame.body.account_id || pending.expectedRevision === undefined || frame.body.revision !== pending.expectedRevision + 1n)) throw new ProtocolError("malformed");
     this.#accountPending.delete(frame.id);
     pending.resolve(Object.freeze({ accountId: frame.body.account_id, revision: frame.body.revision }) as never);

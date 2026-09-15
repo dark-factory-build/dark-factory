@@ -138,9 +138,9 @@ type DiscoveredAccount struct {
 }
 
 type Accounts struct {
-	Accounts []DiscoveredAccount `json:"accounts"`
+	Accounts   []DiscoveredAccount `json:"accounts"`
+	NextOffset *uint32             `json:"next_offset,omitempty"`
 }
-
 type AccountLinkInput struct {
 	Provider string `json:"provider"`
 	Home     string `json:"home"`
@@ -151,12 +151,6 @@ type AgentAccountSelectInput struct {
 	ExpectedRevision uint64 `json:"expected_revision"`
 	AccountID        string `json:"account_id"`
 }
-type AgentModelSelectInput struct {
-	AgentID          string `json:"agent_id"`
-	ExpectedRevision uint64 `json:"expected_revision"`
-	Model            string `json:"model"`
-	ReasoningEffort  string `json:"reasoning_effort"`
-}
 
 func validDiscoveredAccount(value DiscoveredAccount) bool {
 	provider, err := kernel.ParseProvider(value.Provider)
@@ -164,7 +158,7 @@ func validDiscoveredAccount(value DiscoveredAccount) bool {
 		validText(value.Email, 0, 128) && validText(value.Organization, 0, 128) && validText(value.DefaultModel, 0, 128) && validText(value.DefaultReasoningEffort, 0, 128) && validText(value.UnavailableReason, 0, 128) && (value.LinkedID == "" || validID(value.LinkedID))
 }
 func validAccounts(value Accounts) bool {
-	if len(value.Accounts) > 4096 {
+	if value.Accounts == nil || len(value.Accounts) > 4096 || value.NextOffset != nil && *value.NextOffset == 0 {
 		return false
 	}
 	for _, account := range value.Accounts {
@@ -179,9 +173,6 @@ func validAccountLinkInput(value AccountLinkInput) bool {
 }
 func validAgentAccountSelectInput(value AgentAccountSelectInput) bool {
 	return validID(value.AgentID) && validID(value.AccountID) && value.ExpectedRevision != 0
-}
-func validAgentModelSelectInput(value AgentModelSelectInput) bool {
-	return validID(value.AgentID) && value.ExpectedRevision != 0 && validText(value.Model, 1, 128) && validText(value.ReasoningEffort, 0, 128)
 }
 
 type OverseerHumanReplyResult struct {
