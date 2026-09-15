@@ -237,7 +237,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
+	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman {
