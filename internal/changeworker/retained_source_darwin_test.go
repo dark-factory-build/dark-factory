@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,6 +23,11 @@ func TestMaterializeRetainedSourcesBindsCopyToSelectedTreeAndRejectsEscape(t *te
 	runtime, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, path := range []string{parent, runtime} {
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.Chmod(parent, 0o700); err != nil {
 		t.Fatal(err)
@@ -71,6 +77,100 @@ func TestMaterializeRetainedSourcesBindsCopyToSelectedTreeAndRejectsEscape(t *te
 	}
 	if _, err := MaterializeRetainedSource(context.Background(), parent, runtime, source); err == nil {
 		t.Fatal("symlink source was copied")
+	}
+}
+
+func TestMaterializeRetainedSourcesRetriesAfterInterruptedCopy(t *testing.T) {
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{parent, runtime} {
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const id = "44444444444444444444444444444444"
+	result := retainedSourceFixture(t, parent, id, []byte("selected"))
+	source := RetainedSource{ID: id, Result: result}
+	original := copyRetainedFS
+	copyRetainedFS = func(destination string, _ fs.FS) error {
+		if err := os.MkdirAll(destination, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(destination, "partial.txt"), []byte("partial"), 0o600); err != nil {
+			return err
+		}
+		return errors.New("interrupted copy")
+	}
+	t.Cleanup(func() { copyRetainedFS = original })
+	if _, err := MaterializeRetainedSource(context.Background(), parent, runtime, source); err == nil {
+		t.Fatal("interrupted copy unexpectedly succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(runtime, "retained-source", id)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed copy left final target: %v", err)
+	}
+	copyRetainedFS = original
+	path, err := MaterializeRetainedSource(context.Background(), parent, runtime, source)
+	if err != nil || path == "" {
+		t.Fatalf("retry after interrupted copy = %v, %v", path, err)
+	}
+}
+
+func TestMaterializeRetainedSourcesRejectsVerificationFailure(t *testing.T) {
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{parent, runtime} {
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const id = "55555555555555555555555555555555"
+	result := retainedSourceFixture(t, parent, id, []byte("selected"))
+	source := RetainedSource{ID: id, Result: result}
+	original := copyRetainedFS
+	copyRetainedFS = func(destination string, source fs.FS) error {
+		if err := original(destination, source); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(destination, "payload.txt"), []byte("tampered"), 0o600)
+	}
+	t.Cleanup(func() { copyRetainedFS = original })
+	if _, err := MaterializeRetainedSource(context.Background(), parent, runtime, source); err == nil {
+		t.Fatal("verification failure unexpectedly succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(runtime, "retained-source", id)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("verification failure left final target: %v", err)
+	}
+}
+
+func TestSecureCopiedDirectoriesUsesOwnerOnlyModes(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested", "deeper")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureCopiedDirectories(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{root, filepath.Join(root, "nested"), nested} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("%s mode = %o, want 700", path, got)
+		}
 	}
 }
 

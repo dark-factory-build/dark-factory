@@ -29,6 +29,8 @@ type runtimeAuthority struct {
 
 const providerTaskName = ".provider-task"
 
+var copyRetainedFS = os.CopyFS
+
 func runProvider(ctx context.Context) (resultErr error) {
 	control, err := runner.OpenWorkerControl()
 	if err != nil {
@@ -192,8 +194,8 @@ func runProvider(ctx context.Context) (resultErr error) {
 }
 
 // MaterializeRetainedSource copies one selected retained tree into the reader's private runtime.
-func MaterializeRetainedSource(ctx context.Context, parent, runtimePath string, retained RetainedSource) (string, error) {
-	if !validAbsolute(parent, maximumLocatorBytes) || !validAbsolute(runtimePath, maximumLocatorBytes) || len(retained.ID) != 32 || strings.Trim(retained.ID, "0123456789abcdef") != "" || validateResult(retained.Result) != nil {
+func MaterializeRetainedSource(ctx context.Context, changeParent, runtimePath string, retained RetainedSource) (string, error) {
+	if !validAbsolute(changeParent, maximumLocatorBytes) || !validAbsolute(runtimePath, maximumLocatorBytes) || len(retained.ID) != 32 || strings.Trim(retained.ID, "0123456789abcdef") != "" || validateResult(retained.Result) != nil {
 		return "", invalidContract(nil)
 	}
 	if err := ctx.Err(); err != nil {
@@ -203,61 +205,125 @@ func MaterializeRetainedSource(ctx context.Context, parent, runtimePath string, 
 	// identity before CopyFS sees a pathname. Reinspect the private copy
 	// against the same commitment afterwards, so a send-back or mutation
 	// between selection and copying cannot be labelled with old receipt facts.
-	verified, err := change.OpenPublished(ctx, parent, retained.ID, retained.Result.Tree, retained.Result.Format, retained.Result.Base)
+	verified, err := change.OpenPublished(ctx, changeParent, retained.ID, retained.Result.Tree, retained.Result.Format, retained.Result.Base)
 	if err != nil {
 		return "", fmt.Errorf("open retained source: %w", err)
 	}
-	source := filepath.Join(parent, retained.ID)
+	source := filepath.Join(changeParent, retained.ID)
 	target := filepath.Join(runtimePath, "retained-source", retained.ID)
-	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
 		_ = verified.Close()
 		return "", fmt.Errorf("create retained source parent: %w", err)
 	}
-	if err := os.Chmod(filepath.Dir(target), 0o700); err != nil {
+	if err := os.Chmod(parent, 0o700); err != nil {
 		_ = verified.Close()
 		return "", fmt.Errorf("secure retained source parent: %w", err)
 	}
-	if err := os.CopyFS(target, os.DirFS(source)); err != nil {
+	staging, err := os.MkdirTemp(parent, "."+retained.ID+".stage-")
+	if err != nil {
 		_ = verified.Close()
-		return "", fmt.Errorf("materialize retained source: %w", err)
+		return "", fmt.Errorf("create retained source staging: %w", err)
 	}
-	// CopyFS applies the process umask to directories; the verified Change
-	// contract requires private mode-0700 directories regardless of umask.
-	if err := filepath.WalkDir(target, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	published := false
+	var publishedIdentity change.StageIdentity
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+	if err := os.Remove(staging); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("prepare retained source staging: %w", err)
+	}
+	cleanup := func(cause error) error {
+		if published {
+			if removeErr := change.RemoveRecordedTree(context.Background(), parent, retained.ID, publishedIdentity); removeErr != nil {
+				return errors.Join(cause, fmt.Errorf("remove failed retained source: %w", removeErr))
+			}
+			return cause
+		}
+		return errors.Join(cause, os.RemoveAll(staging))
+	}
+	if err := copyRetainedFS(staging, os.DirFS(source)); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("materialize retained source: %w", cleanup(err))
+	}
+	if err := secureCopiedDirectories(staging); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("secure copied retained source directories: %w", cleanup(err))
+	}
+	if err := os.Chmod(staging, 0o700); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("secure retained source: %w", cleanup(err))
+	}
+	stageInfo, err := os.Lstat(staging)
+	if err != nil || !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
+		_ = verified.Close()
+		return "", fmt.Errorf("materialized retained source staging is unavailable: %w", cleanup(errors.Join(err, ErrWorker)))
+	}
+	stageStat, ok := stageInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		_ = verified.Close()
+		return "", fmt.Errorf("materialized retained source staging has no filesystem identity: %w", cleanup(ErrWorker))
+	}
+	publishedIdentity, err = change.NewStageIdentity(uint64(stageStat.Dev), uint64(stageStat.Ino))
+	if err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("materialized retained source staging identity: %w", cleanup(err))
+	}
+	parentDir, err := os.Open(parent)
+	if err == nil {
+		err = unix.RenameatxNp(int(parentDir.Fd()), filepath.Base(staging), int(parentDir.Fd()), retained.ID, unix.RENAME_EXCL)
+		if err == nil {
+			published = true
+		}
+		if syncErr := unix.Fsync(int(parentDir.Fd())); err == nil {
+			err = syncErr
+		}
+		if closeErr := parentDir.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("publish retained source: %w", cleanup(err))
+	}
+	if err := verified.Close(); err != nil {
+		return "", fmt.Errorf("close retained source: %w", cleanup(err))
+	}
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("materialized retained source is unavailable: %w", cleanup(errors.Join(err, ErrWorker)))
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("materialized retained source has no filesystem identity: %w", cleanup(ErrWorker))
+	}
+	identity, err := change.NewStageIdentity(uint64(stat.Dev), uint64(stat.Ino))
+	if err != nil {
+		return "", fmt.Errorf("materialized retained source identity: %w", cleanup(err))
+	}
+	facts, err := change.InspectPublished(ctx, filepath.Dir(target), retained.ID, identity, retained.Result.Format, retained.Result.Base)
+	if err != nil {
+		return "", fmt.Errorf("verify materialized retained source: %w", cleanup(err))
+	}
+	if !retainedContentFactsEqual(retained.Result, facts) {
+		return "", fmt.Errorf("materialized retained source differs from selected tree: %w", cleanup(ErrWorker))
+	}
+	return target, nil
+}
+
+func secureCopiedDirectories(root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
 		if entry.IsDir() {
 			return os.Chmod(path, 0o700)
 		}
 		return nil
-	}); err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("secure retained snapshot: %w", err)
-	}
-	if err := verified.Close(); err != nil {
-		return "", fmt.Errorf("close retained source: %w", err)
-	}
-	info, err := os.Lstat(target)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("materialized retained source is unavailable: %w", err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", fmt.Errorf("materialized retained source has no filesystem identity: %w", ErrWorker)
-	}
-	identity, err := change.NewStageIdentity(uint64(stat.Dev), uint64(stat.Ino))
-	if err != nil {
-		return "", fmt.Errorf("materialized retained source identity: %w", err)
-	}
-	facts, err := change.InspectPublished(ctx, filepath.Dir(target), retained.ID, identity, retained.Result.Format, retained.Result.Base)
-	if err != nil {
-		return "", fmt.Errorf("verify materialized retained source: %w", err)
-	}
-	if !retainedContentFactsEqual(retained.Result, facts) {
-		return "", fmt.Errorf("materialized retained source differs from selected tree: %w", ErrWorker)
-	}
-	return target, nil
+	})
 }
 
 // openChangeDirectory prepares or reopens the run's Change and returns its

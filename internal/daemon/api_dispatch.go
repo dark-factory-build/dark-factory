@@ -308,6 +308,10 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if live == nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
+	if !live.beginSourceOperation() {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	defer live.endSourceOperation()
 	handoff, found, err := daemon.store.RetainedChangeHandoffForTask(ctx, authority.ProjectID, targetTaskID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))

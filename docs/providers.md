@@ -49,6 +49,9 @@ per-run retained-source root, while the daemon creates only the requested exact
 child. It does not receive the daemon database, the Changes parent, or the
 daemon home. A later work revision or Change revision is refused against an
 older materialization and requires a fresh launch profile. The
+daemon drains admitted source materialization before shutting down and
+removing the run's private retained-source directory, so cleanup cannot race a
+source handoff.
 overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
 with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
 the fixed tool path, as its one MCP server; a Claude Code worker is launched

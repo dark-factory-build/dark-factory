@@ -144,6 +144,9 @@ never construct a `$home/changes/...` path, read `factory.sqlite3`, or infer
 source from a published branch. If the task was sent back or any task/work/
 Change revision changed, the request is refused and must use exact current
 task state.
+Source requests are lifetime-bound to the live attempt: shutdown first refuses
+new requests and waits for admitted materialization to finish before runtime
+cleanup removes the private snapshot.
 The daemon verifies the selected retained root and manifest commitment before
 copying, then verifies the private copy again; a changed, mixed, symlinked or
 escaped tree is refused rather than attached to the old receipt. The old
