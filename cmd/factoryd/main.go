@@ -43,7 +43,7 @@ const (
 	exitUsage             = 64
 
 	usage = `usage:
-  factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--base-revision REVISION]
+  factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--toolchain-read-roots PATH_LIST] [--base-revision REVISION]
            [--runner PATH] [--factoryctl PATH]
            [--relay-origin RELAY_ORIGIN]
            [--development-browser-address LOOPBACK]
@@ -74,6 +74,7 @@ type config struct {
 	gitExecutable        string
 	toolPath             string
 	toolPathExplicit     bool
+	toolchainReadRoots   string
 	baseRevision         string
 	runnerExecutable     string
 	factoryctlExecutable string
@@ -175,6 +176,11 @@ func parse(args []string) (config, bool, bool) {
 			}
 			result.toolPath = value
 			result.toolPathExplicit = true
+		case "--toolchain-read-roots":
+			if result.toolchainReadRoots != "" || value == "" || !install.ValidToolchainReadRoots(value) {
+				return config{}, false, false
+			}
+			result.toolchainReadRoots = value
 		case "--base-revision":
 			if result.baseRevision != "" || !validBaseRevision(value) {
 				return config{}, false, false
@@ -632,6 +638,9 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 	if err != nil {
 		return daemon.SupervisorSpec{}, err
 	}
+	if err := install.CheckToolchainReadRoots(configuration.toolchainReadRoots, accountHome, configuration.home, install.ChangesPath(configuration.home)); err != nil {
+		return daemon.SupervisorSpec{}, fmt.Errorf("factoryd: invalid toolchain read roots: %w", err)
+	}
 	toolPath := configuration.toolPath
 	if !configuration.toolPathExplicit {
 		toolPath = filepath.Join(accountHome, ".local", "bin") + string(filepath.ListSeparator) + toolPath
@@ -651,6 +660,7 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 		RunnerExecutable:     runnerExecutable,
 		FactoryctlExecutable: factoryctlExecutable,
 		ToolPath:             toolPath,
+		ToolchainReadRoots:   configuration.toolchainReadRoots,
 		AccountHome:          accountHome,
 	}, nil
 }

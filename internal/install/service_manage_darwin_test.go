@@ -290,7 +290,7 @@ func TestServiceUninstallAcceptsAReceiptBoundPriorPlist(t *testing.T) {
 func TestServicePlistReadBoundCoversFourEscapedHomePaths(t *testing.T) {
 	fixture := newManageFixture(t)
 	home := "/" + strings.Repeat(`"`, serviceMaxPathBytes-1)
-	body, _, err := ServicePlist(home, fixture.config.Label, "", "")
+	body, _, err := ServicePlist(home, fixture.config.Label, "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,12 +844,18 @@ func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 		}
 	}
 
+	toolchain, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.config.ToolPath = toolchain + "/bin:/usr/bin:/bin"
+	fixture.config.ToolchainReadRoots = toolchain
 	fixture.config.RelayOrigin = origin
 	fixture.config.DevelopmentBrowserAddress = address
 	installed := &recordedLaunchctl{results: append(fixture.printAbsent(), launchctlResult{status: 0}, fixture.printRunning(77))}
 	fixture.install(t, installed.run)
 
-	expected, expectedDigest, err := ServicePlist(fixture.home, fixture.config.Label, origin, address)
+	expected, expectedDigest, err := ServicePlist(fixture.home, fixture.config.Label, origin, address, fixture.config.ToolPath, toolchain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -862,13 +868,26 @@ func TestServiceArgumentsSurviveInstallStatusAndUninstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	receipt, err := parseServiceReceipt(receiptBody)
-	if err != nil || receipt.RelayOrigin != origin || receipt.DevelopmentBrowserAddress != address || receipt.PlistDigest != hex.EncodeToString(expectedDigest[:]) {
+	if err != nil || receipt.ToolPath != fixture.config.ToolPath || receipt.ToolchainReadRoots != toolchain || receipt.RelayOrigin != origin || receipt.DevelopmentBrowserAddress != address || receipt.PlistDigest != hex.EncodeToString(expectedDigest[:]) {
 		t.Fatalf("receipt does not bind the relayed plist: %+v, %v", receipt, err)
+	}
+
+	changed := fixture.config
+	changed.ToolPath += ":/usr/local/bin"
+	unchanged := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(77)}}
+	status, err = serviceInstallAt(context.Background(), fixture.home, fixture.userHome, changed, fixture.sourceDir, unchanged.run)
+	if !errors.Is(err, ErrServiceForeign) || status.State != ServiceAmbiguous {
+		t.Fatalf("changed toolchain replaced installed authority: %+v, %v", status, err)
+	}
+	if body, err := os.ReadFile(fixture.plistPath()); err != nil || !bytes.Equal(body, expected) {
+		t.Fatalf("refused toolchain change modified plist: %v", err)
 	}
 
 	// Status re-renders from the receipt, so the relayed plist is recognized
 	// as this installation's property rather than read as foreign bytes.
 	bare := fixture.config
+	bare.ToolPath = ""
+	bare.ToolchainReadRoots = ""
 	bare.RelayOrigin = ""
 	bare.DevelopmentBrowserAddress = ""
 	running := &recordedLaunchctl{results: []launchctlResult{fixture.printRunning(77)}}

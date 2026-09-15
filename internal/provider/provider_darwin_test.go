@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -25,7 +26,7 @@ func runtimeFixture(t *testing.T, toolPath, accountHome string) RuntimePaths {
 	root := t.TempDir()
 	runtime, err := NewRuntimePaths(
 		root+"/home", root+"/tmp", "/private/tmp/df-provider-test.sock", root+"/attempt.token",
-		"/usr/local/bin/factoryctl", root+"/changes", toolPath, accountHome, "",
+		"/usr/local/bin/factoryctl", root+"/changes", toolPath, accountHome, "", "",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -467,13 +468,13 @@ func TestNewRuntimePathsRejectsMissingAndMalformedValues(t *testing.T) {
 		t.Run(string(rune('a'+index)), func(t *testing.T) {
 			values := append([]string(nil), valid...)
 			values[index] = ""
-			if _, err := NewRuntimePaths(values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], ""); !errors.Is(err, ErrInvalid) {
+			if _, err := NewRuntimePaths(values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], "", ""); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("missing index %d error=%v, want ErrInvalid", index, err)
 			}
 		})
 	}
 	for _, toolPath := range []string{"relative:/bin", "/usr/bin::/bin", "/usr/bin:/usr/bin"} {
-		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], toolPath, valid[7], ""); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], toolPath, valid[7], "", ""); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("tool path %q error=%v, want ErrInvalid", toolPath, err)
 		}
 	}
@@ -491,21 +492,21 @@ func TestNewRuntimePathsRejectsMissingAndMalformedValues(t *testing.T) {
 
 	invalid := append([]string(nil), valid...)
 	invalid[0] = "relative/home"
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7], ""); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7], "", ""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("relative home error=%v, want ErrInvalid", err)
 	}
 	invalid = append([]string(nil), valid...)
 	invalid[2] = "/" + strings.Repeat("s", install.MaxSocketPathBytes)
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7], ""); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7], "", ""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized socket error=%v, want ErrInvalid", err)
 	}
 	invalid = append([]string(nil), valid...)
 	invalid[5] = valid[5] + ":/private/other-ceiling"
-	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7], ""); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRuntimePaths(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], invalid[6], invalid[7], "", ""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("multi-ceiling git path error=%v, want ErrInvalid", err)
 	}
 	for _, accountHome := range []string{"relative", "/", valid[0], valid[1]} {
-		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], valid[6], accountHome, ""); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRuntimePaths(valid[0], valid[1], valid[2], valid[3], valid[4], valid[5], valid[6], accountHome, "", ""); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("account home %q error=%v, want ErrInvalid", accountHome, err)
 		}
 	}
@@ -614,7 +615,7 @@ func TestTrustClaudeDirectoryRecordsOnlyTheWorkingDirectory(t *testing.T) {
 	if err := os.Mkdir(accountConfig, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	linked, err := NewRuntimePaths(runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl, runtime.gitCeiling, runtime.toolPath, accountHome, accountConfig)
+	linked, err := NewRuntimePaths(runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl, runtime.gitCeiling, runtime.toolPath, accountHome, accountConfig, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +627,7 @@ func TestTrustClaudeDirectoryRecordsOnlyTheWorkingDirectory(t *testing.T) {
 	}
 	// The default login discovered as an account names the default directory;
 	// its record still lives beside that directory, in the home's own file.
-	discovered, err := NewRuntimePaths(runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl, runtime.gitCeiling, runtime.toolPath, accountHome, ConfigHome(kernel.ProviderClaudeCode, accountHome))
+	discovered, err := NewRuntimePaths(runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl, runtime.gitCeiling, runtime.toolPath, accountHome, ConfigHome(kernel.ProviderClaudeCode, accountHome), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,5 +767,128 @@ func TestCodexPermissionsBoundReadsAndRejectOversizedPolicy(t *testing.T) {
 	request.runtime.token = "/" + strings.Repeat(`"`, runner.MaxArgumentBytes)
 	if _, err := codexPermissions(request); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized policy error = %v", err)
+	}
+}
+
+func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	runtime.toolchainReadRoots = "/opt/software/node:/opt/software/go"
+	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
+	policy, err := codexPermissions(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range filepath.SplitList(runtime.toolchainReadRoots) {
+		if !strings.Contains(policy, tomlBasicString(root)+`="read"`) || strings.Contains(policy, tomlBasicString(root)+`="write"`) {
+			t.Fatalf("software root permissions: %s", policy)
+		}
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "GOMODCACHE=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
+		found := false
+		for _, value := range launch.Environment() {
+			if strings.HasPrefix(value, prefix+runtime.home+"/") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("cache %s not private", prefix)
+		}
+	}
+	for _, root := range []string{runtime.accountHome, runtime.gitCeiling, runtime.home, runtime.temp} {
+		invalid := runtime
+		invalid.toolchainReadRoots = root
+		if _, err := NewRequest(kernel.ProviderCodex, installation, "", "", invalid, request.workingDirectory, kernel.RoleWorker); err == nil {
+			t.Fatalf("accepted private read root %q", root)
+		}
+	}
+}
+
+// Opt-in local proof with an installed Codex CLI; no model or account access.
+// Keep fixtures outside the system temp roots permitted by :minimal.
+func TestCodexToolchainSandbox(t *testing.T) {
+	codex := os.Getenv("DARK_FACTORY_TEST_CODEX")
+	if codex == "" {
+		t.Skip("set DARK_FACTORY_TEST_CODEX to an installed CLI")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(cwd, ".toolchain-proof-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"home", "tmp", "change", "software", "account"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	software := filepath.Join(root, "software")
+	secret := filepath.Join(root, "account", "secret")
+	if err := os.WriteFile(secret, []byte("fixture secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(software, "library"), []byte("fixture library"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	runtime.home, runtime.temp, runtime.accountHome = filepath.Join(root, "home"), filepath.Join(root, "tmp"), filepath.Join(root, "account")
+	runtime.toolchainReadRoots = software
+	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
+	request.workingDirectory = filepath.Join(root, "change")
+	run := func(command string, args ...string) ([]byte, error) {
+		t.Helper()
+		policy, err := codexPermissions(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		argv := []string{"sandbox", "-c", policy, "-P", codexPermissionName(request.runtime), "-C", request.workingDirectory, command}
+		cmd := exec.Command(codex, append(argv, args...)...)
+		cmd.Env = request.runtime.environment(kernel.ProviderCodex)
+		// The sandbox CLI itself uses an empty private config, never account auth.
+		for i, value := range cmd.Env {
+			if strings.HasPrefix(value, "CODEX_HOME=") {
+				cmd.Env[i] = "CODEX_HOME=" + runtime.home
+			}
+		}
+		return cmd.CombinedOutput()
+	}
+	script := `set -eu
+ /bin/cat "$1/library" >/dev/null
+ printf cache > "$HOME/cache"
+ if /bin/cat "$2" >/dev/null 2>&1; then exit 31; fi
+ if printf bad > "$1/write" 2>/dev/null; then exit 32; fi
+ `
+	if out, err := run("/bin/sh", "-c", script, "proof", software, secret); err != nil {
+		t.Fatalf("sandbox isolation: %v\n%s", err, out)
+	}
+	request.runtime.toolchainReadRoots = ""
+	if out, err := run("/bin/cat", filepath.Join(software, "library")); err == nil {
+		t.Fatalf("baseline unexpectedly reads software: %s", out)
+	}
+	if roots := os.Getenv("DARK_FACTORY_TEST_TOOLCHAIN_ROOTS"); roots != "" {
+		if err := install.CheckToolchainReadRoots(roots, runtime.accountHome); err != nil {
+			t.Fatal(err)
+		}
+		request.runtime.toolchainReadRoots = roots
+		request.runtime.toolPath = os.Getenv("DARK_FACTORY_TEST_TOOL_PATH")
+		if !install.ValidToolPath(request.runtime.toolPath) {
+			t.Fatal("set exact DARK_FACTORY_TEST_TOOL_PATH")
+		}
+		// Task-local settings avoid loading operator Go/OpenSSL configuration.
+		out, err := run("/bin/sh", "-c", `set -eu; export OPENSSL_CONF=/dev/null GOENV=off GOTOOLCHAIN=local; node --version; corepack --version; corepack pnpm@11.19.0 --version; go version; printf 'package main\nfunc main() {}\n' > main.go; go run main.go`)
+		if err != nil {
+			t.Fatalf("installed toolchain: %v\n%s", err, out)
+		}
+		t.Logf("installed toolchain proof: %s", out)
 	}
 }

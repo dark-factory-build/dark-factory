@@ -66,7 +66,8 @@ The managed daemon searches this fixed default tool path, never ambient
 ~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-An explicit `factoryd --tool-path` replaces the default. Search is
+An explicit `factoryd --tool-path` replaces the default; managed installations
+accept the same option through `factoryctl service install`. Search is
 ordered; an existing candidate that cannot be resolved and committed fails
 closed rather than falling through to another executable. A symlink is resolved
 once and the direct Mach-O target is committed and reverified before exec. The
@@ -97,7 +98,18 @@ Codex local commands use a launch-derived permission profile: the Change,
 private runtime home and temp directory are writable; the exact provider
 executable, factoryctl, attempt token and socket are readable. Other file
 access is denied except Codex's minimal platform/runtime paths, including its
-temp exceptions. Command escalation is disabled. The profile name is derived from the private runtime home, avoiding shared
+temp exceptions. An optional startup `--toolchain-read-roots` path list adds
+read-only access to exact installed software directories (for example one
+Node installation including its Corepack libraries, or one Go `libexec`).
+This is not inferred from PATH and does not pin every child executable.
+The paths must be canonical existing directories, not writable by other users,
+and cannot overlap Factory private paths or include account/credential roots.
+The managed service install accepts and records the same option; status and
+uninstall recover it from the receipt. Changing it requires reinstalling.
+Codex Go, Corepack, npm and XDG caches live inside the private runtime home;
+operator caches are not inherited. Tool versions and command-specific compiler
+or OpenSSL settings remain the task and installation owner's choices.
+Command escalation is disabled. The profile name is derived from the private runtime home, avoiding shared
 account profile names because Codex merges nested configuration tables. The argv
 policy remains bounded by the runner's existing 8 KiB per-argument limit.
 

@@ -31,6 +31,7 @@ type SupervisorSpec struct {
 	RunnerExecutable     string
 	FactoryctlExecutable string
 	ToolPath             string
+	ToolchainReadRoots   string
 	AccountHome          string
 
 	// UnsettledCompletion reports a scheduled attempt whose durable
