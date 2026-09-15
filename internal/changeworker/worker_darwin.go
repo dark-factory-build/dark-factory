@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -27,6 +29,8 @@ type runtimeAuthority struct {
 }
 
 const providerTaskName = ".provider-task"
+
+var copyRetainedFS = copyRetainedTree
 
 func runProvider(ctx context.Context) (resultErr error) {
 	control, err := runner.OpenWorkerControl()
@@ -96,6 +100,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 	runtimePaths, err := provider.NewRuntimePaths(
 		home, temp, config.AttemptSocket, token, factoryctl.Path(), filepath.Dir(publishedPath), config.ToolPath, config.AccountHome, config.AccountConfigDir, config.ToolchainReadRoots,
 	)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	// Only the daemon can materialize an explicitly requested source here.
+	runtimePaths, err = runtimePaths.WithReadOnlySources([]string{filepath.Join(config.RuntimePath, "retained-source")})
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -182,6 +192,194 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	taskOpen = false
 	return control.ExecProvider(spec, cwd, task)
+}
+
+// MaterializeRetainedSource copies one selected retained tree into the reader's private runtime.
+func MaterializeRetainedSource(ctx context.Context, changeParent, runtimePath string, retained RetainedSource) (string, error) {
+	if !validAbsolute(changeParent, maximumLocatorBytes) || !validAbsolute(runtimePath, maximumLocatorBytes) || len(retained.ID) != 32 || strings.Trim(retained.ID, "0123456789abcdef") != "" || validateResult(retained.Result) != nil {
+		return "", invalidContract(nil)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	// OpenPublished scans the server-observed tree through its exact root
+	// identity before CopyFS sees a pathname. Reinspect the private copy
+	// against the same commitment afterwards, so a send-back or mutation
+	// between selection and copying cannot be labelled with old receipt facts.
+	verified, err := change.OpenPublished(ctx, changeParent, retained.ID, retained.Result.Tree, retained.Result.Format, retained.Result.Base)
+	if err != nil {
+		return "", fmt.Errorf("open retained source: %w", err)
+	}
+	source := filepath.Join(changeParent, retained.ID)
+	target := filepath.Join(runtimePath, "retained-source", retained.ID)
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("create retained source parent: %w", err)
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("secure retained source parent: %w", err)
+	}
+	staging, err := os.MkdirTemp(parent, "."+retained.ID+".stage-")
+	if err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("create retained source staging: %w", err)
+	}
+	published := false
+	var publishedIdentity change.StageIdentity
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+	if err := os.Remove(staging); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("prepare retained source staging: %w", err)
+	}
+	cleanup := func(cause error) error {
+		if published {
+			if removeErr := change.RemoveRecordedTree(context.Background(), parent, retained.ID, publishedIdentity); removeErr != nil {
+				return errors.Join(cause, fmt.Errorf("remove failed retained source: %w", removeErr))
+			}
+			return cause
+		}
+		return errors.Join(cause, os.RemoveAll(staging))
+	}
+	if err := copyRetainedFS(ctx, staging, os.DirFS(source)); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("materialize retained source: %w", cleanup(err))
+	}
+	if err := ctx.Err(); err != nil {
+		_ = verified.Close()
+		return "", cleanup(err)
+	}
+	if err := os.Chmod(staging, 0o700); err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("secure retained source: %w", cleanup(err))
+	}
+	stageInfo, err := os.Lstat(staging)
+	if err != nil || !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
+		_ = verified.Close()
+		return "", fmt.Errorf("materialized retained source staging is unavailable: %w", cleanup(errors.Join(err, ErrWorker)))
+	}
+	stageStat, ok := stageInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		_ = verified.Close()
+		return "", fmt.Errorf("materialized retained source staging has no filesystem identity: %w", cleanup(ErrWorker))
+	}
+	publishedIdentity, err = change.NewStageIdentity(uint64(stageStat.Dev), uint64(stageStat.Ino))
+	if err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("materialized retained source staging identity: %w", cleanup(err))
+	}
+	parentDir, err := os.Open(parent)
+	if err == nil {
+		err = unix.RenameatxNp(int(parentDir.Fd()), filepath.Base(staging), int(parentDir.Fd()), retained.ID, unix.RENAME_EXCL)
+		if err == nil {
+			published = true
+		}
+		if syncErr := unix.Fsync(int(parentDir.Fd())); err == nil {
+			err = syncErr
+		}
+		if closeErr := parentDir.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		_ = verified.Close()
+		return "", fmt.Errorf("publish retained source: %w", cleanup(err))
+	}
+	if err := verified.Close(); err != nil {
+		return "", fmt.Errorf("close retained source: %w", cleanup(err))
+	}
+	if err := ctx.Err(); err != nil {
+		return "", cleanup(err)
+	}
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("materialized retained source is unavailable: %w", cleanup(errors.Join(err, ErrWorker)))
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("materialized retained source has no filesystem identity: %w", cleanup(ErrWorker))
+	}
+	identity, err := change.NewStageIdentity(uint64(stat.Dev), uint64(stat.Ino))
+	if err != nil {
+		return "", fmt.Errorf("materialized retained source identity: %w", cleanup(err))
+	}
+	facts, err := change.InspectPublished(ctx, filepath.Dir(target), retained.ID, identity, retained.Result.Format, retained.Result.Base)
+	if err != nil {
+		return "", fmt.Errorf("verify materialized retained source: %w", cleanup(err))
+	}
+	if !retainedContentFactsEqual(retained.Result, facts) {
+		return "", fmt.Errorf("materialized retained source differs from selected tree: %w", cleanup(ErrWorker))
+	}
+	if err := ctx.Err(); err != nil {
+		return "", cleanup(err)
+	}
+	return target, nil
+}
+
+func copyRetainedTree(ctx context.Context, destination string, source fs.FS) error {
+	if err := os.CopyFS(destination, contextFS{ctx: ctx, source: source}); err != nil {
+		return err
+	}
+	return secureCopiedDirectories(destination)
+}
+
+type contextFS struct {
+	ctx    context.Context
+	source fs.FS
+}
+
+func (source contextFS) Open(name string) (fs.File, error) {
+	if err := source.ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := source.source.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return contextFile{ctx: source.ctx, file: file}, nil
+}
+
+type contextFile struct {
+	ctx  context.Context
+	file fs.File
+}
+
+func (file contextFile) Stat() (fs.FileInfo, error) { return file.file.Stat() }
+func (file contextFile) Close() error               { return file.file.Close() }
+
+func (file contextFile) Read(p []byte) (int, error) {
+	if err := file.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return file.file.Read(p)
+}
+
+func (file contextFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	if err := file.ctx.Err(); err != nil {
+		return nil, err
+	}
+	reader, ok := file.file.(fs.ReadDirFile)
+	if !ok {
+		return nil, &fs.PathError{Op: "readdir", Path: ".", Err: fs.ErrInvalid}
+	}
+	return reader.ReadDir(n)
+}
+
+func secureCopiedDirectories(root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	})
 }
 
 // openChangeDirectory prepares or reopens the run's Change and returns its
@@ -451,7 +649,11 @@ func reportPopulation(control *runner.WorkerControl) error {
 }
 
 func retainedFactsEqual(retained Result, facts change.TreeFacts) bool {
-	return facts.Identity().Equal(retained.Tree) && facts.Commitment().Equal(retained.Commitment) && facts.EntryCount() == retained.EntryCount && facts.BlobBytes() == retained.BlobBytes
+	return facts.Identity().Equal(retained.Tree) && retainedContentFactsEqual(retained, facts)
+}
+
+func retainedContentFactsEqual(retained Result, facts change.TreeFacts) bool {
+	return facts.Commitment().Equal(retained.Commitment) && facts.EntryCount() == retained.EntryCount && facts.BlobBytes() == retained.BlobBytes
 }
 
 func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File, config Config) (*runtimeAuthority, error) {

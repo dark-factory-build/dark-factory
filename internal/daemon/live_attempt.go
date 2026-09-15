@@ -246,6 +246,18 @@ type liveAttempt struct {
 	runID      kernel.RunID
 	sessionID  kernel.TerminalSessionID
 	controller *runner.AttemptController
+	// sourceSnapshots binds explicitly requested immutable source identities to
+	// private per-run materializations. A later work or Change revision cannot
+	// reuse an older grant; no live run reads the shared Changes parent.
+	sourceSnapshots    map[kernel.RetainedChangeHandoff]string
+	sourceRoot         string
+	sourceMu           sync.Mutex
+	sourceGate         chan struct{}
+	sourceOpsMu        sync.Mutex
+	sourceOpsDone      chan struct{}
+	sourceCloseStarted chan struct{}
+	sourceOps          int
+	sourceClosing      bool
 
 	commands chan liveAttemptCommand
 	wake     chan struct{}
@@ -287,6 +299,7 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), result: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
+		sourceGate: make(chan struct{}, 1), sourceOpsDone: make(chan struct{}), sourceCloseStarted: make(chan struct{}),
 		effectLimit: liveAttemptEffectLimit,
 	}
 	if daemon != nil && daemon.store != nil {
@@ -295,6 +308,46 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		}
 	}
 	return attempt
+}
+
+func (attempt *liveAttempt) beginSourceOperation() bool {
+	attempt.sourceOpsMu.Lock()
+	defer attempt.sourceOpsMu.Unlock()
+	if attempt.sourceClosing {
+		return false
+	}
+	if attempt.sourceOps == 0 {
+		// A completed request may be followed by another one. Each non-empty
+		// generation needs its own drain signal; a closed channel is never
+		// reopened or reused.
+		attempt.sourceOpsDone = make(chan struct{})
+	}
+	attempt.sourceOps++
+	return true
+}
+
+func (attempt *liveAttempt) endSourceOperation() {
+	attempt.sourceOpsMu.Lock()
+	defer attempt.sourceOpsMu.Unlock()
+	attempt.sourceOps--
+	if attempt.sourceOps == 0 && attempt.sourceOpsDone != nil {
+		close(attempt.sourceOpsDone)
+	}
+}
+
+func (attempt *liveAttempt) closeSourceOperations() {
+	attempt.sourceOpsMu.Lock()
+	attempt.sourceClosing = true
+	if attempt.sourceCloseStarted != nil {
+		close(attempt.sourceCloseStarted)
+		attempt.sourceCloseStarted = nil
+	}
+	done := attempt.sourceOpsDone
+	zero := attempt.sourceOps == 0
+	attempt.sourceOpsMu.Unlock()
+	if !zero {
+		<-done
+	}
 }
 
 func (daemon *Daemon) registerLiveAttempt(attempt *liveAttempt) error {
@@ -516,4 +569,13 @@ func (attempt *liveAttempt) waitResult() liveAttemptResult {
 		return liveAttemptResult{err: ErrTerminalClosed}
 	}
 	return <-attempt.result
+}
+
+func (attempt *liveAttempt) acquireSourceGate(ctx context.Context) bool {
+	select {
+	case attempt.sourceGate <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

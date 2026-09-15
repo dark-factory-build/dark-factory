@@ -35,6 +35,7 @@ func (attempt *liveAttempt) run(ctx context.Context) {
 	// error is not evidence that the child disappeared.
 	cleanupErr := attempt.shutdownController()
 	err = errors.Join(err, cleanupErr)
+	attempt.closeSourceOperations()
 	if !attempt.resultReturned {
 		if err == nil {
 			err = ErrTerminalClosed

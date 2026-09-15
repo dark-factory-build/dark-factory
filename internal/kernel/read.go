@@ -420,24 +420,26 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 	if err := agentRows.Close(); err != nil {
 		return DashboardSnapshot{}, err
 	}
-	taskRows, err := tx.connection.QueryContext(ctx, `SELECT id, project_id, assigned_agent_id, title, status, priority, revision FROM tasks ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT ?`, SnapshotEntityLimit+1)
+	taskRows, err := tx.connection.QueryContext(ctx, `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, status, priority, revision FROM tasks ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT ?`, SnapshotEntityLimit+1)
 	if err != nil {
 		return DashboardSnapshot{}, fmt.Errorf("read task summaries: %w", err)
 	}
 	for taskRows.Next() {
-		var rawID, rawProjectID, rawAgentID []byte
+		var rawID, rawProjectID, rawAgentID, rawIncarnationID []byte
 		var title, rawStatus string
-		var priority, rawRevision int64
-		if err := taskRows.Scan(&rawID, &rawProjectID, &rawAgentID, &title, &rawStatus, &priority, &rawRevision); err != nil {
+		var workRevision, priority, rawRevision int64
+		if err := taskRows.Scan(&rawID, &rawProjectID, &rawAgentID, &rawIncarnationID, &workRevision, &title, &rawStatus, &priority, &rawRevision); err != nil {
 			taskRows.Close()
 			return DashboardSnapshot{}, fmt.Errorf("scan task summary: %w", err)
 		}
 		id, idErr := TaskIDFromBytes(rawID)
 		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
 		agentID, agentErr := AgentIDFromBytes(rawAgentID)
+		incarnationID, incarnationErr := IncarnationIDFromBytes(rawIncarnationID)
+		workRev, workRevisionErr := NewRevision(workRevision)
 		status, statusErr := parseTaskStatus(rawStatus)
 		revision, revisionErr := NewRevision(rawRevision)
-		if idErr != nil || projectErr != nil || agentErr != nil || statusErr != nil || revisionErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || priority < -1_000_000 || priority > 1_000_000 {
+		if idErr != nil || projectErr != nil || agentErr != nil || incarnationErr != nil || workRevisionErr != nil || statusErr != nil || revisionErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || priority < -1_000_000 || priority > 1_000_000 {
 			taskRows.Close()
 			return DashboardSnapshot{}, fmt.Errorf("%w: invalid task summary", ErrCorruptState)
 		}
@@ -446,7 +448,7 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 			taskRows.Close()
 			return DashboardSnapshot{}, ErrSnapshotTooLarge
 		}
-		snapshot.Tasks = append(snapshot.Tasks, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, Title: title, Status: status.String(), Priority: priority, Revision: revision})
+		snapshot.Tasks = append(snapshot.Tasks, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, WorkRevision: workRev, Title: title, Status: status.String(), Priority: priority, Revision: revision})
 	}
 	if err := taskRows.Close(); err != nil {
 		return DashboardSnapshot{}, err

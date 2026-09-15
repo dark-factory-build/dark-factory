@@ -303,7 +303,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
-
 	// From CreateRuntime until the runtime resource is durably active, a
 	// failure cannot be finalized live: the exact-edge grammar requires either
 	// trusted runtime absence (unprovable after an uncertain create) or an
@@ -581,6 +580,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	// until it observes TerminalReady, but it already owns the controller and
 	// will synchronously converge it if any later step fails.
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
+	live.sourceSnapshots = make(map[kernel.RetainedChangeHandoff]string)
+	live.sourceRoot = filepath.Join(gotRuntimePath, "retained-source")
 	live.beforeProviderStateCheck = spec.beforeProviderStateCheck
 	if err := daemon.registerLiveAttempt(live); err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -247,6 +248,22 @@ func (client *AttemptClient) Task(ctx context.Context) (AttemptTask, error) {
 	}
 	if !validAttemptTask(result) {
 		return AttemptTask{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *AttemptClient) Source(ctx context.Context, taskID string) (RetainedChangeHandoff, error) {
+	if !validID(taskID) {
+		return RetainedChangeHandoff{}, ErrInvalidInput
+	}
+	var result RetainedChangeHandoff
+	if err := client.client.call(ctx, "source", struct {
+		TaskID string `json:"task_id"`
+	}{TaskID: taskID}, &result); err != nil {
+		return RetainedChangeHandoff{}, err
+	}
+	if !validRetainedChangeHandoff(result) {
+		return RetainedChangeHandoff{}, ErrProtocol
 	}
 	return result, nil
 }
@@ -854,7 +871,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		}
 	}
 	for _, task := range snapshot.Tasks {
-		if !validID(task.ID) || !validID(task.ProjectID) || !validID(task.AssignedAgentID) || !validText(task.Title, 1, 1024) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || task.Revision == 0 {
+		if !validID(task.ID) || !validID(task.ProjectID) || !validID(task.AssignedAgentID) || !validID(task.IncarnationID) || task.WorkRevision == 0 || !validText(task.Title, 1, 1024) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || task.Revision == 0 {
 			return false
 		}
 	}
@@ -880,8 +897,13 @@ func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
 }
 
 func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
-	if !validID(snapshot.ProjectID) || snapshot.Head == 0 || snapshot.Agents == nil || snapshot.Tasks == nil || snapshot.Runs == nil || snapshot.Questions == nil || snapshot.PeerQuestions == nil || snapshot.History == nil || len(snapshot.Agents) > kernel.OverseerSnapshotPageSize || len(snapshot.Tasks) > kernel.OverseerSnapshotPageSize || len(snapshot.Runs) > kernel.OverseerSnapshotPageSize || len(snapshot.Questions) > kernel.OverseerSnapshotPageSize || len(snapshot.PeerQuestions) > 1 || len(snapshot.History) > kernel.OverseerSnapshotPageSize {
+	if !validID(snapshot.ProjectID) || snapshot.Head == 0 || snapshot.Agents == nil || snapshot.Tasks == nil || snapshot.Runs == nil || snapshot.Questions == nil || snapshot.PeerQuestions == nil || snapshot.History == nil || snapshot.Handoffs == nil || len(snapshot.Agents) > kernel.OverseerSnapshotPageSize || len(snapshot.Tasks) > kernel.OverseerSnapshotPageSize || len(snapshot.Runs) > kernel.OverseerSnapshotPageSize || len(snapshot.Questions) > kernel.OverseerSnapshotPageSize || len(snapshot.PeerQuestions) > 1 || len(snapshot.History) > kernel.OverseerSnapshotPageSize || len(snapshot.Handoffs) > kernel.OverseerSnapshotPageSize {
 		return false
+	}
+	for _, handoff := range snapshot.Handoffs {
+		if !validRetainedChangeHandoff(handoff) {
+			return false
+		}
 	}
 	if snapshot.NextOffset != nil && *snapshot.NextOffset == 0 || snapshot.NextTextOffset != nil && *snapshot.NextTextOffset == 0 {
 		return false
@@ -918,6 +940,10 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 		}
 	}
 	return true
+}
+
+func validHandoffSourcePath(value, changeID string) bool {
+	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID && filepath.Base(filepath.Dir(value)) == "retained-source"
 }
 
 func validOverseerSnapshotInput(input OverseerSnapshotInput) bool {

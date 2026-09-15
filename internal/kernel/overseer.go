@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"unicode/utf8"
 )
 
@@ -18,6 +19,18 @@ type OverseerSnapshot struct {
 	PeerQuestions  []PeerQuestion
 	History        []TaskIntervention
 	HistoryExcerpt bool
+	Handoffs       []RetainedChangeHandoff
+}
+
+// RetainedChangeHandoff is the complete identity an overseer or delegated
+// reviewer must match before reading a daemon-retained worker tree. It is
+// deliberately an identity, not a caller-supplied pathname.
+type RetainedChangeHandoff struct {
+	ChangeID         ChangeID
+	BaseCommit       string
+	TaskID           TaskID
+	TaskWorkRevision Revision
+	ChangeRevision   Revision
 }
 
 const OverseerSnapshotPageSize = 4
@@ -86,7 +99,7 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	if request.ExpectedHead.Int64() != 0 && request.ExpectedHead != state.Head {
 		return OverseerSnapshot{}, ErrRevisionConflict
 	}
-	result := OverseerSnapshot{ProjectID: authority.ProjectID, Head: state.Head, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRunSummary{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []TaskIntervention{}, HistoryExcerpt: request.TaskID == nil}
+	result := OverseerSnapshot{ProjectID: authority.ProjectID, Head: state.Head, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRunSummary{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []TaskIntervention{}, Handoffs: []RetainedChangeHandoff{}, HistoryExcerpt: request.TaskID == nil}
 	offset := int64(request.Offset)
 	nextOffset := uint64(offset + OverseerSnapshotPageSize)
 	hasMore := false
@@ -151,6 +164,15 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	}
 	if request.TaskID != nil && len(result.Tasks) == 0 {
 		return OverseerSnapshot{}, ErrNotFound
+	}
+	for _, task := range result.Tasks {
+		handoff, found, err := retainedChangeHandoff(ctx, read.connection, authority.ProjectID, task.ID)
+		if err != nil {
+			return OverseerSnapshot{}, err
+		}
+		if found {
+			result.Handoffs = append(result.Handoffs, handoff)
+		}
 	}
 	historyQuery, historyArgs := `SELECT `+taskInterventionColumns+` FROM task_interventions WHERE project_id = ? ORDER BY created_at_ms DESC, operation_id DESC LIMIT ?`, []any{authority.ProjectID.Bytes(), MaxTaskInterventionHistory}
 	if request.TaskID != nil {
@@ -268,6 +290,43 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 		result.NextOffset = &nextOffset
 	}
 	return result, nil
+}
+
+func retainedChangeHandoff(ctx context.Context, connection *sql.Conn, projectID ProjectID, taskID TaskID) (RetainedChangeHandoff, bool, error) {
+	task, found, err := taskByID(ctx, connection, taskID)
+	if err != nil || !found || task.ProjectID != projectID {
+		return RetainedChangeHandoff{}, false, err
+	}
+	change, found, err := changeForTask(ctx, connection, task)
+	if err != nil || !found || change.Phase != ChangeRetained || change.Selection == nil || change.SettledRunID == nil {
+		return RetainedChangeHandoff{}, false, err
+	}
+	run, found, err := runByID(ctx, connection, *change.SettledRunID)
+	if err != nil {
+		return RetainedChangeHandoff{}, false, err
+	}
+	if !found || run.ProjectID != projectID || run.Role != RoleWorker || run.Phase != RunTerminal || run.Terminal == nil || run.TaskID != task.ID {
+		return RetainedChangeHandoff{}, false, ErrCorruptState
+	}
+	// Retained failed or blocked trees, and a tree from an earlier work
+	// revision after send-back, remain durable evidence but are not launch
+	// authority. Only the task's current successful settlement is handoffable.
+	if run.Terminal.Kind() != OutcomeSucceeded || run.AdmittedTaskWorkRevision != task.WorkRevision {
+		return RetainedChangeHandoff{}, false, nil
+	}
+	return RetainedChangeHandoff{ChangeID: change.ID, BaseCommit: hex.EncodeToString(change.Selection.Commit().Bytes()), TaskID: task.ID, TaskWorkRevision: task.WorkRevision, ChangeRevision: change.Revision}, true, nil
+}
+
+// RetainedChangeHandoffForTask returns the current handoff identity for one
+// project task. It is used before a send-back makes that identity stale, so a
+// daemon can revoke launch-time filesystem grants before reopening the Change.
+func (store *Store) RetainedChangeHandoffForTask(ctx context.Context, projectID ProjectID, taskID TaskID) (RetainedChangeHandoff, bool, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return RetainedChangeHandoff{}, false, err
+	}
+	defer read.Close()
+	return retainedChangeHandoff(ctx, read.connection, projectID, taskID)
 }
 
 func overseerTaskText(value string, overview bool, offset uint64) (string, bool, bool) {

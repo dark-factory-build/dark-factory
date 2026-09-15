@@ -72,6 +72,55 @@ func TestLiveAttemptSubmitDoesNotWaitForExitedOwner(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptSourceOperationsDrainAndRejectNewWork(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 10001)
+	attempt := newLiveAttempt(nil, runID, sessionID, nil)
+	if !attempt.beginSourceOperation() {
+		t.Fatal("initial source operation refused")
+	}
+	started := attempt.sourceCloseStarted
+	closed := make(chan struct{})
+	go func() {
+		attempt.closeSourceOperations()
+		close(closed)
+	}()
+	<-started
+	if attempt.beginSourceOperation() {
+		t.Fatal("source operation admitted after cleanup began")
+	}
+	attempt.endSourceOperation()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not drain admitted operation")
+	}
+}
+
+func TestLiveAttemptSourceOperationsCanRunAgainBeforeShutdown(t *testing.T) {
+	runID, sessionID := liveTestIDs(t, 10002)
+	attempt := newLiveAttempt(nil, runID, sessionID, nil)
+	for i := 0; i < 2; i++ {
+		if !attempt.beginSourceOperation() {
+			t.Fatalf("source operation %d refused", i)
+		}
+		attempt.endSourceOperation()
+	}
+	if !attempt.beginSourceOperation() {
+		t.Fatal("source operation refused after completed request")
+	}
+	drained := make(chan struct{})
+	go func() {
+		attempt.closeSourceOperations()
+		close(drained)
+	}()
+	attempt.endSourceOperation()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not drain the current source operation")
+	}
+}
+
 func TestLiveAttemptSubmitReturnsWhenOwnerExitsAfterAcceptingCommand(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 10003)
 	attempt := newLiveAttempt(nil, runID, sessionID, nil)
@@ -276,4 +325,17 @@ func TestTerminalAttachmentFinishIsIdempotentAndPayloadBounded(t *testing.T) {
 	if attachment.enqueue(TerminalEvent{Kind: TerminalEventOutput, Payload: make([]byte, terminalPayloadCap+1)}) {
 		t.Fatal("oversized terminal payload was queued")
 	}
+}
+
+func TestLiveAttemptSourceGateCancellation(t *testing.T) {
+	attempt := newLiveAttempt(nil, kernel.RunID{}, kernel.TerminalSessionID{}, nil)
+	if !attempt.acquireSourceGate(context.Background()) {
+		t.Fatal("first gate")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if attempt.acquireSourceGate(ctx) {
+		t.Fatal("cancelled queued request acquired gate")
+	}
+	<-attempt.sourceGate
 }

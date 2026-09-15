@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,6 +13,11 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
+)
+
+const (
+	defaultDispatchTimeout        = 10 * time.Second
+	retainedSourceDispatchTimeout = 10 * time.Minute
 )
 
 // Daemon is the concrete composition root for the local API. It owns the
@@ -122,11 +128,21 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if err != nil {
 		return err
 	}
+	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
+	defer cancel()
+	if call.Kind() == api.CallAttemptSource {
+		cancel()
+		dispatchContext, cancel = context.WithTimeout(ctx, retainedSourceDispatchTimeout)
+		defer cancel()
+	}
+	if err := connection.RefreshDeadline(dispatchContext); err != nil {
+		return err
+	}
 	if attemptOutcomeCall(call.Kind()) {
 		var attempt *liveAttempt
 		reply, dispatchErr := connection.Dispatch(func(call api.Call) api.Reply {
 			var outcome api.Reply
-			outcome, attempt = daemon.proposeOutcome(ctx, call)
+			outcome, attempt = daemon.proposeOutcome(dispatchContext, call)
 			return outcome
 		})
 		if dispatchErr != nil {
@@ -135,12 +151,12 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		}
 		responseErr := connection.Respond(reply)
 		if responseErr == nil {
-			responseErr = connection.AwaitOutcomeReceipt(ctx)
+			responseErr = connection.AwaitOutcomeReceipt(dispatchContext)
 		}
 		daemon.clearOutcomeReceipt(attempt)
 		return responseErr
 	}
-	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(ctx, call) })
+	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(dispatchContext, call) })
 	if err != nil {
 		return err
 	}
@@ -174,6 +190,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.selectAgentModel(ctx, call)
 	case api.CallAttemptTask:
 		return daemon.attemptTask(ctx, call)
+	case api.CallAttemptSource:
+		return daemon.attemptSource(ctx, call)
 	case api.CallRequestHuman:
 		return daemon.requestHuman(ctx, call)
 	case api.CallPeerStatus:
@@ -272,6 +290,65 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 		return newErrorReply(remoteErrorCode(err))
 	}
 	reply, err := api.NewAttemptTaskReply(api.AttemptTask{Task: authority.Task()})
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
+}
+
+func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Reply {
+	digest, ok := call.AttemptDigest()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	kDigest, err := attemptDigest(digest)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	authority, err := daemon.store.AuthenticateAttempt(ctx, kDigest)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	// Only the Codex launch currently enforces a read-only local-command
+	// boundary for this private snapshot. Claude and shell must not receive a
+	// mutable path described as an immutable source handoff.
+	if authority.Provider != kernel.ProviderCodex {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	taskIDText, ok := call.AttemptSourceTaskID()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	targetTaskID, err := parseTaskID(taskIDText)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	daemon.attemptMu.Lock()
+	live := daemon.attempts[authority.RunID]
+	daemon.attemptMu.Unlock()
+	if live == nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	if !live.beginSourceOperation() {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	defer live.endSourceOperation()
+	handoff, found, err := daemon.store.RetainedChangeHandoffForTask(ctx, authority.ProjectID, targetTaskID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	path, err := daemon.materializeAttemptSource(ctx, live, handoff)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	projected, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: path})
+	if err != nil || len(projected) != 1 {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	reply, err := api.NewAttemptSourceReply(projected[0])
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -897,7 +974,7 @@ func (daemon *Daemon) overseerDigest(ctx context.Context, call api.Call) (kernel
 }
 
 func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.Reply {
-	_, digest, failure := daemon.overseerDigest(ctx, call)
+	authority, digest, failure := daemon.overseerDigest(ctx, call)
 	if failure != nil {
 		return *failure
 	}
@@ -922,7 +999,23 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	reply, err := api.NewOverseerSnapshotReply(projectOverseerSnapshot(snapshot))
+	daemon.attemptMu.Lock()
+	live := daemon.attempts[authority.RunID]
+	var snapshots map[kernel.RetainedChangeHandoff]string
+	if live != nil {
+		live.sourceMu.Lock()
+		snapshots = maps.Clone(live.sourceSnapshots)
+		live.sourceMu.Unlock()
+	}
+	daemon.attemptMu.Unlock()
+	if live == nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	projected, err := projectOverseerSnapshot(snapshot, snapshots)
+	if err != nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	reply, err := api.NewOverseerSnapshotReply(projected)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

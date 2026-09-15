@@ -169,6 +169,7 @@ type RuntimePaths struct {
 	// launch used before accounts existed.
 	accountConfig      string
 	toolchainReadRoots string
+	sourceReadPaths    []string
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
@@ -180,6 +181,23 @@ func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath
 	if !runtime.valid() {
 		return RuntimePaths{}, ErrInvalid
 	}
+	return runtime, nil
+}
+
+// WithReadOnlySources adds exact daemon-selected retained trees to a Codex
+// launch profile. These are paths already derived from validated Change IDs.
+func (runtime RuntimePaths) WithReadOnlySources(paths []string) (RuntimePaths, error) {
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		if !validAbsolute(path, maxPathBytes) || path == runtime.home || path == runtime.temp {
+			return RuntimePaths{}, ErrInvalid
+		}
+		if _, duplicate := seen[path]; duplicate {
+			return RuntimePaths{}, ErrInvalid
+		}
+		seen[path] = struct{}{}
+	}
+	runtime.sourceReadPaths = append([]string(nil), paths...)
 	return runtime, nil
 }
 
@@ -337,7 +355,7 @@ func Build(request Request) (Launch, error) {
 		}
 		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
-			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
+			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For retained source, request attempt source --task TASK_ID and verify its exact task/work/Change receipt before reading source_path; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
 		argv = append(argv, prompt)
 		return Launch{
@@ -366,6 +384,9 @@ func codexPermissions(request Request) (string, error) {
 	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		entries = append(entries, tomlBasicString(root)+`="read"`)
+	}
+	for _, path := range request.runtime.sourceReadPaths {
+		entries = append(entries, tomlBasicString(path)+`="read"`)
 	}
 	// Codex merges profile tables. Use the existing private runtime identity
 	// rather than a shared name that could inherit an account profile.

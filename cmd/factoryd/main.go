@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -38,7 +37,6 @@ const (
 	factoryctlSiblingName = "factoryctl"
 	maxHomeArgumentBytes  = 4096
 	maxAPIHandlers        = 32
-	apiHandlerTimeout     = 10 * time.Second
 	exitFailure           = 1
 	exitUsage             = 64
 
@@ -413,9 +411,7 @@ func (owner *process) accept(ctx context.Context, listener *api.Listener) {
 		go func() {
 			defer owner.handlers.Done()
 			defer func() { <-owner.slots }()
-			handlerContext, cancel := context.WithTimeout(ctx, apiHandlerTimeout)
-			defer cancel()
-			_ = owner.daemon.HandleConnection(handlerContext, connection)
+			_ = owner.daemon.HandleConnection(ctx, connection)
 		}()
 	}
 }

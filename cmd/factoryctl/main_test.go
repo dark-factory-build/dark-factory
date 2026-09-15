@@ -179,6 +179,7 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "attempt help", args: []string{"attempt", "-h"}, help: true},
 		{name: "verb help", args: []string{"attempt", "block", "--help"}, help: true},
 		{name: "task", args: []string{"attempt", "task"}, command: attemptCommand{kind: commandAttemptTask}},
+		{name: "source", args: []string{"attempt", "source", "--task", "0123456789abcdef0123456789abcdef"}, command: attemptCommand{kind: commandAttemptSource, id: "0123456789abcdef0123456789abcdef"}},
 		{name: "empty success", args: []string{"attempt", "succeed"}, command: attemptCommand{kind: commandSucceed}},
 		{name: "success", args: []string{"attempt", "succeed", "--result", "done"}, command: attemptCommand{kind: commandSucceed, text: "done"}},
 		{name: "block", args: []string{"attempt", "block", "--detail", "waiting"}, command: attemptCommand{kind: commandBlock, text: "waiting"}},
