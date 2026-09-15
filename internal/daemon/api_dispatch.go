@@ -170,6 +170,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.setDispatch(ctx, call)
 	case api.CallSetCapacity:
 		return daemon.setCapacity(ctx, call)
+	case api.CallAgentSelectModel:
+		return daemon.selectAgentModel(ctx, call)
 	case api.CallAttemptTask:
 		return daemon.attemptTask(ctx, call)
 	case api.CallRequestHuman:
@@ -1425,4 +1427,38 @@ func remoteErrorCode(err error) api.RemoteErrorCode {
 	default:
 		return api.RemoteInternal
 	}
+}
+
+func (daemon *Daemon) selectAgentModel(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AgentModelSelectInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agentID, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agent, found, err := daemon.store.Agent(ctx, agentID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	if agent.Role != kernel.RoleWorker {
+		return newErrorReply(api.RemoteConflict)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	updated, err := daemon.store.UpdateAgent(ctx, agentID, expected, kernel.AgentPatch{Model: &input.Model, ReasoningEffort: &input.ReasoningEffort}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.mutation(ctx, updated.Revision)
 }
