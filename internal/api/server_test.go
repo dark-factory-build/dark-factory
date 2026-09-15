@@ -291,6 +291,12 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("capacity = %d, %d, %t", revision, capacity, ok)
 			}
 		}},
+		{name: "select agent model", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"agent_select_model","params":{"agent_id":"` + id('2') + `","expected_revision":3,"model":"gpt-5.6-luna","reasoning_effort":"medium"}}`, kind: CallAgentSelectModel, check: func(t *testing.T, call Call) {
+			input, ok := call.AgentModelSelectInput()
+			if !ok || input.AgentID != id('2') || input.ExpectedRevision != 3 || input.Model != "gpt-5.6-luna" || input.ReasoningEffort != "medium" {
+				t.Fatalf("model selection = %+v, %t", input, ok)
+			}
+		}},
 		{name: "task", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"task","params":{}}`, kind: CallAttemptTask},
 		{name: "succeed", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"succeed","params":{"result":"private-result-sentinel"}}`, kind: CallSucceed, check: func(t *testing.T, call Call) {
 			result, ok := call.Result()

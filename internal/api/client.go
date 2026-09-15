@@ -1104,3 +1104,10 @@ func watchCancellation(ctx context.Context, connection deadlineConnection) func(
 func (left credential) equal(right credential) bool {
 	return subtle.ConstantTimeCompare(left[:], right[:]) == 1
 }
+
+func (client *OperatorClient) SelectAgentModel(ctx context.Context, input AgentModelSelectInput) (MutationResult, error) {
+	if !validAgentModelSelectInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "agent_select_model", input)
+}
