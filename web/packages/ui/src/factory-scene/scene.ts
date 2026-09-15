@@ -174,6 +174,10 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
 export function workPositions(room: SceneRoomLayout, bayId?: string): readonly ScenePoint[] {
   const surface = bayId === undefined ? room.contents.find((item) => item.workSurface) : room.contents.find((item) => item.targetId === bayId);
   if (surface === undefined) return [{ x: room.door.x, y: room.door.y - 32 }];
+  // Component bays share the composition's reserved right-hand approach. This
+  // is the same pictured rectangle used by rendering and hit testing, rather
+  // than a second map of invented workstations.
+  if (bayId !== undefined) return [{ x: room.x + room.width - 12, y: surface.y + surface.height / 2 }];
   const offsets = surface.width >= 120 ? [0, -24, 24, -48, 48] : surface.width >= 88 ? [0, -24, 24] : [0, -24];
   return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + 8 }));
 }
@@ -191,33 +195,39 @@ function composeRoom(node: SceneNode, room: SceneRect, arrangement: SceneRoomLay
   const primary = kinds[0];
   const contents: RoomContent[] = [];
   const children = [...(node.components ?? [])].sort((a, b) => compareText(a.label, b.label) || compareText(a.id, b.id));
+  // All pictured rectangles stop before this 20px edge strip. Its centre is
+  // the 8px-clear side approach used for both the bench and direct-child bays.
+  const contentLeft = room.x + 20;
+  const contentWidth = room.width - 40;
   // Root halls can show four direct bays; compact parents deliberately show
   // fewer. Six remains the hard scene-wide pictured-bay bound.
   const bayLimit = arrangement === "bench" ? 0 : arrangement === "parent" ? (room.width >= 192 ? 2 : 1) : room.width >= 216 ? 4 : room.width >= 192 ? 3 : 1;
   const bays = children.slice(0, Math.min(6, bayLimit));
   const columns = arrangement === "parent" ? 1 : bays.length > 3 ? 2 : bays.length;
-  const bayWidth = columns === 0 ? 0 : (room.width - 24 - Math.max(0, columns - 1) * 8) / columns;
+  const bayWidth = columns === 0 ? 0 : (contentWidth - Math.max(0, columns - 1) * 8) / columns;
   const bayHeight = arrangement === "parent" ? 34 : 38;
   bays.forEach((child, index) => {
     const column = index % columns, row = Math.floor(index / columns);
     contents.push({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id,
-      x: room.x + 12 + column * (bayWidth + 8), y: room.y + 48 + row * (bayHeight + 8), width: bayWidth, height: bayHeight,
+      x: contentLeft + column * (bayWidth + 8), y: room.y + 48 + row * (bayHeight + 8), width: bayWidth, height: bayHeight,
     });
   });
   if (primary === undefined) return contents;
-  const width = Math.max(room.width >= 160 ? 112 : 80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary]));
+  const width = Math.min(contentWidth, Math.max(room.width >= 160 ? 112 : 80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary])));
   const height = room.height >= 184 ? 64 : 32;
   contents.push({ key: primary, kind: primary, label: inventoryLabels[primary], count: counts![primary], workSurface: true,
-    // Keep a full sprite's approach lane between a pictured child bay and the
-    // shared surface, while preserving the fixed doorway edge below it.
-    x: room.x + (room.width - width) / 2, y: room.y + room.height - height - 16, width, height });
+    // Keep the doorway and its horizontal approach clear by a full sprite.
+    x: contentLeft, y: room.y + room.height - height - 32, width, height });
   // Tests retain a supporting place even beside a much larger source installation.
   const secondary = kinds.filter((kind) => kind !== primary).sort((a, b) => Number(b === "tests") - Number(a === "tests") || compareText(a, b));
   const slots = arrangement === "bench" ? 2 : bays.length >= 3 ? 1 : 2;
   const bayBottom = bays.length === 0 ? room.y + 38 : room.y + 48 + Math.ceil(bays.length / columns) * (bayHeight + 8) - 8;
-  secondary.slice(0, slots).forEach((kind, index) => contents.push({
+  const supportY = bayBottom + 8;
+  const primaryTop = contents.find((item) => item.workSurface)!.y;
+  const supportCount = supportY + 24 <= primaryTop - 8 ? Math.min(slots, Math.floor(contentWidth / 56)) : 0;
+  secondary.slice(0, supportCount).forEach((kind, index) => contents.push({
     key: kind, kind, label: inventoryLabels[kind], count: counts![kind],
-    x: room.x + 12 + index * 56, y: bayBottom + 8, width: 48, height: 28,
+    x: contentLeft + index * 56, y: supportY, width: 48, height: 24,
   }));
   return contents;
 }
