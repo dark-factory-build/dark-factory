@@ -187,7 +187,7 @@ function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
     x: room.x + 12 + index * (planWidth + 8), y: room.y + 46, width: planWidth, height: 28,
   }));
   if (primary === undefined) return contents;
-  const width = Math.max(80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary]));
+  const width = Math.max(room.width >= 160 ? 112 : 80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary]));
   const height = room.height >= 184 ? 64 : 32;
   contents.push({ key: primary, kind: primary, label: inventoryLabels[primary], count: counts![primary], workSurface: true,
     x: room.x + (room.width - width) / 2, y: room.y + room.height - height - 40, width, height });

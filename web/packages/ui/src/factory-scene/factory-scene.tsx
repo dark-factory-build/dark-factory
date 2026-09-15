@@ -435,7 +435,7 @@ function Equipment({ item, positions }: { item: RoomContent; positions: readonly
       <path d={`M0 ${front}H${width}v7H0Z`} fill={kind === "source" || kind === "tests" ? "#526674" : "#896f57"} stroke={kind === "source" || kind === "tests" ? "#99adb3" : "#c1a68a"} strokeWidth="2" />
       <path d={`M4 ${front + 8}v4 M${width - 6} ${front + 8}v4`} stroke="#455866" strokeWidth="4" />
       <path d={`M6 ${front + 4}H${width - 6}`} stroke="#5a493d" strokeWidth="2" />
-      
+
     </> : <path d={`M0 19H${width}v4H0Z`} fill="#455967" stroke="#71838a" strokeWidth="2" />}
     {!rich ? null : <g stroke={ink} strokeWidth="2">
       {kind === "source" ? <>
