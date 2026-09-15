@@ -66,6 +66,8 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "x"},
 		{"agent", "create", "--project", "short", "--name", "n", "--provider", "shell", "--tool-budget", "1"},
 		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "1", "--role", "manager"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--after-seconds", "60", "--instruction", "x", "--run-budget", "1"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "x"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "0", "--instruction", "x", "--run-budget", "1"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait", "--run-budget", "1"},

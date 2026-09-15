@@ -201,6 +201,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("set idle policy = %+v, %v", policyResult, err)
 	}
 	waitDispatch(t, done)
+	assertSchedulerWake(t, fixture.daemon)
 	updated, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(2)))
 	if err != nil || !found || updated.Idle.Policy != kernel.IdleStandingInstruction || updated.Idle.AfterSeconds != 60 || updated.Idle.Instruction != "review retained changes" || updated.Idle.RunBudget != 3 {
 		t.Fatalf("stored idle policy = %+v, found=%v, err=%v", updated.Idle, found, err)
@@ -211,6 +212,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatal("stale idle policy accepted")
 	}
 	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
 	_, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{
