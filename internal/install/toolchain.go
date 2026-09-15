@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
@@ -54,7 +55,7 @@ func ToolchainReadRootsAllowed(value, accountHome string, privatePaths ...string
 	return true
 }
 
-// Startup refuses aliases, missing directories and roots writable by other users.
+// Startup requires current-user ownership and refuses aliases or writable roots.
 func CheckToolchainReadRoots(value, accountHome string, privatePaths ...string) error {
 	if !ToolchainReadRootsAllowed(value, accountHome, privatePaths...) {
 		return ErrServicePlist
@@ -66,6 +67,10 @@ func CheckToolchainReadRoots(value, accountHome string, privatePaths ...string) 
 		}
 		info, err := os.Stat(root)
 		if err != nil || !info.IsDir() || info.Mode().Perm()&0022 != 0 {
+			return ErrServicePlist
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != uint32(os.Geteuid()) {
 			return ErrServicePlist
 		}
 	}

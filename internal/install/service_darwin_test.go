@@ -920,3 +920,28 @@ func TestServiceHomeSnapshotsTolerateLiveDirectoryChurnButRejectReplacement(t *t
 		t.Fatal("same-name directory replacement passed service image comparison")
 	}
 }
+
+func TestToolchainReadRootRejectsForeignOwnerDespiteSafeMode(t *testing.T) {
+	root := "/System/Library/CoreServices"
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("missing directory ownership")
+	}
+	if stat.Uid == uint32(os.Geteuid()) {
+		t.Skip("requires non-root test user")
+	}
+	if info.Mode().Perm()&0022 != 0 {
+		t.Fatal("fixture must pass the existing mode guard")
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != root {
+		t.Fatalf("fixture must pass canonical path guard: %q %v", resolved, err)
+	}
+	if err := CheckToolchainReadRoots(root, ""); err == nil {
+		t.Fatal("foreign-owned directory with safe mode was accepted")
+	}
+}

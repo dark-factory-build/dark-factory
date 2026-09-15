@@ -102,7 +102,8 @@ temp exceptions. An optional startup `--toolchain-read-roots` path list adds
 read-only access to exact installed software directories (for example one
 Node installation including its Corepack libraries, or one Go `libexec`).
 This is not inferred from PATH and does not pin every child executable.
-The paths must be canonical existing directories, not writable by other users,
+The paths must be canonical existing directories owned by the daemon user,
+not writable by other users,
 and cannot overlap Factory private paths or include account/credential roots.
 The managed service install accepts and records the same option; status and
 uninstall recover it from the receipt. Changing it requires reinstalling.
