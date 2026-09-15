@@ -22,6 +22,22 @@ Shell and Codex are proven end to end. The Claude Code launch path is
 fixture-proven in the current source; a live run against its
 signed-in CLI remains required before it is included in a release.
 
+## Select an existing provider account
+
+Use `factoryctl account discover` or `factoryctl account list` to inspect existing
+provider logins and linked identities. Both return complete paged observations;
+linked accounts remain visible with an unavailable reason if their login files
+have disappeared. These commands do not start a login flow or export credentials.
+
+```sh
+factoryctl account link --provider codex --home /absolute/provider/home --label dogfood
+factoryctl agent select-account --agent AGENT_ID --revision REVISION --account ACCOUNT_ID
+```
+
+Selection requires an idle worker and its current revision. It changes future
+runs; it cannot switch credentials underneath an active run. Use the existing
+provider login flow first when the desired account is not discoverable.
+
 ## Create an agent
 
 Provider choice is explicit:
