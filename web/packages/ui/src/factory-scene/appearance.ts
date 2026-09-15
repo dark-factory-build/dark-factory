@@ -44,14 +44,14 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion): readon
   const appearance = resolvedAppearance(worker);
   const role = worker.role === "orchestrator" ? "overseer" : "worker";
   const provider = worker.provider === "claude_code" || worker.provider === "codex" ? worker.provider : "shell";
-  const activity = ["busy", "waiting", "needs-you", "idle"].includes(worker.activity) ? worker.activity : "idle";
+  const activity = motion?.action === "interacting" ? "idle" : ["busy", "waiting", "needs-you", "idle"].includes(worker.activity) ? worker.activity : "idle";
   const frames = [
     `person.skin.${appearance.skin}.${activity}`,
     `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.${activity}`,
     `person.hair.${appearance.hair}.${appearance.hair_colour}.${activity}`,
-    `person.face.${appearance.face}.${activity}`,
+    ...(motion?.action === "interacting" ? [] : [`person.face.${appearance.face}.${activity}`]),
     `person.shoes.${appearance.shoes}.${activity}`,
-    `person.tool.${appearance.tool}.${activity}`,
+    ...(motion?.action === "interacting" ? [] : [`person.tool.${appearance.tool}.${activity}`]),
     `person.headwear.${appearance.headwear}.${activity}`,
     `person.system.${role}.${provider}.${activity}`,
   ];

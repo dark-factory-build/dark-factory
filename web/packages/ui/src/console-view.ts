@@ -349,7 +349,7 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
       }
       return true;
     });
-  const fallback: SceneNode = { id: project.id, path: project.name, label: project.name, kind: "repository", project: { id: project.id, name: project.name } };
+  const fallback: SceneNode = { id: project.id, path: project.name, label: project.name, kind: "repository", inventoryScope: "subtree", project: { id: project.id, name: project.name } };
   if (!valid) return { project, projectRoom: fallback, nodes: [fallback] };
   const roots = served.filter((node) => node.parent_id === "");
   // The daemon serves one repository root. If that root is unavailable or a
@@ -357,8 +357,9 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
   // instead of manufacturing a containment edge from project text.
   if (roots.length !== 1) return { project, projectRoom: fallback, nodes: [fallback] };
   const root = roots[0]!;
+  const componentLabel = (node: typeof root) => node.kind === "package" && node.label === "main" && node.path !== "." ? node.path.split("/").at(-1)! : node.label;
   const components = new Map<string, Array<{ id: string; label: string }>>();
-  for (const node of served) if (node.parent_id !== "") components.set(node.parent_id, [...(components.get(node.parent_id) ?? []), { id: `${project.id}:${node.id}`, label: node.label }]);
+  for (const node of served) if (node.parent_id !== "") components.set(node.parent_id, [...(components.get(node.parent_id) ?? []), { id: `${project.id}:${node.id}`, label: componentLabel(node) }]);
   for (const children of components.values()) children.sort((a, b) => compareText(a.id, b.id));
   const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number][]>();
   for (const edge of topology?.dependencies?.edges ?? []) {
@@ -374,10 +375,11 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
     id: `${project.id}:${node.id}`,
     ...(node.parent_id === "" ? {} : { parentId: `${project.id}:${node.parent_id}` }),
     path: node.path,
-    label: node.id === root.id ? project.name : node.label,
+    label: node.id === root.id ? project.name : componentLabel(node),
     kind: node.kind,
     sizeBucket: node.size_bucket,
     language: node.language,
+    inventoryScope: "subtree" as const,
     childCount: components.get(node.id)?.length ?? 0,
     components: components.get(node.id) ?? [],
     ...(node.inventory === undefined ? {} : { inventory: node.inventory }),

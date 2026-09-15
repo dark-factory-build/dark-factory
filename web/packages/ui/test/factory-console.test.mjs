@@ -2023,5 +2023,5 @@ test("same-path wrappers retain navigation without overlapping displayed physica
   assert.equal(prepared.roomByID.get(id(module)).parentId, id(root));
   assert.equal(prepared.roomByID.get(id(pkg)).parentId, id(module));
   assert.equal(prepared.roomByID.get(id(child)).parentId, id(module));
-  assert.equal(prepared.roomByID.get(id(root)).inventoryScope, undefined, "selection does not mutate prepared source facts");
+  assert.equal(prepared.roomByID.get(id(root)).inventoryScope, "subtree", "selection does not mutate prepared source facts");
 });

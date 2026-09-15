@@ -1,3 +1,4 @@
+import actualTopology from "./actual-topology.js";
 import { useState } from "react";
 import { SessionError } from "@dark-factory/client";
 import { TerminalPanel } from "../../../packages/ui/dist/src/factory-app.js";
@@ -76,9 +77,9 @@ const inventory = (counts: ReturnType<typeof inventoryCounts>, names: string[] =
 const fixtureInventoryTopologies = new Map(fixtureHierarchyTopologies).set(fixtureObservedRun.projectId, {
   ...fixtureTopologies.get(fixtureObservedRun.projectId)!, digest: "inventory-fixture",
   nodes: [
-    { id: "a1".repeat(32), parent_id: "", kind: "repository", path: ".", label: "Workshop", language: "", size_bucket: "large", inventory: { ...inventory(inventoryCounts({ configuration: 3 }), ["package.json", "go.mod", "go.sum"]), total: inventoryCounts({ source: 206, tests: 140, documentation: 36, configuration: 13, assets: 98, unclassified: 4 }) } },
+    { id: "a1".repeat(32), parent_id: "", kind: "repository", path: ".", label: "Workshop", language: "", size_bucket: "large", inventory: { ...inventory(inventoryCounts({ configuration: 3 }), ["package.json", "go.mod", "go.sum"]), total: inventoryCounts({ source: 206, tests: 200, documentation: 36, configuration: 13, assets: 98, unclassified: 4 }) } },
     ...[
-      ["b2", "internal/kernel", "Source engine", "large", inventoryCounts({ source: 200, configuration: 4 }), ["store.go", "api.go", "run.go"]],
+      ["b2", "internal/kernel", "Source engine", "large", inventoryCounts({ source: 200, tests: 60, configuration: 4 }), ["store.go", "api.go", "run.go"]],
       ["c3", "tests", "Test workshop", "large", inventoryCounts({ tests: 140, source: 4 }), ["session.test.ts", "store_test.go", "test_queue.py"]],
       ["d4", "web", "Design studio", "large", inventoryCounts({ assets: 98, documentation: 36, configuration: 6 }), ["scene.svg", "README.md", "theme.json"]],
       ["e5", "small", "Small component", "tiny", inventoryCounts({ source: 2, unclassified: 4 }), ["main.ts", "notes.bin", "data"]],
@@ -93,8 +94,9 @@ const fixtureInventoryState = { ...fixtureFloorState, humanRequests: new Map() }
 // toggles expose production components; no action reports a daemon result.
 function FixtureTour() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
-  const crowded = fixture === "crowded";
-  const inventoryFixture = fixture === "inventory" || fixture === "inventory-idle";
+  const crowded = fixture === "crowded" || fixture === "inventory-crowded";
+  const actual = fixture === "actual" || fixture === "actual-idle";
+  const inventoryFixture = actual || fixture === "inventory" || fixture === "inventory-idle" || fixture === "inventory-crowded";
   const terminalFixture = fixture === "terminal";
   const archiveFixture = fixture === "archive" || fixture === "archived";
   const [inputRefused, setInputRefused] = useState(true);
@@ -116,7 +118,7 @@ function FixtureTour() {
   return (
     <>
       <p className="devFixtureBanner" role="note">
-        FIXTURE TOUR — sample data, no daemon. Actions that need the factory are inert here.
+        {actual ? `ACTUAL CODEBASE SCAN · ${actualTopology.sourceRevision.slice(0, 8)} · sample workers, no daemon.` : "FIXTURE TOUR — sample data, no daemon. Actions that need the factory are inert here."}
       </p>
       {!hierarchy ? null : <p className="devFixtureBanner" role="note">
         HIERARCHY FIXTURE — North and South use different served nesting; labels and paths are deliberately misleading.
@@ -136,8 +138,8 @@ function FixtureTour() {
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
-        state={inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : fixtureInventoryState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
-        topologies={inventoryFixture ? fixtureInventoryTopologies : fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
+        state={actual ? { ...fixtureInventoryState, projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
+        topologies={actual ? new Map([[actualTopology.projectId, actualTopology]]) : inventoryFixture ? fixtureInventoryTopologies : fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
         runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
         onView={setView}
