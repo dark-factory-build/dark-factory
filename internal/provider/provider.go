@@ -24,16 +24,12 @@ const (
 	// maintainerBridge is the Maintainer App's MCP bridge. An orchestrator
 	// launch names it to Claude, which is how an overseer publishes: the
 	// daemon itself exposes no repository or publication operation.
-	maintainerBridge      = "dark-factory-maintainer-mcp-bridge"
-	codexTool             = "codex"
-	maxPathBytes          = 4096
-	maxClaudePrompt       = 8 << 10
-	maxCodexTask          = 8 << 10
-	claudeConfigDir       = ".claude"
-	codexConfigDir        = ".codex"
-	discoveryInstructions = "Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search."
-	claudeTaskLead        = discoveryInstructions + " " + "Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
-	codexBootstrapPrompt  = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool.` + " " + discoveryInstructions
+	maintainerBridge     = "dark-factory-maintainer-mcp-bridge"
+	codexTool            = "codex"
+	maxPathBytes         = 4096
+	claudeConfigDir      = ".claude"
+	codexConfigDir       = ".codex"
+	codexBootstrapPrompt = `Use the factory_attempt.factory tool with argv ["attempt","task"] before doing anything else. The returned JSON task field is the exact task: complete only that task. Use this tool for every factoryctl attempt or overseer command, passing argv without the executable; shell commands cannot access the attempt API. Peer collaboration is asynchronous: use argv ["attempt","peer","status"] to read or answer task-linked questions, but it grants no task or terminal control. For a stale paged peer status, restart from the first page. Before exiting, report the durable outcome with attempt succeed, block, or fail through this tool.` + " " + runner.DiscoveryInstructions
 )
 
 var (
@@ -173,6 +169,7 @@ type RuntimePaths struct {
 	// launch used before accounts existed.
 	accountConfig      string
 	toolchainReadRoots string
+	sourceReadPaths    []string
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
@@ -184,6 +181,23 @@ func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath
 	if !runtime.valid() {
 		return RuntimePaths{}, ErrInvalid
 	}
+	return runtime, nil
+}
+
+// WithReadOnlySources adds exact daemon-selected retained trees to a Codex
+// launch profile. These are paths already derived from validated Change IDs.
+func (runtime RuntimePaths) WithReadOnlySources(paths []string) (RuntimePaths, error) {
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		if !validAbsolute(path, maxPathBytes) || path == runtime.home || path == runtime.temp {
+			return RuntimePaths{}, ErrInvalid
+		}
+		if _, duplicate := seen[path]; duplicate {
+			return RuntimePaths{}, ErrInvalid
+		}
+		seen[path] = struct{}{}
+	}
+	runtime.sourceReadPaths = append([]string(nil), paths...)
 	return runtime, nil
 }
 
@@ -341,7 +355,7 @@ func Build(request Request) (Launch, error) {
 		}
 		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
-			prompt += " You are the project overseer. Use the factory tool with overseer status to inspect workers, tasks, questions and intervention history. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool's description for flags. Read docs/development/OVERSEER.md inside the task checkout or the repository clone specified by the task; if neither is available, report the missing checkout; publish through your Maintainer App. Respect direct operator interventions. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
+			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For retained source, request attempt source --task TASK_ID and verify its exact task/work/Change receipt before reading source_path; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
 		argv = append(argv, prompt)
 		return Launch{
@@ -370,6 +384,9 @@ func codexPermissions(request Request) (string, error) {
 	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		entries = append(entries, tomlBasicString(root)+`="read"`)
+	}
+	for _, path := range request.runtime.sourceReadPaths {
+		entries = append(entries, tomlBasicString(path)+`="read"`)
 	}
 	// Codex merges profile tables. Use the existing private runtime identity
 	// rather than a shared name that could inherit an account profile.
@@ -417,7 +434,7 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 	case kernel.ProviderShell:
 		return TaskDeliveryFD11, bytes.Clone(task), nil
 	case kernel.ProviderClaudeCode:
-		encoded, err := claudeTaskInput(task)
+		encoded, err := runner.PrepareClaudeTask(task)
 		if err != nil {
 			return 0, nil, ErrInvalid
 		}
@@ -426,7 +443,7 @@ func PrepareTask(kind kernel.Provider, task []byte) (TaskDelivery, []byte, error
 		// Codex reads this value through a shell-tool result. Keep the exact task
 		// comfortably below the model-visible result bound even after JSON turns
 		// every DEL/C1 code point into a six-byte escape.
-		if len(task) > maxCodexTask {
+		if len(task) > runner.MaxCodexTaskBytes {
 			return 0, nil, ErrInvalid
 		}
 		return TaskDeliveryAttemptAPI, nil, nil
@@ -541,35 +558,6 @@ func readClaudeConfig(path string) ([]byte, error) {
 
 func unavailable(kind kernel.Provider) error {
 	return fmt.Errorf("%w: %s", ErrUnavailable, kind.String())
-}
-
-func claudeTaskInput(task []byte) ([]byte, error) {
-	quoted, err := json.Marshal(string(task))
-	if err != nil {
-		return nil, ErrInvalid
-	}
-	payload := make([]byte, 0, len(claudeTaskLead)+len(quoted)+1)
-	payload = append(payload, claudeTaskLead...)
-	payload = appendTerminalSafeJSON(payload, quoted)
-	payload = append(payload, '\r')
-	if len(payload) > maxClaudePrompt {
-		return nil, ErrInvalid
-	}
-	return payload, nil
-}
-
-func appendTerminalSafeJSON(dst, quoted []byte) []byte {
-	const hex = "0123456789abcdef"
-	for len(quoted) > 0 {
-		value, width := utf8.DecodeRune(quoted)
-		if value >= 0x7f && value <= 0x9f {
-			dst = append(dst, '\\', 'u', '0', '0', hex[value>>4], hex[value&0xf])
-		} else {
-			dst = append(dst, quoted[:width]...)
-		}
-		quoted = quoted[width:]
-	}
-	return dst
 }
 
 func (runtime RuntimePaths) valid() bool {

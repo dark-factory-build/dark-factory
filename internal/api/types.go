@@ -270,6 +270,8 @@ type TaskSummary struct {
 	ID              string `json:"id"`
 	ProjectID       string `json:"project_id"`
 	AssignedAgentID string `json:"assigned_agent_id"`
+	IncarnationID   string `json:"incarnation_id"`
+	WorkRevision    uint64 `json:"work_revision"`
 	Title           string `json:"title"`
 	Status          string `json:"status"`
 	Priority        int64  `json:"priority"`
@@ -291,16 +293,35 @@ type DashboardSnapshot struct {
 // orchestrator. Its project identity is derived from the attempt credential;
 // callers cannot select a different project.
 type OverseerSnapshot struct {
-	ProjectID      string                 `json:"project_id"`
-	Head           uint64                 `json:"head"`
-	NextOffset     *uint64                `json:"next_offset"`
-	NextTextOffset *uint64                `json:"next_text_offset"`
-	Agents         []AgentSummary         `json:"agents"`
-	Tasks          []OverseerTask         `json:"tasks"`
-	Runs           []OverseerRun          `json:"runs"`
-	Questions      []OverseerQuestion     `json:"questions"`
-	PeerQuestions  []PeerQuestion         `json:"peer_questions"`
-	History        []OverseerIntervention `json:"history"`
+	ProjectID      string                  `json:"project_id"`
+	Head           uint64                  `json:"head"`
+	NextOffset     *uint64                 `json:"next_offset"`
+	NextTextOffset *uint64                 `json:"next_text_offset"`
+	Agents         []AgentSummary          `json:"agents"`
+	Tasks          []OverseerTask          `json:"tasks"`
+	Runs           []OverseerRun           `json:"runs"`
+	Questions      []OverseerQuestion      `json:"questions"`
+	PeerQuestions  []PeerQuestion          `json:"peer_questions"`
+	History        []OverseerIntervention  `json:"history"`
+	Handoffs       []RetainedChangeHandoff `json:"retained_change_handoffs"`
+}
+
+// RetainedChangeHandoff identifies one server-observed tree.  Consumers must
+// reject it when any revision no longer matches their status snapshot.
+type RetainedChangeHandoff struct {
+	ChangeID         string `json:"change_id"`
+	BaseCommit       string `json:"base_commit"`
+	TaskID           string `json:"task_id"`
+	TaskWorkRevision uint64 `json:"task_work_revision"`
+	ChangeRevision   uint64 `json:"change_revision"`
+	// SourcePath is the one daemon-derived retained tree this status record
+	// describes. It is usable only when the launch profile granted that exact
+	// path; consumers must refresh status after any revision change.
+	SourcePath string `json:"source_path"`
+}
+
+func validRetainedChangeHandoff(handoff RetainedChangeHandoff) bool {
+	return validID(handoff.ChangeID) && validID(handoff.TaskID) && (len(handoff.BaseCommit) == 40 || len(handoff.BaseCommit) == 64) && handoff.TaskWorkRevision != 0 && handoff.ChangeRevision != 0 && validHandoffSourcePath(handoff.SourcePath, handoff.ChangeID)
 }
 
 type OverseerIntervention struct {

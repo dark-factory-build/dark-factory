@@ -110,3 +110,61 @@ func TestOverseerHumanReplyTargetsOnlyWorkers(t *testing.T) {
 		t.Fatalf("worker reply = %+v, %v", delivery, err)
 	}
 }
+
+func TestRetainedChangeHandoffsIgnoreIneligibleRetainedHistory(t *testing.T) {
+	succeeded, err := NewSuccessProposal("finished")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := NewBlockedProposal("needs input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := NewFailureProposal(FailureInternal, "worker failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		proposal Proposal
+		sendBack bool
+		want     bool
+	}{
+		{name: "current succeeded", proposal: succeeded, want: true},
+		{name: "blocked", proposal: blocked},
+		{name: "failed", proposal: failed},
+		{name: "sent back", proposal: succeeded, sendBack: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, test.proposal)
+			defer store.Close()
+			terminal, err := finalizeTestRun(t, store, finalizing, 70)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.sendBack {
+				task, found, err := store.Task(context.Background(), terminal.TaskID)
+				if err != nil || !found {
+					t.Fatalf("task = %+v, found=%v, err=%v", task, found, err)
+				}
+				if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, "repair this", mustTime(t, 80)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			direct, directFound, err := store.RetainedChangeHandoffForTask(context.Background(), terminal.ProjectID, terminal.TaskID)
+			if err != nil {
+				t.Fatalf("direct handoff = %v", err)
+			}
+			if !test.want {
+				if directFound {
+					t.Fatalf("ineligible handoff = %+v", direct)
+				}
+				return
+			}
+			change, found, err := store.Change(context.Background(), *terminal.ChangeID)
+			if err != nil || !found || !directFound || direct.ChangeID != change.ID || direct.TaskID != terminal.TaskID || direct.TaskWorkRevision != terminal.AdmittedTaskWorkRevision || direct.ChangeRevision != change.Revision {
+				t.Fatalf("direct current handoff = %+v, found=%v, err=%v", direct, directFound, err)
+			}
+		})
+	}
+}

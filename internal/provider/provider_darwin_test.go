@@ -337,7 +337,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatalf("Codex task bytes escaped attempt API delivery: %q", payload)
 				}
 			} else {
-				want := claudeTaskLead + `"PRIVATE_TASK_SENTINEL\nline 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
+				want := runner.ClaudeTaskLead + `"PRIVATE_TASK_SENTINEL\nline 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
 				if string(payload) != want {
 					t.Fatalf("startup payload=%q, want %q", payload, want)
 				}
@@ -345,7 +345,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatalf("startup payload contains raw terminal control: %q", payload)
 				}
 				var decoded string
-				if err := json.Unmarshal(payload[len(claudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
+				if err := json.Unmarshal(payload[len(runner.ClaudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
 					t.Fatalf("JSON task decoded as %q: %v", decoded, err)
 				}
 			}
@@ -527,19 +527,23 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 	if _, _, err := PrepareTask(kernel.ProviderShell, append(shellMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Shell over-limit task error=%v, want ErrInvalid", err)
 	}
-	claudeMaximum := bytes.Repeat([]byte{'x'}, maxClaudePrompt-len(claudeTaskLead)-3)
+	claudeMaximum := bytes.Repeat([]byte{'x'}, runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-3)
 	if delivery, _, err := PrepareTask(kernel.ProviderClaudeCode, claudeMaximum); err != nil || delivery != TaskDeliveryStartupTerminal {
 		t.Fatalf("Claude exact startup bound rejected: %v", err)
 	}
 	if _, _, err := PrepareTask(kernel.ProviderClaudeCode, append(claudeMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Claude over-limit task error=%v, want ErrInvalid", err)
 	}
-	codexMaximum := bytes.Repeat([]byte{'x'}, maxCodexTask)
+	codexMaximum := bytes.Repeat([]byte{'x'}, runner.MaxCodexTaskBytes)
 	if delivery, payload, err := PrepareTask(kernel.ProviderCodex, codexMaximum); err != nil || delivery != TaskDeliveryAttemptAPI || payload != nil {
 		t.Fatalf("Codex maximum API task delivery=(%d, %d bytes), error=%v", delivery, len(payload), err)
 	}
 	if _, _, err := PrepareTask(kernel.ProviderCodex, append(codexMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Codex over-limit task error=%v, want ErrInvalid", err)
+	}
+	jsonExpanding := []byte(strings.Repeat("x", runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-5) + "\u0085")
+	if _, _, err := PrepareTask(kernel.ProviderClaudeCode, jsonExpanding); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Claude expanded valid UTF-8 must exceed the encoded ceiling: %v", err)
 	}
 	if _, _, err := PrepareTask(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
@@ -721,7 +725,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal("worker was given overseer authority instructions")
 	}
 	prompt := overseerArgs[len(overseerArgs)-1]
-	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App"} {
+	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake"} {
 		if !strings.Contains(prompt, command) {
 			t.Fatalf("overseer cannot discover %q", command)
 		}
@@ -893,5 +897,40 @@ func TestCodexToolchainSandbox(t *testing.T) {
 			t.Fatalf("installed toolchain: %v\n%s", err, out)
 		}
 		t.Logf("installed toolchain proof: %s", out)
+	}
+}
+
+func TestCodexLaunchGeneratesPermissionsForOnlyTheExplicitRetainedSource(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	source := "/private/factory/changes/0123456789abcdef0123456789abcdef"
+	runtime, err := runtime.WithReadOnlySources([]string{source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := ""
+	for _, argument := range launch.Argv() {
+		if strings.HasPrefix(argument, "permissions."+codexPermissionName(runtime)+"=") {
+			policy = argument
+			break
+		}
+	}
+	if !strings.Contains(policy, tomlBasicString(source)+`="read"`) {
+		t.Fatalf("launch omitted scoped source permission: %q", policy)
+	}
+	if strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="read"`) {
+		t.Fatal("source grant widened to the Changes parent")
+	}
+	if strings.Contains(policy, tomlBasicString("/private/factory/changes/ffffffffffffffffffffffffffffffff")+`="read"`) {
+		t.Fatal("source grant included an unrelated retained Change")
+	}
+	for _, bad := range [][]string{{"relative"}, {source, source}, {runtime.home}} {
+		if _, err := runtime.WithReadOnlySources(bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("sources %q = %v, want ErrInvalid", bad, err)
+		}
 	}
 }

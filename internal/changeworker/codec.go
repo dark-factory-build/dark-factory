@@ -76,6 +76,12 @@ type Result struct {
 	Tree       change.StageIdentity
 }
 
+// RetainedSource is one narrowly scoped retained-tree read grant.
+type RetainedSource struct {
+	ID     string
+	Result Result
+}
+
 func (Result) String() string   { return "Change worker result (private)" }
 func (Result) GoString() string { return "changeworker.Result{private}" }
 

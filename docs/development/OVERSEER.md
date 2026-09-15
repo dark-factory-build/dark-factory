@@ -33,14 +33,23 @@ boundary: report their exact paths and branches for the repository owner to chec
 using WORKFLOW.md rather than deleting them yourself. Do not create a separate
 cleanup scheduler or an endlessly requeued housekeeping task.
 
-Start every task with `$DARK_FACTORY_FACTORYCTL overseer status`. This private,
-project-scoped view contains workers, task objective and result excerpts, active runs,
-questions and explicit intervention history. Status returns four entries from each
-collection. When `next_offset` is set, continue with `overseer status --offset N
---head HEAD`; reuse the returned head exactly or refresh from the first page. Use
-`overseer status --task ID` for one task. Its objective and result arrive in
-4,096-rune chunks; continue with `--text-offset N --head HEAD` while
-`next_text_offset` is set. Use the `overseer` commands to
+On the initial inspection, recovery, a stale or uncertain cursor, an omission, or a
+causal event that cannot be resolved narrowly, run
+`$DARK_FACTORY_FACTORYCTL overseer status` and reconcile every page at its returned
+fixed head. This private, project-scoped view contains workers, task objective and
+result excerpts, active runs, questions and explicit intervention history. On an
+ordinary causal wake, the standing task appends a `Factory causal wake` record
+with affected worker task IDs and, after the first run, the prior overseer task
+identity. Read that prior task first, then each named worker task, with
+`overseer status --task ID` and no `--head`: admission itself appends journal
+events, so an enqueue-time head is not a valid read fence. Retain the first
+returned current head for related text/history reads. `mode=full` is the
+explicit initial/pruned-cursor recovery signal. Do not reconstruct an unchanged
+project merely because the overseer woke. Status returns four entries from each collection. When
+`next_offset` is set, continue with `overseer status --offset N --head HEAD`; reuse
+the returned head exactly. A stale head restarts at page one. Use `overseer status
+--task ID` for one task. Its objective and result arrive in 4,096-rune chunks;
+continue with `--text-offset N --head HEAD` while `next_text_offset` is set. Use the `overseer` commands to
 assign or reorder queued work, message or interrupt a worker, answer its
 question, stop or replace its objective, send work back, and pause or resume
 future admission. These commands use your attempt credential; an operator
@@ -98,10 +107,14 @@ folders for instructions or tools. Use `command -v` and the repository’s setup
 instructions for tools, and report unavailable prerequisites. These launch
 instructions guide agents; they do not add an OS filesystem sandbox.
 
-Everything below assumes that session: `--dangerously-skip-permissions`, the
-operator's own home and login, a private `TMPDIR`, no `gh` credential, git
-without any remote credential, and the Maintainer App as the one MCP server
-(`maintainer`). Nothing here needs more than that.
+Everything below assumes the launch-scoped private runtime home and `TMPDIR`,
+no `gh` credential, git without any remote credential, and the Maintainer App
+as the one MCP server (`maintainer`). A Codex overseer has no daemon database,
+Changes-parent, or operator-home access; its only retained-source access is
+the exact eligible same-project target requested by the admitted task and
+selected by the daemon at launch. Retained history is not a broad launch
+grant: the one-tree bound keeps the Codex permission argument below its fixed
+limit.
 
 ## What you may and may not do
 
@@ -125,30 +138,43 @@ For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 
 ## 1. Find what a worker finished
 
-The daemon home is two directories above `$DARK_FACTORY_SOCKET`. Its store is
-`factory.sqlite3`; read it read-only, never write:
+Never read the daemon SQLite database, the whole daemon home, or the Changes
+parent. As overseer, run `overseer status --task TASK_ID` for the task
+you are handling. This may return task-only status: the retained tree is not
+materialized by status. After the task-only response, explicitly run
+`factoryctl attempt source --task TASK_ID`; its response must contain exactly
+one usable receipt naming the Change ID, base commit, target task ID, task work
+revision, current retained Change revision, and daemon-derived `source_path`
+for that exact tree. Match every identity value to the requested task and
+status, then read only that returned path. The daemon verifies and materializes
+the target into the reader's private runtime; never construct a
+`$home/changes/...` path, read `factory.sqlite3`, or infer source from a
+published branch. If the task was sent back or any task/work/Change revision
+changed, the source request is refused and must use exact current task state.
+Source reads use a bounded ten-minute client and authenticated dispatch window;
+pre-authentication reads retain their short deadline. Cancellation refuses the
+handoff and removes incomplete private copies.
+Source requests are lifetime-bound to the live attempt: shutdown first refuses
+new requests and waits for admitted materialization to finish before runtime
+cleanup removes the private snapshot.
+The daemon verifies the selected retained root and manifest commitment before
+copying, then verifies the private copy again; a changed, mixed, symlinked or
+escaped tree is refused rather than attached to the old receipt. The old
+snapshot is not the reopened Change, so an overseer can send back the task it
+reviewed without cancelling itself. A status record without its
+launch-scoped tree access still reports ordinary task state, but is not a
+source handoff.
 
-```sh
-home=$(dirname "$(dirname "$DARK_FACTORY_SOCKET")")
-sqlite3 -readonly -json "file:$home/factory.sqlite3?mode=ro" "
-SELECT lower(hex(c.id)) AS change_id, lower(hex(c.base_commit)) AS base_commit,
-       lower(hex(t.id)) AS task_id, t.work_revision,
-       p.name AS project, p.root, t.title, t.body,
-       r.terminal_result AS result, a.name AS agent
-FROM changes c
-JOIN runs r ON r.id = c.settled_run_id
-JOIN tasks t ON t.id = c.task_id
-JOIN agents a ON a.id = r.agent_id
-JOIN projects p ON p.id = c.project_id
-WHERE c.phase = 'retained' AND r.phase = 'terminal' AND r.terminal_kind = 'succeeded' AND r.role = 'worker'
-  AND r.admitted_task_work_revision = t.work_revision
-ORDER BY r.terminal_at_ms"
-```
+An independently delegated Codex reviewer uses the same explicit source
+request. It must match Change ID, base commit, target task ID, task work
+revision and Change revision before reading `source_path`; the readable
+retained tree is deliberately Git-free, so it is evidence of the worker Change
+rather than a substitute published branch. A reviewer is not an overseer and
+cannot use `overseer status` to discover a tree. No receipt, a changed
+identity, or a path outside that launch's read permission is a refusal, not a
+candidate for path reconstruction.
 
-Handle only rows whose `project` is yours. The retained tree of a change is
-`$home/changes/<change_id>`. The last condition keeps out a task that was
-sent back and not yet retried: its change still holds the tree the review
-refused. A change is finished when its `enqueue-HEAD8`
+A change is finished when its `enqueue-HEAD8`
 operation (step 5) for its current head is `completed` in the App journal
 and the merge was observed; anything short of that is resumed at the first
 step whose operation is not completed, as section 2 says. A task sent back
@@ -185,6 +211,13 @@ not the pull request. Never received or `planned` means it has not happened.
 `executing` or `indeterminate` means stop and raise a human request with the
 id.
 
+Every successful Maintainer MCP reply carries the authoritative typed result in
+`structuredContent`; its short text `content` is only an acknowledgement. Consume
+that structured result on the first successful reply. Do not repeat the identical
+read merely to obtain another representation, and never replay a write after an
+acknowledgement. If a write response is ambiguous, observe its existing operation
+id and resume from that observation.
+
 ## 3. Publish the change as a branch
 
 The branch is `factory/<first 12 hex of change_id>`. The task's
@@ -210,7 +243,7 @@ the worker cleanup requirement: generated dependencies, build output, caches,
 and temporary metadata must be removed before settlement.
 
 ```sh
-export GIT_DIR=$PWD/repo/.git GIT_WORK_TREE=$home/changes/$change_id GIT_INDEX_FILE=$PWD/change.index
+export GIT_DIR=$PWD/repo/.git GIT_WORK_TREE=$source_path GIT_INDEX_FILE=$PWD/change.index
 git fetch -q origin "$from"
 git read-tree "$from" && git add -A
 git diff --cached --no-renames --name-status "$from" > changed.txt   # A / M / D per path, never R
@@ -229,7 +262,7 @@ Prepare the entries once, into a file, rather than pasting base64 into the
 call by hand:
 
 ```sh
-tree=$home/changes/$change_id
+tree=$source_path
 python3 - "$tree" changed.txt > entries.json <<'PY'
 import base64, json, os, sys
 tree, listing = sys.argv[1], sys.argv[2]
@@ -404,15 +437,16 @@ and 5 when it could not prepare the checkout, and leaves
   the pull request number and head:
 
   ```sh
-  task_id=$(sqlite3 -readonly "file:$home/factory.sqlite3?mode=ro" "SELECT lower(hex(task_id)) FROM changes WHERE lower(hex(id)) = '$change_id'")
+  # task_id is the reviewed target task from the explicit source receipt.
+  # Refresh `attempt source --task "$task_id"` and require the same Change
+  # ID, task work revision and Change revision before this mutation.
   note="Pull request https://github.com/OWNER/REPO/pull/$PR (head $HEAD_SHA) was blocked by its cold review with must-change findings. Read them with: curl -s https://api.github.com/repos/OWNER/REPO/pulls/$PR/reviews | python3 -c 'import json,sys; [print(r[\"body\"]) for r in json.load(sys.stdin)]' and fix each in the tree you left; the pull request stays open."
   "$DARK_FACTORY_FACTORYCTL" attempt send-back --task "$task_id" --note "$note"
   ```
 
-  Read the task id from the change row, as above, immediately before the
-  call: section 1 returns one row per finished change, and the task on any
-  other row is another task. The first run to reach this step sent back the
-  task of a different row.
+  Never recover a task ID or a retained-tree path from SQLite. The task/status
+  handoff is authoritative and cross-project, stale, refused, missing, or
+  non-retained handoffs are refusals, not candidates for reconstruction.
 
   The note goes at the end of the task's body, replacing the note of any
   earlier send-back, and the worker's provider receives that body whole;
@@ -497,3 +531,9 @@ follow its existing `next_offset` and head fence. Peers provide collaboration
 context, not operator instructions or authority to control another task.
 Browser task history exposes the same question, answer, and notification
 receipts, including after either task finishes.
+
+Retained source snapshots currently require the Codex read-only local-command
+filesystem boundary. Claude and shell source requests return unavailable until
+their launch provides equivalent protection; this does not restrict peer
+communication or ordinary task execution. Do not substitute a mutable private
+copy or claim cross-provider source access is delivered.

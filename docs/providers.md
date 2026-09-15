@@ -63,10 +63,22 @@ model and effort, so the selection affects only future admissions.
 
 `--role orchestrator` names an overseer. A worker's run materializes a Change
 of the project and works there; an orchestrator's run binds no Change and is
-given its private runtime home as its working directory, from which it reads
-what workers retained and publishes through the Maintainer App. Neither role
-is confined beyond that: both run as the operator with the authority the
-environment section below describes. A Claude Code orchestrator is launched
+given its private runtime home as its working directory. It requests a worker
+tree explicitly with `factoryctl attempt source --task TASK_ID`. The daemon
+checks that target task in the authenticated attempt's same project, requires
+its current successful retained Change, materializes one private read-only
+snapshot, and returns the Change ID, base commit, target task ID, task work
+revision, current Change revision and daemon-derived `source_path`. An accepted
+response without that receipt is unusable; never reconstruct a path or select a
+project-latest tree. A Codex launch receives read access only to the private
+per-run retained-source root, while the daemon creates only the requested exact
+child. It does not receive the daemon database, the Changes parent, or the
+daemon home. A later work revision or Change revision is refused against an
+older materialization and requires a fresh launch profile. The
+daemon drains admitted source materialization before shutting down and
+removing the run's private retained-source directory, so cleanup cannot race a
+source handoff.
+overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
 with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
 the fixed tool path, as its one MCP server; a Claude Code worker is launched
 with `--strict-mcp-config` and no server, so nothing in its account
@@ -121,7 +133,8 @@ CODEX_HOME=<account-home>/.codex
 ```
 
 Codex local commands use a launch-derived permission profile: the Change,
-private runtime home and temp directory are writable; the exact provider
+private runtime home and temp directory are writable; current same-project
+retained Change trees selected at launch are individually readable; the exact provider
 executable, factoryctl, attempt token and socket are readable. Other file
 access is denied except Codex's minimal platform/runtime paths, including its
 temp exceptions. An optional startup `--toolchain-read-roots` path list adds
@@ -238,7 +251,8 @@ write of the text fails the attempt and is never replayed.
 Codex starts from a fixed, non-secret positional instruction to run
 `factoryctl attempt task` first. That command authenticates with the attempt's
 private credential and returns the exact effective task as terminal-safe JSON;
-body wins, with title used only when a native task has no body. Codex task text
+body wins, with title
+used only when a native task has no body. Codex task text
 is absent from argv, environment, and Change-worker configuration, and is
 bounded to 8 KiB so the configured 32,768-token tool-result budget cannot
 truncate it even under worst-case control-character escaping. The attempt API
@@ -267,3 +281,9 @@ factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5
 ```
 
 Use the current agent revision from `factoryctl status`. The update refuses a stale revision or unsupported provider controls. An already admitted run keeps its model and effort. Omitting effort clears the explicit override for future runs.
+
+Retained source snapshots currently require the Codex read-only local-command
+filesystem boundary. Claude and shell source requests return unavailable until
+their launch provides equivalent protection; this does not restrict peer
+communication or ordinary task execution. Do not substitute a mutable private
+copy or claim cross-provider source access is delivered.

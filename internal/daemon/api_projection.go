@@ -3,6 +3,8 @@ package daemon
 import (
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -41,16 +43,18 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.TaskSummary{
 			ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(),
-			Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()),
+			IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()),
 		})
 	}
 	return result
 }
 
-func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) api.OverseerSnapshot {
+// projectOverseerSnapshot keeps task state readable even when this launch has
+// no source snapshot. Source receipts are an optional, exact capability.
+func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot, snapshots map[kernel.RetainedChangeHandoff]string) (api.OverseerSnapshot, error) {
 	result := api.OverseerSnapshot{
 		ProjectID: snapshot.ProjectID.String(), Head: uint64(snapshot.Head.Int64()), NextOffset: snapshot.NextOffset, NextTextOffset: snapshot.NextTextOffset,
-		Agents: []api.AgentSummary{}, Tasks: []api.OverseerTask{}, Runs: []api.OverseerRun{}, Questions: []api.OverseerQuestion{}, PeerQuestions: []api.PeerQuestion{}, History: []api.OverseerIntervention{},
+		Agents: []api.AgentSummary{}, Tasks: []api.OverseerTask{}, Runs: []api.OverseerRun{}, Questions: []api.OverseerQuestion{}, PeerQuestions: []api.PeerQuestion{}, History: []api.OverseerIntervention{}, Handoffs: []api.RetainedChangeHandoff{},
 	}
 	for _, agent := range snapshot.Agents {
 		item := api.AgentSummary{ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name, Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64())}
@@ -61,6 +65,17 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) api.OverseerSnaps
 	}
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.OverseerTask{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(), Title: task.Title, Objective: task.Objective, ObjectiveTruncated: task.ObjectiveTruncated, Status: task.Status.String(), Priority: task.Priority, BlockedReason: task.BlockedReason, Result: task.Result, ResultTruncated: task.ResultTruncated, Revision: uint64(task.Revision.Int64())})
+	}
+	for _, handoff := range snapshot.Handoffs {
+		sourcePath, granted := snapshots[handoff]
+		if !granted {
+			continue
+		}
+		handoffs, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: sourcePath})
+		if err != nil {
+			return api.OverseerSnapshot{}, err
+		}
+		result.Handoffs = append(result.Handoffs, handoffs...)
 	}
 	for _, run := range snapshot.Runs {
 		result.Runs = append(result.Runs, api.OverseerRun{ID: run.ID.String(), AgentID: run.AgentID.String(), TaskID: run.TaskID.String(), Phase: run.Phase.String(), Revision: uint64(run.Revision.Int64())})
@@ -86,7 +101,25 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) api.OverseerSnaps
 		}
 		result.History = append(result.History, api.OverseerIntervention{OperationID: item.OperationID.String(), TaskID: item.TaskID.String(), RunID: item.RunID.String(), SuccessorTaskID: successor, Kind: item.Kind.String(), Actor: item.Actor.String(), Payload: payload, PayloadTruncated: truncated, State: item.State.String(), Detail: detail, CreatedAtMs: uint64(item.CreatedAt.Int64())})
 	}
-	return result
+	return result, nil
+}
+
+// projectRetainedChangeHandoffs projects only paths produced for this live
+// reader. They must be exact, private snapshot directories, never Changes
+// parent paths reconstructed from an identifier.
+func projectRetainedChangeHandoffs(snapshots map[kernel.RetainedChangeHandoff]string) ([]api.RetainedChangeHandoff, error) {
+	result := make([]api.RetainedChangeHandoff, 0, len(snapshots))
+	for handoff, sourcePath := range snapshots {
+		if !filepath.IsAbs(sourcePath) || filepath.Clean(sourcePath) != sourcePath || filepath.Base(sourcePath) != handoff.ChangeID.String() || filepath.Base(filepath.Dir(sourcePath)) != "retained-source" {
+			return nil, fmt.Errorf("invalid retained source snapshot")
+		}
+		info, err := os.Lstat(sourcePath)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("retained Change source is unavailable")
+		}
+		result = append(result, api.RetainedChangeHandoff{ChangeID: handoff.ChangeID.String(), BaseCommit: handoff.BaseCommit, TaskID: handoff.TaskID.String(), TaskWorkRevision: uint64(handoff.TaskWorkRevision.Int64()), ChangeRevision: uint64(handoff.ChangeRevision.Int64()), SourcePath: sourcePath})
+	}
+	return result, nil
 }
 
 func overseerAPIExcerpt(value string) (string, bool) {

@@ -34,6 +34,7 @@ const (
 	CallAgentSelectAccount
 	CallAgentSelectModel
 	CallAttemptTask
+	CallAttemptSource
 	CallSucceed
 	CallBlock
 	CallFail
@@ -106,6 +107,7 @@ type Call struct {
 	accountsOffset    uint32
 	modelSelection    AgentModelSelectInput
 	text              string
+	sourceTaskID      string
 }
 
 func (call Call) Kind() CallKind { return call.kind }
@@ -116,11 +118,15 @@ func (call Call) GoString() string {
 
 func (call Call) AttemptDigest() (AttemptDigest, bool) {
 	switch call.kind {
-	case CallAttemptTask, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
+	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
 	}
+}
+
+func (call Call) AttemptSourceTaskID() (string, bool) {
+	return call.sourceTaskID, call.kind == CallAttemptSource
 }
 
 func (call Call) OverseerTaskCreateInput() (OverseerTaskCreateInput, bool) {
@@ -237,6 +243,7 @@ const (
 	replySnapshot
 	replyMutation
 	replyAttemptTask
+	replyAttemptSource
 	replyWebStatus
 	replyWebClients
 	replyWebRevoke
@@ -249,19 +256,20 @@ const (
 
 // Reply is constructed only through its fixed reply constructors.
 type Reply struct {
-	kind        replyKind
-	health      HealthStatus
-	snapshot    DashboardSnapshot
-	mutation    MutationResult
-	attemptTask AttemptTask
-	webStatus   WebStatus
-	webClients  WebClientPage
-	webRevoke   WebRevokeResult
-	remote      RemoteStatus
-	overseer    OverseerSnapshot
-	peerStatus  PeerStatus
-	accounts    Accounts
-	code        RemoteErrorCode
+	kind          replyKind
+	health        HealthStatus
+	snapshot      DashboardSnapshot
+	mutation      MutationResult
+	attemptTask   AttemptTask
+	attemptSource RetainedChangeHandoff
+	webStatus     WebStatus
+	webClients    WebClientPage
+	webRevoke     WebRevokeResult
+	remote        RemoteStatus
+	overseer      OverseerSnapshot
+	peerStatus    PeerStatus
+	accounts      Accounts
+	code          RemoteErrorCode
 }
 
 func (Reply) String() string   { return "Reply(<redacted>)" }
@@ -312,6 +320,13 @@ func NewAttemptTaskReply(task AttemptTask) (Reply, error) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyAttemptTask, attemptTask: task}, nil
+}
+
+func NewAttemptSourceReply(source RetainedChangeHandoff) (Reply, error) {
+	if !validRetainedChangeHandoff(source) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyAttemptSource, attemptSource: source}, nil
 }
 
 func NewPeerStatusReply(status PeerStatus) (Reply, error) {
@@ -548,6 +563,24 @@ func (connection *Connection) Dispatch(dispatch func(Call) Reply) (Reply, error)
 	return reply, nil
 }
 
+// RefreshDeadline sets the authenticated dispatch budget without extending pre-auth reads.
+func (connection *Connection) RefreshDeadline(ctx context.Context) error {
+	if connection == nil || connection.self != connection || connection.connection == nil || connection.state != connectionReceived {
+		return ErrProtocol
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ErrProtocol
+	}
+	if err := connection.connection.SetDeadline(deadline); err != nil {
+		return ErrTransport
+	}
+	return nil
+}
+
 func (connection *Connection) setDeadline(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -666,6 +699,14 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 		call.text = input.Result
+	case CallAttemptSource:
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil || !validID(input.TaskID) {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.sourceTaskID = input.TaskID
 	case CallBlock:
 		detail, ok := decodeAttemptDetail(request.Params)
 		if !ok || !validText(detail, 1, 4096) {
@@ -783,6 +824,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallAgentSelectAccount, operatorDomain
 	case "task":
 		return CallAttemptTask, attemptDomain
+	case "source":
+		return CallAttemptSource, attemptDomain
 	case "agent_select_model":
 		return CallAgentSelectModel, operatorDomain
 	case "succeed":
@@ -897,6 +940,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyAccounts
 	case CallAttemptTask:
 		return reply == replyAttemptTask
+	case CallAttemptSource:
+		return reply == replyAttemptSource
 	case CallPeerStatus:
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
@@ -941,6 +986,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.mutation)
 	case replyAttemptTask:
 		data, err = json.Marshal(reply.attemptTask)
+	case replyAttemptSource:
+		data, err = json.Marshal(reply.attemptSource)
 	case replyWebStatus:
 		data, err = json.Marshal(reply.webStatus)
 	case replyWebClients:

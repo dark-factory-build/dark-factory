@@ -257,6 +257,12 @@ func inspectRecoveredRuntimeCensus(rootFD int, device uint64) (map[string]unix.S
 		case runtimeTempName:
 			temp = true
 			continue
+		case runtimeRetainedSourceName:
+			var stat unix.Stat_t
+			if err := unix.Fstatat(rootFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil || !validRuntimeOrdinaryDirectory(stat, device, true) {
+				return nil, invalidContract(err)
+			}
+			continue
 		case runner.RuntimeLifetimeLeaseName:
 			lifetime = true
 			continue

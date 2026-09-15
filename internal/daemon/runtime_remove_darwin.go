@@ -15,7 +15,8 @@ import (
 
 const runtimeRemovalEffectLimit = 256
 const runtimeRemovalDepthLimit = 32
-const runtimeTopEntryLimit = 12 // home, tmp, terminal, lifetime, and eight removable fixed files.
+const runtimeRetainedSourceName = "retained-source"
+const runtimeTopEntryLimit = 13 // home, tmp, retained sources, lifetime, and eight removable fixed files.
 
 // RemoveRecordedRuntime removes only a positively identified, inactive
 // runtime using the fixed V1 grammar. false,nil is bounded progress or lock
@@ -113,6 +114,13 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 		if name == runner.TerminalSpoolName {
 			return false, invalidContract(nil)
 		}
+		if name == runtimeRetainedSourceName {
+			var stat unix.Stat_t
+			if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil || !validRuntimeOrdinaryDirectory(stat, rootIdentity.device, true) {
+				return false, invalidContract(err)
+			}
+			continue
+		}
 		if name != runtimeHomeName && name != runtimeTempName {
 			if !isRemovableRuntimeFile(name) {
 				return false, invalidContract(nil)
@@ -129,8 +137,13 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 			return false, nil
 		}
 	}
+	if done, err := removeRuntimeTree(ctx, fd, runtimeRetainedSourceName, rootIdentity.device, &budget, syncDirectory, true, 0); err != nil {
+		return false, invalidContract(err)
+	} else if !done {
+		return false, nil
+	}
 	for _, name := range entries {
-		if name == runtimeHomeName || name == runtimeTempName || name == runner.RuntimeLifetimeLeaseName {
+		if name == runtimeHomeName || name == runtimeTempName || name == runtimeRetainedSourceName || name == runner.RuntimeLifetimeLeaseName {
 			continue
 		}
 		if err := ctx.Err(); err != nil {

@@ -58,6 +58,7 @@ func TestRetainedConfigRoundTripPreservesExactPublicationAuthority(t *testing.T)
 	if _, err := EncodeConfig(bad); !errors.Is(err, ErrInvalidContract) {
 		t.Fatalf("invalid retained authority encoded: %v", err)
 	}
+
 }
 
 // An orchestrator's config names no Change: its names and retained result

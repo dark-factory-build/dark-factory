@@ -141,6 +141,59 @@ func runSupervisorCodexFixture() error {
 	if err != nil {
 		return err
 	}
+	// An explicit target request must cross the runner, Change worker, provider
+	// profile and live daemon registry; task launch and status never select a
+	// project-latest tree.
+	target, overseer := "", false
+	if target, overseer = strings.CutPrefix(task.Task, "handoff "); !overseer {
+		var reviewer bool
+		target, reviewer = strings.CutPrefix(task.Task, "review handoff ")
+		if !reviewer {
+			target = ""
+		}
+	}
+	if target != "" {
+		expected := strings.Fields(target)
+		if len(expected) != 5 {
+			return fmt.Errorf("source target = %q", target)
+		}
+		if overseer {
+			before, err := client.OverseerTaskSnapshot(ctx, expected[0])
+			if err != nil || len(before.Handoffs) != 0 {
+				return fmt.Errorf("status before explicit request = %+v, %v", before.Handoffs, err)
+			}
+		}
+		handoff, err := client.Source(ctx, expected[0])
+		if err != nil {
+			return err
+		}
+		if handoff.TaskID != expected[0] || handoff.ChangeID != expected[1] || handoff.BaseCommit != expected[2] || strconv.FormatUint(handoff.TaskWorkRevision, 10) != expected[3] || strconv.FormatUint(handoff.ChangeRevision, 10) != expected[4] {
+			return fmt.Errorf("source receipt = %+v for expected identity %q", handoff, target)
+		}
+		if overseer {
+			snapshot, err := client.OverseerTaskSnapshot(ctx, expected[0])
+			if err != nil {
+				return err
+			}
+			if len(snapshot.Handoffs) != 1 || snapshot.Handoffs[0].TaskID != handoff.TaskID || snapshot.Handoffs[0].SourcePath != handoff.SourcePath {
+				return fmt.Errorf("status lost explicitly requested handoff = %+v", snapshot.Handoffs)
+			}
+		} else if _, err := client.OverseerTaskSnapshot(ctx, expected[0]); err == nil {
+			return errors.New("reviewer gained overseer source discovery")
+		} else {
+			var remote *api.RemoteError
+			if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+				return fmt.Errorf("reviewer overseer refusal = %w", err)
+			}
+		}
+		info, err := os.Stat(handoff.SourcePath)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("launch handoff source: %w", err)
+		}
+		if _, err := os.ReadFile(filepath.Join(handoff.SourcePath, "payload.txt")); err != nil {
+			return fmt.Errorf("launch handoff source payload: %w", err)
+		}
+	}
 	for _, value := range append(append([]string(nil), os.Args[1:]...), os.Environ()...) {
 		if strings.Contains(value, task.Task) {
 			return errors.New("private task crossed the Codex argv/environment boundary")
@@ -392,6 +445,109 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 		t.Fatalf("Codex task/PTY receipt = %q", run.Proposal.Result())
 	}
 	fixture.assertReleased(t, run)
+}
+
+// The retained source is selected from durable state before the second,
+// independently admitted Codex launch.  Its own attempt receipt and targeted
+// overseer status must agree before the provider can read the Git-free tree.
+// This is intentionally not a projection-only test: it exercises the real
+// supervisor, Change worker, provider permission profile and attempt API.
+func TestSupervisorCodexOverseerLaunchReceivesExactRetainedChangeReceipt(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("worker RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
+	changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
+	if err != nil || !found || changeState.Selection == nil {
+		t.Fatalf("retained worker Change = %+v, found=%v, err=%v", changeState, found, err)
+	}
+
+	overseerID := supervisorAgentID(t, 9)
+	if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
+		ID: overseerID, ProjectID: worker.ProjectID, Name: "overseer", Role: kernel.RoleOrchestrator,
+		Provider: kernel.ProviderCodex, ToolBudgetLimit: 20,
+	}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+		ID: supervisorTaskID(t, 10), ProjectID: worker.ProjectID, AssignedAgentID: overseerID, IncarnationID: supervisorIncarnationID(t, 11),
+		Title: "review retained Change", Body: fmt.Sprintf("handoff %s %s %x %d %d", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
+	}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, executable, filepath.Join(tools, "codex"))
+	if err := os.WriteFile(filepath.Join(tools, "dark-factory-maintainer-mcp-bridge"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+
+	overseer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("overseer RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, overseer, kernel.OutcomeSucceeded)
+	if overseer.Role != kernel.RoleOrchestrator || overseer.Proposal == nil || !strings.Contains(overseer.Proposal.Result(), "handoff ") {
+		t.Fatalf("overseer receipt = %+v", overseer)
+	}
+	fixture.assertReleased(t, overseer)
+}
+
+// A delegated reviewer is a worker, not an overseer. It must explicitly
+// request the target receipt without gaining project supervision authority.
+func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("source worker RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
+	changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
+	if err != nil || !found || changeState.Selection == nil {
+		t.Fatalf("retained source Change = %+v, found=%v, err=%v", changeState, found, err)
+	}
+	reviewerID := supervisorAgentID(t, 12)
+	if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
+		ID: reviewerID, ProjectID: worker.ProjectID, Name: "reviewer", Role: kernel.RoleWorker,
+		Provider: kernel.ProviderCodex, ToolBudgetLimit: 20,
+	}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+		ID: supervisorTaskID(t, 13), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 14),
+		Title: "review retained Change", Body: fmt.Sprintf("review handoff %s %s %x %d %d", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
+	}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "reviewer-tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, executable, filepath.Join(tools, "codex"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+
+	reviewer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("reviewer RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, reviewer, kernel.OutcomeSucceeded)
+	if reviewer.Role != kernel.RoleWorker || reviewer.Proposal == nil || !strings.Contains(reviewer.Proposal.Result(), "review handoff ") {
+		t.Fatalf("reviewer receipt = %+v", reviewer)
+	}
+	fixture.assertReleased(t, reviewer)
 }
 
 func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) {
