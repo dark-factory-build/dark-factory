@@ -15,6 +15,11 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
 
+const (
+	defaultDispatchTimeout        = 10 * time.Second
+	retainedSourceDispatchTimeout = 10 * time.Minute
+)
+
 // Daemon is the concrete composition root for the local API. It owns the
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
@@ -123,11 +128,21 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	if err != nil {
 		return err
 	}
+	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
+	defer cancel()
+	if call.Kind() == api.CallAttemptSource {
+		cancel()
+		dispatchContext, cancel = context.WithTimeout(ctx, retainedSourceDispatchTimeout)
+		defer cancel()
+	}
+	if err := connection.RefreshDeadline(dispatchContext); err != nil {
+		return err
+	}
 	if attemptOutcomeCall(call.Kind()) {
 		var attempt *liveAttempt
 		reply, dispatchErr := connection.Dispatch(func(call api.Call) api.Reply {
 			var outcome api.Reply
-			outcome, attempt = daemon.proposeOutcome(ctx, call)
+			outcome, attempt = daemon.proposeOutcome(dispatchContext, call)
 			return outcome
 		})
 		if dispatchErr != nil {
@@ -136,12 +151,12 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		}
 		responseErr := connection.Respond(reply)
 		if responseErr == nil {
-			responseErr = connection.AwaitOutcomeReceipt(ctx)
+			responseErr = connection.AwaitOutcomeReceipt(dispatchContext)
 		}
 		daemon.clearOutcomeReceipt(attempt)
 		return responseErr
 	}
-	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(ctx, call) })
+	reply, err := connection.Dispatch(func(call api.Call) api.Reply { return daemon.dispatch(dispatchContext, call) })
 	if err != nil {
 		return err
 	}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,7 @@ type runtimeAuthority struct {
 
 const providerTaskName = ".provider-task"
 
-var copyRetainedFS = os.CopyFS
+var copyRetainedFS = copyRetainedTree
 
 func runProvider(ctx context.Context) (resultErr error) {
 	control, err := runner.OpenWorkerControl()
@@ -245,13 +246,13 @@ func MaterializeRetainedSource(ctx context.Context, changeParent, runtimePath st
 		}
 		return errors.Join(cause, os.RemoveAll(staging))
 	}
-	if err := copyRetainedFS(staging, os.DirFS(source)); err != nil {
+	if err := copyRetainedFS(ctx, staging, os.DirFS(source)); err != nil {
 		_ = verified.Close()
 		return "", fmt.Errorf("materialize retained source: %w", cleanup(err))
 	}
-	if err := secureCopiedDirectories(staging); err != nil {
+	if err := ctx.Err(); err != nil {
 		_ = verified.Close()
-		return "", fmt.Errorf("secure copied retained source directories: %w", cleanup(err))
+		return "", cleanup(err)
 	}
 	if err := os.Chmod(staging, 0o700); err != nil {
 		_ = verified.Close()
@@ -292,6 +293,9 @@ func MaterializeRetainedSource(ctx context.Context, changeParent, runtimePath st
 	if err := verified.Close(); err != nil {
 		return "", fmt.Errorf("close retained source: %w", cleanup(err))
 	}
+	if err := ctx.Err(); err != nil {
+		return "", cleanup(err)
+	}
 	info, err := os.Lstat(target)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("materialized retained source is unavailable: %w", cleanup(errors.Join(err, ErrWorker)))
@@ -311,7 +315,59 @@ func MaterializeRetainedSource(ctx context.Context, changeParent, runtimePath st
 	if !retainedContentFactsEqual(retained.Result, facts) {
 		return "", fmt.Errorf("materialized retained source differs from selected tree: %w", cleanup(ErrWorker))
 	}
+	if err := ctx.Err(); err != nil {
+		return "", cleanup(err)
+	}
 	return target, nil
+}
+
+func copyRetainedTree(ctx context.Context, destination string, source fs.FS) error {
+	if err := os.CopyFS(destination, contextFS{ctx: ctx, source: source}); err != nil {
+		return err
+	}
+	return secureCopiedDirectories(destination)
+}
+
+type contextFS struct {
+	ctx    context.Context
+	source fs.FS
+}
+
+func (source contextFS) Open(name string) (fs.File, error) {
+	if err := source.ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := source.source.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return contextFile{ctx: source.ctx, file: file}, nil
+}
+
+type contextFile struct {
+	ctx  context.Context
+	file fs.File
+}
+
+func (file contextFile) Stat() (fs.FileInfo, error) { return file.file.Stat() }
+func (file contextFile) Close() error               { return file.file.Close() }
+
+func (file contextFile) Read(p []byte) (int, error) {
+	if err := file.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return file.file.Read(p)
+}
+
+func (file contextFile) ReadDir(n int) ([]fs.DirEntry, error) {
+	if err := file.ctx.Err(); err != nil {
+		return nil, err
+	}
+	reader, ok := file.file.(fs.ReadDirFile)
+	if !ok {
+		return nil, &fs.PathError{Op: "readdir", Path: ".", Err: fs.ErrInvalid}
+	}
+	return reader.ReadDir(n)
 }
 
 func secureCopiedDirectories(root string) error {

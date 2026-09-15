@@ -252,6 +252,7 @@ type liveAttempt struct {
 	sourceSnapshots    map[kernel.RetainedChangeHandoff]string
 	sourceRoot         string
 	sourceMu           sync.Mutex
+	sourceGate         chan struct{}
 	sourceOpsMu        sync.Mutex
 	sourceOpsDone      chan struct{}
 	sourceCloseStarted chan struct{}
@@ -298,7 +299,7 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), result: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
-		sourceOpsDone: make(chan struct{}), sourceCloseStarted: make(chan struct{}),
+		sourceGate: make(chan struct{}, 1), sourceOpsDone: make(chan struct{}), sourceCloseStarted: make(chan struct{}),
 		effectLimit: liveAttemptEffectLimit,
 	}
 	if daemon != nil && daemon.store != nil {
@@ -568,4 +569,13 @@ func (attempt *liveAttempt) waitResult() liveAttemptResult {
 		return liveAttemptResult{err: ErrTerminalClosed}
 	}
 	return <-attempt.result
+}
+
+func (attempt *liveAttempt) acquireSourceGate(ctx context.Context) bool {
+	select {
+	case attempt.sourceGate <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

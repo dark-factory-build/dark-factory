@@ -151,6 +151,9 @@ the target into the reader's private runtime; never construct a
 `$home/changes/...` path, read `factory.sqlite3`, or infer source from a
 published branch. If the task was sent back or any task/work/Change revision
 changed, the source request is refused and must use exact current task state.
+Source reads use a bounded ten-minute client and authenticated dispatch window;
+pre-authentication reads retain their short deadline. Cancellation refuses the
+handoff and removes incomplete private copies.
 Source requests are lifetime-bound to the live attempt: shutdown first refuses
 new requests and waits for admitted materialization to finish before runtime
 cleanup removes the private snapshot.

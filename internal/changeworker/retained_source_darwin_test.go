@@ -98,7 +98,7 @@ func TestMaterializeRetainedSourcesRetriesAfterInterruptedCopy(t *testing.T) {
 	result := retainedSourceFixture(t, parent, id, []byte("selected"))
 	source := RetainedSource{ID: id, Result: result}
 	original := copyRetainedFS
-	copyRetainedFS = func(destination string, _ fs.FS) error {
+	copyRetainedFS = func(_ context.Context, destination string, _ fs.FS) error {
 		if err := os.MkdirAll(destination, 0o755); err != nil {
 			return err
 		}
@@ -139,8 +139,8 @@ func TestMaterializeRetainedSourcesRejectsVerificationFailure(t *testing.T) {
 	result := retainedSourceFixture(t, parent, id, []byte("selected"))
 	source := RetainedSource{ID: id, Result: result}
 	original := copyRetainedFS
-	copyRetainedFS = func(destination string, source fs.FS) error {
-		if err := original(destination, source); err != nil {
+	copyRetainedFS = func(ctx context.Context, destination string, source fs.FS) error {
+		if err := original(ctx, destination, source); err != nil {
 			return err
 		}
 		return os.WriteFile(filepath.Join(destination, "payload.txt"), []byte("tampered"), 0o600)
@@ -175,6 +175,10 @@ func TestSecureCopiedDirectoriesUsesOwnerOnlyModes(t *testing.T) {
 }
 
 func retainedSourceFixture(t *testing.T, parent, id string, body []byte) Result {
+	return retainedSourceFixtureWithMode(t, parent, id, body, "100644")
+}
+
+func retainedSourceFixtureWithMode(t *testing.T, parent, id string, body []byte, mode string) Result {
 	t.Helper()
 	format, err := change.NewObjectFormat("sha1")
 	if err != nil {
@@ -189,7 +193,7 @@ func retainedSourceFixture(t *testing.T, parent, id string, body []byte) Result 
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, err := change.NewEntry([]byte("payload.txt"), "100644", uint64(len(body)), object)
+	entry, err := change.NewEntry([]byte("payload.txt"), mode, uint64(len(body)), object)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,4 +214,50 @@ func retainedSourceFixture(t *testing.T, parent, id string, body []byte) Result 
 	}
 	facts := published.Facts()
 	return Result{Format: format, Base: base, Commitment: facts.Commitment(), EntryCount: facts.EntryCount(), BlobBytes: facts.BlobBytes(), Tree: facts.Identity()}
+}
+
+func TestMaterializeRetainedSourceExecutableAndPostCopyCancellation(t *testing.T) {
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runtime, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const id = "77777777777777777777777777777777"
+	source := RetainedSource{ID: id, Result: retainedSourceFixtureWithMode(t, parent, id, []byte("#!/bin/sh\nexit 0\n"), "100755")}
+	original := copyRetainedFS
+	t.Cleanup(func() { copyRetainedFS = original })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	copyRetainedFS = func(ctx context.Context, destination string, source fs.FS) error {
+		err := original(ctx, destination, source)
+		cancel()
+		return err
+	}
+	if _, err := MaterializeRetainedSource(ctx, parent, runtime, source); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runtime, "retained-source", id)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancel left target: %v", err)
+	}
+	copyRetainedFS = original
+	target, err := MaterializeRetainedSource(context.Background(), parent, runtime, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(target, "payload.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0100 == 0 {
+		t.Fatal("lost executable bit")
+	}
 }

@@ -13,8 +13,15 @@ import (
 )
 
 func (daemon *Daemon) materializeAttemptSource(ctx context.Context, live *liveAttempt, handoff kernel.RetainedChangeHandoff) (string, error) {
+	if !live.acquireSourceGate(ctx) {
+		return "", ctx.Err()
+	}
+	defer func() { <-live.sourceGate }()
 	live.sourceMu.Lock()
 	defer live.sourceMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if live.sourceRoot == "" || filepath.Base(live.sourceRoot) != "retained-source" {
 		return "", errInvalidContract
 	}

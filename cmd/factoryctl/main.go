@@ -23,11 +23,12 @@ import (
 )
 
 const (
-	attemptRequestTimeout = 5 * time.Second
-	serviceRequestTimeout = 30 * time.Second
-	exitUsage             = 64
-	exitFailure           = 1
-	maxHomeArgumentBytes  = 4096
+	attemptRequestTimeout        = 5 * time.Second
+	retainedSourceRequestTimeout = 10 * time.Minute
+	serviceRequestTimeout        = 30 * time.Second
+	exitUsage                    = 64
+	exitFailure                  = 1
+	maxHomeArgumentBytes         = 4096
 
 	// pairListenAddress is factoryd's fixed loopback listener and pairPageURL
 	// the first-party pair page it serves there. A successful install opens
@@ -249,6 +250,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	}
 
 	timeout := attemptRequestTimeout
+	if command.kind == commandAttemptSource {
+		timeout = retainedSourceRequestTimeout
+	}
 	if command.kind == commandPeerAsk || command.kind == commandPeerAnswer {
 		timeout = serviceRequestTimeout
 	}

@@ -539,6 +539,24 @@ func (connection *Connection) Dispatch(dispatch func(Call) Reply) (Reply, error)
 	return reply, nil
 }
 
+// RefreshDeadline sets the authenticated dispatch budget without extending pre-auth reads.
+func (connection *Connection) RefreshDeadline(ctx context.Context) error {
+	if connection == nil || connection.self != connection || connection.connection == nil || connection.state != connectionReceived {
+		return ErrProtocol
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ErrProtocol
+	}
+	if err := connection.connection.SetDeadline(deadline); err != nil {
+		return ErrTransport
+	}
+	return nil
+}
+
 func (connection *Connection) setDeadline(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

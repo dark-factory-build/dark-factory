@@ -1318,3 +1318,47 @@ func TestRawRequestHelperProducesOneExactFrame(t *testing.T) {
 		t.Fatalf("test request has trailing bytes: %v", err)
 	}
 }
+
+func TestAuthenticatedDispatchRefreshesTransportDeadline(t *testing.T) {
+
+	bearer := testCredential('R')
+	listener, socketPath := newAPITestListener(t, bearer)
+	done := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer connection.Close()
+		receiveCtx, receiveCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		call, err := connection.Receive(receiveCtx)
+		receiveCancel()
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err = connection.RefreshDeadline(ctx)
+			if err == nil {
+				time.Sleep(100 * time.Millisecond)
+				_, err = connection.Dispatch(func(Call) Reply { return NewHealthReply(HealthStatus{Ready: true}) })
+				if err == nil {
+					err = connection.Respond(NewHealthReply(HealthStatus{Ready: true}))
+				}
+			}
+		}
+		_ = call
+		done <- err
+	}()
+	client, err := NewOperatorClient(socketPath, filepath.Join(filepath.Dir(filepath.Dir(socketPath)), "operator.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if status, err := client.Health(ctx); err != nil || !status.Ready {
+		t.Fatalf("delayed authenticated response = %+v, %v", status, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
