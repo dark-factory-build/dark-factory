@@ -333,6 +333,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
               <title>{item.kind === "component" ? item.label : `${item.count} scanned ${item.label.toLowerCase()} files represented by this group`}</title>
               <Equipment item={item} positions={item.workSurface ? workPositions(room) : []} />
             </g>)}
+            {room.omittedBayCount === 0 ? null : <text data-omitted-bays={room.omittedBayCount} x={room.x + room.width - 8} y={room.y + 44} textAnchor="end" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">+{room.omittedBayCount} BAYS</text>}
             {node.inventory === undefined ? <text x={room.x + 12} y={room.y + room.height - 52} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">INVENTORY UNAVAILABLE</text> : contents.length === 0 ? <text x={room.x + 12} y={room.y + 62} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">NO SCANNED FILES</text> : null}
             {(node.dependencies?.links.length ?? 0) === 0 ? null : <g {...sceneAction(() => setSelectedRoomId(room.id))} aria-label={`Inspect static dependencies of ${node.label}`}>
               <rect x={room.x + room.width - 28} y={room.y + 18} width="24" height="24" fill="transparent" />
@@ -422,8 +423,8 @@ function Equipment({ item, positions }: { item: RoomContent; positions: readonly
     <rect x="2" y="3" width={width} height={height} fill={ink} opacity=".6" />
     <rect width={width} height={height} fill="#384e5a" stroke="#8197a0" strokeWidth="2" />
     <path d={`M4 4h${width - 8}v${height - 8}H4Z`} fill="#263b47" stroke="#5f7681" />
-    <path d="M8 8h12v10H8Z M20 13h8" fill="none" stroke="#9cb9bf" strokeWidth="2" />
-    <text x="6" y={height - 5} fill="#e0e4d7" fontSize="9" fontFamily="ui-monospace, monospace">{shortLabel(item.label.split("/").at(-1) || item.label, Math.floor((width - 10) / 5.4))}</text>
+    <path d={`M8 8h${Math.max(12, width - 16)}v${Math.max(10, height - 22)}H8Z`} fill="none" stroke="#9cb9bf" strokeWidth="2" />
+    <text x="6" y={height - 6} fill="#e0e4d7" fontSize="10" fontFamily="ui-monospace, monospace">{shortLabel(item.label.split("/").at(-1) || item.label, Math.floor((width - 10) / 6))}</text>
   </g>;
   const tint = kind === "tests" ? "#c5ae78" : kind === "documentation" ? "#c5ac88" : kind === "assets" ? "#b7a4ca" : kind === "source" ? "#8db2bd" : "#acaa9c";
   const objectX = workSurface ? width - 36 : 4;

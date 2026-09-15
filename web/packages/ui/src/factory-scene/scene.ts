@@ -51,6 +51,7 @@ type SceneRect = Readonly<{ x: number; y: number; width: number; height: number 
 export type SceneRoomLayout = SceneRect & Readonly<{
   id: string;
   arrangement: "hall" | "parent" | "bench";
+  omittedBayCount: number;
   door: ScenePoint;
   contents: readonly RoomContent[];
 }>;
@@ -122,7 +123,9 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
       const y = bottom - height;
       const center = x + width / 2;
       const rectangle = { x, y, width, height };
-      rooms.push({ id: node.id, ...rectangle, arrangement: node.parentId === undefined || node.parentId === "" ? "hall" : (node.components?.length ?? 0) > 0 ? "parent" : "bench", contents: composeRoom(node, rectangle),
+      const arrangement = node.parentId === undefined || node.parentId === "" ? "hall" : (node.components?.length ?? 0) > 0 ? "parent" : "bench";
+      const contents = composeRoom(node, rectangle, arrangement);
+      rooms.push({ id: node.id, ...rectangle, arrangement, omittedBayCount: Math.max(0, (node.components?.length ?? 0) - contents.filter((item) => item.kind === "component").length), contents,
         door: { x: center, y: bottom } });
       if (index % columns === 0) corridors.push({ x: PADDING, y: bottom, width: CORRIDOR + Math.min(columns, members.length - index) * ROOM_WIDTH, height: CORRIDOR });
     });
@@ -180,7 +183,7 @@ type ContentKind = keyof typeof inventoryLabels | "component";
 export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string; workSurface?: boolean }>;
 
 /** Three bounded arrangements: a root hall, parent edge bays, or a leaf bench. */
-function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
+function composeRoom(node: SceneNode, room: SceneRect, arrangement: SceneRoomLayout["arrangement"]): readonly RoomContent[] {
   const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
   const kinds = (Object.keys(inventoryLabels) as Array<keyof typeof inventoryLabels>)
     .filter((kind) => (counts?.[kind] ?? 0) > 0)
@@ -190,27 +193,31 @@ function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
   const children = [...(node.components ?? [])].sort((a, b) => compareText(a.label, b.label) || compareText(a.id, b.id));
   // Root halls can show four direct bays; compact parents deliberately show
   // fewer. Six remains the hard scene-wide pictured-bay bound.
-  const bayLimit = room.width >= 216 ? 4 : room.width >= 192 ? 3 : 1;
+  const bayLimit = arrangement === "bench" ? 0 : arrangement === "parent" ? (room.width >= 192 ? 2 : 1) : room.width >= 216 ? 4 : room.width >= 192 ? 3 : 1;
   const bays = children.slice(0, Math.min(6, bayLimit));
-  const columns = bays.length > 3 ? 2 : bays.length;
-  const bayWidth = columns === 0 ? 0 : (room.width - 24 - Math.max(0, columns - 1) * 4) / columns;
+  const columns = arrangement === "parent" ? 1 : bays.length > 3 ? 2 : bays.length;
+  const bayWidth = columns === 0 ? 0 : (room.width - 24 - Math.max(0, columns - 1) * 8) / columns;
+  const bayHeight = arrangement === "parent" ? 34 : 38;
   bays.forEach((child, index) => {
     const column = index % columns, row = Math.floor(index / columns);
     contents.push({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id,
-      x: room.x + 12 + column * (bayWidth + 4), y: room.y + 46 + row * 30, width: bayWidth, height: 24,
+      x: room.x + 12 + column * (bayWidth + 8), y: room.y + 48 + row * (bayHeight + 8), width: bayWidth, height: bayHeight,
     });
   });
   if (primary === undefined) return contents;
   const width = Math.max(room.width >= 160 ? 112 : 80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary]));
   const height = room.height >= 184 ? 64 : 32;
   contents.push({ key: primary, kind: primary, label: inventoryLabels[primary], count: counts![primary], workSurface: true,
-    x: room.x + (room.width - width) / 2, y: room.y + room.height - height - 40, width, height });
+    // Keep a full sprite's approach lane between a pictured child bay and the
+    // shared surface, while preserving the fixed doorway edge below it.
+    x: room.x + (room.width - width) / 2, y: room.y + room.height - height - 16, width, height });
   // Tests retain a supporting place even beside a much larger source installation.
   const secondary = kinds.filter((kind) => kind !== primary).sort((a, b) => Number(b === "tests") - Number(a === "tests") || compareText(a, b));
-  const slots = bays.length === 0 ? (room.width >= 192 ? 3 : 2) : room.height >= 208 && bays.length < 3 ? 2 : 0;
+  const slots = arrangement === "bench" ? 2 : bays.length >= 3 ? 1 : 2;
+  const bayBottom = bays.length === 0 ? room.y + 38 : room.y + 48 + Math.ceil(bays.length / columns) * (bayHeight + 8) - 8;
   secondary.slice(0, slots).forEach((kind, index) => contents.push({
     key: kind, kind, label: inventoryLabels[kind], count: counts![kind],
-    x: room.x + 12 + index * 56, y: room.y + (children.length === 0 ? 46 : 78), width: 48, height: 28,
+    x: room.x + 12 + index * 56, y: bayBottom + 8, width: 48, height: 28,
   }));
   return contents;
 }

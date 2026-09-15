@@ -57,6 +57,35 @@ function leaveRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], from
   ];
 }
 
+const PERSON_RADIUS = 8;
+
+function crossesContent(from: ScenePoint, to: ScenePoint, room: SceneLayout["rooms"][number]) {
+  const left = Math.min(from.x, to.x), right = Math.max(from.x, to.x);
+  const top = Math.min(from.y, to.y), bottom = Math.max(from.y, to.y);
+  return room.contents.some((item) => left < item.x + item.width + PERSON_RADIUS
+    && right > item.x - PERSON_RADIUS
+    && top < item.y + item.height + PERSON_RADIUS
+    && bottom > item.y - PERSON_RADIUS);
+}
+
+/** Enter by the same clear side lane whenever a pictured surface blocks the door. */
+function roomApproach(room: SceneLayout["rooms"][number], to: ScenePoint): readonly ScenePoint[] {
+  if (!crossesContent(room.door, to, room)) return [{ x: room.door.x, y: to.y }, to];
+  const entryY = Math.max(to.y, ...room.contents.map((item) => item.y + item.height + PERSON_RADIUS));
+  const sides = [room.x + 12, room.x + room.width - 12];
+  for (const x of sides) {
+    const turn = { x, y: to.y };
+    if (!crossesContent(room.door, { x: room.door.x, y: entryY }, room)
+      && !crossesContent({ x: room.door.x, y: entryY }, { x, y: entryY }, room)
+      && !crossesContent({ x, y: entryY }, turn, room)
+      && !crossesContent(turn, to, room)) return [{ x: room.door.x, y: entryY }, { x, y: entryY }, turn, to];
+  }
+  // A valid room composition always has one side lane. Keep the established
+  // destination rather than inventing an unreachable alternative if malformed
+  // content is ever supplied.
+  return [{ x: room.door.x, y: to.y }, to];
+}
+
 function enterRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], to: ScenePoint, center: number) {
   const corridor = rowCorridor(layout, room);
   if (corridor === undefined) return undefined;
@@ -65,7 +94,7 @@ function enterRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], to: 
     { x: center, y: clear },
     { x: room.door.x, y: clear },
     room.door,
-    { x: room.door.x, y: to.y }, to,
+    ...roomApproach(room, to),
   ];
 }
 
