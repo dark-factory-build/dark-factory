@@ -787,6 +787,9 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+		t.Fatalf("generated Codex environment rejected by runner: %v", err)
+	}
 	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "GOMODCACHE=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
 		found := false
 		for _, value := range launch.Environment() {
