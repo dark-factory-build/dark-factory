@@ -895,3 +895,24 @@ func TestCodexToolchainSandbox(t *testing.T) {
 		t.Logf("installed toolchain proof: %s", out)
 	}
 }
+	}
+func TestCodexPermissionsGrantOnlyExplicitRetainedSources(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	source := "/private/factory/changes/0123456789abcdef0123456789abcdef"
+	runtime, err := runtime.WithReadOnlySources([]string{source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := codexPermissions(requestFor(t, kernel.ProviderCodex, installation, runtime, "", ""))
+	if err != nil || !strings.Contains(policy, tomlBasicString(source)+`="read"`) {
+		t.Fatalf("scoped source policy = %q, %v", policy, err)
+	}
+	if strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="read"`) {
+		t.Fatal("source grant widened to the Changes parent")
+	}
+	for _, bad := range [][]string{{"relative"}, {source, source}, {runtime.home}} {
+		if _, err := runtime.WithReadOnlySources(bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("sources %q = %v, want ErrInvalid", bad, err)
+		}
+	}
+}

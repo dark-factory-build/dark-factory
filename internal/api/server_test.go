@@ -752,7 +752,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 		listener, socketPath := newAPITestListener(t, bearer)
 		tasks := make([]TaskSummary, maxSnapshotEntries)
 		for index := range tasks {
-			tasks[index] = TaskSummary{ID: id('1'), ProjectID: id('2'), AssignedAgentID: id('3'), Title: strings.Repeat("x", 1024), Status: "queued", Revision: 1}
+			tasks[index] = TaskSummary{ID: id('1'), ProjectID: id('2'), AssignedAgentID: id('3'), IncarnationID: id('4'), WorkRevision: 1, Title: strings.Repeat("x", 1024), Status: "queued", Revision: 1}
 		}
 		snapshot := DashboardSnapshot{Head: 1, Factory: FactorySummary{Capacity: 1, Revision: 1}, Projects: []ProjectSummary{}, Agents: []AgentSummary{}, Tasks: tasks}
 		reply, err := NewSnapshotReply(snapshot)

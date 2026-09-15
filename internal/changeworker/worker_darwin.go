@@ -100,6 +100,15 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
+	sourcePaths := make([]string, 0, len(config.RetainedSourceIDs))
+	for _, id := range config.RetainedSourceIDs {
+		sourcePaths = append(sourcePaths, filepath.Join(config.ChangeParent, id))
+	}
+	runtimePaths, err = runtimePaths.WithReadOnlySources(sourcePaths)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
 	installation, err := provider.ResolveInstallation(config.Provider, config.ToolPath)
 	if err != nil {
 		_ = cwd.Close()

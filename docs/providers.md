@@ -37,10 +37,15 @@ rejected for `shell`. Claude Code accepts `low`, `medium`, `high`, `xhigh`, or
 
 `--role orchestrator` names an overseer. A worker's run materializes a Change
 of the project and works there; an orchestrator's run binds no Change and is
-given its private runtime home as its working directory, from which it reads
-what workers retained and publishes through the Maintainer App. Neither role
-is confined beyond that: both run as the operator with the authority the
-environment section below describes. A Claude Code orchestrator is launched
+given its private runtime home as its working directory. It discovers a worker
+  tree through `overseer status --task TASK_ID`, which returns the Change ID,
+  base commit, task ID, task work revision, current Change revision and its
+  daemon-derived `source_path` for an eligible retained tree. A Codex launch receives read access only to those
+same-project retained tree paths selected by the daemon at launch; it does not
+receive the daemon database, the Changes parent, or the daemon home. A later
+work revision or Change revision must be rediscovered and gets a fresh launch
+profile. The
+overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
 with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
 the fixed tool path, as its one MCP server; a Claude Code worker is launched
 with `--strict-mcp-config` and no server, so nothing in its account
@@ -95,7 +100,8 @@ CODEX_HOME=<account-home>/.codex
 ```
 
 Codex local commands use a launch-derived permission profile: the Change,
-private runtime home and temp directory are writable; the exact provider
+private runtime home and temp directory are writable; current same-project
+retained Change trees selected at launch are individually readable; the exact provider
 executable, factoryctl, attempt token and socket are readable. Other file
 access is denied except Codex's minimal platform/runtime paths, including its
 temp exceptions. An optional startup `--toolchain-read-roots` path list adds

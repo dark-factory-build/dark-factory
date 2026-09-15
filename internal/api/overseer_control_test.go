@@ -46,7 +46,7 @@ func TestMutationReplyValidatesOverseerHumanReplyState(t *testing.T) {
 func TestOverseerSnapshotPagesFitTheResponseFrameAfterEscaping(t *testing.T) {
 	project := strings.Repeat("1", 32)
 	for _, selected := range []bool{false, true} {
-		snapshot := OverseerSnapshot{ProjectID: project, Head: 1, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, History: []OverseerIntervention{}}
+		snapshot := OverseerSnapshot{ProjectID: project, Head: 1, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, History: []OverseerIntervention{}, Handoffs: []RetainedChangeHandoff{}}
 		for index := 0; index < 4; index++ {
 			id := fmt.Sprintf("%032x", index+2)
 			snapshot.Agents = append(snapshot.Agents, AgentSummary{ID: id, ProjectID: project, Name: strings.Repeat("<", 128), Role: "worker", Provider: "codex", Revision: 1})
@@ -78,7 +78,7 @@ func TestOverseerSnapshotPagesFitTheResponseFrameAfterEscaping(t *testing.T) {
 func TestOverseerSnapshotReplyKeepsEmptyCollections(t *testing.T) {
 	snapshot := OverseerSnapshot{
 		ProjectID: strings.Repeat("1", 32), Head: 1,
-		Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, History: []OverseerIntervention{},
+		Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, History: []OverseerIntervention{}, Handoffs: []RetainedChangeHandoff{},
 	}
 	reply, err := NewOverseerSnapshotReply(snapshot)
 	if err != nil {
@@ -101,5 +101,22 @@ func TestOverseerSnapshotContinuationRequiresTaskForText(t *testing.T) {
 	}
 	if validOverseerSnapshotInput(OverseerSnapshotInput{TextOffset: 1, ExpectedHead: 7}) {
 		t.Fatal("unselected text continuation accepted")
+	}
+}
+
+func TestOverseerSnapshotRequiresAnExactSourcePathForEachHandoff(t *testing.T) {
+	project := strings.Repeat("1", 32)
+	handoff := RetainedChangeHandoff{ChangeID: strings.Repeat("2", 32), BaseCommit: strings.Repeat("a", 40), TaskID: strings.Repeat("3", 32), TaskWorkRevision: 1, ChangeRevision: 1, SourcePath: "/private/factory/changes/22222222222222222222222222222222"}
+	snapshot := OverseerSnapshot{ProjectID: project, Head: 1, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []OverseerIntervention{}, Handoffs: []RetainedChangeHandoff{handoff}}
+	if _, err := NewOverseerSnapshotReply(snapshot); err != nil {
+		t.Fatalf("exact handoff rejected: %v", err)
+	}
+	for _, source := range []string{"", "relative", "/private/factory/changes/../other", "/private/factory/changes/44444444444444444444444444444444"} {
+		invalid := snapshot
+		invalid.Handoffs = append([]RetainedChangeHandoff(nil), snapshot.Handoffs...)
+		invalid.Handoffs[0].SourcePath = source
+		if _, err := NewOverseerSnapshotReply(invalid); err == nil {
+			t.Fatalf("source path %q accepted", source)
+		}
 	}
 }

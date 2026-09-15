@@ -98,10 +98,11 @@ folders for instructions or tools. Use `command -v` and the repository’s setup
 instructions for tools, and report unavailable prerequisites. These launch
 instructions guide agents; they do not add an OS filesystem sandbox.
 
-Everything below assumes that session: `--dangerously-skip-permissions`, the
-operator's own home and login, a private `TMPDIR`, no `gh` credential, git
-without any remote credential, and the Maintainer App as the one MCP server
-(`maintainer`). Nothing here needs more than that.
+Everything below assumes the launch-scoped private runtime home and `TMPDIR`,
+no `gh` credential, git without any remote credential, and the Maintainer App
+as the one MCP server (`maintainer`). A Codex overseer has no daemon database,
+Changes-parent, or operator-home access; its only retained-source access is
+the exact same-project tree the daemon selected at launch.
 
 ## What you may and may not do
 
@@ -125,30 +126,20 @@ For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 
 ## 1. Find what a worker finished
 
-The daemon home is two directories above `$DARK_FACTORY_SOCKET`. Its store is
-`factory.sqlite3`; read it read-only, never write:
+Never read the daemon SQLite database, the whole daemon home, or the Changes
+parent. Run `overseer status --task TASK_ID` for the task you are handling.
+Its `retained_change_handoffs` entry is the supported source handoff: it names
+the Change ID, base commit, task ID, task work revision, current retained
+Change revision, and the daemon-derived `source_path` for that exact tree.
+Match every identity value to the selected task, then read only that
+already-authorized `source_path`. The daemon derives this read grant from the
+current retained handoff at launch; never construct a `$home/changes/...` path,
+read `factory.sqlite3`, or infer source from a published branch. If the task
+was sent back or any task/work/Change revision changed, discard the old
+handoff, refresh status and use a newly launched reviewer. A status record
+without its launch-scoped tree access is not a source handoff.
 
-```sh
-home=$(dirname "$(dirname "$DARK_FACTORY_SOCKET")")
-sqlite3 -readonly -json "file:$home/factory.sqlite3?mode=ro" "
-SELECT lower(hex(c.id)) AS change_id, lower(hex(c.base_commit)) AS base_commit,
-       lower(hex(t.id)) AS task_id, t.work_revision,
-       p.name AS project, p.root, t.title, t.body,
-       r.terminal_result AS result, a.name AS agent
-FROM changes c
-JOIN runs r ON r.id = c.settled_run_id
-JOIN tasks t ON t.id = c.task_id
-JOIN agents a ON a.id = r.agent_id
-JOIN projects p ON p.id = c.project_id
-WHERE c.phase = 'retained' AND r.phase = 'terminal' AND r.terminal_kind = 'succeeded' AND r.role = 'worker'
-  AND r.admitted_task_work_revision = t.work_revision
-ORDER BY r.terminal_at_ms"
-```
-
-Handle only rows whose `project` is yours. The retained tree of a change is
-`$home/changes/<change_id>`. The last condition keeps out a task that was
-sent back and not yet retried: its change still holds the tree the review
-refused. A change is finished when its `enqueue-HEAD8`
+A change is finished when its `enqueue-HEAD8`
 operation (step 5) for its current head is `completed` in the App journal
 and the merge was observed; anything short of that is resumed at the first
 step whose operation is not completed, as section 2 says. A task sent back
@@ -210,7 +201,7 @@ the worker cleanup requirement: generated dependencies, build output, caches,
 and temporary metadata must be removed before settlement.
 
 ```sh
-export GIT_DIR=$PWD/repo/.git GIT_WORK_TREE=$home/changes/$change_id GIT_INDEX_FILE=$PWD/change.index
+export GIT_DIR=$PWD/repo/.git GIT_WORK_TREE=$source_path GIT_INDEX_FILE=$PWD/change.index
 git fetch -q origin "$from"
 git read-tree "$from" && git add -A
 git diff --cached --no-renames --name-status "$from" > changed.txt   # A / M / D per path, never R
@@ -229,7 +220,7 @@ Prepare the entries once, into a file, rather than pasting base64 into the
 call by hand:
 
 ```sh
-tree=$home/changes/$change_id
+tree=$source_path
 python3 - "$tree" changed.txt > entries.json <<'PY'
 import base64, json, os, sys
 tree, listing = sys.argv[1], sys.argv[2]
@@ -404,15 +395,16 @@ and 5 when it could not prepare the checkout, and leaves
   the pull request number and head:
 
   ```sh
-  task_id=$(sqlite3 -readonly "file:$home/factory.sqlite3?mode=ro" "SELECT lower(hex(task_id)) FROM changes WHERE lower(hex(id)) = '$change_id'")
+  # task_id is the matching retained_change_handoffs.task_id from section 1.
+  # Refresh `overseer status --task "$task_id"` and require the same Change
+  # ID, task work revision and Change revision before this mutation.
   note="Pull request https://github.com/OWNER/REPO/pull/$PR (head $HEAD_SHA) was blocked by its cold review with must-change findings. Read them with: curl -s https://api.github.com/repos/OWNER/REPO/pulls/$PR/reviews | python3 -c 'import json,sys; [print(r[\"body\"]) for r in json.load(sys.stdin)]' and fix each in the tree you left; the pull request stays open."
   "$DARK_FACTORY_FACTORYCTL" attempt send-back --task "$task_id" --note "$note"
   ```
 
-  Read the task id from the change row, as above, immediately before the
-  call: section 1 returns one row per finished change, and the task on any
-  other row is another task. The first run to reach this step sent back the
-  task of a different row.
+  Never recover a task ID or a retained-tree path from SQLite. The task/status
+  handoff is authoritative and cross-project, stale, refused, missing, or
+  non-retained handoffs are refusals, not candidates for reconstruction.
 
   The note goes at the end of the task's body, replacing the note of any
   earlier send-back, and the worker's provider receives that body whole;

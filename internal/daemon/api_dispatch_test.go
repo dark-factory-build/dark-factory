@@ -874,6 +874,10 @@ func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {
 	projectID := mustProjectID(t, testID(51))
 	agentID := mustAgentID(t, testID(52))
 	taskID := mustTaskID(t, testID(53))
+	incarnationID, err := parseIncarnationID(testID(54))
+	if err != nil {
+		t.Fatal(err)
+	}
 	revision := mustRevision(t, 3)
 	head, err := kernel.NewEventSequence(0)
 	if err != nil {
@@ -884,7 +888,7 @@ func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {
 		Factory:  kernel.FactorySummary{Capacity: 2, Revision: revision},
 		Projects: []kernel.ProjectSummary{{ID: projectID, Name: "project", RunBudgetLimit: 8, RunsUsed: 3, MaxRunSeconds: 900, Revision: revision}},
 		Agents:   []kernel.AgentSummary{{ID: agentID, ProjectID: projectID, Name: "agent", Role: "worker", Provider: "codex", Revision: revision}},
-		Tasks:    []kernel.TaskSummary{{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, Title: "title", Status: "queued", Priority: 3, Revision: revision}},
+		Tasks:    []kernel.TaskSummary{{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, WorkRevision: revision, Title: "title", Status: "queued", Priority: 3, Revision: revision}},
 	})
 	if projected.Head != 0 || projected.Projects == nil || projected.Agents == nil || projected.Tasks == nil {
 		t.Fatalf("projection emptiness/head = %+v", projected)

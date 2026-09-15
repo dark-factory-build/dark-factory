@@ -895,7 +895,7 @@ func (daemon *Daemon) overseerDigest(ctx context.Context, call api.Call) (kernel
 }
 
 func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.Reply {
-	_, digest, failure := daemon.overseerDigest(ctx, call)
+	authority, digest, failure := daemon.overseerDigest(ctx, call)
 	if failure != nil {
 		return *failure
 	}
@@ -920,7 +920,25 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	reply, err := api.NewOverseerSnapshotReply(projectOverseerSnapshot(snapshot))
+	parent := daemon.changeParent.Load()
+	if parent == nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	daemon.attemptMu.Lock()
+	live := daemon.attempts[authority.RunID]
+	var allowed []kernel.RetainedChangeHandoff
+	if live != nil {
+		allowed = append([]kernel.RetainedChangeHandoff(nil), live.sourceHandoffs...)
+	}
+	daemon.attemptMu.Unlock()
+	if live == nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	projected, err := projectOverseerSnapshot(snapshot, *parent, allowed)
+	if err != nil {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	reply, err := api.NewOverseerSnapshotReply(projected)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

@@ -650,6 +650,8 @@ type TaskSummary struct {
 	ID              TaskID
 	ProjectID       ProjectID
 	AssignedAgentID AgentID
+	IncarnationID   IncarnationID
+	WorkRevision    Revision
 	Title           string
 	Status          string
 	Priority        int64

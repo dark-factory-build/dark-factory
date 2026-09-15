@@ -173,6 +173,7 @@ type RuntimePaths struct {
 	// launch used before accounts existed.
 	accountConfig      string
 	toolchainReadRoots string
+	sourceReadPaths    []string
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
@@ -184,6 +185,23 @@ func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath
 	if !runtime.valid() {
 		return RuntimePaths{}, ErrInvalid
 	}
+	return runtime, nil
+}
+
+// WithReadOnlySources adds exact daemon-selected retained trees to a Codex
+// launch profile. These are paths already derived from validated Change IDs.
+func (runtime RuntimePaths) WithReadOnlySources(paths []string) (RuntimePaths, error) {
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		if !validAbsolute(path, maxPathBytes) || path == runtime.home || path == runtime.temp {
+			return RuntimePaths{}, ErrInvalid
+		}
+		if _, duplicate := seen[path]; duplicate {
+			return RuntimePaths{}, ErrInvalid
+		}
+		seen[path] = struct{}{}
+	}
+	runtime.sourceReadPaths = append([]string(nil), paths...)
 	return runtime, nil
 }
 
@@ -370,6 +388,9 @@ func codexPermissions(request Request) (string, error) {
 	}
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		entries = append(entries, tomlBasicString(root)+`="read"`)
+	}
+	for _, path := range request.runtime.sourceReadPaths {
+		entries = append(entries, tomlBasicString(path)+`="read"`)
 	}
 	// Codex merges profile tables. Use the existing private runtime identity
 	// rather than a shared name that could inherit an account profile.

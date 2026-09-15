@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -105,19 +104,34 @@ def validate_config(config: object) -> dict:
     return config
 
 
-def validate_factory(config: dict) -> None:
-    database = Path(config["factory_home"]) / "factory.sqlite3"
+def factory_status(config: dict) -> dict:
+    """Read the daemon's bounded status projection, never its SQLite files."""
+    home = Path(config["factory_home"])
+    env = os.environ.copy()
+    env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
+    env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "operator.token")
     try:
-        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
-            row = connection.execute("SELECT p.run_budget_limit, p.runs_used, p.max_run_seconds, a.role, a.provider FROM projects p JOIN agents a ON a.project_id=p.id WHERE p.id=? AND a.id=?", (bytes.fromhex(config["project_id"]), bytes.fromhex(config["overseer_agent_id"]))).fetchone()
-    except sqlite3.Error as exc:
-        raise IntakeError("cannot verify configured factory limits; install the matching runtime first") from exc
-    if row is None or row[3:] != ("orchestrator", "codex"):
+        value = json.loads(command(["factoryctl", "status"], env=env, timeout=int(config.get("command_timeout", 30))))
+    except (json.JSONDecodeError, IntakeError) as exc:
+        raise IntakeError("cannot read configured factory status; install the matching runtime first") from exc
+    if not isinstance(value, dict) or not isinstance(value.get("projects"), list) or not isinstance(value.get("agents"), list) or not isinstance(value.get("tasks"), list):
+        raise IntakeError("factory status is invalid")
+    return value
+
+
+def validate_factory(config: dict) -> dict:
+    status = factory_status(config)
+    project = next((value for value in status["projects"] if isinstance(value, dict) and value.get("id") == config["project_id"]), None)
+    agent = next((value for value in status["agents"] if isinstance(value, dict) and value.get("id") == config["overseer_agent_id"]), None)
+    if project is None or agent is None or agent.get("project_id") != config["project_id"] or agent.get("role") != "orchestrator" or agent.get("provider") != "codex":
         raise IntakeError("configured project needs a Codex overseer")
-    if row[2] == 0:
+    if not isinstance(project.get("max_run_seconds"), int) or not isinstance(project.get("run_budget_limit"), int) or not isinstance(project.get("runs_used"), int):
+        raise IntakeError("factory status has invalid project limits")
+    if project["max_run_seconds"] == 0:
         raise IntakeError("configure a finite per-run duration before unattended intake")
-    if row[0] != 0 and row[1] >= row[0]:
+    if project["run_budget_limit"] != 0 and project["runs_used"] >= project["run_budget_limit"]:
         raise IntakeError("project run allowance is exhausted")
+    return status
 
 
 def load_journal(path: Path) -> dict:
@@ -192,20 +206,13 @@ def issue_key(config: dict, number: int) -> str:
 def task_state(config: dict, operation: dict) -> dict | None:
     if not isinstance(operation, dict) or any(not isinstance(operation.get(key), str) or not ID_RE.fullmatch(operation[key]) for key in ("task_id", "incarnation_id")):
         raise IntakeError("journal operation is invalid")
-    database = Path(config["factory_home"]) / "factory.sqlite3"
-    if not database.is_file():
-        raise IntakeError("factory database is missing")
-    try:
-        with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as connection:
-            row = connection.execute("SELECT lower(hex(id)), lower(hex(project_id)), lower(hex(assigned_agent_id)), lower(hex(incarnation_id)), status FROM tasks WHERE id = ?", (bytes.fromhex(operation["task_id"]),)).fetchone()
-            stale = connection.execute("SELECT EXISTS(SELECT 1 FROM human_requests h JOIN runs r ON r.id=h.run_id WHERE r.task_id=? AND r.task_incarnation_id=? AND h.status='stale')", (bytes.fromhex(operation["task_id"]), bytes.fromhex(operation["incarnation_id"]))).fetchone()[0]
-    except (sqlite3.Error, ValueError) as exc:
-        raise IntakeError("factory task state could not be read") from exc
+    status = factory_status(config)
+    row = next((value for value in status["tasks"] if isinstance(value, dict) and value.get("id") == operation["task_id"]), None)
     if row is None:
         return None
-    if row[0] != operation["task_id"] or row[1] != config["project_id"] or row[2] != config["overseer_agent_id"] or row[3] != operation["incarnation_id"]:
+    if row.get("project_id") != config["project_id"] or row.get("assigned_agent_id") != config["overseer_agent_id"] or row.get("incarnation_id") != operation["incarnation_id"] or not isinstance(row.get("work_revision"), int) or row["work_revision"] < 1 or row.get("status") not in {"queued", "running", "blocked", "failed", "succeeded", "cancelled"}:
         raise IntakeError("deterministic intake task identity conflicts with factory state")
-    return {"status": row[4], "needs_operator_recovery": bool(stale)}
+    return {"status": row["status"], "work_revision": row["work_revision"]}
 
 
 def source_marker(config: dict, issue: dict) -> str:
@@ -274,11 +281,6 @@ def process(config: dict, journal: dict, key: str, issue: dict, messages: list[s
             messages.append(f"replayed {key}")
             return
         if state["status"] in ACTIVE:
-            return
-        if state.get("needs_operator_recovery"):
-            record["needs_operator_recovery"] = {"fingerprint": operation["fingerprint"], "task_id": operation["task_id"]}
-            atomic_json(Path(config["journal"]), journal)
-            messages.append(f"needs operator recovery {key}")
             return
         record["processed_fingerprint"] = operation["fingerprint"]
         record.pop("operation", None)

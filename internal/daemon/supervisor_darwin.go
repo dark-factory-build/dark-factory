@@ -303,6 +303,17 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
+	// Source grants are derived from the authoritative store immediately before
+	// launch. They are identifiers only; the Change worker reconstructs their
+	// paths beneath the daemon-owned Change parent.
+	retainedSources, err := daemon.store.RetainedChangeHandoffsForProject(ctx, run.ProjectID)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+	}
+	sourceIDs := make([]string, 0, len(retainedSources))
+	for _, handoff := range retainedSources {
+		sourceIDs = append(sourceIDs, handoff.ChangeID.String())
+	}
 
 	// From CreateRuntime until the runtime resource is durably active, a
 	// failure cannot be finalized live: the exact-edge grammar requires either
@@ -341,7 +352,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
-		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
+		AttemptSocket: spec.AttemptSocket, Retained: retained, RetainedSourceIDs: sourceIDs, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
 	if err != nil {
@@ -581,6 +592,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	// until it observes TerminalReady, but it already owns the controller and
 	// will synchronously converge it if any later step fails.
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
+	live.sourceHandoffs = append([]kernel.RetainedChangeHandoff(nil), retainedSources...)
 	live.beforeProviderStateCheck = spec.beforeProviderStateCheck
 	if err := daemon.registerLiveAttempt(live); err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
