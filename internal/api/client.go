@@ -187,6 +187,13 @@ func (client *OperatorClient) CreateAgent(ctx context.Context, input CreateAgent
 	return client.client.mutate(ctx, "create_agent", input)
 }
 
+func (client *OperatorClient) SetAgentIdlePolicy(ctx context.Context, input AgentIdlePolicyInput) (MutationResult, error) {
+	if !validAgentIdlePolicyInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "agent_idle_policy", input)
+}
+
 // SendBackTask returns a finished task to its queue with a note.
 func (client *OperatorClient) SendBackTask(ctx context.Context, input SendBackInput) (MutationResult, error) {
 	if !validID(input.TaskID) || !validText(input.Note, 1, 8192) {

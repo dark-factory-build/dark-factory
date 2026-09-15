@@ -25,6 +25,7 @@ const (
 	CallCreateProject
 	CallProjectLimits
 	CallCreateAgent
+	CallAgentIdlePolicy
 	CallEnqueueTask
 	CallSetDispatch
 	CallSetCapacity
@@ -73,6 +74,7 @@ type Call struct {
 	project           CreateProjectInput
 	projectLimits     ProjectLimitsInput
 	agent             CreateAgentInput
+	agentIdlePolicy   AgentIdlePolicyInput
 	task              EnqueueTaskInput
 	humanQuestion     HumanQuestionInput
 	peerQuestion      PeerQuestionInput
@@ -159,6 +161,10 @@ func (call Call) ProjectLimitsInput() (ProjectLimitsInput, bool) {
 
 func (call Call) CreateAgentInput() (CreateAgentInput, bool) {
 	return call.agent, call.kind == CallCreateAgent
+}
+
+func (call Call) AgentIdlePolicyInput() (AgentIdlePolicyInput, bool) {
+	return call.agentIdlePolicy, call.kind == CallAgentIdlePolicy
 }
 
 func (call Call) EnqueueTaskInput() (EnqueueTaskInput, bool) {
@@ -580,6 +586,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.agent); err != nil || !validCreateAgentInput(call.agent) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallAgentIdlePolicy:
+		if err := decodeExact(request.Params, &call.agentIdlePolicy); err != nil || !validAgentIdlePolicyInput(call.agentIdlePolicy) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallEnqueueTask:
 		if err := decodeExact(request.Params, &call.task); err != nil || !validID(call.task.ID) || !validID(call.task.ProjectID) || !validID(call.task.AssignedAgentID) || !validID(call.task.IncarnationID) || !validText(call.task.Title, 1, 1024) || !validText(call.task.Body, 0, 131072) || call.task.Priority < -1_000_000 || call.task.Priority > 1_000_000 {
 			return Call{}, RemoteInvalidRequest
@@ -711,6 +721,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallProjectLimits, operatorDomain
 	case "create_agent":
 		return CallCreateAgent, operatorDomain
+	case "agent_idle_policy":
+		return CallAgentIdlePolicy, operatorDomain
 	case "enqueue_task":
 		return CallEnqueueTask, operatorDomain
 	case "set_dispatch":
@@ -833,7 +845,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
 		return reply == replyOverseerSnapshot
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus

@@ -22,6 +22,8 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "project limits", args: []string{"project", "limits", "--project", id, "--revision", "7", "--run-budget", "20", "--max-run-seconds", "900"}},
 		{name: "agent create shell default role", args: []string{"agent", "create", "--project", id, "--name", "Builder One", "--provider", "shell", "--tool-budget", "100"}},
 		{name: "agent create codex controls", args: []string{"agent", "create", "--project", id, "--name", "Foreman", "--provider", "codex", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium", "--tool-budget", "100", "--role", "orchestrator"}},
+		{name: "agent idle policy", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes", "--run-budget", "3"}},
+		{name: "agent idle wait", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait"}},
 		{name: "task add minimal", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "Tighten the queue ordering"}},
 		{name: "task add full", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--body", "b", "--priority", "-5"}},
 		{name: "task add supplied identities", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--task-id", id, "--incarnation-id", strings.Repeat("cd", 16)}},
@@ -64,6 +66,9 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "x"},
 		{"agent", "create", "--project", "short", "--name", "n", "--provider", "shell", "--tool-budget", "1"},
 		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "1", "--role", "manager"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "x"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "0", "--instruction", "x", "--run-budget", "1"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait", "--run-budget", "1"},
 		{"task", "add", "--project", id, "--title", "t"},
 		{"task", "add", "--project", id, "--agent", id},
 		{"task", "add", "--project", id, "--agent", id, "--title", ""},
@@ -173,6 +178,31 @@ func TestAgentCreateCarriesProviderControls(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), received.ID) || !strings.Contains(stdout.String(), `"head":8`) || !strings.Contains(stdout.String(), `"revision":1`) {
 		t.Fatalf("printed %q", stdout.String())
+	}
+}
+
+func TestAgentIdlePolicyUsesTheOperatorAPI(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	agentID := strings.Repeat("22", 16)
+	var received api.AgentIdlePolicyInput
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		var ok bool
+		received, ok = call.AgentIdlePolicyInput()
+		if !ok || call.Kind() != api.CallAgentIdlePolicy {
+			t.Errorf("call = %v, input=%+v, ok=%v", call.Kind(), received, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 8, Revision: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"agent", "idle-policy", "--agent", agentID, "--revision", "2", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes", "--run-budget", "3"}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || received != (api.AgentIdlePolicyInput{AgentID: agentID, ExpectedRevision: 2, Policy: "standing_instruction", AfterSeconds: 60, Instruction: "review retained changes", RunBudget: 3}) || !strings.Contains(stdout.String(), `"revision":3`) {
+		t.Fatalf("idle policy = exit %d input=%+v stdout=%q stderr=%q", exit, received, stdout.String(), stderr.String())
 	}
 }
 

@@ -73,8 +73,10 @@ interventions wake you again. Events received while you are queued or running
 remain pending for the next supervision task. A factory-wide overseer slot lets
 you supervise alongside workers even when worker capacity is one.
 
-Set the overseer's standing instruction through SUPERVISION → WHEN WORK
-CHANGES → supervise worker activity. The instruction is short, because a
+Set or replace the overseer's standing instruction through SUPERVISION → WHEN
+WORK CHANGES → supervise worker activity, or without a paired browser with
+`factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT --run-budget N`.
+Use `--policy wait` to disable it. The instruction is short, because a
 native-provider launch delivers the task through the terminal and that
 prepared prompt is capped at 8 KiB:
 

@@ -196,6 +196,23 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	assertNoSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
+	policyResult, err := client.SetAgentIdlePolicy(ctx, api.AgentIdlePolicyInput{AgentID: testID(2), ExpectedRevision: agentResult.Revision, Policy: "standing_instruction", AfterSeconds: 60, Instruction: "review retained changes", RunBudget: 3})
+	if err != nil || policyResult.Revision != agentResult.Revision+1 {
+		t.Fatalf("set idle policy = %+v, %v", policyResult, err)
+	}
+	waitDispatch(t, done)
+	updated, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(2)))
+	if err != nil || !found || updated.Idle.Policy != kernel.IdleStandingInstruction || updated.Idle.AfterSeconds != 60 || updated.Idle.Instruction != "review retained changes" || updated.Idle.RunBudget != 3 {
+		t.Fatalf("stored idle policy = %+v, found=%v, err=%v", updated.Idle, found, err)
+	}
+
+	done = fixture.serve(t)
+	if _, err := client.SetAgentIdlePolicy(ctx, api.AgentIdlePolicyInput{AgentID: testID(2), ExpectedRevision: agentResult.Revision, Policy: "wait"}); err == nil {
+		t.Fatal("stale idle policy accepted")
+	}
+	waitDispatch(t, done)
+
+	done = fixture.serve(t)
 	_, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "oversized", Body: strings.Repeat("x", 8193), Priority: 7,
@@ -215,7 +232,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "public title", Body: "private task body sentinel", Priority: 7,
 	})
-	if err != nil || taskResult.Revision != 1 || taskResult.Head != 4 {
+	if err != nil || taskResult.Revision != 1 || taskResult.Head != 5 {
 		t.Fatalf("enqueue task = %+v, %v", taskResult, err)
 	}
 	waitDispatch(t, done)
@@ -223,7 +240,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 
 	done = fixture.serve(t)
 	dispatchResult, err := client.SetDispatch(ctx, 1, true)
-	if err != nil || dispatchResult.Revision != 2 || dispatchResult.Head != 5 {
+	if err != nil || dispatchResult.Revision != 2 || dispatchResult.Head != 6 {
 		t.Fatalf("set dispatch = %+v, %v", dispatchResult, err)
 	}
 	waitDispatch(t, done)
@@ -235,7 +252,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
-	if snapshot.Head != 5 || len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
+	if snapshot.Head != 6 || len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	if snapshot.Projects[0].ID != projectInput.ID || snapshot.Projects[0].Name != projectInput.Name || snapshot.Agents[0].Role != "orchestrator" || snapshot.Tasks[0].Title != "public title" {
