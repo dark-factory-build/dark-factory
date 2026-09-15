@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,8 +35,6 @@ class IntakeTest(unittest.TestCase):
 
     def command(self, argv, **_kwargs):
         self.calls.append(argv)
-        if argv == ["factoryctl", "status"]:
-            return json.dumps({"projects": [{"id": self.config["project_id"], "run_budget_limit": 0, "runs_used": 0, "max_run_seconds": 2700}], "agents": [{"id": self.config["overseer_agent_id"], "project_id": self.config["project_id"], "role": "orchestrator", "provider": "codex"}], "tasks": [{"id": task_id, "project_id": self.config["project_id"], "assigned_agent_id": self.config["overseer_agent_id"], "incarnation_id": state["incarnation"], "work_revision": state.get("work_revision", 1), "status": state["status"]} for task_id, state in self.states.items()]})
         if argv[:3] == ["gh", "issue", "list"]:
             return json.dumps([{ "number": 7 }] if self.source["state"] == "OPEN" and "factory:ready" in [label["name"] for label in self.source["labels"]] else [])
         if argv[:3] == ["gh", "issue", "view"]:
@@ -44,25 +43,23 @@ class IntakeTest(unittest.TestCase):
         self.states[task_id] = {"status": "queued", "id": task_id, "incarnation": incarnation}
         return json.dumps({"id": task_id, "incarnation_id": incarnation})
 
-    def test_readiness_uses_daemon_status_not_sqlite(self):
-        status = json.loads(self.command(["factoryctl", "status"]))
-        self.assertEqual(self.config["project_id"], INTAKE.validate_factory(self.config)["projects"][0]["id"])
-        self.assertFalse((Path(self.config["factory_home"]) / "factory.sqlite3").exists())
-        status["projects"][0]["max_run_seconds"] = 0
-        INTAKE.command = lambda argv, **kwargs: json.dumps(status) if argv == ["factoryctl", "status"] else self.command(argv, **kwargs)
-        with self.assertRaisesRegex(INTAKE.IntakeError, "duration"):
-            INTAKE.validate_factory(self.config)
-
-    def test_task_state_uses_exact_status_identity_without_sqlite(self):
-        operation = INTAKE.operation_for(self.config, INTAKE.issue_from_json(self.source), "f" * 64)
-        self.states[operation["task_id"]] = {"status": "succeeded", "incarnation": operation["incarnation_id"], "work_revision": 2}
-        for status in ("queued", "blocked", "failed", "succeeded"):
-            self.states[operation["task_id"]]["status"] = status
-            self.assertEqual({"status": status, "work_revision": 2}, self.real_state(self.config, operation))
-        self.states[operation["task_id"]]["incarnation"] = "4" * 32
-        with self.assertRaisesRegex(INTAKE.IntakeError, "identity conflicts"):
-            self.real_state(self.config, operation)
-        self.assertFalse((Path(self.config["factory_home"]) / "factory.sqlite3").exists())
+    def test_unlimited_allowance_preserves_duration_and_finite_exhaustion_checks(self):
+        with sqlite3.connect(Path(self.config["factory_home"]) / "factory.sqlite3") as database:
+            database.executescript("CREATE TABLE projects (id BLOB, run_budget_limit INTEGER, runs_used INTEGER, max_run_seconds INTEGER); CREATE TABLE agents (id BLOB, project_id BLOB, role TEXT, provider TEXT);")
+            project = bytes.fromhex(self.config["project_id"])
+            database.execute("INSERT INTO projects VALUES (?, 0, 999, 2700)", (project,))
+            database.execute("INSERT INTO agents VALUES (?, ?, 'orchestrator', 'codex')", (bytes.fromhex(self.config["overseer_agent_id"]), project))
+            database.commit()
+            for limit, used, duration, error in [(0, 999, 2700, None), (2, 1, 2700, None), (2, 2, 2700, "exhausted"), (2, 3, 2700, "exhausted"), (0, 999, 0, "duration"), (2, 1, 0, "duration")]:
+                with self.subTest(limit=limit, used=used, duration=duration):
+                    database.execute("UPDATE projects SET run_budget_limit=?, runs_used=?, max_run_seconds=?", (limit, used, duration))
+                    database.commit()
+                    if error is None:
+                        INTAKE.validate_factory(self.config)
+                    else:
+                        with self.assertRaisesRegex(INTAKE.IntakeError, error):
+                            INTAKE.validate_factory(self.config)
+        self.assertEqual([], self.calls, "limit verification performs no provider or network action")
 
     def factory_calls(self):
         return [call for call in self.calls if call[0] == "factoryctl"]
@@ -146,13 +143,16 @@ class IntakeTest(unittest.TestCase):
         with self.assertRaisesRegex(INTAKE.IntakeError, "exceeds"):
             INTAKE.issue_from_json(issue(body="x" * 5001))
 
-    def test_terminal_history_does_not_replay_without_a_source_edit(self):
+    def test_stale_human_decision_waits_for_a_material_source_edit(self):
         INTAKE.run_once(self.config)
         first = next(iter(self.states))
-        self.states[first].update({'status': 'blocked'})
+        self.states[first].update({'status': 'failed', 'needs_operator_recovery': True})
         self.calls.clear()
-        self.assertEqual([], INTAKE.run_once(self.config))
+        self.assertEqual(['needs operator recovery o/r#7'], INTAKE.run_once(self.config))
         self.assertEqual([], self.factory_calls())
+        record = json.loads(Path(self.config['journal']).read_text())['issues']['o/r#7']
+        self.assertEqual(first, record['needs_operator_recovery']['task_id'])
+        self.assertEqual([], INTAKE.run_once(self.config))
         self.source = issue(body='operator clarified scope')
         self.assertEqual(['queued o/r#7'], INTAKE.run_once(self.config))
         self.assertNotEqual(first, self.factory_calls()[-1][self.factory_calls()[-1].index('--task-id') + 1])
