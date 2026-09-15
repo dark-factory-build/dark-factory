@@ -129,7 +129,7 @@ func (owner *supervisorAttemptOwner) close() error {
 	return errors.Join(terminationErr, controllerErr)
 }
 
-func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kernel.Run, resultErr error) {
+func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultRun kernel.Run, resultErr error) {
 	if ctx == nil || daemon == nil || daemon.store == nil || spec.RuntimeParent == nil ||
 		spec.ChangeParent == "" || !filepath.IsAbs(spec.ChangeParent) || filepath.Clean(spec.ChangeParent) != spec.ChangeParent ||
 		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" ||
@@ -166,7 +166,18 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		RunID: keys.run, TerminalSessionID: keys.session, AttemptDigest: digest, ResultProofDigest: proofDigest, CandidateChangeID: keys.change,
 		Resources: keys.resources, RuntimeRoot: runtimeRoot,
 	}
+	// Keep only a proven admission identity when an uncertain operation
+	// returns no row. The scheduler rereads durable state before acting.
+	var admittedRun kernel.Run
+	defer func() {
+		if resultRun.ID == (kernel.RunID{}) {
+			resultRun = admittedRun
+		}
+	}()
 	admission, err := daemon.store.AdmitNext(ctx, admissionKeys, at)
+	if err == nil && admission.Admitted() {
+		admittedRun = *admission.Run
+	}
 	admissionObserved := false
 	if err == nil && spec.admissionObserved != nil {
 		spec.admissionObserved(admission.Admitted())
@@ -193,6 +204,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 				continue
 			}
 			if reconciled.Admitted() {
+				admittedRun = *reconciled.Run
 				if !admissionObserved && spec.admissionObserved != nil {
 					spec.admissionObserved(true)
 				}

@@ -541,3 +541,24 @@ func TestSchedulerCancellationDoesNotHideLimitPollFailure(t *testing.T) {
 		t.Fatalf("invalid clock during cancellation = %v", err)
 	}
 }
+
+func TestSchedulerPreservesAdmittedRunWhenAttemptCompletionIsUnknown(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	runID := schedulerRunID(t, 7)
+	sentinel := errors.New("completion remains unknown")
+	var completed kernel.Run
+	spec := SupervisorSpec{
+		scheduledAttempt: func(_ context.Context, spec SupervisorSpec) (kernel.Run, error) {
+			spec.admissionObserved(true)
+			return kernel.Run{ID: runID, Phase: kernel.RunFinalizing}, kernel.NewOutcomeUnknownError(sentinel)
+		},
+		scheduledCompletion: func(run kernel.Run) error {
+			completed = run
+			return sentinel
+		},
+	}
+	err := daemon.RunScheduler(context.Background(), spec)
+	if !errors.Is(err, sentinel) || completed.ID != runID || completed.Phase != kernel.RunFinalizing {
+		t.Fatalf("unknown completion lost admitted run: run=%+v err=%v", completed, err)
+	}
+}
