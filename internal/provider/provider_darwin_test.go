@@ -895,7 +895,7 @@ func TestCodexToolchainSandbox(t *testing.T) {
 		t.Logf("installed toolchain proof: %s", out)
 	}
 }
-	}
+
 func TestCodexPermissionsGrantOnlyExplicitRetainedSources(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
 	source := "/private/factory/changes/0123456789abcdef0123456789abcdef"
