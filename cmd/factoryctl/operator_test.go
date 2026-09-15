@@ -25,6 +25,11 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "agent create codex controls", args: []string{"agent", "create", "--project", id, "--name", "Foreman", "--provider", "codex", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium", "--tool-budget", "100", "--role", "orchestrator"}},
 		{name: "agent idle policy", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes", "--run-budget", "3"}},
 		{name: "agent idle wait", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait"}},
+		{name: "account discover", args: []string{"account", "discover"}},
+		{name: "account list", args: []string{"account", "list"}},
+		{name: "account link", args: []string{"account", "link", "--provider", "codex", "--home", "/Users/operator/.codex-dogfood", "--label", "dogfood"}},
+		{name: "agent select account", args: []string{"agent", "select-account", "--agent", id, "--revision", "7", "--account", strings.Repeat("cd", 16)}},
+		{name: "agent select model", args: []string{"agent", "select-model", "--agent", id, "--revision", "7", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium"}},
 		{name: "task add minimal", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "Tighten the queue ordering"}},
 		{name: "task add full", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--body", "b", "--priority", "-5"}},
 		{name: "task add supplied identities", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--task-id", id, "--incarnation-id", strings.Repeat("cd", 16)}},
@@ -72,6 +77,12 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "x"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "0", "--instruction", "x", "--run-budget", "1"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait", "--run-budget", "1"},
+		{"account", "link", "--provider", "shell", "--home", "/Users/operator/.shell", "--label", "shell"},
+		{"account", "link", "--provider", "codex", "--home", "relative", "--label", "codex"},
+		{"agent", "select-account", "--agent", id, "--revision", "0", "--account", id},
+		{"agent", "select-model", "--agent", id, "--revision", "0", "--model", "gpt-5.6-luna"},
+		{"agent", "select-model", "--agent", id, "--revision", "1", "--model", ""},
+		{"agent", "select-model", "--agent", id, "--revision", "1", "--model", "gpt-5.6-luna", "--reasoning-effort", "extreme"},
 		{"task", "add", "--project", id, "--title", "t"},
 		{"task", "add", "--project", id, "--agent", id},
 		{"task", "add", "--project", id, "--agent", id, "--title", ""},
@@ -419,5 +430,59 @@ func TestAgentSelectModelCarriesRevisionCheckedControls(t *testing.T) {
 	awaitServer(t, done)
 	if exit != 0 || stderr.Len() != 0 || received != (api.AgentModelSelectInput{AgentID: agentID, ExpectedRevision: 7, Model: "gpt-5.6-luna", ReasoningEffort: "medium"}) {
 		t.Fatalf("select model = exit %d stderr %q received %+v", exit, stderr.String(), received)
+	}
+}
+
+func TestAccountDiscoverCLICollectsPagesAndRejectsRepeatedCursor(t *testing.T) {
+	for _, repeated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "repeated cursor"}[repeated], func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			served := make(chan struct{})
+			go func() {
+				defer close(served)
+				for page := 0; page < 2; page++ {
+					done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+						offset, ok := call.AccountsOffset()
+						if !ok || offset != uint32(page*4096) {
+							t.Errorf("page %d offset=%d valid=%t", page, offset, ok)
+						}
+						count := 4096
+						if page == 1 {
+							count = 1
+						}
+						accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, count)}
+						for index := range accounts.Accounts {
+							accounts.Accounts[index] = api.DiscoveredAccount{Provider: "codex", Home: "/private/account", Label: "linked", LinkedID: strings.Repeat("ab", 16), UnavailableReason: "login is no longer discoverable"}
+						}
+						if page == 0 || repeated {
+							next := uint32(4096)
+							accounts.NextOffset = &next
+						}
+						reply, err := api.NewAccountsReply(accounts)
+						if err != nil {
+							t.Errorf("page reply: %v", err)
+						}
+						return reply
+					})
+					if result := <-done; result.err != nil {
+						t.Errorf("page server: %v", result.err)
+					}
+				}
+			}()
+			var stdout, stderr bytes.Buffer
+			exit := run(context.Background(), []string{"account", "discover"}, webEnvironment(fixture), &stdout, &stderr)
+			<-served
+			if repeated {
+				if exit == 0 {
+					t.Fatal("repeated cursor accepted")
+				}
+				return
+			}
+			var result api.Accounts
+			if exit != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil || len(result.Accounts) != 4097 || result.NextOffset != nil || result.Accounts[4096].UnavailableReason == "" {
+				t.Fatalf("CLI discovery exit=%d count=%d stderr=%q", exit, len(result.Accounts), stderr.String())
+			}
+		})
 	}
 }

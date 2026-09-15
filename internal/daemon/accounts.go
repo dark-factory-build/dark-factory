@@ -22,7 +22,8 @@ import (
 // tokens beside that identity are never read into a returned value, and the
 // JWT that carries a Codex e-mail is decoded, never verified: it is a display
 // label, not authority.
-const maxDiscoveredAccounts = browserprotocol.MaxJSONArray
+// Account discovery also projects linked logins whose directories have since
+// disappeared. Callers page this complete projection at the wire boundary.
 
 // accountProviders is the closed set of providers that have logins at all.
 // Their configuration directory names come from internal/provider, which is
@@ -68,8 +69,39 @@ func (daemon *Daemon) discoverAccounts(home string) []browserprotocol.Discovered
 		result = append(result, account)
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].Home < result[right].Home })
-	if len(result) > maxDiscoveredAccounts {
-		result = result[:maxDiscoveredAccounts]
+	return result
+}
+
+// listedAccounts keeps durable links visible after a local login disappears.
+// LinkAccount still authorizes solely against fresh discovery.
+func (daemon *Daemon) listedAccounts(home string, linked []kernel.Account) []browserprotocol.DiscoveredAccount {
+	found := daemon.discoverAccounts(home)
+	present := make(map[string]browserprotocol.DiscoveredAccount, len(found))
+	for _, item := range found {
+		present[item.Provider+"\x00"+item.Home] = item
+	}
+	result := make([]browserprotocol.DiscoveredAccount, 0, len(found)+len(linked))
+	linkedKeys := make(map[string]struct{}, len(linked))
+	for _, account := range linked {
+		key := account.Provider.String() + "\x00" + account.Home
+		linkedKeys[key] = struct{}{}
+		if item, ok := present[key]; ok {
+			item.LinkedID, item.Label = account.ID.String(), account.Label
+			result = append(result, item)
+		} else {
+			result = append(result, browserprotocol.DiscoveredAccount{Provider: account.Provider.String(), Home: account.Home, Label: account.Label, LinkedID: account.ID.String(), UnavailableReason: "login is no longer discoverable"})
+		}
+	}
+	sort.Slice(result, func(left, right int) bool {
+		if result[left].Home == result[right].Home {
+			return result[left].Provider < result[right].Provider
+		}
+		return result[left].Home < result[right].Home
+	})
+	for _, item := range found {
+		if _, linked := linkedKeys[item.Provider+"\x00"+item.Home]; !linked {
+			result = append(result, item)
+		}
 	}
 	return result
 }

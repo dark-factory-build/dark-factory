@@ -715,7 +715,7 @@ func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserp
 // DiscoverAccounts reports the provider logins that already exist under the
 // operator's home, marked with the account row each one is linked to. It reads
 // the login directories' own identity files and never a token value.
-func (backend *browserBackend) DiscoverAccounts(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte) (browserprotocol.Accounts, error) {
+func (backend *browserBackend) DiscoverAccounts(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.AccountsDiscover) (browserprotocol.Accounts, error) {
 	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
 	if err != nil {
 		return browserprotocol.Accounts{}, err
@@ -732,17 +732,12 @@ func (backend *browserBackend) DiscoverAccounts(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.Accounts{}, mapBrowserError(err)
 	}
-	found := backend.owner.discoverAccounts(home)
-	for index, candidate := range found {
-		for _, account := range linked {
-			if account.Provider.String() == candidate.Provider && account.Home == candidate.Home {
-				found[index].LinkedID = account.ID.String()
-				found[index].Label = account.Label
-				break
-			}
-		}
+	found := backend.owner.listedAccounts(home, linked)
+	result, err := browserprotocol.PageAccounts(found, request.Offset)
+	if err != nil {
+		return browserprotocol.Accounts{}, browser.ErrStale
 	}
-	return browserprotocol.Accounts{Accounts: found}, nil
+	return result, nil
 }
 
 // LinkAccount registers one login the operator can point an agent at. Only a

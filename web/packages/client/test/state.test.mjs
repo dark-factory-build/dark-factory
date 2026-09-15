@@ -434,6 +434,9 @@ test("linked accounts and agent account selections decode under the closed rules
   assert.equal(accounts.length, 2);
   assert.deepEqual(Object.keys(accounts[0]), ["provider", "home", "label", "email", "organization", "default_model", "default_reasoning_effort", "linked_id"]);
   assert.equal(accounts[1].linked_id, "");
+  const withReason = decodeServerControl(fixture("accounts.json").replace('"linked_id":""', '"linked_id":"","unavailable_reason":"not selected"')).body.accounts[1];
+  assert.equal(withReason.unavailable_reason, "not selected");
+  expectMalformed(() => decodeServerControl(fixture("accounts.json").replace('"linked_id":""', `"linked_id":"","unavailable_reason":"${"r".repeat(MAX_AGENT_MODEL_BYTES + 1)}"`)));
   expectMalformed(() => decodeServerControl(fixture("accounts.json").replace('"provider":"codex"', '"provider":"shell"')));
 });
 

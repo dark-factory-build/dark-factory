@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -377,7 +378,7 @@ func TestBrowserAccountsNeedAdministration(t *testing.T) {
 	home := accountHomeFixture(t, fixture)
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
-	if _, err := fixture.backend.DiscoverAccounts(ctx, client); !errors.Is(err, browser.ErrUnauthorized) {
+	if _, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{}); !errors.Is(err, browser.ErrUnauthorized) {
 		t.Fatalf("discovery without administration = %v", err)
 	}
 	if _, err := fixture.backend.LinkAccount(ctx, client, browserprotocol.AccountLink{Provider: "codex", Home: filepath.Join(home, ".codex"), Label: "dogfood"}); !errors.Is(err, browser.ErrUnauthorized) {
@@ -412,7 +413,7 @@ func TestBrowserAccountsLinkOnlyWhatDiscoveryFound(t *testing.T) {
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
 
-	discovered, err := fixture.backend.DiscoverAccounts(ctx, client)
+	discovered, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +466,7 @@ func TestBrowserAccountsLinkOnlyWhatDiscoveryFound(t *testing.T) {
 	if _, err := fixture.backend.UpdateAccount(ctx, client, browserprotocol.AccountUpdate{AccountID: result.AccountID, ExpectedRevision: result.Revision, Label: &renameLabel}); !errors.Is(err, browser.ErrStale) {
 		t.Fatalf("stale rename = %v, want stale", err)
 	}
-	again, err := fixture.backend.DiscoverAccounts(ctx, client)
+	again, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
 	if err != nil || len(again.Accounts) != 1 {
 		t.Fatalf("second discovery = %+v, %v", again.Accounts, err)
 	}
@@ -489,7 +490,7 @@ func TestBrowserAccountsUnlinkUnused(t *testing.T) {
 	home := accountHomeFixture(t, fixture)
 	ctx := context.Background()
 	client := rawBrowserClient(fixture.client.ID)
-	discovered, err := fixture.backend.DiscoverAccounts(ctx, client)
+	discovered, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{})
 	if err != nil || len(discovered.Accounts) != 1 {
 		t.Fatalf("discovery = %+v, %v", discovered.Accounts, err)
 	}
@@ -505,6 +506,95 @@ func TestBrowserAccountsUnlinkUnused(t *testing.T) {
 	accounts, err := fixture.store.ListAccounts(ctx)
 	if err != nil || len(accounts) != 0 {
 		t.Fatalf("accounts after unlink = %d, err=%v", len(accounts), err)
+	}
+}
+
+// Linked account rows outlive an operator removing a provider profile. The
+// discovery result must show every such durable identity or refuse the whole
+// observation; silently trimming the oldest unavailable rows would make them
+// impossible to manage.
+func TestBrowserAccountsPagesAccumulatedUnavailableProjection(t *testing.T) {
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions|kernel.BrowserCapabilityAdministration, consoleRoot(t))
+	accountHomeFixture(t, fixture)
+	ctx := context.Background()
+	client := rawBrowserClient(fixture.client.ID)
+	seen := make(map[string]bool, browserprotocol.MaxSnapshotEntities*2+1)
+	for index := 0; index < browserprotocol.MaxSnapshotEntities*2; index++ {
+		raw := make([]byte, kernel.IDBytes)
+		binary.BigEndian.PutUint32(raw[len(raw)-4:], uint32(index+1))
+		id, err := kernel.AccountIDFromBytes(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		account, err := fixture.store.LinkAccount(ctx, kernel.NewAccount{
+			ID: id, Provider: kernel.ProviderCodex,
+			Home: fmt.Sprintf("/Users/operator/.codex-missing-%04d", index), Label: fmt.Sprintf("missing-%04d", index),
+		}, adapterTime(t, int64(100+index)))
+		if err != nil {
+			t.Fatalf("link unavailable %d: %v", index, err)
+		}
+		seen[account.ID.String()] = true
+	}
+	expectedIDs := make(map[string]bool, len(seen))
+	for id := range seen {
+		expectedIDs[id] = true
+	}
+	readAll := func() map[string]bool {
+		read := make(map[string]bool)
+		remaining := make(map[string]bool, len(expectedIDs))
+		for id := range expectedIDs {
+			remaining[id] = true
+		}
+		var offset uint32
+		for {
+			page, err := fixture.backend.DiscoverAccounts(ctx, client, browserprotocol.AccountsDiscover{Offset: offset})
+			if err != nil {
+				t.Fatalf("discover page at %d: %v", offset, err)
+			}
+			wire, err := browserprotocol.EncodeAccounts("accounts", page)
+			if err != nil || len(wire) > browserprotocol.MaxSnapshotBytes {
+				t.Fatalf("page at %d exceeds bound: %d bytes, %v", offset, len(wire), err)
+			}
+			for _, account := range page.Accounts {
+				if expected, ok := remaining[account.LinkedID]; ok && expected {
+					if account.UnavailableReason != "login is no longer discoverable" {
+						t.Fatalf("unavailable account = %+v", account)
+					}
+					delete(remaining, account.LinkedID)
+				}
+				read[account.Home] = true
+			}
+			if page.NextOffset == nil {
+				if len(remaining) != 0 {
+					t.Fatalf("page sequence omitted %d unavailable identities", len(remaining))
+				}
+				return read
+			}
+			if *page.NextOffset != offset+uint32(len(page.Accounts)) || len(page.Accounts) == 0 {
+				t.Fatalf("non-contiguous cursor at %d: page=%d next=%d", offset, len(page.Accounts), *page.NextOffset)
+			}
+			offset = *page.NextOffset
+		}
+	}
+	before := readAll()
+	if len(before) != browserprotocol.MaxSnapshotEntities*2+1 {
+		t.Fatalf("before adding row omitted %d identities or read %d accounts", len(seen), len(before))
+	}
+
+	raw := make([]byte, kernel.IDBytes)
+	binary.BigEndian.PutUint32(raw[len(raw)-4:], browserprotocol.MaxSnapshotEntities*2+1)
+	id, err := kernel.AccountIDFromBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := fixture.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: kernel.ProviderCodex, Home: "/Users/operator/.codex-missing-overflow", Label: "missing-overflow"}, adapterTime(t, 10_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedIDs[account.ID.String()] = true
+	after := readAll()
+	if len(after) != browserprotocol.MaxSnapshotEntities*2+2 {
+		t.Fatalf("after adding row omitted %d identities or read %d accounts", len(seen), len(after))
 	}
 }
 

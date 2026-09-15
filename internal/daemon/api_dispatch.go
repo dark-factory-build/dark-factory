@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
@@ -186,6 +187,16 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.setDispatch(ctx, call)
 	case api.CallSetCapacity:
 		return daemon.setCapacity(ctx, call)
+	case api.CallAccountsDiscover:
+		offset, ok := call.AccountsOffset()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		return daemon.discoverOperatorAccounts(ctx, offset)
+	case api.CallAccountLink:
+		return daemon.linkOperatorAccount(ctx, call)
+	case api.CallAgentSelectAccount:
+		return daemon.selectAgentAccount(ctx, call)
 	case api.CallAgentSelectModel:
 		return daemon.selectAgentModel(ctx, call)
 	case api.CallAttemptTask:
@@ -573,6 +584,119 @@ func (daemon *Daemon) snapshot(ctx context.Context) api.Reply {
 	}
 	return reply
 }
+
+func (daemon *Daemon) discoverOperatorAccounts(ctx context.Context, offset uint32) api.Reply {
+	home, err := operatorHome()
+	if err != nil {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	linked, err := daemon.store.ListAccounts(ctx)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	found := daemon.listedAccounts(home, linked)
+	protocolFound := make([]browserprotocol.DiscoveredAccount, 0, len(found))
+	for _, candidate := range found {
+		protocolFound = append(protocolFound, browserprotocol.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort, LinkedID: candidate.LinkedID, UnavailableReason: candidate.UnavailableReason})
+	}
+	page, err := browserprotocol.PageAccounts(protocolFound, offset)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, 0, len(page.Accounts)), NextOffset: page.NextOffset}
+	for _, candidate := range page.Accounts {
+		accounts.Accounts = append(accounts.Accounts, api.DiscoveredAccount{Provider: candidate.Provider, Home: candidate.Home, Label: candidate.Label, Email: candidate.Email, Organization: candidate.Organization, DefaultModel: candidate.DefaultModel, DefaultReasoningEffort: candidate.DefaultReasoningEffort, LinkedID: candidate.LinkedID, UnavailableReason: candidate.UnavailableReason})
+	}
+	reply, err := api.NewAccountsReply(accounts)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
+}
+
+func (daemon *Daemon) linkOperatorAccount(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AccountLinkInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	provider, err := kernel.ParseProvider(input.Provider)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	home, err := operatorHome()
+	if err != nil {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	present := false
+	for _, candidate := range daemon.discoverAccounts(home) {
+		if candidate.Provider == input.Provider && candidate.Home == input.Home {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	var raw [kernel.IDBytes]byte
+	if _, err := rand.Read(raw[:]); err != nil || raw == ([kernel.IDBytes]byte{}) {
+		return newErrorReply(api.RemoteInternal)
+	}
+	id, err := kernel.AccountIDFromBytes(raw[:])
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	account, err := daemon.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: provider, Home: input.Home, Label: input.Label}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.mutation(ctx, account.Revision)
+}
+
+func (daemon *Daemon) selectAgentAccount(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AgentAccountSelectInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agentID, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	accountID, err := parseAccountID(input.AccountID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agent, found, err := daemon.store.Agent(ctx, agentID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	if agent.Role != kernel.RoleWorker || agent.Archived {
+		return newErrorReply(api.RemoteConflict)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	updated, err := daemon.store.UpdateAgent(ctx, agentID, expected, kernel.AgentPatch{AccountID: &accountID}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.mutation(ctx, updated.Revision)
+}
+
+// selectAgentModel stores the next admission's native-provider controls. An
+// admitted run already holds its own immutable model and effort, so it remains
+// unaffected while this update is committed for future runs.
 
 func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Reply {
 	input, ok := call.CreateProjectInput()

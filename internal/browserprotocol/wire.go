@@ -23,11 +23,11 @@ const (
 )
 
 // controlLimit is the exact encoded bound for one message type. Client-to-
-// server control stays at 64 KiB; only the server's whole-state snapshot may
-// reach 1 MiB.
+// server control stays at 64 KiB; the bounded server snapshots, topology and
+// account discovery observations may reach 1 MiB.
 func controlLimit(kind MessageType) int {
 	switch kind {
-	case TypeStateSnapshot, TypeTopology:
+	case TypeStateSnapshot, TypeTopology, TypeAccounts:
 		return MaxSnapshotBytes
 	}
 	return MaxControlBytes

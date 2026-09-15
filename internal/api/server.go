@@ -29,6 +29,9 @@ const (
 	CallEnqueueTask
 	CallSetDispatch
 	CallSetCapacity
+	CallAccountsDiscover
+	CallAccountLink
+	CallAgentSelectAccount
 	CallAgentSelectModel
 	CallAttemptTask
 	CallAttemptSource
@@ -98,8 +101,11 @@ type Call struct {
 	webAfter          string
 	expectedRevision  uint64
 	enabled           bool
-	modelSelection    AgentModelSelectInput
 	capacity          uint16
+	account           AccountLinkInput
+	selection         AgentAccountSelectInput
+	accountsOffset    uint32
+	modelSelection    AgentModelSelectInput
 	text              string
 	sourceTaskID      string
 }
@@ -187,6 +193,14 @@ func (call Call) Capacity() (uint64, uint16, bool) {
 	return call.expectedRevision, call.capacity, call.kind == CallSetCapacity
 }
 
+func (call Call) AccountLinkInput() (AccountLinkInput, bool) {
+	return call.account, call.kind == CallAccountLink
+}
+
+func (call Call) AgentAccountSelectInput() (AgentAccountSelectInput, bool) {
+	return call.selection, call.kind == CallAgentSelectAccount
+}
+
 func (call Call) Result() (string, bool) {
 	return call.text, call.kind == CallSucceed
 }
@@ -236,6 +250,7 @@ const (
 	replyRemoteStatus
 	replyOverseerSnapshot
 	replyPeerStatus
+	replyAccounts
 	replyError
 )
 
@@ -253,6 +268,7 @@ type Reply struct {
 	remote        RemoteStatus
 	overseer      OverseerSnapshot
 	peerStatus    PeerStatus
+	accounts      Accounts
 	code          RemoteErrorCode
 }
 
@@ -319,6 +335,14 @@ func NewPeerStatusReply(status PeerStatus) (Reply, error) {
 	}
 	status.Questions = append([]PeerQuestion{}, status.Questions...)
 	return Reply{kind: replyPeerStatus, peerStatus: status}, nil
+}
+
+func NewAccountsReply(accounts Accounts) (Reply, error) {
+	accounts.Accounts = append([]DiscoveredAccount{}, accounts.Accounts...)
+	if !validAccounts(accounts) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyAccounts, accounts: accounts}, nil
 }
 
 func NewWebStatusReply(status WebStatus) (Reply, error) {
@@ -597,6 +621,14 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallAccountsDiscover:
+		var input struct {
+			Offset uint32 `json:"offset,omitempty"`
+		}
+		if err := decodeExact(request.Params, &input); err != nil {
+			return Call{}, RemoteInvalidRequest
+		}
+		call.accountsOffset = input.Offset
 	case CallOverseerSnapshot:
 		if err := decodeExact(request.Params, &call.overseerSnapshot); err != nil || !validOverseerSnapshotInput(call.overseerSnapshot) {
 			return Call{}, RemoteInvalidRequest
@@ -647,6 +679,14 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 		call.expectedRevision, call.capacity = input.ExpectedRevision, input.Capacity
+	case CallAccountLink:
+		if err := decodeExact(request.Params, &call.account); err != nil || !validAccountLinkInput(call.account) {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallAgentSelectAccount:
+		if err := decodeExact(request.Params, &call.selection); err != nil || !validAgentAccountSelectInput(call.selection) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallAgentSelectModel:
 		if err := decodeExact(request.Params, &call.modelSelection); err != nil || !validAgentModelSelectInput(call.modelSelection) {
 			return Call{}, RemoteInvalidRequest
@@ -776,6 +816,12 @@ func methodKind(method string) (CallKind, byte) {
 		return CallSetDispatch, operatorDomain
 	case "set_capacity":
 		return CallSetCapacity, operatorDomain
+	case "accounts_discover":
+		return CallAccountsDiscover, operatorDomain
+	case "account_link":
+		return CallAccountLink, operatorDomain
+	case "agent_select_account":
+		return CallAgentSelectAccount, operatorDomain
 	case "task":
 		return CallAttemptTask, attemptDomain
 	case "source":
@@ -890,6 +936,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyHealth
 	case CallSnapshot:
 		return reply == replySnapshot
+	case CallAccountsDiscover:
+		return reply == replyAccounts
 	case CallAttemptTask:
 		return reply == replyAttemptTask
 	case CallAttemptSource:
@@ -898,7 +946,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
 		return reply == replyOverseerSnapshot
-	case CallAgentSelectModel, CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus
@@ -952,6 +1000,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.overseer)
 	case replyPeerStatus:
 		data, err = json.Marshal(reply.peerStatus)
+	case replyAccounts:
+		data, err = json.Marshal(reply.accounts)
 	case replyError:
 	default:
 		return ErrProtocol
@@ -1030,4 +1080,8 @@ func (connection *Connection) Close() error {
 
 func (call Call) AgentModelSelectInput() (AgentModelSelectInput, bool) {
 	return call.modelSelection, call.kind == CallAgentSelectModel
+}
+
+func (call Call) AccountsOffset() (uint32, bool) {
+	return call.accountsOffset, call.kind == CallAccountsDiscover
 }

@@ -560,12 +560,18 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			err = ErrUnauthorized
 			break
 		}
-		result, backendErr := current.server.consoleBackend.DiscoverAccounts(ctx, current.principal.ClientID)
+		result, backendErr := current.server.consoleBackend.DiscoverAccounts(ctx, current.principal.ClientID, body)
 		if backendErr != nil {
 			err = backendErr
 			break
 		}
-		payload, err = browserprotocol.EncodeAccounts(frame.ID, result)
+		if payload, err = browserprotocol.EncodeAccounts(frame.ID, result); errors.Is(err, browserprotocol.ErrOversized) {
+			err = ErrTooLarge
+		}
+		if err != nil {
+			break
+		}
+		return current.writeSnapshot(payload) == nil
 	case browserprotocol.AccountLink:
 		if current.server.consoleBackend == nil {
 			err = ErrUnauthorized
@@ -1249,8 +1255,8 @@ func (current *connection) write(payload []byte) error {
 }
 
 // writeSnapshot is the only outbound path allowed past MaxControlBytes, and
-// STATE_SNAPSHOT and TOPOLOGY are its only frames. Every other frame in either
-// direction stays inside the 64 KiB control bound.
+// STATE_SNAPSHOT, TOPOLOGY and ACCOUNTS are the frames allowed past the
+// control bound. Every other frame in either direction stays inside 64 KiB.
 func (current *connection) writeSnapshot(payload []byte) error {
 	if len(payload) == 0 || len(payload) > browserprotocol.MaxSnapshotBytes {
 		return fmt.Errorf("invalid outbound snapshot frame")

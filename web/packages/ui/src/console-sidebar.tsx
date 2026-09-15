@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_PRIORITY, type AccountItem, type AgentItem, type ProjectItem, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_PRIORITY, type DiscoveredAccount, type AccountItem, type AgentItem, type ProjectItem, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
@@ -7,18 +7,6 @@ import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js"
 
 /** Only the controls the operator actually changed; the rest are left alone. */
 export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
-
-/** One discovered login and the account row it is linked to, if any. */
-export type DiscoveredAccount = Readonly<{
-  provider: "claude_code" | "codex";
-  home: string;
-  label: string;
-  email: string;
-  organization: string;
-  default_model: string;
-  default_reasoning_effort: string;
-  linked_id: string;
-}>;
 
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
@@ -707,6 +695,7 @@ function AccountsSection({
                 <p className="dfConsoleRow__title">{account.label} · {account.provider}</p>
                 <p>{identity === "" ? account.home : identity}</p>
                 {login?.default_model ? <p className="dfConsoleSidebar__inherit">CLI default: {login.default_model}</p> : null}
+                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again in this directory, then refresh.</p>}
                 <div className="dfConsoleSidebar__taskActions">
                   <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-linked-account-${account.id}`}>Label for {account.label}</label>
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />

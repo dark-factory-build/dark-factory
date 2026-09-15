@@ -348,6 +348,10 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			_, err := client.SetCapacity(context.Background(), 3, 2)
 			return err
 		}},
+		{name: "select agent model", response: mutationResponse(), request: `{"method":"agent_select_model","params":{"agent_id":"` + id('2') + `","expected_revision":3,"model":"gpt-5.6-luna","reasoning_effort":"medium"}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.SelectAgentModel(context.Background(), AgentModelSelectInput{AgentID: id('2'), ExpectedRevision: 3, Model: "gpt-5.6-luna", ReasoningEffort: "medium"})
+			return err
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -368,6 +372,21 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			fixture.wait(t)
 		})
 	}
+}
+
+func TestOperatorDiscoverAccountsRejectsForwardJump(t *testing.T) {
+	bearer := testCredential('A')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireOperatorDomain, successResponse(`{"accounts":[{"provider":"codex","home":"/Users/operator/.codex","label":"codex"}],"next_offset":2}`))
+	})
+	client, err := NewOperatorClient(fixture.socket, fixture.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.DiscoverAccounts(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("forward cursor error = %v, want protocol error", err)
+	}
+	fixture.wait(t)
 }
 
 func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) {

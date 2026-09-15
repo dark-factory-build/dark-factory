@@ -142,6 +142,28 @@ func TestUpdateAgentValidatesLaunchControlsAtTheObservedRevision(t *testing.T) {
 	}
 }
 
+func TestUpdateAgentModelChangesFutureAdmissionsWhileRunIsActive(t *testing.T) {
+	store, running, _, _ := runningWorkerAndOverseer(t)
+	defer store.Close()
+	ctx := context.Background()
+	agent, found, err := store.Agent(ctx, running.AgentID)
+	if err != nil || !found {
+		t.Fatalf("worker agent = %+v, found=%v, err=%v", agent, found, err)
+	}
+	model, effort := "gpt-5.6-luna", "medium"
+	updated, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{Model: &model, ReasoningEffort: &effort}, mustTime(t, 60))
+	if err != nil || updated.Model != model || updated.ReasoningEffort != effort {
+		t.Fatalf("active worker selection = %+v, %v", updated, err)
+	}
+	frozen, found, err := store.Run(ctx, running.ID)
+	if err != nil || !found || frozen.Model != running.Model || frozen.ReasoningEffort != running.ReasoningEffort {
+		t.Fatalf("admitted snapshot changed = %+v, found=%v, err=%v", frozen, found, err)
+	}
+	if _, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{Model: &model, ReasoningEffort: &effort}, mustTime(t, 61)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale active selection = %v", err)
+	}
+}
+
 func TestUpdateAgentAppearancePersistsAndResetsAtomically(t *testing.T) {
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
