@@ -244,3 +244,11 @@ checks that none remain in its Change.
 Provider changes must preserve admission-time selection, daemon-owned process
 lifecycle, exact task delivery, and deterministic failure when a required
 launch fact is unavailable.
+
+An operator can change an existing worker's model for future runs:
+
+```sh
+factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5.6-luna --reasoning-effort medium
+```
+
+Use the current agent revision from `factoryctl status`. The update refuses a stale revision or unsupported provider controls. An already admitted run keeps its model and effort. Omitting effort clears the explicit override for future runs.

@@ -63,6 +63,7 @@ const (
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
   factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT --run-budget N
+  factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
   factoryctl task add --project ID --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
@@ -113,6 +114,7 @@ const (
 	commandProjectLimits
 	commandAgentCreate
 	commandAgentIdlePolicy
+	commandAgentSelectModel
 	commandTaskAdd
 	commandTaskSendBack
 	commandDispatch
@@ -228,7 +230,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
+	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman {
@@ -756,7 +758,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 3 && helpFlag(args[2]) {
 		switch args[0] + " " + args[1] {
-		case "project create", "project limits", "agent create", "agent idle-policy", "task add", "task send-back":
+		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-model", "task add", "task send-back":
 			return attemptCommand{}, true, true
 		}
 	}
@@ -795,6 +797,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandAgentCreate
 	case "agent idle-policy":
 		command.kind = commandAgentIdlePolicy
+	case "agent select-model":
+		command.kind = commandAgentSelectModel
 	case "task add":
 		command.kind = commandTaskAdd
 	case "task send-back":
@@ -837,8 +841,18 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.maxRunSeconds = uint32(seconds)
-		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy) && validHumanRequestKey(value):
+		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectModel) && validHumanRequestKey(value):
 			command.agent = value
+		case name == "--revision" && command.kind == commandAgentSelectModel:
+			revision, ok := parseRevision(value)
+			if !ok {
+				return attemptCommand{}, false, false
+			}
+			command.expectedRevision = revision
+		case name == "--model" && command.kind == commandAgentSelectModel && validOperatorText(value, 1, 128):
+			command.model = value
+		case name == "--reasoning-effort" && command.kind == commandAgentSelectModel:
+			command.reasoningEffort = value
 		case name == "--role" && command.kind == commandAgentCreate && (value == "worker" || value == "orchestrator"):
 			command.role = value
 		case name == "--provider" && command.kind == commandAgentCreate:
@@ -910,6 +924,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandAgentIdlePolicy:
 		if command.agent == "" || command.expectedRevision == 0 || (command.provider != "wait" && command.provider != "standing_instruction") || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "" || command.toolBudget == 0)) {
+			return attemptCommand{}, false, false
+		}
+	case commandAgentSelectModel:
+		if command.agent == "" || command.model == "" || command.expectedRevision == 0 || !validReasoningEffort(command.reasoningEffort) {
 			return attemptCommand{}, false, false
 		}
 	case commandTaskAdd:
@@ -1272,6 +1290,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "status", callErr)
 		}
 		return writeJSON(stdout, snapshot)
+	case commandAgentSelectModel:
+		result, callErr := client.SelectAgentModel(callContext, api.AgentModelSelectInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Model: command.model, ReasoningEffort: command.reasoningEffort})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent select-model", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandProjectCreate:
 		id, err := newOperatorID()
 		if err != nil {
@@ -1559,4 +1583,13 @@ func writeWebFailure(stderr io.Writer, subject string, err error) int {
 	}
 	_, _ = io.WriteString(stderr, message)
 	return exitFailure
+}
+
+func validReasoningEffort(value string) bool {
+	switch value {
+	case "", "low", "medium", "high", "xhigh", "max", "ultra":
+		return true
+	default:
+		return false
+	}
 }

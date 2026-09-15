@@ -1069,3 +1069,49 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 		}
 	}
 }
+
+func TestDaemonSelectAgentModelRequiresWorkerRevisionAndCompatibleControls(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	project := api.CreateProjectInput{ID: testID(50), Name: "project", Root: filepath.Join(t.TempDir(), "source")}
+	done := fixture.serve(t)
+	if _, err := client.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	for _, input := range []api.CreateAgentInput{
+		{ID: testID(51), ProjectID: project.ID, Name: "worker", Role: "worker", Provider: "codex", ToolBudgetLimit: 1},
+		{ID: testID(52), ProjectID: project.ID, Name: "overseer", Role: "orchestrator", Provider: "codex", ToolBudgetLimit: 1},
+	} {
+		done = fixture.serve(t)
+		if _, err := client.CreateAgent(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	selectModel := api.AgentModelSelectInput{AgentID: testID(51), ExpectedRevision: 1, Model: "gpt-5.6-luna", ReasoningEffort: "medium"}
+	done = fixture.serve(t)
+	updated, err := client.SelectAgentModel(ctx, selectModel)
+	if err != nil || updated.Revision != 2 {
+		t.Fatalf("select worker model = %+v, %v", updated, err)
+	}
+	waitDispatch(t, done)
+	if agent, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(51))); err != nil || !found || agent.Model != selectModel.Model || agent.ReasoningEffort != selectModel.ReasoningEffort {
+		t.Fatalf("stored model selection = %+v, found=%v, err=%v", agent, found, err)
+	}
+	for _, input := range []api.AgentModelSelectInput{
+		{AgentID: testID(51), ExpectedRevision: 1, Model: "gpt-5.6-luna", ReasoningEffort: "medium"},
+		{AgentID: testID(51), ExpectedRevision: 2, Model: "gpt-5.6-luna", ReasoningEffort: "extreme"},
+		{AgentID: testID(52), ExpectedRevision: 1, Model: "gpt-5.6-luna", ReasoningEffort: "medium"},
+	} {
+		done = fixture.serve(t)
+		if _, err := client.SelectAgentModel(ctx, input); err == nil {
+			t.Fatalf("invalid selection accepted: %+v", input)
+		}
+		waitDispatch(t, done)
+	}
+}

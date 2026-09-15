@@ -18,6 +18,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		name string
 		args []string
 	}{
+		{name: "select model", args: []string{"agent", "select-model", "--agent", id, "--revision", "7", "--model", "gpt-5.6-luna"}},
 		{name: "project create", args: []string{"project", "create", "--name", "North Workshop", "--root", "/private/tmp/repo"}},
 		{name: "project limits", args: []string{"project", "limits", "--project", id, "--revision", "7", "--run-budget", "20", "--max-run-seconds", "900"}},
 		{name: "agent create shell default role", args: []string{"agent", "create", "--project", id, "--name", "Builder One", "--provider", "shell", "--tool-budget", "100"}},
@@ -393,5 +394,30 @@ func TestOperatorRemoteRejectionIsReportedWithoutFabricatedSuccess(t *testing.T)
 	awaitServer(t, done)
 	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "agent create was not accepted") {
 		t.Fatalf("rejection = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestAgentSelectModelCarriesRevisionCheckedControls(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	agentID := strings.Repeat("22", 16)
+	var received api.AgentModelSelectInput
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		var ok bool
+		received, ok = call.AgentModelSelectInput()
+		if !ok || call.Kind() != api.CallAgentSelectModel {
+			t.Errorf("call = %v, input = %+v, ok = %v", call.Kind(), received, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 10, Revision: 8})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"agent", "select-model", "--agent", agentID, "--revision", "7", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium"}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || received != (api.AgentModelSelectInput{AgentID: agentID, ExpectedRevision: 7, Model: "gpt-5.6-luna", ReasoningEffort: "medium"}) {
+		t.Fatalf("select model = exit %d stderr %q received %+v", exit, stderr.String(), received)
 	}
 }

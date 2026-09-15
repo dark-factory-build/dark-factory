@@ -29,6 +29,7 @@ const (
 	CallEnqueueTask
 	CallSetDispatch
 	CallSetCapacity
+	CallAgentSelectModel
 	CallAttemptTask
 	CallAttemptSource
 	CallSucceed
@@ -97,6 +98,7 @@ type Call struct {
 	webAfter          string
 	expectedRevision  uint64
 	enabled           bool
+	modelSelection    AgentModelSelectInput
 	capacity          uint16
 	text              string
 	sourceTaskID      string
@@ -627,6 +629,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 		call.expectedRevision, call.capacity = input.ExpectedRevision, input.Capacity
+	case CallAgentSelectModel:
+		if err := decodeExact(request.Params, &call.modelSelection); err != nil || !validAgentModelSelectInput(call.modelSelection) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallSucceed:
 		var input struct {
 			Result string `json:"result"`
@@ -756,6 +762,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallAttemptTask, attemptDomain
 	case "source":
 		return CallAttemptSource, attemptDomain
+	case "agent_select_model":
+		return CallAgentSelectModel, operatorDomain
 	case "succeed":
 		return CallSucceed, attemptDomain
 	case "block":
@@ -872,7 +880,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
 		return reply == replyOverseerSnapshot
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
+	case CallAgentSelectModel, CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus
@@ -1000,4 +1008,8 @@ func (connection *Connection) Close() error {
 		}
 	})
 	return connection.closeErr
+}
+
+func (call Call) AgentModelSelectInput() (AgentModelSelectInput, bool) {
+	return call.modelSelection, call.kind == CallAgentSelectModel
 }
