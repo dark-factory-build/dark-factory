@@ -7,6 +7,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -69,5 +74,100 @@ func TestAttemptMCPRefusesOperatorShellRecursiveAndInvalidCommands(t *testing.T)
 	var output bytes.Buffer
 	if runAttemptMCP(context.Background(), strings.NewReader(strings.Repeat("x", 1<<20)), &output, func(string) string { return "" }) != exitFailure || output.Len() != 0 {
 		t.Fatal("oversized input accepted")
+	}
+}
+
+func TestAttemptMCPCommandCatalogueParity(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	allowed := []struct {
+		name string
+		argv []string
+	}{
+		{"attempt task", []string{"attempt", "task"}},
+		{"attempt succeed", []string{"attempt", "succeed"}},
+		{"attempt block", []string{"attempt", "block", "--detail", "blocked"}},
+		{"attempt fail", []string{"attempt", "fail"}},
+		{"attempt request-human", []string{"attempt", "request-human", "--idempotency-key", id, "--question", "question"}},
+		{"attempt peer status", []string{"attempt", "peer", "status"}},
+		{"attempt peer ask", []string{"attempt", "peer", "ask", "--task", id, "--idempotency-key", id, "--question", "question"}},
+		{"attempt peer answer", []string{"attempt", "peer", "answer", "--question", id, "--revision", "1", "--idempotency-key", id, "--answer", "answer"}},
+		{"attempt send-back", []string{"attempt", "send-back", "--task", id, "--note", "note"}},
+		{"overseer status", []string{"overseer", "status"}},
+		{"overseer task add", []string{"overseer", "task", "add", "--agent", id, "--title", "title"}},
+		{"overseer task update", []string{"overseer", "task", "update", "--task", id, "--revision", "1", "--title", "title"}},
+		{"overseer task send-back", []string{"overseer", "task", "send-back", "--task", id, "--note", "note"}},
+		{"overseer agent pause", []string{"overseer", "agent", "pause", "--agent", id, "--revision", "1"}},
+		{"overseer agent resume", []string{"overseer", "agent", "resume", "--agent", id, "--revision", "1"}},
+		{"overseer agent archive", []string{"overseer", "agent", "archive", "--agent", id, "--revision", "1"}},
+		{"overseer agent restore", []string{"overseer", "agent", "restore", "--agent", id, "--revision", "1"}},
+		{"overseer worker stop", []string{"overseer", "worker", "stop", "--operation-id", id, "--task", id, "--task-revision", "1", "--run", id, "--run-revision", "1"}},
+		{"overseer worker replace", []string{"overseer", "worker", "replace", "--operation-id", id, "--task", id, "--task-revision", "1", "--run", id, "--run-revision", "1", "--successor-task", id, "--successor-incarnation", id, "--instruction", "instruction"}},
+		{"overseer worker message", []string{"overseer", "worker", "message", "--operation-id", id, "--task", id, "--task-revision", "1", "--run", id, "--run-revision", "1", "--message", "message"}},
+		{"overseer worker interrupt", []string{"overseer", "worker", "interrupt", "--operation-id", id, "--task", id, "--task-revision", "1", "--run", id, "--run-revision", "1"}},
+		{"overseer human reply", []string{"overseer", "human", "reply", "--operation-id", id, "--request", id, "--revision", "1", "--reply", "reply"}},
+	}
+	for _, test := range allowed {
+		t.Run(test.name, func(t *testing.T) {
+			command, help, ok := parse(test.argv)
+			if !ok || help || !allowedAttemptMCPCommand(command.kind) {
+				t.Fatalf("advertised command is unsupported: %v", test.argv)
+			}
+		})
+	}
+}
+
+func TestAttemptMCPCommandAllowlistExcludesOperatorCommands(t *testing.T) {
+	for _, kind := range []commandKind{
+		commandWebStatus, commandWebListClients, commandWebRevoke, commandRemoteStatus,
+		commandInit, commandDoctor, commandServiceStatus, commandServiceInstall,
+		commandServiceStart, commandServiceStop, commandServiceUninstall,
+		commandProjectCreate, commandProjectLimits, commandAgentCreate, commandAgentIdlePolicy, commandTaskAdd,
+		commandTaskSendBack, commandDispatch, commandCapacity, commandStatus,
+		commandKind(0), commandKind(255),
+	} {
+		if allowedAttemptMCPCommand(kind) {
+			t.Fatalf("operator or unknown command %d was exposed", kind)
+		}
+	}
+}
+
+// The command kind values are intentionally opaque: inserting or reordering an
+// enum must not alter MCP authority. Keep this structural canary next to the
+// catalogue so an ordinal range cannot return unnoticed.
+func TestAttemptMCPCommandAllowlistDoesNotDependOnOrdinals(t *testing.T) {
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate mcp test source")
+	}
+	parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(filepath.Dir(testFile), "mcp.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var allowlist *ast.FuncDecl
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "allowedAttemptMCPCommand" {
+			allowlist = function
+			break
+		}
+	}
+	if allowlist == nil {
+		t.Fatal("allowlist function missing")
+	}
+	usesOrdinalComparison := false
+	ast.Inspect(allowlist.Body, func(node ast.Node) bool {
+		comparison, ok := node.(*ast.BinaryExpr)
+		if !ok || (comparison.Op != token.LSS && comparison.Op != token.LEQ && comparison.Op != token.GTR && comparison.Op != token.GEQ) {
+			return true
+		}
+		for _, operand := range []ast.Expr{comparison.X, comparison.Y} {
+			if identifier, ok := operand.(*ast.Ident); ok && identifier.Name == "kind" {
+				usesOrdinalComparison = true
+			}
+		}
+		return true
+	})
+	if usesOrdinalComparison {
+		t.Fatal("MCP allowlist must name commands explicitly, not compare command kind ordinals")
 	}
 }

@@ -100,6 +100,7 @@ type Call struct {
 	webAfter          string
 	expectedRevision  uint64
 	enabled           bool
+	modelSelection    AgentModelSelectInput
 	capacity          uint16
 	account           AccountLinkInput
 	selection         AgentAccountSelectInput
@@ -780,6 +781,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallAgentSelectModel, operatorDomain
 	case "task":
 		return CallAttemptTask, attemptDomain
+	case "agent_select_model":
+		return CallAgentSelectModel, operatorDomain
 	case "succeed":
 		return CallSucceed, attemptDomain
 	case "block":
@@ -1024,4 +1027,8 @@ func (connection *Connection) Close() error {
 		}
 	})
 	return connection.closeErr
+}
+
+func (call Call) AgentModelSelectInput() (AgentModelSelectInput, bool) {
+	return call.modelSelection, call.kind == CallAgentSelectModel
 }

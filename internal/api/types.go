@@ -624,3 +624,14 @@ type WebClientRevocationInput struct {
 	ID               string `json:"id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
 }
+
+type AgentModelSelectInput struct {
+	AgentID          string `json:"agent_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Model            string `json:"model"`
+	ReasoningEffort  string `json:"reasoning_effort"`
+}
+
+func validAgentModelSelectInput(value AgentModelSelectInput) bool {
+	return validID(value.AgentID) && value.ExpectedRevision != 0 && validText(value.Model, 1, 128) && validText(value.ReasoningEffort, 0, 128)
+}

@@ -1667,3 +1667,12 @@ func writeWebFailure(stderr io.Writer, subject string, err error) int {
 	_, _ = io.WriteString(stderr, message)
 	return exitFailure
 }
+
+func validReasoningEffort(value string) bool {
+	switch value {
+	case "", "low", "medium", "high", "xhigh", "max", "ultra":
+		return true
+	default:
+		return false
+	}
+}
