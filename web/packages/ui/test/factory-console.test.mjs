@@ -11,6 +11,7 @@ import { prepareFloor, selectFloor, projectFloor } from "../dist/src/console-vie
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
+import { DEFAULT_FLOOR_APPEARANCE, readFloorAppearance } from "../dist/src/floor-appearance.js";
 import { fixtureState, fixtureTopologies, fixtureTopology } from "../../../fixtures/state.mjs";
 
 const ids = {
@@ -70,6 +71,60 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   assert.match(css, /\.dfFactoryFloor__map \{ overflow: auto; max-height: 70vh;/);
   assert.match(render(), /class="dfFactoryFloor__map" role="region" aria-label="Scrollable codebase floor" tabindex="0"/);
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
+});
+
+test("floor appearance is local, field-validated, and available before a connection", () => {
+  assert.deepEqual(readFloorAppearance('{"scenery":"off","dependencyLinks":"bad","labels":"names-and-counts","taskProps":false,"animation":"off"}'), {
+    scenery: "off", dependencyLinks: "selected-room", labels: "names-and-counts", taskProps: false, animation: "off",
+  });
+  assert.deepEqual(readFloorAppearance('{"scenery":"subtle"}'), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "subtle" });
+  assert.deepEqual(readFloorAppearance("not json"), DEFAULT_FLOOR_APPEARANCE);
+  const markup = render({ status: "closed", settingsOpen: true });
+  for (const text of ["Scenery", "Dependency links", "Labels", "Task props", "Animation", "Reset floor appearance", "Saved in this browser. Does not change how the factory runs."]) assert.match(markup, new RegExp(text));
+  assert.match(markup, /<option value="selected-room" selected="">Selected room<\/option>/);
+});
+
+test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
+  const priorWindow = globalThis.window;
+  const entries = new Map([
+    ["dark-factory.floor-appearance", '{"scenery":"subtle","dependencyLinks":"overview","labels":"bad","taskProps":"bad","animation":"off"}'],
+    ["dark-factory.pairing", "keep"],
+  ]);
+  const writes = [];
+  globalThis.window = { localStorage: {
+    getItem: (key) => entries.get(key) ?? null,
+    setItem: (key, value) => { writes.push([key, value]); entries.set(key, value); },
+    removeItem: (key) => { writes.push([key]); entries.delete(key); },
+  } };
+  try {
+    let tree;
+    act(() => { tree = create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); });
+    assert.deepEqual(writes, [], "loading never writes defaults");
+    const selects = tree.root.findAllByType("select");
+    assert.equal(selects[0].props.value, "subtle");
+    assert.equal(selects[1].props.value, "overview");
+    assert.equal(selects[2].props.value, "names");
+    assert.equal(selects[3].props.value, "on");
+    act(() => { selects[0].props.onChange({ currentTarget: { value: "off" } }); });
+    assert.deepEqual(JSON.parse(entries.get("dark-factory.floor-appearance")), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "off" });
+    act(() => { tree.root.findAllByType("button").find((button) => button.props.children === "Reset floor appearance").props.onClick(); });
+    assert.equal(entries.has("dark-factory.floor-appearance"), false);
+    assert.equal(entries.get("dark-factory.pairing"), "keep");
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
+});
+
+test("blocked floor-appearance storage leaves the console renderable", () => {
+  const priorWindow = globalThis.window;
+  globalThis.window = { localStorage: { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => { throw new Error("blocked"); } } };
+  try {
+    assert.doesNotThrow(() => act(() => { create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); }));
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
 });
 
 test("one screen keeps Factory and the operator panels together", () => {
