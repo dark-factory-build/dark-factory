@@ -2097,3 +2097,44 @@ test("paired identities list newest first and revoke at an exact revision, never
   await assert.rejects(session.revokeBrowserClient({ clientId: other, expectedRevision: 0n }), (error) => error instanceof SessionError && error.code === "invalid_request");
   session.close();
 });
+
+test("closed state watches reconnect only for transport loss or retryable errors without replaying mutations", { timeout: 3_000 }, async () => {
+  for (const failure of [null, { code: "rate_limited", retryable: true }, { code: "unauthorized", retryable: false }, { code: "internal", retryable: false }]) {
+    const store = new MemoryKeys();
+    const sockets = [];
+    const timer = new VirtualTimer();
+    let ready;
+    let readiness = new Promise((resolve) => { ready = resolve; });
+    const client = new BrowserClient({
+      url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
+      onStatus: (status) => { if (status === "ready") ready(); },
+      socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; },
+    });
+    await client.connect();
+    await readiness;
+    readiness = new Promise((resolve) => { ready = resolve; });
+    const saved = store.value;
+    const mutation = client.session.updateTask({ taskId: "aa".repeat(16), expectedRevision: 1n, body: "one-shot instruction" });
+    const rejected = assert.rejects(mutation, (error) => error instanceof SessionError);
+    const watch = lastFrame(sockets[0], "STATE_WATCH");
+    if (failure === null) sockets[0].close();
+    else sockets[0].reply(encodeServerError(failure, watch.id));
+    await rejected;
+    await tick();
+    timer.advance(10);
+    const retry = failure === null || failure.retryable;
+    if (retry) await readiness;
+    assert.equal(sockets.length, retry ? 2 : 1);
+    assert.equal(client.status, retry ? "ready" : "closed");
+    assert.strictEqual(store.value, saved, "pairing must remain unchanged");
+    if (retry) {
+      const types = sockets[1].sent.map((wire) => decodeClientControl(wire).type);
+      assert.ok(types.includes("AUTH_PROVE"));
+      assert.ok(types.includes("STATE_GET"));
+      assert.ok(!types.includes("PAIR_PROVE"));
+      assert.ok(!types.includes("TASK_UPDATE"));
+      assert.ok(!types.some((type) => type.startsWith("TERMINAL_")));
+    }
+    client.close();
+  }
+});

@@ -84,7 +84,8 @@ type AuthRequest struct {
 
 // StateUpdate is exactly one head-only invalidation. It carries no entity
 // data: the client refetches a whole snapshot when it wants current state.
-// Closing Updates is treated as an internal failure and forces reconnect.
+// Closing Updates ends the connection; a retained subscription error determines
+// whether the client may reconnect. Clean closure reconnects through transport loss.
 type StateUpdate struct {
 	Head browserprotocol.Decimal
 }

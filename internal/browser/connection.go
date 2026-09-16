@@ -293,7 +293,15 @@ func (current *connection) serve() {
 			return
 		case update, ok := <-updates:
 			subscriptionID := current.subscriptionID
-			if !ok || current.sendUpdate(update) != nil {
+			if !ok {
+				if err := current.closeSubscription(); err != nil {
+					current.recordCleanup(err)
+					mapped := errorFrame(err)
+					current.sendError(subscriptionID, mapped.Code, mapped.Retryable)
+				}
+				return
+			}
+			if current.sendUpdate(update) != nil {
 				current.sendError(subscriptionID, browserprotocol.ErrorInternal, false)
 				return
 			}
@@ -1113,7 +1121,7 @@ func stopSubscription(subscription StateSubscription) error {
 	select {
 	case <-done:
 		if err := subscription.Err(); err != nil {
-			return fmt.Errorf("%w: %v", ErrSubscriptionUnresolved, err)
+			return fmt.Errorf("%w: %w", ErrSubscriptionUnresolved, err)
 		}
 		return nil
 	case <-timer.C:
