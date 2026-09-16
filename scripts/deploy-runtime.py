@@ -58,6 +58,24 @@ def deploy(sha, home=None):
             raise ValueError('operator changed factory controls during deployment drain')
         return revision, active
 
+    def restore_dispatch(revision):
+        # Only a definite refused CAS is retryable. Each fresh owned snapshot
+        # must prove another settlement, so at most the original runs can race.
+        for _ in range(original_active + 1):
+            try:
+                subprocess.run([str(control), 'dispatch', 'on', '--revision', str(revision)], env=env, check=True, timeout=15,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                return
+            except subprocess.CalledProcessError as exc:
+                if exc.returncode != 1 or exc.stderr != 'factoryctl: dispatch revision is stale\n':
+                    sys.stderr.write(exc.stderr or '')
+                    raise
+                next_revision, _ = paused_state()
+                if next_revision <= revision:
+                    raise
+                revision = next_revision
+        raise ValueError('dispatch restoration did not converge after known settlements')
+
     paused_state()
     deadline = time.monotonic() + 300
     while True:
@@ -68,7 +86,7 @@ def deploy(sha, home=None):
             # Installation has not started. Restore only this proven owned pause;
             # the revision CAS refuses a racing operator change or settlement.
             if enabled:
-                subprocess.run([str(control), 'dispatch', 'on', '--revision', str(drained_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
+                restore_dispatch(drained_revision)
             raise ValueError('runs did not drain')
         time.sleep(1)
     try:
@@ -87,7 +105,7 @@ def deploy(sha, home=None):
     current_enabled, revision, active = state(home)
     # A subsequent explicit operator dispatch change wins over our restoration.
     if enabled and not current_enabled and active == 0 and revision == drained_revision:
-        subprocess.run([str(control), 'dispatch', 'on', '--revision', str(drained_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
+        restore_dispatch(drained_revision)
     print(json.dumps({'sha': sha, 'healthy': True, 'dispatch_enabled': bool(state(home)[0])}))
 
 

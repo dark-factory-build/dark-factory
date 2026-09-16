@@ -261,6 +261,33 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                     self.assertEqual(['on', '--revision', str(paused + 1)], restore[0][-3:])
                 receipt.assert_not_called()
 
+    def test_runtime_restore_retries_only_a_refused_cas_with_proven_settlement(self):
+        cases = [
+            ('settlement', 'factoryctl: dispatch revision is stale\n', (False, 6, 1), [5, 6], ValueError),
+            ('operator', 'factoryctl: dispatch revision is stale\n', (False, 7, 1), [5], ValueError),
+            ('no progress', 'factoryctl: dispatch revision is stale\n', (False, 5, 2), [5], subprocess.CalledProcessError),
+            ('opaque', 'factoryctl: dispatch was not accepted\n', None, [5], subprocess.CalledProcessError),
+            ('timeout', None, None, [5], subprocess.TimeoutExpired),
+        ]
+        for name, error, raced, expected, failure in cases:
+            with self.subTest(name=name):
+                states = iter([(True, 4, 2), (False, 5, 2), (False, 5, 2), raced])
+                attempts = []
+                def command(argv, **kwargs):
+                    if 'on' in argv:
+                        attempts.append(int(argv[-1]))
+                        if len(attempts) == 1:
+                            if error is None:
+                                raise subprocess.TimeoutExpired(argv, 15)
+                            raise subprocess.CalledProcessError(1, argv, stderr=error)
+                    return subprocess.CompletedProcess(argv, 0, '', '')
+                with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), \
+                     patch.object(deploy.subprocess, 'run', side_effect=command), \
+                     patch.object(deploy.time, 'monotonic', side_effect=[0, 301]):
+                    with self.assertRaises(failure):
+                        deploy.deploy('a' * 40)
+                self.assertEqual(expected, attempts)
+
     def test_runtime_operator_change_after_install_wins_over_restore(self):
         states = iter([(True, 4, 2), (False, 5, 2), (False, 7, 0), (False, 9, 0), (False, 9, 0)])
         with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), \
