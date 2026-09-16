@@ -847,7 +847,21 @@ func taskMatchesRun(task Task, run Run) bool {
 }
 
 func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Task) error {
-	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id = ? AND task_incarnation_id = ? ORDER BY admitted_task_work_revision`, task.ID.Bytes(), task.IncarnationID.Bytes())
+	return validateTaskRunTopologyWithLimit(ctx, connection, task, 0)
+}
+
+func validateTaskRunTopologyBounded(ctx context.Context, connection *sql.Conn, task Task, limit int) error {
+	return validateTaskRunTopologyWithLimit(ctx, connection, task, limit)
+}
+
+func validateTaskRunTopologyWithLimit(ctx context.Context, connection *sql.Conn, task Task, limit int) error {
+	query := `SELECT ` + runColumns + ` FROM runs WHERE task_id = ? AND task_incarnation_id = ? ORDER BY admitted_task_work_revision`
+	args := []any{task.ID.Bytes(), task.IncarnationID.Bytes()}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit+1)
+	}
+	rows, err := connection.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -856,6 +870,10 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 	found := false
 	var invalid error
 	for rows.Next() {
+		if limit > 0 && expectedRevision > int64(limit) {
+			_ = rows.Close()
+			return fmt.Errorf("%w: task has more than %d runs", ErrRecoveryBounds, limit)
+		}
 		run, present, err := scanRun(rows)
 		if err != nil || !present || run.ProjectID != task.ProjectID || run.TaskID != task.ID || run.TaskIncarnationID != task.IncarnationID || run.AdmittedTaskWorkRevision.Int64() != expectedRevision {
 			if err != nil {

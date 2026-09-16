@@ -456,13 +456,31 @@ func (store *Store) Resource(ctx context.Context, id ResourceID) (Resource, bool
 }
 
 func resourcesForRun(ctx context.Context, connection *sql.Conn, runID RunID) ([]Resource, error) {
-	rows, err := connection.QueryContext(ctx, `SELECT `+resourceColumns+` FROM resources WHERE run_id = ? ORDER BY kind, id`, runID.Bytes())
+	return resourcesForRunWithLimit(ctx, connection, runID, 0)
+}
+
+func resourcesForRunBounded(ctx context.Context, connection *sql.Conn, runID RunID, limit int) ([]Resource, error) {
+	return resourcesForRunWithLimit(ctx, connection, runID, limit)
+}
+
+func resourcesForRunWithLimit(ctx context.Context, connection *sql.Conn, runID RunID, limit int) ([]Resource, error) {
+	query := `SELECT ` + resourceColumns + ` FROM resources WHERE run_id = ? ORDER BY kind, id`
+	args := []any{runID.Bytes()}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit+1)
+	}
+	rows, err := connection.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var resources []Resource
 	for rows.Next() {
+		if limit > 0 && len(resources) == limit {
+			_ = rows.Close()
+			return nil, fmt.Errorf("%w: run has more than %d resources", ErrRecoveryBounds, limit)
+		}
 		resource, found, err := scanResource(rows)
 		if err != nil {
 			return nil, err

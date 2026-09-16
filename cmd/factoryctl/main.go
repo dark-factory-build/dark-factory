@@ -73,6 +73,7 @@ const (
   factoryctl task add --project ID --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
+  factoryctl task recovery --task ID --incarnation ID
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
@@ -127,6 +128,7 @@ const (
 	commandAgentSelectModel
 	commandTaskAdd
 	commandTaskSendBack
+	commandTaskRecovery
 	commandDispatch
 	commandCapacity
 	commandStatus
@@ -826,6 +828,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandTaskAdd
 	case "task send-back":
 		command.kind = commandTaskSendBack
+	case "task recovery":
+		command.kind = commandTaskRecovery
 	default:
 		return attemptCommand{}, false, false
 	}
@@ -926,6 +930,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.run = value
 		case name == "--task" && command.kind == commandTaskSendBack && validHumanRequestKey(value):
 			command.id = value
+		case name == "--task" && command.kind == commandTaskRecovery && validHumanRequestKey(value):
+			command.id = value
+		case name == "--incarnation" && command.kind == commandTaskRecovery && validHumanRequestKey(value):
+			command.run = value
 		case name == "--note" && command.kind == commandTaskSendBack && validQuestion(value):
 			command.text = value
 		case name == "--priority" && command.kind == commandTaskAdd:
@@ -975,6 +983,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandTaskSendBack:
 		if command.id == "" || command.text == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandTaskRecovery:
+		if command.id == "" || command.run == "" {
 			return attemptCommand{}, false, false
 		}
 	}
@@ -1467,6 +1479,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Head     uint64 `json:"head"`
 			Revision uint64 `json:"revision"`
 		}{ID: command.id, Head: result.Head, Revision: result.Revision})
+	case commandTaskRecovery:
+		recovery, callErr := client.TaskRecovery(callContext, api.TaskRecoveryInput{TaskID: command.id, IncarnationID: command.run})
+		if callErr != nil {
+			return writeWebFailure(stderr, "task recovery", callErr)
+		}
+		return writeJSON(stdout, recovery)
 	case commandDispatch:
 		revision := command.expectedRevision
 		if revision == 0 {

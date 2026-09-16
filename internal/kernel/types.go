@@ -14,6 +14,8 @@ const (
 	MaxFactoryCapacity     = 1024
 	MaxChangeTreeEntries   = 10_000
 	MaxChangeTreeBlobBytes = 1 << 30
+	MaxRecoveryRuns        = 64
+	MaxRecoveryResources   = 16
 )
 
 type identifier struct {

@@ -44,6 +44,7 @@ const (
 	CallPeerAnswer
 	CallSendBack
 	CallSendBackTask
+	CallTaskRecovery
 	CallWebStatus
 	CallWebListClients
 	CallWebRevokeClient
@@ -88,6 +89,7 @@ type Call struct {
 	peerTargetOffset  uint64
 	peerExpectedHead  uint64
 	sendBack          SendBackInput
+	taskRecovery      TaskRecoveryInput
 	overseerTask      OverseerTaskCreateInput
 	overseerSnapshot  OverseerSnapshotInput
 	overseerTaskEdit  OverseerTaskUpdateInput
@@ -228,6 +230,10 @@ func (call Call) SendBackInput() (SendBackInput, bool) {
 	return call.sendBack, call.kind == CallSendBack || call.kind == CallSendBackTask
 }
 
+func (call Call) TaskRecoveryInput() (TaskRecoveryInput, bool) {
+	return call.taskRecovery, call.kind == CallTaskRecovery
+}
+
 func (call Call) WebClientRevocationInput() (WebClientRevocationInput, bool) {
 	return call.webClient, call.kind == CallWebRevokeClient
 }
@@ -251,6 +257,7 @@ const (
 	replyOverseerSnapshot
 	replyPeerStatus
 	replyAccounts
+	replyTaskRecovery
 	replyError
 )
 
@@ -269,6 +276,7 @@ type Reply struct {
 	overseer      OverseerSnapshot
 	peerStatus    PeerStatus
 	accounts      Accounts
+	taskRecovery  TaskRecovery
 	code          RemoteErrorCode
 }
 
@@ -327,6 +335,13 @@ func NewAttemptSourceReply(source RetainedChangeHandoff) (Reply, error) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyAttemptSource, attemptSource: source}, nil
+}
+
+func NewTaskRecoveryReply(value TaskRecovery) (Reply, error) {
+	if value.State != "missing" && value.State != "found" || value.State == "found" && !validID(value.TaskID) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyTaskRecovery, taskRecovery: value}, nil
 }
 
 func NewPeerStatusReply(status PeerStatus) (Reply, error) {
@@ -661,6 +676,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.task); err != nil || !validID(call.task.ID) || !validID(call.task.ProjectID) || !validID(call.task.AssignedAgentID) || !validID(call.task.IncarnationID) || !validText(call.task.Title, 1, 1024) || !validText(call.task.Body, 0, 131072) || call.task.Priority < -1_000_000 || call.task.Priority > 1_000_000 {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallTaskRecovery:
+		if err := decodeExact(request.Params, &call.taskRecovery); err != nil || !validID(call.taskRecovery.TaskID) || !validID(call.taskRecovery.IncarnationID) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallSetDispatch:
 		var input struct {
 			ExpectedRevision uint64 `json:"expected_revision"`
@@ -846,6 +865,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallSendBack, attemptDomain
 	case "send_back_task":
 		return CallSendBackTask, operatorDomain
+	case "task_recovery":
+		return CallTaskRecovery, operatorDomain
 	case "web_status":
 		return CallWebStatus, operatorDomain
 	case "web_list_clients":
@@ -942,6 +963,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyAttemptTask
 	case CallAttemptSource:
 		return reply == replyAttemptSource
+	case CallTaskRecovery:
+		return reply == replyTaskRecovery
 	case CallPeerStatus:
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
@@ -988,6 +1011,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.attemptTask)
 	case replyAttemptSource:
 		data, err = json.Marshal(reply.attemptSource)
+	case replyTaskRecovery:
+		data, err = json.Marshal(reply.taskRecovery)
 	case replyWebStatus:
 		data, err = json.Marshal(reply.webStatus)
 	case replyWebClients:

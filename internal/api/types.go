@@ -278,6 +278,33 @@ type TaskSummary struct {
 	Revision        uint64 `json:"revision"`
 }
 
+type TaskRecoveryInput struct {
+	TaskID        string `json:"task_id"`
+	IncarnationID string `json:"incarnation_id"`
+}
+
+type TaskRecovery struct {
+	State                 string   `json:"state"`
+	TaskID                string   `json:"task_id"`
+	IncarnationID         string   `json:"incarnation_id"`
+	ProjectID             string   `json:"project_id"`
+	AssignedAgentID       string   `json:"assigned_agent_id"`
+	WorkRevision          uint64   `json:"work_revision"`
+	Revision              uint64   `json:"revision"`
+	Status                string   `json:"status"`
+	NeedsOperatorRecovery bool     `json:"needs_operator_recovery"`
+	ChangeID              string   `json:"change_id,omitempty"`
+	ChangeRevision        uint64   `json:"change_revision,omitempty"`
+	ChangePhase           string   `json:"change_phase,omitempty"`
+	SourceFormat          string   `json:"source_format,omitempty"`
+	SourceBaseCommit      string   `json:"source_base_commit,omitempty"`
+	SourceRepositoryDev   int64    `json:"source_repository_dev,omitempty"`
+	SourceRepositoryInode int64    `json:"source_repository_inode,omitempty"`
+	RunID                 string   `json:"run_id,omitempty"`
+	RunRevision           uint64   `json:"run_revision,omitempty"`
+	ArtifactPaths         []string `json:"artifact_paths"`
+}
+
 // DashboardSnapshot deliberately contains only the bounded public Store
 // projection. Roots, task bodies/results, models, credentials and source data
 // have no representable field here.
