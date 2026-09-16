@@ -63,6 +63,18 @@ the latest retained send-back note remains attached as read-only review
 feedback; it does not create a new `work_revision`. Use priority, assignment,
 or cancel alone when changing a legacy task whose stored prompt is no longer
 accepted by its provider.
+Put enduring acceptance criteria, merged prerequisites and owner-authority
+clarifications in that complete base instruction, preserving the original
+acceptance criteria. Send-back replaces the previous feedback; it is not a place
+to accumulate requirements. For a settled task, pause its assigned worker before
+send-back if needed to keep the correction queued, read the returned revision,
+update `--body`, then restore the worker's previous admission state. Do not
+resume a worker that was already paused by the operator. Resume only with the
+agent revision returned by your own pause; if it changed, leave the newer
+control intact. If the task has already
+started, do not replay the edit or interrupt it merely to rewrite instructions;
+use the existing worker communication path and persist the instruction at the
+next queued boundary.
 For `factoryctl` controls, mint a 32-hex operation ID once (for example,
 `python3 -c 'import uuid; print(uuid.uuid4().hex)'`) and keep it when observing or
 retrying that operation. Supply `--task-id` and `--incarnation-id` when creating
@@ -450,7 +462,8 @@ unavailable read-only checks are deferred delivery conditions, not defects.
   non-retained handoffs are refusals, not candidates for reconstruction.
 
   The note goes at the end of the task's body, replacing the note of any
-  earlier send-back, and the worker's provider receives that body whole;
+  earlier send-back. Keep enduring requirements in the base instruction above;
+  the worker's provider receives that instruction and latest note whole;
   the daemon refuses a send-back the provider could not be handed
   (`too_large`), so keep the note to that shape: a pointer, never the
   findings pasted. A shell agent's task is a program and cannot be sent

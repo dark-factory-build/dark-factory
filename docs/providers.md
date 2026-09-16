@@ -61,6 +61,13 @@ factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5
 The same provider validation applies. An admitted run retains its immutable
 model and effort, so the selection affects only future admissions.
 
+Overseers keep enduring acceptance criteria, prerequisites and owner-authority
+clarifications in the task's complete base instruction using
+`overseer task update --body` while it is queued, preserving its original
+acceptance criteria. A send-back replaces the previous feedback; use its note
+for the latest findings or pointers, not enduring requirements. See
+[the queued correction procedure](development/OVERSEER.md).
+
 `--role orchestrator` names an overseer. A worker's run materializes a Change
 of the project and works there; an orchestrator's run binds no Change and is
 given its private runtime home as its working directory. It requests a worker

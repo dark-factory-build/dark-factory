@@ -268,6 +268,12 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 	if _, err := store.SendBackTask(ctx, sent.ID, sent.Revision, "again", mustTime(t, 92)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("queued task sent back = %v", err)
 	}
+	// Requirements belong in the editable instruction, not the replaceable note.
+	durableInstruction := legacyInstruction + "\nIntegrate reviewed prerequisite #744; preserve exact owner authority."
+	edited, err := store.UpdateTask(ctx, sent.ID, sent.Revision, TaskPatch{Body: &durableInstruction}, mustTime(t, 93))
+	if err != nil || TaskInstruction(edited) != durableInstruction || TaskFeedback(edited) != TaskFeedback(sent) {
+		t.Fatalf("durable correction instruction = %+v, %v", edited, err)
+	}
 	candidate := changeID(t, 110)
 	keys := admissionKeys(t, 100, &candidate)
 	result, err := store.AdmitNext(ctx, keys, mustTime(t, 100))
@@ -303,7 +309,7 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 		t.Fatalf("second terminal task = %+v, found=%v, %v", retried, found, err)
 	}
 	second, err := store.SendBackTask(ctx, retried.ID, retried.Revision, "the second note", mustTime(t, 160))
-	if err != nil || second.Body != legacyInstruction+"\n\n## Sent back for work revision 3\n\nthe second note" || second.SentBackInstructionBytes == nil || *second.SentBackInstructionBytes != int64(byteLen(legacyInstruction)) {
+	if err != nil || second.Body != durableInstruction+"\n\n## Sent back for work revision 3\n\nthe second note" || second.SentBackInstructionBytes == nil || *second.SentBackInstructionBytes != int64(byteLen(durableInstruction)) {
 		t.Fatalf("second send-back = %+v, %v", second, err)
 	}
 }
