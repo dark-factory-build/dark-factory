@@ -334,7 +334,7 @@ func validTaskRecovery(value TaskRecovery) bool {
 			return false
 		}
 	} else {
-		if !(value.SourceFormat == "sha1" && len(value.SourceBaseCommit) == 40 || value.SourceFormat == "sha256" && len(value.SourceBaseCommit) == 64) || value.SourceRepositoryDev <= 0 || value.SourceRepositoryInode <= 0 {
+		if !(value.SourceFormat == "sha1" && len(value.SourceBaseCommit) == 40 || value.SourceFormat == "sha256" && len(value.SourceBaseCommit) == 64) || value.SourceRepositoryDev < 0 || value.SourceRepositoryInode <= 0 {
 			return false
 		}
 		for _, ch := range value.SourceBaseCommit {
