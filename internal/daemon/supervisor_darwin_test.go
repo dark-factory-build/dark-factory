@@ -308,7 +308,7 @@ func TestSupervisorCancelsRetainedOutcomeRetryWithWriterBlocked(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "retained outcome proposal") {
 			t.Fatalf("canceled retained retry = %v", err)
 		}
 	case <-time.After(2 * time.Second):
