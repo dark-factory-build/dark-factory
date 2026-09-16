@@ -8,7 +8,7 @@ import (
 
 func TestAttemptTaskAssignmentReceiptIsAdditiveAndTerminalSafe(t *testing.T) {
 	value := AttemptTask{
-		Task:                   "inspect\u007f\u0085",
+		Task:                   "inspect\x7f\u0085",
 		TaskID:                 strings.Repeat("1", 32),
 		IncarnationID:          strings.Repeat("2", 32),
 		WorkRevision:           3,
