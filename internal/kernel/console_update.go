@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
@@ -214,7 +215,16 @@ func (store *Store) AuthorizeWorkerTaskForOverseer(ctx context.Context, digest A
 	if !found || task.ProjectID != overseer.ProjectID {
 		return ErrUnauthorized
 	}
-	agent, found, err := agentByID(ctx, read.connection, task.AssignedAgentID)
+	return requireWorkerTask(ctx, read.connection, task)
+}
+
+// requireWorkerTask authorizes an overseer edit: the task is a worker's, or
+// unclaimed shared work that only a worker can claim.
+func requireWorkerTask(ctx context.Context, connection *sql.Conn, task Task) error {
+	if task.AssignedAgentID.zero() {
+		return nil
+	}
+	agent, found, err := agentByID(ctx, connection, task.AssignedAgentID)
 	if err != nil {
 		return err
 	}
@@ -251,12 +261,8 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
 	if digest != nil {
-		agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
-		if err != nil {
+		if err := requireWorkerTask(ctx, tx.connection, task); err != nil {
 			return Task{}, tx.Rollback(err)
-		}
-		if !found || agent.Role != RoleWorker {
-			return Task{}, tx.Rollback(ErrUnauthorized)
 		}
 	}
 	if task.Status != TaskQueued {
@@ -301,7 +307,7 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		sentBack = *task.SentBackInstructionBytes
 	}
 	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET title = ?, body = ?, sent_back_instruction_bytes = ?, priority = ?, assigned_agent_id = ?, status = ?, completed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = 'queued' AND revision = ?`,
-		task.Title, task.Body, sentBack, task.Priority, task.AssignedAgentID.Bytes(), status, completed, at.Int64(), id.Bytes(), expected.Int64())
+		task.Title, task.Body, sentBack, task.Priority, nullableAgentID(task.AssignedAgentID), status, completed, at.Int64(), id.Bytes(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}

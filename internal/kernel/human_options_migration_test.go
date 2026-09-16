@@ -30,6 +30,9 @@ func TestV8PendingQuestionSurvivesOptionsMigration(t *testing.T) {
 	if err := rebuildTable(ctx, connection, expectedSchemaOf(v8SchemaStatements()), "human_requests", columns, "human_requests_one_unresolved_per_run", "", ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v8SchemaStatements()), "tasks", testTaskColumnsV5, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
 		t.Fatal(err)
 	}
