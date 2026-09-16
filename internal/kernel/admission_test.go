@@ -789,3 +789,48 @@ func terminalSessionForRunTest(t testing.TB, store *Store, runID RunID) Terminal
 	}
 	return session
 }
+
+func TestAdmissionValidatesBeforeMutationAndReconciliation(t *testing.T) {
+	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
+		for _, replay := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/replay=%v", role, replay), func(t *testing.T) {
+				store, _, project, agent := newAdmissionStore(t, role, 2)
+				defer store.Close()
+				ctx := context.Background()
+				if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 20), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 21), Title: "work"}, mustTime(t, 4)); err != nil {
+					t.Fatal(err)
+				}
+				keys := admissionKeys(t, 30, nil)
+				if replay {
+					result, err := store.AdmitNext(ctx, keys, mustTime(t, 5))
+					if err != nil || !result.Admitted() {
+						t.Fatalf("initial admission=%+v %v", result, err)
+					}
+				}
+				// Unrelated event corruption must still block new or reconciled authority.
+				corruptSQL(t, store, `UPDATE invalidations SET sequence = 100 WHERE sequence = 1`)
+				before := captureWriteFootprint(t, store)
+				if _, err := store.AdmitNext(ctx, keys, mustTime(t, 6)); !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("corrupt admission=%v", err)
+				}
+				if after := captureWriteFootprint(t, store); after != before {
+					t.Fatal("refusal mutated durable state")
+				}
+			})
+		}
+	}
+}
+
+func TestEmptyAdmissionDoesNotValidateUnrelatedHistoryOrWrite(t *testing.T) {
+	store, _, _, _ := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	corruptSQL(t, store, `UPDATE invalidations SET sequence = 100 WHERE sequence = 1`)
+	before := captureWriteFootprint(t, store)
+	result, err := store.AdmitNext(context.Background(), admissionKeys(t, 30, nil), mustTime(t, 6))
+	if err != nil || result.Admitted() || result.Reason != NoAdmissionQueueEmpty {
+		t.Fatalf("empty probe=%+v %v", result, err)
+	}
+	if after := captureWriteFootprint(t, store); after != before {
+		t.Fatal("empty probe mutated durable state")
+	}
+}
