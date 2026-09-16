@@ -77,10 +77,12 @@ operator interventions as changes in direction: read their history before
 issuing conflicting instructions. Raw terminal keystrokes are not recorded as
 messages; only explicit controls enter this history.
 
-After delegating or handling the current events, report your durable outcome
-and exit. Do not poll a worker until it finishes. With a standing instruction
-and remaining run budget configured, worker completion, questions, and explicit
-interventions wake you again. Events received while you are queued or running
+Continue useful, actionable supervision and delivery in the same session,
+including unblocking other workers while a change awaits correction. When no
+actionable work remains, report a concise durable checkpoint and exit; do not
+poll or keep a paid session idle waiting for a worker. With a standing instruction
+configured, worker completion, questions, and explicit interventions wake you
+again. Events received while you are queued or running
 remain pending for the next supervision task. A factory-wide overseer slot lets
 you supervise alongside workers even when worker capacity is one.
 
@@ -112,11 +114,11 @@ instructions guide agents; they do not add an OS filesystem sandbox.
 Everything below assumes the launch-scoped private runtime home and `TMPDIR`,
 no `gh` credential, git without any remote credential, and the Maintainer App
 as the one MCP server (`maintainer`). A Codex overseer has no daemon database,
-Changes-parent, or operator-home access; its only retained-source access is
-the exact eligible same-project target requested by the admitted task and
-selected by the daemon at launch. Retained history is not a broad launch
-grant: the one-tree bound keeps the Codex permission argument below its fixed
-limit.
+Changes-parent, or operator-home access; retained-source access uses
+its private runtime source directory. Each explicit source request is checked
+against current task authority and materializes an exact eligible same-project
+handoff there. Multiple eligible handoffs can be read in one attempt without
+granting access to the Changes parent or adding permission entries per tree.
 
 ## What you may and may not do
 
@@ -127,7 +129,8 @@ limit.
   Change.
 - Never record a review verdict yourself. The review is a separate headless
   session started by `scripts/cold-review.sh`; you read its verdict.
-- One change at a time, in the order the runs finished.
+- Prioritize actionable changes and throughput blockers; one blocked change
+  does not prevent handling another independent change in the same session.
 - A review that asks for changes is not a decision for a human: send the task
   back to its worker with the findings (`attempt send-back`, section 5) and
   the worker's next run continues from the tree it left.
