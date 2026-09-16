@@ -19,7 +19,7 @@ SPEC = importlib.util.spec_from_file_location("factory_intake", HERE / "factory-
 intake = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(intake)
 SHA = re.compile(r"^[0-9a-f]{40}$")
-FOOTER = re.compile(r"(?im)^(?:refs|closes)\s+#([1-9][0-9]*)\s*$")
+FOOTER = re.compile(r"(?im)^(?:refs|closes)[ \t]+#([1-9][0-9]*)[ \t]*$")
 
 
 class ReviewError(Exception):

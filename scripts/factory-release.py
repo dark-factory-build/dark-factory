@@ -18,7 +18,6 @@ import time
 from pathlib import Path
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
-SOURCE_FOOTER = re.compile(r"(?mi)^(Refs|Closes) #([1-9][0-9]*)\s*$")
 APP_MARKER_TRAILER = re.compile(r"(?mi)^<!-- dark-factory-operation:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9a-f]{64} -->\s*\Z")
 MAX_RANGE_COMMITS = 100
 MAX_RANGE_PULLS = 100
@@ -289,15 +288,14 @@ def range_sources(config, previous, target):
             actual = (detail.get("mergeCommit") or {}).get("oid") if isinstance(detail, dict) else None
             if not isinstance(detail, dict) or detail.get("state") != "MERGED" or detail.get("baseRefName") != config["base"] or actual != merge or not isinstance(detail.get("body"), str):
                 raise ReleaseError("deployment pull request changed or is malformed")
-            footer = SOURCE_FOOTER.findall(detail["body"])
-            terminal_footer = re.search(r"(?mi)^(Refs|Closes) #([1-9][0-9]*)[ \t]*(?:\n\s*)?\Z", detail["body"])
+            terminal_footer = re.search(r"(?mi)^(Refs|Closes)[ \t]+#([1-9][0-9]*)[ \t]*(?:\n[ \t]*)*\Z", detail["body"])
             if terminal_footer is None:
                 marker = APP_MARKER_TRAILER.search(detail["body"])
                 before_marker = detail["body"][:marker.start()] if marker else ""
-                terminal_footer = re.search(r"(?mi)^(Refs|Closes) #([1-9][0-9]*)[ \t]*\s*\Z", before_marker)
-            if len(footer) != 1 or terminal_footer is None:
-                raise ReleaseError(f"merged PR #{number} must contain exactly one Refs #N or Closes #N footer")
-            kind, issue = footer[0]
+                terminal_footer = re.search(r"(?mi)^(Refs|Closes)[ \t]+#([1-9][0-9]*)[ \t]*(?:\n[ \t]*)*\Z", before_marker)
+            if terminal_footer is None:
+                raise ReleaseError(f"merged PR #{number} must contain exactly one terminal Refs #N or Closes #N footer")
+            kind, issue = terminal_footer.groups()
             sources.append({"pr": number, "merge_sha": merge, "issue": int(issue), "reference": kind.lower()})
     if len(sources) != len(by_number):
         raise ReleaseError("deployment pull-request lookup did not cover every merged PR")

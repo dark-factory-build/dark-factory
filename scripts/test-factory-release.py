@@ -206,6 +206,20 @@ class ReleaseFixtures(unittest.TestCase):
         with mock.patch.object(release, "run", side_effect=gh):
             self.assertEqual(release.range_sources(cfg, OLD, SHA)[0][0]["issue"], 602)
 
+    def test_range_routes_terminal_source_footer_with_related_issue_prose(self):
+        cfg = config(Path("/tmp/release.json"))
+        def gh(argv, *unused):
+            command = " ".join(argv)
+            if "/compare/" in command:
+                return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
+            if "/pulls" in command:
+                return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA},
+                               "body": "Refs #784\n\nRefs #602\n"})
+        with mock.patch.object(release, "run", side_effect=gh):
+            self.assertEqual(release.range_sources(cfg, OLD, SHA)[0],
+                             [{"pr": 10, "merge_sha": SHA, "issue": 602, "reference": "refs"}])
+
     @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
     def test_timeout_terminates_the_hook_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
