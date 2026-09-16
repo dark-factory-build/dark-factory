@@ -32,7 +32,12 @@ type dispatchFixture struct {
 
 func newDispatchFixture(t *testing.T) *dispatchFixture {
 	t.Helper()
-	directory, err := os.MkdirTemp("/private/tmp", "dark-factory-dispatch-")
+	return newDispatchFixtureAt(t, "/private/tmp")
+}
+
+func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
+	t.Helper()
+	directory, err := os.MkdirTemp(parent, "dark-factory-dispatch-")
 	if err != nil {
 		t.Fatal(err)
 	}

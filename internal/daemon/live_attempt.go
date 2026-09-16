@@ -242,10 +242,14 @@ type liveAttemptResult struct {
 // below, mutable fields belong to its one owner goroutine after construction;
 // the registry mutex protects only the daemon's map membership.
 type liveAttempt struct {
-	daemon     *Daemon
-	runID      kernel.RunID
-	sessionID  kernel.TerminalSessionID
-	controller *runner.AttemptController
+	daemon *Daemon
+	runID  kernel.RunID
+	// attemptDigest identifies the exact bearer that owns this live run. It is
+	// retained only for routing a refused outcome back to its owner; it is not
+	// authority and is never exposed through the live-attempt API.
+	attemptDigest kernel.AttemptDigest
+	sessionID     kernel.TerminalSessionID
+	controller    *runner.AttemptController
 
 	commands chan liveAttemptCommand
 	wake     chan struct{}
@@ -256,6 +260,14 @@ type liveAttempt struct {
 	// It spans durable finalization through the reporting client's validated
 	// response acknowledgement, without holding that global gate during I/O.
 	outcomeReceiptPending bool
+	// outcomeRefusal is written and consumed under daemon.operationMu. It is a
+	// typed refusal from this exact bearer, never a generic unauthorized hint.
+	outcomeRefusal error
+	// pendingOutcome retains the exact proposal whose live API call was refused
+	// until the authenticated runner result gives the supervisor one final,
+	// owner-bound chance to commit it. It is not terminal authority and is never
+	// recovered or replayed after this owner is gone.
+	pendingOutcome *kernel.Proposal
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
@@ -330,6 +342,24 @@ func (daemon *Daemon) unregisterLiveAttempt(runID kernel.RunID, attempt *liveAtt
 	daemon.attemptMu.Unlock()
 }
 
+// liveAttemptForDigest finds the owner for an exact attempt bearer without
+// asking SQLite to authenticate it. The caller has already validated the
+// digest shape; this lookup is only a best-effort wake route for a refused
+// outcome, and the owner still rereads durable state before acting.
+func (daemon *Daemon) liveAttemptForDigest(digest kernel.AttemptDigest) *liveAttempt {
+	if daemon == nil {
+		return nil
+	}
+	daemon.attemptMu.Lock()
+	defer daemon.attemptMu.Unlock()
+	for _, attempt := range daemon.attempts {
+		if attempt != nil && attempt.attemptDigest == digest {
+			return attempt
+		}
+	}
+	return nil
+}
+
 // closeLiveAttempts is the daemon shutdown seam. It first closes admission to
 // the in-memory owner registry, then synchronously asks each owner to converge
 // and joins it. The Store remains the authority for recovery after an
@@ -338,12 +368,10 @@ func (daemon *Daemon) closeLiveAttempts() error {
 	if daemon == nil {
 		return nil
 	}
-	daemon.operationMu.Lock()
 	daemon.attemptMu.Lock()
 	if daemon.closing {
 		done := daemon.closeDone
 		daemon.attemptMu.Unlock()
-		daemon.operationMu.Unlock()
 		if done != nil {
 			<-done
 		}
@@ -361,7 +389,6 @@ func (daemon *Daemon) closeLiveAttempts() error {
 		supervisors = append(supervisors, registration)
 	}
 	daemon.attemptMu.Unlock()
-	daemon.operationMu.Unlock()
 	for _, registration := range supervisors {
 		registration.cancel()
 	}
@@ -399,6 +426,26 @@ func (attempt *liveAttempt) notify() {
 	case attempt.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (attempt *liveAttempt) notifyOutcomeRefusal(err error) {
+	if attempt == nil || err == nil || attempt.daemon == nil {
+		return
+	}
+	attempt.outcomeRefusal = err
+	attempt.notify()
+}
+
+func (attempt *liveAttempt) pendingOutcomeSnapshot() (kernel.Proposal, bool) {
+	if attempt == nil || attempt.daemon == nil {
+		return kernel.Proposal{}, false
+	}
+	attempt.daemon.operationMu.Lock()
+	defer attempt.daemon.operationMu.Unlock()
+	if attempt.pendingOutcome == nil {
+		return kernel.Proposal{}, false
+	}
+	return *attempt.pendingOutcome, true
 }
 
 func (attempt *liveAttempt) submit(ctx context.Context, command liveAttemptCommand) error {

@@ -678,6 +678,10 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
+	// Keep the exact live owner so a refusal caused by a concurrent durable
+	// finalization wakes its lifecycle loop immediately. The refusal remains
+	// the caller's error; this lookup carries no authority and is not exposed.
+	live := daemon.liveAttemptForDigest(kDigest)
 	proposal, err := proposalForCall(call)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest), nil
@@ -699,6 +703,7 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		attempt = daemon.attempts[run.ID]
 		if attempt != nil {
 			attempt.outcomeReceiptPending = true
+			attempt.pendingOutcome = nil
 		}
 		daemon.attemptMu.Unlock()
 		// The commit completed before ProposeAttemptOutcome returned. The owner
@@ -706,10 +711,29 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		// state payload; it only shortens the next durable Store poll.
 		daemon.notifyRun(run.ID)
 	}
-	daemon.operationMu.Unlock()
 	if err != nil {
+		var refusal *kernel.OutcomeRefusal
+		if live != nil && errors.As(err, &refusal) {
+			// Only the exact bearer owner receives a refusal action. A foreign
+			// bearer remains a plain API error and cannot terminate this run.
+			// Retain the first refused proposal only after the kernel has
+			// correlated this exact call to a durable refusal. A successful
+			// proposal already cleared this slot while holding operationMu.
+			if live.pendingOutcome == nil {
+				copy := proposal
+				live.pendingOutcome = &copy
+			}
+			live.notifyOutcomeRefusal(refusal)
+		} else if live != nil {
+			// Unauthorized/non-refusal responses include scope cancellation and
+			// credential revocation. Never retain a stale provider proposal across
+			// those durable boundaries.
+			live.pendingOutcome = nil
+		}
+		daemon.operationMu.Unlock()
 		return newErrorReply(remoteErrorCode(err)), nil
 	}
+	daemon.operationMu.Unlock()
 	return daemon.mutation(ctx, run.Revision), attempt
 }
 
@@ -834,6 +858,18 @@ func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply
 	}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
+	}
+	// Native worker providers can yield their bearer at a provider question.
+	// Shell and orchestrator questions retain their established terminal
+	// delivery contract until their provider-specific continuation surface is
+	// available; this keeps the daemon's operator/control-plane questions from
+	// being mistaken for a worker continuation.
+	if authority, authErr := daemon.store.AuthenticateAttempt(ctx, kDigest); authErr == nil && authority.Role == kernel.RoleWorker && authority.Provider != kernel.ProviderShell {
+		var conditionID kernel.ContinuationConditionID
+		copy(conditionID[:], request.ID.Bytes())
+		if _, err := daemon.store.YieldContinuationForAttempt(ctx, kDigest, kernel.ConditionHumanRequest, conditionID, request.Revision, at); err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
 	}
 	// A replayed idempotency key returns the earlier question; only a question
 	// that opened just now wakes the phones.
@@ -1141,6 +1177,15 @@ func (daemon *Daemon) overseerReplyHuman(ctx context.Context, call api.Call) api
 	at, err := daemon.timestamp()
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
+	}
+	if handled, continuationErr := daemon.store.ResolveHumanContinuationForAttempt(ctx, digest, requestID, expected, input.Reply, at); continuationErr == nil && handled {
+		projection, _, readErr := daemon.store.HumanRequest(ctx, requestID)
+		if readErr != nil {
+			return newErrorReply(remoteErrorCode(readErr))
+		}
+		return daemon.overseerHumanReplyMutation(projection)
+	} else if continuationErr != nil && !errors.Is(continuationErr, kernel.ErrNotFound) && !errors.Is(continuationErr, kernel.ErrConflict) && !errors.Is(continuationErr, kernel.ErrRevisionConflict) {
+		return newErrorReply(remoteErrorCode(continuationErr))
 	}
 	delivery, err := daemon.store.BeginHumanReplyForAttempt(ctx, digest, requestID, expected, deliveryID, input.Reply, at)
 	if err != nil {

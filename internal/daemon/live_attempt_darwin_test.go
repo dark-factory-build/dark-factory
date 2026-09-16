@@ -287,6 +287,60 @@ func TestLiveAttemptCancellationPreemptsOutcomeReceipt(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptConsumesRefusalAfterReturnedResult(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 115)
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
+	}
+	controller, peer := readyTerminalEffectController(t)
+	foreignController, foreignPeer := readyTerminalEffectController(t)
+	_ = foreignPeer
+	attempt := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
+	attempt.resultReturned = true
+	attempt.outcomeRefusal = kernel.NewOutcomeRefusal(kernel.ErrConflict)
+	foreign := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, foreignController)
+	foreign.resultReturned = true
+
+	// A receipt fence wins over a refusal, including after the result notice has
+	// already been returned. The refusal remains queued for the next pass.
+	attempt.outcomeReceiptPending = true
+	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || attempt.terminationSent {
+		t.Fatalf("receipt precedence = stop=%v err=%v terminated=%v", stop, err, attempt.terminationSent)
+	}
+	if attempt.outcomeRefusal == nil {
+		t.Fatal("receipt fence consumed refusal")
+	}
+
+	// A refusal for this exact owner converges its controller despite the result
+	// notice having been returned, while a foreign owner remains untouched.
+	attempt.outcomeReceiptPending = false
+	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop || !attempt.terminationSent || !attempt.terminationDelivered {
+		t.Fatalf("returned-result refusal = stop=%v err=%v sent=%v delivered=%v", stop, err, attempt.terminationSent, attempt.terminationDelivered)
+	}
+	if frame := readTerminalEffectWire(t, peer); frame.Kind != "terminate" {
+		t.Fatalf("refusal controller frame = %+v", frame)
+	}
+	if stop, err := foreign.processLifecycle(context.Background()); err != nil || stop || foreign.terminationSent {
+		t.Fatalf("foreign lifecycle = stop=%v err=%v terminated=%v", stop, err, foreign.terminationSent)
+	}
+}
+
+func TestLiveAttemptResultReadyReleasesOperationGate(t *testing.T) {
+	daemon := &Daemon{store: &kernel.Store{}}
+	attempt := newLiveAttempt(daemon, kernel.RunID{}, kernel.TerminalSessionID{}, nil)
+	attempt.resultReturned = true
+
+	if stop, err := attempt.processLifecycle(context.Background()); err != nil || stop {
+		t.Fatalf("result-ready lifecycle = stop=%v err=%v", stop, err)
+	}
+	if !daemon.operationMu.TryLock() {
+		t.Fatal("result-ready lifecycle left operation gate locked")
+	}
+	daemon.operationMu.Unlock()
+}
+
 func TestHandleConnectionClearsOnlyTheFailedOutcomeReceipt(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 114)

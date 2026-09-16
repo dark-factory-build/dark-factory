@@ -54,6 +54,47 @@ func TestLiveAttemptRegistryIsBoundedAndRejectsDuplicateRuns(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptDigestWakeTargetsOnlyExactOwner(t *testing.T) {
+	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
+	firstRun, firstSession := liveTestIDs(t, 11000)
+	secondRun, secondSession := liveTestIDs(t, 12000)
+	firstDigest, err := kernel.AttemptDigestFromBytes([]byte("11111111111111111111111111111111"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := kernel.AttemptDigestFromBytes([]byte("22222222222222222222222222222222"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := newLiveAttempt(daemon, firstRun, firstSession, nil)
+	first.attemptDigest = firstDigest
+	second := newLiveAttempt(daemon, secondRun, secondSession, nil)
+	second.attemptDigest = secondDigest
+	if err := daemon.registerLiveAttempt(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemon.registerLiveAttempt(second); err != nil {
+		t.Fatal(err)
+	}
+	if got := daemon.liveAttemptForDigest(firstDigest); got != first {
+		t.Fatalf("first digest owner = %p, want %p", got, first)
+	}
+	daemon.liveAttemptForDigest(firstDigest).notify()
+	select {
+	case <-first.wake:
+	default:
+		t.Fatal("exact owner was not woken")
+	}
+	select {
+	case <-second.wake:
+		t.Fatal("foreign owner was woken")
+	default:
+	}
+	if got := daemon.liveAttemptForDigest(secondDigest); got != second {
+		t.Fatalf("second digest owner = %p, want %p", got, second)
+	}
+}
+
 func TestLiveAttemptSubmitDoesNotWaitForExitedOwner(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 10000)
 	attempt := newLiveAttempt(nil, runID, sessionID, nil)
@@ -117,6 +158,36 @@ func TestLiveAttemptShutdownClosesRegistryToNewOwners(t *testing.T) {
 	runID, sessionID := liveTestIDs(t, 10000)
 	if err := daemon.registerLiveAttempt(newLiveAttempt(daemon, runID, sessionID, nil)); !errors.Is(err, ErrTerminalClosed) {
 		t.Fatalf("registration after shutdown error = %v", err)
+	}
+}
+
+func TestLiveAttemptShutdownDoesNotHoldOperationGateWhileWaitingForRegistry(t *testing.T) {
+	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
+	daemon.attemptMu.Lock()
+	closed := make(chan error, 1)
+	go func() { closed <- daemon.closeLiveAttempts() }()
+
+	// Shutdown may wait for the registry mutex, but it must not occupy the
+	// operation gate while doing so. Outcome API work and scheduler admission
+	// use that gate and must remain live during this benign shutdown race.
+	select {
+	case <-closed:
+		t.Fatal("shutdown acquired the registry before the test released it")
+	case <-time.After(25 * time.Millisecond):
+	}
+	if !daemon.operationMu.TryLock() {
+		daemon.attemptMu.Unlock()
+		t.Fatal("shutdown held operation gate while waiting for registry")
+	}
+	daemon.operationMu.Unlock()
+	daemon.attemptMu.Unlock()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("shutdown error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not finish after registry release")
 	}
 }
 
