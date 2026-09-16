@@ -2098,17 +2098,21 @@ test("paired identities list newest first and revoke at an exact revision, never
   session.close();
 });
 
-test("closed state watches reconnect only for transport loss or retryable errors without replaying mutations", async () => {
+test("closed state watches reconnect only for transport loss or retryable errors without replaying mutations", { timeout: 3_000 }, async () => {
   for (const failure of [null, { code: "rate_limited", retryable: true }, { code: "unauthorized", retryable: false }, { code: "internal", retryable: false }]) {
     const store = new MemoryKeys();
     const sockets = [];
     const timer = new VirtualTimer();
+    let ready;
+    let readiness = new Promise((resolve) => { ready = resolve; });
     const client = new BrowserClient({
       url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
+      onStatus: (status) => { if (status === "ready") ready(); },
       socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; },
     });
     await client.connect();
-    await tick();
+    await readiness;
+    readiness = new Promise((resolve) => { ready = resolve; });
     const saved = store.value;
     const mutation = client.session.updateTask({ taskId: "aa".repeat(16), expectedRevision: 1n, body: "one-shot instruction" });
     const rejected = assert.rejects(mutation, (error) => error instanceof SessionError);
@@ -2118,8 +2122,8 @@ test("closed state watches reconnect only for transport loss or retryable errors
     await rejected;
     await tick();
     timer.advance(10);
-    await new Promise((resolve) => setTimeout(resolve, 10));
     const retry = failure === null || failure.retryable;
+    if (retry) await readiness;
     assert.equal(sockets.length, retry ? 2 : 1);
     assert.equal(client.status, retry ? "ready" : "closed");
     assert.strictEqual(store.value, saved, "pairing must remain unchanged");
