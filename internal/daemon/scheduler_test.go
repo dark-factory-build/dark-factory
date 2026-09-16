@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/ncruces/go-sqlite3"
 )
 
 func TestSchedulerUsesOneUnobservedProbeAndJoinsAdmittedOwners(t *testing.T) {
@@ -176,6 +177,42 @@ func TestSchedulerUnobservedCompletionPreservesUnexpectedErrors(t *testing.T) {
 			}}
 			if err := daemon.RunScheduler(ctx, spec); !errors.Is(err, kernel.ErrCorruptState) || !errors.Is(err, cause) {
 				t.Fatalf("unobserved completion lost unexpected failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestSchedulerUnobservedCompletionPreservesJoinedFailures(t *testing.T) {
+	sentinel := errors.New("admission reconciliation failed")
+	for _, test := range []struct {
+		name    string
+		outcome error
+		failure bool
+	}{
+		{"joined cancellation and failure", errors.Join(context.Canceled, sentinel), true},
+		{"wrapped unknown joined outcome", kernel.NewOutcomeUnknownError(errors.Join(context.Canceled, sentinel)), true},
+		{"unknown pure cancellation", kernel.NewOutcomeUnknownError(context.Canceled), true},
+		{"joined interrupt and failure", errors.Join(sqlite3.INTERRUPT, sentinel), true},
+		{"wrapped pure interrupt", fmt.Errorf("sqlite: %w", sqlite3.INTERRUPT), false},
+		{"joined cancellation and interrupt", errors.Join(context.Canceled, sqlite3.INTERRUPT), false},
+		{"nested pure cancellation", fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", context.Canceled)), false},
+		{"joined pure cancellation", errors.Join(context.Canceled, fmt.Errorf("wrapped: %w", context.Canceled)), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			daemon := newSchedulerTestDaemon(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			spec := SupervisorSpec{scheduledAttempt: func(context.Context, SupervisorSpec) (kernel.Run, error) {
+				cancel()
+				return kernel.Run{}, test.outcome
+			}}
+			err := daemon.RunScheduler(ctx, spec)
+			if test.failure {
+				if !errors.Is(err, test.outcome) || !errors.Is(err, kernel.ErrCorruptState) {
+					t.Fatalf("joined failure lost: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("pure cancellation refused: %v", err)
 			}
 		})
 	}

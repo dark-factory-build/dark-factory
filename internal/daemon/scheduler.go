@@ -117,7 +117,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				if err := daemon.enforceRunLimits(ownedCtx); err != nil {
 					// Cancellation can interrupt the read before the Done arm runs.
 					// Preserve unrelated failures even when shutdown races with them.
-					if cancellation := ownedCtx.Err(); cancellation == nil || (!errors.Is(err, cancellation) && !errors.Is(err, sqlite3.INTERRUPT)) {
+					if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(err, cancellation) {
 						resultErr = err
 					}
 					stopping = true
@@ -167,7 +167,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 				if !owner.observed {
 					// Completion can beat the cancellation select arm. The context,
 					// not which event was selected first, determines cancellation.
-					if cancellation := ownedCtx.Err(); cancellation == nil || !errors.Is(event.err, cancellation) {
+					if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(event.err, cancellation) {
 						resultErr = errors.Join(resultErr, event.err, fmt.Errorf("%w: attempt ended before admission was observed", kernel.ErrCorruptState))
 					}
 				} else if owner.admitted {
@@ -193,6 +193,33 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 		}
 	}
 	return resultErr
+}
+
+// A joined reconciliation failure must survive even when another leaf is the
+// shutdown cancellation. Outcome-unknown also requires recovery, not silence.
+func schedulerOnlyCancellation(err, cancellation error) bool {
+	var unknown *kernel.OutcomeUnknownError
+	if err == nil || cancellation == nil || errors.As(err, &unknown) {
+		return false
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		causes := wrapped.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !schedulerOnlyCancellation(cause, cancellation) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		if cause := wrapped.Unwrap(); cause != nil {
+			return schedulerOnlyCancellation(cause, cancellation)
+		}
+	}
+	return err == cancellation || errors.Is(err, sqlite3.INTERRUPT)
 }
 
 func duplicateAdmissionObservation(count int) error {
