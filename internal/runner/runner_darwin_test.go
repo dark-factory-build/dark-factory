@@ -106,6 +106,14 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if len(os.Args) == 4 && os.Args[1] == "--owned-descendant-helper" {
+		root := os.Args[3]
+		if os.Args[2] == "fifo-child" {
+			root = filepath.Dir(root)
+		}
+		if err := watchTestOwner(root); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(92)
+		}
 		switch os.Args[2] {
 		case "leader":
 			if err := runLeaderExitDescendantHelper(os.Args[3]); err != nil {
@@ -186,6 +194,24 @@ func runProofProviderHelper(root string) error {
 		}
 	}
 	return os.WriteFile(filepath.Join(root, "proof-census.safe"), nil, 0o600)
+}
+
+// The test process holds the exclusive lock. Its death must also end helpers
+// deliberately launched into other process groups, where Ctrl-C cannot reach.
+func watchTestOwner(root string) error {
+	fd, err := unix.Open(filepath.Join(root, "test-owner.lock"), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	go func() {
+		if err := unix.Flock(fd, unix.LOCK_SH); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(92)
+		}
+		_ = unix.Close(fd)
+		os.Exit(0)
+	}()
+	return nil
 }
 
 func runLeaderExitDescendantHelper(root string) error {
@@ -1044,8 +1070,17 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ownerFD, err := unix.Open(filepath.Join(root, "test-owner.lock"), unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(ownerFD, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = unix.Close(ownerFD)
+		t.Fatal(err)
+	}
 	f := &fixture{t: t, root: root, cwd: cwd, dir: dir, lifetime: lifetime, lease: lease}
 	t.Cleanup(func() {
+		_ = unix.Close(ownerFD)
 		if f.child != nil {
 			_ = f.child.Close()
 		}
@@ -1942,6 +1977,91 @@ func TestLeaderExitRetryConvergesAfterDescendantQuiesces(t *testing.T) {
 	}
 	assertWaitedAndAbsent(t, child)
 	cleanupDone()
+}
+
+func TestDescendantHelpersExitWhenTestOwnerIsInterrupted(t *testing.T) {
+	if os.Getenv("RUNNER_TEST_DESCENDANT_OWNER") == "1" {
+		f := newFixture(t)
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reader.Close()
+		defer writer.Close()
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		child := f.start(executable, []string{"--owned-descendant-helper", "term-fork", f.root}, nil, writer)
+		if _, err := child.Activate(); err != nil {
+			t.Fatal(err)
+		}
+		reports := bufio.NewReader(reader)
+		if line := readOwnedPipeLine(t, reader, reports); line != "ready" {
+			t.Fatalf("readiness=%q", line)
+		}
+		if err := unix.Kill(child.Identity().PID, unix.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		late := readOwnedPipeLine(t, reader, reports)
+		if !strings.HasPrefix(late, "late:") {
+			t.Fatalf("descendant=%q", late)
+		}
+		fmt.Printf("%d %s\n", child.Identity().PID, strings.TrimPrefix(late, "late:"))
+		select {}
+	}
+	for _, interrupted := range []os.Signal{unix.SIGINT, unix.SIGKILL} {
+		t.Run(interrupted.String(), func(t *testing.T) {
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			defer writer.Close()
+			command := exec.Command(executable, "-test.run=^TestDescendantHelpersExitWhenTestOwnerIsInterrupted$")
+			command.Env = append(os.Environ(), "RUNNER_TEST_DESCENDANT_OWNER=1", "TMPDIR="+t.TempDir())
+			command.Stdout = writer
+			command.Stderr = os.Stderr
+			command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = command.Process.Kill(); _ = command.Wait() }()
+			_ = writer.Close()
+			line := readOwnedPipeLine(t, reader, bufio.NewReader(reader))
+			var leaderPID, latePID int
+			if _, err := fmt.Sscanf(line, "%d %d", &leaderPID, &latePID); err != nil {
+				t.Fatalf("helpers=%q: %v", line, err)
+			}
+			leader, err := readIdentity(leaderPID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			late, err := readIdentity(latePID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanLeader := installExactDescendantSafetyCleanup(t, leader)
+			cleanLate := installExactDescendantSafetyCleanup(t, late)
+			leaderExit, lateExit := exactExitKqueue(t, leader), exactExitKqueue(t, late)
+			if err := command.Process.Signal(interrupted); err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Wait(); err == nil {
+				t.Fatal("owner survived interruption")
+			}
+			waitKqueueExit(t, leaderExit, leader)
+			waitKqueueExit(t, lateExit, late)
+			waitExactAbsence(t, leader)
+			waitExactAbsence(t, late)
+			cleanLeader()
+			cleanLate()
+		})
+	}
 }
 
 func TestTerminateGroupSignalCatchesDescendantForkedDuringTERMGrace(t *testing.T) {
