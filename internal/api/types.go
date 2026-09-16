@@ -227,7 +227,14 @@ type OverseerInterventionResult struct {
 // AttemptTask is the exact private task text visible only to the authenticated
 // live attempt that owns it.
 type AttemptTask struct {
-	Task string `json:"task"`
+	Task                   string `json:"task"`
+	TaskID                 string `json:"task_id,omitempty"`
+	IncarnationID          string `json:"incarnation_id,omitempty"`
+	WorkRevision           uint64 `json:"work_revision,omitempty"`
+	ChangeID               string `json:"change_id,omitempty"`
+	AdmittedChangeRevision uint64 `json:"admitted_change_revision,omitempty"`
+	ChangeRevision         uint64 `json:"change_revision,omitempty"`
+	BaseCommit             string `json:"base_commit,omitempty"`
 }
 
 // TerminalObserveInput identifies one exact attempt terminal. The API derives
@@ -287,12 +294,12 @@ func (task AttemptTask) MarshalJSON() ([]byte, error) {
 	if !validAttemptTask(task) {
 		return nil, ErrInvalidInput
 	}
-	quoted, err := json.Marshal(task.Task)
+	type plain AttemptTask
+	quoted, err := json.Marshal(plain(task))
 	if err != nil {
 		return nil, err
 	}
-	encoded := append([]byte(`{"task":`), terminalSafeJSON(nil, quoted)...)
-	return append(encoded, '}'), nil
+	return terminalSafeJSON(nil, quoted), nil
 }
 
 func terminalSafeJSON(dst, encoded []byte) []byte {
@@ -310,7 +317,21 @@ func terminalSafeJSON(dst, encoded []byte) []byte {
 }
 
 func validAttemptTask(task AttemptTask) bool {
-	return validText(task.Task, 0, 131072)
+	if !validText(task.Task, 0, 131072) {
+		return false
+	}
+	if task.TaskID == "" && task.IncarnationID == "" && task.WorkRevision == 0 && task.ChangeID == "" && task.AdmittedChangeRevision == 0 && task.ChangeRevision == 0 && task.BaseCommit == "" {
+		return true
+	}
+	if !validID(task.TaskID) || !validID(task.IncarnationID) || task.WorkRevision == 0 || !validID(task.ChangeID) || task.AdmittedChangeRevision == 0 || task.ChangeRevision == 0 || len(task.BaseCommit) != 40 && len(task.BaseCommit) != 64 {
+		return false
+	}
+	for _, ch := range task.BaseCommit {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 type FactorySummary struct {

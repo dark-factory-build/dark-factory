@@ -1012,15 +1012,19 @@ type AdmissionResult struct {
 func (result AdmissionResult) Admitted() bool { return result.Run != nil }
 
 type AttemptAuthority struct {
-	RunID           RunID
-	ProjectID       ProjectID
-	AgentID         AgentID
-	TaskID          TaskID
-	TaskIncarnation IncarnationID
-	Role            AgentRole
-	Provider        Provider
-	ChangeID        *ChangeID
-	task            string
+	RunID                    RunID
+	ProjectID                ProjectID
+	AgentID                  AgentID
+	TaskID                   TaskID
+	TaskIncarnation          IncarnationID
+	AdmittedTaskWorkRevision Revision
+	Role                     AgentRole
+	Provider                 Provider
+	ChangeID                 *ChangeID
+	AdmittedChangeRevision   *Revision
+	CurrentChangeRevision    *Revision
+	BaseCommit               []byte
+	task                     string
 }
 
 func (authority AttemptAuthority) Task() string { return authority.task }
