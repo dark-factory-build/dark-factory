@@ -26,7 +26,11 @@ func TestDispatchFixtureTraversesUnreadableAncestors(t *testing.T) {
 				t.Fatal("sandbox unexpectedly reads sibling secret")
 			}
 		}
-		fixture := newDispatchFixture(t)
+		parent := "/private/tmp"
+		if mode != "generated" {
+			parent = os.TempDir()
+		}
+		fixture := newDispatchFixtureAt(t, parent)
 		active := prepareActiveAttempt(t, fixture, 101)
 		done := fixture.serve(t)
 		if _, err := active.client.Succeed(context.Background(), "sandbox outcome"); err != nil {
@@ -39,6 +43,17 @@ func TestDispatchFixtureTraversesUnreadableAncestors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Real providers receive a private TMPDIR. Keep scratch and fixture cleanup
+	// inside that grant rather than inheriting a host/CI shared temp root.
+	privateTemp, err := os.MkdirTemp("/private/tmp", "df-ancestor-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(privateTemp); err != nil {
+			t.Error(err)
+		}
+	})
 	secret := filepath.Join(t.TempDir(), "unrelated-secret")
 	if err := os.WriteFile(secret, []byte("sentinel"), 0o600); err != nil {
 		t.Fatal(err)
@@ -52,8 +67,12 @@ func TestDispatchFixtureTraversesUnreadableAncestors(t *testing.T) {
 	profile := fmt.Sprintf(`(version 1)(allow default)
 (deny file-read-data (literal "/private") (literal "/private/tmp") (literal %q))`, secret)
 	cmd := exec.Command("/usr/bin/sandbox-exec", "-p", profile, executable, "-test.run=^TestDispatchFixtureTraversesUnreadableAncestors$", "-test.count=1")
-	cmd.Env = append(os.Environ(), childEnv+"=1", "DARK_FACTORY_TEST_ANCESTOR_SECRET="+secret)
+	cmd.Env = append(os.Environ(), childEnv+"=1", "DARK_FACTORY_TEST_ANCESTOR_SECRET="+secret, "TMPDIR="+privateTemp)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("private fixture sandbox: %v\n%s", err, output)
+	}
+	entries, err := os.ReadDir(privateTemp)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("private fixture left scratch state: %v, %v", entries, err)
 	}
 }
