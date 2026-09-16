@@ -247,7 +247,7 @@ func TestFactoryctlLocatorValidationPrecedesSelectionAndProviderEffects(t *testi
 			if err := fixture.controller.Release(runner.StageSelection); err != nil {
 				t.Fatal(err)
 			}
-			if event, err := fixture.controller.Next(workerEventPatience); !errors.Is(err, io.EOF) || event.Kind != "" {
+			if event, err := fixture.controller.Next(workerEventPatience); err == nil || !strings.Contains(err.Error(), "invalid executable locator") || !fixture.controller.Spent() || event.Kind != "" {
 				t.Fatalf("event=%+v err=%v diagnostic=%q", event, err, fixture.output())
 			}
 			if exit, err := fixture.child.FinishAfterExit(workerEventPatience); err != nil || exit.Code == 0 && exit.Signal == 0 {
@@ -365,7 +365,7 @@ func TestInitialRuntimeChildValidationPrecedesSelectionEffects(t *testing.T) {
 				t.Fatal(err)
 			}
 			event, err := fixture.controller.Next(workerEventPatience)
-			if !errors.Is(err, io.EOF) || event.Kind != "" || event.Stage != "" || event.Identity.Valid() || len(event.Payload) != 0 || event.Result != nil {
+			if err == nil || !strings.Contains(err.Error(), "Change worker failed") || !fixture.controller.Spent() || event.Kind != "" || event.Stage != "" || event.Identity.Valid() || len(event.Payload) != 0 || event.Result != nil {
 				t.Fatalf("event=%+v err=%v diag=%q", event, err, fixture.output())
 			}
 			if exit, err := fixture.child.FinishAfterExit(workerEventPatience); err != nil || exit.Code == 0 && exit.Signal == 0 {

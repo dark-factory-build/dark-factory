@@ -197,6 +197,15 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	if frame.Kind == string(AttemptResultReady) {
 		return c.acceptAttemptResult(frame)
 	}
+	if frame.Kind == "provider-exec-error" {
+		switch c.state {
+		case controllerSelectionReleased, controllerPreparationReleased, controllerPopulationReleased:
+			if validProviderErrorFrame(frame) {
+				return AttemptEvent{}, errors.Join(fmt.Errorf("runner: worker preparation: %s", frame.Payload), c.spend())
+			}
+		}
+		return AttemptEvent{}, ErrState
+	}
 	switch c.state {
 	case controllerConfigured:
 		if frame.Kind != "inner-ready" || !frame.Identity.Valid() || frame.Identity.PID != frame.Identity.PGID || frame.Stage != "" || len(frame.Payload) != 0 || frame.FileIdentity != nil || frame.Digest != "" || !noTerminalFields(frame) {
@@ -568,10 +577,10 @@ func (w *WorkerControl) AwaitProvider() error {
 }
 
 // ReportProviderError is the one bounded pre-exec failure report. It lets the
-// outer owner distinguish a deliberate final source/authority rejection from
+// outer owner distinguish a deliberate source/authority rejection from
 // an unexplained capability close, without introducing a general worker RPC.
 func (w *WorkerControl) ReportProviderError(cause error) error {
-	if w == nil || w.file == nil || w.state != workerProvider || w.providerErrorReported || cause == nil {
+	if w == nil || w.file == nil || !workerCanReportError(w.state) || w.providerErrorReported || cause == nil {
 		return ErrState
 	}
 	message, err := providerErrorPayload(cause)
@@ -583,6 +592,19 @@ func (w *WorkerControl) ReportProviderError(cause error) error {
 	}
 	w.providerErrorReported = true
 	return nil
+}
+
+func workerCanReportError(state workerState) bool {
+	switch state {
+	case workerConfigConsumed, workerSelection, workerPreparation, workerPopulation, workerProvider:
+		return true
+	default:
+		return false
+	}
+}
+
+func validProviderErrorFrame(frame attemptFrame) bool {
+	return frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxProviderErrorBytes && utf8.Valid(frame.Payload) && !bytes.ContainsRune(frame.Payload, 0)
 }
 
 func (w *WorkerControl) report(stage AttemptStage, before, after workerState, payload []byte) error {
@@ -1098,6 +1120,12 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 	}
 	for _, step := range sequence {
 		frame, source, err = nextAttemptFrame(child, daemon, workerParent, true, true, stagePTY, 0)
+		if err == nil && source == sourceWorker && validProviderErrorFrame(frame) {
+			// Forward the bounded refusal before waiting for child cleanup, so the
+			// daemon can revoke this attempt and persist the actual failure cause.
+			writeErr := writeControlFrame(daemon, frame, maxFrameBytes)
+			return finishAttemptFailure(child, dir, cfg, &reads, errors.Join(fmt.Errorf("runner: worker %s: %s", step.report, frame.Payload), writeErr))
+		}
 		if err != nil || source != sourceWorker || !validCheckpointFrame(frame, step.report) {
 			return finishAttemptFailure(child, dir, cfg, &reads, protocolError(string(step.report)+" report", source, err))
 		}
