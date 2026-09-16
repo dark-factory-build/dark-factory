@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wake the overseer for App-linked pull requests in a private host mirror."""
+"""Run one independent host review and wake its overseer with the App receipt."""
 import argparse
 import fcntl
 import hashlib
@@ -8,6 +8,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import stat
+import subprocess
+import uuid
 
 
 HERE = Path(__file__).resolve().parent
@@ -75,12 +79,9 @@ def ready(config, path, pr, issue):
     if head != pr["headRefOid"] or not SHA.fullmatch(observed_base):
         raise ReviewError("mirror did not prove the App-reported exact head and base")
     marker = intake.source_marker(config, {"number": issue})
-    task_id = intake.sha_id("review-wakeup", config["project_id"], config["repository"], str(pr["number"]), head)
     return {"pr": pr["number"], "head": head, "base": observed_base, "source_marker": marker,
-            "task_id": task_id, "incarnation_id": intake.sha_id("incarnation", task_id),
-            "priority": int(config.get("priority_default", 0)),
-            "title": "Resume publication review for GitHub PR #" + str(pr["number"]),
-            "body": "Resume the existing publication for " + marker + ". The host verified App-reported PR #" + str(pr["number"]) + " at exact head " + head + " and base " + observed_base + ". Review only from the private mirror " + str(path) + "; set DARK_FACTORY_REVIEW_REMOTE=file://" + str(path.parent.parent) + " for cold-review. Verify the exact head before any review or merge action. Do not author the independent review yourself; arrange the required independent exact-head review and resume the existing publication journal."}
+            "priority": int(config.get("priority_default", 0))}
+
 
 
 def verify_existing(path, pr, operation):
@@ -92,6 +93,64 @@ def verify_existing(path, pr, operation):
     if observed != pr["headRefOid"] or observed != head:
         raise ReviewError("mirror did not prove the App-reported exact head")
     intake.command(["git", "-C", str(path), "cat-file", "-e", base + "^{commit}"])
+
+
+def observe_review(operation):
+    bridge = os.environ.get("DARK_FACTORY_MAINTAINER_BRIDGE") or shutil.which("dark-factory-maintainer-mcp-bridge")
+    if not bridge or not os.path.isabs(bridge):
+        raise ReviewError("maintainer bridge is unavailable")
+    metadata = Path(bridge).stat()
+    if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & stat.S_IXUSR or metadata.st_mode & 0o022:
+        raise ReviewError("maintainer bridge is not a safe executable")
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "observe_operation", "arguments": {"operation_id": operation["review_operation"]}}}
+    try:
+        response = subprocess.run([bridge], input=json.dumps(request) + "\n", capture_output=True, text=True, timeout=40, check=True)
+        reply = json.loads(response.stdout)
+        value = reply["result"]["structuredContent"]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+        raise ReviewError("review operation observation unavailable") from exc
+    if reply.get("id") != 1 or reply["result"].get("isError") or not isinstance(value, dict) or value.get("operation_id") != operation["review_operation"]:
+        raise ReviewError("review operation observation invalid")
+    state = value.get("state")
+    if state == "completed":
+        result = value.get("result")
+        if value.get("kind") != "submit_pull_request_review" or not isinstance(result, dict) or result.get("head_sha") != operation["head"] or result.get("verdict") not in {"allow", "block"}:
+            raise ReviewError("review receipt does not match the exact head")
+        return result["verdict"]
+    if state not in {"missing", "planned", "executing", "indeterminate"}:
+        raise ReviewError("review operation state invalid")
+    return state
+
+
+def launch_review(config, path, pr, operation):
+    # The existing process-group wrapper owns and verifies reviewer cleanup.
+    # A parent subprocess timeout must not kill only the shell and orphan Codex.
+    directory = Path(config["journal"]).parent / ("review-" + str(pr["number"]) + "-" + operation["head"])
+    directory.mkdir(mode=0o700, exist_ok=True)
+    body = directory / "body.md"
+    body.write_text(pr["body"])
+    env = dict(os.environ, DARK_FACTORY_REVIEW_OPERATION_ID=operation["review_operation"],
+               DARK_FACTORY_REVIEW_REMOTE="file://" + str(path.parent.parent))
+    env.pop("DARK_FACTORY_REVIEW_EVIDENCE_FILE", None)
+    with (directory / "launch.log").open("w") as output:
+        return subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-process-owner",
+                               str(HERE / "go-gate-environment.sh"), "1200", str(HERE / "cold-review.sh"),
+                               config["repository"], str(pr["number"]), operation["head"], operation["base"], str(body)],
+                              cwd=directory, env=env, stdout=output, stderr=subprocess.STDOUT).returncode
+
+
+def review_followup(config, operation, state):
+    task = {"priority": operation["priority"], "title": "Resume publication review for GitHub PR #" + str(operation["pr"])}
+    task["task_id"] = intake.sha_id("review-result", config["project_id"], config["repository"], str(operation["pr"]), operation["head"], state)
+    task["incarnation_id"] = intake.sha_id("incarnation", task["task_id"])
+    task["body"] = ("Resume publication for " + operation["source_marker"] + ". Host independent review for PR #" + str(operation["pr"]) +
+                    " at exact head " + operation["head"] + " and base " + operation["base"] +
+                    " has App operation " + operation["review_operation"] + " with state " + state + ". Host review exit: " + str(operation.get("review_exit", "not launched")) + ". " +
+                    ("Read that exact operation and its GitHub review; route blocking findings to the original task, or resume protected enqueue after ALLOW. " if state in {"allow", "block"} else
+                     "The launch or submission is unresolved. Observe this operation; do not start another reviewer or invent a verdict. Report the concrete infrastructure blocker. ") +
+                    "Never submit your own verdict or run a nested cold-review. Merge and deployment remain separate delivery gates.")
+    return task
 
 
 def config_fingerprint(config):
@@ -126,6 +185,7 @@ def run_locked(config, path, journal, journal_path):
     else:
         receipts = {"version": 2, "config_fingerprint": config_fingerprint(config), "pulls": {}}
     messages = []
+    launched = False
     for pr in list_prs(config):
         issue = linked_issue(pr["body"], journal, config["repository"])
         if issue is None:
@@ -139,9 +199,27 @@ def run_locked(config, path, journal, journal_path):
         else:
             operation = existing
             verify_existing(path, pr, operation)
-        if intake.task_state(config, operation) is None:
-            intake.enqueue(config, operation)
-            messages.append("woke PR #" + str(pr["number"]))
+        operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
+        state = observe_review(operation)
+        if state == "missing" and not operation.get("review_attempted"):
+            if launched:
+                continue
+            # Persist before launching: a crash cannot authorize a second model
+            # run while the first may still be submitting its exact-head verdict.
+            operation["review_attempted"] = True
+            intake.atomic_json(journal_path, receipts)
+            launched = True
+            operation["review_exit"] = launch_review(config, path, pr, operation)
+            intake.atomic_json(journal_path, receipts)
+            state = observe_review(operation)
+        if state not in {"allow", "block"}:
+            state = "unresolved"
+        operation["review_state"] = state
+        intake.atomic_json(journal_path, receipts)
+        followup = review_followup(config, operation, state)
+        if intake.task_state(config, followup) is None:
+            intake.enqueue(config, followup)
+            messages.append("woke PR #" + str(pr["number"]) + " review " + state)
     return messages
 
 

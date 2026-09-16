@@ -128,7 +128,8 @@ granting access to the Changes parent or adding permission entries per tree.
   `git push`, never edit the operator's checkout, never write into a retained
   Change.
 - Never record a review verdict yourself. The review is a separate headless
-  session started by `scripts/cold-review.sh`; you read its verdict.
+  session started by the host review controller; you read its App receipt.
+  Do not run a nested provider or grant local commands Maintainer credentials.
 - Prioritize actionable changes and throughput blockers; one blocked change
   does not prevent handling another independent change in the same session.
 - A review that asks for changes is not a decision for a human: send the task
@@ -394,47 +395,29 @@ Write that body to a file; the review needs it.
 
 ## 5. Get the cold review, then merge
 
-```sh
-DARK_FACTORY_REVIEW_OPERATION_ID=$(opid "$change_id" "review-$(printf '%s' "$HEAD_SHA" | cut -c1-8)") \
-    repo/scripts/cold-review.sh OWNER/REPO PR HEAD_SHA "$base_commit" body.md "first review"
-```
+The existing host `factory-review-intake.py` controller handles independent
+review for published PRs linked to tracked source issues. It pins the observed
+PR head and base in its review journal, runs at most one fresh
+`cold-review.sh` per pass, and sends an idempotent task containing the exact
+Maintainer operation and its result. Intake and release checks run first.
+The reviewer is a separate read-only session, never the author or overseer.
 
-`cold-review.sh` uses a fresh read-only Codex review with `gpt-5.6-sol` by
-default. Set `DARK_FACTORY_REVIEW_MODEL=gpt-5.6-terra` for the lower-cost
-variant, or `DARK_FACTORY_REVIEW_PROVIDER=claude` only when Claude is needed.
+Observe the operation named in that task before acting. Only a completed App
+`submit_pull_request_review` result for the exact head is a verdict. A retained
+Change review is useful source evidence, not a published-head approval. The
+controller preserves uncertainty after an interrupted launch and observes the
+same operation on later passes; it does not replay the launch automatically.
+If no controller is configured, report that missing host capability rather than
+launching a nested provider from the worker sandbox.
 
-The fourth argument is the change's `base_commit`, the commit the branch was
-published from, never main's live head: the reviewer's diff runs from the
-merge base of that commit and the pull request head, and its rules are that
-commit's `AGENTS.md`.
+Host operators can still invoke `scripts/cold-review.sh` directly with the
+repository, PR, exact head, pinned base and body file. Optional exact-head gate
+evidence supplements rather than replaces required checks. Blocking findings
+need a concrete reproducer or reachable code path through the current guards;
+unavailable read-only checks are deferred delivery conditions, not defects.
 
-When an exact-head gate receipt is available, pass its path without changing
-the review's read-only tools or permissions:
-
-```sh
-DARK_FACTORY_REVIEW_EVIDENCE_FILE=gate.json \
-DARK_FACTORY_REVIEW_OPERATION_ID=$(opid "$change_id" "review-$(printf '%s' "$HEAD_SHA" | cut -c1-8)") \
-    repo/scripts/cold-review.sh OWNER/REPO PR HEAD_SHA "$base_commit" body.md "first review"
-```
-
-The JSON receipt supplements, never replaces, the required gate. The helper
-requires matching `head` and `base` strings and integer `exit_code: 0` before
-starting the reviewer. A blocking review finding needs a concrete reproducer or a
-reachable code path through the current guards to a missing or ineffective
-check. Reviewers inspect the documented threat model before security claims;
-an unverified hypothetical or an unavailable read-only test is a deferred
-note, not a block.
-
-The verdict is recorded under that operation id, so `observe_operation`
-with it answers `completed` with the verdict (`allow` or `block`) once a
-review exists, and nothing until then. The script exits 0 for ALLOW, 1 for
-REQUEST_CHANGES, 3 when the session reported no verdict, 4 when the pull
-request is no longer at that head, 2 for an argument or a tool it refuses,
-and 5 when it could not prepare the checkout, and leaves
-`review-PR-HEAD8.log` in the current directory.
-
-- Exit 3: run it once more; a second 3 is a human request with the log's
-  last lines.
+- Unresolved: observe the supplied operation and report its concrete host
+  infrastructure failure. Do not manufacture a verdict or start another review.
 - ALLOW: `enqueue_pull_request` with `opid "$change_id" enqueue-HEAD8`, the PR number, the head
   and `base = main`. Then `observe_pull_request_merge`, with the PR number,
   the head, `base = main` and the enqueue operation id, every 60 s for up to
@@ -480,23 +463,14 @@ and 5 when it could not prepare the checkout, and leaves
   tree; a later run of yours finds the same change id at the next work
   revision and publishes the new tree on top of the branch (section 3).
   Stop handling this change for now.
-- Exit 4: the pull request is no longer at the head you published, which
-  only a person can have done; raise a human request.
-- Exit 2 or 5: the script refused its arguments or could not prepare the
-  checkout; the log was not written. Check the head and base you passed once,
-  then raise a human request with the script's message.
-
-On a resumed run, a change whose `pr` is completed but whose `enqueue-HEAD8`
-for the current head is not needs no second review if one was recorded:
-`observe_operation` with `opid "$change_id"
-review-HEAD8` for the pull request head answers `completed` with verdict
-`allow` (enqueue), `block` (blocked: send the task back with the note
-above, which needs only the pull request and its head, if the task is not
-already queued at the next work revision, then stop), `note`
-(a comment that decided nothing: run the review again under a fresh id, the
-head's plus `-2`), or nothing (run the review); `executing` or
-`indeterminate` is a human request, as in section 2. The `review` check
-itself runs only in the merge queue, so it is never the signal here.
+On a resumed run, a published change needs no second review if the host
+controller's exact operation already completed. Read the operation ID from its
+follow-up task: `allow` permits protected enqueue; `block` returns findings to
+the original task unless it is already queued for correction. Missing,
+`executing`, or `indeterminate` is not a verdict. Preserve that operation and
+report unresolved infrastructure; do not derive a replacement ID or launch a
+second reviewer. The `review` check runs only in the merge queue, so its absence
+before enqueue is not a signal to repeat review.
 
 ## 6. Hand off and finish
 

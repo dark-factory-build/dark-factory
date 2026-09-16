@@ -36,18 +36,18 @@ def validate_controller_config(config):
 def tick(config_path, config):
     scripts = Path(__file__).resolve().parent
     calls = []
-    if 'review_mirror_root' in config:
-        if not isinstance(config['review_mirror_root'], str) or not Path(config['review_mirror_root']).is_absolute():
-            raise ValueError('review_mirror_root must be an absolute path')
-        calls.append([sys.executable, str(scripts / 'factory-review-intake.py'), str(config_path), '--once'])
     calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
     releases = config.get('release_configs', [])
     for release_config in releases:
         calls.append([sys.executable, str(scripts / 'factory-release.py'), release_config, '--latest', '--once'])
+    if 'review_mirror_root' in config:
+        if not isinstance(config['review_mirror_root'], str) or not Path(config['review_mirror_root']).is_absolute():
+            raise ValueError('review_mirror_root must be an absolute path')
+        calls.append([sys.executable, str(scripts / 'factory-review-intake.py'), str(config_path), '--once'])
     results = []
     for argv in calls:
         try:
-            completed = subprocess.run(argv, capture_output=True, text=True, timeout=1300)
+            completed = subprocess.run(argv, capture_output=True, text=True, timeout=None if Path(argv[1]).name == 'factory-review-intake.py' else 1300)
             result = {'component': Path(argv[1]).stem, 'ok': completed.returncode == 0}
             if completed.returncode:
                 result['error'] = 'exit_' + str(completed.returncode)
@@ -108,8 +108,9 @@ def main():
                  'EnvironmentVariables': {'PATH': os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')}}
         sys.stdout.buffer.write(plistlib.dumps(plist))
         return 0
-    # ponytail: one host controller at a time; split maintenance leases only
-    # when independent factories need concurrent host deployment hooks.
+    # ponytail: one host controller at a time. A final cold review can occupy
+    # this job/lock for its 20-minute deadline; separate existing review
+    # scheduling only if intake/release latency justifies that additional job.
     descriptor = os.open(Path(str(Path(config['factory_home']).resolve()) + '.autonomy.lock'), os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(descriptor, 'a+') as lock:
         try:
