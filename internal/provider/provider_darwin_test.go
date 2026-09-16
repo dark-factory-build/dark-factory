@@ -1048,3 +1048,11 @@ func TestCodexLaunchGeneratesPermissionsForOnlyTheExplicitRetainedSource(t *test
 		}
 	}
 }
+
+func TestBothProviderAssignmentsDistinguishOwnedCheckoutFromRetainedReview(t *testing.T) {
+	for name, prompt := range map[string]string{"codex": codexBootstrapPrompt, "claude": runner.ClaudeTaskLead} {
+		if !strings.Contains(prompt, "including corrections after send-back") || !strings.Contains(prompt, "attempt source is only for inspecting a settled retained Change") || !strings.Contains(prompt, "Never substitute another task or private Change path") {
+			t.Fatalf("%s assignment loses checkout/reviewer authority distinction", name)
+		}
+	}
+}

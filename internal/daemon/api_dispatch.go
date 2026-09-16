@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
@@ -326,6 +327,14 @@ func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply
 		value.ProjectID, value.AssignedAgentID = recovery.Task.ProjectID.String(), recovery.Task.AssignedAgentID.String()
 		value.WorkRevision, value.Revision, value.Status = uint64(recovery.Task.WorkRevision.Int64()), uint64(recovery.Task.Revision.Int64()), recovery.Task.Status.String()
 		value.NeedsOperatorRecovery = recovery.NeedsOperatorRecovery
+		value.Result, value.BlockedReason = recovery.Task.Result, recovery.Task.BlockedReason
+		if len(value.Result) > api.MaxRecoveryResultBytes {
+			end := api.MaxRecoveryResultBytes
+			for !utf8.RuneStart(value.Result[end]) {
+				end--
+			}
+			value.Result, value.ResultTruncated = value.Result[:end], true
+		}
 		if recovery.Change != nil {
 			value.ChangeID, value.ChangeRevision, value.ChangePhase = recovery.Change.ID.String(), uint64(recovery.Change.Revision.Int64()), recovery.Change.Phase.String()
 			if recovery.Change.Selection != nil {
@@ -337,6 +346,10 @@ func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply
 		}
 		if recovery.Run != nil {
 			value.RunID, value.RunRevision = recovery.Run.ID.String(), uint64(recovery.Run.Revision.Int64())
+			value.RunWorkRevision = uint64(recovery.Run.AdmittedTaskWorkRevision.Int64())
+			if recovery.Run.Terminal != nil {
+				value.RunOutcome, value.RunDetail = recovery.Run.Terminal.Kind().String(), recovery.Run.Terminal.Detail()
+			}
 		}
 		for _, resource := range recovery.Artifacts {
 			if resource.Path != "" {

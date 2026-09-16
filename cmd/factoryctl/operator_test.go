@@ -496,7 +496,7 @@ func TestTaskRecoveryUsesOperatorClient(t *testing.T) {
 		if !ok || input.TaskID != taskID || input.IncarnationID != incarnationID {
 			t.Errorf("unexpected recovery call: %+v", call)
 		}
-		reply, err := api.NewTaskRecoveryReply(api.TaskRecovery{State: "missing", ArtifactPaths: []string{}})
+		reply, err := api.NewTaskRecoveryReply(api.TaskRecovery{State: "found", TaskID: taskID, IncarnationID: incarnationID, ProjectID: taskID, AssignedAgentID: taskID, WorkRevision: 1, Revision: 1, Status: "blocked", BlockedReason: "tool unavailable", ArtifactPaths: []string{}})
 		if err != nil {
 			t.Error(err)
 		}
@@ -509,7 +509,7 @@ func TestTaskRecoveryUsesOperatorClient(t *testing.T) {
 	}
 	awaitServer(t, done)
 	var result api.TaskRecovery
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.State != "missing" {
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.BlockedReason != "tool unavailable" {
 		t.Fatalf("recovery response %q: %v", stdout.String(), err)
 	}
 }
