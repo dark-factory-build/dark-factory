@@ -716,6 +716,11 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	resolvedBridge, err := filepath.EvalSymlinks(bridge)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	overseer, err := Build(request)
 	if err != nil {
 		t.Fatal(err)
@@ -724,10 +729,10 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.dark_factory_maintainer={command=") {
 		t.Fatal("overseer lost its explicit Maintainer tools")
 	}
-	if !slices.Contains(overseer.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge) {
+	if !slices.Contains(overseer.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
 		t.Fatalf("overseer did not export its exact Maintainer bridge: %q", overseer.Environment())
 	}
-	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge) {
+	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
 		t.Fatal("worker inherited the overseer's Maintainer bridge")
 	}
 	if strings.Contains(strings.Join(workerArgs, " "), "mcp_servers.dark_factory_maintainer=") {
