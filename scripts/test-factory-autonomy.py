@@ -66,19 +66,18 @@ class AutonomyTest(unittest.TestCase):
 
     def test_intake_failure_is_retained_in_health(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
-        with patch.object(autonomy.subprocess, 'run', side_effect=[subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 1, '', 'GitHub unavailable')]) as run:
+        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'GitHub unavailable')) as run:
             result = autonomy.tick(Path('/private/tmp/config'), config)
-        self.assertFalse(result[1]['ok'])
-        self.assertEqual(2, len(result))
-        self.assertIn('factory-source-refresh.py', run.call_args_list[0].args[0][1])
+        self.assertFalse(result[0]['ok'])
+        self.assertEqual(1, len(result))
+        self.assertIn('factory-intake.py', run.call_args_list[0].args[0][1])
 
     def test_launchd_results_do_not_retain_child_output(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal'}
         secret = 'token=should-not-appear'
         with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, secret, secret)):
             result = autonomy.tick(Path('/private/tmp/config'), config)
-        self.assertEqual([{'component': 'factory-source-refresh', 'ok': False, 'error': 'exit_1'},
-                          {'component': 'factory-intake', 'ok': False, 'error': 'source_refresh_failed'}], result)
+        self.assertEqual([{'component': 'factory-intake', 'ok': False, 'error': 'exit_1'}], result)
 
     def test_health_receipt_is_private_and_finite(self):
         with tempfile.TemporaryDirectory() as directory:

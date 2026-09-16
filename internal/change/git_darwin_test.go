@@ -993,3 +993,101 @@ func TestGitBoundaryResourceCensus(t *testing.T) {
 		t.Fatalf("Git HOME census before=%v after=%v err=%v", homesBefore, homesAfter, err)
 	}
 }
+
+func TestFreshSelectionFetchesConfiguredUpstreamWithoutMovingCheckout(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	remote := newLocalGitFixture(t, "sha1")
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "add", "upstream", remote.repository)
+	// Fixture-only local transport; production keeps Git's protocol policy.
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "protocol.file.allow", "always")
+	branch := strings.TrimSpace(runFixtureGitOutput(t, remote.git, remote.repository, "symbolic-ref", "HEAD"))
+	localBranch := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "branch", "--show-current"))
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "branch."+localBranch+".remote", "upstream")
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "branch."+localBranch+".merge", branch)
+	if err := os.WriteFile(filepath.Join(remote.repository, "new-source.txt"), []byte("new source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, remote.git, remote.repository, "add", "new-source.txt")
+	runFixtureGit(t, remote.git, remote.repository, "commit", "-m", "remote advances")
+	want := strings.TrimSpace(runFixtureGitOutput(t, remote.git, remote.repository, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("uncommitted operator work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkout := runFixtureGitOutput(t, fixture.git, fixture.repository, "status", "--porcelain")
+	tracking := runFixtureGitOutput(t, fixture.git, fixture.repository, "for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/")
+	start, results := make(chan struct{}), make(chan error, 8)
+	for range cap(results) {
+		go func() {
+			<-start
+			selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+			if err == nil && selected.Base().Hex() != want {
+				err = fmt.Errorf("concurrent source=%s want=%s", selected.Base().Hex(), want)
+			}
+			results <- err
+		}()
+	}
+	close(start)
+	for range cap(results) {
+		if err := <-results; err != nil {
+			t.Fatalf("parallel fresh selection: %v", err)
+		}
+	}
+	for _, policy := range []string{"HEAD", "refs/remotes/upstream/" + strings.TrimPrefix(branch, "refs/heads/")} {
+		selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, policy, fixture.identity)
+		if err != nil || selected.Base().Hex() != want {
+			t.Fatalf("policy=%s source=%s want=%s err=%v", policy, selected.Base().Hex(), want, err)
+		}
+	}
+	if got := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", "HEAD")); got != fixture.base.Hex() {
+		t.Fatalf("checkout moved to %s", got)
+	}
+	if got := runFixtureGitOutput(t, fixture.git, fixture.repository, "status", "--porcelain"); got != checkout {
+		t.Fatalf("checkout changed: %q -> %q", checkout, got)
+	}
+	if got := runFixtureGitOutput(t, fixture.git, fixture.repository, "for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/"); got != tracking {
+		t.Fatalf("tracking refs changed: %q -> %q", tracking, got)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.repository, ".git", "FETCH_HEAD")); !os.IsNotExist(err) {
+		t.Fatalf("fetch wrote shared FETCH_HEAD: %v", err)
+	}
+	// Custom remote mappings are read policy, never permission to rewrite a
+	// local branch. Fetching only the pinned objects preserves this branch.
+	localTarget := "refs/heads/operator-work"
+	runFixtureGit(t, fixture.git, fixture.repository, "update-ref", localTarget, fixture.base.Hex())
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "--replace-all", "remote.upstream.fetch", "+"+branch+":"+localTarget)
+	custom, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil || custom.Base().Hex() != want {
+		t.Fatalf("custom upstream source: %v", err)
+	}
+	if got := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", localTarget)); got != fixture.base.Hex() {
+		t.Fatalf("operator branch changed: %s", got)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "--replace-all", "remote.upstream.fetch", "+refs/heads/*:refs/remotes/upstream/*")
+	// A deleted branch cannot fall back to previously fetched objects.
+	runFixtureGit(t, remote.git, remote.repository, "update-ref", "-d", branch)
+	if _, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil {
+		t.Fatal("deleted remote branch silently selected old source")
+	}
+	runFixtureGit(t, remote.git, remote.repository, "update-ref", branch, want)
+	// A cached successful tracking ref must not hide a subsequent failed fetch.
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "set-url", "upstream", filepath.Join(t.TempDir(), "missing"))
+	if _, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil || !strings.Contains(err.Error(), "source refresh failed") {
+		t.Fatalf("failed fetch fell back to old source: %v", err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "config", "branch."+localBranch+".remote", "unconfigured-remote")
+	if _, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity); err == nil {
+		t.Fatal("broken tracking configuration silently selected local source")
+	}
+	// Explicit local pins and detached HEAD remain usable without the remote.
+	for _, policy := range []string{fixture.base.Hex(), "refs/heads/" + localBranch} {
+		selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, policy, fixture.identity)
+		if err != nil || selected.Base().Hex() != fixture.base.Hex() {
+			t.Fatalf("local policy=%s err=%v", policy, err)
+		}
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "checkout", "--detach", fixture.base.Hex())
+	selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil || selected.Base().Hex() != fixture.base.Hex() {
+		t.Fatalf("detached source: %v", err)
+	}
+}
