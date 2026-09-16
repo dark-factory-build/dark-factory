@@ -108,7 +108,7 @@ func TestStateFixturesRoundTrip(t *testing.T) {
 	}
 	// The shared fixture is the cross-language contract: it must carry one of
 	// every public kind so a TypeScript consumer exercises the whole shape.
-	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 || len(snapshot.HumanRequests) != 1 {
+	if len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 || len(snapshot.SharedTasks) != 1 || len(snapshot.HumanRequests) != 1 {
 		t.Fatalf("snapshot fixture does not cover every kind: %+v", snapshot)
 	}
 }

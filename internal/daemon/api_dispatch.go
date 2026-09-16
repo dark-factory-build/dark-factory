@@ -324,7 +324,7 @@ func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply
 		value.State = "missing"
 	} else {
 		value.State, value.TaskID, value.IncarnationID = "found", recovery.Task.ID.String(), recovery.Incarnation.String()
-		value.ProjectID, value.AssignedAgentID = recovery.Task.ProjectID.String(), recovery.Task.AssignedAgentID.String()
+		value.ProjectID, value.AssignedAgentID = recovery.Task.ProjectID.String(), optionalAgentText(recovery.Task.AssignedAgentID)
 		value.WorkRevision, value.Revision, value.Status = uint64(recovery.Task.WorkRevision.Int64()), uint64(recovery.Task.Revision.Int64()), recovery.Task.Status.String()
 		value.NeedsOperatorRecovery = recovery.NeedsOperatorRecovery
 		value.Result, value.BlockedReason = recovery.Task.Result, recovery.Task.BlockedReason
@@ -975,7 +975,7 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	agentID, err := parseAgentID(input.AssignedAgentID)
+	agentID, err := parseOptionalAgentID(input.AssignedAgentID)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1176,6 +1176,10 @@ func (daemon *Daemon) sendBack(ctx context.Context, call api.Call) api.Reply {
 	if attempt && current.ProjectID != authority.ProjectID {
 		return newErrorReply(api.RemoteUnauthorized)
 	}
+	if current.AssignedAgentID == (kernel.AgentID{}) {
+		// Never claimed: there is no run to correct.
+		return newErrorReply(api.RemoteConflict)
+	}
 	agent, found, err := daemon.store.Agent(ctx, current.AssignedAgentID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
@@ -1326,7 +1330,7 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	agentID, err := parseAgentID(input.AssignedAgentID)
+	agentID, err := parseOptionalAgentID(input.AssignedAgentID)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
