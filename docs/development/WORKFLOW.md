@@ -142,6 +142,8 @@ repository's canonical Git common directory. Git-free workers receive only
 that subtree through `DARK_FACTORY_LOCAL_CI_DIRECTORY`; use
 `scripts/with-local-ci-lease.sh <focused check>` to share the host gate.
 Full `local-ci.sh` still requires a Git checkout for its source-control checks.
+If lease preparation is unavailable or refused, source work can still start with
+no lease grant and an explicit startup diagnostic; required CI remains blocked.
 
 When installing this lease layout, drain old CI holders, let their existing
 helper clean its lease state, and update active host checkouts before enabling

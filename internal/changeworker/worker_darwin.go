@@ -104,6 +104,9 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
+	if config.Role == kernel.RoleWorker && config.LocalCILeaseDir == "" {
+		fmt.Fprintln(os.Stderr, "factory: shared local CI lease unavailable; continue source work, but required CI needs host preparation before it can run")
+	}
 	runtimePaths, err = runtimePaths.WithLocalCILeaseDirectory(config.LocalCILeaseDir)
 	if err != nil {
 		_ = cwd.Close()

@@ -315,14 +315,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
-	// Retained source execution does not depend on Git being available. A
-	// failed lease lookup grants no check directory, but cannot discard it.
+	// CI is an optional execution capability. An unavailable or unsafe lease
+	// must not block otherwise valid source work; no directory is granted.
 	var localCILeaseDir string
 	if worker {
-		localCILeaseDir, err = prepareLocalCILeaseDirectory(ctx, spec.GitExecutable, project.Root)
-		if err != nil && retained == nil {
-			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
-		}
+		localCILeaseDir, _ = prepareLocalCILeaseDirectory(ctx, spec.GitExecutable, project.Root)
 	}
 	// From CreateRuntime until the runtime resource is durably active, a
 	// failure cannot be finalized live: the exact-edge grammar requires either
