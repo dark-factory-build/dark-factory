@@ -485,3 +485,30 @@ func TestAccountDiscoverCLICollectsPagesAndRejectsRepeatedCursor(t *testing.T) {
 		})
 	}
 }
+
+func TestTaskRecoveryUsesOperatorClient(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	taskID, incarnationID := strings.Repeat("11", 16), strings.Repeat("22", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.TaskRecoveryInput()
+		if !ok || input.TaskID != taskID || input.IncarnationID != incarnationID {
+			t.Errorf("unexpected recovery call: %+v", call)
+		}
+		reply, err := api.NewTaskRecoveryReply(api.TaskRecovery{State: "missing", ArtifactPaths: []string{}})
+		if err != nil {
+			t.Error(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"task", "recovery", "--task", taskID, "--incarnation", incarnationID}, webEnvironment(fixture), &stdout, &stderr)
+	if exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("task recovery = exit %d stderr %q", exit, stderr.String())
+	}
+	awaitServer(t, done)
+	var result api.TaskRecovery
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.State != "missing" {
+		t.Fatalf("recovery response %q: %v", stdout.String(), err)
+	}
+}
