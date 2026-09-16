@@ -117,6 +117,13 @@ from worker success, merge, a TCP socket, or an unchanged alias alone.
 `scripts/factory-autonomy.py CONFIG --once` runs intake;
 optional `release_configs` paths run exact-default-head releases and enqueue
 one idempotent verified-delivery follow-up for the same project's overseer.
+After verification, the controller fast-forwards its own source checkout to the
+exact released commit so the next tick loads the released scripts. The checkout
+must be on the configured release branch, have no tracked edits, and use an
+`origin` matching the configured GitHub repository (HTTPS or SSH). Untracked
+files are preserved. Fetch or ancestry failures, operator edits, and a different
+branch are reported without resetting the checkout or changing the verified
+runtime receipt; resolve the reported checkout condition before the next pass.
 Use `--plist` to generate a launchd StartInterval job. The generated job uses
 absolute script/config paths and the host's tool PATH. Install it only after
 the one-shot preflight succeeds. Each config gets a separate launchd label. Controllers for the same factory
@@ -124,7 +131,7 @@ serialize through a host lock, so their intake and deployment hooks
 cannot overlap. Use the controller for scheduled work; direct maintenance
 hooks are operator tools.
 Each tick writes a mode-0600 `.autonomy.json` health receipt beside the intake
-journal, containing only component names and finite status codes for bounded
+journal, containing component names, finite status codes, and fixed source-refresh refusal details for bounded
 automation health diagnostics.
 For private repositories, optionally set `review_mirror_root` to an existing
 bare mirror at `ROOT/OWNER/REPOSITORY` whose `origin` is the configured HTTPS

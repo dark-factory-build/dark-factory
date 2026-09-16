@@ -33,6 +33,38 @@ def validate_controller_config(config):
             raise ValueError('release journal must be outside factory_home')
 
 
+class ControllerSourceError(ValueError):
+    pass
+
+
+def refresh_controller(checkout, release_config, receipt):
+    """Advance this existing checkout only after an exact verified release."""
+    sha = receipt.get('sha', '')
+    repository, branch = release_config['repository'], release_config['base']
+    if receipt.get('state') != 'verified' or len(sha) != 40 or any(c not in '0123456789abcdef' for c in sha):
+        raise ControllerSourceError('controller source refresh requires an exact verified release')
+
+    def git(*args):
+        result = subprocess.run(['git', '-C', str(checkout), '-c', 'core.hooksPath=/dev/null', *args], capture_output=True, text=True, timeout=120)
+        if result.returncode:
+            raise ControllerSourceError('controller source refresh refused at git ' + args[0] + '; inspect the checkout before the next release pass')
+        return result.stdout.strip()
+
+    if git('rev-parse', '--show-toplevel') != str(checkout.resolve()):
+        raise ControllerSourceError('controller source must be the checkout root')
+    if git('symbolic-ref', '--short', 'HEAD') != branch:
+        raise ControllerSourceError('controller source must be on the configured release branch')
+    remote = git('remote', 'get-url', 'origin')
+    if remote not in ('https://github.com/' + repository, 'https://github.com/' + repository + '.git',
+                      'git@github.com:' + repository + '.git', 'ssh://git@github.com/' + repository + '.git'):
+        raise ControllerSourceError('controller origin must match the configured release repository')
+    if git('status', '--porcelain', '--untracked-files=no'):
+        raise ControllerSourceError('controller source has tracked edits; preserve them before refreshing')
+    git('fetch', '--no-tags', '--no-write-fetch-head', '--refmap=', 'origin', sha)
+    git('merge-base', '--is-ancestor', 'HEAD', sha)
+    git('merge', '--ff-only', sha)
+
+
 def tick(config_path, config):
     scripts = Path(__file__).resolve().parent
     calls = []
@@ -60,7 +92,10 @@ def tick(config_path, config):
                     spec.loader.exec_module(delivery)
                     release_config = json.loads(Path(argv[2]).read_text())
                     delivery.deliver(config, release_config, receipt)
+                    refresh_controller(scripts.parent, release_config, receipt)
 
+        except ControllerSourceError as error:
+            result.update({'ok': False, 'error': str(error)})
         except subprocess.TimeoutExpired:
             results.append({'component': Path(argv[1]).stem, 'ok': False, 'error': 'timeout'})
         except Exception:
