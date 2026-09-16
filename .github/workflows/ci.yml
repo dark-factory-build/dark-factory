@@ -157,7 +157,7 @@ jobs:
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
 
-      - name: Provide the Homebrew Go and Node toolchains
+      - name: Provide the Homebrew Go toolchain
         run: |
           set -euxo pipefail
           if [ ! -x /opt/homebrew/bin/go ]; then
@@ -166,9 +166,30 @@ jobs:
             brew update
             HOMEBREW_NO_AUTO_UPDATE=1 brew install go
           fi
-          node_major=$(node -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
-          [ "$node_major" -ge 22 ] || HOMEBREW_NO_AUTO_UPDATE=1 brew install node
           /opt/homebrew/bin/go version
+
+      - name: Provide an isolated Node and Corepack pair
+        run: |
+          set -euo pipefail
+          case $(uname -m) in
+            arm64) node_arch=arm64 ;;
+            x86_64) node_arch=x64 ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          node_release=node-v22.20.0-darwin-$node_arch
+          node_archive=$node_release.tar.gz
+          node_url=https://nodejs.org/dist/v22.20.0
+          curl --fail --silent --show-error --location "$node_url/$node_archive" -o "$RUNNER_TEMP/$node_archive"
+          curl --fail --silent --show-error --location "$node_url/SHASUMS256.txt" -o "$RUNNER_TEMP/node-shasums.txt"
+          checksum=$(awk -v archive="$node_archive" '$2 == archive { print }' "$RUNNER_TEMP/node-shasums.txt")
+          test -n "$checksum"
+          (cd "$RUNNER_TEMP" && printf '%s\n' "$checksum" | shasum -a 256 -c -)
+          tar -xzf "$RUNNER_TEMP/$node_archive" -C "$RUNNER_TEMP"
+          node_bin=$RUNNER_TEMP/$node_release/bin
+          "$node_bin/node" --version
+          "$node_bin/node" "$node_bin/corepack" --version
+          printf '%s\n' "$node_bin" >> "$GITHUB_PATH"
+          printf 'DF_CI_NODE=%s/node\nDF_CI_COREPACK=%s/corepack\n' "$node_bin" "$node_bin" >> "$GITHUB_ENV"
 
       - name: Run the macOS source gate
         run: ./scripts/local-ci.sh
