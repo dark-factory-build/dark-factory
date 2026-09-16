@@ -597,6 +597,13 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	// until it observes TerminalReady, but it already owns the controller and
 	// will synchronously converge it if any later step fails.
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
+	if worker && changeState.AvailableAt != nil && run.RunningAt != nil {
+		live.agentID, live.changeID = run.AgentID, changeState.ID
+		live.pathsSince = *changeState.AvailableAt
+		if run.RunningAt.Int64() > live.pathsSince.Int64() {
+			live.pathsSince = *run.RunningAt
+		}
+	}
 	live.sourceSnapshots = make(map[kernel.RetainedChangeHandoff]string)
 	live.sourceRoot = filepath.Join(gotRuntimePath, "retained-source")
 	live.attemptDigest = digest
