@@ -1028,6 +1028,10 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
+	// Keep the exact live owner so a refusal caused by a concurrent durable
+	// finalization wakes its lifecycle loop immediately. The refusal remains
+	// the caller's error; this lookup carries no authority and is not exposed.
+	live := daemon.liveAttemptForDigest(kDigest)
 	proposal, err := proposalForCall(call)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest), nil
@@ -1037,6 +1041,14 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		return newErrorReply(api.RemoteInternal), nil
 	}
 	daemon.operationMu.Lock()
+	if live != nil {
+		// Keep the exact provider detail attached to the exact bearer even when
+		// the first durable finalization attempt is refused. The supervisor can
+		// retry it after the runner's authenticated result establishes the final
+		// cleanup boundary.
+		copy := proposal
+		live.pendingOutcome = &copy
+	}
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
 	// running/finalizing boundary; notification carries no authority.
@@ -1049,6 +1061,7 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		attempt = daemon.attempts[run.ID]
 		if attempt != nil {
 			attempt.outcomeReceiptPending = true
+			attempt.pendingOutcome = nil
 		}
 		daemon.attemptMu.Unlock()
 		// The commit completed before ProposeAttemptOutcome returned. The owner
@@ -1058,6 +1071,21 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	}
 	daemon.operationMu.Unlock()
 	if err != nil {
+		var refusal *kernel.OutcomeRefusal
+		if live != nil && errors.As(err, &refusal) {
+			// Only the exact bearer owner receives a refusal action. A foreign
+			// bearer remains a plain API error and cannot terminate this run.
+			daemon.operationMu.Lock()
+			live.notifyOutcomeRefusal(refusal)
+			daemon.operationMu.Unlock()
+		} else if live != nil {
+			// Unauthorized/non-refusal responses include scope cancellation and
+			// credential revocation. Never retain a stale provider proposal across
+			// those durable boundaries.
+			daemon.operationMu.Lock()
+			live.pendingOutcome = nil
+			daemon.operationMu.Unlock()
+		}
 		return newErrorReply(remoteErrorCode(err)), nil
 	}
 	return daemon.mutation(ctx, run.Revision), attempt

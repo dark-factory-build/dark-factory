@@ -229,7 +229,7 @@ func (attempt *liveAttempt) handleBeforeRelease(ctx context.Context, command liv
 }
 
 func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) {
-	if attempt.terminationSent || attempt.resultReturned {
+	if attempt.terminationSent {
 		return false, nil
 	}
 	if ctx.Err() != nil {
@@ -245,6 +245,18 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		return false, nil
 	}
 	if attempt.outcomeReceiptPending {
+		attempt.daemon.operationMu.Unlock()
+		return false, nil
+	}
+	if attempt.outcomeRefusal != nil {
+		// The refusal was authenticated to this exact owner. Consume the
+		// bounded cause and converge the owned controller; no durable state
+		// claim is made here and no other live attempt can be affected.
+		attempt.outcomeRefusal = nil
+		attempt.daemon.operationMu.Unlock()
+		return false, attempt.terminateController()
+	}
+	if attempt.resultReturned {
 		attempt.daemon.operationMu.Unlock()
 		return false, nil
 	}

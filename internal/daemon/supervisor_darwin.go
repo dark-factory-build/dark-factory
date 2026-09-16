@@ -594,6 +594,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
 	live.sourceSnapshots = make(map[kernel.RetainedChangeHandoff]string)
 	live.sourceRoot = filepath.Join(gotRuntimePath, "retained-source")
+	live.attemptDigest = digest
 	live.beforeProviderStateCheck = spec.beforeProviderStateCheck
 	if err := daemon.registerLiveAttempt(live); err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
@@ -659,6 +660,23 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	result, err := kernelAttemptResult(record, run.ID, run.CredentialDigest, runtimeIdentity)
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureProtocol, err)
+	}
+	// A provider can finish after its outcome call was refused by a transient
+	// finalization race. The exact live owner retains that proposal; retry it
+	// once the authenticated runner result proves the provider has converged.
+	// A competing durable outcome wins normally: its unauthorized response is
+	// not a license to replace that outcome.
+	if pending, ok := live.pendingOutcomeSnapshot(); ok {
+		at, proposalErr := daemon.timestamp()
+		if proposalErr != nil {
+			return kernel.Run{}, proposalErr
+		}
+		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(context.Background(), digest, pending, at)
+		if proposeErr == nil {
+			run = proposalRun
+		} else if !errors.Is(proposeErr, kernel.ErrUnauthorized) {
+			return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: retained outcome proposal: %w", proposeErr))
+		}
 	}
 	run, err = daemon.consumeAttemptResult(result, false)
 	if err != nil {

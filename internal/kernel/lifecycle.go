@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -444,7 +445,11 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return Run{}, tx.Rollback(ErrUnauthorized)
 	}
-	return store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil)
+	finalizing, err := store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil)
+	if err != nil && (errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict)) {
+		return Run{}, NewOutcomeRefusal(err)
+	}
+	return finalizing, err
 }
 
 // FailRun records a daemon-owned infrastructure failure before or during a
