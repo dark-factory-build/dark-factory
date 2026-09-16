@@ -50,7 +50,7 @@ def deploy(sha, home=None):
     # Preparation is non-destructive and leaves working agents running.
     subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--prepare', sha], env=env, check=True, timeout=600, capture_output=True, text=True)
     enabled, original_revision, _ = state(home)
-    subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15)
+    subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
     _, paused_revision, _ = state(home)
     if paused_revision != original_revision + int(bool(enabled)):
         raise ValueError('operator changed dispatch during deployment pause')
@@ -75,7 +75,7 @@ def deploy(sha, home=None):
     current_enabled, revision, _ = state(home)
     # A subsequent explicit operator dispatch change wins over our restoration.
     if enabled and not current_enabled and revision == paused_revision:
-        subprocess.run([str(control), 'dispatch', 'on', '--revision', str(paused_revision)], env=env, check=True, timeout=15)
+        subprocess.run([str(control), 'dispatch', 'on', '--revision', str(paused_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
     print(json.dumps({'sha': sha, 'healthy': True, 'dispatch_enabled': bool(state(home)[0])}))
 
 
