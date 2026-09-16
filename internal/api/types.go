@@ -229,6 +229,53 @@ type AttemptTask struct {
 	Task string `json:"task"`
 }
 
+// TerminalObserveInput identifies one exact attempt terminal. The API derives
+// authority from the bearer and requires all three durable identities to
+// match; cursor is a byte cursor in the runner's bounded replay ring.
+type TerminalObserveInput struct {
+	ProjectID string `json:"project_id"`
+	TaskID    string `json:"task_id"`
+	RunID     string `json:"run_id"`
+	Cursor    uint64 `json:"cursor"`
+	MaxBytes  uint32 `json:"max_bytes"`
+}
+
+type TerminalObservation struct {
+	ProjectID  string `json:"project_id"`
+	TaskID     string `json:"task_id"`
+	RunID      string `json:"run_id"`
+	Cursor     uint64 `json:"cursor"`
+	NextCursor uint64 `json:"next_cursor"`
+	Floor      uint64 `json:"floor"`
+	Head       uint64 `json:"head"`
+	Source     string `json:"source"`
+	Gap        bool   `json:"gap"`
+	Omitted    uint64 `json:"omitted"`
+	Payload    []byte `json:"payload"`
+}
+
+// MarshalDisplayJSON renders readable, terminal-safe text for CLI/MCP without
+// changing the byte payload or raw cursors on the local API wire.
+func (value TerminalObservation) MarshalDisplayJSON() ([]byte, error) {
+	type plain TerminalObservation
+	encoded, err := json.Marshal(struct {
+		plain
+		Payload string `json:"payload"`
+	}{plain(value), string(value.Payload)})
+	if err != nil {
+		return nil, err
+	}
+	return terminalSafeJSON(nil, encoded), nil
+}
+
+func validTerminalObservationInput(input TerminalObserveInput) bool {
+	return validID(input.ProjectID) && validID(input.TaskID) && validID(input.RunID) && input.MaxBytes > 0 && input.MaxBytes <= 65536
+}
+
+func validTerminalObservation(value TerminalObservation) bool {
+	return validID(value.ProjectID) && validID(value.TaskID) && validID(value.RunID) && value.NextCursor >= value.Cursor && value.Floor <= value.Head && value.NextCursor <= value.Head && (value.Source == "stored" || value.Source == "none") && len(value.Payload) <= 65536 && value.Omitted <= value.NextCursor-value.Cursor && uint64(len(value.Payload)) == value.NextCursor-value.Cursor-value.Omitted
+}
+
 func (AttemptTask) String() string   { return "AttemptTask(<redacted>)" }
 func (AttemptTask) GoString() string { return "AttemptTask(<redacted>)" }
 
@@ -659,9 +706,10 @@ type PeerStatus struct {
 }
 
 type PeerStatusInput struct {
-	Offset       uint64 `json:"offset"`
-	TargetOffset uint64 `json:"target_offset"`
-	ExpectedHead uint64 `json:"expected_head"`
+	Offset         uint64 `json:"offset"`
+	TargetOffset   uint64 `json:"target_offset"`
+	ExpectedHead   uint64 `json:"expected_head"`
+	IncludeTargets bool   `json:"include_targets"`
 }
 
 // Peer status is printed in an authenticated provider terminal.

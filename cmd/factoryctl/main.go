@@ -46,9 +46,10 @@ const (
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT [--option TEXT ...]
-  factoryctl attempt peer status [--offset N] [--target-offset N] [--head HEAD]
+  factoryctl attempt peer status [--targets [--target-offset N]] [--offset N] [--head HEAD]
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
+  factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl attempt send-back --task ID --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
   factoryctl overseer task add --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
@@ -108,6 +109,7 @@ const (
 	commandPeerAnswer
 	commandSendBack
 	commandAttemptTask
+	commandTerminalObserve
 	commandAttemptSource
 	commandWebStatus
 	commandWebListClients
@@ -179,12 +181,14 @@ type attemptCommand struct {
 	bodySet         bool
 	toolBudget      uint64
 	capacity        uint16
+	maxBytes        uint32
 	maxRunSeconds   uint32
 	priority        int64
 	prioritySet     bool
 	offset          uint64
 	head            uint64
 	textOffset      uint64
+	includeTargets  bool
 	enabled         bool
 	operationID     string
 	taskRevision    uint64
@@ -308,8 +312,27 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		}
 		return writeJSON(stdout, result)
 	}
+	if command.kind == commandTerminalObserve {
+		result, observeErr := client.TerminalObserve(callContext, api.TerminalObserveInput{ProjectID: command.project, TaskID: command.id, RunID: command.run, Cursor: command.offset, MaxBytes: command.maxBytes})
+		if observeErr != nil {
+			writeFailure(stderr, command.kind, observeErr)
+			return exitFailure
+		}
+		encoded, err := result.MarshalDisplayJSON()
+		if err != nil {
+			writeFailure(stderr, command.kind, err)
+			return exitFailure
+		}
+		return writeJSON(stdout, json.RawMessage(encoded))
+	}
 	if command.kind == commandPeerStatus {
-		result, statusErr := client.PeerStatusPage(callContext, command.offset, command.textOffset, command.head)
+		var result api.PeerStatus
+		var statusErr error
+		if command.includeTargets {
+			result, statusErr = client.PeerStatusPage(callContext, command.offset, command.textOffset, command.head)
+		} else {
+			result, statusErr = client.PeerInboxPage(callContext, command.offset, command.head)
+		}
 		if statusErr != nil {
 			writeFailure(stderr, command.kind, statusErr)
 			return exitFailure
@@ -457,7 +480,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) >= 3 && args[2] == "status" {
 			command := attemptCommand{kind: commandPeerStatus}
 			seen := map[string]bool{}
-			for index := 3; index < len(args); index += 2 {
+			for index := 3; index < len(args); {
+				if args[index] == "--targets" && !seen[args[index]] {
+					seen[args[index]] = true
+					command.includeTargets = true
+					index++
+					continue
+				}
 				if index+1 >= len(args) || seen[args[index]] {
 					return attemptCommand{}, false, false
 				}
@@ -476,8 +505,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 				default:
 					return attemptCommand{}, false, false
 				}
+				index += 2
 			}
-			if command.head == 0 && (command.offset != 0 || command.textOffset != 0) {
+			if command.head == 0 && (command.offset != 0 || command.textOffset != 0) || !command.includeTargets && command.textOffset != 0 {
 				return attemptCommand{}, false, false
 			}
 			return command, false, true
@@ -488,6 +518,48 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) == 11 && args[2] == "answer" && args[3] == "--question" && validHumanRequestKey(args[4]) && args[5] == "--revision" && validRevision(args[6]) && args[7] == "--idempotency-key" && validHumanRequestKey(args[8]) && args[9] == "--answer" && validPeerText(args[10]) {
 			revision, _ := strconv.ParseUint(args[6], 10, 64)
 			return attemptCommand{kind: commandPeerAnswer, id: args[4], expectedRevision: revision, idempotencyKey: args[8], text: args[10]}, false, true
+		}
+	case "terminal":
+		if len(args) >= 3 && args[2] == "observe" && (len(args)-3)%2 == 0 {
+			command := attemptCommand{kind: commandTerminalObserve, maxBytes: 8192}
+			seen := map[string]bool{}
+			for i := 3; i < len(args); i += 2 {
+				name, value := args[i], args[i+1]
+				if seen[name] {
+					return attemptCommand{}, false, false
+				}
+				seen[name] = true
+				switch name {
+				case "--project", "--task", "--run":
+					if !validHumanRequestKey(value) {
+						return attemptCommand{}, false, false
+					}
+					if name == "--project" {
+						command.project = value
+					} else if name == "--task" {
+						command.id = value
+					} else {
+						command.run = value
+					}
+				case "--cursor", "--max-bytes":
+					parsed, err := strconv.ParseUint(value, 10, 64)
+					if err != nil || name == "--max-bytes" && parsed > 65536 {
+						return attemptCommand{}, false, false
+					}
+					if name == "--cursor" {
+						command.offset = parsed
+					} else if parsed > 0 {
+						command.maxBytes = uint32(parsed)
+					} else {
+						return attemptCommand{}, false, false
+					}
+				default:
+					return attemptCommand{}, false, false
+				}
+			}
+			if command.project != "" && command.id != "" && command.run != "" {
+				return command, false, true
+			}
 		}
 	case "send-back":
 		if len(args) == 6 && args[2] == "--task" && validHumanRequestKey(args[3]) && args[4] == "--note" && validQuestion(args[5]) {
@@ -1314,6 +1386,8 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 		subject = "task request"
 	} else if kind == commandAttemptSource {
 		subject, input = "source request", "source request input"
+	} else if kind == commandTerminalObserve {
+		subject, input = "terminal observation", "terminal observation input"
 	} else if kind == commandRequestHuman {
 		subject, input = "human request", "human request input"
 	} else if kind == commandPeerStatus || kind == commandPeerAsk || kind == commandPeerAnswer {

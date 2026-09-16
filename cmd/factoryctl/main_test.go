@@ -33,6 +33,19 @@ func TestVersionRequiresNoHomeOrCredential(t *testing.T) {
 	}
 }
 
+func TestTerminalObserveCursorIsNotResponseBudget(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	args := []string{"attempt", "terminal", "observe", "--project", id, "--task", id, "--run", id, "--cursor", "10000000", "--max-bytes", "1024"}
+	command, help, ok := parse(args)
+	if !ok || help || command.kind != commandTerminalObserve || command.offset != 10000000 || command.maxBytes != 1024 {
+		t.Fatalf("valid large cursor rejected: %+v help=%v ok=%v", command, help, ok)
+	}
+	args[len(args)-1] = "65537"
+	if _, _, ok := parse(args); ok {
+		t.Fatal("oversized response accepted")
+	}
+}
+
 func TestBuildIdentityRequiresNoHomeOrCredential(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"--build-identity"}, func(string) string { return "private" }, &stdout, &stderr)
@@ -190,9 +203,10 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "human request", args: []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "what now?"}, command: attemptCommand{kind: commandRequestHuman, idempotencyKey: "0123456789abcdef0123456789abcdef", text: "what now?"}},
 		{name: "peer status", args: []string{"attempt", "peer", "status"}, command: attemptCommand{kind: commandPeerStatus}},
 		{name: "peer status history page", args: []string{"attempt", "peer", "status", "--offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, head: 8}},
-		{name: "peer status target page", args: []string{"attempt", "peer", "status", "--target-offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, textOffset: 4, head: 8}},
-		{name: "peer status both pages", args: []string{"attempt", "peer", "status", "--offset", "4", "--target-offset", "8", "--head", "9"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9}},
-		{name: "peer status both pages reversed", args: []string{"attempt", "peer", "status", "--target-offset", "8", "--head", "9", "--offset", "4"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9}},
+		{name: "peer status targets", args: []string{"attempt", "peer", "status", "--targets"}, command: attemptCommand{kind: commandPeerStatus, includeTargets: true}},
+		{name: "peer status target page", args: []string{"attempt", "peer", "status", "--targets", "--target-offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, textOffset: 4, head: 8, includeTargets: true}},
+		{name: "peer status both pages", args: []string{"attempt", "peer", "status", "--offset", "4", "--targets", "--target-offset", "8", "--head", "9"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9, includeTargets: true}},
+		{name: "peer status both pages reversed", args: []string{"attempt", "peer", "status", "--target-offset", "8", "--head", "9", "--targets", "--offset", "4"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9, includeTargets: true}},
 		{name: "peer ask", args: []string{"attempt", "peer", "ask", "--task", "0123456789abcdef0123456789abcdef", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--question", "need context"}, command: attemptCommand{kind: commandPeerAsk, id: "0123456789abcdef0123456789abcdef", idempotencyKey: "fedcba9876543210fedcba9876543210", text: "need context"}},
 		{name: "peer answer", args: []string{"attempt", "peer", "answer", "--question", "0123456789abcdef0123456789abcdef", "--revision", "7", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--answer", "context"}, command: attemptCommand{kind: commandPeerAnswer, id: "0123456789abcdef0123456789abcdef", expectedRevision: 7, idempotencyKey: "fedcba9876543210fedcba9876543210", text: "context"}},
 		{name: "send back", args: []string{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", "five findings"}, command: attemptCommand{kind: commandSendBack, id: "0123456789abcdef0123456789abcdef", text: "five findings"}},
@@ -250,6 +264,7 @@ func TestParsePeerStatusRejectsDuplicateOrMalformedPageFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"attempt", "peer", "status", "--offset", "4"},
 		{"attempt", "peer", "status", "--target-offset", "4"},
+		{"attempt", "peer", "status", "--targets", "--targets"},
 		{"attempt", "peer", "status", "--offset", "4", "--offset", "8"},
 		{"attempt", "peer", "status", "--target-offset", "4", "--target-offset", "8"},
 		{"attempt", "peer", "status", "--head", "8", "--head", "9"},

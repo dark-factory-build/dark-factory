@@ -117,8 +117,8 @@ def validate_factory(config: dict) -> None:
         agent = next((item for item in value.get("agents", []) if item.get("id") == config["overseer_agent_id"]), None)
     except (json.JSONDecodeError, IntakeError, OSError) as exc:
         raise IntakeError("cannot verify configured factory limits; install the matching runtime first") from exc
-    if project is None or agent is None or agent.get("project_id") != config["project_id"] or agent.get("role") != "orchestrator" or agent.get("provider") != "codex":
-        raise IntakeError("configured project needs a Codex overseer")
+    if project is None or agent is None or agent.get("project_id") != config["project_id"] or agent.get("role") != "orchestrator":
+        raise IntakeError("configured project needs an overseer")
     duration = project.get("max_run_seconds")
     if type(duration) is not int or not 0 <= duration <= 86400:
         raise IntakeError("configured per-run duration is invalid")

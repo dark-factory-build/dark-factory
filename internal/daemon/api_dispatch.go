@@ -218,6 +218,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.peerAsk(ctx, call)
 	case api.CallPeerAnswer:
 		return daemon.peerAnswer(ctx, call)
+	case api.CallTerminalObserve:
+		return daemon.terminalObserve(ctx, call)
 	case api.CallSendBack, api.CallSendBackTask:
 		return daemon.sendBack(ctx, call)
 	case api.CallOverseerSnapshot:
@@ -494,13 +496,13 @@ func (daemon *Daemon) peerStatus(ctx context.Context, call api.Call) api.Reply {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
 	authority, err := daemon.store.AuthenticateAttempt(ctx, kDigest)
-	if err != nil || authority.Role != kernel.RoleWorker {
+	if err != nil || (authority.Role != kernel.RoleWorker && authority.Role != kernel.RoleOrchestrator) {
 		if err == nil {
 			err = kernel.ErrUnauthorized
 		}
 		return newErrorReply(remoteErrorCode(err))
 	}
-	offset, targetOffset, expectedHead, ok := call.PeerStatusPage()
+	offset, targetOffset, expectedHead, includeTargets, ok := call.PeerStatusPage()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -512,13 +514,17 @@ func (daemon *Daemon) peerStatus(ctx context.Context, call api.Call) api.Reply {
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	targets, nextTargetOffset, err := daemon.store.PeerTargetsForAttempt(ctx, kDigest, targetOffset, head)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	status := api.PeerStatus{Head: uint64(head.Int64()), Targets: make([]api.PeerTarget, 0, len(targets)), Questions: make([]api.PeerQuestion, 0, len(items)), NextOffset: nextOffset, NextTargetOffset: nextTargetOffset}
-	for _, target := range targets {
-		status.Targets = append(status.Targets, api.PeerTarget{TaskID: target.TaskID.String(), AgentID: target.AgentID.String(), Name: target.Name, Title: target.Title, Status: target.Status.String(), Revision: uint64(target.Revision.Int64())})
+	status := api.PeerStatus{Head: uint64(head.Int64()), Targets: []api.PeerTarget{}, Questions: make([]api.PeerQuestion, 0, len(items)), NextOffset: nextOffset}
+	if includeTargets {
+		targets, nextTargetOffset, err := daemon.store.PeerTargetsForAttempt(ctx, kDigest, targetOffset, head)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		status.Targets = make([]api.PeerTarget, 0, len(targets))
+		status.NextTargetOffset = nextTargetOffset
+		for _, target := range targets {
+			status.Targets = append(status.Targets, api.PeerTarget{TaskID: target.TaskID.String(), AgentID: target.AgentID.String(), Name: target.Name, Title: target.Title, Status: target.Status.String(), Revision: uint64(target.Revision.Int64())})
+		}
 	}
 	for _, item := range items {
 		status.Questions = append(status.Questions, daemon.projectPeerQuestion(ctx, item))
