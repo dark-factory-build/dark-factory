@@ -207,7 +207,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 				if !admissionObserved && spec.admissionObserved != nil {
 					spec.admissionObserved(true)
 				}
-				return daemon.failRunBeforeRuntime(*reconciled.Run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, *reconciled.Run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 			}
 			if reconciled.Reason == kernel.NoAdmissionNotReconciled {
 				// The reconciliation read proves the failed write created no run, so
@@ -234,27 +234,27 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if err == nil {
 			err = kernel.ErrCorruptState
 		}
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	if project.VerificationPolicy != run.VerificationPolicy || project.VerificationPolicy != kernel.VerificationNone {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue))
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue))
 	}
 	// The account is read from the agent at launch, not copied onto the run:
 	// it is configuration, not part of the admitted work.
 	accountConfigDir, err := daemon.agentAccountConfigDir(ctx, run.AgentID)
 	if err != nil {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	factoryctl, err := runner.CommitExecutableLocator(spec.FactoryctlExecutable)
 	if err != nil {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
 	repositoryIdentity, err := inspectRepositoryIdentity(project.Root)
 	if err != nil {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
 	}
 	if worker != (run.ChangeID != nil && run.AdmittedChangeRevision != nil) {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 	}
 	var changeID kernel.ChangeID
 	var finalName, stagingName string
@@ -268,7 +268,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if err == nil {
 			err = kernel.ErrCorruptState
 		}
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	rawProviderTask := []byte(task.Body)
 	if run.Provider != kernel.ProviderShell && len(rawProviderTask) == 0 {
@@ -276,7 +276,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
 	var startupInput []byte
 	providerTask := rawProviderTask
@@ -287,11 +287,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		startupInput = preparedTask
 	case provider.TaskDeliveryAttemptAPI:
 		if len(preparedTask) != 0 {
-			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 		}
 		providerTask = nil
 	default:
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 	}
 	var changeState kernel.Change
 	var retained *changeworker.Result
@@ -302,16 +302,16 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			if err == nil {
 				err = kernel.ErrCorruptState
 			}
-			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 		}
 		if changeState.Phase == kernel.ChangeAvailable && changeState.Revision == *run.AdmittedChangeRevision {
 			var retainedRepository change.RepositoryIdentity
 			retained, retainedRepository, err = retainedWorkerCheckpoint(changeState)
 			if err != nil || !retainedRepository.Equal(repositoryIdentity) {
-				return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSource, errors.Join(err, errInvalidContract))
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, errors.Join(err, errInvalidContract))
 			}
 		} else if changeState.Phase != kernel.ChangeReserved || changeState.Revision != *run.AdmittedChangeRevision {
-			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
 	// CI is an optional execution capability. An unavailable or unsafe lease
@@ -1044,7 +1044,7 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 // failRunBeforeRuntime finalizes an admitted run whose runtime was never
 // created. The caller must not have attempted CreateRuntime for this run;
 // trusted absence is exactly that precondition.
-func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.ResourceID, code kernel.FailureCode, cause error) (kernel.Run, error) {
+func (daemon *Daemon) failRunBeforeRuntime(ctx context.Context, run kernel.Run, runtimeID kernel.ResourceID, code kernel.FailureCode, cause error) (kernel.Run, error) {
 	daemon.operationMu.Lock()
 	defer daemon.operationMu.Unlock()
 	failure, err := kernel.NewFailureProposal(code, failureDetail(cause))
@@ -1053,7 +1053,7 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
+		current, found, readErr := daemon.store.Run(ctx, run.ID)
 		if readErr != nil || !found {
 			lastErr = readErr
 			if lastErr == nil {
@@ -1064,7 +1064,7 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 		if current.Phase != kernel.RunAdmitted {
 			return current, cause
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(daemon.cleanupCtx, runtimeID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(ctx, runtimeID)
 		if resourceErr != nil || !resourceFound {
 			lastErr = resourceErr
 			if lastErr == nil {
@@ -1077,7 +1077,7 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 			lastErr = clockErr
 			continue
 		}
-		failed, failErr := daemon.store.FailRunWithRuntimeAbsent(daemon.cleanupCtx, current.ID, runtimeID, current.Revision, resource.Revision, failure, at)
+		failed, failErr := daemon.store.FailRunWithRuntimeAbsent(ctx, current.ID, runtimeID, current.Revision, resource.Revision, failure, at)
 		if failErr == nil {
 			return failed, cause
 		}

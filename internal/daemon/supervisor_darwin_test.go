@@ -1180,7 +1180,7 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	var failed kernel.Run
 	var failErr error
 	go func() {
-		failed, failErr = daemon.failRunBeforeRuntime(*admission.Run, resource(216), kernel.FailureInternal, failureCause)
+		failed, failErr = daemon.failRunBeforeRuntime(context.Background(), *admission.Run, resource(216), kernel.FailureInternal, failureCause)
 		close(finished)
 	}()
 	select {

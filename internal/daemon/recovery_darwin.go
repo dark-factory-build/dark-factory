@@ -293,7 +293,7 @@ func (daemon *Daemon) recoverBeforeRuntime(ctx context.Context, parent *RuntimeP
 		// stronger evidence resolves it.
 		return RecoveredUncertain, nil
 	}
-	failed, failErr := daemon.failRunBeforeRuntime(run, runtimeRoot.ID, kernel.FailureSpawn, fmt.Errorf("daemon: runtime absent at recovery"))
+	failed, failErr := daemon.failRunBeforeRuntime(ctx, run, runtimeRoot.ID, kernel.FailureSpawn, fmt.Errorf("daemon: runtime absent at recovery"))
 	if failErr != nil && failed.Phase != kernel.RunFinalizing {
 		return RecoveredUncertain, failErr
 	}

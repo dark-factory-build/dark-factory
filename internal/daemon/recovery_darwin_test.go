@@ -315,7 +315,7 @@ func TestReconciliationWaitsForBriefWriterContention(t *testing.T) {
 	cause := errors.New("writer contention")
 	completed := make(chan result, 1)
 	go func() {
-		run, err := fixture.daemon.failRunBeforeRuntime(fixture.run, fixture.keys.Resources.RuntimeRoot, kernel.FailureInternal, cause)
+		run, err := fixture.daemon.failRunBeforeRuntime(context.Background(), fixture.run, fixture.keys.Resources.RuntimeRoot, kernel.FailureInternal, cause)
 		completed <- result{run: run, err: err}
 	}()
 
@@ -1023,5 +1023,49 @@ func TestDaemonCloseCancelsCleanupWaitingForWriter(t *testing.T) {
 	}
 	if current := fixture.currentRun(t); current.Revision != before.Revision || current.Phase != kernel.RunFinalizing {
 		t.Fatal("shutdown lost recoverable finalizing run")
+	}
+}
+
+func TestRuntimeAbsentRecoveryHonorsCancellationWhileWriterHeld(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0xc0)
+	before := fixture.currentRun(t)
+	lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	entered := make(chan struct{}, 1)
+	fixture.daemon.now = func() time.Time {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		return time.UnixMilli(9000)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.daemon.RecoverAbandonedRuns(ctx, fixture.parent, fixture.changeParent)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("absent-runtime recovery did not reach mutation")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("recovery ignored caller cancellation with writer held")
+	}
+	if current := fixture.currentRun(t); current.Revision != before.Revision {
+		t.Fatal("canceled recovery mutated admitted run")
 	}
 }
