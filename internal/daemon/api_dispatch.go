@@ -1028,6 +1028,10 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
+	// Keep the exact live owner so a refusal caused by a concurrent durable
+	// finalization wakes its lifecycle loop immediately. The refusal remains
+	// the caller's error; this lookup carries no authority and is not exposed.
+	live := daemon.liveAttemptForDigest(kDigest)
 	proposal, err := proposalForCall(call)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest), nil
@@ -1049,6 +1053,7 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		attempt = daemon.attempts[run.ID]
 		if attempt != nil {
 			attempt.outcomeReceiptPending = true
+			attempt.pendingOutcome = nil
 		}
 		daemon.attemptMu.Unlock()
 		// The commit completed before ProposeAttemptOutcome returned. The owner
@@ -1056,10 +1061,29 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		// state payload; it only shortens the next durable Store poll.
 		daemon.notifyRun(run.ID)
 	}
-	daemon.operationMu.Unlock()
 	if err != nil {
+		var refusal *kernel.OutcomeRefusal
+		if live != nil && errors.As(err, &refusal) {
+			// Only the exact bearer owner receives a refusal action. A foreign
+			// bearer remains a plain API error and cannot terminate this run.
+			// Retain the first refused proposal only after the kernel has
+			// correlated this exact call to a durable refusal. A successful
+			// proposal already cleared this slot while holding operationMu.
+			if live.pendingOutcome == nil {
+				copy := proposal
+				live.pendingOutcome = &copy
+			}
+			live.notifyOutcomeRefusal(refusal)
+		} else if live != nil {
+			// Unauthorized/non-refusal responses include scope cancellation and
+			// credential revocation. Never retain a stale provider proposal across
+			// those durable boundaries.
+			live.pendingOutcome = nil
+		}
+		daemon.operationMu.Unlock()
 		return newErrorReply(remoteErrorCode(err)), nil
 	}
+	daemon.operationMu.Unlock()
 	return daemon.mutation(ctx, run.Revision), attempt
 }
 

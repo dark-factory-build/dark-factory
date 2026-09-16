@@ -37,6 +37,14 @@ file-binding, dependency, or toolchain changes. A whole-kernel race run is
 exceptional and uses `-timeout 1200s`. One memory-heavy Go run at a time avoids
 macOS resource exhaustion.
 
+## Review and merge ordering
+
+Independent exact-head review precedes enqueue. The protected merge queue then
+runs required CI on the combined tree before merging. A pending future queue
+check is a delivery condition, not by itself a source-review defect. Reviewers
+still block concrete defects and false verification claims; neither local test
+evidence nor an ALLOW verdict bypasses the protected gates.
+
 ## Operator human requests
 
 With the existing operator socket and token-file environment configured,
