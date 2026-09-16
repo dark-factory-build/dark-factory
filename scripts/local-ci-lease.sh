@@ -38,14 +38,11 @@ local_ci_lease_common_dir() {
         local_ci_old_lock=$local_ci_git_dir/.dark-factory-local-ci.lock
         local_ci_barrier=dark-factory-local-ci/.dark-factory-local-ci.lock
         if [ "$(readlink "$local_ci_old_lock" 2>/dev/null || true)" != "$local_ci_barrier" ]; then
-            # macOS ln treats an existing directory destination as a target
-            # directory even with -n, so reject every existing final path
-            # before the no-follow, create-only link operation.
             if [ -e "$local_ci_old_lock" ] || [ -L "$local_ci_old_lock" ]; then
                 echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
                 return 1
             fi
-            /bin/ln -s -n "$local_ci_barrier" "$local_ci_old_lock" || {
+            local_ci_lease_install_legacy_barrier "$local_ci_barrier" "$local_ci_old_lock" || {
                 echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
                 return 1
             }
@@ -60,6 +57,19 @@ local_ci_lease_common_dir() {
         return 1
     }
     printf '%s\n' "$local_ci_lease_dir"
+}
+
+local_ci_lease_install_legacy_barrier() {
+    # File.symlink is one atomic symlink(2) create-only operation. BSD ln can
+    # reinterpret an existing directory destination as a child pathname after
+    # the guard above, creating a second legacy lock domain in that race.
+    if [ -n "${DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_LEGACY_BARRIER-}" ]; then
+        : >"$DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_LEGACY_BARRIER.ready"
+        read -r local_ci_lease_test_pause_token \
+            <"$DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_LEGACY_BARRIER" || true
+    fi
+    /usr/bin/ruby --disable-gems -e \
+        'File.symlink(ARGV[0], ARGV[1])' -- "$1" "$2"
 }
 
 local_ci_lease_setup_paths() {

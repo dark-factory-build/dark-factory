@@ -292,6 +292,36 @@ grep -Fq 'legacy lease' "$temporary/legacy-symlink.stderr" || fail "legacy symli
     || fail "legacy migration mutated the external symlink target"
 rm -f "$legacy_lock"
 
+# The final barrier create must remain create-only when a legacy helper races
+# the precheck by placing a directory at the old pathname.
+race_host_checkout="$temporary/race-host-checkout"
+/usr/bin/git init -q "$race_host_checkout"
+/bin/mkdir -p "$race_host_checkout/scripts"
+/bin/cp "$repository_root/scripts/local-ci-lease.sh" "$repository_root/scripts/with-local-ci-lease.sh" "$race_host_checkout/scripts/"
+/bin/chmod +x "$race_host_checkout/scripts/with-local-ci-lease.sh"
+race_host_git_dir=$(/usr/bin/git -C "$race_host_checkout" rev-parse --path-format=absolute --git-common-dir)
+race_legacy_lock="$race_host_git_dir/.dark-factory-local-ci.lock"
+race_pause="$temporary/legacy-barrier-race"
+mkfifo "$race_pause"
+(
+    cd "$race_host_checkout"
+    DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_LEGACY_BARRIER="$race_pause" \
+        ./scripts/with-local-ci-lease.sh true
+) 2>"$temporary/legacy-barrier-race.stderr" &
+race_pid=$!
+background_pids="$background_pids $race_pid"
+wait_for_file "$race_pause.ready"
+/bin/mkdir "$race_legacy_lock"
+printf '\n' >"$race_pause"
+if wait_bounded "legacy barrier race" "$race_pid"; then
+    fail "legacy barrier race unexpectedly succeeded"
+else
+    race_status=$?
+fi
+[ "$race_status" -ne 0 ] || fail "legacy barrier race returned success"
+[ -d "$race_legacy_lock" ] && [ ! -L "$race_legacy_lock" ] \
+    || fail "legacy barrier race replaced the competing directory"
+
 # The host and generated overseer profiles may not expose Perl. The native
 # symlink primitive must therefore cover the legacy barrier migration without
 # consulting that optional runtime.
