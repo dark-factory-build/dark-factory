@@ -313,6 +313,11 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 	legacy := expectedSchemaOf(wantStatements)
 	statements := []string{"BEGIN IMMEDIATE"}
 	statements = append(statements, extra...)
+	if version <= v10UserVersion {
+		// Continuations were introduced in v11. Remove the current schema
+		// objects before rebuilding the rest of the exact historical home.
+		statements = append(statements, "DROP INDEX continuations_admission_queue", "DROP INDEX continuations_one_waiting_per_condition", "DROP TABLE continuations")
+	}
 	for _, statement := range statements {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			t.Fatalf("prepare legacy home: %v", err)
@@ -331,10 +336,8 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 	} else if version == v10UserVersion {
 		agentColumnsFor = v10AgentColumns
 	}
-	if version != legacyUserVersion {
-		if err := rebuildTable(ctx, connection, legacy, "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
-			t.Fatal(err)
-		}
+	if err := rebuildTable(ctx, connection, legacy, "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
+		t.Fatal(err)
 	}
 	if err := rebuildTable(ctx, connection, legacy, "agents", agentColumnsFor, "agents_id_project_unique", "", ""); err != nil {
 		t.Fatal(err)
@@ -556,7 +559,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
+		{"current", schemaStatements, "dd40c890f825e8ac7670fc54e97b5cc4f2620f54dfbb63463448b0273f1b0700"},
+		{"v11", v11SchemaStatements(), "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
 		{"v10", v10SchemaStatements(), "af5c61224274d2c62e8b78036e911239aa98d8b40154811cb9c4788ad224a603"},
 		{"v9", v9SchemaStatements(), "049dc8ff317e31a86157fd5366579954581a4468caaca63c5dd95ee2958ab4cb"},
 		{"v8", v8SchemaStatements(), "45606d5fa2b054c4ccee79c55f20b184f25ee0860ec5817099c0582174df676b"},

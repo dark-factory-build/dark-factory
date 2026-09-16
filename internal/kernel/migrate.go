@@ -35,6 +35,7 @@ const (
 	v8UserVersion       = 8
 	v9UserVersion       = 9
 	v10UserVersion      = 10
+	v11UserVersion      = 11
 	v8HumanRequests     = `CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
@@ -281,7 +282,7 @@ func v8SchemaStatements() []string {
 
 // v9SchemaStatements predates durable sprite appearance.
 func v9SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v10SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statements[i] = v7Agents
@@ -292,13 +293,29 @@ func v9SchemaStatements() []string {
 
 // v10 predates worker archiving.
 func v10SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v11SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statements[i] = strings.Replace(statement, "\tarchived INTEGER NOT NULL CHECK (archived IN (0, 1)),\n", "", 1)
 		}
 	}
 	return statements
+}
+
+func v11SchemaStatements() []string {
+	statements := append([]string(nil), schemaStatements...)
+	filtered := make([]string, 0, len(statements))
+	for _, statement := range statements {
+		_, name := schemaObjectIdentity(statement)
+		if name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
+			continue
+		}
+		if name == "invalidations" {
+			statement = strings.Replace(statement, ", 'continuation'", "", 1)
+		}
+		filtered = append(filtered, statement)
+	}
+	return filtered
 }
 
 // priorSchemaStatements is the exact v3 schema: v4 with the frozen agents
@@ -420,7 +437,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -443,6 +460,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[8:]
 	case v10UserVersion:
 		steps = all[9:]
+	case v11UserVersion:
+		steps = all[10:]
 	default:
 		return connection.Close()
 	}
@@ -674,8 +693,29 @@ func migrateV10Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	columns := `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "agents", columns, "agents_id_project_unique", "archived", "0"); err != nil {
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v11SchemaStatements()), "agents", columns, "agents_id_project_unique", "archived", "0"); err != nil {
 		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v11UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v11UserVersion, v11SchemaStatements())
+}
+
+func migrateV11Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v11UserVersion, v11SchemaStatements()); err != nil {
+		return err
+	}
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "invalidations", "sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted", "invalidations_entity_revision_unique", "", ""); err != nil {
+		return err
+	}
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err

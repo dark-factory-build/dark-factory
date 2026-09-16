@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 11
+	userVersion   = 12
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -388,10 +388,33 @@ var schemaStatements = []string{
 	`CREATE UNIQUE INDEX peer_questions_recipient_delivery_unique ON peer_questions(recipient_delivery_id) WHERE recipient_delivery_id IS NOT NULL`,
 	`CREATE UNIQUE INDEX peer_questions_answer_delivery_unique ON peer_questions(answer_delivery_id) WHERE answer_delivery_id IS NOT NULL`,
 	`CREATE INDEX peer_questions_task_history ON peer_questions(project_id, source_task_id, target_task_id, created_at_ms, id)`,
+	`CREATE TABLE continuations (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
+    work_revision INTEGER NOT NULL CHECK (work_revision >= 1),
+    context_digest BLOB NOT NULL CHECK (length(context_digest) = 32),
+    condition_kind TEXT NOT NULL CHECK (condition_kind IN ('human_request', 'peer_question', 'handoff', 'dependency', 'invalidation')),
+    condition_id BLOB NOT NULL CHECK (length(condition_id) = 16 AND condition_id <> zeroblob(16)),
+    condition_revision INTEGER NOT NULL CHECK (condition_revision >= 1),
+    state TEXT NOT NULL CHECK (state IN ('waiting', 'queued', 'resolved', 'cancelled')),
+    resolution_detail TEXT CHECK (resolution_detail IS NULL OR length(CAST(resolution_detail AS BLOB)) BETWEEN 1 AND 4096),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    resolved_at_ms INTEGER CHECK (resolved_at_ms IS NULL OR resolved_at_ms = updated_at_ms),
+    FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
+    CHECK ((state = 'waiting' AND resolution_detail IS NULL AND resolved_at_ms IS NULL) OR
+           (state = 'queued' AND resolution_detail IS NOT NULL AND resolved_at_ms IS NOT NULL) OR
+           (state IN ('resolved', 'cancelled') AND resolution_detail IS NOT NULL AND resolved_at_ms IS NOT NULL))
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX continuations_one_waiting_per_condition ON continuations(task_id, task_incarnation_id, work_revision, condition_kind, condition_id) WHERE state = 'waiting'`,
+	`CREATE INDEX continuations_admission_queue ON continuations(state, updated_at_ms, id)`,
 	`CREATE TABLE invalidations (
     sequence INTEGER PRIMARY KEY CHECK (sequence >= 1),
     occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
-    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('factory', 'project', 'agent', 'task', 'change', 'run', 'human_request', 'account', 'peer_question')),
+    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('factory', 'project', 'agent', 'task', 'change', 'run', 'human_request', 'account', 'peer_question', 'continuation')),
     entity_id BLOB NOT NULL CHECK (length(entity_id) = 16),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     deleted INTEGER NOT NULL CHECK (deleted IN (0, 1))
