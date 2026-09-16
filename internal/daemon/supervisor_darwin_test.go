@@ -483,9 +483,14 @@ func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) 
 		t.Fatalf("retained worker Change = %+v, found=%v, err=%v", changeState, found, err)
 	}
 
+	workerTask, found, err := fixture.store.Task(context.Background(), worker.TaskID)
+	if err != nil || !found {
+		t.Fatalf("source worker task: found=%v, err=%v", found, err)
+	}
+
 	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
 		ID: supervisorTaskID(t, 20), ProjectID: worker.ProjectID, AssignedAgentID: worker.AgentID,
-		IncarnationID: supervisorIncarnationID(t, 21), Title: "second source", Priority: 1,
+		IncarnationID: supervisorIncarnationID(t, 21), Title: "second source", Body: workerTask.Body, Priority: 1,
 	}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}
