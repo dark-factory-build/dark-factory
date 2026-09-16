@@ -147,10 +147,6 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			_, err := store.SetCapacity(context.Background(), mustRevision(t, 1), 2, at)
 			return err
 		}},
-		{name: "AdmitNext", invoke: func(store *Store) error {
-			_, err := store.AdmitNext(context.Background(), admissionKeys(t, 224, nil), at)
-			return err
-		}},
 		{name: "RecordChangePrepared", invoke: func(store *Store) error {
 			_, err := store.RecordChangePrepared(context.Background(), changeID(t, 225), mustRevision(t, 1), selection, stage, at)
 			return err

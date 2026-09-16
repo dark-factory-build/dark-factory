@@ -15,7 +15,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if !keys.valid() {
 		return AdmissionResult{}, fmt.Errorf("%w: invalid admission request", ErrInvalidValue)
 	}
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return AdmissionResult{}, err
 	}
@@ -28,6 +28,10 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if result, found, err := reconcileAdmissionOnConnection(ctx, tx.connection, keys); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	} else if found {
+		// A reconciled admission still grants existing launch authority.
+		if err := validateDurableControls(ctx, tx.connection); err != nil {
+			return AdmissionResult{}, tx.Rollback(err)
+		}
 		if err := tx.Rollback(nil); err != nil {
 			return AdmissionResult{}, err
 		}
@@ -120,6 +124,12 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		return rollbackNoAdmission(tx, NoAdmissionNoEligibleWork)
 	}
 	if err := validateAdmissionLocatorOwnership(ctx, tx.connection, keys); err != nil {
+		return AdmissionResult{}, tx.Rollback(err)
+	}
+
+	// Empty probes only read. Validate the complete graph before the first
+	// admission write, while retaining the same reserved transaction.
+	if err := validateDurableControls(ctx, tx.connection); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 
