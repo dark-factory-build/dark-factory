@@ -190,7 +190,7 @@ with sqlite3.connect(home / 'factory.sqlite3') as connection:
     enabled, revision = connection.execute('SELECT dispatch_enabled, revision FROM factory').fetchone()
     assert revision == int(sys.argv[-1])
     target = int(sys.argv[2] == 'on')
-    revision += int(enabled != target)
+    revision += 1
     connection.execute('UPDATE factory SET dispatch_enabled=?, revision=?', (target, revision))
     if sys.argv[2] == 'off':
         settled = connection.execute("UPDATE runs SET phase='terminal' WHERE phase <> 'terminal'").rowcount
@@ -246,7 +246,7 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
     def test_runtime_drain_timeout_restores_only_the_owned_pause(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
-                paused = 4 + int(enabled)
+                paused = 5
                 states = iter([(enabled, 4, 2), (False, paused, 2), (False, paused + 1, 1)])
                 with patch.object(deploy, 'state', side_effect=lambda _home: next(states, (False, paused + 1, 1))), \
                      patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run, \

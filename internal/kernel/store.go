@@ -198,8 +198,8 @@ func (store *Store) SetDispatch(ctx context.Context, expected Revision, enabled 
 	if expected.Int64() < 1 {
 		return FactoryState{}, fmt.Errorf("%w: invalid expected factory revision", ErrInvalidValue)
 	}
-	return store.setFactory(ctx, expected, at, func(state FactoryState) (bool, int64, int64) {
-		return state.DispatchEnabled != enabled, int64(boolInt(enabled)), int64(state.Capacity)
+	return store.setFactory(ctx, expected, at, func(state FactoryState) (int64, int64) {
+		return int64(boolInt(enabled)), int64(state.Capacity)
 	})
 }
 
@@ -207,12 +207,12 @@ func (store *Store) SetCapacity(ctx context.Context, expected Revision, capacity
 	if expected.Int64() < 1 || capacity < 1 || capacity > MaxFactoryCapacity {
 		return FactoryState{}, fmt.Errorf("%w: capacity %d outside 1..%d", ErrInvalidValue, capacity, MaxFactoryCapacity)
 	}
-	return store.setFactory(ctx, expected, at, func(state FactoryState) (bool, int64, int64) {
-		return state.Capacity != capacity, int64(boolInt(state.DispatchEnabled)), int64(capacity)
+	return store.setFactory(ctx, expected, at, func(state FactoryState) (int64, int64) {
+		return int64(boolInt(state.DispatchEnabled)), int64(capacity)
 	})
 }
 
-func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMillis, desired func(FactoryState) (bool, int64, int64)) (FactoryState, error) {
+func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMillis, desired func(FactoryState) (int64, int64)) (FactoryState, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return FactoryState{}, err
@@ -222,19 +222,9 @@ func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMi
 	if err != nil {
 		return FactoryState{}, tx.Rollback(err)
 	}
-	changed, dispatch, capacity := desired(state)
-	if state.Revision == expected && !changed {
-		if err := tx.Rollback(nil); err != nil {
-			return FactoryState{}, err
-		}
-		return state, nil
-	}
-	if state.Revision.Int64() == expected.Int64()+1 && !changed {
-		if err := tx.Rollback(nil); err != nil {
-			return FactoryState{}, err
-		}
-		return state, nil
-	}
+	// Even a same-value operator command records new intent and invalidates
+	// earlier control authority. A matching value never proves who wrote it.
+	dispatch, capacity := desired(state)
 	if state.Revision != expected {
 		return FactoryState{}, tx.Rollback(ErrRevisionConflict)
 	}

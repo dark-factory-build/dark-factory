@@ -81,3 +81,16 @@ from the previous binaries.
 `factoryctl service install` copies the binaries into
 `$HOME/.dark-factory.service/bin/current`, and launchd runs the service from
 there. The build directory is only the source of that copy.
+
+Factory dispatch and capacity commands use strict revision guards. Every accepted
+command advances the revision, including an explicit `dispatch off` when already
+paused; this preserves an operator's stop intent against automatic restoration.
+A stale identical request is refused, not treated as proof of ownership.
+
+The first upgrade from a daemon with the older same-value replay behavior needs a
+controlled operator pause and drain, followed by the prepared-runtime installation
+and exact live identity check. Keep automated deployment restoration disabled for
+that cutover; restore dispatch only from the operator's explicitly owned pause.
+After the updated daemon and CLI are verified, the deployment hook can account
+for terminal settlements and retry only a definite stale-revision refusal backed
+by another observed settlement. Older CLI errors remain non-retryable.

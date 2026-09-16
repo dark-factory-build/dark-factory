@@ -53,7 +53,7 @@ def deploy(sha, home=None):
     subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
     def paused_state():
         current_enabled, revision, active = state(home)
-        expected = original_revision + int(bool(enabled)) + original_active - active
+        expected = original_revision + 1 + original_active - active
         if current_enabled or not 0 <= active <= original_active or revision != expected:
             raise ValueError('operator changed factory controls during deployment drain')
         return revision, active

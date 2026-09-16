@@ -25,7 +25,7 @@ func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
 	}
 }
 
-func TestFactoryTimestampGuardsWritesButNotExactReplay(t *testing.T) {
+func TestFactoryTimestampAndRevisionGuardEveryControlIntent(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
 	initial, err := store.Factory(context.Background())
@@ -44,9 +44,10 @@ func TestFactoryTimestampGuardsWritesButNotExactReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	before = captureWriteFootprint(t, store)
-	replay, err := store.SetCapacity(context.Background(), initial.Revision, 2, mustTime(t, 0))
-	if err != nil || replay.Revision != updated.Revision || replay.updatedAt != updated.updatedAt {
-		t.Fatalf("older factory replay = %+v, %v", replay, err)
+	for _, revision := range []Revision{initial.Revision, updated.Revision} {
+		if _, err := store.SetCapacity(context.Background(), revision, 2, mustTime(t, 0)); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("older same-value control = %v", err)
+		}
 	}
 	if after := captureWriteFootprint(t, store); after != before {
 		t.Fatalf("older factory replay footprint before=%+v after=%+v", before, after)

@@ -269,9 +269,8 @@ func TestDispatchCapacityRevisionGuards(t *testing.T) {
 	if !state.DispatchEnabled || state.Revision.Int64() != 2 || state.Head.Int64() != 1 {
 		t.Fatalf("dispatch state = %+v", state)
 	}
-	replay, err := store.SetDispatch(ctx, revision, true, mustTime(t, 2))
-	if err != nil || replay.Revision != state.Revision || replay.Head != state.Head {
-		t.Fatalf("dispatch replay = %+v, %v", replay, err)
+	if _, err := store.SetDispatch(ctx, revision, true, mustTime(t, 2)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("identical stale dispatch = %v", err)
 	}
 	if _, err := store.SetDispatch(ctx, revision, false, mustTime(t, 3)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale dispatch error = %v", err)
@@ -1023,4 +1022,44 @@ func invalidationsAfter(t *testing.T, store *Store, after EventSequence) []struc
 		t.Fatal(err)
 	}
 	return result
+}
+
+func TestExplicitFactoryControlInvalidatesEarlierPauseAuthority(t *testing.T) {
+	for _, duringPause := range []bool{false, true} {
+		t.Run(fmt.Sprint(duringPause), func(t *testing.T) {
+			ctx := context.Background()
+			store, _ := newTestStore(t)
+			defer store.Close()
+			enabled, err := store.SetDispatch(ctx, mustRevision(t, 1), true, mustTime(t, 2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			paused, err := store.SetDispatch(ctx, enabled.Revision, false, mustTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := enabled.Revision
+			if duringPause {
+				expected = paused.Revision
+				paused, err = store.SetDispatch(ctx, paused.Revision, false, mustTime(t, 4))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if paused.Revision.Int64() != expected.Int64()+1 {
+					t.Fatal("explicit stop did not record intent")
+				}
+			}
+			before := captureWriteFootprint(t, store)
+			if _, err := store.SetDispatch(ctx, expected, duringPause, mustTime(t, 5)); !errors.Is(err, ErrRevisionConflict) {
+				t.Fatalf("earlier pause authority accepted: %v", err)
+			}
+			if got := captureWriteFootprint(t, store); got != before {
+				t.Fatal("stale control mutated durable state")
+			}
+			sameCapacity, err := store.SetCapacity(ctx, paused.Revision, paused.Capacity, mustTime(t, 6))
+			if err != nil || sameCapacity.Revision.Int64() != paused.Revision.Int64()+1 {
+				t.Fatalf("same-value capacity intent: %+v %v", sameCapacity, err)
+			}
+		})
+	}
 }
