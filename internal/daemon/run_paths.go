@@ -32,36 +32,50 @@ type runPathsResult struct {
 
 // RunPaths reports the directories one agent's live run has touched since its
 // change directory was published, as paths relative to that directory. An
-// agent with no non-terminal run has no run identity and no paths.
+// agent without a registered live source owner has no run identity or paths.
 func (daemon *Daemon) RunPaths(ctx context.Context, agentID kernel.AgentID) (kernel.RunID, []string, error) {
 	if daemon == nil || daemon.store == nil {
 		return kernel.RunID{}, nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
-	// ponytail: the store has no agent-to-open-run read, and every non-terminal
-	// run is already loaded with its Change here. Add a narrower read only if
-	// this shows up in a profile.
-	runs, err := daemon.store.RecoverableRuns(ctx)
+	// Observation follows the existing owner, never the recovery graph. Before
+	// registration or after owner exit the location is honestly unknown.
+	daemon.attemptMu.Lock()
+	var owner *liveAttempt
+	for _, candidate := range daemon.attempts {
+		if candidate.agentID != agentID || candidate.changeID == (kernel.ChangeID{}) {
+			continue
+		}
+		select {
+		case <-candidate.done:
+			continue
+		default:
+		}
+		if owner != nil {
+			daemon.attemptMu.Unlock()
+			return kernel.RunID{}, nil, fmt.Errorf("%w: multiple live agent owners", kernel.ErrCorruptState)
+		}
+		owner = candidate
+	}
+	daemon.attemptMu.Unlock()
+	if owner == nil {
+		return kernel.RunID{}, []string{}, nil
+	}
+	paths, err := daemon.cachedRunPaths(ctx, owner.runID, owner.changeID.String(), owner.pathsSince)
 	if err != nil {
 		return kernel.RunID{}, nil, err
 	}
-	for _, candidate := range runs {
-		if candidate.Run.AgentID != agentID || candidate.Change == nil || candidate.Change.AvailableAt == nil {
-			continue
-		}
-		// A retained change keeps the AvailableAt of its first publication, so
-		// a continued run would otherwise report an earlier run's edits. The
-		// moment this run started is the later, truthful cut.
-		cut := *candidate.Change.AvailableAt
-		if candidate.Run.RunningAt != nil && candidate.Run.RunningAt.Int64() > cut.Int64() {
-			cut = *candidate.Run.RunningAt
-		}
-		paths, err := daemon.cachedRunPaths(ctx, candidate.Run.ID, candidate.Change.ID.String(), cut)
-		if err != nil {
-			return kernel.RunID{}, nil, err
-		}
-		return candidate.Run.ID, paths, nil
+	daemon.attemptMu.Lock()
+	current := daemon.attempts[owner.runID] == owner
+	daemon.attemptMu.Unlock()
+	select {
+	case <-owner.done:
+		current = false
+	default:
 	}
-	return kernel.RunID{}, []string{}, nil
+	if !current {
+		return kernel.RunID{}, []string{}, nil
+	}
+	return owner.runID, paths, nil
 }
 
 // cachedRunPaths keeps one walk per run for runPathsTTL. The mutex covers the

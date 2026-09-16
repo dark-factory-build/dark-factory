@@ -242,8 +242,12 @@ type liveAttemptResult struct {
 // below, mutable fields belong to its one owner goroutine after construction;
 // the registry mutex protects only the daemon's map membership.
 type liveAttempt struct {
-	daemon     *Daemon
-	runID      kernel.RunID
+	daemon *Daemon
+	runID  kernel.RunID
+	// Immutable observation facts from the inspected source, installed before registration.
+	agentID    kernel.AgentID
+	changeID   kernel.ChangeID
+	pathsSince kernel.UnixMillis
 	sessionID  kernel.TerminalSessionID
 	controller *runner.AttemptController
 	// sourceSnapshots binds explicitly requested immutable source identities to

@@ -65,6 +65,16 @@ func TestRunPathsAnswersForALiveRunAndCachesTheWalk(t *testing.T) {
 	if published.AvailableAt == nil || run.RunningAt == nil || published.AvailableAt.Int64() >= run.RunningAt.Int64() {
 		t.Fatalf("fixture does not separate publication from the run start: %+v %+v", published.AvailableAt, run.RunningAt)
 	}
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, run.ID, session.ID, nil)
+	owner.agentID, owner.changeID, owner.pathsSince = run.AgentID, published.ID, *run.RunningAt
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(run.ID, owner) })
 	root := filepath.Join(changeParent, run.ChangeID.String())
 	writeRunFile(t, root, "internal/kernel/store.go", time.UnixMilli(run.RunningAt.Int64()+10))
 	writeRunFile(t, root, "web/ui/app.ts", time.UnixMilli(run.RunningAt.Int64()+10))
@@ -112,6 +122,16 @@ func TestRunPathsWithoutARecordedChangeParentIsEmpty(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	fixture.pair(t)
 	run := adapterRunningRoleRun(t, fixture.store, 0x80, kernel.RoleWorker)
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, run.ID, session.ID, nil)
+	owner.agentID, owner.changeID, owner.pathsSince = run.AgentID, *run.ChangeID, *run.RunningAt
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(run.ID, owner) })
 	answer, err := fixture.backend.RunPaths(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.RunPathsGet{AgentID: run.AgentID.String()})
 	if err != nil {
 		t.Fatal(err)
@@ -228,4 +248,58 @@ func adapterPublishChange(t *testing.T, store *kernel.Store, run kernel.Run) ker
 		t.Fatal(err)
 	}
 	return available
+}
+
+func TestRunPathsUsesOnlyCurrentOwnerAndIsolatesReplacementCache(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	run := adapterRunningRoleRun(t, fixture.store, 0x70, kernel.RoleWorker)
+	parent := t.TempDir()
+	fixture.daemon.rememberSupervisorAccount(parent, "")
+	root := filepath.Join(parent, run.ChangeID.String())
+	writeRunFile(t, root, "old/file.go", time.UnixMilli(run.RunningAt.Int64()+1))
+	check := func(want kernel.RunID, paths string) {
+		t.Helper()
+		got, actual, err := fixture.daemon.RunPaths(context.Background(), run.AgentID)
+		if err != nil || got != want || fmt.Sprint(actual) != paths {
+			t.Fatalf("run=%v paths=%v err=%v", got, actual, err)
+		}
+	}
+	check(kernel.RunID{}, "[]") // Durable run alone is not a registered owner.
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, run.ID, session.ID, nil)
+	owner.agentID, owner.changeID, owner.pathsSince = run.AgentID, *run.ChangeID, *run.RunningAt
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	check(run.ID, "[old]")
+	// Closing the store proves this observation path does not read recovery data.
+	closedStore, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "closed.sqlite"), kernel.FactoryConfig{Capacity: 1}, adapterTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closedStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.store = closedStore
+	defer func() { fixture.daemon.store = fixture.store }()
+	check(run.ID, "[old]")
+	close(owner.done)
+	check(kernel.RunID{}, "[]")
+	fixture.daemon.unregisterLiveAttempt(run.ID, owner)
+	check(kernel.RunID{}, "[]")
+	nextID, _ := kernel.RunIDFromBytes(bytes.Repeat([]byte{0x99}, kernel.IDBytes))
+	next := newLiveAttempt(fixture.daemon, nextID, session.ID, nil)
+	next.agentID, next.changeID = run.AgentID, *run.ChangeID
+	next.pathsSince, _ = kernel.NewUnixMillis(run.RunningAt.Int64() + 10)
+	writeRunFile(t, root, "new/file.go", time.UnixMilli(next.pathsSince.Int64()+1))
+	if err := fixture.daemon.registerLiveAttempt(next); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(nextID, next) })
+	check(nextID, "[new]")
+	fixture.daemon.unregisterLiveAttempt(run.ID, owner) // Stale removal cannot clear successor.
+	check(nextID, "[new]")
 }

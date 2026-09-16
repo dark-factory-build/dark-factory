@@ -236,9 +236,23 @@ func runSupervisorCodexFixture() error {
 
 func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	var observed kernel.RunID
+	fixture.spec.beforeProviderRelease = func() {
+		var err error
+		observed, _, err = fixture.daemon.RunPaths(context.Background(), fixture.agentID)
+		if err != nil || observed == (kernel.RunID{}) {
+			t.Fatalf("registered source observation: %v %v", observed, err)
+		}
+	}
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("RunNext: %v", err)
+	}
+	if observed != run.ID {
+		t.Fatalf("observed run %v, actual %v", observed, run.ID)
+	}
+	if current, paths, err := fixture.daemon.RunPaths(context.Background(), fixture.agentID); err != nil || current != (kernel.RunID{}) || len(paths) != 0 {
+		t.Fatalf("finished owner observation: %v %v %v", current, paths, err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
 	if run.Proposal == nil || run.Proposal.Result() != "typed-success" {
