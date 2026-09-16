@@ -343,26 +343,37 @@ func TestDispatchReadsExactFactoryRevisionThenSets(t *testing.T) {
 }
 
 func TestDispatchExplicitRevisionDoesNotRefreshOrOverrideTheGuard(t *testing.T) {
-	fixture := newAPIFixture(t)
-	defer fixture.close(t)
-	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
-		revision, enabled, ok := call.Dispatch()
-		if !ok || call.Kind() != api.CallSetDispatch || revision != 19 || !enabled {
-			t.Errorf("guarded dispatch = kind=%v revision=%d enabled=%v ok=%v", call.Kind(), revision, enabled, ok)
-		}
-		reply, err := api.NewErrorReply(api.RemoteConflict)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return reply
-	})
-	var stdout, stderr bytes.Buffer
-	exit := run(context.Background(), []string{"dispatch", "on", "--revision", "19"}, webEnvironment(fixture), &stdout, &stderr)
-	if result := awaitServer(t, done); result.err != nil {
-		t.Fatal(result.err)
-	}
-	if exit == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not accepted") {
-		t.Fatalf("guarded stale dispatch = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	for _, test := range []struct {
+		code    api.RemoteErrorCode
+		message string
+	}{
+		{api.RemoteConflict, "was not accepted"},
+		{api.RemoteRevisionConflict, "revision is stale"},
+		{api.RemoteInternal, "was not accepted"},
+	} {
+		t.Run(string(test.code), func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+				revision, enabled, ok := call.Dispatch()
+				if !ok || call.Kind() != api.CallSetDispatch || revision != 19 || !enabled {
+					t.Errorf("guarded dispatch = kind=%v revision=%d enabled=%v ok=%v", call.Kind(), revision, enabled, ok)
+				}
+				reply, err := api.NewErrorReply(test.code)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return reply
+			})
+			var stdout, stderr bytes.Buffer
+			exit := run(context.Background(), []string{"dispatch", "on", "--revision", "19"}, webEnvironment(fixture), &stdout, &stderr)
+			if result := awaitServer(t, done); result.err != nil {
+				t.Fatal(result.err)
+			}
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: dispatch "+test.message+"\n" {
+				t.Fatalf("guarded stale dispatch = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 

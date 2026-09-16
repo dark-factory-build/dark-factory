@@ -154,9 +154,9 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("fresh snapshot = %+v", initialSnapshot)
 	}
 	done = fixture.serve(t)
-	noOp, err := client.SetDispatch(ctx, 1, false)
-	if err != nil || noOp.Head != 0 || noOp.Revision != 1 {
-		t.Fatalf("head-zero no-op mutation = %+v, %v", noOp, err)
+	stop, err := client.SetDispatch(ctx, 1, false)
+	if err != nil || stop.Head != 1 || stop.Revision != 2 {
+		t.Fatalf("explicit stop mutation = %+v, %v", stop, err)
 	}
 	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
@@ -172,7 +172,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	projectInput := api.CreateProjectInput{ID: testID(1), Name: "project", Root: filepath.Join(t.TempDir(), "source-root")}
 	done = fixture.serve(t)
 	projectResult, err := client.CreateProject(ctx, projectInput)
-	if err != nil || projectResult.Revision != 1 || projectResult.Head != 1 {
+	if err != nil || projectResult.Revision != 1 || projectResult.Head != 2 {
 		t.Fatalf("create project = %+v, %v", projectResult, err)
 	}
 	waitDispatch(t, done)
@@ -197,7 +197,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		ID: testID(2), ProjectID: projectInput.ID, Name: "agent", Role: "orchestrator",
 		Provider: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium", ToolBudgetLimit: 50,
 	})
-	if err != nil || agentResult.Revision != 1 || agentResult.Head != 3 {
+	if err != nil || agentResult.Revision != 1 || agentResult.Head != 4 {
 		t.Fatalf("create agent = %+v, %v", agentResult, err)
 	}
 	waitDispatch(t, done)
@@ -242,15 +242,15 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "public title", Body: "private task body sentinel", Priority: 7,
 	})
-	if err != nil || taskResult.Revision != 1 || taskResult.Head != 5 {
+	if err != nil || taskResult.Revision != 1 || taskResult.Head != 6 {
 		t.Fatalf("enqueue task = %+v, %v", taskResult, err)
 	}
 	waitDispatch(t, done)
 	assertSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	dispatchResult, err := client.SetDispatch(ctx, 1, true)
-	if err != nil || dispatchResult.Revision != 2 || dispatchResult.Head != 6 {
+	dispatchResult, err := client.SetDispatch(ctx, stop.Revision, true)
+	if err != nil || dispatchResult.Revision != 3 || dispatchResult.Head != 7 {
 		t.Fatalf("set dispatch = %+v, %v", dispatchResult, err)
 	}
 	waitDispatch(t, done)
@@ -262,7 +262,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
-	if snapshot.Head != 6 || len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
+	if snapshot.Head != 7 || len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	if snapshot.Projects[0].ID != projectInput.ID || snapshot.Projects[0].Name != projectInput.Name || snapshot.Agents[0].Role != "orchestrator" || snapshot.Tasks[0].Title != "public title" {
@@ -310,7 +310,7 @@ func TestDaemonDispatchesAttemptOutcomeAfterCommit(t *testing.T) {
 	ctx := context.Background()
 	done := fixture.serve(t)
 	result, err := active.client.Succeed(ctx, "private result sentinel")
-	if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 12 {
+	if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 11 {
 		t.Fatalf("attempt succeed = %+v, %v", result, err)
 	}
 	waitDispatch(t, done)
@@ -905,7 +905,7 @@ func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 			active := prepareActiveAttempt(t, fixture, byte(21+len(test.name)))
 			done := fixture.serve(t)
 			result, err := test.call(context.Background(), active.client)
-			if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 12 {
+			if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 11 {
 				t.Fatalf("outcome = %+v, %v", result, err)
 			}
 			waitDispatch(t, done)

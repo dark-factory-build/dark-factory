@@ -269,3 +269,34 @@ func TestBrowserTaskListRequiresPrivateCapabilityAndPagesCompletedWork(t *testin
 		}
 	}
 }
+
+// Activity is invalidated by event head; the control revision remains usable
+// across admission and settlement, while each snapshot has the current count.
+func TestBrowserActivityRefreshDoesNotConsumeFactoryControlRevision(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	connection := fixture.pair(t)
+	before, _ := adapterSnapshot(t, fixture, connection, "before")
+	run := adapterRunningRun(t, fixture.store, 170)
+	active, _ := adapterSnapshot(t, fixture, connection, "active")
+	if active.Factory.Revision != before.Factory.Revision || active.Factory.ActiveRuns != 1 || active.Head <= before.Head {
+		t.Fatalf("admission snapshot: before=%+v active=%+v", before, active)
+	}
+	completeAdapterRun(t, fixture.store, run, "finished")
+	watch, err := browserprotocol.EncodeStateWatch("activity-watch", browserprotocol.StateWatch{AfterHead: active.Head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, connection, watch)
+	frame := adapterRead(t, connection)
+	if frame.Type != browserprotocol.TypeStateChanged {
+		t.Fatalf("activity invalidation = %+v", frame)
+	}
+	settled, _ := adapterSnapshot(t, fixture, connection, "settled")
+	if settled.Factory.Revision != before.Factory.Revision || settled.Factory.ActiveRuns != 0 || settled.Head <= active.Head {
+		t.Fatalf("settlement snapshot: active=%+v settled=%+v", active, settled)
+	}
+	revision, _ := kernel.NewRevision(int64(before.Factory.Revision))
+	if _, err := fixture.store.SetDispatch(context.Background(), revision, false, adapterTime(t, 500)); err != nil {
+		t.Fatalf("activity invalidated control authority: %v", err)
+	}
+}

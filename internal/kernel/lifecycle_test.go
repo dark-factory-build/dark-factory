@@ -235,7 +235,7 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 		t.Fatalf("terminal task = %+v", freshTask)
 	}
 	after, _ := store.Factory(context.Background())
-	if after.Head.Int64() != before.Head.Int64()+3 {
+	if after.Head.Int64() != before.Head.Int64()+2 || after.Revision != before.Revision {
 		t.Fatalf("terminal invalidations before=%+v after=%+v", before, after)
 	}
 	replay, err := store.FinalizeRun(context.Background(), admitted.ID, finalizing.Revision, mustTime(t, 0))
