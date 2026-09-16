@@ -244,7 +244,11 @@ func openDatabasePathAuthority(path string) (_ *databasePathAuthority, resultErr
 			resultErr = errors.Join(resultErr, authority.Close())
 		}
 	}()
-	rootFD, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+	rootFlag := databaseAncestorOpenFlag
+	if len(parts) == 0 {
+		rootFlag = unix.O_RDONLY
+	}
+	rootFD, err := unix.Open(string(filepath.Separator), rootFlag|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite path root: %w", err)
 	}
@@ -263,7 +267,11 @@ func openDatabasePathAuthority(path string) (_ *databasePathAuthority, resultErr
 			return nil, fmt.Errorf("%w: sqlite path contains a noncanonical component", ErrInvalidValue)
 		}
 		parentFile := authority.components[len(authority.components)-1].file
-		fd, err := unix.Openat(int(parentFile.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+		flag := databaseAncestorOpenFlag
+		if index == len(parts)-1 {
+			flag = unix.O_RDONLY
+		}
+		fd, err := unix.Openat(int(parentFile.Fd()), name, flag|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
 		if err != nil {
 			return nil, fmt.Errorf("%w: open sqlite parent component %q: %v", ErrForeignDatabase, name, err)
 		}

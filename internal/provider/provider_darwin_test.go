@@ -902,6 +902,15 @@ func TestCodexToolchainSandbox(t *testing.T) {
 		}
 		t.Logf("installed toolchain proof: %s", out)
 	}
+	if fixture := os.Getenv("DARK_FACTORY_TEST_FIXTURE_BINARY"); fixture != "" {
+		request.runtime.sourceReadPaths = append(request.runtime.sourceReadPaths, fixture)
+		out, err := run("/usr/bin/env", "DARK_FACTORY_TEST_ANCESTOR_SANDBOX=generated", fixture,
+			"-test.run=^TestDispatchFixtureTraversesUnreadableAncestors$", "-test.count=1")
+		if err != nil {
+			t.Fatalf("generated-profile private fixture: %v\n%s", err, out)
+		}
+		t.Logf("generated-profile private fixture: %s", out)
+	}
 }
 
 func TestCodexLaunchGeneratesPermissionsForOnlyTheExplicitRetainedSource(t *testing.T) {
