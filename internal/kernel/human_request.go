@@ -401,7 +401,7 @@ func (store *Store) OperatorHumanRequests(ctx context.Context) ([]OperatorHumanR
 		if err != nil {
 			return nil, err
 		}
-		if !found || run.Role != RoleWorker {
+		if !found {
 			return nil, ErrCorruptState
 		}
 		result = append(result, OperatorHumanRequest{ID: request.ID, RunID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: request.Status, Revision: request.Revision, QuestionText: request.QuestionText, Options: append([]string(nil), request.Options...)})
