@@ -340,6 +340,10 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			_, err := client.EnqueueTask(context.Background(), EnqueueTaskInput{ID: id('3'), ProjectID: id('1'), AssignedAgentID: id('2'), IncarnationID: id('4'), Title: "task", Body: "private body", Priority: 7})
 			return err
 		}},
+		{name: "enqueue shared task", response: mutationResponse(), request: `{"method":"enqueue_task","params":{"id":"` + id('3') + `","project_id":"` + id('1') + `","assigned_agent_id":"","incarnation_id":"` + id('4') + `","title":"task","body":"any eligible worker","priority":0}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.EnqueueTask(context.Background(), EnqueueTaskInput{ID: id('3'), ProjectID: id('1'), AssignedAgentID: "", IncarnationID: id('4'), Title: "task", Body: "any eligible worker"})
+			return err
+		}},
 		{name: "set dispatch", response: mutationResponse(), request: `{"method":"set_dispatch","params":{"expected_revision":3,"enabled":true}}`, invoke: func(client *OperatorClient) error {
 			_, err := client.SetDispatch(context.Background(), 3, true)
 			return err
