@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -867,6 +868,109 @@ func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {
 	observed, found, err := fixture.store.Run(context.Background(), active.run.ID)
 	if err != nil || !found || observed.Phase != kernel.RunFinalizing || observed.Proposal == nil {
 		t.Fatalf("concurrent durable result = %+v, found=%v, err=%v", observed, found, err)
+	}
+}
+
+// The first caller pauses before Store admission so the second caller is the
+// first correlated refusal. Arrival order must not replace that proposal.
+func TestDaemonOverlappingRefusalsRetainFirstCorrelatedOutcome(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 81)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session: found=%v err=%v", found, err)
+	}
+	live := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	live.attemptDigest = active.run.CredentialDigest
+	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, live)
+
+	firstArrived, releaseFirst := make(chan struct{}), make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(releaseFirst) })
+	var clockCalls atomic.Int32
+	var now atomic.Int64
+	now.Store(100) // Before the active run's revision: authenticated refusal.
+	fixture.daemon.now = func() time.Time {
+		if clockCalls.Add(1) == 1 {
+			close(firstArrived)
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+			}
+		}
+		return time.UnixMilli(now.Load())
+	}
+	assertRemote := func(err error, code api.RemoteErrorCode) {
+		t.Helper()
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != code {
+			t.Fatalf("outcome error = %v, want %s", err, code)
+		}
+	}
+	assertPending := func() {
+		t.Helper()
+		proposal, ok := live.pendingOutcomeSnapshot()
+		if !ok || proposal.Kind() != kernel.OutcomeBlocked || proposal.Detail() != "first actual refusal" {
+			t.Fatalf("retained proposal = %+v, present=%v", proposal, ok)
+		}
+	}
+	firstDone := fixture.serve(t)
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := active.client.Succeed(ctx, "later actual refusal")
+		firstResult <- err
+	}()
+	select {
+	case <-firstArrived:
+	case <-ctx.Done():
+		t.Fatal("first request did not reach the clock gate")
+	}
+	secondDone := fixture.serve(t)
+	_, err = active.client.Block(ctx, "first actual refusal")
+	assertRemote(err, api.RemoteRevisionConflict)
+	waitDispatch(t, secondDone)
+	assertPending()
+	release.Do(func() { close(releaseFirst) })
+	assertRemote(<-firstResult, api.RemoteRevisionConflict)
+	waitDispatch(t, firstDone)
+	assertPending()
+
+	wrongToken := filepath.Join(filepath.Dir(fixture.socket), "wrong.token")
+	if err := os.WriteFile(wrongToken, bytes.Repeat([]byte{'z'}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", wrongToken)
+	wrong, err := api.NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	_, err = wrong.Fail(ctx, "foreign proposal")
+	assertRemote(err, api.RemoteUnauthorized)
+	waitDispatch(t, done)
+	assertPending()
+	observed, found, err := fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || observed.Phase != kernel.RunRunning || observed.Proposal != nil {
+		t.Fatalf("refused proposals changed durable run = %+v, found=%v err=%v", observed, found, err)
+	}
+
+	now.Store(2000)
+	done = fixture.serve(t)
+	if _, err := active.client.Succeed(ctx, "durable winner"); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	if proposal, ok := live.pendingOutcomeSnapshot(); ok {
+		t.Fatalf("accepted outcome retained stale proposal: %+v", proposal)
+	}
+	observed, found, err = fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || observed.Phase != kernel.RunFinalizing || observed.Proposal == nil || observed.Proposal.Result() != "durable winner" {
+		t.Fatalf("accepted durable proposal = %+v, found=%v err=%v", observed, found, err)
 	}
 }
 

@@ -671,7 +671,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if proposalErr != nil {
 			return kernel.Run{}, proposalErr
 		}
-		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(context.Background(), digest, pending, at)
+		storeCtx, cancel := context.WithTimeout(ctx, liveAttemptStoreTimeout)
+		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(storeCtx, digest, pending, at)
+		cancel()
 		if proposeErr == nil {
 			run = proposalRun
 		} else if !errors.Is(proposeErr, kernel.ErrUnauthorized) {

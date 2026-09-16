@@ -1041,14 +1041,6 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		return newErrorReply(api.RemoteInternal), nil
 	}
 	daemon.operationMu.Lock()
-	if live != nil {
-		// Keep the exact provider detail attached to the exact bearer even when
-		// the first durable finalization attempt is refused. The supervisor can
-		// retry it after the runner's authenticated result establishes the final
-		// cleanup boundary.
-		copy := proposal
-		live.pendingOutcome = &copy
-	}
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
 	// running/finalizing boundary; notification carries no authority.
@@ -1069,25 +1061,29 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		// state payload; it only shortens the next durable Store poll.
 		daemon.notifyRun(run.ID)
 	}
-	daemon.operationMu.Unlock()
 	if err != nil {
 		var refusal *kernel.OutcomeRefusal
 		if live != nil && errors.As(err, &refusal) {
 			// Only the exact bearer owner receives a refusal action. A foreign
 			// bearer remains a plain API error and cannot terminate this run.
-			daemon.operationMu.Lock()
+			// Retain the first refused proposal only after the kernel has
+			// correlated this exact call to a durable refusal. A successful
+			// proposal already cleared this slot while holding operationMu.
+			if live.pendingOutcome == nil {
+				copy := proposal
+				live.pendingOutcome = &copy
+			}
 			live.notifyOutcomeRefusal(refusal)
-			daemon.operationMu.Unlock()
 		} else if live != nil {
 			// Unauthorized/non-refusal responses include scope cancellation and
 			// credential revocation. Never retain a stale provider proposal across
 			// those durable boundaries.
-			daemon.operationMu.Lock()
 			live.pendingOutcome = nil
-			daemon.operationMu.Unlock()
 		}
+		daemon.operationMu.Unlock()
 		return newErrorReply(remoteErrorCode(err)), nil
 	}
+	daemon.operationMu.Unlock()
 	return daemon.mutation(ctx, run.Revision), attempt
 }
 

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -228,6 +229,93 @@ func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	changeState, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found || changeState.Selection == nil || fmt.Sprintf("%x", changeState.Selection.Commit().Bytes()) != fixture.base {
 		t.Fatalf("Change exact base = %+v, found=%v, err=%v", changeState.Selection, found, err)
+	}
+}
+
+// Exercise the actual provider API, runner result authentication, and retained
+// proposal retry together. A backwards clock causes the first durable
+// finalization to refuse after authenticating the exact attempt bearer.
+func TestSupervisorConvergesRefusedProviderOutcome(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	var refuse atomic.Bool
+	fixture.daemon.now = func() time.Time {
+		if refuse.CompareAndSwap(true, false) {
+			return time.UnixMilli(1)
+		}
+		return time.Now()
+	}
+	fixture.spec.beforeProviderRelease = func() { refuse.Store(true) }
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext after authenticated outcome refusal: %v", err)
+	}
+	if refuse.Load() {
+		t.Fatal("provider never attempted its outcome")
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
+	if run.Proposal == nil || run.Proposal.Result() != "typed-success" {
+		t.Fatalf("retained provider proposal = %+v", run.Proposal)
+	}
+	fixture.assertOneWitness(t)
+	fixture.assertReleased(t, run)
+}
+
+func TestSupervisorCancelsRetainedOutcomeRetryWithWriterBlocked(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.SetMaxOpenConns(1)
+	defer lock.Close()
+	defer lock.Exec("ROLLBACK")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	var released atomic.Bool
+	retryReached := make(chan error, 1)
+	fixture.daemon.now = func() time.Time {
+		if released.Load() {
+			switch calls.Add(1) {
+			case 1:
+				return time.UnixMilli(1)
+			case 2:
+				// The first call was the API refusal; this is the supervisor's
+				// retry after authenticating the runner result. Keep the writer
+				// unavailable until RunNext has returned from cancellation.
+				_, lockErr := lock.Exec("BEGIN IMMEDIATE")
+				retryReached <- lockErr
+				cancel()
+			}
+		}
+		return time.Now()
+	}
+	fixture.spec.beforeProviderRelease = func() { released.Store(true) }
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := fixture.daemon.RunNext(ctx, fixture.spec)
+		done <- runErr
+	}()
+	select {
+	case err := <-retryReached:
+		if err != nil {
+			t.Fatalf("hold retry writer: %v", err)
+		}
+	case err := <-done:
+		t.Fatalf("RunNext returned before retained retry: %v", err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("retained retry was not reached")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled retained retry = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		// Release before failing so even a regressed background retry joins.
+		_, _ = lock.Exec("ROLLBACK")
+		<-done
+		t.Fatal("cancellation waited for writer availability")
 	}
 }
 
