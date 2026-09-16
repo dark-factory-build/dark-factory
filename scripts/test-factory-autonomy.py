@@ -92,6 +92,8 @@ class AutonomyTest(unittest.TestCase):
         with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}', '')) as run:
             autonomy.tick(Path('/private/tmp/config'), config)
         self.assertTrue(any('factory-review-intake.py' in call.args[0][1] for call in run.call_args_list))
+        self.assertIn('factory-review-intake.py', run.call_args_list[-1].args[0][1])
+        self.assertIsNone(run.call_args_list[-1].kwargs['timeout'])
 
     def test_mixed_installed_binaries_cannot_prove_health(self):
         identities = ['a' * 40, 'b' * 40, 'a' * 40]

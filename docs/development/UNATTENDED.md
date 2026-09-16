@@ -129,11 +129,33 @@ automation health diagnostics.
 For private repositories, optionally set `review_mirror_root` to an existing
 bare mirror at `ROOT/OWNER/REPOSITORY` whose `origin` is the configured HTTPS
 GitHub repository. Create it with `git clone --bare https://github.com/OWNER/REPOSITORY ROOT/OWNER/REPOSITORY` so it retains base history. The host fetches only the base and `refs/pull/N/head` into
-that mirror after GitHub reports the exact head. It wakes Sol only for open PRs
-whose App footer has `Refs #N` or `Closes #N` for a tracked source issue. The
-Sol task receives the mirror and exact head to resume publication; it must not
-author its own independent review. No GitHub credential is stored in config or
-passed to a task.
+that mirror after GitHub reports the exact head. For open PRs whose footer has
+`Refs #N` or `Closes #N` for a tracked source issue, the existing controller runs
+one independent cold review per pass after intake and release checks. The existing
+autonomy job and lock stay occupied during that review (up to its 20-minute
+owned-group deadline); the next scheduled intake/release tick waits. This change
+removes nested-sandbox failures, not that existing serialization limit. The host
+needs the selected Codex/Claude installation and the owner-installed Maintainer
+bridge on PATH (or `DARK_FACTORY_MAINTAINER_BRIDGE`). These remain host
+capabilities; no bridge credentials or provider SDK permissions are granted to
+worker local commands.
+
+The existing `.reviews.json` journal pins the head/base and deterministic App
+operation before launching. The reviewer runs inside the existing owned process
+group deadline and records its own exact-head verdict through the App. A timeout,
+crash, or lost reply remains unresolved: later passes observe the same App
+operation instead of starting another model call. Completed allow/block results
+wake the configured overseer to enqueue or return findings to the original task.
+A blocked review is a completed review, not an infrastructure failure. The host
+must reconcile an unresolved launch before explicitly authorizing another; do
+not erase the attempted marker to retry an ambiguous submission.
+
+Bind the controller config to the actual `factory_home`, `project_id`,
+`overseer_agent_id`, external `journal`, and verified `review_mirror_root`; its
+PATH must select the matching installed factoryctl plus provider/bridge tools.
+Regenerate and replace the existing launchd job only after a one-shot preflight.
+An unloaded job or a config pointing at an older factory is not autonomous proof.
+No GitHub credential is stored in config or passed to a task.
 
 A release configuration pins `repository`, `base`, `journal`, `deploy_argv`,
 `verify_argv`, `review_verifier`, and `command_timeout` (5–1200 seconds).
