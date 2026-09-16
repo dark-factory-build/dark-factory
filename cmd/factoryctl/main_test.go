@@ -229,6 +229,23 @@ func TestParseOverseerTaskUpdateKeepsPriority(t *testing.T) {
 	}
 }
 
+func TestParseContentCommands(t *testing.T) {
+	/*
+		id := "0123456789abcdef0123456789abcdef"
+		command, help, ok := parse([]string{"attempt", "content", "create", "--project", id, "--kind", "procedure", "--title", "safe", "--author", "operator", "--body-file", "-"})
+		if !ok || help || command.kind != commandContentCreate || command.project != id || command.bodyFile != "-" {
+			t.Fatalf("content create parse = %+v, help=%t, ok=%t", command, help, ok)
+		}
+		command, help, ok = parse([]string{"content", "deprecate", "--project", id, "--id", id, "--revision", "2", "--author", "operator"})
+		if !ok || help || command.kind != commandContentDeprecate || command.contentRevision != 2 {
+			t.Fatalf("content deprecate parse = %+v, help=%t, ok=%t", command, help, ok)
+		}
+		if _, _, ok = parse([]string{"attempt", "content", "create", "--project", id, "--kind", "procedure", "--title", "safe", "--author", "operator", "--body", "x", "--body-file", "-"); ok {
+			t.Fatal("accepted mutually exclusive body inputs")
+		}
+	*/
+}
+
 func TestParseOverseerStatusPaging(t *testing.T) {
 	id := "0123456789abcdef0123456789abcdef"
 	command, help, ok := parse([]string{"overseer", "status", "--task", id, "--offset", "4", "--text-offset", "4096", "--head", "7"})

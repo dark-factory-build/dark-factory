@@ -57,7 +57,7 @@ func runAttemptMCP(ctx context.Context, input io.Reader, output io.Writer, geten
 			exit := exitUsage
 			if json.Unmarshal(request.Params, &params) == nil && params.Name == "factory" && len(params.Arguments.Argv) >= 2 && len(params.Arguments.Argv) <= 64 {
 				command, help, ok := parse(params.Arguments.Argv)
-				if ok && !help && (command.kind >= commandSucceed && command.kind <= commandAttemptTask || command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman) {
+				if ok && !help && (command.kind >= commandSucceed && command.kind <= commandAttemptTask || command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman || command.kind >= commandContentCreate && command.kind <= commandContentAttach) {
 					exit = run(ctx, params.Arguments.Argv, getenv, &stdout, &stderr)
 				}
 			}
