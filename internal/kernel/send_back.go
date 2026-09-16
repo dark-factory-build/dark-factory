@@ -143,7 +143,7 @@ func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDi
 	if task.ProjectID != run.ProjectID {
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
-	if task.ID == run.TaskID {
+	if task.ID == run.TaskID || task.AssignedAgentID.zero() {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
 	agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
@@ -164,6 +164,10 @@ func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDi
 }
 
 func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note string, at UnixMillis) (Task, error) {
+	if task.AssignedAgentID.zero() {
+		// Never claimed, so there is no run to correct.
+		return Task{}, ErrConflict
+	}
 	agent, found, err := agentByID(ctx, connection, task.AssignedAgentID)
 	if err != nil {
 		return Task{}, err

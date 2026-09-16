@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 12
+	userVersion   = 13
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -83,7 +83,7 @@ var schemaStatements = []string{
 	`CREATE TABLE tasks (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
-    assigned_agent_id BLOB NOT NULL CHECK (length(assigned_agent_id) = 16),
+    assigned_agent_id BLOB CHECK (assigned_agent_id IS NULL OR length(assigned_agent_id) = 16),
     incarnation_id BLOB NOT NULL CHECK (length(incarnation_id) = 16),
     work_revision INTEGER NOT NULL CHECK (work_revision >= 1),
     title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 1024),
@@ -104,7 +104,8 @@ var schemaStatements = []string{
         (status = 'succeeded' AND blocked_reason IS NULL AND completed_at_ms IS NOT NULL) OR
         (status IN ('failed', 'cancelled') AND blocked_reason IS NULL AND result IS NULL AND completed_at_ms IS NOT NULL)
     ),
-    CHECK (completed_at_ms IS NULL OR completed_at_ms = updated_at_ms)
+    CHECK (completed_at_ms IS NULL OR completed_at_ms = updated_at_ms),
+    CHECK (assigned_agent_id IS NOT NULL OR status IN ('queued', 'cancelled'))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX tasks_id_project_incarnation_unique ON tasks(id, project_id, incarnation_id)`,
 	`CREATE UNIQUE INDEX tasks_incarnation_unique ON tasks(incarnation_id)`,
