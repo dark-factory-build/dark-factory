@@ -301,6 +301,7 @@ func Build(request Request) (Launch, error) {
 		// account configuration and Change-local .mcp.json cannot add servers.
 		argv = append(argv, "--strict-mcp-config")
 		servers := map[string]any{}
+		environment := request.runtime.environment(request.provider)
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -310,6 +311,7 @@ func Build(request Request) (Launch, error) {
 				return Launch{}, errors.Join(err, fmt.Errorf("%s on %s", maintainerBridge, request.runtime.toolPath))
 			}
 			servers["maintainer"] = map[string]string{"command": bridge}
+			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
 		if len(servers) > 0 {
 			config, err := json.Marshal(map[string]any{"mcpServers": servers})
@@ -320,7 +322,7 @@ func Build(request Request) (Launch, error) {
 		}
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryStartupTerminal,
+			environment: environment, taskDelivery: TaskDeliveryStartupTerminal,
 		}, nil
 	case kernel.ProviderCodex:
 		permissions, err := codexPermissions(request)
@@ -346,21 +348,23 @@ func Build(request Request) (Launch, error) {
 		if request.reasoningEffort != "" {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
+		environment := request.runtime.environment(request.provider)
 		if request.role == kernel.RoleOrchestrator {
 			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
 			if err != nil {
 				return Launch{}, err
 			}
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(bridge)+`,enabled=true,required=true,default_tools_approval_mode="approve"}`)
+			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
 		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
-			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For retained source, request attempt source --task TASK_ID and verify its exact task/work/Change receipt before reading source_path; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
+			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For retained source, request attempt source --task TASK_ID and verify its exact task/work/Change receipt before reading source_path; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Continue actionable supervision and delivery in this session; when none remains, report a durable checkpoint and exit without idle polling. Events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
 		argv = append(argv, prompt)
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryAttemptAPI,
+			environment: environment, taskDelivery: TaskDeliveryAttemptAPI,
 		}, nil
 	default:
 		return Launch{}, ErrInvalid

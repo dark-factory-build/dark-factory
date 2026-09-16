@@ -80,7 +80,25 @@ if [ -n "$evidence" ] && [ ! -f "$evidence" ]; then
     echo "no review evidence file: $evidence" >&2
     exit 2
 fi
-bridge=$(command -v dark-factory-maintainer-mcp-bridge) || { echo "maintainer bridge is not on PATH" >&2; exit 2; }
+if [ -n "${DARK_FACTORY_MAINTAINER_BRIDGE:-}" ]; then
+    bridge=$DARK_FACTORY_MAINTAINER_BRIDGE
+else
+    bridge=$(command -v dark-factory-maintainer-mcp-bridge) || { echo "maintainer bridge is not on PATH" >&2; exit 2; }
+fi
+# Apply the same executable checks to both the factory receipt and PATH lookup.
+case "$bridge" in
+    /*) ;;
+    *) echo "maintainer bridge must be an absolute executable path" >&2; exit 2 ;;
+esac
+bridge_mode=$(stat -L -f '%Lp' "$bridge" 2>/dev/null) || bridge_mode=$(stat -L -c '%a' "$bridge" 2>/dev/null) || bridge_mode=
+case "$bridge_mode" in
+    '' | *[!0-7]*) echo "cannot inspect maintainer bridge permissions" >&2; exit 2 ;;
+esac
+[ -f "$bridge" ] && [ -x "$bridge" ] && [ $((0$bridge_mode & 0100)) -ne 0 ] && [ $((0$bridge_mode & 0022)) -eq 0 ] || {
+    echo "maintainer bridge is not a safe executable" >&2
+    exit 2
+}
+
 provider=${DARK_FACTORY_REVIEW_PROVIDER:-codex}
 case "$provider" in
     codex | claude) ;;
