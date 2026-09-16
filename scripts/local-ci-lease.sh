@@ -38,7 +38,11 @@ local_ci_lease_common_dir() {
         local_ci_old_lock=$local_ci_git_dir/.dark-factory-local-ci.lock
         local_ci_barrier=dark-factory-local-ci/.dark-factory-local-ci.lock
         if [ "$(readlink "$local_ci_old_lock" 2>/dev/null || true)" != "$local_ci_barrier" ]; then
-            perl -e 'symlink($ARGV[0], $ARGV[1]) or exit 1' "$local_ci_barrier" "$local_ci_old_lock" || {
+            if [ -e "$local_ci_old_lock" ] || [ -L "$local_ci_old_lock" ]; then
+                echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
+                return 1
+            fi
+            local_ci_lease_install_legacy_barrier "$local_ci_barrier" "$local_ci_old_lock" || {
                 echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
                 return 1
             }
@@ -53,6 +57,19 @@ local_ci_lease_common_dir() {
         return 1
     }
     printf '%s\n' "$local_ci_lease_dir"
+}
+
+local_ci_lease_install_legacy_barrier() {
+    # File.symlink is one atomic symlink(2) create-only operation. BSD ln can
+    # reinterpret an existing directory destination as a child pathname after
+    # the guard above, creating a second legacy lock domain in that race.
+    if [ -n "${DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_LEGACY_BARRIER-}" ]; then
+        : >"$DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_LEGACY_BARRIER.ready"
+        read -r local_ci_lease_test_pause_token \
+            <"$DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_LEGACY_BARRIER" || true
+    fi
+    /usr/bin/ruby --disable-gems -e \
+        'File.symlink(ARGV[0], ARGV[1])' -- "$1" "$2"
 }
 
 local_ci_lease_setup_paths() {
@@ -460,16 +477,14 @@ local_ci_lease_release_owner() {
 local_ci_lease_start_child() {
     # The background function execs this helper, so the session leader remains
     # the wrapper's direct waitable child. No detached grandchild can survive
-    # if startup aborts before the release handshake.
-    command -v perl >/dev/null 2>&1 || {
-        echo "local-ci: Perl is required to establish the command process group" >&2
-        return 1
-    }
+    # if startup aborts before the release handshake. Ruby is a macOS system
+    # runtime; use its built-in setsid instead of requiring the optional Perl
+    # installation and its broad standard-library read surface.
     local_ci_lease_pid_file=$1
     local_ci_lease_release_fifo=$2
     shift 2
-    exec perl -MPOSIX -e \
-        'my ($pid_file, $release_fifo) = splice @ARGV, 0, 2; POSIX::setsid() == -1 and die "setsid: $!\n"; open my $fh, ">", $pid_file or die "pid file: $!\n"; print $fh "$$\n"; close $fh; open my $release, "<", $release_fifo or die "release fifo: $!\n"; <$release>; close $release; exec @ARGV or die "exec: $!\n"' \
+    exec /usr/bin/ruby --disable-gems -e \
+        'pid_file, release_fifo = ARGV.shift(2); Process.setsid; File.write(pid_file, "#{Process.pid}\n"); File.open(release_fifo) { |release| release.gets }; exec(*ARGV)' \
         -- "$local_ci_lease_pid_file" "$local_ci_lease_release_fifo" "$@"
 }
 

@@ -269,6 +269,70 @@ if (cd "$first" && ./scripts/with-local-ci-lease.sh true) 2>"$temporary/legacy.s
 fi
 grep -Fq 'legacy lease' "$temporary/legacy.stderr" || fail "legacy cutover refusal was unexplained"
 rmdir "$legacy_lock"
+
+# A normal host checkout must not follow an existing legacy barrier symlink
+# into an external writable directory while installing the migration barrier.
+host_checkout="$temporary/host-checkout"
+/usr/bin/git init -q "$host_checkout"
+/bin/mkdir -p "$host_checkout/scripts"
+/bin/cp "$repository_root/scripts/local-ci-lease.sh" "$repository_root/scripts/with-local-ci-lease.sh" "$host_checkout/scripts/"
+/bin/chmod +x "$host_checkout/scripts/with-local-ci-lease.sh"
+host_git_dir=$(/usr/bin/git -C "$host_checkout" rev-parse --path-format=absolute --git-common-dir)
+legacy_lock="$host_git_dir/.dark-factory-local-ci.lock"
+legacy_target="$temporary/legacy-target"
+/bin/mkdir "$legacy_target"
+: >"$legacy_target/untouched"
+/bin/ln -s "$legacy_target" "$legacy_lock"
+if (cd "$host_checkout" && ./scripts/with-local-ci-lease.sh true) 2>"$temporary/legacy-symlink.stderr"; then
+    fail "legacy migration followed an existing directory symlink"
+fi
+grep -Fq 'legacy lease' "$temporary/legacy-symlink.stderr" || fail "legacy symlink refusal was unexplained"
+[ "$(readlink "$legacy_lock")" = "$legacy_target" ] || fail "legacy barrier symlink was replaced"
+[ -f "$legacy_target/untouched" ] && [ "$(find "$legacy_target" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "legacy migration mutated the external symlink target"
+rm -f "$legacy_lock"
+
+# The final barrier create must remain create-only when a legacy helper races
+# the precheck by placing a directory at the old pathname.
+race_host_checkout="$temporary/race-host-checkout"
+/usr/bin/git init -q "$race_host_checkout"
+/bin/mkdir -p "$race_host_checkout/scripts"
+/bin/cp "$repository_root/scripts/local-ci-lease.sh" "$repository_root/scripts/with-local-ci-lease.sh" "$race_host_checkout/scripts/"
+/bin/chmod +x "$race_host_checkout/scripts/with-local-ci-lease.sh"
+race_host_git_dir=$(/usr/bin/git -C "$race_host_checkout" rev-parse --path-format=absolute --git-common-dir)
+race_legacy_lock="$race_host_git_dir/.dark-factory-local-ci.lock"
+race_pause="$temporary/legacy-barrier-race"
+mkfifo "$race_pause"
+(
+    cd "$race_host_checkout"
+    DARK_FACTORY_LOCAL_CI_TEST_PAUSE_BEFORE_LEGACY_BARRIER="$race_pause" \
+        ./scripts/with-local-ci-lease.sh true
+) 2>"$temporary/legacy-barrier-race.stderr" &
+race_pid=$!
+background_pids="$background_pids $race_pid"
+wait_for_file "$race_pause.ready"
+/bin/mkdir "$race_legacy_lock"
+printf '\n' >"$race_pause"
+if wait_bounded "legacy barrier race" "$race_pid"; then
+    fail "legacy barrier race unexpectedly succeeded"
+else
+    race_status=$?
+fi
+[ "$race_status" -ne 0 ] || fail "legacy barrier race returned success"
+[ -d "$race_legacy_lock" ] && [ ! -L "$race_legacy_lock" ] \
+    || fail "legacy barrier race replaced the competing directory"
+
+# The host and generated overseer profiles may not expose Perl. The native
+# symlink primitive must therefore cover the legacy barrier migration without
+# consulting that optional runtime.
+perl_probe="$temporary/perl-probe"
+mkdir "$temporary/no-perl"
+printf '%s\n' '#!/bin/sh' ': >"'"$perl_probe"'"' 'exit 99' >"$temporary/no-perl/perl"
+chmod +x "$temporary/no-perl/perl"
+env PATH="$temporary/no-perl:$PATH" DARK_FACTORY_LOCAL_CI_DIRECTORY="$common_dir" \
+    /bin/sh -c 'cd "$1" && ./scripts/with-local-ci-lease.sh true' local-ci-no-perl "$first" \
+    || fail "lease acquisition depended on Perl"
+[ ! -e "$perl_probe" ] || fail "lease helper invoked the forbidden Perl probe"
 lease_path="$common_dir/.dark-factory-local-ci"
 lock_path="$common_dir/.dark-factory-local-ci.lock"
 

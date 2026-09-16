@@ -1014,6 +1014,9 @@ func TestCodexLocalCILeaseGrantExcludesGitMetadata(t *testing.T) {
 	if !strings.Contains(policy, tomlBasicString(lease)+`="write"`) || strings.Contains(policy, tomlBasicString(filepath.Dir(lease))+`="write"`) {
 		t.Fatalf("lease permission is not narrow: %s", policy)
 	}
+	if !strings.Contains(policy, `"/usr/bin/ruby"="read"`) || strings.Contains(policy, `"/System/Library/Perl"="read"`) {
+		t.Fatalf("lease process-group runtime permission is not exact: %s", policy)
+	}
 	if !slices.Contains(withLease.environment(kernel.ProviderCodex), "DARK_FACTORY_LOCAL_CI_DIRECTORY="+lease) {
 		t.Fatal("lease path missing from launch environment")
 	}
