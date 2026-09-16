@@ -38,7 +38,14 @@ local_ci_lease_common_dir() {
         local_ci_old_lock=$local_ci_git_dir/.dark-factory-local-ci.lock
         local_ci_barrier=dark-factory-local-ci/.dark-factory-local-ci.lock
         if [ "$(readlink "$local_ci_old_lock" 2>/dev/null || true)" != "$local_ci_barrier" ]; then
-            /bin/ln -s "$local_ci_barrier" "$local_ci_old_lock" || {
+            # macOS ln treats an existing directory destination as a target
+            # directory even with -n, so reject every existing final path
+            # before the no-follow, create-only link operation.
+            if [ -e "$local_ci_old_lock" ] || [ -L "$local_ci_old_lock" ]; then
+                echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
+                return 1
+            fi
+            /bin/ln -s -n "$local_ci_barrier" "$local_ci_old_lock" || {
                 echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
                 return 1
             }

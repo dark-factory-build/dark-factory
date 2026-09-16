@@ -270,6 +270,28 @@ fi
 grep -Fq 'legacy lease' "$temporary/legacy.stderr" || fail "legacy cutover refusal was unexplained"
 rmdir "$legacy_lock"
 
+# A normal host checkout must not follow an existing legacy barrier symlink
+# into an external writable directory while installing the migration barrier.
+host_checkout="$temporary/host-checkout"
+/usr/bin/git init -q "$host_checkout"
+/bin/mkdir -p "$host_checkout/scripts"
+/bin/cp "$repository_root/scripts/local-ci-lease.sh" "$repository_root/scripts/with-local-ci-lease.sh" "$host_checkout/scripts/"
+/bin/chmod +x "$host_checkout/scripts/with-local-ci-lease.sh"
+host_git_dir=$(/usr/bin/git -C "$host_checkout" rev-parse --path-format=absolute --git-common-dir)
+legacy_lock="$host_git_dir/.dark-factory-local-ci.lock"
+legacy_target="$temporary/legacy-target"
+/bin/mkdir "$legacy_target"
+: >"$legacy_target/untouched"
+/bin/ln -s "$legacy_target" "$legacy_lock"
+if (cd "$host_checkout" && ./scripts/with-local-ci-lease.sh true) 2>"$temporary/legacy-symlink.stderr"; then
+    fail "legacy migration followed an existing directory symlink"
+fi
+grep -Fq 'legacy lease' "$temporary/legacy-symlink.stderr" || fail "legacy symlink refusal was unexplained"
+[ "$(readlink "$legacy_lock")" = "$legacy_target" ] || fail "legacy barrier symlink was replaced"
+[ -f "$legacy_target/untouched" ] && [ "$(find "$legacy_target" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "legacy migration mutated the external symlink target"
+rm -f "$legacy_lock"
+
 # The host and generated overseer profiles may not expose Perl. The native
 # symlink primitive must therefore cover the legacy barrier migration without
 # consulting that optional runtime.
