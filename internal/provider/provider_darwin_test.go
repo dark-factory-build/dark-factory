@@ -116,6 +116,9 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
+	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+		t.Fatalf("runner rejected Claude overseer environment: %v", err)
+	}
 	if !slices.Contains(launch.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
 		t.Fatal("Claude overseer lost its exact bridge environment")
 	}
@@ -728,6 +731,9 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	workerArgs, overseerArgs := worker.Argv(), overseer.Argv()
 	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.dark_factory_maintainer={command=") {
 		t.Fatal("overseer lost its explicit Maintainer tools")
+	}
+	if _, err := runner.PrepareCommittedExecSpec(overseer.Executable(), overseer.Argv(), overseer.Environment(), t.TempDir()); err != nil {
+		t.Fatalf("runner rejected Codex overseer environment: %v", err)
 	}
 	if !slices.Contains(overseer.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
 		t.Fatalf("overseer did not export its exact Maintainer bridge: %q", overseer.Environment())
