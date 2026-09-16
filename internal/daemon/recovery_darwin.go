@@ -13,6 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var errRuntimeCleanupPending = errors.New("daemon: runtime cleanup pending")
+
 // RecoveredRunAction is the bounded disposition of one run in one sweep pass.
 type RecoveredRunAction string
 
@@ -187,12 +189,36 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 		}
 		if runtimeRoot.State == kernel.ResourceReleasing && errors.Is(err, errRecoveredRuntimeLayout) {
 			if result, resultErr := recoveredConsumedAttemptResult(run, runtimeRoot, providerProcess); resultErr == nil {
+				// The result may have been consumed before the runtime removal
+				// pass stopped.  In that crash cut the runner can still be
+				// releasing while its exit edge is absent; authorize removal only
+				// after the same exact-identity absence edge used by the normal
+				// authenticated-result path.  Otherwise the blocked proposal can
+				// never advance to the terminal postcondition.
+				if current, found, resourceErr := daemon.store.Resource(context.Background(), runnerProcess.ID); resourceErr != nil || !found {
+					if resourceErr == nil {
+						resourceErr = errInvalidContract
+					}
+					return RecoveredUncertain, resourceErr
+				} else if current.State == kernel.ResourceReleasing || current.State == kernel.ResourceUnresolved {
+					if run.RunnerExit != nil || !daemon.recoveredRunnerAbsent(current) {
+						return RecoveredUncertain, errInvalidContract
+					}
+					if _, absenceErr := daemon.recordRecoveredRunnerAbsence(run.ID, current.ID, current.Identity); absenceErr != nil {
+						return RecoveredUncertain, absenceErr
+					}
+				}
 				storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
 				_, authorizeErr := daemon.store.AuthorizeAttemptResultRemoval(storeCtx, result)
 				cancel()
 				if authorizeErr == nil {
 					if removeErr := daemon.removeRecordedRuntime(parent, run.ID, fileIdentity); removeErr != nil {
-						return RecoveredUncertain, removeErr
+						// The authenticated result is already consumed and the
+						// runner absence edge is durable.  A bounded removal
+						// refusal is therefore continuation work, not uncertainty;
+						// retain the consumed-result action so boot schedules the
+						// exact-run continuation.
+						return RecoveredResultConsumed, removeErr
 					}
 					_, settleErr := daemon.settleRun(changeParent, run.ID)
 					return RecoveredConverged, settleErr
@@ -568,11 +594,45 @@ func (daemon *Daemon) removeRecordedRuntime(parent *RuntimeParent, runID kernel.
 			break
 		}
 		if time.Now().After(deadline) {
-			return errInvalidContract
+			return errRuntimeCleanupPending
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 	return daemon.releaseResources(context.Background(), runID, kernel.ResourceRuntimeRoot)
+}
+
+// ContinueUnsettledRun retries one exact finalizing run after a bounded
+// cleanup pass yielded progress but did not finish. Recovery re-reads the
+// durable footprint on every pass, so identity, lifetime and ownership checks
+// remain the authority; uncertainty stops the continuation.
+func (daemon *Daemon) ContinueUnsettledRun(ctx context.Context, parent *RuntimeParent, changeParent string, runID kernel.RunID) error {
+	if daemon == nil || ctx == nil || parent == nil || changeParent == "" || runID == (kernel.RunID{}) {
+		return errInvalidContract
+	}
+	for {
+		run, err := daemon.recoverReturnedRun(parent, changeParent, runID)
+		if err == nil {
+			if run.Phase == kernel.RunTerminal {
+				return nil
+			}
+			return kernel.ErrConflict
+		}
+		if !errors.Is(err, errRuntimeCleanupPending) {
+			return err
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // runtimeFileIdentity converts the durable runtime path identity back to the
