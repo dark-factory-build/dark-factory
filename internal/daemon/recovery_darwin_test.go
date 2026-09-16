@@ -659,6 +659,12 @@ func TestRecoverySweepConvergesPartialReleasingRuntimeOnlyAfterResultConsumption
 		if states := fixture.resourceStates(t); states[kernel.ResourceRuntimeRoot].State != kernel.ResourceReleasing {
 			t.Fatalf("runtime after refusal = %+v", states[kernel.ResourceRuntimeRoot])
 		}
+		states := fixture.resourceStates(t)
+		if states[kernel.ResourceRunnerProcess].State != kernel.ResourceReleased ||
+			states[kernel.ResourceProviderProcess].State != kernel.ResourceReleased ||
+			states[kernel.ResourceProviderGroup].State != kernel.ResourceReleased {
+			t.Fatalf("released process footprint after bounded cleanup = %+v", states)
+		}
 		if _, err := os.Stat(filepath.Join(fixture.parentPath, fixture.run.ID.String(), runner.AttemptResultSpoolName)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("consumed artifact remains: %v", err)
 		}

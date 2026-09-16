@@ -617,7 +617,11 @@ func (daemon *Daemon) ContinueUnsettledRun(ctx context.Context, parent *RuntimeP
 			}
 			return kernel.ErrConflict
 		}
-		if !errors.Is(err, errRuntimeCleanupPending) {
+		// Cleanup progress and a retained-change settlement refusal are both
+		// safe continuation points: the next pass re-reads the exact durable
+		// run/resource/change authority. Identity, lifetime, and artifact
+		// uncertainty remain terminal refusals and are never retried here.
+		if !errors.Is(err, errRuntimeCleanupPending) && !errors.Is(err, kernel.ErrConflict) {
 			return err
 		}
 		timer := time.NewTimer(25 * time.Millisecond)
