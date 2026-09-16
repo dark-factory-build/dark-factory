@@ -286,11 +286,11 @@ export class BrowserSession {
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
   get authAttempted(): boolean { return this.#authAttempted; }
 
-  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; instruction: string; mode?: "now" | "queue" }): Promise<{ taskId: string; revision: bigint }> {
+  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; instruction: string; mode?: "now" | "queue" | "any" }): Promise<{ taskId: string; revision: bigint }> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (!validDynamicID(request.agentId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.mode !== undefined && request.mode !== "now" && request.mode !== "queue") return Promise.reject(new SessionError("invalid_request"));
+    if (!validDynamicID(request.agentId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.mode !== undefined && request.mode !== "now" && request.mode !== "queue" && request.mode !== "any") return Promise.reject(new SessionError("invalid_request"));
     const bytes = new TextEncoder().encode(request.instruction).length;
     if (bytes < 1 || bytes > MAX_TASK_INSTRUCTION_BYTES || /^[ \t\r\n]*$/.test(request.instruction)) return Promise.reject(new SessionError("invalid_request"));
     if (this.#taskPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
@@ -298,7 +298,7 @@ export class BrowserSession {
     try { taskId = this.#randomID(); incarnationId = this.#randomID(); } catch (error) { return Promise.reject(error); }
     const id = this.#nextID("task-enqueue");
     let payload: string;
-    try { payload = encodeTaskEnqueue(id, { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" ? { mode: "queue" } : {}) }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeTaskEnqueue(id, { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}) }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<{ taskId: string; revision: bigint }>((resolve, reject) => this.#taskPending.set(id, { taskId, expectedAgentRevision: request.expectedAgentRevision, resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
