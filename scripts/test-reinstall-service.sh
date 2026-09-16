@@ -20,6 +20,8 @@ fail() {
 # The default macOS umask: the fixture store and anything the script creates
 # without guarding against it are world-readable.
 umask 022
+# Compiler execution is fake; no host CI lease is acquired by these fixtures.
+export DARK_FACTORY_LOCAL_CI_LEASE_HELD=1
 test_repository=$temporary/repository
 fake_bin=$temporary/fake-bin
 fake_home=$temporary/home
@@ -32,7 +34,8 @@ git -C "$test_repository" config user.name fixture
 git -C "$test_repository" config user.email fixture@example.invalid
 printf 'fixture\n' >"$test_repository/README.md"
 printf 'module fixture\n\ngo 1.2.3\n' >"$test_repository/go.mod"
-git -C "$test_repository" add README.md go.mod
+printf '0.3.5\n' >"$test_repository/VERSION"
+git -C "$test_repository" add README.md go.mod VERSION
 git -C "$test_repository" commit -q -m fixture
 git clone -q --bare "$test_repository" "$temporary/origin.git"
 git -C "$test_repository" remote add origin "$temporary/origin.git"
@@ -47,7 +50,7 @@ git -C "$test_repository" config core.hooksPath "$temporary/configured-hooks"
 printf 'live store\n' >"$fake_home/.dark-factory/factory.sqlite3"
 printf '\n' >"$fake_home/.dark-factory/home.lock"
 mkdir -p "$fake_home/.dark-factory.service"
-printf '{"relay_origin":"wss://relay.example"}\n' >"$fake_home/.dark-factory.service/receipt"
+printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay.example"}\n' >"$fake_home/.dark-factory.service/receipt"
 printf '0\n' >"$temporary/dispatch-enabled"
 printf '0\n' >"$temporary/active-runs"
 : >"$temporary/pids"
@@ -75,6 +78,8 @@ case "$1" in
         [ -z "${DARK_FACTORY_TEST_ADMIT_DURING_BUILD-}" ] || printf '1\n' >"$DARK_FACTORY_TEST_ACTIVE_RUNS"
         [ -z "${DARK_FACTORY_TEST_ENABLE_DISPATCH_DURING_BUILD-}" ] || printf '1\n' >"$DARK_FACTORY_TEST_DISPATCH_ENABLED"
         ;;
+    env) case "$2" in GOOS) echo darwin ;; GOARCH) echo arm64 ;; esac ;;
+    run) printf '%s|%s|%s|fixture-id\n' "$4" "$5" "$6" ;;
     version) cat "$3" ;;
     *) exit 1 ;;
 esac
@@ -107,15 +112,25 @@ FAKE
 cat >"$fake_bin/factoryctl" <<'FAKE'
 #!/bin/sh
 set -eu
+if [ "${1-}" = --build-identity ]; then
+    printf '{"version":"0.3.5","source":"%s","target":"darwin/arm64","build_id":"%s","release":true}\n' "$DARK_FACTORY_TEST_SOURCE" "${DARK_FACTORY_TEST_BUILD_ID-fixture-id}"
+    exit 0
+fi
 echo "$*" >>"$DARK_FACTORY_TEST_FACTORYCTL_LOG"
-runtimes=$HOME/.dark-factory/runtimes
+factory_home=$HOME/.dark-factory
+previous=
+for argument in "$@"; do
+    [ "$previous" != --home ] || factory_home=$argument
+    previous=$argument
+done
+runtimes=$factory_home/runtimes
 stop() {
     kill $(cat "$DARK_FACTORY_TEST_PIDS") 2>/dev/null || true
     : >"$DARK_FACTORY_TEST_PIDS"
 }
 case "$1 $2" in
     "service uninstall")
-        [ ! -e "$HOME/.dark-factory/verification-browser" ] || exit 1
+        [ ! -e "$factory_home/verification-browser" ] || exit 1
         case "${DARK_FACTORY_TEST_UNINSTALL_LEAVES-}" in
             stale) stop ;;
             listening) ;;
@@ -123,7 +138,7 @@ case "$1 $2" in
                 stop
                 rm -f "$runtimes/factory.sock"
                 perl -MFcntl=:flock -e 'open my $lock, "+<", shift or die "$!\\n"; flock $lock, LOCK_EX or die "$!\\n"; sleep 1000' \
-                    "$HOME/.dark-factory/home.lock" &
+                    "$factory_home/home.lock" &
                 echo $! >>"$DARK_FACTORY_TEST_PIDS"
                 ;;
             *) stop; rm -f "$runtimes/factory.sock" ;;
@@ -139,7 +154,7 @@ case "$1 $2" in
         done
         mkdir -p "$runtimes"
         [ -n "${DARK_FACTORY_TEST_INSTALL_DEAD-}" ] || {
-            (cd "$runtimes" && /bin/sleep 0.2 && rm -f factory.sock && exec perl -MFcntl=:flock -MSocket -MIO::Socket::UNIX -e 'open my $lock, "+<", shift or die "$!\\n"; flock $lock, LOCK_EX or die "$!\\n"; my $s = IO::Socket::UNIX->new(Type => SOCK_STREAM, Local => "factory.sock", Listen => 1) or die "$!\\n"; while (my $c = $s->accept) { close $c }' "$HOME/.dark-factory/home.lock") &
+            (cd "$runtimes" && /bin/sleep 0.2 && rm -f factory.sock && exec perl -MFcntl=:flock -MSocket -MIO::Socket::UNIX -e 'open my $lock, "+<", shift or die "$!\\n"; flock $lock, LOCK_EX or die "$!\\n"; my $s = IO::Socket::UNIX->new(Type => SOCK_STREAM, Local => "factory.sock", Listen => 1) or die "$!\\n"; while (my $c = $s->accept) { close $c }' "$factory_home/home.lock") &
             echo $! >>"$DARK_FACTORY_TEST_PIDS"
         }
         ;;
@@ -160,6 +175,7 @@ export DARK_FACTORY_TEST_DISPATCH_ENABLED="$temporary/dispatch-enabled"
 export DARK_FACTORY_TEST_BACKUP_MODES="$temporary/backup-modes"
 export DARK_FACTORY_TEST_FACTORYCTL_LOG="$temporary/factoryctl.log"
 export DARK_FACTORY_TEST_GO_LOG="$temporary/go.log"
+export DARK_FACTORY_TEST_SOURCE="$sha"
 export DARK_FACTORY_TEST_PIDS="$temporary/pids"
 script=$test_repository/scripts/reinstall-service.sh
 
@@ -236,7 +252,7 @@ printf 'legacy session\n' >"$unsafe_home/real-home/verification-browser/session"
 printf 'current session\n' >"$unsafe_home/.dark-factory-verification-browser/session"
 ln -s real-home "$unsafe_home/.dark-factory"
 HOME="$unsafe_home" "$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "symlinked runtime home accepted"
-grep -q 'browser verification profile migration failed' "$temporary/stderr" || fail "symlinked runtime home: wrong refusal"
+grep -q 'operator-owned directory' "$temporary/stderr" || fail "symlinked runtime home: wrong refusal"
 grep -qx 'legacy session' "$unsafe_home/real-home/verification-browser/session" \
     || fail "symlinked runtime home: legacy profile changed"
 grep -qx 'current session' "$unsafe_home/.dark-factory-verification-browser/session" \
@@ -246,7 +262,7 @@ no_service_change "symlinked runtime home"
 "$script" "$sha" >"$temporary/stdout" || fail "clean reinstall exited non-zero"
 backup=$(find "$fake_home/.dark-factory-backups" -name factory.sqlite3)
 case "$backup" in
-    "$fake_home/.dark-factory-backups/"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]-"$sha/factory.sqlite3") ;;
+    "$fake_home/.dark-factory-backups/"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]-"$sha".??????/factory.sqlite3) ;;
     *) fail "unexpected backup path: $backup" ;;
 esac
 cmp -s "$backup" "$fake_home/.dark-factory/factory.sqlite3" || fail "backup content differs"
@@ -262,9 +278,9 @@ builds=$(wc -l <"$DARK_FACTORY_TEST_GO_LOG" | tr -d ' ')
 [ "$builds" -gt 0 ] && [ "$(grep -F -c -- '-buildvcs=true' "$DARK_FACTORY_TEST_GO_LOG")" = "$builds" ] \
     || fail "builds did not require VCS metadata: $(tr '\n' ';' <"$DARK_FACTORY_TEST_GO_LOG")"
 printf '%s\n' \
-    "service uninstall --home $fake_home/.dark-factory" \
-    "service install --home $fake_home/.dark-factory --relay-origin wss://relay.example" \
-    "service status --home $fake_home/.dark-factory" \
+    "service uninstall --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
+    "service install --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists --relay-origin wss://relay.example" \
+    "service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "web status" \
     "remote status" >"$temporary/expected.log"
 cmp -s "$temporary/expected.log" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" \
@@ -274,12 +290,12 @@ rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
 
 # An absent receipt member is a local-only install: factoryctl rejects an
 # empty relay argument, so reinstall must omit the flag rather than pass "".
-printf '{}\n' >"$fake_home/.dark-factory.service/receipt"
+printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist"}\n' >"$fake_home/.dark-factory.service/receipt"
 "$script" "$sha" >"$temporary/stdout" || fail "local-only reinstall exited non-zero"
 printf '%s\n' \
-    "service uninstall --home $fake_home/.dark-factory" \
-    "service install --home $fake_home/.dark-factory" \
-    "service status --home $fake_home/.dark-factory" \
+    "service uninstall --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
+    "service install --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
+    "service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "web status" \
     "remote status" >"$temporary/expected-local.log"
 cmp -s "$temporary/expected-local.log" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" \
@@ -287,18 +303,18 @@ cmp -s "$temporary/expected-local.log" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" \
 rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
 # The receipt comes from Go's JSON encoder, which escapes HTML-significant
 # bytes. Reinstall must restore the decoded, valid custom origin.
-printf '%s\n' '{"relay_origin":"wss://relay\u0026.example"}' >"$fake_home/.dark-factory.service/receipt"
+printf '%s\n' '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay\u0026.example"}' >"$fake_home/.dark-factory.service/receipt"
 "$script" "$sha" >"$temporary/stdout" || fail "escaped relay origin reinstall exited non-zero"
 printf '%s\n' \
-    "service uninstall --home $fake_home/.dark-factory" \
-    "service install --home $fake_home/.dark-factory --relay-origin wss://relay&.example" \
-    "service status --home $fake_home/.dark-factory" \
+    "service uninstall --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
+    "service install --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists --relay-origin wss://relay&.example" \
+    "service status --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists" \
     "web status" \
     "remote status" >"$temporary/expected-escaped.log"
 cmp -s "$temporary/expected-escaped.log" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" \
     || fail "escaped relay origin: factoryctl calls: $(tr '\n' ';' <"$DARK_FACTORY_TEST_FACTORYCTL_LOG")"
 rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
-printf '{"relay_origin":"wss://relay.example"}\n' >"$fake_home/.dark-factory.service/receipt"
+printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay.example"}\n' >"$fake_home/.dark-factory.service/receipt"
 
 # VCS metadata is provenance, not just a build option: both refusal paths must
 # stop before the backup or service change.
@@ -340,11 +356,45 @@ not_installed "held home lock"
 DARK_FACTORY_TEST_INSTALL_DEAD=1 "$script" "$sha" >/dev/null 2>"$temporary/stderr" \
     && fail "daemon that never listens accepted"
 grep -q 'did not listen' "$temporary/stderr" || fail "daemon that never listens: wrong refusal"
-grep -q "service uninstall --home $fake_home/.dark-factory.*home.lock is free" "$temporary/stderr" \
+grep -q "service uninstall --home $fake_home/.dark-factory --label com.dark-factory.fixture --plist-dir /private/tmp/fixture-plists.*home.lock is free" "$temporary/stderr" \
     || fail "daemon that never listens: safe stop instruction not printed"
 grep -q "restore $fake_home/.dark-factory-backups/.*/factory.sqlite3 over .*factory.sqlite3-shm" "$temporary/stderr" \
     || fail "daemon that never listens: restore instruction not printed"
 rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
+
+# Preparation can run alongside active work, without migrating profiles,
+# backing up stores, or changing the service.
+printf '1\n' >"$temporary/dispatch-enabled"
+printf '1\n' >"$temporary/active-runs"
+mkdir -p "$fake_home/.dark-factory/verification-browser"
+before_backups=$(backups)
+"$script" --prepare "$sha" >/dev/null 2>"$temporary/stderr" \
+    || fail "preparation while active: $(cat "$temporary/stderr")"
+[ -d "$fake_home/.dark-factory/verification-browser" ] || fail "preparation moved profile"
+[ "$(backups)" = "$before_backups" ] || fail "preparation backed up store"
+no_service_change "preparation"
+rmdir "$fake_home/.dark-factory/verification-browser"
+printf '0\n' >"$temporary/dispatch-enabled"
+printf '0\n' >"$temporary/active-runs"
+
+# The drained phase uses the prepared artifacts without compiler work, and
+# preserves the configured service rather than targeting the default factory.
+custom_home="$fake_home/other-factory"
+mkdir -p "$custom_home" "$custom_home.service"
+printf 'other store\n' >"$custom_home/factory.sqlite3"
+printf '\n' >"$custom_home/home.lock"
+printf '%s\n' '{"label":"com.dark-factory.other","plist_path":"/private/tmp/custom plists/com.dark-factory.other.plist","relay_origin":"wss://other.example","tool_path":"/tools with spaces:/bin","toolchain_read_roots":"/tool roots:/sdk","development_browser_address":"127.0.0.1:4173"}' >"$custom_home.service/receipt"
+before_builds=$(wc -l <"$DARK_FACTORY_TEST_GO_LOG")
+"$script" --home "$custom_home" --install-prepared "$sha" >/dev/null 2>"$temporary/stderr" \
+    || fail "configured prepared installation: $(cat "$temporary/stderr")"
+[ "$(wc -l <"$DARK_FACTORY_TEST_GO_LOG")" = "$before_builds" ] || fail "prepared install rebuilt"
+grep -Fqx "service uninstall --home $custom_home --label com.dark-factory.other --plist-dir /private/tmp/custom plists" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" || fail "wrong configured uninstall"
+grep -Fqx "service install --home $custom_home --label com.dark-factory.other --plist-dir /private/tmp/custom plists --relay-origin wss://other.example --tool-path /tools with spaces:/bin --toolchain-read-roots /tool roots:/sdk --development-browser-address 127.0.0.1:4173" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" || fail "configured settings lost"
+rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
+DARK_FACTORY_TEST_BUILD_ID=wrong "$script" --prepare "$sha" >/dev/null 2>"$temporary/stderr" \
+    && fail "incorrect build receipt accepted"
+grep -q 'build receipt mismatch' "$temporary/stderr" || fail "wrong build receipt refusal"
+no_service_change "build receipt"
 
 rm -rf "$fake_home/.dark-factory-backups"
 printf 'stray\n' >"$test_repository/.worktrees/build-$sha/stray"

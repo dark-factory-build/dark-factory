@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Drain, reinstall an exact runtime revision, verify, and restore dispatch."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -37,13 +38,17 @@ def failure_receipt(sha, reachable):
             pass
 
 
-def deploy(sha):
+def deploy(sha, home=None):
     if re.fullmatch('[0-9a-f]{40}', sha) is None:
         raise ValueError('expected a full merge SHA')
     scripts = Path(__file__).resolve().parent
-    home = Path.home() / '.dark-factory'
+    home = Path(home) if home is not None else Path.home() / '.dark-factory'
+    if not home.is_absolute():
+        raise ValueError('factory home must be absolute')
     control = Path(str(home) + '.service') / 'bin' / 'current' / 'factoryctl'
     env = dict(os.environ, DARK_FACTORY_SOCKET=str(home / 'runtimes' / 'factory.sock'), DARK_FACTORY_OPERATOR_TOKEN_FILE=str(home / 'operator.token'))
+    # Preparation is non-destructive and leaves working agents running.
+    subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--prepare', sha], env=env, check=True, timeout=600, capture_output=True, text=True)
     enabled, original_revision, _ = state(home)
     subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15)
     _, paused_revision, _ = state(home)
@@ -55,9 +60,9 @@ def deploy(sha):
             if time.monotonic() >= deadline:
                 raise ValueError('runs did not drain')
             time.sleep(1)
-        subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), sha], env=env, check=True, timeout=600,
+        subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--install-prepared', sha], env=env, check=True, timeout=600,
                        capture_output=True, text=True)
-        observed = json.loads(subprocess.run([sys.executable, str(scripts / 'verify-live-runtime.py'), sha], env=env, capture_output=True, text=True, check=True, timeout=60).stdout)
+        observed = json.loads(subprocess.run([sys.executable, str(scripts / 'verify-live-runtime.py'), '--home', str(home), sha], env=env, capture_output=True, text=True, check=True, timeout=60).stdout)
         if observed.get('sha') != sha or observed.get('healthy') is not True:
             raise ValueError('runtime verification failed')
     except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
@@ -76,9 +81,11 @@ def deploy(sha):
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) != 2:
-            raise ValueError('usage: deploy-runtime.py MERGE_SHA')
-        deploy(sys.argv[1])
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument('--home', type=Path, default=Path.home() / '.dark-factory')
+        parser.add_argument('sha')
+        args = parser.parse_args()
+        deploy(args.sha, args.home)
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
         print('deploy-runtime: ' + str(error), file=sys.stderr)
         raise SystemExit(1)
