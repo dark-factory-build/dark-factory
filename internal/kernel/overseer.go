@@ -147,6 +147,19 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 			hasMore = true
 			break
 		}
+		// Failed/cancelled task rows have no result; their exact settled run
+		// retains the report needed to diagnose and route the next action.
+		if task.Status == TaskFailed || task.Status == TaskCancelled {
+			var detail sql.NullString
+			err := read.connection.QueryRowContext(ctx, `SELECT terminal_detail FROM runs
+				WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ? AND phase = 'terminal'
+				ORDER BY terminal_at_ms DESC, id DESC LIMIT 1`, task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64()).Scan(&detail)
+			if err != nil && err != sql.ErrNoRows {
+				tasks.Close()
+				return OverseerSnapshot{}, err
+			}
+			task.Result = detail.String
+		}
 		objective, objectiveTruncated, objectiveMore := overseerTaskText(task.Body, request.TaskID == nil, request.TextOffset)
 		resultText, resultTruncated, resultMore := overseerTaskText(task.Result, request.TaskID == nil, request.TextOffset)
 		if objectiveMore || resultMore {
