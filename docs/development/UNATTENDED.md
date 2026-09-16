@@ -114,8 +114,8 @@ from worker success, merge, a TCP socket, or an unchanged alias alone.
 
 ## Host scheduling and deployment
 
-`scripts/factory-autonomy.py CONFIG --once` runs intake;
-optional `release_configs` paths run exact-default-head releases and enqueue
+`scripts/factory-autonomy.py CONFIG --once` runs intake and review.
+The separate `--release-only` pass uses `release_configs` paths for exact-default-head releases and enqueues
 one idempotent verified-delivery follow-up for the same project's overseer.
 After verification, the controller fast-forwards its own source checkout to the
 exact released commit so the next tick loads the released scripts. The checkout
@@ -127,8 +127,8 @@ runtime receipt; resolve the reported checkout condition before the next pass.
 Use `--plist` to generate a launchd StartInterval job. The generated job uses
 absolute script/config paths and the host's tool PATH. Install it only after
 the one-shot preflight succeeds. Each config gets a separate launchd label. Controllers for the same factory
-serialize through a host lock, so their intake and deployment hooks
-cannot overlap. Use the controller for scheduled work; direct maintenance
+serialize each lane through its own host lock. Intake/review can continue while
+a release waits for productive runs to drain. Use the controller for scheduled work; direct maintenance
 hooks are operator tools.
 Each tick writes a mode-0600 `.autonomy.json` health receipt beside the intake
 journal, containing component names, finite status codes, and fixed source-refresh refusal details for bounded
@@ -168,8 +168,16 @@ A release configuration pins `repository`, `base`, `journal`, `deploy_argv`,
 `verify_argv`, `review_verifier`, and `command_timeout` (5–1200 seconds).
 All command arrays are trusted operator configuration with absolute executable
 paths, never source or agent output. The controller appends the full merge SHA.
-The runtime hook prepares before draining. Set its release configuration timeout
-to 1200 seconds to cover preparation, drain, installation, and verification.
+The runtime hook prepares before draining and waits for productive runs to finish.
+Deployment has no elapsed-time ceiling; `command_timeout` bounds verification and
+review commands. Preparation, installation, and runtime probes retain their own
+command bounds. Install a second launchd job generated with
+`factory-autonomy.py CONFIG --plist --release-only`; the ordinary job handles
+intake and review, while this independent job handles release and delivery.
+Their separate locks keep a draining release from suppressing intake or review.
+The existing release journal lock prevents duplicate deployment. An explicit
+operator control change still cancels the owned pause; a stuck run must be
+resolved through its existing recovery path, never killed to meet a release clock.
 For this repository use Python with `scripts/deploy-runtime.py` and
 `scripts/verify-live-runtime.py`. For a non-default factory, include
 `"--home", "/absolute/factory-home"` in both arrays before the appended SHA.

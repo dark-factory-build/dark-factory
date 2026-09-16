@@ -6,6 +6,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -84,17 +86,17 @@ class AutonomyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             release = Path(directory) / 'release.json'
             release.write_text(json.dumps({'repository': 'fixture/controller', 'base': 'main'}))
-            config = {'release_configs': [str(release)]}
+            config = {'release_configs': [str(release)], 'factory_home': str(Path(directory) / 'home')}
             for state in ('planned', 'verified'):
                 receipt = {'state': state, 'sha': 'a' * 40}
-                responses = [subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 0, json.dumps(receipt), '')]
+                responses = [subprocess.CompletedProcess([], 0, json.dumps(receipt), '')]
                 with patch.object(autonomy.subprocess, 'run', side_effect=responses) as run, \
                      patch.object(autonomy.importlib.util, 'spec_from_file_location'), \
                      patch.object(autonomy.importlib.util, 'module_from_spec', return_value=Mock()), \
                      patch.object(autonomy, 'refresh_controller', side_effect=autonomy.ControllerSourceError('controller source has tracked edits')) as refresh:
-                    result = autonomy.tick(Path(directory) / 'config', config)
-                self.assertEqual(2, run.call_count)
-                self.assertEqual(2, len(result))
+                    result = autonomy.tick(Path(directory) / 'config', config, release_only=True)
+                self.assertEqual(1, run.call_count)
+                self.assertEqual(1, len(result))
                 if state == 'verified':
                     refresh.assert_called_once()
                     self.assertFalse(result[-1]['ok'])
@@ -168,6 +170,74 @@ class AutonomyTest(unittest.TestCase):
             receipt = Path(config['journal'] + '.autonomy.json')
             self.assertEqual(oct(receipt.stat().st_mode & 0o777), '0o600')
             self.assertEqual(json.loads(receipt.read_text())['components'][0]['error'], 'exit_1')
+
+    def test_source_refresh_waits_for_normal_pass_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = {'factory_home': str(root / 'home'), 'release_configs': [str(root / 'release.json')]}
+            (root / 'release.json').write_text('{}')
+            receipt = {'state': 'verified', 'sha': 'a' * 40}
+            requested, refreshed = threading.Event(), threading.Event()
+            flock = autonomy.fcntl.flock
+            def lock(fd, mode):
+                requested.set()
+                return flock(fd, mode)
+            with (root / 'home.autonomy.lock').open('a+') as held:
+                flock(held, autonomy.fcntl.LOCK_EX)
+                with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(receipt), '')), \
+                     patch.object(autonomy.importlib.util, 'spec_from_file_location'), \
+                     patch.object(autonomy.importlib.util, 'module_from_spec', return_value=Mock()), \
+                     patch.object(autonomy.fcntl, 'flock', side_effect=lock), \
+                     patch.object(autonomy, 'refresh_controller', side_effect=lambda *_args: refreshed.set()):
+                    worker = threading.Thread(target=autonomy.tick, args=(root / 'config', config, True))
+                    worker.start()
+                    try:
+                        self.assertTrue(requested.wait(5))
+                        self.assertFalse(refreshed.is_set())
+                    finally:
+                        flock(held, autonomy.fcntl.LOCK_UN)
+                        worker.join(5)
+                    self.assertFalse(worker.is_alive())
+                    self.assertTrue(refreshed.is_set())
+
+    def test_waiting_release_does_not_block_intake_review_or_allow_duplicate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / 'factory-autonomy.py'
+            script.write_text(Path(autonomy.__file__).read_text())
+            release_config = root / 'release.json'
+            release_config.write_text(json.dumps({'journal': str(root / 'release-journal')}))
+            config = root / 'config.json'
+            config.write_text(json.dumps({'factory_home': str(root / 'home'), 'journal': str(root / 'journal'),
+                                          'release_configs': [str(release_config)], 'review_mirror_root': str(root / 'mirror')}))
+            for name in ('factory-intake', 'factory-review-intake'):
+                (root / (name + '.py')).write_text('print("{}")')
+            (root / 'factory-release.py').write_text(
+                'from pathlib import Path\nimport time\n'
+                'root = Path(__file__).parent\n(root / "started").touch()\n'
+                'while not (root / "finish").exists(): time.sleep(.01)\n'
+                "print('{\"state\":\"planned\"}')\n")
+            release = subprocess.Popen([sys.executable, str(script), str(config), '--once', '--release-only'],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 5
+                while not (root / 'started').exists():
+                    self.assertIsNone(release.poll())
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                normal = subprocess.run([sys.executable, str(script), str(config), '--once'], capture_output=True, text=True, timeout=5)
+                self.assertEqual(0, normal.returncode, normal.stderr)
+                self.assertEqual(['factory-intake', 'factory-review-intake'],
+                                 [item['component'] for item in json.loads(normal.stdout)['components']])
+                duplicate = subprocess.run([sys.executable, str(script), str(config), '--once', '--release-only'], capture_output=True, text=True, timeout=5)
+                self.assertNotEqual(0, duplicate.returncode)
+                self.assertIn('another controller owns', duplicate.stderr)
+                self.assertIsNone(release.poll())
+            finally:
+                (root / 'finish').touch()
+                stdout, stderr = release.communicate(timeout=5)
+            self.assertEqual(0, release.returncode, stderr)
+            self.assertEqual(['factory-release'], [item['component'] for item in json.loads(stdout)['components']])
 
     def test_private_review_wakeup_is_optional(self):
         config = {'factory_home': '/private/tmp/factory', 'journal': '/private/tmp/journal', 'review_mirror_root': '/private/tmp/mirror'}
@@ -324,34 +394,30 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                 self.assertFalse(any('--install-prepared' in call.args[0] or 'on' in call.args[0] for call in run.call_args_list))
                 receipt.assert_not_called()
 
-    def test_runtime_drain_timeout_restores_only_the_owned_pause(self):
+    def test_runtime_waits_past_old_deadline_without_replaying_pause(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
-                paused = 5
-                states = iter([(enabled, 4, 2), (False, paused, 2), (False, paused, 1)])
-                with patch.object(deploy, 'state', side_effect=lambda _home: next(states, (False, paused, 1))), \
-                     patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run, \
-                     patch.object(deploy.time, 'monotonic', side_effect=[0, 301]), \
-                     patch.object(deploy, 'failure_receipt') as receipt:
-                    with self.assertRaisesRegex(ValueError, 'runs did not drain'):
-                        deploy.deploy('a' * 40)
-                self.assertFalse(any('--install-prepared' in call.args[0] for call in run.call_args_list))
-                restore = [call.args[0] for call in run.call_args_list if 'on' in call.args[0]]
-                self.assertEqual(int(enabled), len(restore))
-                if enabled:
-                    self.assertEqual(['on', '--revision', str(paused)], restore[0][-3:])
-                receipt.assert_not_called()
+                states = iter([(enabled, 4, 2), (False, 5, 2), (False, 5, 1),
+                               (False, 5, 1), (False, 5, 0), (False, 5, 0), (enabled, 6, 0)])
+                with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), \
+                     patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps({'sha': 'a' * 40, 'healthy': True}), '')) as run, \
+                     patch.object(deploy.time, 'monotonic', side_effect=[0, 301, 1301]), \
+                     patch.object(deploy.time, 'sleep') as sleep:
+                    deploy.deploy('a' * 40)
+                self.assertEqual(2, sleep.call_count)
+                self.assertEqual(1, sum('off' in call.args[0] for call in run.call_args_list))
+                self.assertEqual(int(enabled), sum('on' in call.args[0] for call in run.call_args_list))
+                self.assertEqual(1, sum('--install-prepared' in call.args[0] for call in run.call_args_list))
 
     def test_runtime_restore_never_retries_a_refusal_or_uncertain_result(self):
         cases = [
-            ('operator', 'factoryctl: dispatch revision is stale\n', (False, 7, 1), [5], subprocess.CalledProcessError),
-            ('no progress', 'factoryctl: dispatch revision is stale\n', (False, 5, 2), [5], subprocess.CalledProcessError),
-            ('opaque', 'factoryctl: dispatch was not accepted\n', None, [5], subprocess.CalledProcessError),
-            ('timeout', None, None, [5], subprocess.TimeoutExpired),
+            ('operator', 'factoryctl: dispatch revision is stale\n', [5], subprocess.CalledProcessError),
+            ('opaque', 'factoryctl: dispatch was not accepted\n', [5], subprocess.CalledProcessError),
+            ('timeout', None, [5], subprocess.TimeoutExpired),
         ]
-        for name, error, raced, expected, failure in cases:
+        for name, error, expected, failure in cases:
             with self.subTest(name=name):
-                states = iter([(True, 4, 2), (False, 5, 2), (False, 5, 2), raced])
+                states = iter([(True, 4, 2), (False, 5, 2), (False, 5, 0), (False, 5, 0)])
                 attempts = []
                 def command(argv, **kwargs):
                     if 'on' in argv:
@@ -360,7 +426,7 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                             if error is None:
                                 raise subprocess.TimeoutExpired(argv, 15)
                             raise subprocess.CalledProcessError(1, argv, stderr=error)
-                    return subprocess.CompletedProcess(argv, 0, '', '')
+                    return subprocess.CompletedProcess(argv, 0, json.dumps({'sha': 'a' * 40, 'healthy': True}), '')
                 with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), \
                      patch.object(deploy.subprocess, 'run', side_effect=command), \
                      patch.object(deploy.time, 'monotonic', side_effect=[0, 301]):

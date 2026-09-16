@@ -392,7 +392,7 @@ def once(config, number, retry=False):
         entry["state"] = "running"
         atomic_json(journal_path, journal)
         try:
-            run(config["deploy_argv"] + [sha], int(config.get("command_timeout", 60)))
+            run(config["deploy_argv"] + [sha], timeout=None)
             value = verify(config, sha)
         except ReleaseError as exc:
             entry["state"] = "blocked"
