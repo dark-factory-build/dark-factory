@@ -14,7 +14,7 @@ import (
 // running overseer, so activity while it works causes one follow-up after it
 // exits. Journal pruning is conservative: a cursor behind the floor wakes once.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -74,6 +74,13 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 		if !fullReconciliation {
 			targets, err = workerInvalidationTargetsAfter(ctx, tx.connection, agent.ProjectID, cursor, factory.Head.Int64())
 			if err != nil {
+				return nil, tx.Rollback(err)
+			}
+		}
+		// Validate once, before the first task or cursor write; an unchanged
+		// poll rolls back without scanning unrelated retained history.
+		if !changed && (fullReconciliation || len(targets) != 0 || cursor != factory.Head.Int64()) {
+			if err := validateDurableControls(ctx, tx.connection); err != nil {
 				return nil, tx.Rollback(err)
 			}
 		}

@@ -470,9 +470,10 @@ func (store *Store) beginValidatedWrite(ctx context.Context) (*writeTx, error) {
 	return tx, nil
 }
 
-// beginUncheckedWrite exists only because a fresh database has no durable
-// graph to validate until initialize creates it. Public mutations must enter
-// through beginValidatedWrite.
+// beginUncheckedWrite reserves the writer without validating retained history.
+// Enqueue polls may inspect candidates and roll back a true no-op. Every
+// mutation must validateDurableControls before its first write; ordinary
+// mutations use beginValidatedWrite.
 func (store *Store) beginUncheckedWrite(ctx context.Context) (*writeTx, error) {
 	if err := store.acquireWriter(ctx); err != nil {
 		return nil, err
