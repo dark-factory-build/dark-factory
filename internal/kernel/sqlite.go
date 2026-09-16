@@ -302,6 +302,7 @@ func (store *Store) verifiedConnection(ctx context.Context, pool *sql.DB, kind s
 	if err := verifyConnection(ctx, connection); err != nil {
 		cancellation := ctx.Err()
 		if cancellation != nil && (errors.Is(err, cancellation) || errors.Is(err, sqlite3.INTERRUPT)) {
+			err = errors.Join(err, cancellation)
 			releaseUncertainConnection(connection)
 		} else {
 			discardConnection(connection)

@@ -600,7 +600,7 @@ func (daemon *Daemon) ContinueUnsettledRun(ctx context.Context, parent *RuntimeP
 		// run/resource/change authority. Identity, lifetime, and artifact
 		// uncertainty remain terminal refusals and are never retried here.
 		if !errors.Is(err, errRuntimeCleanupPending) && !errors.Is(err, kernel.ErrConflict) {
-			return err
+			return errors.Join(err, ctx.Err())
 		}
 		timer := time.NewTimer(25 * time.Millisecond)
 		select {
