@@ -815,16 +815,6 @@ func (daemon *Daemon) selectAgentAccount(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
-	agent, found, err := daemon.store.Agent(ctx, agentID)
-	if err != nil {
-		return newErrorReply(remoteErrorCode(err))
-	}
-	if !found {
-		return newErrorReply(api.RemoteNotFound)
-	}
-	if agent.Role != kernel.RoleWorker || agent.Archived {
-		return newErrorReply(api.RemoteConflict)
-	}
 	at, err := daemon.timestamp()
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)

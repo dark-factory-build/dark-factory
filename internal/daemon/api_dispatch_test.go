@@ -1474,3 +1474,70 @@ func TestOperatorTaskRecoveryReportsBoundedExactOutcome(t *testing.T) {
 		})
 	}
 }
+
+func TestDaemonSelectOverseerAccountPreservesSelectionGuards(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := api.CreateProjectInput{ID: testID(40), Name: "project", Root: filepath.Join(t.TempDir(), "source")}
+	done := fixture.serve(t)
+	_, err = client.CreateProject(ctx, project)
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	_, err = client.CreateAgent(ctx, api.CreateAgentInput{ID: testID(41), ProjectID: project.ID, Name: "overseer", Role: "orchestrator", Provider: "codex", ToolBudgetLimit: 1})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, provider := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		id, err := kernel.AccountIDFromBytes(bytes.Repeat([]byte{byte(42 + i)}, kernel.IDBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = fixture.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: provider, Home: filepath.Join(t.TempDir(), "login"), Label: "account"}, mustKernelTime(t, 1000))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := api.AgentAccountSelectInput{AgentID: testID(41), ExpectedRevision: 1, AccountID: testID(42)}
+	done = fixture.serve(t)
+	result, err := client.SelectAgentAccount(ctx, input)
+	waitDispatch(t, done)
+	if err != nil || result.Revision != 2 {
+		t.Fatalf("overseer account = %+v, %v", result, err)
+	}
+	for _, tc := range []struct {
+		input api.AgentAccountSelectInput
+		code  api.RemoteErrorCode
+	}{
+		{input, api.RemoteRevisionConflict},
+		{api.AgentAccountSelectInput{AgentID: testID(41), ExpectedRevision: 2, AccountID: testID(43)}, api.RemoteInvalidRequest},
+		{api.AgentAccountSelectInput{AgentID: testID(99), ExpectedRevision: 1, AccountID: testID(42)}, api.RemoteNotFound},
+	} {
+		done = fixture.serve(t)
+		_, err := client.SelectAgentAccount(ctx, tc.input)
+		waitDispatch(t, done)
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != tc.code {
+			t.Fatalf("selection %+v: %v, want %v", tc.input, err, tc.code)
+		}
+	}
+	agent, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(41)))
+	if err != nil || !found || agent.AccountID.String() != testID(42) || agent.Revision.Int64() != 2 {
+		t.Fatalf("stored selection: %+v, %v", agent, err)
+	}
+	active := prepareActiveAttempt(t, fixture, 60)
+	done = fixture.serve(t)
+	_, err = client.SelectAgentAccount(ctx, api.AgentAccountSelectInput{AgentID: active.run.AgentID.String(), ExpectedRevision: 1, AccountID: testID(42)})
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("active account edit: %v", err)
+	}
+}
