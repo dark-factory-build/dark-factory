@@ -90,7 +90,7 @@ func TestForgedProofArtifactIsRefusedByComposedConsumption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := daemon.consumeAttemptResult(result, false); err == nil {
+	if _, err := daemon.consumeAttemptResult(context.Background(), result, false); err == nil {
 		t.Fatal("forged-proof artifact was consumed")
 	} else if !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("forged-proof refusal = %v, want conflict", err)
@@ -108,7 +108,7 @@ func TestForgedProofArtifactIsRefusedByComposedConsumption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumed, err := daemon.consumeAttemptResult(result, false)
+	consumed, err := daemon.consumeAttemptResult(context.Background(), result, false)
 	if err != nil || consumed.Phase != kernel.RunFinalizing {
 		t.Fatalf("genuine consumption = %+v err=%v", consumed, err)
 	}

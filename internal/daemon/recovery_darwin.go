@@ -92,12 +92,10 @@ func (daemon *Daemon) RecoverAbandonedRuns(ctx context.Context, parent *RuntimeP
 // intentionally narrower than RecoverAbandonedRuns: a scheduler may have
 // other admitted attempts that are still between admission and registration,
 // and a global sweep here could misclassify those concurrent owners.
-func (daemon *Daemon) recoverReturnedRun(parent *RuntimeParent, changeParent string, runID kernel.RunID) (kernel.Run, error) {
+func (daemon *Daemon) recoverReturnedRun(ctx context.Context, parent *RuntimeParent, changeParent string, runID kernel.RunID) (kernel.Run, error) {
 	if daemon == nil || daemon.store == nil || parent == nil || changeParent == "" || runID == (kernel.RunID{}) {
 		return kernel.Run{}, fmt.Errorf("%w: invalid returned-run recovery", kernel.ErrInvalidValue)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
 	recoverable, found, err := daemon.store.RecoverableRun(ctx, runID)
 	if err != nil {
 		return kernel.Run{}, err
@@ -204,13 +202,11 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 					if run.RunnerExit != nil || !daemon.recoveredRunnerAbsent(current) {
 						return RecoveredUncertain, errInvalidContract
 					}
-					if _, absenceErr := daemon.recordRecoveredRunnerAbsence(run.ID, current.ID, current.Identity); absenceErr != nil {
+					if _, absenceErr := daemon.recordRecoveredRunnerAbsence(ctx, run.ID, current.ID, current.Identity); absenceErr != nil {
 						return RecoveredUncertain, absenceErr
 					}
 				}
-				storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-				_, authorizeErr := daemon.store.AuthorizeAttemptResultRemoval(storeCtx, result)
-				cancel()
+				_, authorizeErr := daemon.store.AuthorizeAttemptResultRemoval(ctx, result)
 				if authorizeErr == nil {
 					if removeErr := daemon.removeRecordedRuntime(parent, run.ID, fileIdentity); removeErr != nil {
 						// The authenticated result is already consumed and the
@@ -253,7 +249,7 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 			// ActivateRunner commits. Corrupt or hostile; fail closed.
 			return RecoveredUncertain, errInvalidContract
 		}
-		converged, convergeErr := daemon.recordUnregisteredRunnerConverged(run.ID, runnerProcess.ID)
+		converged, convergeErr := daemon.recordUnregisteredRunnerConverged(ctx, run.ID, runnerProcess.ID)
 		if convergeErr != nil {
 			return RecoveredUncertain, convergeErr
 		}
@@ -267,7 +263,7 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 		if !daemon.recoveredRunnerAbsent(runnerProcess) {
 			return RecoveredUncertain, errInvalidContract
 		}
-		if _, absenceErr := daemon.recordPreSessionRunnerAbsence(run.ID, runnerProcess.ID, runnerProcess.Identity); absenceErr != nil {
+		if _, absenceErr := daemon.recordPreSessionRunnerAbsence(ctx, run.ID, runnerProcess.ID, runnerProcess.Identity); absenceErr != nil {
 			return RecoveredUncertain, absenceErr
 		}
 		if removeErr := daemon.removeRecoveredRuntime(ctx, parent, run.ID, recovered, fileIdentity); removeErr != nil {
@@ -314,15 +310,13 @@ func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *Ru
 	// postcondition. Its removal authorization validates the same run, proof,
 	// runtime, provider, runner, and session binding without replaying a
 	// consumption edge whose predecessor revision is no longer available.
-	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-	_, authorizedErr := daemon.store.AuthorizeAttemptResultRemoval(storeCtx, result)
-	cancel()
+	_, authorizedErr := daemon.store.AuthorizeAttemptResultRemoval(ctx, result)
 	alreadyAuthorized := authorizedErr == nil
 	if authorizedErr != nil {
 		if !errors.Is(authorizedErr, kernel.ErrConflict) {
 			return RecoveredUncertain, authorizedErr
 		}
-		if _, err := daemon.consumeAttemptResult(result, true); err != nil {
+		if _, err := daemon.consumeAttemptResult(ctx, result, true); err != nil {
 			return RecoveredUncertain, err
 		}
 	}
@@ -334,7 +328,7 @@ func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *Ru
 		if !daemon.recoveredRunnerAbsent(current) {
 			return RecoveredUncertain, errInvalidContract
 		}
-		if _, absenceErr := daemon.recordRecoveredRunnerAbsence(run.ID, current.ID, current.Identity); absenceErr != nil {
+		if _, absenceErr := daemon.recordRecoveredRunnerAbsence(ctx, run.ID, current.ID, current.Identity); absenceErr != nil {
 			return RecoveredUncertain, absenceErr
 		}
 	}
@@ -343,14 +337,12 @@ func (daemon *Daemon) recoverAuthenticatedResult(ctx context.Context, parent *Ru
 		return RecoveredUncertain, errors.Join(err, errInvalidContract)
 	}
 	if session.State != kernel.TerminalSessionClosed {
-		if _, err := daemon.closeTerminalAfterRunner(result); err != nil {
+		if _, err := daemon.closeTerminalAfterRunner(ctx, result); err != nil {
 			return RecoveredUncertain, err
 		}
 	}
 	if !alreadyAuthorized {
-		storeCtx, cancel = context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		_, authorizeErr := daemon.store.AuthorizeAttemptResultRemoval(storeCtx, result)
-		cancel()
+		_, authorizeErr := daemon.store.AuthorizeAttemptResultRemoval(ctx, result)
 		if authorizeErr != nil {
 			return RecoveredUncertain, authorizeErr
 		}
@@ -388,9 +380,7 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		if err != nil {
 			return RecoveredUncertain, err
 		}
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		failed, failErr := daemon.store.FailRun(storeCtx, run.ID, run.Revision, failure, at)
-		cancel()
+		failed, failErr := daemon.store.FailRun(ctx, run.ID, run.Revision, failure, at)
 		if failErr != nil {
 			return RecoveredUncertain, failErr
 		}
@@ -424,9 +414,7 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		if err != nil {
 			return RecoveredUncertain, err
 		}
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		_, _, _, markErr := daemon.store.MarkProviderResourcesUnresolved(storeCtx, run.ID, process.ID, group.ID, freshRun.Revision, process.Revision, group.Revision, process.Identity, "provider absent without an attempt result at recovery", at)
-		cancel()
+		_, _, _, markErr := daemon.store.MarkProviderResourcesUnresolved(ctx, run.ID, process.ID, group.ID, freshRun.Revision, process.Revision, group.Revision, process.Identity, "provider absent without an attempt result at recovery", at)
 		if markErr != nil {
 			return RecoveredUncertain, markErr
 		}
@@ -440,7 +428,7 @@ func (daemon *Daemon) recoverWithoutResult(ctx context.Context, run kernel.Run, 
 		if !daemon.recoveredRunnerAbsent(runnerCurrent) {
 			return RecoveredUncertain, errInvalidContract
 		}
-		if _, absenceErr := daemon.recordRecoveredRunnerAbsence(run.ID, runnerCurrent.ID, runnerCurrent.Identity); absenceErr != nil {
+		if _, absenceErr := daemon.recordRecoveredRunnerAbsence(ctx, run.ID, runnerCurrent.ID, runnerCurrent.Identity); absenceErr != nil {
 			return RecoveredUncertain, absenceErr
 		}
 		acted = true
@@ -458,7 +446,7 @@ func (daemon *Daemon) recoverReleasedRuntimeResidue(ctx context.Context, run ker
 		if !daemon.recoveredRunnerAbsent(runnerProcess) {
 			return RecoveredUncertain, errInvalidContract
 		}
-		if _, err := daemon.recordRecoveredRunnerAbsence(run.ID, runnerProcess.ID, runnerProcess.Identity); err != nil {
+		if _, err := daemon.recordRecoveredRunnerAbsence(ctx, run.ID, runnerProcess.ID, runnerProcess.Identity); err != nil {
 			return RecoveredUncertain, err
 		}
 		return RecoveredNoResultUnresolved, nil
@@ -487,30 +475,25 @@ func (daemon *Daemon) recoveredProviderAbsent(resource kernel.Resource) bool {
 	return observation.Presence == runner.Absent || observation.Presence == runner.Reused
 }
 
-func (daemon *Daemon) recordUnregisteredRunnerConverged(runID kernel.RunID, runnerID kernel.ResourceID) (kernel.Run, error) {
+func (daemon *Daemon) recordUnregisteredRunnerConverged(ctx context.Context, runID kernel.RunID, runnerID kernel.ResourceID) (kernel.Run, error) {
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, runID)
+		current, found, readErr := daemon.store.Run(ctx, runID)
 		if readErr != nil || !found {
-			cancel()
 			lastErr = errors.Join(readErr, errInvalidContract)
 			continue
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(storeCtx, runnerID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(ctx, runnerID)
 		if resourceErr != nil || !resourceFound {
-			cancel()
 			lastErr = errors.Join(resourceErr, errInvalidContract)
 			continue
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		converged, convergeErr := daemon.store.RecordUnregisteredRunnerConverged(storeCtx, runID, runnerID, current.Revision, resource.Revision, at)
-		cancel()
+		converged, convergeErr := daemon.store.RecordUnregisteredRunnerConverged(ctx, runID, runnerID, current.Revision, resource.Revision, at)
 		if convergeErr == nil {
 			return converged, nil
 		}
@@ -519,30 +502,25 @@ func (daemon *Daemon) recordUnregisteredRunnerConverged(runID kernel.RunID, runn
 	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: recovered unregistered convergence: %w", lastErr))
 }
 
-func (daemon *Daemon) recordRecoveredRunnerAbsence(runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Run, error) {
+func (daemon *Daemon) recordRecoveredRunnerAbsence(ctx context.Context, runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Run, error) {
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, runID)
+		current, found, readErr := daemon.store.Run(ctx, runID)
 		if readErr != nil || !found {
-			cancel()
 			lastErr = errors.Join(readErr, errInvalidContract)
 			continue
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(storeCtx, resourceID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(ctx, resourceID)
 		if resourceErr != nil || !resourceFound {
-			cancel()
 			lastErr = errors.Join(resourceErr, errInvalidContract)
 			continue
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		recorded, _, recordErr := daemon.store.RecordRecoveredRunnerAbsence(storeCtx, runID, resourceID, current.Revision, resource.Revision, identity, at)
-		cancel()
+		recorded, _, recordErr := daemon.store.RecordRecoveredRunnerAbsence(ctx, runID, resourceID, current.Revision, resource.Revision, identity, at)
 		if recordErr == nil {
 			return recorded, nil
 		}
@@ -610,7 +588,7 @@ func (daemon *Daemon) ContinueUnsettledRun(ctx context.Context, parent *RuntimeP
 		return errInvalidContract
 	}
 	for {
-		run, err := daemon.recoverReturnedRun(parent, changeParent, runID)
+		run, err := daemon.recoverReturnedRun(ctx, parent, changeParent, runID)
 		if err == nil {
 			if run.Phase == kernel.RunTerminal {
 				return nil
@@ -651,30 +629,25 @@ func runtimeFileIdentity(identity kernel.ResourceIdentity) (runner.FileIdentity,
 
 // recordPreSessionRunnerAbsence commits the atomic pre-session finalization for an
 // activated runner that is positively absent with the provider pair declared.
-func (daemon *Daemon) recordPreSessionRunnerAbsence(runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Run, error) {
+func (daemon *Daemon) recordPreSessionRunnerAbsence(ctx context.Context, runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Run, error) {
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, runID)
+		current, found, readErr := daemon.store.Run(ctx, runID)
 		if readErr != nil || !found {
-			cancel()
 			lastErr = errors.Join(readErr, errInvalidContract)
 			continue
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(storeCtx, resourceID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(ctx, resourceID)
 		if resourceErr != nil || !resourceFound {
-			cancel()
 			lastErr = errors.Join(resourceErr, errInvalidContract)
 			continue
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		converged, absenceErr := daemon.store.RecordRecoveredPreSessionRunnerAbsence(storeCtx, runID, resourceID, current.Revision, resource.Revision, identity, at)
-		cancel()
+		converged, absenceErr := daemon.store.RecordRecoveredPreSessionRunnerAbsence(ctx, runID, resourceID, current.Revision, resource.Revision, identity, at)
 		if absenceErr == nil {
 			return converged, nil
 		}

@@ -79,7 +79,7 @@ func (daemon *Daemon) RunNext(ctx context.Context, spec SupervisorSpec) (run ker
 	defer func() { daemon.endSupervisor(registration, resultErr) }()
 	run, resultErr = daemon.runNext(registration.ctx, spec)
 	if run.Phase == kernel.RunFinalizing && run.ID != (kernel.RunID{}) {
-		recovered, recoverErr := daemon.recoverReturnedRun(spec.RuntimeParent, spec.ChangeParent, run.ID)
+		recovered, recoverErr := daemon.recoverReturnedRun(context.Background(), spec.RuntimeParent, spec.ChangeParent, run.ID)
 		run = recovered
 		resultErr = errors.Join(resultErr, recoverErr)
 	}
