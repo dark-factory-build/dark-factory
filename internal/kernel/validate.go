@@ -35,9 +35,6 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validateChanges(ctx, connection); err != nil {
 		return FactoryState{}, fmt.Errorf("validate Changes: %w", err)
 	}
-	if err := validateRuns(ctx, connection); err != nil {
-		return FactoryState{}, fmt.Errorf("validate runs: %w", err)
-	}
 	if err := validateResources(ctx, connection); err != nil {
 		return FactoryState{}, fmt.Errorf("validate resources: %w", err)
 	}
@@ -339,6 +336,10 @@ func validateRunRelationships(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -1165,20 +1166,6 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 		}
 	}
 	return nil
-}
-
-func validateRuns(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		if _, _, err := scanRun(rows); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
 }
 
 func validateResources(ctx context.Context, connection *sql.Conn) error {

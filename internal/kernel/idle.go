@@ -43,7 +43,8 @@ func idleRuleFromRow(policy string, after int64, instruction string, budget, use
 // itself once its quiet spell has passed, and spends one of its idle runs
 // for it, in one transaction. Idle means the agent itself could take work
 // (not paused, tool budget left; the factory's dispatch switch and capacity
-// stay admission's to apply once the task is queued) and has no queued or
+// stay admission's to apply once the task is queued; the daemon defers
+// automatic enqueue calls while dispatch is paused) and has no queued or
 // running task, so the rule never stacks on work; a run in flight is a
 // running task, which the durable checks enforce. The quiet spell starts at
 // the later of the agent's last edit and its
