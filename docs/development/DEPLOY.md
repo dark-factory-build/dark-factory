@@ -59,6 +59,13 @@ reinstalled: a daemon granting the new bit to a console still running the old
 client makes every deployed console reject its own authentication result. A
 change that only narrows the granted mask needs no ordering.
 
+**Shared queue.** Queued work no worker has claimed yet reaches the console
+in the additive `shared_tasks` member; every `tasks` item still names its
+agent, so a console vendored before the shared queue keeps decoding snapshots
+in either installation order. Its ANY WORKER control and the Any eligible
+worker queue group appear only after the site is re-vendored from a merged
+runtime commit that contains them.
+
 **Schema change.** When a change bumps `PRAGMA user_version`, keep the previous
 build's `.worktrees/bin-<sha>` for rollback. The daemon migrates the store
 before it listens, but a socket timeout does not prove that the new daemon has
