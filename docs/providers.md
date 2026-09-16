@@ -66,8 +66,8 @@ of the project and works there; an orchestrator's run binds no Change and is
 given its private runtime home as its working directory. It requests a worker
 tree explicitly with `factoryctl attempt source --task TASK_ID`. The daemon
 checks that target task in the authenticated attempt's same project, requires
-its current successful retained Change, materializes one private read-only
-snapshot, and returns the Change ID, base commit, target task ID, task work
+its current settled retained Change (including blocked, failed, or cancelled
+outcomes), materializes one private read-only snapshot, and returns the Change ID, base commit, target task ID, task work
 revision, current Change revision and daemon-derived `source_path`. An accepted
 response without that receipt is unusable; never reconstruct a path or select a
 project-latest tree. A Codex launch receives read access only to the private

@@ -111,7 +111,7 @@ func TestOverseerHumanReplyTargetsOnlyWorkers(t *testing.T) {
 	}
 }
 
-func TestRetainedChangeHandoffsIgnoreIneligibleRetainedHistory(t *testing.T) {
+func TestRetainedChangeHandoffsInspectCurrentSettledOutcomes(t *testing.T) {
 	succeeded, err := NewSuccessProposal("finished")
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +124,10 @@ func TestRetainedChangeHandoffsIgnoreIneligibleRetainedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cancelled, err := NewCancelledProposal("operator stopped")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, test := range []struct {
 		name     string
 		proposal Proposal
@@ -131,13 +135,19 @@ func TestRetainedChangeHandoffsIgnoreIneligibleRetainedHistory(t *testing.T) {
 		want     bool
 	}{
 		{name: "current succeeded", proposal: succeeded, want: true},
-		{name: "blocked", proposal: blocked},
-		{name: "failed", proposal: failed},
+		{name: "blocked", proposal: blocked, want: true},
+		{name: "failed", proposal: failed, want: true},
+		{name: "cancelled", proposal: cancelled, want: true},
+		{name: "blocked sent back", proposal: blocked, sendBack: true},
+		{name: "failed sent back", proposal: failed, sendBack: true},
 		{name: "sent back", proposal: succeeded, sendBack: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, test.proposal)
 			defer store.Close()
+			if _, found, err := store.RetainedChangeHandoffForTask(context.Background(), finalizing.ProjectID, finalizing.TaskID); err != nil || found {
+				t.Fatalf("unsettled source handoff: found=%v err=%v", found, err)
+			}
 			terminal, err := finalizeTestRun(t, store, finalizing, 70)
 			if err != nil {
 				t.Fatal(err)
