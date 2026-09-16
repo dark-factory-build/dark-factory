@@ -6,7 +6,7 @@ import (
 )
 
 func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) {
-	for _, outcome := range []string{"failed", "cancelled", "sent-back", "empty-success"} {
+	for _, outcome := range []string{"blocked", "failed", "cancelled", "sent-back", "empty-success"} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx := context.Background()
 			store, first, firstKeys := runningOrchestratorRun(t)
@@ -53,6 +53,8 @@ func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) 
 				proposal, _ = NewFailureProposal(FailureAttempt, "provider failed")
 			case "cancelled":
 				proposal, _ = NewCancelledProposal("operator cancelled")
+			case "blocked":
+				proposal, _ = NewBlockedProposal("review rejected; inspect the recorded head")
 			case "sent-back":
 				proposal, _ = NewSuccessProposal("later result cleared by send-back")
 			case "empty-success":
@@ -75,11 +77,22 @@ func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) 
 			}
 			prior, err := latestOverseerTask(ctx, read.connection, first.AgentID)
 			read.Close()
-			if err != nil || prior == nil || *prior != first.TaskID {
-				t.Fatalf("readable prior: %v %v", prior, err)
+			wantPrior := first.TaskID
+			if outcome == "blocked" {
+				wantPrior = second.TaskID
+			}
+			if err != nil || prior == nil || *prior != wantPrior {
+				t.Fatalf("readable prior: %v %v, want %v", prior, err, wantPrior)
 			}
 			snapshot, err := store.OverseerSnapshotForAttempt(ctx, readerKeys.AttemptDigest, OverseerSnapshotRequest{TaskID: prior})
-			if err != nil || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Result != decision {
+			wantResult := decision
+			if outcome == "blocked" {
+				if err != nil || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].BlockedReason != "review rejected; inspect the recorded head" {
+					t.Fatalf("blocked context inaccessible through supported read: %+v %v", snapshot, err)
+				}
+				return
+			}
+			if err != nil || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Result != wantResult {
 				t.Fatalf("context inaccessible through supported read: %+v %v", snapshot, err)
 			}
 		})

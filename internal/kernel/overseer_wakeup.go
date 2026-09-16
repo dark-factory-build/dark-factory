@@ -121,11 +121,16 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 
 // latestOverseerTask is durable continuity, not a new conversation store. The
 // next wake names this task so its result, decisions and operation IDs are one
-// targeted status read away.
+// targeted status read away. Failed and cancelled tasks are intentionally
+// excluded: their task rows have no durable detail to carry continuity, so
+// falling back to them would silently revive an older outcome.
 func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID AgentID) (*TaskID, error) {
 	var raw []byte
 	err := connection.QueryRowContext(ctx, `SELECT t.id FROM runs AS r JOIN tasks AS t ON t.id = r.task_id
-		WHERE r.agent_id = ? AND r.role = 'orchestrator' AND r.phase = 'terminal' AND t.status = 'succeeded' AND t.result IS NOT NULL AND length(trim(t.result)) > 0
+		WHERE r.agent_id = ? AND r.role = 'orchestrator' AND r.phase = 'terminal' AND (
+			(t.status = 'succeeded' AND t.result IS NOT NULL AND length(trim(t.result)) > 0) OR
+			(t.status = 'blocked' AND t.blocked_reason IS NOT NULL AND length(trim(t.blocked_reason)) > 0)
+		)
 		ORDER BY r.terminal_at_ms DESC, r.id DESC LIMIT 1`, agentID.Bytes()).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return nil, nil
