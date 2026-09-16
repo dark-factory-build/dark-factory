@@ -36,6 +36,7 @@ const (
 	v9UserVersion       = 9
 	v10UserVersion      = 10
 	v11UserVersion      = 11
+	v12UserVersion      = 12
 	v8HumanRequests     = `CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
@@ -179,6 +180,33 @@ const (
     CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL AND account_id IS NULL))
 ) STRICT, WITHOUT ROWID`
 
+	v12Tasks = `CREATE TABLE tasks (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
+    assigned_agent_id BLOB NOT NULL CHECK (length(assigned_agent_id) = 16),
+    incarnation_id BLOB NOT NULL CHECK (length(incarnation_id) = 16),
+    work_revision INTEGER NOT NULL CHECK (work_revision >= 1),
+    title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 1024),
+    body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 131072),
+    sent_back_instruction_bytes INTEGER CHECK (sent_back_instruction_bytes IS NULL OR sent_back_instruction_bytes BETWEEN 0 AND length(CAST(body AS BLOB))),
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'blocked', 'succeeded', 'failed', 'cancelled')),
+    priority INTEGER NOT NULL CHECK (priority BETWEEN -1000000 AND 1000000),
+    blocked_reason TEXT CHECK (blocked_reason IS NULL OR length(CAST(blocked_reason AS BLOB)) BETWEEN 1 AND 4096),
+    result TEXT CHECK (result IS NULL OR length(CAST(result AS BLOB)) <= 131072),
+    completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= 0),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    FOREIGN KEY (assigned_agent_id, project_id) REFERENCES agents(id, project_id),
+    CHECK (
+        (status IN ('queued', 'running') AND blocked_reason IS NULL AND result IS NULL AND completed_at_ms IS NULL) OR
+        (status = 'blocked' AND blocked_reason IS NOT NULL AND result IS NULL AND completed_at_ms IS NULL) OR
+        (status = 'succeeded' AND blocked_reason IS NULL AND completed_at_ms IS NOT NULL) OR
+        (status IN ('failed', 'cancelled') AND blocked_reason IS NULL AND result IS NULL AND completed_at_ms IS NOT NULL)
+    ),
+    CHECK (completed_at_ms IS NULL OR completed_at_ms = updated_at_ms)
+) STRICT, WITHOUT ROWID`
+
 	v4Tasks = `CREATE TABLE tasks (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
@@ -282,7 +310,7 @@ func v8SchemaStatements() []string {
 
 // v9SchemaStatements predates durable sprite appearance.
 func v9SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v12SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statements[i] = v7Agents
@@ -293,7 +321,7 @@ func v9SchemaStatements() []string {
 
 // v10 predates worker archiving.
 func v10SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v12SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statement = strings.Replace(statement, "\tarchived INTEGER NOT NULL CHECK (archived IN (0, 1)),\n", "", 1)
@@ -309,12 +337,25 @@ func v10SchemaStatements() []string {
 // an existing home is rebuilt rather than served with weaker constraints than
 // its recorded user_version promises.
 func v11SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v12SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statement = strings.Replace(statement, "idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0),", "idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0 AND idle_runs_used <= idle_run_budget),", 1)
 			statement = strings.Replace(statement, "CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> ''))", "CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> '' AND idle_run_budget >= 1))", 1)
 			statements[i] = statement
+		}
+	}
+	return statements
+}
+
+// v12 predates the shared queue: every task named one agent. v13 lets a
+// queued task carry no assigned agent (any eligible worker claims it at
+// admission) and requires an agent on every other status.
+func v12SchemaStatements() []string {
+	statements := append([]string(nil), schemaStatements...)
+	for i, statement := range statements {
+		if _, name := schemaObjectIdentity(statement); name == "tasks" {
+			statements[i] = v12Tasks
 		}
 	}
 	return statements
@@ -416,6 +457,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v10SchemaStatements(), true
 	case v11UserVersion:
 		return v11SchemaStatements(), true
+	case v12UserVersion:
+		return v12SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -441,7 +484,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -466,6 +509,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[9:]
 	case v11UserVersion:
 		steps = all[10:]
+	case v12UserVersion:
+		steps = all[11:]
 	default:
 		return connection.Close()
 	}
@@ -711,7 +756,23 @@ func migrateV11Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	columns := `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, archived, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "agents", columns, "agents_id_project_unique", "", ""); err != nil {
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v12SchemaStatements()), "agents", columns, "agents_id_project_unique", "", ""); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v12UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v12UserVersion, v12SchemaStatements())
+}
+
+// migrateV12Transaction relaxes tasks.assigned_agent_id to nullable. Every
+// existing task keeps the agent it always had; only new shared work is NULL.
+func migrateV12Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v12UserVersion, v12SchemaStatements()); err != nil {
+		return err
+	}
+	columns := `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms`
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "tasks", columns, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
 		return err
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
