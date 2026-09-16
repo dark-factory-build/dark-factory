@@ -659,6 +659,12 @@ func TestRecoverySweepConvergesPartialReleasingRuntimeOnlyAfterResultConsumption
 		if states := fixture.resourceStates(t); states[kernel.ResourceRuntimeRoot].State != kernel.ResourceReleasing {
 			t.Fatalf("runtime after refusal = %+v", states[kernel.ResourceRuntimeRoot])
 		}
+		states := fixture.resourceStates(t)
+		if states[kernel.ResourceRunnerProcess].State != kernel.ResourceReleased ||
+			states[kernel.ResourceProviderProcess].State != kernel.ResourceReleased ||
+			states[kernel.ResourceProviderGroup].State != kernel.ResourceReleased {
+			t.Fatalf("released process footprint after bounded cleanup = %+v", states)
+		}
 		if _, err := os.Stat(filepath.Join(fixture.parentPath, fixture.run.ID.String(), runner.AttemptResultSpoolName)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("consumed artifact remains: %v", err)
 		}
@@ -818,5 +824,49 @@ func TestRecoverySweepFailsClosedForActiveAttemptWithoutResult(t *testing.T) {
 	resweep := fixture.sweep(t)
 	if resweep.Action != RecoveredConverged || resweep.Err != nil {
 		t.Fatalf("re-sweep disposition = %+v", resweep)
+	}
+}
+
+func TestContinueUnsettledRunFinishesBoundedRuntimeRemoval(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x4a)
+	fixture.stageRuntime(t)
+	fixture.beginRunnerStart(t)
+	fixture.activateRunner(t)
+	fixture.writeMarker(t, runner.OuterActivationMarkerName)
+	body, err := json.Marshal(forgedResultWire{Version: 1, AttemptID: fixture.run.ID.String(), Kind: "inner_unregistered_converged", Proof: hex.EncodeToString(fixture.proof[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeArtifact(t, body)
+	root := filepath.Join(fixture.parentPath, fixture.run.ID.String())
+	// Each pass removes at most 256 entries and yields for 25ms. This tree
+	// necessarily exceeds two four-second passes even on a fast filesystem.
+	for i := 0; i < 110000; i++ {
+		if err := os.WriteFile(filepath.Join(root, runtimeHomeName, fmt.Sprintf("file-%05d", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := fixture.sweep(t)
+	if first.Action != RecoveredResultConsumed || !errors.Is(first.Err, errRuntimeCleanupPending) {
+		t.Fatalf("bounded pass = %+v", first)
+	}
+	if run := fixture.currentRun(t); run.Phase != kernel.RunFinalizing {
+		t.Fatalf("premature settlement: %+v", run)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if run := fixture.currentRun(t); run.Phase != kernel.RunTerminal || run.Terminal == nil {
+		t.Fatalf("unsettled run: %+v", run)
+	}
+	for kind, resource := range fixture.resourceStates(t) {
+		if resource.State != kernel.ResourceReleased {
+			t.Fatalf("%s retained: %+v", kind, resource)
+		}
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime persists: %v", err)
 	}
 }

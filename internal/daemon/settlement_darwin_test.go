@@ -596,9 +596,22 @@ func TestSettleRunFinishesARefusalMovedEarlier(t *testing.T) {
 	if after := fixture.currentRun(t); after.Phase != kernel.RunFinalizing || after.Revision != before.Revision {
 		t.Fatalf("refused settlement mutated the run: %+v -> %+v", before, after)
 	}
+	// A durable settlement refusal keeps the exact-run continuation alive,
+	// but cancellation must release it without inventing a terminal outcome.
+	retryContext, cancelRetry := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancelRetry()
+	if err := fixture.daemon.ContinueUnsettledRun(retryContext, fixture.parent, fixture.changeParent, fixture.run.ID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("conflicting continuation = %v", err)
+	}
+	if after := fixture.currentRun(t); after.Phase != kernel.RunFinalizing || after.Revision != before.Revision {
+		t.Fatalf("cancelled continuation changed durable outcome: %+v", after)
+	}
 	aside := filepath.Join(fixture.changeParent, changeState.ID.String()+".refused-"+fixture.run.ID.String()[:8])
 	if err := os.Mkdir(aside, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	if err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID); err != nil {
+		t.Fatalf("continuation after removing refusal: %v", err)
 	}
 	settled, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID)
 	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Code() != kernel.FailureSource ||
