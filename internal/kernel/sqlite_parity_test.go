@@ -48,10 +48,6 @@ func (plan *storeFaultPlan) arm(fault storeFaultKind) {
 	plan.fault = fault
 }
 
-func (plan *storeFaultPlan) armVerifyCancellation(cancel context.CancelFunc) {
-	plan.armVerifyFailure(cancel, sqlite3.INTERRUPT)
-}
-
 func (plan *storeFaultPlan) armVerifyFailure(cancel context.CancelFunc, err error) {
 	plan.mu.Lock()
 	defer plan.mu.Unlock()
@@ -302,32 +298,52 @@ func installSealedFaultWriter(t *testing.T, store *Store, path string) *storeFau
 }
 
 func TestVerifiedConnectionCancellationRetainsSealedWriter(t *testing.T) {
-	path, _ := walSnapshotFixture(t, "")
-	store, err := openOperationalTestStore(path)
-	if err != nil {
-		t.Fatalf("open operational store: %v", err)
-	}
-	defer store.Close()
-	plan := installSealedFaultWriter(t, store, path)
-	if open := store.writer.Stats().OpenConnections; open != 1 {
-		t.Fatalf("sealed writer set = %d physical connections, want 1", open)
-	}
+	for _, test := range []struct {
+		name     string
+		deadline bool
+		failure  error
+	}{
+		{"cancelled", false, sqlite3.INTERRUPT},
+		{"deadline", true, sqlite3.INTERRUPT},
+		{"uncertain cause", false, NewOutcomeUnknownError(sqlite3.INTERRUPT)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path, _ := walSnapshotFixture(t, "")
+			store, err := openOperationalTestStore(path)
+			if err != nil {
+				t.Fatalf("open operational store: %v", err)
+			}
+			defer store.Close()
+			plan := installSealedFaultWriter(t, store, path)
+			if open := store.writer.Stats().OpenConnections; open != 1 {
+				t.Fatalf("sealed writer set = %d physical connections, want 1", open)
+			}
 
-	callerCtx, cancelCaller := context.WithCancel(context.Background())
-	defer cancelCaller()
-	plan.armVerifyCancellation(cancelCaller)
-	if _, err := store.writerConnection(callerCtx); !errors.Is(err, sqlite3.INTERRUPT) {
-		t.Fatalf("cancelled verification error = %v, want sqlite3.INTERRUPT", err)
-	}
-	if callerCtx.Err() == nil {
-		t.Fatal("verification fault did not cancel its context")
-	}
-	faultedID, closed := plan.faultedAndClosed()
-	if faultedID == 0 || closed {
-		t.Fatalf("cancelled verification connection = %d closed=%v, want retained", faultedID, closed)
-	}
-	if currentID := faultWriterConnectionID(t, store); currentID != faultedID {
-		t.Fatalf("cancelled verification replaced connection %d with %d", faultedID, currentID)
+			callerCtx, cancelCaller := context.WithCancel(context.Background())
+			if test.deadline {
+				cancelCaller()
+				callerCtx, cancelCaller = context.WithTimeout(context.Background(), 100*time.Millisecond)
+			}
+			defer cancelCaller()
+			cancelAtVerification := cancelCaller
+			if test.deadline {
+				cancelAtVerification = func() { <-callerCtx.Done() }
+			}
+			plan.armVerifyFailure(cancelAtVerification, test.failure)
+			if _, err := store.writerConnection(callerCtx); !errors.Is(err, sqlite3.INTERRUPT) || !errors.Is(err, callerCtx.Err()) || !errors.Is(err, test.failure) {
+				t.Fatalf("cancelled verification error = %v, want interrupt, original failure and %v", err, callerCtx.Err())
+			}
+			if callerCtx.Err() == nil {
+				t.Fatal("verification fault did not cancel its context")
+			}
+			faultedID, closed := plan.faultedAndClosed()
+			if faultedID == 0 || closed {
+				t.Fatalf("cancelled verification connection = %d closed=%v, want retained", faultedID, closed)
+			}
+			if currentID := faultWriterConnectionID(t, store); currentID != faultedID {
+				t.Fatalf("cancelled verification replaced connection %d with %d", faultedID, currentID)
+			}
+		})
 	}
 }
 
