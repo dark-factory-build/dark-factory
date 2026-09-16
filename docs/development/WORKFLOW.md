@@ -37,6 +37,21 @@ file-binding, dependency, or toolchain changes. A whole-kernel race run is
 exceptional and uses `-timeout 1200s`. One memory-heavy Go run at a time avoids
 macOS resource exhaustion.
 
+## Operator human requests
+
+With the existing operator socket and token-file environment configured,
+`factoryctl human list` shows open, delivering, and delivery-unknown requests,
+including overseer questions. Answer an open request with:
+
+```sh
+factoryctl human reply --operation-id HEX32 --request ID --revision REVISION --reply "Answer"
+```
+
+Use the listed request revision and a fresh 32-character hexadecimal operation
+ID. Inspect the returned `human_reply.state`; `delivery_unknown` means input
+may have been delivered and must not be replayed. Operator credentials are
+required; a worker attempt token does not grant this authority.
+
 ## Finish and clean up
 
 After a confirmed merge, the repository agent that owns the checkout removes its
