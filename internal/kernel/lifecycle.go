@@ -960,8 +960,7 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 			return Run{}, tx.Rollback(err)
 		}
 	}
-	factoryRevision := factory.Revision.Int64() + 1
-	updated, err = tx.connection.ExecContext(ctx, `UPDATE factory SET revision = revision + 1, updated_at_ms = ? WHERE singleton = 1 AND revision = ?`, at.Int64(), factory.Revision.Int64())
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE factory SET updated_at_ms = ? WHERE singleton = 1 AND revision = ?`, at.Int64(), factory.Revision.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
@@ -970,7 +969,6 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		return Run{}, tx.Rollback(err)
 	}
 	pending := []pendingInvalidation{
-		{kind: EntityFactory, id: factoryEntityID[:], revision: factoryRevision},
 		{kind: EntityTask, id: task.ID.Bytes(), revision: taskRevision},
 		{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1},
 	}

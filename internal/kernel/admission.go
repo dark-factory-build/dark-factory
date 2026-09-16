@@ -192,13 +192,11 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))
 		}
 	}
-	factoryRevision := factory.Revision.Int64() + 1
-	result, err = tx.connection.ExecContext(ctx, `UPDATE factory SET revision = revision + 1, updated_at_ms = ? WHERE singleton = 1 AND revision = ?`, at.Int64(), factory.Revision.Int64())
+	result, err = tx.connection.ExecContext(ctx, `UPDATE factory SET updated_at_ms = ? WHERE singleton = 1 AND revision = ?`, at.Int64(), factory.Revision.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	pending := []pendingInvalidation{
-		{kind: EntityFactory, id: factoryEntityID[:], revision: factoryRevision},
 		{kind: EntityTask, id: task.ID.Bytes(), revision: updatedTaskRevision},
 	}
 	if change != nil {

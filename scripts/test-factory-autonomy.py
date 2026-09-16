@@ -193,8 +193,7 @@ with sqlite3.connect(home / 'factory.sqlite3') as connection:
     revision += 1
     connection.execute('UPDATE factory SET dispatch_enabled=?, revision=?', (target, revision))
     if sys.argv[2] == 'off':
-        settled = connection.execute("UPDATE runs SET phase='terminal' WHERE phase <> 'terminal'").rowcount
-        connection.execute('UPDATE factory SET revision=revision+?', (settled,))
+        connection.execute("UPDATE runs SET phase='terminal' WHERE phase <> 'terminal'")
 print(json.dumps({'enabled': bool(target), 'revision': revision}))
 """.replace('FAILING_ACTION', repr(failing_action)))
                 control.chmod(0o700)
@@ -223,13 +222,13 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
         self.assertFalse(any(Path(call.args[0][1]).name == 'reinstall-service.sh' and '--prepare' not in call.args[0] for call in run.call_args_list))
 
     def test_runtime_settlements_during_pause_and_drain_restore_current_revision(self):
-        states = iter([(True, 4, 4), (False, 6, 3), (False, 7, 2), (False, 9, 0), (False, 9, 0), (True, 10, 0)])
+        states = iter([(True, 4, 4), (False, 5, 3), (False, 5, 2), (False, 5, 0), (False, 5, 0), (True, 6, 0)])
         def command(argv, **kwargs):
             return subprocess.CompletedProcess(argv, 0, json.dumps({'sha': 'a' * 40, 'healthy': True}), '')
         with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), \
              patch.object(deploy.subprocess, 'run', side_effect=command) as run, patch.object(deploy.time, 'sleep'):
             deploy.deploy('a' * 40)
-        self.assertTrue(any(call.args[0][-3:] == ['on', '--revision', '9'] for call in run.call_args_list))
+        self.assertTrue(any(call.args[0][-3:] == ['on', '--revision', '5'] for call in run.call_args_list))
 
     def test_runtime_operator_change_during_drain_never_installs_or_restores(self):
         for changed in [(False, 7, 3), (True, 6, 4), (False, 6, 5)]:
@@ -247,8 +246,8 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
                 paused = 5
-                states = iter([(enabled, 4, 2), (False, paused, 2), (False, paused + 1, 1)])
-                with patch.object(deploy, 'state', side_effect=lambda _home: next(states, (False, paused + 1, 1))), \
+                states = iter([(enabled, 4, 2), (False, paused, 2), (False, paused, 1)])
+                with patch.object(deploy, 'state', side_effect=lambda _home: next(states, (False, paused, 1))), \
                      patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run, \
                      patch.object(deploy.time, 'monotonic', side_effect=[0, 301]), \
                      patch.object(deploy, 'failure_receipt') as receipt:
@@ -258,13 +257,12 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                 restore = [call.args[0] for call in run.call_args_list if 'on' in call.args[0]]
                 self.assertEqual(int(enabled), len(restore))
                 if enabled:
-                    self.assertEqual(['on', '--revision', str(paused + 1)], restore[0][-3:])
+                    self.assertEqual(['on', '--revision', str(paused)], restore[0][-3:])
                 receipt.assert_not_called()
 
-    def test_runtime_restore_retries_only_a_refused_cas_with_proven_settlement(self):
+    def test_runtime_restore_never_retries_a_refusal_or_uncertain_result(self):
         cases = [
-            ('settlement', 'factoryctl: dispatch revision is stale\n', (False, 6, 1), [5, 6], ValueError),
-            ('operator', 'factoryctl: dispatch revision is stale\n', (False, 7, 1), [5], ValueError),
+            ('operator', 'factoryctl: dispatch revision is stale\n', (False, 7, 1), [5], subprocess.CalledProcessError),
             ('no progress', 'factoryctl: dispatch revision is stale\n', (False, 5, 2), [5], subprocess.CalledProcessError),
             ('opaque', 'factoryctl: dispatch was not accepted\n', None, [5], subprocess.CalledProcessError),
             ('timeout', None, None, [5], subprocess.TimeoutExpired),
@@ -289,7 +287,7 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                 self.assertEqual(expected, attempts)
 
     def test_runtime_operator_change_after_install_wins_over_restore(self):
-        states = iter([(True, 4, 2), (False, 5, 2), (False, 7, 0), (False, 9, 0), (False, 9, 0)])
+        states = iter([(True, 4, 2), (False, 5, 2), (False, 5, 0), (False, 6, 0), (False, 6, 0)])
         with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), \
              patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps({'sha': 'a' * 40, 'healthy': True}), '')) as run:
             deploy.deploy('a' * 40)

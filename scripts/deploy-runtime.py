@@ -14,8 +14,7 @@ import time
 
 def state(home):
     with sqlite3.connect((home / 'factory.sqlite3').as_uri() + '?mode=ro', uri=True) as connection:
-        # One statement gives both values the same SQLite snapshot; settlement
-        # increments the factory revision and removes one active run atomically.
+        # Controls and active runs are read from the same SQLite snapshot.
         return connection.execute("SELECT dispatch_enabled, revision, (SELECT count(*) FROM runs WHERE phase <> 'terminal') FROM factory WHERE singleton=1").fetchone()
 
 
@@ -49,32 +48,18 @@ def deploy(sha, home=None):
     env = dict(os.environ, DARK_FACTORY_SOCKET=str(home / 'runtimes' / 'factory.sock'), DARK_FACTORY_OPERATOR_TOKEN_FILE=str(home / 'operator.token'))
     # Preparation is non-destructive and leaves working agents running.
     subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--prepare', sha], env=env, check=True, timeout=600, capture_output=True, text=True)
-    enabled, original_revision, original_active = state(home)
+    enabled, original_revision, _ = state(home)
     subprocess.run([str(control), 'dispatch', 'off', '--revision', str(original_revision)], env=env, check=True, timeout=15, stdout=subprocess.DEVNULL)
     def paused_state():
         current_enabled, revision, active = state(home)
-        expected = original_revision + 1 + original_active - active
-        if current_enabled or not 0 <= active <= original_active or revision != expected:
+        expected = original_revision + 1
+        if current_enabled or revision != expected:
             raise ValueError('operator changed factory controls during deployment drain')
         return revision, active
 
     def restore_dispatch(revision):
-        # Only a definite refused CAS is retryable. Each fresh owned snapshot
-        # must prove another settlement, so at most the original runs can race.
-        for _ in range(original_active + 1):
-            try:
-                subprocess.run([str(control), 'dispatch', 'on', '--revision', str(revision)], env=env, check=True, timeout=15,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-                return
-            except subprocess.CalledProcessError as exc:
-                if exc.returncode != 1 or exc.stderr != 'factoryctl: dispatch revision is stale\n':
-                    sys.stderr.write(exc.stderr or '')
-                    raise
-                next_revision, _ = paused_state()
-                if next_revision <= revision:
-                    raise
-                revision = next_revision
-        raise ValueError('dispatch restoration did not converge after known settlements')
+        subprocess.run([str(control), 'dispatch', 'on', '--revision', str(revision)], env=env, check=True, timeout=15,
+                       stdout=subprocess.DEVNULL)
 
     paused_state()
     deadline = time.monotonic() + 300
@@ -84,7 +69,7 @@ def deploy(sha, home=None):
             break
         if time.monotonic() >= deadline:
             # Installation has not started. Restore only this proven owned pause;
-            # the revision CAS refuses a racing operator change or settlement.
+            # the revision CAS refuses a racing operator change.
             if enabled:
                 restore_dispatch(drained_revision)
             raise ValueError('runs did not drain')

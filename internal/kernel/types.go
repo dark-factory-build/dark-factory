@@ -514,10 +514,11 @@ type FactoryState struct {
 	DaemonID        DaemonID
 	DispatchEnabled bool
 	Capacity        uint16
-	Revision        Revision
-	Head            EventSequence
-	Floor           EventSequence
-	updatedAt       UnixMillis
+	// Revision guards explicit controls; Head tracks activity and all other changes.
+	Revision  Revision
+	Head      EventSequence
+	Floor     EventSequence
+	updatedAt UnixMillis
 }
 
 type Project struct {
