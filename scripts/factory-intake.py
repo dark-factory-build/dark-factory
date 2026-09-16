@@ -205,10 +205,14 @@ def task_state(config: dict, operation: dict) -> dict | None:
         value = json.loads(raw)
     except (json.JSONDecodeError, IntakeError) as exc:
         raise IntakeError("factory task state could not be read") from exc
+    if not isinstance(value, dict) or value.get("state") not in ("missing", "found"):
+        raise IntakeError("factory task state response is invalid")
     if value.get("state") == "missing":
         return None
     if value.get("task_id") != operation["task_id"] or value.get("incarnation_id") != operation["incarnation_id"] or value.get("project_id") != config["project_id"] or value.get("assigned_agent_id") != config["overseer_agent_id"]:
         raise IntakeError("deterministic intake task identity conflicts with factory state")
+    if value.get("status") not in ("queued", "running", "blocked", "succeeded", "failed", "cancelled") or type(value.get("needs_operator_recovery")) is not bool:
+        raise IntakeError("factory task state response is incomplete")
     return {"status": value["status"], "needs_operator_recovery": value["needs_operator_recovery"]}
 
 

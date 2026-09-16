@@ -51,7 +51,7 @@ class IntakeTest(unittest.TestCase):
             state = self.states.get(task_id)
             if state is None:
                 return json.dumps({"state": "missing"})
-            return json.dumps({"state": "present", "task_id": task_id, "incarnation_id": incarnation, "project_id": self.config["project_id"], "assigned_agent_id": self.config["overseer_agent_id"], "status": state["status"], "needs_operator_recovery": state.get("needs_operator_recovery", False)})
+            return json.dumps({"state": "found", "task_id": task_id, "incarnation_id": incarnation, "project_id": self.config["project_id"], "assigned_agent_id": self.config["overseer_agent_id"], "status": state["status"], "needs_operator_recovery": state.get("needs_operator_recovery", False)})
         task_id, incarnation = argv[argv.index("--task-id") + 1], argv[argv.index("--incarnation-id") + 1]
         self.states[task_id] = {"status": "queued", "id": task_id, "incarnation": incarnation}
         return json.dumps({"id": task_id, "incarnation_id": incarnation})
@@ -90,10 +90,18 @@ class IntakeTest(unittest.TestCase):
 
     def test_recovery_read_rejects_mismatched_identity(self):
         operation = {"task_id": "4" * 32, "incarnation_id": "5" * 32}
-        value = {"state": "present", "task_id": operation["task_id"], "incarnation_id": operation["incarnation_id"], "project_id": "2" * 32, "assigned_agent_id": self.config["overseer_agent_id"], "status": "queued", "needs_operator_recovery": False}
+        value = {"state": "found", "task_id": operation["task_id"], "incarnation_id": operation["incarnation_id"], "project_id": "2" * 32, "assigned_agent_id": self.config["overseer_agent_id"], "status": "queued", "needs_operator_recovery": False}
         with patch.object(INTAKE, "command", return_value=json.dumps(value)):
             with self.assertRaisesRegex(INTAKE.IntakeError, "identity conflicts"):
                 self.real_state(self.config, operation)
+
+    def test_recovery_read_rejects_incomplete_output(self):
+        operation = {"task_id": "4" * 32, "incarnation_id": "5" * 32}
+        value = {"state": "found", "task_id": operation["task_id"], "incarnation_id": operation["incarnation_id"], "project_id": self.config["project_id"], "assigned_agent_id": self.config["overseer_agent_id"]}
+        for malformed in ([], {"state": "present"}, value):
+            with self.subTest(value=malformed), patch.object(INTAKE, "command", return_value=json.dumps(malformed)):
+                with self.assertRaises(INTAKE.IntakeError):
+                    self.real_state(self.config, operation)
 
     def test_one_source_task_replays_after_lost_response(self):
         def lost(argv, **kwargs):

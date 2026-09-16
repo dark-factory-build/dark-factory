@@ -248,7 +248,7 @@ func (client *OperatorClient) TaskRecovery(ctx context.Context, input TaskRecove
 	if err := client.client.call(ctx, "task_recovery", input, &result); err != nil {
 		return TaskRecovery{}, err
 	}
-	if result.State != "missing" && (result.State != "found" || result.TaskID != input.TaskID || result.IncarnationID != input.IncarnationID || result.ArtifactPaths == nil) {
+	if !validTaskRecovery(result) || result.State == "found" && (result.TaskID != input.TaskID || result.IncarnationID != input.IncarnationID) {
 		return TaskRecovery{}, ErrProtocol
 	}
 	return result, nil

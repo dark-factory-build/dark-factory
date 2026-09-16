@@ -338,9 +338,10 @@ func NewAttemptSourceReply(source RetainedChangeHandoff) (Reply, error) {
 }
 
 func NewTaskRecoveryReply(value TaskRecovery) (Reply, error) {
-	if value.State != "missing" && value.State != "found" || value.State == "found" && !validID(value.TaskID) {
+	if !validTaskRecovery(value) {
 		return Reply{}, ErrInvalidInput
 	}
+	value.ArtifactPaths = append([]string{}, value.ArtifactPaths...)
 	return Reply{kind: replyTaskRecovery, taskRecovery: value}, nil
 }
 
