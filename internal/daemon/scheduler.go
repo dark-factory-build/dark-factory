@@ -60,8 +60,27 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	events := make(chan schedulerEvent, (kernel.MaxFactoryCapacity+1)*2)
 	owners := make(map[uint64]*scheduledOwner, kernel.MaxFactoryCapacity+1)
 	var nextID, probeID uint64
+	stopping := false
+	var resultErr error
+	// Dispatch is an advisory scheduling gate; admission still validates the
+	// complete durable graph atomically when dispatch resumes.
+	dispatchEnabled := func() bool {
+		factory, err := daemon.store.Factory(ownedCtx)
+		if err != nil {
+			if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(err, cancellation) {
+				resultErr = errors.Join(resultErr, err)
+			}
+			stopping = true
+			cancel()
+			return false
+		}
+		return factory.DispatchEnabled
+	}
 
 	startProbe := func() {
+		if !dispatchEnabled() {
+			return
+		}
 		nextID++
 		id := nextID
 		probeID = id
@@ -88,8 +107,6 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 		pollEvents = poll.C
 		defer poll.Stop()
 	}
-	stopping := false
-	var resultErr error
 	ctxDone := ctx.Done()
 	if err := ownedCtx.Err(); err == nil {
 		startProbe()
@@ -112,7 +129,8 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 		case <-pollEvents:
 			if !stopping && resultErr == nil {
 				// Worker idle rules and event-driven overseer wakeups are enqueued
-				// on the tick ahead of the probe that admits them. A round that
+				// on enabled ticks ahead of the probe that admits them. Pausing
+				// defers automatic tasks without consuming their causal events. A round that
 				// fails is retried next tick; the admission probe stays exact.
 				if err := daemon.enforceRunLimits(ownedCtx); err != nil {
 					// Cancellation can interrupt the read before the Done arm runs.
@@ -122,7 +140,7 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					}
 					stopping = true
 					cancel()
-				} else if at, err := daemon.timestamp(); err == nil {
+				} else if at, err := daemon.timestamp(); err == nil && dispatchEnabled() {
 					_, _ = daemon.store.EnqueueIdleInstructions(ownedCtx, at)
 					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at)
 				}
