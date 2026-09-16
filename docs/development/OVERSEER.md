@@ -143,6 +143,19 @@ For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 
 ## 1. Find what a worker finished
 
+The implementing worker uses its assigned writable checkout directly, including
+a correction after send-back. Do not require that worker to obtain an
+`attempt source` receipt for its own reopened Change: the retained source
+operation is for settled review targets. A reviewer must still follow the exact
+receipt procedure below; this distinction grants no access to other Changes.
+
+An installed runtime upgrade does not update source in a retained Change.
+Before repeating a sandbox or toolchain blocker, compare its pinned source base
+with already-merged prerequisite fixes. Integrate an exact reviewed prerequisite
+into the assigned writable checkout when required, preserving current edits and
+source lineage; publication against current main must exclude changes already
+merged. Do not reset the Change or mistake the daemon revision for its source.
+
 Never read the daemon SQLite database, the whole daemon home, or the Changes
 parent. As overseer, run `overseer status --task TASK_ID` for the task
 you are handling. This may return task-only status: the retained tree is not
@@ -561,3 +574,10 @@ Known credentials and private paths are redacted; partial boundary lines are
 omitted so an arbitrary cursor cannot reveal a fragment of a redacted line.
 `omitted` counts skipped raw bytes. This is a bounded observation of available
 output, not a complete transcript or a guarantee that output is secret-free.
+
+Operator supervision can use `factoryctl task recovery --task TASK_ID --incarnation INCARNATION_ID` for current result and blocker text without
+opening runtime files. `result_truncated` explicitly marks a UTF-8-safe 65536-byte
+excerpt; existing overseer or browser task-detail paging retrieves the full
+stored result. `run_outcome` and `run_detail` describe only the returned run at
+`run_work_revision`, which may precede the current task work revision after
+send-back. They are not a result for the new correction.

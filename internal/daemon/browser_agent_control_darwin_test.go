@@ -140,11 +140,16 @@ func TestBrowserTaskDetailPagesMaximumResultPastTheFormerCursorLimit(t *testing.
 
 func completeAdapterRun(t *testing.T, store *kernel.Store, run kernel.Run, resultText string) kernel.Run {
 	t.Helper()
-	ctx := context.Background()
 	proposal, err := kernel.NewSuccessProposal(resultText)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return completeAdapterRunWithProposal(t, store, run, proposal)
+}
+
+func completeAdapterRunWithProposal(t *testing.T, store *kernel.Store, run kernel.Run, proposal kernel.Proposal) kernel.Run {
+	t.Helper()
+	ctx := context.Background()
 	current, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, adapterTime(t, 400))
 	if err != nil {
 		t.Fatal(err)

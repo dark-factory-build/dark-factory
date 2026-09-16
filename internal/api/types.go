@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	maxFrameBytes      = 1 << 20
-	maxSnapshotEntries = 4096
-	credentialBytes    = 32
+	maxFrameBytes          = 1 << 20
+	MaxRecoveryResultBytes = 65536
+	maxSnapshotEntries     = 4096
+	credentialBytes        = 32
 )
 
 var (
@@ -358,6 +359,12 @@ type TaskRecoveryInput struct {
 }
 
 type TaskRecovery struct {
+	Result                string   `json:"result"`
+	ResultTruncated       bool     `json:"result_truncated"`
+	BlockedReason         string   `json:"blocked_reason"`
+	RunWorkRevision       uint64   `json:"run_work_revision,omitempty"`
+	RunOutcome            string   `json:"run_outcome,omitempty"`
+	RunDetail             string   `json:"run_detail,omitempty"`
 	State                 string   `json:"state"`
 	TaskID                string   `json:"task_id"`
 	IncarnationID         string   `json:"incarnation_id"`
@@ -380,6 +387,36 @@ type TaskRecovery struct {
 }
 
 func validTaskRecovery(value TaskRecovery) bool {
+	if !utf8.ValidString(value.Result) || len(value.Result) > MaxRecoveryResultBytes || !utf8.ValidString(value.BlockedReason) || len(value.BlockedReason) > 4096 || !utf8.ValidString(value.RunDetail) || len(value.RunDetail) > 4096 {
+		return false
+	}
+	if (value.Result != "" || value.ResultTruncated) && value.Status != "succeeded" || value.BlockedReason != "" && value.Status != "blocked" {
+		return false
+	}
+	if value.ResultTruncated && len(value.Result) < MaxRecoveryResultBytes-3 {
+		return false
+	}
+	if value.RunID == "" && (value.RunWorkRevision != 0 || value.RunOutcome != "" || value.RunDetail != "") || value.RunID != "" && (value.RunWorkRevision == 0 || value.RunWorkRevision > value.WorkRevision) {
+		return false
+	}
+	switch value.RunOutcome {
+	case "":
+		if value.RunDetail != "" {
+			return false
+		}
+	case "succeeded":
+		if value.RunDetail != "" {
+			return false
+		}
+	case "blocked", "cancelled":
+		if value.RunDetail == "" {
+			return false
+		}
+	case "failed":
+	default:
+		return false
+	}
+
 	if value.State == "missing" {
 		return value.TaskID == "" && value.IncarnationID == "" && value.ProjectID == "" && value.AssignedAgentID == "" && value.WorkRevision == 0 && value.Revision == 0 && value.Status == "" && !value.NeedsOperatorRecovery && value.ChangeID == "" && value.ChangeRevision == 0 && value.ChangePhase == "" && value.SourceFormat == "" && value.SourceBaseCommit == "" && value.SourceRepositoryDev == 0 && value.SourceRepositoryInode == 0 && value.RunID == "" && value.RunRevision == 0 && value.ArtifactPaths != nil && len(value.ArtifactPaths) == 0
 	}

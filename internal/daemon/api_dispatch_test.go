@@ -1413,3 +1413,64 @@ func TestPeerConversationSurvivesUnavailableNotification(t *testing.T) {
 		t.Fatalf("durable answer=%+v err=%v", inbox, err)
 	}
 }
+
+func TestOperatorTaskRecoveryReportsBoundedExactOutcome(t *testing.T) {
+	for _, kind := range []string{"succeeded", "blocked", "failed"} {
+		t.Run(kind, func(t *testing.T) {
+			fixture := newDispatchFixture(t)
+			ctx := context.Background()
+			initialRevision, _ := kernel.NewRevision(1)
+			if _, err := fixture.store.SetDispatch(ctx, initialRevision, true, mustKernelTime(t, 101)); err != nil {
+				t.Fatal(err)
+			}
+			run := adapterRunningRun(t, fixture.store, 180)
+			result := strings.Repeat("x", api.MaxRecoveryResultBytes-1) + "😀tail"
+			var proposal kernel.Proposal
+			switch kind {
+			case "succeeded":
+				proposal, _ = kernel.NewSuccessProposal(result)
+			case "blocked":
+				proposal, _ = kernel.NewBlockedProposal("missing supported tool")
+			case "failed":
+				proposal, _ = kernel.NewFailureProposal(kernel.FailureInternal, "execution failed")
+			}
+			terminal := completeAdapterRunWithProposal(t, fixture.store, run, proposal)
+			client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+			if err != nil {
+				t.Fatal(err)
+			}
+			read := func() api.TaskRecovery {
+				done := fixture.serve(t)
+				value, err := client.TaskRecovery(ctx, api.TaskRecoveryInput{TaskID: run.TaskID.String(), IncarnationID: run.TaskIncarnationID.String()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				waitDispatch(t, done)
+				return value
+			}
+			value := read()
+			if value.Status != kind || value.RunOutcome != kind || value.RunID != terminal.ID.String() || value.RunWorkRevision != 1 {
+				t.Fatalf("identity/outcome = %+v", value)
+			}
+			if kind == "succeeded" {
+				if !value.ResultTruncated || value.Result != strings.Repeat("x", api.MaxRecoveryResultBytes-1) {
+					t.Fatalf("UTF8 excerpt len=%d truncated=%v", len(value.Result), value.ResultTruncated)
+				}
+			} else if value.RunDetail != proposal.Detail() || kind == "blocked" && value.BlockedReason != proposal.Detail() {
+				t.Fatalf("diagnostic = %+v", value)
+			}
+			task, found, err := fixture.store.Task(ctx, run.TaskID)
+			if err != nil || !found {
+				t.Fatal(err)
+			}
+			if _, err := fixture.store.SendBackTask(ctx, task.ID, task.Revision, "correct this", mustKernelTime(t, 500)); err != nil {
+				t.Fatal(err)
+			}
+			value = read()
+			if value.Status != "queued" || value.WorkRevision != 2 || value.Result != "" || value.ResultTruncated || value.BlockedReason != "" || value.RunWorkRevision != 1 || value.RunOutcome != kind {
+				t.Fatalf("prior outcome presented as current: %+v", value)
+			}
+
+		})
+	}
+}
