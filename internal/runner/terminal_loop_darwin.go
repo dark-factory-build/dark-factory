@@ -234,7 +234,7 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 			if err != nil {
 				return err
 			}
-			if frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxProviderErrorBytes {
+			if validProviderErrorFrame(frame) {
 				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
 			}
 			if !validCurrentExecCheck(frame) {
