@@ -1072,3 +1072,17 @@ func TestRuntimeAbsentRecoveryHonorsCancellationWhileWriterHeld(t *testing.T) {
 		t.Fatal("canceled recovery mutated admitted run")
 	}
 }
+
+func TestUnsettledContinuationPreservesFailureAlongsideCancellation(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x9b)
+	fixture.failBeforeRuntime(t)
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID)
+	if !errors.Is(err, kernel.ErrStoreClosed) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled continuation = %v, want retained store failure and caller cancellation", err)
+	}
+}
