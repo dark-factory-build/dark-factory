@@ -1114,6 +1114,7 @@ func TestClosedStateWatchPreservesReconnectClassification(t *testing.T) {
 		retryable bool
 	}{
 		{name: "clean"},
+		{name: "daemon reload", cause: context.Canceled},
 		{name: "busy", cause: ErrRateLimited, code: browserprotocol.ErrorRateLimited, retryable: true},
 		{name: "revoked", cause: ErrUnauthorized, code: browserprotocol.ErrorUnauthorized},
 		{name: "fault", cause: errors.New("store failed"), code: browserprotocol.ErrorInternal},
@@ -1135,7 +1136,7 @@ func TestClosedStateWatchPreservesReconnectClassification(t *testing.T) {
 				t.Fatalf("watch barrier = %+v", frame)
 			}
 			close(backend.sub.updates)
-			if test.cause == nil {
+			if test.cause == nil || errors.Is(test.cause, context.Canceled) {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
 				if _, wire, err := connection.Read(ctx); err == nil {
@@ -1149,7 +1150,7 @@ func TestClosedStateWatchPreservesReconnectClassification(t *testing.T) {
 				}
 			}
 			err = server.Close()
-			if test.cause == nil && err != nil || test.cause != nil && !errors.Is(err, ErrSubscriptionUnresolved) {
+			if (test.cause == nil || errors.Is(test.cause, context.Canceled)) && err != nil || test.cause != nil && !errors.Is(test.cause, context.Canceled) && !errors.Is(err, ErrSubscriptionUnresolved) {
 				t.Fatalf("cleanup authority = %v", err)
 			}
 			if backend.sub.closed.Load() != 1 {

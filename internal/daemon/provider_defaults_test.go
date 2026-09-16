@@ -236,3 +236,19 @@ func TestProjectAgentReadsTheSelectedAccountsDefaults(t *testing.T) {
 		t.Fatalf("served account = %q", item.AccountID)
 	}
 }
+
+func TestProjectAgentDropsUnservableProviderDefaults(t *testing.T) {
+	summary := kernel.AgentSummary{ID: mustAgentID(t, testID(54)), ProjectID: mustProjectID(t, testID(55)), Name: "bounded", Role: "worker", Provider: "codex", Revision: mustRevision(t, 3)}
+	item := projectAgent(summary, "", func(string, string) (string, string, string) {
+		return strings.Repeat("m", browserprotocol.MaxAgentModelBytes+1), "high", strings.Repeat("/", browserprotocol.MaxModelSourceBytes+1)
+	})
+	if item.EffectiveModel != "" || item.EffectiveReasoningEffort != "" || item.ModelSource != "" {
+		t.Fatalf("unservable defaults leaked into public agent: %+v", item)
+	}
+	if _, err := browserprotocol.EncodeStateSnapshot("bounded", browserprotocol.StateSnapshot{
+		Head: 1, Factory: browserprotocol.FactoryItem{DispatchEnabled: browserprotocol.Bool(true), Capacity: 1, Revision: 1},
+		Projects: []browserprotocol.ProjectItem{}, Agents: []browserprotocol.AgentItem{item}, Tasks: []browserprotocol.TaskItem{}, HumanRequests: []browserprotocol.HumanRequestItem{},
+	}); err != nil {
+		t.Fatalf("snapshot with degraded defaults did not encode: %v", err)
+	}
+}

@@ -1061,6 +1061,13 @@ func projectProject(item kernel.ProjectSummary) browserprotocol.ProjectItem {
 // own login, which is what the daemon falls back to.
 func projectAgent(item kernel.AgentSummary, configHome string, providerDefaults func(string, string) (string, string, string)) browserprotocol.AgentItem {
 	defaultModel, defaultEffort, source := providerDefaults(item.Provider, configHome)
+	// The provider CLI remains usable when its configuration cannot be served.
+	// Keep the same degraded behavior at this public boundary if a provider
+	// implementation supplies a value outside the wire contract: one agent's
+	// display default must not make the complete factory snapshot unencodable.
+	if !fitsWire(defaultModel, browserprotocol.MaxAgentModelBytes) || !fitsWire(defaultEffort, browserprotocol.MaxAgentModelBytes) || !fitsWire(source, browserprotocol.MaxModelSourceBytes) {
+		defaultModel, defaultEffort, source = "", "", ""
+	}
 	effectiveModel, effectiveEffort := item.Model, item.ReasoningEffort
 	if effectiveModel == "" {
 		effectiveModel = defaultModel
