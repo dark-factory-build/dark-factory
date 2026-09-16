@@ -69,3 +69,32 @@ func TestTaskRecoveryReportsStaleHumanRequest(t *testing.T) {
 		t.Fatalf("stale human recovery = %+v, found=%v, err=%v", recovery, found, err)
 	}
 }
+
+func TestLatestRunForTaskUsesWorkRevisionForEqualAdmissionTimes(t *testing.T) {
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+
+	// The retry has the lower ID, so an ID tie-breaker would incorrectly pick
+	// the predecessor when both rows have the same admission timestamp.
+	_, retryKeys := queueRetryForTerminalSeed(t, store, terminal, 45, 180)
+	second, err := store.AdmitNext(context.Background(), retryKeys, mustTime(t, 45))
+	if err != nil || !second.Admitted() {
+		t.Fatalf("retry admission = %+v, %v", second, err)
+	}
+	task, found, err := store.Task(context.Background(), terminal.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task = %+v, found=%v, err=%v", task, found, err)
+	}
+	// Exercise the selection query directly with equal, scanner-valid run
+	// timestamps. Other recovery tests cover complete lifecycle relationships.
+	corruptSQL(t, store, `UPDATE runs SET admitted_at_ms = ?, updated_at_ms = ? WHERE id = ?`, terminal.AdmittedAt.Int64(), terminal.AdmittedAt.Int64(), second.Run.ID.Bytes())
+	read, err := store.beginRead(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	latest, found, err := latestRunForTask(context.Background(), read.connection, task)
+	if err != nil || !found || latest.ID != second.Run.ID || latest.AdmittedTaskWorkRevision.Int64() != 2 {
+		t.Fatalf("latest run = %+v, found=%v, err=%v", latest, found, err)
+	}
+}

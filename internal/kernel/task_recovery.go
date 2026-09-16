@@ -64,5 +64,5 @@ func (store *Store) TaskRecovery(ctx context.Context, id TaskID, incarnation Inc
 }
 
 func latestRunForTask(ctx context.Context, connection *sql.Conn, task Task) (Run, bool, error) {
-	return scanRun(connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE project_id=? AND task_id=? AND task_incarnation_id=? ORDER BY admitted_at_ms DESC, id DESC LIMIT 1`, task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes()))
+	return scanRun(connection.QueryRowContext(ctx, `SELECT `+runColumns+` FROM runs WHERE project_id=? AND task_id=? AND task_incarnation_id=? ORDER BY admitted_task_work_revision DESC LIMIT 1`, task.ProjectID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes()))
 }
