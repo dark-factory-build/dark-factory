@@ -751,6 +751,20 @@ test("a paused agent with queued work says the queue is paused", () => {
   assert.equal(markup.includes("QUEUED · WAITING FOR CAPACITY"), false);
 });
 
+test("unclaimed shared work waits under its project until an eligible worker claims it", () => {
+  const template = [...fixtureState.tasks.values()].find((task) => task.status === "queued");
+  const shared = { ...template, id: "3a".repeat(16), title: "Anyone free", assigned_agent_id: "" };
+  const markup = render({
+    state: baseState({ tasks: new Map([[shared.id, shared]]) }),
+    detail: "queue",
+    selectedAgent: agentSelection(),
+    onEditTask: () => {},
+  });
+  assert.match(markup, /Anyone free/);
+  assert.match(markup, /ANY ELIGIBLE WORKER · QUEUED · PRIORITY/);
+  assert.match(markup, /<option value="" disabled=""[^>]*>Any eligible worker<\/option>/);
+});
+
 test("the queued task row keeps served order and changes its exact priority", async () => {
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
