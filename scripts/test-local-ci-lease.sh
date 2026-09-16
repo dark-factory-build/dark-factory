@@ -269,6 +269,18 @@ if (cd "$first" && ./scripts/with-local-ci-lease.sh true) 2>"$temporary/legacy.s
 fi
 grep -Fq 'legacy lease' "$temporary/legacy.stderr" || fail "legacy cutover refusal was unexplained"
 rmdir "$legacy_lock"
+
+# The host and generated overseer profiles may not expose Perl. The native
+# symlink primitive must therefore cover the legacy barrier migration without
+# consulting that optional runtime.
+perl_probe="$temporary/perl-probe"
+mkdir "$temporary/no-perl"
+printf '%s\n' '#!/bin/sh' ': >"'"$perl_probe"'"' 'exit 99' >"$temporary/no-perl/perl"
+chmod +x "$temporary/no-perl/perl"
+env PATH="$temporary/no-perl:$PATH" DARK_FACTORY_LOCAL_CI_DIRECTORY="$common_dir" \
+    /bin/sh -c 'cd "$1" && ./scripts/with-local-ci-lease.sh true' local-ci-no-perl "$first" \
+    || fail "lease acquisition depended on Perl"
+[ ! -e "$perl_probe" ] || fail "lease helper invoked the forbidden Perl probe"
 lease_path="$common_dir/.dark-factory-local-ci"
 lock_path="$common_dir/.dark-factory-local-ci.lock"
 
