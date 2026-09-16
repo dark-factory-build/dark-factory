@@ -55,8 +55,8 @@ def refresh_controller(checkout, release_config, receipt):
     if git('symbolic-ref', '--short', 'HEAD') != branch:
         raise ControllerSourceError('controller source must be on the configured release branch')
     remote = git('remote', 'get-url', 'origin')
-    if remote not in ('https://github.com/' + repository, 'https://github.com/' + repository + '.git',
-                      'git@github.com:' + repository + '.git', 'ssh://git@github.com/' + repository + '.git'):
+    if remote.removesuffix('.git') not in ('https://github.com/' + repository,
+                                          'git@github.com:' + repository, 'ssh://git@github.com/' + repository):
         raise ControllerSourceError('controller origin must match the configured release repository')
     if git('status', '--porcelain', '--untracked-files=no'):
         raise ControllerSourceError('controller source has tracked edits; preserve them before refreshing')

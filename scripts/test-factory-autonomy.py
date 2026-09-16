@@ -65,7 +65,12 @@ class AutonomyTest(unittest.TestCase):
                 self.assertEqual(head, git(checkout, 'rev-parse', 'HEAD'))
                 self.assertEqual('after', (checkout / 'source').read_text())
                 self.assertEqual('keep', (checkout / 'untracked').read_text())
-                autonomy.refresh_controller(checkout, config, receipt)
+                for prefix in ('https://github.com/', 'git@github.com:', 'ssh://git@github.com/'):
+                    for suffix in ('', '.git'):
+                        url = prefix + 'fixture/controller' + suffix
+                        git(checkout, 'remote', 'set-url', 'origin', url)
+                        git(checkout, 'config', 'url.' + str(remote) + '.insteadOf', url)
+                        autonomy.refresh_controller(checkout, config, receipt)
                 with self.assertRaisesRegex(ValueError, 'merge-base'):
                     autonomy.refresh_controller(checkout, config, {'state': 'verified', 'sha': original})
                 with self.assertRaisesRegex(ValueError, 'configured release repository'):
