@@ -18,6 +18,27 @@ var (
 	ErrStoreClosed      = errors.New("kernel store is closed")
 )
 
+// OutcomeRefusal is returned after an exact attempt bearer was found, but
+// the durable finalization edge refused the proposal. It deliberately keeps
+// the underlying bounded kernel cause so the exact live owner can reconcile
+// without turning every unauthorized response into a kill signal.
+type OutcomeRefusal struct {
+	cause error
+}
+
+func (err *OutcomeRefusal) Error() string {
+	return "attempt outcome refused: " + err.cause.Error()
+}
+
+func (err *OutcomeRefusal) Unwrap() error { return err.cause }
+
+func NewOutcomeRefusal(cause error) error {
+	if cause == nil {
+		return fmt.Errorf("%w: missing outcome refusal cause", ErrInvalidValue)
+	}
+	return &OutcomeRefusal{cause: cause}
+}
+
 type OutcomeUnknownError struct {
 	cause error
 }
