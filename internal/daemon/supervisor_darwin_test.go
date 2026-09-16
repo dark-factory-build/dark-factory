@@ -1170,6 +1170,18 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	if err != nil || !admission.Admitted() || admission.Run == nil {
 		t.Fatalf("admission = %+v, %v", admission, err)
 	}
+	// This is the live-owner failure edge, not the runtime-absent edge.
+	runtime, found, err := store.Resource(ctx, resource(216))
+	if err != nil || !found {
+		t.Fatalf("runtime resource: found=%v err=%v", found, err)
+	}
+	runtimeIdentity, err := kernel.NewPathResourceIdentity(100, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActivateResource(ctx, admission.Run.ID, runtime.ID, runtime.Revision, runtimeIdentity, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
 	daemon, err := newDaemon(store, time.Now)
 	if err != nil {
 		t.Fatal(err)
@@ -1180,7 +1192,7 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	var failed kernel.Run
 	var failErr error
 	go func() {
-		failed, failErr = daemon.failRunBeforeRuntime(context.Background(), *admission.Run, resource(216), kernel.FailureInternal, failureCause)
+		failed, failErr = daemon.failRun(*admission.Run, kernel.FailureInternal, failureCause)
 		close(finished)
 	}()
 	select {
