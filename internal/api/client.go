@@ -167,6 +167,24 @@ func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, 
 	return result, nil
 }
 
+func (client *OperatorClient) HumanRequests(ctx context.Context) (HumanRequestList, error) {
+	var result HumanRequestList
+	if err := client.client.call(ctx, "human_requests", struct{}{}, &result); err != nil {
+		return HumanRequestList{}, err
+	}
+	if !validHumanRequestList(result) {
+		return HumanRequestList{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) HumanReply(ctx context.Context, input OverseerHumanReplyInput) (MutationResult, error) {
+	if !validID(input.OperationID) || !validID(input.RequestID) || input.ExpectedRevision == 0 || !validText(input.Reply, 1, 8192) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "human_reply", input)
+}
+
 func (client *OperatorClient) DiscoverAccounts(ctx context.Context) (Accounts, error) {
 	accounts := make([]DiscoveredAccount, 0)
 	for offset := uint32(0); ; {

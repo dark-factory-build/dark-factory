@@ -59,6 +59,8 @@ const (
   factoryctl overseer worker message --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --message TEXT
   factoryctl overseer worker interrupt --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl overseer human reply --operation-id ID --request ID --revision REVISION --reply TEXT
+  factoryctl human list
+  factoryctl human reply --operation-id ID --request ID --revision REVISION --reply TEXT
   factoryctl project create --name TEXT --root ABSOLUTE
   factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
@@ -142,6 +144,8 @@ const (
 	commandOverseerMessageWorker
 	commandOverseerInterruptWorker
 	commandOverseerReplyHuman
+	commandHumanList
+	commandHumanReply
 )
 
 type attemptCommand struct {
@@ -242,7 +246,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
+	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman {
@@ -353,6 +357,16 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, true, true
 		}
 		return parseOverseer(args)
+	}
+	if len(args) >= 1 && args[0] == "human" {
+		if len(args) == 2 && args[1] == "list" {
+			return attemptCommand{kind: commandHumanList}, false, true
+		}
+		if len(args) == 10 && args[1] == "reply" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) && args[4] == "--request" && validHumanRequestKey(args[5]) && args[6] == "--revision" && validRevision(args[7]) && args[8] == "--reply" && validQuestion(args[9]) {
+			revision, _ := strconv.ParseUint(args[7], 10, 64)
+			return attemptCommand{kind: commandHumanReply, operationID: args[3], id: args[5], expectedRevision: revision, text: args[9]}, false, true
+		}
+		return attemptCommand{}, false, false
 	}
 	if len(args) >= 1 && args[0] == "remote" {
 		return parseRemote(args)
@@ -1341,6 +1355,18 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "status", callErr)
 		}
 		return writeJSON(stdout, snapshot)
+	case commandHumanList:
+		result, callErr := client.HumanRequests(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "human requests", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandHumanReply:
+		result, callErr := client.HumanReply(callContext, api.OverseerHumanReplyInput{OperationID: command.operationID, RequestID: command.id, ExpectedRevision: command.expectedRevision, Reply: command.text})
+		if callErr != nil {
+			return writeWebFailure(stderr, "human reply", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandAccountsDiscover:
 		accounts, callErr := client.DiscoverAccounts(callContext)
 		if callErr != nil {

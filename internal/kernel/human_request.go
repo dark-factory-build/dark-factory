@@ -374,6 +374,56 @@ func (store *Store) HumanRequestDetail(ctx context.Context, clientID BrowserClie
 	return humanRequestDetail(ctx, tx.connection, clientID, id, expected)
 }
 
+func (store *Store) OperatorHumanRequests(ctx context.Context) ([]OperatorHumanRequest, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer read.Close()
+	rows, err := read.connection.QueryContext(ctx, `SELECT `+humanRequestColumns+` FROM human_requests WHERE status IN ('open', 'delivering', 'delivery_unknown') ORDER BY created_at_ms ASC, id ASC LIMIT ?`, MaxOpenHumanRequests+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]OperatorHumanRequest, 0)
+	for rows.Next() {
+		request, found, err := scanHumanRequest(rows)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return nil, err
+		}
+		if len(result) == MaxOpenHumanRequests {
+			return nil, ErrSnapshotTooLarge
+		}
+		run, found, err := runByID(ctx, read.connection, request.RunID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || run.Role != RoleWorker {
+			return nil, ErrCorruptState
+		}
+		result = append(result, OperatorHumanRequest{ID: request.ID, RunID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: request.Status, Revision: request.Revision, QuestionText: request.QuestionText, Options: append([]string(nil), request.Options...)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (store *Store) BeginHumanReplyForOperator(ctx context.Context, requestID HumanRequestID, expected Revision, deliveryID HumanRequestDeliveryID, reply string, at UnixMillis) (HumanDelivery, error) {
+	if requestID.zero() || deliveryID.zero() || expected.Int64() < 1 || !utf8TextWithin(reply, 1, MaxHumanRequestReplyBytes) {
+		return HumanDelivery{}, fmt.Errorf("%w: invalid human request reply", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return HumanDelivery{}, err
+	}
+	defer tx.Close()
+	return store.beginHumanReplyTx(ctx, tx, requestID, expected, deliveryID, reply, at, ProjectID{}, RunID{})
+}
+
 func humanRequestDetail(ctx context.Context, connection *sql.Conn, clientID BrowserClientID, id HumanRequestID, expected Revision) (HumanRequestDetail, error) {
 	client, found, err := browserClientByID(ctx, connection, clientID)
 	if err != nil {
