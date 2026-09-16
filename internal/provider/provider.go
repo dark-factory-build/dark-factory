@@ -382,6 +382,9 @@ func codexPermissions(request Request) (string, error) {
 	for _, path := range []string{request.installation.executable.Path(), request.runtime.factoryctl, request.runtime.token, request.runtime.socket} {
 		entries = append(entries, tomlBasicString(path)+`="read"`)
 	}
+	// Node/Corepack reads the system OpenSSL configuration before dispatch.
+	// Permit this file, not the surrounding directory or operator configuration.
+	entries = append(entries, tomlBasicString("/System/Library/OpenSSL/openssl.cnf")+`="read"`)
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		entries = append(entries, tomlBasicString(root)+`="read"`)
 	}
