@@ -576,18 +576,8 @@ test('a controller message over 64 KiB ends that socket', async () => {
 	assert.equal((await host.tap.quiet(200)).closed, null);
 });
 
-test('a burst past the token bucket ends the controller and tells the host', async () => {
-	const { node, host } = await withHost();
-	const controller = await openControl(node, await controlCredential(node));
-	const open = await host.tap.nextRecordOf(RECORD_OPEN);
-
-	for (let index = 0; index < 200; index += 1) controller.tap.send(`burst-${index}`);
-	assert.equal((await controller.tap.waitClosed()).code, 4003);
-	const closed = await host.tap.nextRecordOf(RECORD_CLOSE);
-	assert.equal(closed.connection, open.connection);
-	assert.equal(JSON.parse(closed.payload.toString('utf8')).code, 4003);
-	assert.equal((await host.tap.quiet(200)).closed, null);
-});
+// Exact burst/refill boundaries are covered by relay.rate.test.mjs with a
+// controlled server clock; network scheduling can legitimately refill a burst.
 
 test('a record payload past the cap ends the host and every controller', async () => {
 	const { node, host } = await withHost();
