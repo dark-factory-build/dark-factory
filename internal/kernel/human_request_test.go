@@ -36,6 +36,25 @@ func humanDeliveryID(t *testing.T, seed byte) HumanRequestDeliveryID {
 	return id
 }
 
+func TestOperatorHumanRequestsIncludesOverseerQuestions(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{
+		IdempotencyKey: humanKey(239), QuestionText: "operator bridge question",
+	}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests, err := store.OperatorHumanRequests(ctx)
+	if err != nil || len(requests) != 1 || requests[0].ID != request.ID || requests[0].RunID != run.ID {
+		t.Fatalf("operator requests = %+v, %v", requests, err)
+	}
+	if _, err := store.BeginHumanReplyForAttempt(ctx, run.CredentialDigest, request.ID, request.Revision, humanDeliveryID(t, 240), "must remain overseer-restricted", mustTime(t, 401)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("overseer self reply = %v", err)
+	}
+}
+
 func TestHumanQuestionCreationProjectionDetailAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)

@@ -173,6 +173,10 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.health(ctx)
 	case api.CallSnapshot:
 		return daemon.snapshot(ctx)
+	case api.CallHumanRequests:
+		return daemon.humanRequests(ctx)
+	case api.CallHumanReply:
+		return daemon.humanReplyOperator(ctx, call)
 	case api.CallCreateProject:
 		return daemon.createProject(ctx, call)
 	case api.CallProjectLimits:
@@ -285,6 +289,67 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	default:
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+}
+
+func (daemon *Daemon) humanRequests(ctx context.Context) api.Reply {
+	requests, err := daemon.store.OperatorHumanRequests(ctx)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	result := api.HumanRequestList{Requests: make([]api.HumanRequest, 0, len(requests))}
+	for _, request := range requests {
+		result.Requests = append(result.Requests, api.HumanRequest{ID: request.ID.String(), RunID: request.RunID.String(), TaskID: request.TaskID.String(), AgentID: request.AgentID.String(), Status: request.Status.String(), Revision: uint64(request.Revision.Int64()), Question: request.QuestionText, Options: append([]string{}, request.Options...)})
+	}
+	return api.NewHumanRequestListReply(result)
+}
+
+func (daemon *Daemon) humanReplyOperator(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.HumanReplyInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	requestID, err := parseHumanRequestID(input.RequestID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	deliveryID, err := parseHumanDeliveryID(input.OperationID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	if !terminalEffectsSupported {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	daemon.operationMu.Lock()
+	defer daemon.operationMu.Unlock()
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	delivery, err := daemon.store.BeginHumanReplyForOperator(ctx, requestID, expected, deliveryID, input.Reply, at)
+	if err != nil {
+		if terminalStoreOutcomeUnknown(err) {
+			deliveryRevision, revisionErr := kernel.NewRevision(expected.Int64() + 1)
+			var unknownErr error
+			if revisionErr == nil {
+				unknownErr = daemon.markHumanReplyUnknown(requestID, deliveryID, deliveryRevision)
+			}
+			return newErrorReply(remoteErrorCode(errors.Join(err, revisionErr, unknownErr)))
+		}
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if delivery.RequestID != requestID || delivery.DeliveryID != deliveryID {
+		return newErrorReply(api.RemoteInternal)
+	}
+	_, effectErr := daemon.deliverHumanReply(ctx, delivery)
+	projection, err := daemon.humanReplyOutcome(requestID, effectErr)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	return daemon.overseerHumanReplyMutation(projection)
 }
 
 func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply {

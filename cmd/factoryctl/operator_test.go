@@ -34,6 +34,8 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "task add full", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--body", "b", "--priority", "-5"}},
 		{name: "task add supplied identities", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--task-id", id, "--incarnation-id", strings.Repeat("cd", 16)}},
 		{name: "status", args: []string{"status"}},
+		{name: "human list", args: []string{"human", "list"}},
+		{name: "human reply", args: []string{"human", "reply", "--operation-id", id, "--request", id, "--revision", "7", "--reply", "operator answer"}},
 		{name: "task send back", args: []string{"task", "send-back", "--task", id, "--note", "five findings"}},
 		{name: "dispatch on", args: []string{"dispatch", "on"}},
 		{name: "dispatch off", args: []string{"dispatch", "off"}},
@@ -123,6 +125,48 @@ func TestOperatorCommandsRequireExactEnvironmentBeforeDialing(t *testing.T) {
 	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "operator client configuration is invalid") {
 		t.Fatalf("missing environment = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
+}
+
+func TestTopLevelOperatorHumanListAndReply(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	requestID := strings.Repeat("ab", 16)
+	runID := strings.Repeat("cd", 16)
+	taskID := strings.Repeat("ef", 16)
+	agentID := strings.Repeat("12", 16)
+	opID := strings.Repeat("34", 16)
+
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		if call.Kind() != api.CallHumanRequests {
+			t.Errorf("list call kind = %v", call.Kind())
+		}
+		return api.NewHumanRequestListReply(api.HumanRequestList{Requests: []api.HumanRequest{{
+			ID: requestID, RunID: runID, TaskID: taskID, AgentID: agentID, Status: "open", Revision: 3, Question: "bridge question", Options: []string{},
+		}}})
+	})
+	var stdout, stderr bytes.Buffer
+	if exit := run(context.Background(), []string{"human", "list"}, webEnvironment(fixture), &stdout, &stderr); exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "bridge question") {
+		t.Fatalf("human list = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+	awaitServer(t, done)
+
+	done = serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.HumanReplyInput()
+		if !ok || input.OperationID != opID || input.RequestID != requestID || input.ExpectedRevision != 3 || input.Reply != "operator answer" {
+			t.Errorf("human reply input = %+v, ok=%v", input, ok)
+		}
+		result, err := api.NewMutationReply(api.MutationResult{Head: 8, Revision: 4, HumanReply: &api.OverseerHumanReplyResult{RequestID: requestID, State: "resolved"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	})
+	stdout.Reset()
+	stderr.Reset()
+	if exit := run(context.Background(), []string{"human", "reply", "--operation-id", opID, "--request", requestID, "--revision", "3", "--reply", "operator answer"}, webEnvironment(fixture), &stdout, &stderr); exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "resolved") {
+		t.Fatalf("human reply = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+	awaitServer(t, done)
 }
 
 func TestProjectCreateMintsIdentityAndReportsResult(t *testing.T) {

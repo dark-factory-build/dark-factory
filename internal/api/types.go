@@ -180,6 +180,33 @@ type OverseerHumanReplyResult struct {
 	State     string `json:"state"`
 }
 
+type HumanRequest struct {
+	ID       string   `json:"id"`
+	RunID    string   `json:"run_id"`
+	TaskID   string   `json:"task_id"`
+	AgentID  string   `json:"agent_id"`
+	Status   string   `json:"status"`
+	Revision uint64   `json:"revision"`
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
+}
+
+type HumanRequestList struct {
+	Requests []HumanRequest `json:"requests"`
+}
+
+func validHumanRequestList(value HumanRequestList) bool {
+	if value.Requests == nil || len(value.Requests) > 1024 {
+		return false
+	}
+	for _, request := range value.Requests {
+		if !validID(request.ID) || !validID(request.RunID) || !validID(request.TaskID) || !validID(request.AgentID) || request.Revision == 0 || !validText(request.Question, 1, 8192) || request.Status != "open" && request.Status != "delivering" && request.Status != "delivery_unknown" || request.Options == nil || kernel.ValidateHumanOptions(request.Options) != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func validMutation(result MutationResult) bool {
 	if result.Revision == 0 {
 		return false
