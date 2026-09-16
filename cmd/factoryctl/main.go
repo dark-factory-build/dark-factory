@@ -20,6 +20,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const (
@@ -215,6 +216,24 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 type serviceInspector func(context.Context, string) (install.ServiceStatus, error)
 
 func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
+	if len(args) > 0 && args[0] == "--local-ci-process-identity" {
+		if len(args) != 2 {
+			return exitUsage
+		}
+		pid, err := strconv.Atoi(args[1])
+		if err != nil || pid <= 1 {
+			return exitUsage
+		}
+		identity, err := runner.ReadOwnedProcessIdentity(pid)
+		if err != nil {
+			return exitFailure
+		}
+		_, err = fmt.Fprintf(stdout, "%d:%06d %d\n", identity.Birth.Seconds, identity.Birth.Microseconds, identity.PGID)
+		if err != nil {
+			return exitFailure
+		}
+		return 0
+	}
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintf(stdout, "factoryctl %s\n", buildinfo.Current().Version())
 		return 0

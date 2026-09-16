@@ -251,6 +251,44 @@ func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	}
 }
 
+func TestSupervisorOptionalCILeaseRefusalDoesNotFailFreshWork(t *testing.T) {
+	program := "test -z \"${DARK_FACTORY_LOCAL_CI_DIRECTORY-}\" || exit 90\n" + supervisorProgram(t, false, false)
+	fixture := newSupervisorFixture(t, program)
+	legacyLock := filepath.Join(fixture.root, "repository", ".git", ".dark-factory-local-ci.lock")
+	if err := os.Mkdir(legacyLock, 0700); err != nil {
+		t.Fatal(err)
+	}
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
+	fixture.assertOneWitness(t)
+	fixture.assertReleased(t, run)
+	if info, err := os.Lstat(legacyLock); err != nil || !info.IsDir() {
+		t.Fatalf("legacy lease changed: %v, %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(legacyLock), "dark-factory-local-ci")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refusal created a capability: %v", err)
+	}
+	if body, err := os.ReadFile(filepath.Join(fixture.changeParent, fixture.changeName(t, run), "payload.txt")); err != nil || string(body) != "exact source\n" {
+		t.Fatalf("retained exact source = %q, %v", body, err)
+	}
+}
+
+func TestSupervisorOptionalCILeaseDoesNotHideSourceFailure(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	fixture.spec.BaseRevision = "refs/heads/nonexistent-source"
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Logf("source selection refusal: %v", err)
+	}
+	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
+	if run.Terminal == nil || run.Terminal.Code() != kernel.FailureSource {
+		t.Fatalf("source failure = %+v", run.Terminal)
+	}
+}
+
 // Exercise the actual provider API, runner result authentication, and retained
 // proposal retry together. A backwards clock causes the first durable
 // finalization to refuse after authenticating the exact attempt bearer.

@@ -18,7 +18,6 @@ DARK_FACTORY_AGENT
 DARK_FACTORY_SESSION
 DARK_FACTORY_SESSION_TOKEN_FILE
 DARK_FACTORY_AGENT_DIR
-DARK_FACTORY_FACTORYCTL
 DARK_FACTORY_TASK
 DARK_FACTORY_RUN'
 
@@ -28,6 +27,8 @@ child_environment=$temporary/child.env
         export "$name=hostile live value; \$(must remain data)"
     done
     export DARK_FACTORY_LOCAL_CI_TEST_SENTINEL=preserved-local-ci-test-seam
+    export DARK_FACTORY_LOCAL_CI_DIRECTORY=/private/fixture/.git/dark-factory-local-ci
+    export DARK_FACTORY_FACTORYCTL=/private/fixture/factoryctl
     export DARK_FACTORY_LOCAL_CI_LEASE_HELD=1
     export DARK_FACTORY_LOCAL_CI_TEST_PAUSE_AFTER_LOCKF=/hostile/pause
     export CARGO_TARGET_DIR=/intentional/build-target
@@ -55,6 +56,8 @@ done
 for expected in \
     'DARK_FACTORY_LOCAL_CI_TEST_SENTINEL=preserved-local-ci-test-seam' \
     'DARK_FACTORY_LOCAL_CI_LEASE_HELD=1' \
+    'DARK_FACTORY_LOCAL_CI_DIRECTORY=/private/fixture/.git/dark-factory-local-ci' \
+    'DARK_FACTORY_FACTORYCTL=/private/fixture/factoryctl' \
     'DARK_FACTORY_LOCAL_CI_TEST_PAUSE_AFTER_LOCKF=/hostile/pause'
 do
     grep -F -x "$expected" "$child_environment" >/dev/null \

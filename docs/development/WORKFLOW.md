@@ -137,6 +137,35 @@ test kills is not absence proof.
 The real disposable launchd check is `scripts/go-service-e2e.sh`. Run it only
 when install or service ownership changes; it is not a routine extra gate.
 
+The local CI lease lives entirely in `dark-factory-local-ci` beneath the
+repository's canonical Git common directory. Git-free workers receive only
+that subtree through `DARK_FACTORY_LOCAL_CI_DIRECTORY`; use
+`scripts/with-local-ci-lease.sh <focused check>` to share the host gate.
+Full `local-ci.sh` still requires a Git checkout for its source-control checks.
+If lease preparation is unavailable or refused, source work can still start with
+no lease grant and an explicit startup diagnostic; required CI remains blocked.
+
+When installing this lease layout, drain old CI holders, let their existing
+helper clean its lease state, and update active host checkouts before enabling
+worker checks. The new helper refuses legacy lease state, then atomically installs a
+symlink barrier at the former lock pathname. Old helpers already refuse this
+object and cannot create an independent gate. Never grant workers the enclosing
+`.git`, and never delete a held lease to complete this cutover.
+
+To check an older exact host checkout after cutover without changing its source,
+run the current helper from that checkout:
+`/absolute/current/scripts/with-local-ci-lease.sh /bin/sh ./scripts/local-ci.sh`.
+The old entry preserves the held-lease marker and does not acquire a second gate.
+For its process gate, wrap `./scripts/go-ci-owned.sh` directly, not `go-ci.sh`
+(which always tries to acquire another lease). Git-free retained Changes must
+receive current helper source through the existing source-refresh workflow before
+using their local wrapper; do not bypass the migration barrier.
+
+Native checks use the already-pinned `DARK_FACTORY_FACTORYCTL` binary for only
+same-user process birth and group identity because macOS's setuid `/bin/ps`
+cannot execute inside the provider sandbox. Host checks retain `/bin/ps`.
+Neither path exposes process arguments, credentials, or a new daemon operation.
+
 ## Release and installation
 
 Publishing an immutable semver tag whose name matches `VERSION` triggers

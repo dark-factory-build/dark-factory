@@ -163,6 +163,7 @@ func (Installation) GoString() string { return "provider.Installation{private}" 
 // capabilities that make these paths true immediately around Build and exec.
 // This value is never authority by itself.
 type RuntimePaths struct {
+	localCILeaseDir                                                          string
 	home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome string
 	// accountConfig is one linked provider login's own configuration
 	// directory. Empty means the provider's default, which is what every
@@ -170,6 +171,16 @@ type RuntimePaths struct {
 	accountConfig      string
 	toolchainReadRoots string
 	sourceReadPaths    []string
+}
+
+// WithLocalCILeaseDirectory carries only daemon-resolved lease storage, never
+// the enclosing Git directory, into a Git-free worker.
+func (runtime RuntimePaths) WithLocalCILeaseDirectory(path string) (RuntimePaths, error) {
+	if path != "" && (!validAbsolute(path, maxPathBytes) || filepath.Base(path) != "dark-factory-local-ci") {
+		return RuntimePaths{}, ErrInvalid
+	}
+	runtime.localCILeaseDir = path
+	return runtime, nil
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
@@ -392,6 +403,11 @@ func codexPermissions(request Request) (string, error) {
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		entries = append(entries, tomlBasicString(root)+`="read"`)
 	}
+	if request.runtime.localCILeaseDir != "" {
+		entries = append(entries, tomlBasicString(request.runtime.localCILeaseDir)+`="write"`)
+		// The existing lease wrapper uses system Perl for its owned process group.
+		entries = append(entries, tomlBasicString("/System/Library/Perl")+`="read"`)
+	}
 	for _, path := range request.runtime.sourceReadPaths {
 		entries = append(entries, tomlBasicString(path)+`="read"`)
 	}
@@ -568,6 +584,9 @@ func unavailable(kind kernel.Provider) error {
 }
 
 func (runtime RuntimePaths) valid() bool {
+	if runtime.localCILeaseDir != "" && (!validAbsolute(runtime.localCILeaseDir, maxPathBytes) || filepath.Base(runtime.localCILeaseDir) != "dark-factory-local-ci") {
+		return false
+	}
 	paths := []string{runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl}
 	for _, path := range paths {
 		if !validAbsolute(path, maxPathBytes) {
@@ -619,6 +638,9 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 		if configDir := filepath.Dir(ClaudeConfigFile(runtime.accountHome, runtime.accountConfig)); configDir != runtime.accountHome {
 			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
 		}
+	}
+	if runtime.localCILeaseDir != "" {
+		environment = append(environment, "DARK_FACTORY_LOCAL_CI_DIRECTORY="+runtime.localCILeaseDir)
 	}
 	return append(environment,
 		"LANG=C",
