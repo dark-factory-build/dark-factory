@@ -2,7 +2,9 @@
 import importlib.util
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -158,6 +160,55 @@ class AutonomyTest(unittest.TestCase):
         with patch.object(runtime.shutil, 'which', return_value='/usr/local/bin/go'), patch.object(runtime.subprocess, 'run', side_effect=command):
             with self.assertRaisesRegex(ValueError, 'receipt disagrees'):
                 runtime.observe(Path('/private/tmp/alternate-factory'))
+
+    def test_real_deploy_process_emits_one_receipt_without_replaying_commands(self):
+        for initially_enabled, failing_action in ((False, ''), (True, ''), (True, 'off'), (True, 'on')):
+            with self.subTest(initially_enabled=initially_enabled, failing_action=failing_action), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                home = root / 'factory'
+                home.mkdir()
+                with sqlite3.connect(home / 'factory.sqlite3') as connection:
+                    connection.executescript('CREATE TABLE factory(singleton INTEGER, dispatch_enabled INTEGER, revision INTEGER); CREATE TABLE runs(phase TEXT);')
+                    connection.execute('INSERT INTO factory VALUES(1, ?, 4)', (initially_enabled,))
+                (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
+                (root / 'reinstall-service.sh').write_text('printf "%s\\n" "$*" >>"$DARK_FACTORY_SOCKET.install-calls"\necho installer-output\n')
+                (root / 'verify-live-runtime.py').write_text('import json, sys\nprint(json.dumps({"sha": sys.argv[-1], "healthy": True}))\n')
+                control = Path(str(home) + '.service/bin/current/factoryctl')
+                control.parent.mkdir(parents=True)
+                (home / 'runtimes').mkdir()
+                control.write_text('#!' + sys.executable + '\n' + r"""
+import json, os, pathlib, sqlite3, sys
+home = pathlib.Path(os.environ['DARK_FACTORY_OPERATOR_TOKEN_FILE']).parent
+with (home / 'dispatch-calls').open('a') as stream:
+    stream.write(sys.argv[2] + '\n')
+if sys.argv[2] == FAILING_ACTION:
+    print('fixture dispatch refused', file=sys.stderr)
+    raise SystemExit(7)
+with sqlite3.connect(home / 'factory.sqlite3') as connection:
+    enabled, revision = connection.execute('SELECT dispatch_enabled, revision FROM factory').fetchone()
+    assert revision == int(sys.argv[-1])
+    target = int(sys.argv[2] == 'on')
+    revision += int(enabled != target)
+    connection.execute('UPDATE factory SET dispatch_enabled=?, revision=?', (target, revision))
+print(json.dumps({'enabled': bool(target), 'revision': revision}))
+""".replace('FAILING_ACTION', repr(failing_action)))
+                control.chmod(0o700)
+                result = subprocess.run([sys.executable, str(root / 'deploy-runtime.py'), '--home', str(home), 'a' * 40], capture_output=True, text=True, timeout=15)
+                calls = (home / 'dispatch-calls').read_text().splitlines()
+                self.assertEqual(['off', 'on'] if initially_enabled and failing_action != 'off' else ['off'], calls)
+                install_calls = (home / 'runtimes/factory.sock.install-calls').read_text().splitlines()
+                self.assertEqual(1 if failing_action == 'off' else 2, len(install_calls))
+                self.assertIn('--prepare', install_calls[0])
+                if len(install_calls) == 2:
+                    self.assertIn('--install-prepared', install_calls[1])
+                if failing_action:
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual('', result.stdout)
+                    self.assertIn('fixture dispatch refused', result.stderr)
+                else:
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual({'sha': 'a' * 40, 'healthy': True, 'dispatch_enabled': initially_enabled}, json.loads(result.stdout))
+                    self.assertEqual(1, len(result.stdout.splitlines()))
 
     def test_runtime_operator_change_after_pause_never_installs(self):
         states = iter([(True, 4, 0), (False, 6, 0)])
