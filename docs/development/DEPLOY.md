@@ -5,7 +5,7 @@ mis-positioned worktree.
 
 ```sh
 ./scripts/deploy-site.sh <site-commit-sha>
-./scripts/reinstall-service.sh <commit-sha>
+./scripts/reinstall-service.sh [--home /absolute/factory-home] <commit-sha>
 ```
 
 `deploy-site.sh` deploys the public site to Vercel production from a detached
@@ -17,9 +17,9 @@ for `https://app.darkfactory.build`.
 from a detached worktree of this repository at that commit with `GOTOOLCHAIN`
 pinned to the Go version that worktree's `go.mod` declares (as the release
 workflow pins it), verifies `go version -m` reports the same `vcs.revision`
-and `vcs.modified=false`, backs
-up `$HOME/.dark-factory/factory.sqlite3` to
-`$HOME/.dark-factory-backups/<utc-timestamp>-<sha>/`, then runs
+and `vcs.modified=false`, links and verifies the release build receipt, backs
+up the selected home’s `factory.sqlite3` to
+`$HOME/.dark-factory-backups/<utc-timestamp>-<sha>.<unique>/`, then runs
 `factoryctl service uninstall` and `service install` with the new binaries,
 waits (bounded) for the previous daemon to leave and for the new one to accept
 on its socket, and prints service, web and remote status. It refuses to run
@@ -31,6 +31,19 @@ then run `factoryctl dispatch on`. Binaries land in
 `.worktrees/bin-<sha>`. If it stops after the uninstall because the previous
 daemon still accepts connections or retains `home.lock`, the service is
 uninstalled: rerun once that daemon has exited.
+
+For a configured factory, pass the same absolute `--home` to both
+`deploy-runtime.py` and `verify-live-runtime.py` (the default remains
+`$HOME/.dark-factory`). The installer preserves the existing service receipt’s
+label, relay origin, tool path, toolchain read roots, and development browser
+address. It refuses a missing label or a receipt changed during preparation.
+
+The deployment hook calls `reinstall-service.sh --prepare` while work continues.
+Only preparation holds the shared local-CI lease. After it releases the lease,
+the hook pauses dispatch and drains work, then calls `--install-prepared`.
+That phase validates the clean exact source and all three binaries’ VCS and
+release identities without compiling or waiting for the compiler lease.
+Preparation does not back up, migrate a browser profile, or alter the service.
 
 `scripts/local-ci.sh` runs `scripts/test-reinstall-service.sh` and
 `scripts/test-deploy-site.sh`, which exercise both scripts against fakes.

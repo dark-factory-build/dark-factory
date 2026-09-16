@@ -139,10 +139,12 @@ A release configuration pins `repository`, `base`, `journal`, `deploy_argv`,
 `verify_argv`, `review_verifier`, and `command_timeout` (5–1200 seconds).
 All command arrays are trusted operator configuration with absolute executable
 paths, never source or agent output. The controller appends the full merge SHA.
-The runtime installer can take up to 960 seconds (drain, reinstall, and
-probe), so its release configuration uses 1200 seconds.
+The runtime hook prepares before draining. Set its release configuration timeout
+to 1200 seconds to cover preparation, drain, installation, and verification.
 For this repository use Python with `scripts/deploy-runtime.py` and
-`scripts/verify-live-runtime.py`; for the site use `/bin/sh` with
+`scripts/verify-live-runtime.py`. For a non-default factory, include
+`"--home", "/absolute/factory-home"` in both arrays before the appended SHA.
+For the site use `/bin/sh` with
 `scripts/deploy-site.sh` and Python with `scripts/verify-live-site.py`.
 `review_verifier` runs `/bin/sh` with `scripts/verify-adversarial-review.sh`.
 A probe emits the actually installed `sha` and boolean `healthy`; unavailable

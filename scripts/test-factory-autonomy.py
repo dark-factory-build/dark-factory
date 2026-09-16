@@ -95,8 +95,12 @@ class AutonomyTest(unittest.TestCase):
 
     def test_mixed_installed_binaries_cannot_prove_health(self):
         identities = ['a' * 40, 'b' * 40, 'a' * 40]
+        last_sha = []
         def observe(argv, **kwargs):
+            if '--build-identity' in argv:
+                return subprocess.CompletedProcess(argv, 0, json.dumps({'source': last_sha[0], 'release': True}), '')
             sha = identities.pop(0)
+            last_sha[:] = [sha]
             return subprocess.CompletedProcess(argv, 0, 'vcs.revision=' + sha + '\nvcs.modified=false\n', '')
         with patch.object(runtime.shutil, 'which', return_value='/usr/local/bin/go'), patch.object(runtime.subprocess, 'run', side_effect=observe):
             with self.assertRaisesRegex(ValueError, 'different revisions'):
@@ -110,21 +114,61 @@ class AutonomyTest(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, '', '')
         with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), patch.object(deploy.subprocess, 'run', side_effect=command) as run:
             deploy.deploy('a' * 40)
-        install = next(call for call in run.call_args_list if Path(call.args[0][1]).name == 'reinstall-service.sh')
+        install = next(call for call in run.call_args_list if Path(call.args[0][1]).name == 'reinstall-service.sh' and '--prepare' not in call.args[0])
         self.assertEqual(600, install.kwargs['timeout'])
         self.assertIn([str(Path.home() / '.dark-factory.service/bin/current/factoryctl'), 'dispatch', 'off', '--revision', '4'], [call.args[0] for call in run.call_args_list])
         self.assertIn([str(Path.home() / '.dark-factory.service/bin/current/factoryctl'), 'dispatch', 'on', '--revision', '5'], [call.args[0] for call in run.call_args_list])
+
+    def test_custom_home_prepares_before_pausing_and_is_used_throughout(self):
+        home = Path('/private/tmp/alternate-factory')
+        events = []
+        states = iter([(True, 4, 0), (False, 5, 0), (False, 5, 0), (False, 5, 0), (True, 6, 0)])
+        def state(actual_home):
+            self.assertEqual(home, actual_home)
+            events.append('state')
+            return next(states)
+        def command(argv, **kwargs):
+            events.append(argv)
+            self.assertEqual(str(home / 'runtimes/factory.sock'), kwargs['env']['DARK_FACTORY_SOCKET'])
+            self.assertEqual(str(home / 'operator.token'), kwargs['env']['DARK_FACTORY_OPERATOR_TOKEN_FILE'])
+            if 'dispatch' in argv:
+                self.assertEqual(str(home) + '.service/bin/current/factoryctl', argv[0])
+            else:
+                self.assertEqual(str(home), argv[argv.index('--home') + 1])
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'sha': 'a' * 40, 'healthy': True}), '')
+        with patch.object(deploy, 'state', side_effect=state), patch.object(deploy.subprocess, 'run', side_effect=command):
+            deploy.deploy('a' * 40, home)
+        self.assertIn('--prepare', events[0])
+        self.assertEqual('state', events[1])
+
+    def test_preparation_failure_does_not_pause_or_write_failure_receipt(self):
+        with patch.object(deploy, 'state') as state, patch.object(deploy, 'failure_receipt') as receipt, \
+             patch.object(deploy.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, ['prepare'])) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                deploy.deploy('a' * 40, Path('/private/tmp/alternate-factory'))
+        state.assert_not_called()
+        receipt.assert_not_called()
+        self.assertEqual(1, run.call_count)
+        self.assertIn('--prepare', run.call_args.args[0])
+
+    def test_runtime_build_receipt_must_match_source(self):
+        def command(argv, **kwargs):
+            output = json.dumps({'source': 'b' * 40, 'release': True}) if '--build-identity' in argv else 'vcs.revision=' + 'a' * 40 + '\nvcs.modified=false\n'
+            return subprocess.CompletedProcess(argv, 0, output, '')
+        with patch.object(runtime.shutil, 'which', return_value='/usr/local/bin/go'), patch.object(runtime.subprocess, 'run', side_effect=command):
+            with self.assertRaisesRegex(ValueError, 'receipt disagrees'):
+                runtime.observe(Path('/private/tmp/alternate-factory'))
 
     def test_runtime_operator_change_after_pause_never_installs(self):
         states = iter([(True, 4, 0), (False, 6, 0)])
         with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
             with self.assertRaisesRegex(ValueError, 'operator changed'):
                 deploy.deploy('a' * 40)
-        self.assertFalse(any(Path(call.args[0][1]).name == 'reinstall-service.sh' for call in run.call_args_list))
+        self.assertFalse(any(Path(call.args[0][1]).name == 'reinstall-service.sh' and '--prepare' not in call.args[0] for call in run.call_args_list))
 
     def test_runtime_failure_records_a_safe_receipt(self):
         def timeout_install(argv, **_kwargs):
-            if Path(argv[1]).name == 'reinstall-service.sh':
+            if Path(argv[1]).name == 'reinstall-service.sh' and '--prepare' not in argv:
                 raise subprocess.TimeoutExpired(argv, 600)
             return subprocess.CompletedProcess(argv, 0, '', '')
         with patch.object(deploy, 'state', side_effect=[(True, 4, 0), (False, 5, 0), (False, 5, 0), (False, 5, 0)]), \
