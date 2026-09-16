@@ -56,10 +56,75 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validatePeerQuestions(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
+	if err := validateContinuations(ctx, connection); err != nil {
+		return FactoryState{}, err
+	}
 	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
 	return state, nil
+}
+
+func validateContinuations(ctx context.Context, connection *sql.Conn) error {
+	rows, err := connection.QueryContext(ctx, `SELECT id FROM continuations ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return err
+		}
+		id, err := ContinuationIDFromBytes(raw)
+		if err != nil {
+			return fmt.Errorf("%w: continuation identifier", ErrCorruptState)
+		}
+		continuation, found, err := continuationByID(ctx, connection, id)
+		if err != nil {
+			return err
+		}
+		if !found || continuation.ID != id {
+			return fmt.Errorf("%w: continuation lookup", ErrCorruptState)
+		}
+		switch continuation.State {
+		case ContinuationWaiting:
+			if continuation.ResolutionDetail != "" || continuation.ResolvedAt != nil {
+				return fmt.Errorf("%w: waiting continuation is resolved", ErrCorruptState)
+			}
+		case ContinuationQueued, ContinuationResolved, ContinuationCancelled:
+			if continuation.ResolutionDetail == "" || continuation.ResolvedAt == nil {
+				return fmt.Errorf("%w: resolved continuation lacks resolution", ErrCorruptState)
+			}
+		default:
+			return fmt.Errorf("%w: unknown continuation state", ErrCorruptState)
+		}
+		var taskProject []byte
+		var taskIncarnation []byte
+		var taskWork, taskRevision int64
+		var taskStatus string
+		if err := connection.QueryRowContext(ctx, `SELECT project_id, incarnation_id, work_revision, status, revision FROM tasks WHERE id = ?`, continuation.TaskID.Bytes()).Scan(&taskProject, &taskIncarnation, &taskWork, &taskStatus, &taskRevision); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: continuation task is missing", ErrCorruptState)
+			}
+			return err
+		}
+		project, err := ProjectIDFromBytes(taskProject)
+		if err != nil || project != continuation.ProjectID {
+			return fmt.Errorf("%w: continuation project relationship", ErrCorruptState)
+		}
+		incarnation, err := IncarnationIDFromBytes(taskIncarnation)
+		if err != nil || incarnation != continuation.TaskIncarnationID || taskWork != continuation.WorkRevision.Int64() || taskRevision < 1 {
+			return fmt.Errorf("%w: continuation task identity", ErrCorruptState)
+		}
+		// Queued continuations retain the task's current lifecycle row until
+		// admission is wired to the continuation queue. Historical resolved
+		// rows likewise outlive the task state that created them.
+		if continuation.State == ContinuationWaiting && taskStatus != TaskRunning.String() {
+			return fmt.Errorf("%w: continuation task state", ErrCorruptState)
+		}
+	}
+	return rows.Err()
 }
 
 func validatePeerQuestions(ctx context.Context, connection *sql.Conn) error {
