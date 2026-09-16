@@ -9,6 +9,8 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
+const trustedSystemToolchainRoot = "/Library/Developer/CommandLineTools"
+
 // Toolchain read roots are explicit startup authority, not inferred PATH parents.
 // Keep their total below the provider's existing bounded permission argument.
 func ValidToolchainReadRoots(value string) bool {
@@ -55,7 +57,8 @@ func ToolchainReadRootsAllowed(value, accountHome string, privatePaths ...string
 	return true
 }
 
-// Startup requires current-user ownership and refuses aliases or writable roots.
+// Startup requires current-user ownership, except for the exact root-owned
+// Apple Command Line Tools installation, and refuses aliases or writable roots.
 func CheckToolchainReadRoots(value, accountHome string, privatePaths ...string) error {
 	if !ToolchainReadRootsAllowed(value, accountHome, privatePaths...) {
 		return ErrServicePlist
@@ -70,11 +73,15 @@ func CheckToolchainReadRoots(value, accountHome string, privatePaths ...string) 
 			return ErrServicePlist
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != uint32(os.Geteuid()) {
+		if !ok || (stat.Uid != uint32(os.Geteuid()) && !trustedSystemToolchainOwnership(root, stat.Uid)) {
 			return ErrServicePlist
 		}
 	}
 	return nil
+}
+
+func trustedSystemToolchainOwnership(root string, uid uint32) bool {
+	return root == trustedSystemToolchainRoot && uid == 0
 }
 
 func containsToolchainPath(root, path string) bool {

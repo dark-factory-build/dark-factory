@@ -142,6 +142,7 @@ read-only access to exact installed software directories (for example one
 Node installation including its Corepack libraries, or one Go `libexec`).
 This is not inferred from PATH and does not pin every child executable.
 The paths must be canonical existing directories owned by the daemon user,
+or the exact root-owned `/Library/Developer/CommandLineTools` installation,
 not writable by other users,
 and cannot overlap Factory private paths or include account/credential roots.
 The managed service install accepts and records the same option; status and
