@@ -321,18 +321,17 @@ func retainedChangeHandoff(ctx context.Context, connection *sql.Conn, projectID 
 	if !found || run.ProjectID != projectID || run.Role != RoleWorker || run.Phase != RunTerminal || run.Terminal == nil || run.TaskID != task.ID {
 		return RetainedChangeHandoff{}, false, ErrCorruptState
 	}
-	// Retained failed or blocked trees, and a tree from an earlier work
-	// revision after send-back, remain durable evidence but are not launch
-	// authority. Only the task's current successful settlement is handoffable.
-	if run.Terminal.Kind() != OutcomeSucceeded || run.AdmittedTaskWorkRevision != task.WorkRevision {
+	// Every current settled tree is inspectable evidence, regardless of outcome.
+	// A send-back invalidates this identity; it never authorizes execution.
+	if run.AdmittedTaskWorkRevision != task.WorkRevision {
 		return RetainedChangeHandoff{}, false, nil
 	}
 	return RetainedChangeHandoff{ChangeID: change.ID, BaseCommit: hex.EncodeToString(change.Selection.Commit().Bytes()), TaskID: task.ID, TaskWorkRevision: task.WorkRevision, ChangeRevision: change.Revision}, true, nil
 }
 
 // RetainedChangeHandoffForTask returns the current handoff identity for one
-// project task. It is used before a send-back makes that identity stale, so a
-// daemon can revoke launch-time filesystem grants before reopening the Change.
+// project task. The daemon copies it into an immutable attempt-local snapshot;
+// a send-back makes the identity stale for subsequent source requests.
 func (store *Store) RetainedChangeHandoffForTask(ctx context.Context, projectID ProjectID, taskID TaskID) (RetainedChangeHandoff, bool, error) {
 	read, err := store.beginRead(ctx)
 	if err != nil {

@@ -56,7 +56,7 @@ func TestMain(m *testing.M) {
 			err = runner.RunAttemptRunner()
 		case "--change-worker":
 			err = changeworker.Run(context.Background())
-		case "--supervisor-attempt-succeed":
+		case "--supervisor-attempt-succeed", "--supervisor-attempt-block", "--supervisor-attempt-fail":
 			if len(os.Args) != 3 {
 				err = errors.New("invalid attempt helper invocation")
 				break
@@ -67,7 +67,14 @@ func TestMain(m *testing.M) {
 				break
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_, err = client.Succeed(ctx, os.Args[2])
+			switch os.Args[1] {
+			case "--supervisor-attempt-block":
+				_, err = client.Block(ctx, os.Args[2])
+			case "--supervisor-attempt-fail":
+				_, err = client.Fail(ctx, os.Args[2])
+			default:
+				_, err = client.Succeed(ctx, os.Args[2])
+			}
 			cancel()
 		case "attempt":
 			if len(os.Args) != 7 || os.Args[2] != "request-human" || os.Args[3] != "--idempotency-key" || os.Args[5] != "--question" {
@@ -592,18 +599,19 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 	fixture.assertReleased(t, run)
 }
 
-// One Codex overseer reads two independently retained Changes in the same
+// One Codex overseer reads blocked and failed retained Changes in the same
 // attempt. Each source receipt must agree with targeted status, and requesting
 // the second tree must preserve the first tree and its cached receipt.
 // This is intentionally not a projection-only test: it exercises the real
 // supervisor, Change worker, provider permission profile and attempt API.
 func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) {
-	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	program := strings.Replace(supervisorProgram(t, false, false), "--supervisor-attempt-succeed", "--supervisor-attempt-block", 1)
+	fixture := newSupervisorFixture(t, program)
 	worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("worker RunNext: %v", err)
 	}
-	fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
+	fixture.assertTerminal(t, worker, kernel.OutcomeBlocked)
 	changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
 	if err != nil || !found || changeState.Selection == nil {
 		t.Fatalf("retained worker Change = %+v, found=%v, err=%v", changeState, found, err)
@@ -616,7 +624,7 @@ func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) 
 
 	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
 		ID: supervisorTaskID(t, 20), ProjectID: worker.ProjectID, AssignedAgentID: worker.AgentID,
-		IncarnationID: supervisorIncarnationID(t, 21), Title: "second source", Body: workerTask.Body, Priority: 1,
+		IncarnationID: supervisorIncarnationID(t, 21), Title: "second source", Body: strings.Replace(workerTask.Body, "--supervisor-attempt-block", "--supervisor-attempt-fail", 1), Priority: 1,
 	}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +632,7 @@ func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) 
 	if err != nil {
 		t.Fatalf("second worker RunNext: %v", err)
 	}
-	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	fixture.assertTerminal(t, second, kernel.OutcomeFailed)
 	secondChange, found, err := fixture.store.Change(context.Background(), *second.ChangeID)
 	if err != nil || !found || secondChange.Selection == nil {
 		t.Fatalf("second retained Change = %+v, found=%v, err=%v", secondChange, found, err)
@@ -2356,8 +2364,13 @@ func (fixture *supervisorFixture) assertTerminal(t *testing.T, run kernel.Run, k
 		t.Fatalf("terminal task read = %+v, found=%v, err=%v", task, found, err)
 	}
 	want := kernel.TaskFailed
-	if kind == kernel.OutcomeSucceeded {
+	switch kind {
+	case kernel.OutcomeSucceeded:
 		want = kernel.TaskSucceeded
+	case kernel.OutcomeBlocked:
+		want = kernel.TaskBlocked
+	case kernel.OutcomeCancelled:
+		want = kernel.TaskCancelled
 	}
 	if task.Status != want {
 		t.Fatalf("task status = %s, want %s", task.Status.String(), want.String())
