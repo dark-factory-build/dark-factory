@@ -52,6 +52,11 @@ receipt_field() {
 service_receipt_hash=$(shasum -a 256 "$runtime_home.service/receipt")
 label=$(receipt_field label)
 [ -n "$label" ] || { echo "service receipt has no label" >&2; exit 1; }
+plist_path=$(receipt_field plist_path)
+case "$plist_path" in
+    /*/"$label.plist") plist_dir=$(dirname "$plist_path") ;;
+    *) echo "service receipt has no matching absolute plist path" >&2; exit 1 ;;
+esac
 relay_origin=$(receipt_field relay_origin)
 tool_path=$(receipt_field tool_path)
 toolchain_read_roots=$(receipt_field toolchain_read_roots)
@@ -102,8 +107,8 @@ uninstall_stalled() {
 }
 install_stalled() {
     echo "factoryd did not listen on $socket within 60s" >&2
-    echo "check 'factoryctl service status --home $runtime_home --label $label' and the daemon log; after a failed migration" >&2
-    echo "run 'factoryctl service uninstall --home $runtime_home --label $label', confirm $runtime_home/home.lock is free, then restore $backup/factory.sqlite3 over $db, remove $db-wal and $db-shm, and reinstall the previous bin-*" >&2
+    echo "check 'factoryctl service status --home $runtime_home --label $label --plist-dir $plist_dir' and the daemon log; after a failed migration" >&2
+    echo "run 'factoryctl service uninstall --home $runtime_home --label $label --plist-dir $plist_dir', confirm $runtime_home/home.lock is free, then restore $backup/factory.sqlite3 over $db, remove $db-wal and $db-shm, and reinstall the previous bin-*" >&2
     exit 1
 }
 
@@ -212,12 +217,12 @@ refuse_dispatch_enabled
 refuse_active_runs
 [ "$(shasum -a 256 "$runtime_home.service/receipt")" = "$service_receipt_hash" ] \
     || { echo "service settings changed during preparation; retry from the current receipt" >&2; exit 1; }
-"$bin/factoryctl" service uninstall --home "$runtime_home" --label "$label"
+"$bin/factoryctl" service uninstall --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
 # bootout returns once launchd forgets the job; factoryd unlinks its socket
 # before it closes the store and releases the home flock. A socket file that
 # nothing answers on is stale, and factoryd removes it on its next start.
 await previous_left uninstall_stalled
-set -- service install --home "$runtime_home" --label "$label"
+set -- service install --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
 [ -z "$relay_origin" ] || set -- "$@" --relay-origin "$relay_origin"
 [ -z "$tool_path" ] || set -- "$@" --tool-path "$tool_path"
 [ -z "$toolchain_read_roots" ] || set -- "$@" --toolchain-read-roots "$toolchain_read_roots"
@@ -228,7 +233,7 @@ set -- service install --home "$runtime_home" --label "$label"
 # the migration finished. Bounded: a daemon that dies on a failed migration
 # never listens.
 await listening install_stalled
-"$bin/factoryctl" service status --home "$runtime_home" --label "$label"
+"$bin/factoryctl" service status --home "$runtime_home" --label "$label" --plist-dir "$plist_dir"
 export DARK_FACTORY_SOCKET="$socket"
 export DARK_FACTORY_OPERATOR_TOKEN_FILE="$runtime_home/operator.token"
 "$bin/factoryctl" web status

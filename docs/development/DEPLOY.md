@@ -35,7 +35,7 @@ uninstalled: rerun once that daemon has exited.
 For a configured factory, pass the same absolute `--home` to both
 `deploy-runtime.py` and `verify-live-runtime.py` (the default remains
 `$HOME/.dark-factory`). The installer preserves the existing service receipt’s
-label, relay origin, tool path, toolchain read roots, and development browser
+label, plist directory, relay origin, tool path, toolchain read roots, and development browser
 address. It refuses a missing label or a receipt changed during preparation.
 
 The deployment hook calls `reinstall-service.sh --prepare` while work continues.
