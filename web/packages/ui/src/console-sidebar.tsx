@@ -269,11 +269,18 @@ export function QueuePanel({
   const agents = state === undefined ? [] : [...state.agents.values()];
   const tasks = state === undefined ? [] : [...state.tasks.values()];
   const running = tasks.filter((task) => task.status === "running");
-  const queued = agents.flatMap((agent) => {
-    const assigned = tasks
-      .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
-    return assigned.length === 0 ? [] : [{ agent, tasks: assigned }];
-  });
+  const queued = [
+    ...agents.flatMap((agent) => {
+      const assigned = tasks
+        .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
+      return assigned.length === 0 ? [] : [{ projectId: agent.project_id, tasks: assigned }];
+    }),
+    // Shared work waits under its project until an eligible worker claims it.
+    ...(state === undefined ? [] : [...state.projects.values()]).flatMap((project) => {
+      const shared = tasks.filter((task) => task.assigned_agent_id === "" && task.project_id === project.id && task.status === "queued");
+      return shared.length === 0 ? [] : [{ projectId: project.id, tasks: shared }];
+    }),
+  ];
   return <section className="dfConsoleSidebar__panel" aria-label="Queue">
     {state === undefined ? <p className="dfFactoryConsole__empty">WAITING FOR SNAPSHOT</p>
       : <>
@@ -284,8 +291,8 @@ export function QueuePanel({
             <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"}</span>
           </div></li>)}</ul>
         </section>}
-        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">NO QUEUED TASKS</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ agent, tasks }) => {
-          const peers = agents.filter((peer) => peer.project_id === agent.project_id);
+        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">NO QUEUED TASKS</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ projectId, tasks }) => {
+          const peers = agents.filter((peer) => peer.project_id === projectId);
           return tasks.filter((task) => selectedTaskId === undefined || task.id === selectedTaskId).map((task) => <QueuedTask
               selected={selectedTaskId === task.id}
               onSelectTask={onSelectTask}
@@ -459,7 +466,7 @@ function QueuedTask({
   return (
     <li>
       <details className="dfConsoleItem" onToggle={(event) => { if (event.currentTarget.open && brief === undefined && !loading) void load(); }}>
-        <summary className="dfConsoleItem__summary" onClick={() => onSelectTask?.(task.id)}><strong>{task.title}</strong><span className="dfConsoleItem__meta">{peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
+        <summary className="dfConsoleItem__summary" onClick={() => onSelectTask?.(task.id)}><strong>{task.title}</strong><span className="dfConsoleItem__meta">{task.assigned_agent_id === "" ? "ANY ELIGIBLE WORKER" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
         <div className="dfConsoleItem__detail">
         {open ? <>
           <label htmlFor={`df-title-${task.id}`}>TITLE</label>
@@ -486,7 +493,10 @@ function QueuedTask({
             disabled={disabled}
             onChange={(event) => { void onEditTask(task, { assignedAgentId: event.currentTarget.value }); }}
           >
-            {peers.filter((peer) => !peer.archived).map((peer) => <option key={peer.id} value={peer.id}>{peer.name}</option>)}
+            {[
+              ...(task.assigned_agent_id === "" ? [<option key="" value="" disabled>Any eligible worker</option>] : []),
+              ...peers.filter((peer) => !peer.archived && (task.assigned_agent_id !== "" || peer.role === "worker")).map((peer) => <option key={peer.id} value={peer.id}>{peer.name}</option>),
+            ]}
           </select>
           <button type="button" disabled={disabled} onClick={() => { void onEditTask(task, { cancel: true }); }}>CANCEL</button>
         </div>
