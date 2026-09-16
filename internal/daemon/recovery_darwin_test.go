@@ -968,3 +968,60 @@ func TestConvergenceWritesUseLifecycleContext(t *testing.T) {
 		}
 	}
 }
+
+func TestDaemonCloseCancelsCleanupWaitingForWriter(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0xa0)
+	fixture.failBeforeRuntime(t)
+	before := fixture.currentRun(t)
+	lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	entered := make(chan struct{}, 1)
+	fixture.daemon.now = func() time.Time {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		return time.UnixMilli(9000)
+	}
+	registration, err := fixture.daemon.registerSupervisor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupDone := make(chan error, 1)
+	go func() {
+		_, err := fixture.daemon.settleRun(fixture.daemon.cleanupCtx, fixture.changeParent, fixture.run.ID)
+		cleanupDone <- err
+		fixture.daemon.endSupervisor(registration, err)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup did not reach writer")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- fixture.daemon.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("shutdown did not cancel unreleased writer wait")
+	}
+	select {
+	case err := <-cleanupDone:
+		if err == nil || !errors.Is(fixture.daemon.cleanupCtx.Err(), context.Canceled) {
+			t.Fatalf("shutdown cleanup result: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup did not finish after shutdown")
+	}
+	if current := fixture.currentRun(t); current.Revision != before.Revision || current.Phase != kernel.RunFinalizing {
+		t.Fatal("shutdown lost recoverable finalizing run")
+	}
+}

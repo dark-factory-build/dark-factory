@@ -196,7 +196,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		}
 		var reconcileErr error
 		for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-			reconcileCtx := context.Background()
+			reconcileCtx := daemon.cleanupCtx
 			reconciled, readErr := reconcileAdmission(reconcileCtx, admissionKeys)
 			reconcileErr = readErr
 			if reconcileErr != nil {
@@ -683,7 +683,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: retained outcome proposal: %w", proposeErr))
 		}
 	}
-	run, err = daemon.consumeAttemptResult(ctx, result, false)
+	run, err = daemon.consumeAttemptResult(daemon.cleanupCtx, result, false)
 	if err != nil {
 		return kernel.Run{}, err
 	}
@@ -692,7 +692,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return run, err
 	}
 	if resultOutcome.observersRetained {
-		if err := live.finishExit(context.Background(), exitEvent); err != nil {
+		if err := live.finishExit(daemon.cleanupCtx, exitEvent); err != nil {
 			return run, fmt.Errorf("daemon: broadcast committed exit: %w", err)
 		}
 	}
@@ -711,15 +711,15 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		return run, err
 	}
-	run, err = daemon.recordLiveRunnerExit(ctx, run.ID, keys.resources.RunnerProcess, runnerResourceIdentity, exit)
+	run, err = daemon.recordLiveRunnerExit(daemon.cleanupCtx, run.ID, keys.resources.RunnerProcess, runnerResourceIdentity, exit)
 	if err != nil {
 		return kernel.Run{}, err
 	}
-	run, err = daemon.closeTerminalAfterRunner(ctx, result)
+	run, err = daemon.closeTerminalAfterRunner(daemon.cleanupCtx, result)
 	if err != nil {
 		return kernel.Run{}, err
 	}
-	if err := daemon.removeAttemptResult(ctx, runtimeDirectory, result, record); err != nil {
+	if err := daemon.removeAttemptResult(daemon.cleanupCtx, runtimeDirectory, result, record); err != nil {
 		return run, err
 	}
 	if err := child.Close(); err != nil {
@@ -751,7 +751,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.unresolvedRuntime(run, keys.resources.RuntimeRoot, errors.Join(err, errRetainedRuntime))
 	}
 	for {
-		done, removeErr := RemoveRecordedRuntime(context.Background(), spec.RuntimeParent, keys.run.String(), runtimeFileIdentity)
+		done, removeErr := RemoveRecordedRuntime(daemon.cleanupCtx, spec.RuntimeParent, keys.run.String(), runtimeFileIdentity)
 		if removeErr != nil {
 			return daemon.unresolvedRuntime(run, keys.resources.RuntimeRoot, removeErr)
 		}
@@ -760,10 +760,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if err := daemon.releaseResources(context.Background(), run.ID, kernel.ResourceRuntimeRoot); err != nil {
+	if err := daemon.releaseResources(daemon.cleanupCtx, run.ID, kernel.ResourceRuntimeRoot); err != nil {
 		return run, err
 	}
-	current, found, err := daemon.store.Run(context.Background(), run.ID)
+	current, found, err := daemon.store.Run(daemon.cleanupCtx, run.ID)
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrCorruptState
@@ -775,11 +775,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return run, err
 	}
 	if !worker {
-		final, err := daemon.store.FinalizeRun(context.Background(), run.ID, current.Revision, at)
+		final, err := daemon.store.FinalizeRun(daemon.cleanupCtx, run.ID, current.Revision, at)
 		return final, errors.Join(err, ctx.Err())
 	}
 	var settleErr error
-	changeState, found, settleErr = daemon.store.Change(context.Background(), changeID)
+	changeState, found, settleErr = daemon.store.Change(daemon.cleanupCtx, changeID)
 	if settleErr != nil || !found {
 		if settleErr == nil {
 			settleErr = kernel.ErrCorruptState
@@ -787,7 +787,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return current, errors.Join(settleErr, ctx.Err())
 	}
 	var settlement kernel.ChangeSettlement
-	settledFacts, settleErr := change.InspectPublished(context.Background(), spec.ChangeParent, finalName, workerResult.Tree, workerResult.Format, workerResult.Base)
+	settledFacts, settleErr := change.InspectPublished(daemon.cleanupCtx, spec.ChangeParent, finalName, workerResult.Tree, workerResult.Format, workerResult.Base)
 	if refused, refusal := publicationRefused(settleErr); refused {
 		// The tree the worker left cannot be published as it is. That is the
 		// run's outcome, recorded now, not a reason to leave it finalizing.
@@ -802,7 +802,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if settleErr != nil {
 		return current, errors.Join(settleErr, ctx.Err())
 	}
-	final, err := daemon.store.FinalizeWorkerRun(context.Background(), run.ID, current.Revision, settlement, at)
+	final, err := daemon.store.FinalizeWorkerRun(daemon.cleanupCtx, run.ID, current.Revision, settlement, at)
 	return final, errors.Join(err, ctx.Err())
 }
 
@@ -1013,7 +1013,7 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		current, found, readErr := daemon.store.Run(context.Background(), run.ID)
+		current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 		if readErr != nil || !found {
 			lastErr = readErr
 			if lastErr == nil {
@@ -1029,7 +1029,7 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 			lastErr = clockErr
 			continue
 		}
-		failed, failErr := daemon.store.FailRun(context.Background(), current.ID, current.Revision, failure, at)
+		failed, failErr := daemon.store.FailRun(daemon.cleanupCtx, current.ID, current.Revision, failure, at)
 		if failErr == nil {
 			return failed, cause
 		}
@@ -1053,7 +1053,7 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		current, found, readErr := daemon.store.Run(context.Background(), run.ID)
+		current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 		if readErr != nil || !found {
 			lastErr = readErr
 			if lastErr == nil {
@@ -1064,7 +1064,7 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 		if current.Phase != kernel.RunAdmitted {
 			return current, cause
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(context.Background(), runtimeID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(daemon.cleanupCtx, runtimeID)
 		if resourceErr != nil || !resourceFound {
 			lastErr = resourceErr
 			if lastErr == nil {
@@ -1077,7 +1077,7 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 			lastErr = clockErr
 			continue
 		}
-		failed, failErr := daemon.store.FailRunWithRuntimeAbsent(context.Background(), current.ID, runtimeID, current.Revision, resource.Revision, failure, at)
+		failed, failErr := daemon.store.FailRunWithRuntimeAbsent(daemon.cleanupCtx, current.ID, runtimeID, current.Revision, resource.Revision, failure, at)
 		if failErr == nil {
 			return failed, cause
 		}
@@ -1095,7 +1095,7 @@ func (daemon *Daemon) convergeUnstartedRunner(run kernel.Run, owner *supervisorA
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		current, found, readErr := daemon.store.Run(context.Background(), run.ID)
+		current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 		if readErr != nil || !found {
 			lastErr = readErr
 			if lastErr == nil {
@@ -1103,7 +1103,7 @@ func (daemon *Daemon) convergeUnstartedRunner(run kernel.Run, owner *supervisorA
 			}
 			continue
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(context.Background(), runnerID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(daemon.cleanupCtx, runnerID)
 		if resourceErr != nil || !resourceFound {
 			lastErr = resourceErr
 			if lastErr == nil {
@@ -1116,7 +1116,7 @@ func (daemon *Daemon) convergeUnstartedRunner(run kernel.Run, owner *supervisorA
 			lastErr = clockErr
 			continue
 		}
-		converged, convergeErr := daemon.store.RecordUnregisteredRunnerConverged(context.Background(), run.ID, runnerID, current.Revision, resource.Revision, at)
+		converged, convergeErr := daemon.store.RecordUnregisteredRunnerConverged(daemon.cleanupCtx, run.ID, runnerID, current.Revision, resource.Revision, at)
 		if convergeErr == nil {
 			return converged, cause
 		}
@@ -1198,7 +1198,7 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 		if resultErr != nil {
 			return kernel.Run{}, kernel.NewOutcomeUnknownError(errors.Join(cause, resultErr))
 		}
-		converged, consumeErr := daemon.consumeAttemptResult(context.Background(), result, false)
+		converged, consumeErr := daemon.consumeAttemptResult(daemon.cleanupCtx, result, false)
 		if consumeErr != nil {
 			return kernel.Run{}, errors.Join(cause, consumeErr)
 		}
@@ -1210,15 +1210,15 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 		if exitErr != nil {
 			return converged, errors.Join(cause, exitErr)
 		}
-		converged, exitErr = daemon.recordLiveRunnerExit(context.Background(), run.ID, runnerID, runnerIdentity, exit)
+		converged, exitErr = daemon.recordLiveRunnerExit(daemon.cleanupCtx, run.ID, runnerID, runnerIdentity, exit)
 		if exitErr != nil {
 			return kernel.Run{}, errors.Join(cause, exitErr)
 		}
-		converged, closeErr := daemon.closeTerminalAfterRunner(context.Background(), result)
+		converged, closeErr := daemon.closeTerminalAfterRunner(daemon.cleanupCtx, result)
 		if closeErr != nil {
 			return kernel.Run{}, errors.Join(cause, closeErr)
 		}
-		if removeErr := daemon.removeAttemptResult(context.Background(), runtimeDirectory, result, record); removeErr != nil {
+		if removeErr := daemon.removeAttemptResult(daemon.cleanupCtx, runtimeDirectory, result, record); removeErr != nil {
 			return converged, errors.Join(cause, removeErr)
 		}
 		return converged, cause
@@ -1228,7 +1228,7 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		current, found, readErr := daemon.store.Run(context.Background(), run.ID)
+		current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 		if readErr != nil || !found {
 			lastErr = readErr
 			if lastErr == nil {
@@ -1236,7 +1236,7 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 			}
 			continue
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(context.Background(), runnerID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(daemon.cleanupCtx, runnerID)
 		if resourceErr != nil || !resourceFound {
 			lastErr = resourceErr
 			if lastErr == nil {
@@ -1249,7 +1249,7 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 			lastErr = clockErr
 			continue
 		}
-		converged, absenceErr := daemon.store.RecordRecoveredPreSessionRunnerAbsence(context.Background(), run.ID, runnerID, current.Revision, resource.Revision, runnerIdentity, at)
+		converged, absenceErr := daemon.store.RecordRecoveredPreSessionRunnerAbsence(daemon.cleanupCtx, run.ID, runnerID, current.Revision, resource.Revision, runnerIdentity, at)
 		if absenceErr == nil {
 			return converged, cause
 		}
@@ -1442,17 +1442,17 @@ func (daemon *Daemon) removeAttemptResult(ctx context.Context, runtimeDirectory 
 }
 
 func (daemon *Daemon) unresolvedRuntime(run kernel.Run, resourceID kernel.ResourceID, cause error) (kernel.Run, error) {
-	resource, found, err := daemon.store.Resource(context.Background(), resourceID)
+	resource, found, err := daemon.store.Resource(daemon.cleanupCtx, resourceID)
 	if err == nil && found && resource.State != kernel.ResourceReleased && resource.State != kernel.ResourceUnresolved {
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
 			err = clockErr
 		} else {
-			_, markErr := daemon.store.MarkResourceUnresolved(context.Background(), run.ID, resourceID, resource.Revision, resource.Identity, "runtime cleanup could not prove absence", at)
+			_, markErr := daemon.store.MarkResourceUnresolved(daemon.cleanupCtx, run.ID, resourceID, resource.Revision, resource.Identity, "runtime cleanup could not prove absence", at)
 			err = markErr
 		}
 	}
-	current, found, readErr := daemon.store.Run(context.Background(), run.ID)
+	current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 	if readErr == nil && found {
 		run = current
 	}

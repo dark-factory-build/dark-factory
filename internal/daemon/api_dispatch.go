@@ -29,6 +29,10 @@ type Daemon struct {
 	store *kernel.Store
 	now   func() time.Time
 
+	// Cleanup survives caller cancellation but remains interruptible by daemon shutdown.
+	cleanupCtx    context.Context
+	cleanupCancel context.CancelFunc
+
 	// settleRetained is a package-test-only seam for an inspection that races a
 	// durable update. Production settlement always uses retainedSettlement.
 	settleRetained func(context.Context, string, kernel.Change) (kernel.ChangeSettlement, error)
@@ -114,7 +118,8 @@ func newDaemon(store *kernel.Store, now func() time.Time) (*Daemon, error) {
 	if store == nil || now == nil {
 		return nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
-	return &Daemon{store: store, now: now, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1)}, nil
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	return &Daemon{store: store, now: now, cleanupCtx: cleanupCtx, cleanupCancel: cleanupCancel, browsers: make(map[*BrowserRuntime]struct{}), browserClientGates: &browserClientGates{}, attempts: make(map[kernel.RunID]*liveAttempt), supervisors: make(map[*supervisorRegistration]struct{}), schedulerWake: make(chan struct{}, 1)}, nil
 }
 
 // HandleConnection synchronously consumes exactly one authenticated request,
@@ -1747,6 +1752,9 @@ func (registration *supervisorRegistration) wait() error {
 func (daemon *Daemon) Close() error {
 	if daemon == nil {
 		return nil
+	}
+	if daemon.cleanupCancel != nil {
+		daemon.cleanupCancel()
 	}
 	return errors.Join(daemon.closeBrowsers(), daemon.closeLiveAttempts())
 }

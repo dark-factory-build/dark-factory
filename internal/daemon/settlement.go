@@ -18,13 +18,12 @@ import (
 // verified against its recorded identity, base and format. Every state the
 // kernel edges refuse is returned unchanged with the refusal — settlement
 // never invents evidence.
-func (daemon *Daemon) settleRun(changeParent string, runID kernel.RunID) (kernel.Run, error) {
+func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID kernel.RunID) (kernel.Run, error) {
 	if daemon == nil || daemon.store == nil || runID == (kernel.RunID{}) {
 		return kernel.Run{}, fmt.Errorf("%w: invalid run settlement", kernel.ErrInvalidValue)
 	}
-	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-	run, found, err := daemon.store.Run(storeCtx, runID)
-	cancel()
+
+	run, found, err := daemon.store.Run(ctx, runID)
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrNotFound
@@ -42,17 +41,15 @@ func (daemon *Daemon) settleRun(changeParent string, runID kernel.RunID) (kernel
 		if err != nil {
 			return run, err
 		}
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		final, err := daemon.store.FinalizeRun(storeCtx, run.ID, run.Revision, at)
-		cancel()
+
+		final, err := daemon.store.FinalizeRun(ctx, run.ID, run.Revision, at)
 		return final, err
 	}
 	if run.ChangeID == nil {
 		return run, fmt.Errorf("%w: worker run without a candidate change", kernel.ErrCorruptState)
 	}
-	storeCtx, cancel = context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-	changeState, found, err := daemon.store.Change(storeCtx, *run.ChangeID)
-	cancel()
+
+	changeState, found, err := daemon.store.Change(ctx, *run.ChangeID)
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrCorruptState
@@ -69,16 +66,15 @@ func (daemon *Daemon) settleRun(changeParent string, runID kernel.RunID) (kernel
 		if err != nil {
 			return run, err
 		}
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		final, err := daemon.store.FinalizeWorkerRun(storeCtx, run.ID, run.Revision, settlement, at)
-		cancel()
+
+		final, err := daemon.store.FinalizeWorkerRun(ctx, run.ID, run.Revision, settlement, at)
 		return final, err
 	case kernel.ChangeAvailable:
 		settleRetained := daemon.settleRetained
 		if settleRetained == nil {
 			settleRetained = retainedSettlement
 		}
-		inspectionCtx, cancel := context.WithTimeout(context.Background(), supervisorInspectionWindow)
+		inspectionCtx, cancel := context.WithTimeout(ctx, supervisorInspectionWindow)
 		settlement, err := settleRetained(inspectionCtx, changeParent, changeState)
 		cancel()
 		if refused, refusal := publicationRefused(err); refused {
@@ -93,9 +89,8 @@ func (daemon *Daemon) settleRun(changeParent string, runID kernel.RunID) (kernel
 		if err != nil {
 			return run, err
 		}
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		final, err := daemon.store.FinalizeWorkerRun(storeCtx, run.ID, run.Revision, settlement, at)
-		cancel()
+
+		final, err := daemon.store.FinalizeWorkerRun(ctx, run.ID, run.Revision, settlement, at)
 		return final, err
 	default:
 		return run, fmt.Errorf("%w: change %s is not settleable for a finalizing run", kernel.ErrCorruptState, changeState.Phase.String())

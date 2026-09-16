@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -45,15 +46,15 @@ func (fixture *recoveryFixture) failBeforeRuntime(t *testing.T) kernel.Run {
 
 func TestSettleRunFinalizesOrchestratorAndReplaysTerminal(t *testing.T) {
 	fixture := newRecoveryFixture(t, 0x60)
-	if _, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID); !errors.Is(err, kernel.ErrConflict) {
+	if _, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID); !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("admitted run settlement = %v", err)
 	}
 	fixture.failBeforeRuntime(t)
-	settled, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID)
+	settled, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Code() != kernel.FailureSpawn {
 		t.Fatalf("settled orchestrator run = %+v, %v", settled, err)
 	}
-	replay, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID)
+	replay, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 	if err != nil || replay.Phase != kernel.RunTerminal || replay.Revision != settled.Revision {
 		t.Fatalf("terminal replay = %+v, %v", replay, err)
 	}
@@ -170,7 +171,7 @@ func TestSettleRunAllowsAFullRetainedTreeScan(t *testing.T) {
 	}
 	settledResult := make(chan settlementResult, 1)
 	go func() {
-		run, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID)
+		run, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 		settledResult <- settlementResult{run, err}
 	}()
 	select {
@@ -197,7 +198,7 @@ func TestSettleRunAllowsAFullRetainedTreeScan(t *testing.T) {
 func TestSettleRunAbandonsUnpublishedWorkerChange(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x70, kernel.RoleWorker)
 	fixture.failBeforeRuntime(t)
-	settled, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID)
+	settled, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil {
 		t.Fatalf("settled worker run = %+v, %v", settled, err)
 	}
@@ -260,7 +261,7 @@ func TestSettleRunRefusesUnverifiablePublishedChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := fixture.failBeforeRuntime(t)
-	settled, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID)
+	settled, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 	if !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("unverifiable published change settlement = %+v, %v", settled, err)
 	}
@@ -590,7 +591,7 @@ func TestSettleRunFinishesARefusalMovedEarlier(t *testing.T) {
 	}
 	before := fixture.failBeforeRuntime(t)
 	// Nothing at the Change's own name and nothing moved aside: not settleable.
-	if settled, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID); !errors.Is(err, kernel.ErrConflict) {
+	if settled, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID); !errors.Is(err, kernel.ErrConflict) {
 		t.Fatalf("missing tree with nothing aside = %+v, %v", settled, err)
 	}
 	if after := fixture.currentRun(t); after.Phase != kernel.RunFinalizing || after.Revision != before.Revision {
@@ -613,7 +614,7 @@ func TestSettleRunFinishesARefusalMovedEarlier(t *testing.T) {
 	if err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID); err != nil {
 		t.Fatalf("continuation after removing refusal: %v", err)
 	}
-	settled, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID)
+	settled, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Code() != kernel.FailureSource ||
 		!strings.Contains(settled.Terminal.Detail(), "earlier pass") || !strings.Contains(settled.Terminal.Detail(), filepath.Base(aside)) {
 		t.Fatalf("settlement of an earlier refusal = %+v, %v", settled, err)
@@ -679,5 +680,61 @@ func TestScheduledCompletionSurfacesUnsettledRun(t *testing.T) {
 	after := fixture.currentRun(t)
 	if after.Phase != kernel.RunFinalizing {
 		t.Fatalf("surfaced run mutated to %v", after.Phase)
+	}
+}
+
+func TestSettlementWaitsForWriterUsingLifecycleContext(t *testing.T) {
+	for _, role := range []kernel.AgentRole{kernel.RoleOrchestrator, kernel.RoleWorker} {
+		t.Run(role.String(), func(t *testing.T) {
+			fixture := newRecoveryFixtureWithRole(t, 0xb0, role)
+			fixture.failBeforeRuntime(t)
+			lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			lock.SetMaxOpenConns(1)
+			if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Exec("ROLLBACK")
+			entered := make(chan struct{}, 1)
+			fixture.daemon.now = func() time.Time {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				return time.UnixMilli(9000)
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := fixture.daemon.settleRun(fixture.daemon.cleanupCtx, fixture.changeParent, fixture.run.ID)
+				done <- err
+			}()
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("settlement did not reach writer")
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("settlement abandoned before release: %v", err)
+			case <-time.After(liveAttemptStoreTimeout + 300*time.Millisecond):
+			}
+			if _, err := lock.Exec("ROLLBACK"); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("settlement did not finish")
+			}
+			if current := fixture.currentRun(t); current.Phase != kernel.RunTerminal {
+				t.Fatalf("settlement=%+v", current)
+			}
+		})
 	}
 }
