@@ -317,7 +317,7 @@ chmod 755 "$unwritable"
 farm=$temporary/farm
 mkdir -p "$farm"
 cp "$tools/codex" "$tools/dark-factory-maintainer-mcp-bridge" "$farm/"
-for tool in cat cp cut find grep ls mkdir mktemp mv rm sed tail tr; do
+for tool in cat cp cut find grep ls mkdir mktemp mv rm sed stat tail tr; do
     ln -s "$(command -v "$tool")" "$farm/$tool"
 done
 printf 'Findings.\nVERDICT: ALLOW\n' >"$reply"
@@ -359,6 +359,41 @@ status=0
     PATH="$bridge_only:/usr/bin:/bin" "$repository_root/scripts/cold-review.sh" owner/repo 7 "$head" "$base" "$body" >/dev/null 2>&1) || status=$?
 [ "$status" -eq 2 ] || fail "missing codex exited $status, want 2"
 [ ! -s "$args" ] || fail "a missing codex still started a session"
+# A factory-launched overseer supplies the exact bridge path. The review can
+# therefore run with a provider-only PATH and does not rediscover publication
+# authority from the host environment.
+provider_only=$temporary/provider-only
+mkdir -p "$provider_only"
+cp "$tools/codex" "$provider_only/"
+: >"$args"
+(cd "$run" && TMPDIR="$scratch" DARK_FACTORY_REVIEW_REMOTE="file://$remote" DARK_FACTORY_MAINTAINER_BRIDGE="$tools/dark-factory-maintainer-mcp-bridge" DARK_FACTORY_FAKE_CLAUDE_ARGS="$args" DARK_FACTORY_FAKE_CLAUDE_REPLY="$reply" DARK_FACTORY_REVIEW_OPERATION_ID=0f0f0f0f-0f0f-0f0f-0f0f-0f0f0f0f0f0f \
+    PATH="$provider_only:/usr/bin:/bin" "$repository_root/scripts/cold-review.sh" owner/repo 7 "$head" "$base" "$body" >"$temporary/supplied-bridge.log" 2>&1) || { cat "$temporary/supplied-bridge.log" >&2; fail "factory-supplied bridge did not run the review"; }
+
+# Both bridge selection paths reject writable and non-executable files before
+# starting a reviewer; an invalid explicit receipt must not fall back to PATH.
+for mode in 775 702 644; do
+    chmod "$mode" "$tools/dark-factory-maintainer-mcp-bridge"
+    for source in path supplied; do
+        : >"$args"
+        status=0
+        (PATH=/usr/bin:/bin
+        export PATH
+        if [ "$source" = supplied ]; then
+            export DARK_FACTORY_MAINTAINER_BRIDGE="$tools/dark-factory-maintainer-mcp-bridge"
+        else
+            unset DARK_FACTORY_MAINTAINER_BRIDGE
+        fi
+        review owner/repo 7 "$head" "$base" "$body") || status=$?
+        [ "$status" -eq 2 ] || fail "$source bridge mode $mode exited $status, want 2"
+        [ ! -s "$args" ] || fail "$source unsafe bridge started a reviewer"
+    done
+done
+chmod 700 "$tools/dark-factory-maintainer-mcp-bridge"
+: >"$args"
+status=0
+(export DARK_FACTORY_MAINTAINER_BRIDGE="$temporary/missing-bridge"; review owner/repo 7 "$head" "$base" "$body") || status=$?
+[ "$status" -eq 2 ] || fail "missing explicit bridge fell back to PATH"
+[ ! -s "$args" ] || fail "missing explicit bridge started a reviewer"
 status=0
 review owner/repo 7x "$head" "$base" "$body" || status=$?
 [ "$status" -eq 2 ] || fail "non-numeric pull request exited $status, want 2"

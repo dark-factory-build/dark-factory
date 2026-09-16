@@ -116,6 +116,15 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
+	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+		t.Fatalf("runner rejected Claude overseer environment: %v", err)
+	}
+	if !slices.Contains(launch.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
+		t.Fatal("Claude overseer lost its exact bridge environment")
+	}
+	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
+		t.Fatal("Claude worker inherited publication authority")
+	}
 	// A bridge that is present but unfit is refused by name, unlike a
 	// missing one, so the operator learns which of the two it is.
 	for name, mode := range map[string]os.FileMode{"not executable": 0o644, "group writable": 0o775} {
@@ -710,6 +719,11 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	resolvedBridge, err := filepath.EvalSymlinks(bridge)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	overseer, err := Build(request)
 	if err != nil {
 		t.Fatal(err)
@@ -718,6 +732,15 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.dark_factory_maintainer={command=") {
 		t.Fatal("overseer lost its explicit Maintainer tools")
 	}
+	if _, err := runner.PrepareCommittedExecSpec(overseer.Executable(), overseer.Argv(), overseer.Environment(), t.TempDir()); err != nil {
+		t.Fatalf("runner rejected Codex overseer environment: %v", err)
+	}
+	if !slices.Contains(overseer.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
+		t.Fatalf("overseer did not export its exact Maintainer bridge: %q", overseer.Environment())
+	}
+	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
+		t.Fatal("worker inherited the overseer's Maintainer bridge")
+	}
 	if strings.Contains(strings.Join(workerArgs, " "), "mcp_servers.dark_factory_maintainer=") {
 		t.Fatal("worker was granted publication tool approvals")
 	}
@@ -725,7 +748,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal("worker was given overseer authority instructions")
 	}
 	prompt := overseerArgs[len(overseerArgs)-1]
-	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake"} {
+	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling"} {
 		if !strings.Contains(prompt, command) {
 			t.Fatalf("overseer cannot discover %q", command)
 		}
