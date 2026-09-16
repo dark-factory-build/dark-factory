@@ -59,6 +59,14 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertEqual([], review.run_once(self.config))
         self.assertEqual(7, review.linked_issue('Refs #8\nRefs #7', json.loads(Path(self.config['journal']).read_text()), 'o/r'))
 
+    def test_managed_earlier_footer_is_ignored_when_unmanaged_footer_is_terminal(self):
+        body = 'Refs #7\n\nRelated context: Refs #8\n'
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': body}]), \
+             patch.object(review, 'ready') as ready:
+            self.assertEqual([], review.run_once(self.config))
+        ready.assert_not_called()
+        self.assertIsNone(review.linked_issue(body, json.loads(Path(self.config['journal']).read_text()), 'o/r'))
+
     def test_multiple_managed_footers_fail_closed(self):
         journal = json.loads(Path(self.config['journal']).read_text())
         journal['issues']['o/r#8'] = {'number': 8, 'managed': True}
