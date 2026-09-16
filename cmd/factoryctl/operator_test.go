@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -510,5 +511,45 @@ func TestTaskRecoveryUsesOperatorClient(t *testing.T) {
 	var result api.TaskRecovery
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.State != "missing" {
 		t.Fatalf("recovery response %q: %v", stdout.String(), err)
+	}
+}
+
+func TestHumanCommandsUseOperatorClient(t *testing.T) {
+	id := strings.Repeat("11", 16)
+	operation := strings.Repeat("22", 16)
+	for _, reply := range []bool{false, true} {
+		t.Run(fmt.Sprint(reply), func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			args := []string{"human", "list"}
+			if reply {
+				args = []string{"human", "reply", "--operation-id", operation, "--request", id, "--revision", "3", "--reply", "Proceed"}
+			}
+			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+				if !reply {
+					if call.Kind() != api.CallHumanRequests {
+						t.Errorf("wrong list call %v", call.Kind())
+					}
+					return api.NewHumanRequestListReply(api.HumanRequestList{Requests: []api.HumanRequest{}})
+				}
+				input, ok := call.HumanReplyInput()
+				if !ok || input.RequestID != id || input.OperationID != operation || input.ExpectedRevision != 3 || input.Reply != "Proceed" {
+					t.Errorf("wrong reply input %+v", input)
+				}
+				result, err := api.NewMutationReply(api.MutationResult{Head: 7, Revision: 4})
+				if err != nil {
+					t.Error(err)
+				}
+				return result
+			})
+			var stdout, stderr bytes.Buffer
+			if exit := run(context.Background(), args, webEnvironment(fixture), &stdout, &stderr); exit != 0 || stderr.Len() != 0 {
+				t.Fatalf("command failed: exit=%d stderr=%q", exit, stderr.String())
+			}
+			awaitServer(t, done)
+			if !json.Valid(stdout.Bytes()) {
+				t.Fatalf("invalid output %q", stdout.String())
+			}
+		})
 	}
 }
