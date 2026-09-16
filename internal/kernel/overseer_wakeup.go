@@ -25,7 +25,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 	}
 	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents
 		WHERE role = 'orchestrator' AND idle_policy = 'standing_instruction' AND paused = 0
-		  AND idle_runs_used < idle_run_budget AND tool_calls_used < tool_budget_limit
+		  AND tool_calls_used < tool_budget_limit
 		  AND MAX(updated_at_ms, COALESCE((SELECT MAX(terminal_at_ms) FROM runs WHERE agent_id = agents.id), 0)) + idle_after_seconds * 1000 <= ?
 		ORDER BY id`, at.Int64())
 	if err != nil {

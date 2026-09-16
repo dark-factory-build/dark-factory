@@ -16,8 +16,7 @@ type AgentPatch struct {
 	Paused     *bool
 	Archived   *bool
 	Appearance *AgentAppearance
-	// The idle rule. A new budget starts the used count again; that is the
-	// one explicit operator action that resets it.
+	// The idle rule. Edits preserve the recorded wake count.
 	IdlePolicy       *IdlePolicy
 	IdleAfterSeconds *uint32
 	IdleInstruction  *string
@@ -144,7 +143,7 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 		agent.Idle.Instruction = *patch.IdleInstruction
 	}
 	if patch.IdleRunBudget != nil {
-		agent.Idle.RunBudget, agent.Idle.RunsUsed = *patch.IdleRunBudget, 0
+		agent.Idle.RunBudget = *patch.IdleRunBudget
 	}
 	if err := validateIdleRule(agent.Idle); err != nil {
 		return Agent{}, tx.Rollback(err)

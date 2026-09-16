@@ -1915,6 +1915,9 @@ test("an agent's idle rule travels on AGENT_UPDATE and comes back on the snapsho
   // A snapshot from before idle rules describes an agent that waits.
   const legacy = decodeServerControl(JSON.stringify({ type: "STATE_SNAPSHOT", id: "s", body: { head: "1", factory: { dispatch_enabled: true, capacity: 1, active_runs: 0, revision: "1" }, projects: [], agents: [{ id: agentId, project_id: "0a".repeat(16), name: "old", role: "worker", provider: "shell", paused: false, revision: "1" }], tasks: [], human_requests: [] } }));
   assert.deepEqual([legacy.body.agents[0].idle_policy, legacy.body.agents[0].idle_after_seconds, legacy.body.agents[0].idle_instruction, legacy.body.agents[0].idle_run_budget, legacy.body.agents[0].idle_runs_used], ["wait", 0, "", 0, 0]);
+  const uncapped = { ...legacy.body.agents[0], idle_policy: "standing_instruction", idle_after_seconds: 1, idle_instruction: "Inspect work", idle_run_budget: 0, idle_runs_used: 1000001 };
+  const history = decodeServerControl(encodeServerControl({ ...legacy, body: { ...legacy.body, agents: [uncapped] } }));
+  assert.equal(history.body.agents[0].idle_runs_used, 1000001);
   session.close();
 });
 

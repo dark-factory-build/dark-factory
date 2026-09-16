@@ -63,7 +63,7 @@ const (
   factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
-  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT --run-budget N
+  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N]
 
   factoryctl account discover
   factoryctl account list
@@ -954,7 +954,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentIdlePolicy:
-		if command.agent == "" || command.expectedRevision == 0 || (command.provider != "wait" && command.provider != "standing_instruction") || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "" || command.toolBudget == 0)) {
+		if command.agent == "" || command.expectedRevision == 0 || (command.provider != "wait" && command.provider != "standing_instruction") || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentSelectAccount:
