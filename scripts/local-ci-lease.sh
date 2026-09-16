@@ -4,7 +4,8 @@
 # owner-aware diagnostics only; they are never used to decide that a live
 # lease is stale.  lockf's descriptor is inherited by the command and its
 # descendants, so killing the wrapper shell cannot release the gate while an
-# owned command is still alive.
+# owned command is still alive. The directory and descriptor remain in place
+# across handoffs: unlinking them can strand queued contenders in a deleted cwd.
 
 LOCAL_CI_LEASE_NAME=.dark-factory-local-ci
 LOCAL_CI_LEASE_OWNER_PREFIX=.dark-factory-local-ci-owner.
@@ -281,14 +282,6 @@ local_ci_lease_remove_starting_stale() {
     rmdir "$LOCAL_CI_LEASE_STARTING_NAME"
 }
 
-local_ci_lease_remove_recovery_guard() {
-    local_ci_lease_expected_identity=$1
-    [ -n "$local_ci_lease_expected_identity" ] || return 0
-    [ -d "$LOCAL_CI_LEASE_RECOVERY_NAME" ] && [ ! -L "$LOCAL_CI_LEASE_RECOVERY_NAME" ] || return 0
-    [ "$(stat -f '%d:%i' "$LOCAL_CI_LEASE_RECOVERY_NAME" 2>/dev/null)" = "$local_ci_lease_expected_identity" ] || return 0
-    rmdir "$LOCAL_CI_LEASE_RECOVERY_NAME" 2>/dev/null || true
-}
-
 local_ci_lease_reclaim_stale_recovery_guard() {
     [ -d "$LOCAL_CI_LEASE_RECOVERY_NAME" ] && [ ! -L "$LOCAL_CI_LEASE_RECOVERY_NAME" ] || return 1
     local_ci_lease_recovery_identity=$(stat -f '%d:%i' "$LOCAL_CI_LEASE_RECOVERY_NAME" 2>/dev/null) || return 1
@@ -298,21 +291,6 @@ local_ci_lease_reclaim_stale_recovery_guard() {
     [ -d "$local_ci_lease_recovery_quarantine" ] && [ ! -L "$local_ci_lease_recovery_quarantine" ] || return 1
     [ "$(stat -f '%d:%i' "$local_ci_lease_recovery_quarantine" 2>/dev/null)" = "$local_ci_lease_recovery_identity" ] || return 1
     rmdir "$local_ci_lease_recovery_quarantine"
-}
-
-local_ci_lease_remove_lock_object() {
-    local_ci_lease_lock_object_is_safe || return 0
-    (
-        local_ci_lease_enter_lock_object || exit 0
-        local_ci_lease_object_identity=$(stat -f '%d:%i' . 2>/dev/null) || exit 0
-        local_ci_lease_remove_starting "${LOCAL_CI_LEASE_STARTING_IDENTITY-}" || exit 0
-        rm -f "$LOCAL_CI_LEASE_LOCK_FILE_NAME"
-        # A holder never owns this guard; leave it for the contender that
-        # created and identity-checked it, so recovery cannot be split.
-        CDPATH= cd -- "$LOCAL_CI_LEASE_COMMON_DIR" || exit 0
-        [ "$(stat -f '%d:%i' "$LOCAL_CI_LEASE_LOCK" 2>/dev/null)" = "$local_ci_lease_object_identity" ] || exit 0
-        rmdir "$(basename "$LOCAL_CI_LEASE_LOCK")" 2>/dev/null || true
-    )
 }
 
 local_ci_lease_lock_probe() {
@@ -344,15 +322,9 @@ local_ci_lease_recover_lock_object() {
                 [ -d "$LOCAL_CI_LEASE_RECOVERY_NAME" ] && [ ! -L "$LOCAL_CI_LEASE_RECOVERY_NAME" ] || exit 2
                 local_ci_lease_reclaim_stale_recovery_guard || exit 2
             fi
-            mkdir "$LOCAL_CI_LEASE_RECOVERY_NAME"
-            recovery_identity=$(stat -f "%d:%i" "$LOCAL_CI_LEASE_RECOVERY_NAME")
             local_ci_lease_clear_metadata || exit 2
             local_ci_lease_remove_starting_stale || exit 2
-            rm -f "$LOCAL_CI_LEASE_LOCK_FILE_NAME"
-            local_ci_lease_remove_recovery_guard "$recovery_identity" || exit 2
-            CDPATH= cd -- "$LOCAL_CI_LEASE_COMMON_DIR"
             [ "$(stat -f "%d:%i" "$LOCAL_CI_LEASE_LOCK" 2>/dev/null)" = "$object_identity" ] || exit 2
-            rmdir "$(basename "$LOCAL_CI_LEASE_LOCK")"
         ' local-ci-lease-recover "$LOCAL_CI_LEASE_HELPER" "$LOCAL_CI_LEASE_COMMON_DIR" \
             "$local_ci_lease_object_identity"; then
             exit 0
@@ -415,6 +387,13 @@ local_ci_lease_acquire_lock_object() {
             sleep 1
             continue
         fi
+        if local_ci_lease_recover_lock_object; then
+            local_ci_lease_recovery_status=0
+        else
+            local_ci_lease_recovery_status=$?
+        fi
+        [ "$local_ci_lease_recovery_status" -eq 2 ] && return 1
+        [ "$local_ci_lease_recovery_status" -eq 0 ] && return 0
         if [ "$local_ci_lease_reported_wait" -eq 0 ]; then
             local_ci_lease_diagnostic
             local_ci_lease_reported_wait=1
@@ -423,13 +402,6 @@ local_ci_lease_acquire_lock_object() {
             echo "local-ci: gate is already owned; DARK_FACTORY_LOCAL_CI_WAIT=0 requested no wait" >&2
             return 1
         fi
-        if local_ci_lease_recover_lock_object; then
-            local_ci_lease_recovery_status=0
-        else
-            local_ci_lease_recovery_status=$?
-        fi
-        [ "$local_ci_lease_recovery_status" -eq 2 ] && return 1
-        [ "$local_ci_lease_recovery_status" -eq 0 ] && continue
         sleep 1
     done
 }
@@ -584,7 +556,7 @@ local_ci_lease_lock_holder() {
         status=$?
         set -e
         local_ci_lease_release_owner
-        local_ci_lease_remove_lock_object
+        # Keep the lock inode and directory stable for queued contenders.
         rm -f "$LOCAL_CI_LEASE_OWNER_RECORD"
         exit "$status"
     ' local-ci-lease-holder "$LOCAL_CI_LEASE_HELPER" "$LOCAL_CI_LEASE_COMMON_DIR" \

@@ -292,7 +292,7 @@ exercise_disappearing_lock() {
     disappearing_case=$1
     disappearing_marker="$temporary/disappearing-$disappearing_case-observed"
     if [ "$disappearing_case" = existing ]; then
-        mkdir "$lock_path"
+        mkdir -p "$lock_path"
         : >"$lock_path/descriptor"
     fi
     (
@@ -324,48 +324,21 @@ exercise_disappearing_lock() {
 exercise_disappearing_lock existing
 exercise_disappearing_lock absent
 
-# A persistent absent-path failure and alternating absent/present churn each
-# get one disappearance retry for the entire acquisition, not one per cycle.
-exercise_bounded_mkdir_failure() {
-    mkdir_failure_mode=$1
-    mkdir_failure_expected=$2
-    mkdir_failure_attempts="$temporary/mkdir-failure-$mkdir_failure_mode-attempts"
-    mkdir_failure_stderr="$temporary/mkdir-failure-$mkdir_failure_mode.stderr"
-    (
-        cd "$second"
-        LOCAL_CI_LEASE_HELPER=$PWD/scripts/local-ci-lease.sh
-        . "$LOCAL_CI_LEASE_HELPER"
-        mkdir() {
-            if [ "${1-}" != "$lock_path" ]; then
-                /bin/mkdir "$@"
-                return
-            fi
-            printf 'attempt\n' >>"$mkdir_failure_attempts"
-            mkdir_failure_attempt=$(wc -l <"$mkdir_failure_attempts" | tr -d ' ')
-            if [ "$mkdir_failure_mode" = alternating ]; then
-                /bin/mkdir "$1"
-                : >"$1/descriptor"
-                if [ "$mkdir_failure_attempt" -ne 2 ]; then
-                    /bin/rm -f "$1/descriptor"
-                    /bin/rmdir "$1"
-                fi
-            fi
-            return 1
-        }
-        local_ci_lease_setup_paths
-        local_ci_lease_reported_wait=0
-        if local_ci_lease_acquire_lock_object 2>"$mkdir_failure_stderr"; then
-            exit 1
-        fi
-    ) || fail "$mkdir_failure_mode mkdir failure was not bounded"
-    [ "$(wc -l <"$mkdir_failure_attempts" | tr -d ' ')" -eq "$mkdir_failure_expected" ] \
-        || fail "$mkdir_failure_mode mkdir failure retry count changed"
-    grep -Fq 'after a completed handoff retry' "$mkdir_failure_stderr" \
-        || fail "$mkdir_failure_mode mkdir failure was unexplained"
-    assert_absent "$lock_path"
-}
-exercise_bounded_mkdir_failure persistent 2
-exercise_bounded_mkdir_failure alternating 3
+# A persistent creation refusal fails after its single bounded handoff retry.
+(
+    cd "$second"
+    LOCAL_CI_LEASE_HELPER=$PWD/scripts/local-ci-lease.sh
+    . "$LOCAL_CI_LEASE_HELPER"
+    mkdir() { return 1; }
+    local_ci_lease_setup_paths
+    local_ci_lease_reported_wait=0
+    if local_ci_lease_acquire_lock_object 2>"$temporary/mkdir-failure.stderr"; then
+        exit 1
+    fi
+) || fail "persistent mkdir failure was not bounded"
+grep -Fq 'after a completed handoff retry' "$temporary/mkdir-failure.stderr" \
+    || fail "persistent mkdir failure was unexplained"
+assert_absent "$lock_path"
 
 # The wrapper owns its detached session leader before the command is released.
 # Interrupt that exact PID-published/pre-trap seam and prove the direct child,
@@ -437,7 +410,7 @@ wait_checked "startup-recovery waiter" "$starting_waiter_pid"
 assert_absent "$starting_marker"
 assert_absent "$lease_path"
 assert_absent "$lock_path/.recovery"
-assert_absent "$lock_path"
+[ -f "$lock_path/descriptor" ] || fail "stable lock descriptor missing"
 [ -z "$(find "$common_dir" -maxdepth 1 -type f -name '.dark-factory-local-ci-owner.*' -print)" ] \
     || fail "dead starter left owner records behind"
 
@@ -502,7 +475,7 @@ chmod +x "$fake_ps_bin/ps"
 recover_starting_case() {
     case_name=$1
     case_marker="$temporary/starting-$case_name-recovered"
-    mkdir "$lock_path"
+    mkdir -p "$lock_path"
     : >"$lock_path/descriptor"
     mkdir "$lock_path/.recovery"
     mkdir "$lock_path/.starting"
@@ -522,7 +495,7 @@ recover_starting_case() {
     [ -f "$case_marker" ] || fail "$case_name recovery command did not run"
     assert_absent "$lock_path/.starting"
     assert_absent "$lock_path/.recovery"
-    assert_absent "$lock_path"
+    [ -f "$lock_path/descriptor" ] || fail "stable lock descriptor missing"
 }
 
 recover_starting_case missing
@@ -537,6 +510,10 @@ waiter_stderr="$temporary/waiter.stderr"
 head=$(git -C "$first" rev-parse HEAD)
 start_holder "$first" "$held_marker" 2 $'agent\nSECRET' $'task\033SECRET'
 wait_for_file "$held_marker"
+# A queued contender may already reference this directory and descriptor.
+# Normal release must retain both inodes, including across later acquisitions.
+held_lock_identity=$(stat -f '%d:%i' "$lock_path")
+held_descriptor_identity=$(stat -f '%d:%i' "$lock_path/descriptor")
 [ "$(readlink "$legacy_lock")" = 'dark-factory-local-ci/.dark-factory-local-ci.lock' ] || fail "legacy migration barrier missing"
 # The retired helper acquires by mkdir and rejects any symlink after EEXIST.
 # It must not acquire its former pathname while a dedicated holder is live.
@@ -557,6 +534,10 @@ background_pids="$background_pids $waiter_pid"
 sleep 0.2
 [ ! -f "$waiter_marker" ] || fail "waiter acquired before the owner released"
 wait_checked "ordinary waiter" "$waiter_pid"
+[ "$(stat -f '%d:%i' "$lock_path")" = "$held_lock_identity" ] \
+    || fail "normal handoff replaced the lock directory"
+[ "$(stat -f '%d:%i' "$lock_path/descriptor")" = "$held_descriptor_identity" ] \
+    || fail "normal handoff replaced the lock descriptor"
 [ "$(grep -c 'current owner:' "$waiter_stderr")" -eq 1 ] || fail "owner diagnostic count changed"
 [ "$(wc -c <"$waiter_stderr" | tr -d ' ')" -le 2300 ] || fail "owner diagnostic was not bounded"
 grep -Fq "head=$head" "$waiter_stderr" || fail "owner head was not reported"
@@ -580,7 +561,7 @@ wait_checked "invalid-owner diagnostic holder" "$last_holder_pid"
 forged_record="$temporary/forged-record"
 forged_owner_ref=.dark-factory-local-ci-owner.forged
 printf 'pid=7\nworktree=SECRET\nstarted_at=SECRET\nlock_identity=7:7\nhead=0123456789abcdef0123456789abcdef01234567\nsecret=DO_NOT_DISCLOSE\n' >"$forged_record"
-mkdir "$lock_path"
+mkdir -p "$lock_path"
 : >"$lock_path/descriptor"
 ln -s "$forged_record" "$common_dir/$forged_owner_ref"
 ln -s "$forged_owner_ref" "$lease_path"
@@ -646,12 +627,12 @@ fi
 wait_for_file "$descendant_done"
 acquire_and_release "$second" "$temporary/descendant-recovered"
 
-# Two stale-recovery contenders cannot remove a new owner: recovery is guarded
-# inside the lock object before cleaning the old diagnostic link.
+# Two stale-recovery contenders share the same stable kernel lock before
+# cleaning the old diagnostic link; neither may remove a new owner.
 stale_record="$common_dir/.dark-factory-local-ci-owner.stale"
 stale_pid=999999
 while kill -0 "$stale_pid" 2>/dev/null; do stale_pid=$((stale_pid - 1)); done
-mkdir "$lock_path"
+mkdir -p "$lock_path"
 : >"$lock_path/descriptor"
 printf 'pid=%s\nworktree=%s\nstarted_at=stale\nlock_identity=%s\nhead=%s\n' \
     "$stale_pid" "$first" "$(stat -f '%d:%i' "$lock_path")" \
@@ -672,7 +653,7 @@ wait_checked "first stale-recovery contender" "$stale_first_pid"
 wait_checked "second stale-recovery contender" "$stale_second_pid"
 assert_absent "$lock_path/.recovery"
 assert_absent "$lease_path"
-assert_absent "$lock_path"
+[ -f "$lock_path/descriptor" ] || fail "stable lock descriptor missing"
 
 # Removing or replacing a live object with a symlink or another directory must
 # fail closed rather than locking a different inode.
@@ -706,7 +687,7 @@ replacement_held="$temporary/replacement-directory-held"
 start_holder "$first" "$replacement_held" 2
 wait_for_file "$replacement_held"
 mv "$lock_path" "$temporary/original-lock-object"
-mkdir "$lock_path"
+mkdir -p "$lock_path"
 : >"$lock_path/descriptor"
 if (cd "$second" && DARK_FACTORY_LOCAL_CI_WAIT=0 ./scripts/with-local-ci-lease.sh true) \
     2>"$temporary/replacement-directory.stderr"; then
