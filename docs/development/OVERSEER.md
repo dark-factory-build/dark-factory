@@ -521,11 +521,14 @@ the journal says you stopped.
 
 ### Peer collaboration
 
-Workers use `attempt peer status` to discover eligible same-project Codex tasks
-and read questions or answers linked to their own task. Follow `next_offset`
-with `--offset` and `head` with `--head` for older conversations, and
-`next_target_offset` with `--target-offset` under the same head for more
-targets. A stale continuation must restart from the first page. `attempt peer
+Workers and overseers use `attempt peer status` to read questions or answers
+linked to their own task. It reads the compact, decision-relevant inbox first;
+use `--targets` only when choosing a same-project collaborator. The inbox is
+provider-neutral: terminal notices are only an optional adapter hint, and never
+the durable receipt. Follow `next_offset` with `--offset` and `head` with
+`--head` for older conversations. With `--targets`, follow `next_target_offset`
+with `--target-offset` under the same head for more targets. A stale
+continuation must restart from the first page. `attempt peer
 ask` and `attempt peer answer` are asynchronous: queued recipients can read
 the question when admitted, and neither operation changes capacity or waits for
 another worker. Reuse the same idempotency key when retrying an uncertain
@@ -542,3 +545,19 @@ filesystem boundary. Claude and shell source requests return unavailable until
 their launch provides equivalent protection; this does not restrict peer
 communication or ordinary task execution. Do not substitute a mutable private
 copy or claim cross-provider source access is delivered.
+
+### Bounded worker terminal observation
+
+Use `factoryctl attempt terminal observe --project PROJECT --task TASK --run RUN`
+with the current attempt client to inspect public terminal output. Workers can
+read only their own exact run; overseers can read worker runs in their own
+project, not other overseers. This read does not send input or resume a worker.
+
+The response identifies the project, task and run, plus a fixed snapshot `head`,
+raw-byte `next_cursor`, and readable terminal-safe `payload`. Continue explicitly
+with `--cursor NEXT_CURSOR`; `--max-bytes` bounds raw bytes read (default 8192,
+maximum 65536). A `gap` reports an expired replay cursor and the available floor.
+Known credentials and private paths are redacted; partial boundary lines are
+omitted so an arbitrary cursor cannot reveal a fragment of a redacted line.
+`omitted` counts skipped raw bytes. This is a bounded observation of available
+output, not a complete transcript or a guarantee that output is secret-free.

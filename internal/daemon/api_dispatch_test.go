@@ -705,8 +705,13 @@ type activeAttempt struct {
 
 func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) activeAttempt {
 	t.Helper()
+	return prepareActiveAttemptInProject(t, fixture, seed, testID(seed), "orchestrator")
+}
+
+func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role string) activeAttempt {
+	t.Helper()
 	ctx := context.Background()
-	projectID, agentID, taskID, incarnationID := testID(seed), testID(seed+1), testID(seed+2), testID(seed+3)
+	agentID, taskID, incarnationID := testID(seed+1), testID(seed+2), testID(seed+3)
 	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
 	if err != nil {
 		t.Fatal(err)
@@ -718,22 +723,38 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 		}
 		waitDispatch(t, done)
 	}
+	id, err := parseProjectID(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, foundProject, err := fixture.store.Project(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !foundProject {
+		call(func() error {
+			_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "project", Root: filepath.Join(filepath.Dir(fixture.socket), "source-root")})
+			return err
+		})
+	}
 	call(func() error {
-		_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "project", Root: filepath.Join(filepath.Dir(fixture.socket), "source-root")})
-		return err
-	})
-	call(func() error {
-		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: "orchestrator", Provider: "shell", ToolBudgetLimit: 10})
+		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: "shell", ToolBudgetLimit: 10})
 		return err
 	})
 	call(func() error {
 		_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "task", Body: "private", Priority: 1})
 		return err
 	})
-	call(func() error {
-		_, err := operator.SetDispatch(ctx, 1, true)
-		return err
-	})
+	factory, err := fixture.store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !factory.DispatchEnabled {
+		call(func() error {
+			_, err := operator.SetDispatch(ctx, uint64(factory.Revision.Int64()), true)
+			return err
+		})
+	}
 	bearer := bytes.Repeat([]byte{seed}, 32)
 	digestBytes := sha256.Sum256(bearer)
 	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
@@ -748,9 +769,14 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil {
 		t.Fatal(err)
 	}
+	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{seed + 20}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
 	keys := kernel.AdmissionKeys{
-		RunID: mustRunID(t, testID(seed+4)), TerminalSessionID: mustTerminalSessionID(t, testID(seed+14)), AttemptDigest: digest, CandidateChangeID: candidateChange,
-		RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime"),
+		ResultProofDigest: proof,
+		RunID:             mustRunID(t, testID(seed+4)), TerminalSessionID: mustTerminalSessionID(t, testID(seed+14)), AttemptDigest: digest, CandidateChangeID: candidateChange,
+		RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), fmt.Sprintf("runtime-%d", seed)),
 		Resources: kernel.AdmissionResourceIDs{
 			RuntimeRoot: mustResourceID(t, testID(seed+5)), RunnerProcess: mustResourceID(t, testID(seed+6)),
 			ProviderProcess: mustResourceID(t, testID(seed+7)), ProviderGroup: mustResourceID(t, testID(seed+8)),
@@ -796,11 +822,14 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil || !found {
 		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
 	}
+	if role == "worker" {
+		adapterPublishChange(t, fixture.store, *run)
+	}
 	active, err := fixture.store.ActivateRun(ctx, run.ID, session.ID, run2.Revision, session.Revision, at)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptToken := filepath.Join(filepath.Dir(fixture.socket), "attempt.token")
+	attemptToken := filepath.Join(filepath.Dir(fixture.socket), fmt.Sprintf("attempt-%d.token", seed))
 	if err := os.WriteFile(attemptToken, bearer, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1349,4 +1378,38 @@ func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
 		t.Fatalf("unprotected source = %v", err)
 	}
 	waitDispatch(t, done)
+}
+
+// An unavailable notification transport must not turn a durable conversation
+// into a failed or unreadable operation. No live terminal is registered here.
+func TestPeerConversationSurvivesUnavailableNotification(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	source := prepareActiveAttemptInProject(t, fixture, 11, testID(11), "worker")
+	target := prepareActiveAttemptInProject(t, fixture, 41, testID(11), "worker")
+	ctx := context.Background()
+	done := fixture.serve(t)
+	_, err := source.client.PeerAsk(ctx, api.PeerQuestionInput{TargetTaskID: target.run.TaskID.String(), IdempotencyKey: testID(91), Question: "review x.go"})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	inbox, err := target.client.PeerInboxPage(ctx, 0, 0)
+	waitDispatch(t, done)
+	if err != nil || len(inbox.Questions) != 1 || inbox.Questions[0].Question != "review x.go" || inbox.Questions[0].RecipientDeliveryState != "unknown" {
+		t.Fatalf("durable question=%+v err=%v", inbox, err)
+	}
+	question := inbox.Questions[0]
+	done = fixture.serve(t)
+	_, err = target.client.PeerAnswer(ctx, api.PeerAnswerInput{QuestionID: question.ID, ExpectedRevision: question.Revision, IdempotencyKey: testID(92), Answer: "reviewed"})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	inbox, err = source.client.PeerInboxPage(ctx, 0, 0)
+	waitDispatch(t, done)
+	if err != nil || len(inbox.Questions) != 1 || inbox.Questions[0].Answer != "reviewed" || inbox.Questions[0].AnswerDeliveryState != "unknown" {
+		t.Fatalf("durable answer=%+v err=%v", inbox, err)
+	}
 }

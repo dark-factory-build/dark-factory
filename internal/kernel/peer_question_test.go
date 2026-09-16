@@ -54,7 +54,7 @@ func TestPeerQuestionIsTaskLinkedIdempotentAndPrivate(t *testing.T) {
 	}
 }
 
-func TestPeerQuestionRejectsCrossProjectAndNonCodexTarget(t *testing.T) {
+func TestPeerQuestionRejectsCrossProjectButIsProviderNeutral(t *testing.T) {
 	ctx := context.Background()
 	store, source, _ := runningWorkerRun(t)
 	defer store.Close()
@@ -81,8 +81,81 @@ func TestPeerQuestionRejectsCrossProjectAndNonCodexTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreatePeerQuestionForAttempt(ctx, source.CredentialDigest, NewPeerQuestion{TargetTaskID: shellTask.ID, IdempotencyKey: peerKey(6), Question: "no shell"}, mustTime(t, 37)); !errors.Is(err, ErrUnauthorized) {
-		t.Fatalf("shell target=%v", err)
+	if _, err := store.CreatePeerQuestionForAttempt(ctx, source.CredentialDigest, NewPeerQuestion{TargetTaskID: shellTask.ID, IdempotencyKey: peerKey(6), Question: "shell inbox"}, mustTime(t, 37)); err != nil {
+		t.Fatalf("provider-neutral target=%v", err)
+	}
+	_, _, head, err := store.PeerQuestionsForTask(ctx, source.TaskID, 0, EventSequence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, _, err := store.PeerTargetsForAttempt(ctx, source.CredentialDigest, 0, head)
+	if err != nil || len(targets) != 1 || targets[0].TaskID != shellTask.ID {
+		t.Fatalf("shell target discovery = %+v, %v", targets, err)
+	}
+}
+
+func TestPeerQuestionClaudeAndCodexExchangeQuestionsAndAnswers(t *testing.T) {
+	ctx := context.Background()
+	store, codex, _ := runningWorkerRun(t)
+	defer store.Close()
+	claudeAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 156), ProjectID: codex.ProjectID, Name: "claude", Role: RoleWorker, Provider: ProviderClaudeCode, ToolBudgetLimit: 4}, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 157), ProjectID: codex.ProjectID, AssignedAgentID: claudeAgent.ID, IncarnationID: incarnationID(t, 158), Title: "claude peer"}, mustTime(t, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := activatePeerWorker(t, store, claudeTask, 159)
+	_, _, head, err := store.PeerQuestionsForTask(ctx, codex.TaskID, 0, EventSequence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, _, err := store.PeerTargetsForAttempt(ctx, codex.CredentialDigest, 0, head)
+	if err != nil || len(targets) != 1 || targets[0].TaskID != claude.TaskID {
+		t.Fatalf("Claude target discovery = %+v, %v", targets, err)
+	}
+
+	question, err := store.CreatePeerQuestionForAttempt(ctx, codex.CredentialDigest, NewPeerQuestion{TargetTaskID: claude.TaskID, IdempotencyKey: peerKey(40), Question: "Codex to Claude"}, mustTime(t, 60))
+	if err != nil {
+		t.Fatalf("Codex question = %v", err)
+	}
+	answered, err := store.AnswerPeerQuestionForAttempt(ctx, claude.CredentialDigest, PeerAnswer{QuestionID: question.ID, Expected: question.Revision, IdempotencyKey: peerKey(41), Answer: "Claude answer"}, mustTime(t, 61))
+	if err != nil || answered.Answer != "Claude answer" {
+		t.Fatalf("Claude answer = %+v, %v", answered, err)
+	}
+	question, err = store.CreatePeerQuestionForAttempt(ctx, claude.CredentialDigest, NewPeerQuestion{TargetTaskID: codex.TaskID, IdempotencyKey: peerKey(42), Question: "Claude to Codex"}, mustTime(t, 62))
+	if err != nil {
+		t.Fatalf("Claude question = %v", err)
+	}
+	answered, err = store.AnswerPeerQuestionForAttempt(ctx, codex.CredentialDigest, PeerAnswer{QuestionID: question.ID, Expected: question.Revision, IdempotencyKey: peerKey(43), Answer: "Codex answer"}, mustTime(t, 63))
+	if err != nil || answered.Answer != "Codex answer" {
+		t.Fatalf("Codex answer = %+v, %v", answered, err)
+	}
+}
+
+func TestPeerQuestionAllowsWorkerOverseerConversation(t *testing.T) {
+	ctx := context.Background()
+	store, worker, overseer, _ := runningWorkerAndOverseer(t)
+	defer store.Close()
+
+	question, err := store.CreatePeerQuestionForAttempt(ctx, worker.CredentialDigest, NewPeerQuestion{
+		TargetTaskID: overseer.TaskID, IdempotencyKey: peerKey(30), Question: "please review artifact: build/receipt.json",
+	}, mustTime(t, 60))
+	if err != nil {
+		t.Fatalf("worker to overseer = %v", err)
+	}
+	answered, err := store.AnswerPeerQuestionForAttempt(ctx, overseer.CredentialDigest, PeerAnswer{
+		QuestionID: question.ID, Expected: question.Revision, IdempotencyKey: peerKey(31), Answer: "reviewed; continue",
+	}, mustTime(t, 61))
+	if err != nil || answered.Answer != "reviewed; continue" {
+		t.Fatalf("overseer answer = %+v, %v", answered, err)
+	}
+	followUp, err := store.CreatePeerQuestionForAttempt(ctx, overseer.CredentialDigest, NewPeerQuestion{
+		TargetTaskID: worker.TaskID, IdempotencyKey: peerKey(32), Question: "handoff: retain the receipt",
+	}, mustTime(t, 62))
+	if err != nil || followUp.SourceTaskID != overseer.TaskID || followUp.TargetTaskID != worker.TaskID {
+		t.Fatalf("overseer follow-up = %+v, %v", followUp, err)
 	}
 }
 
@@ -243,6 +316,43 @@ func TestPeerAnswerReplaysAfterDeliveryRevisionAdvances(t *testing.T) {
 	replay, err := store.AnswerPeerQuestionForAttempt(ctx, targetRun.CredentialDigest, answer, mustTime(t, 64))
 	if err != nil || replay.Answer != answer.Answer || replay.AnswerDeliveryState != PeerDeliveryDelivered {
 		t.Fatalf("reply-loss replay = %+v, %v", replay, err)
+	}
+}
+
+func TestPeerQuestionRefusesStaleAttemptsAndWrongRecipient(t *testing.T) {
+	ctx := context.Background()
+	store, source, _ := runningWorkerRun(t)
+	defer store.Close()
+	targetAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 201), ProjectID: source.ProjectID, Name: "target", Role: RoleWorker, Provider: ProviderClaudeCode, ToolBudgetLimit: 4}, mustTime(t, 31))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 202), ProjectID: source.ProjectID, AssignedAgentID: targetAgent.ID, IncarnationID: incarnationID(t, 203), Title: "target"}, mustTime(t, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := activatePeerWorker(t, store, targetTask, 204)
+
+	question, err := store.CreatePeerQuestionForAttempt(ctx, source.CredentialDigest, NewPeerQuestion{
+		TargetTaskID: target.TaskID, IdempotencyKey: peerKey(205), Question: "current question",
+	}, mustTime(t, 60))
+	if err != nil {
+		t.Fatalf("create current question = %v", err)
+	}
+	if _, err := store.CreatePeerQuestionForAttempt(ctx, source.CredentialDigest, NewPeerQuestion{
+		TargetTaskID: target.TaskID, IdempotencyKey: peerKey(206), Question: "stale question",
+	}, mustTime(t, source.UpdatedAt.Int64()-1)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("stale source attempt = %v", err)
+	}
+	if _, err := store.AnswerPeerQuestionForAttempt(ctx, source.CredentialDigest, PeerAnswer{
+		QuestionID: question.ID, Expected: question.Revision, IdempotencyKey: peerKey(207), Answer: "wrong worker",
+	}, mustTime(t, 61)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("wrong recipient answer = %v", err)
+	}
+	if _, err := store.AnswerPeerQuestionForAttempt(ctx, target.CredentialDigest, PeerAnswer{
+		QuestionID: question.ID, Expected: question.Revision, IdempotencyKey: peerKey(208), Answer: "stale answer",
+	}, mustTime(t, target.UpdatedAt.Int64()-1)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("stale target attempt = %v", err)
 	}
 }
 

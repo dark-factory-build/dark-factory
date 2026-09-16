@@ -363,11 +363,24 @@ func (client *AttemptClient) PeerStatus(ctx context.Context) (PeerStatus, error)
 }
 
 func (client *AttemptClient) PeerStatusPage(ctx context.Context, offset, targetOffset, expectedHead uint64) (PeerStatus, error) {
+	return client.peerStatusPage(ctx, offset, targetOffset, expectedHead, true)
+}
+
+// PeerInboxPage reads only the caller's task-linked conversation. Target
+// discovery stays available through PeerStatusPage when the caller needs it.
+func (client *AttemptClient) PeerInboxPage(ctx context.Context, offset, expectedHead uint64) (PeerStatus, error) {
+	return client.peerStatusPage(ctx, offset, 0, expectedHead, false)
+}
+
+func (client *AttemptClient) peerStatusPage(ctx context.Context, offset, targetOffset, expectedHead uint64, includeTargets bool) (PeerStatus, error) {
 	if offset > uint64(^uint64(0)>>1)-1 || targetOffset > uint64(^uint64(0)>>1)-4 || expectedHead > uint64(^uint64(0)>>1) || expectedHead == 0 && (offset != 0 || targetOffset != 0) {
 		return PeerStatus{}, ErrInvalidInput
 	}
+	if !includeTargets && targetOffset != 0 {
+		return PeerStatus{}, ErrInvalidInput
+	}
 	var result PeerStatus
-	if err := client.client.call(ctx, "peer_status", PeerStatusInput{Offset: offset, TargetOffset: targetOffset, ExpectedHead: expectedHead}, &result); err != nil {
+	if err := client.client.call(ctx, "peer_status", PeerStatusInput{Offset: offset, TargetOffset: targetOffset, ExpectedHead: expectedHead, IncludeTargets: includeTargets}, &result); err != nil {
 		return PeerStatus{}, err
 	}
 	if !validPeerStatus(result) || expectedHead != 0 && result.Head != expectedHead {
@@ -388,6 +401,20 @@ func (client *AttemptClient) PeerAnswer(ctx context.Context, input PeerAnswerInp
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "peer_answer", input)
+}
+
+func (client *AttemptClient) TerminalObserve(ctx context.Context, input TerminalObserveInput) (TerminalObservation, error) {
+	if !validTerminalObservationInput(input) {
+		return TerminalObservation{}, ErrInvalidInput
+	}
+	var result TerminalObservation
+	if err := client.client.call(ctx, "terminal_observe", input, &result); err != nil {
+		return TerminalObservation{}, err
+	}
+	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
+		return TerminalObservation{}, ErrProtocol
+	}
+	return result, nil
 }
 
 // SendBack returns a finished task of the attempt's project to its queue

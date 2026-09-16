@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -84,6 +85,7 @@ func TestAttemptMCPCommandCatalogueParity(t *testing.T) {
 		argv []string
 	}{
 		{"attempt task", []string{"attempt", "task"}},
+		{"attempt terminal observe", []string{"attempt", "terminal", "observe", "--project", id, "--task", id, "--run", id}},
 		{"attempt succeed", []string{"attempt", "succeed"}},
 		{"attempt block", []string{"attempt", "block", "--detail", "blocked"}},
 		{"attempt fail", []string{"attempt", "fail"}},
@@ -169,5 +171,75 @@ func TestAttemptMCPCommandAllowlistDoesNotDependOnOrdinals(t *testing.T) {
 	})
 	if usesOrdinalComparison {
 		t.Fatal("MCP allowlist must name commands explicitly, not compare command kind ordinals")
+	}
+}
+
+func TestTerminalObservationCLIAndMCPUseReadableSafeExactOutput(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	argv := []string{"attempt", "terminal", "observe", "--project", id, "--task", id, "--run", id, "--cursor", "10000000"}
+	for _, mode := range []string{"cli", "mcp"} {
+		for _, refused := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/refused=%v", mode, refused), func(t *testing.T) {
+				fixture := newAPIFixture(t)
+				defer fixture.close(t)
+				t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+				payload := []byte("building x.go\n\x1b[2J\u009b")
+				done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+					input, ok := call.TerminalObserveInput()
+					if !ok || input.ProjectID != id || input.TaskID != id || input.RunID != id || input.Cursor != 10000000 {
+						t.Errorf("request identity changed: %+v", input)
+					}
+					if refused {
+						reply, _ := api.NewErrorReply(api.RemoteForbidden)
+						return reply
+					}
+					reply, err := api.NewTerminalObservationReply(api.TerminalObservation{ProjectID: id, TaskID: id, RunID: id, Cursor: input.Cursor, NextCursor: input.Cursor + uint64(len(payload)), Head: input.Cursor + uint64(len(payload)), Source: "stored", Payload: payload})
+					if err != nil {
+						t.Error(err)
+					}
+					return reply
+				})
+				var output, stderr bytes.Buffer
+				if mode == "cli" {
+					exit := run(context.Background(), argv, func(string) string { return fixture.socket }, &output, &stderr)
+					if (exit != 0) != refused {
+						t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+					}
+				} else {
+					request, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "factory", "arguments": map[string]any{"argv": argv}}})
+					if runAttemptMCP(context.Background(), bytes.NewReader(request), &output, func(string) string { return fixture.socket }) != 0 {
+						t.Fatal("MCP failed")
+					}
+					var response struct {
+						Result struct {
+							IsError bool
+							Content []struct{ Text string }
+						}
+					}
+					if err := json.Unmarshal(output.Bytes(), &response); err != nil || response.Result.IsError != refused || len(response.Result.Content) != 1 {
+						t.Fatalf("MCP result=%s err=%v", output.String(), err)
+					}
+					output.Reset()
+					output.WriteString(response.Result.Content[0].Text)
+				}
+				result := awaitServer(t, done)
+				digest, ok := result.call.AttemptDigest()
+				if result.err != nil || !ok || digest.Bytes() != sha256.Sum256(fixture.bearer[:]) {
+					t.Fatal("observer credential changed")
+				}
+				if !refused {
+					var displayed struct {
+						Payload    string
+						NextCursor uint64 `json:"next_cursor"`
+					}
+					if err := json.Unmarshal(output.Bytes(), &displayed); err != nil || displayed.Payload != string(payload) || displayed.NextCursor != 10000000+uint64(len(payload)) {
+						t.Fatalf("display=%s err=%v", output.String(), err)
+					}
+					if strings.ContainsAny(output.String(), "\x1b\u009b") {
+						t.Fatalf("terminal controls were emitted: %q", output.String())
+					}
+				}
+			})
+		}
 	}
 }

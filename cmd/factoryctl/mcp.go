@@ -82,7 +82,7 @@ func allowedAttemptMCPCommand(kind commandKind) bool {
 	switch kind {
 	case commandSucceed, commandBlock, commandFail, commandRequestHuman,
 		commandPeerStatus, commandPeerAsk, commandPeerAnswer, commandSendBack,
-		commandAttemptTask, commandAttemptSource, commandOverseerStatus, commandOverseerTaskAdd,
+		commandAttemptTask, commandAttemptSource, commandTerminalObserve, commandOverseerStatus, commandOverseerTaskAdd,
 		commandOverseerTaskUpdate, commandOverseerTaskSendBack,
 		commandOverseerAgentUpdate, commandOverseerStopWorker,
 		commandOverseerReplaceWorker, commandOverseerMessageWorker,

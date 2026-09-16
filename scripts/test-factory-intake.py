@@ -80,8 +80,20 @@ class IntakeTest(unittest.TestCase):
     def test_status_read_rejects_mismatched_identity(self):
         status = {"projects": [{"id": "2" * 32, "run_budget_limit": 0, "runs_used": 0, "max_run_seconds": 2700}], "agents": []}
         with patch.object(INTAKE, "command", return_value=json.dumps(status)):
-            with self.assertRaisesRegex(INTAKE.IntakeError, "configured project needs a Codex overseer"):
+            with self.assertRaisesRegex(INTAKE.IntakeError, "configured project needs an overseer"):
                 INTAKE.validate_factory(self.config)
+
+    def test_overseer_eligibility_depends_on_role_and_project_not_provider(self):
+        for provider in ("codex", "claude_code"):
+            for role, project in (("orchestrator", self.config["project_id"]), ("worker", self.config["project_id"]), ("orchestrator", "2" * 32)):
+                value = {"projects": [{"id": self.config["project_id"], "run_budget_limit": 0, "runs_used": 0, "max_run_seconds": 0}],
+                         "agents": [{"id": self.config["overseer_agent_id"], "project_id": project, "role": role, "provider": provider}]}
+                with self.subTest(provider=provider, role=role, project=project), patch.object(INTAKE, "command", return_value=json.dumps(value)):
+                    if role == "orchestrator" and project == self.config["project_id"]:
+                        INTAKE.validate_factory(self.config)
+                    else:
+                        with self.assertRaisesRegex(INTAKE.IntakeError, "needs an overseer"):
+                            INTAKE.validate_factory(self.config)
 
     def test_status_read_rejects_malformed_collections(self):
         for value in ([], {}, {"projects": [1], "agents": []}, {"projects": [], "agents": None}, {"projects": [], "agents": [None]}):

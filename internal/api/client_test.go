@@ -479,8 +479,27 @@ func TestPeerStatusPageRejectsMismatchedContinuationHead(t *testing.T) {
 	if _, err := client.PeerStatusPage(context.Background(), 1, 0, 7); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("mismatched continuation head = %v", err)
 	}
-	if got := requestJSON(t, <-fixture.request, wireAttemptDomain, bearer); got != `{"method":"peer_status","params":{"offset":1,"target_offset":0,"expected_head":7}}` {
+	if got := requestJSON(t, <-fixture.request, wireAttemptDomain, bearer); got != `{"method":"peer_status","params":{"offset":1,"target_offset":0,"expected_head":7,"include_targets":true}}` {
 		t.Fatalf("peer status request = %s", got)
+	}
+	fixture.wait(t)
+}
+
+func TestPeerInboxPageAvoidsTargetDirectory(t *testing.T) {
+	bearer := testCredential('P')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireAttemptDomain, successResponse(`{"head":8,"targets":[],"questions":[],"next_target_offset":null,"next_offset":null}`))
+	})
+	t.Setenv(attemptTokenFileEnv, fixture.token)
+	client, err := NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.PeerInboxPage(context.Background(), 0, 0); err != nil {
+		t.Fatalf("peer inbox = %v", err)
+	}
+	if got := requestJSON(t, <-fixture.request, wireAttemptDomain, bearer); got != `{"method":"peer_status","params":{"offset":0,"target_offset":0,"expected_head":0,"include_targets":false}}` {
+		t.Fatalf("peer inbox request = %s", got)
 	}
 	fixture.wait(t)
 }
@@ -1320,3 +1339,41 @@ type clonedFileInfo struct {
 }
 
 func (info clonedFileInfo) Sys() any { return &info.stat }
+
+func TestTerminalObserveBindsReturnedSnapshotToRequest(t *testing.T) {
+	input := TerminalObserveInput{ProjectID: strings.Repeat("1", 32), TaskID: strings.Repeat("2", 32), RunID: strings.Repeat("3", 32), Cursor: 10000000, MaxBytes: 8}
+	for _, test := range []struct {
+		name   string
+		mutate func(*TerminalObservation)
+	}{
+		{"valid", func(*TerminalObservation) {}},
+		{"wrong project", func(v *TerminalObservation) { v.ProjectID = strings.Repeat("4", 32) }},
+		{"wrong task", func(v *TerminalObservation) { v.TaskID = strings.Repeat("4", 32) }},
+		{"wrong run", func(v *TerminalObservation) { v.RunID = strings.Repeat("4", 32) }},
+		{"wrong cursor", func(v *TerminalObservation) { v.Cursor--; v.Omitted++ }},
+		{"raw budget exceeded", func(v *TerminalObservation) { v.NextCursor += 8; v.Omitted += 8 }},
+		{"bad byte accounting", func(v *TerminalObservation) { v.Omitted++ }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value := TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: input.Cursor + 5, Head: input.Cursor + 100, Source: "stored", Payload: []byte("safe\n")}
+			test.mutate(&value)
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture := newWireFixture(t, testCredential('T'), func(connection net.Conn, _ []byte) error {
+				return writeTestResponse(connection, wireAttemptDomain, successResponse(string(encoded)))
+			})
+			t.Setenv(attemptTokenFileEnv, fixture.token)
+			client, err := NewAttemptClientFromEnvironment(fixture.socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.TerminalObserve(context.Background(), input)
+			if test.name == "valid" && err != nil || test.name != "valid" && !errors.Is(err, ErrProtocol) {
+				t.Fatalf("snapshot validation=%v", err)
+			}
+			fixture.wait(t)
+		})
+	}
+}

@@ -215,7 +215,7 @@ func adapterPublishChange(t *testing.T, store *kernel.Store, run kernel.Run) ker
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := store.RecordChangePrepared(ctx, state.ID, state.Revision, selection, tree, adapterTime(t, 322))
+	prepared, err := store.RecordChangePrepared(ctx, state.ID, state.Revision, selection, tree, adapterTime(t, max(int64(322), run.UpdatedAt.Int64())))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func adapterPublishChange(t *testing.T, store *kernel.Store, run kernel.Run) ker
 	if err != nil {
 		t.Fatal(err)
 	}
-	available, err := store.MarkChangeAvailable(ctx, state.ID, prepared.Revision, availability, adapterTime(t, 324))
+	available, err := store.MarkChangeAvailable(ctx, state.ID, prepared.Revision, availability, adapterTime(t, max(int64(324), run.UpdatedAt.Int64())))
 	if err != nil {
 		t.Fatal(err)
 	}

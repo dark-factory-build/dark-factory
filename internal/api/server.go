@@ -42,6 +42,7 @@ const (
 	CallPeerStatus
 	CallPeerAsk
 	CallPeerAnswer
+	CallTerminalObserve
 	CallSendBack
 	CallSendBackTask
 	CallTaskRecovery
@@ -77,42 +78,44 @@ func digestAttemptCredential(bearer credential) AttemptDigest {
 // Call is an immutable decoded request. Only the accessor matching Kind
 // returns true.
 type Call struct {
-	kind              CallKind
-	digest            AttemptDigest
-	project           CreateProjectInput
-	projectLimits     ProjectLimitsInput
-	agent             CreateAgentInput
-	agentIdlePolicy   AgentIdlePolicyInput
-	task              EnqueueTaskInput
-	humanQuestion     HumanQuestionInput
-	peerQuestion      PeerQuestionInput
-	peerAnswer        PeerAnswerInput
-	peerStatusOffset  uint64
-	peerTargetOffset  uint64
-	peerExpectedHead  uint64
-	sendBack          SendBackInput
-	taskRecovery      TaskRecoveryInput
-	overseerTask      OverseerTaskCreateInput
-	overseerSnapshot  OverseerSnapshotInput
-	overseerTaskEdit  OverseerTaskUpdateInput
-	overseerAgent     OverseerAgentUpdateInput
-	overseerRun       OverseerRunStopInput
-	overseerReplace   OverseerRunReplaceInput
-	overseerMessage   OverseerWorkerMessageInput
-	overseerInterrupt OverseerWorkerInterruptInput
-	overseerReply     OverseerHumanReplyInput
-	humanReply        OverseerHumanReplyInput
-	webClient         WebClientRevocationInput
-	webAfter          string
-	expectedRevision  uint64
-	enabled           bool
-	capacity          uint16
-	account           AccountLinkInput
-	selection         AgentAccountSelectInput
-	accountsOffset    uint32
-	modelSelection    AgentModelSelectInput
-	text              string
-	sourceTaskID      string
+	terminalObserve    TerminalObserveInput
+	peerIncludeTargets bool
+	kind               CallKind
+	digest             AttemptDigest
+	project            CreateProjectInput
+	projectLimits      ProjectLimitsInput
+	agent              CreateAgentInput
+	agentIdlePolicy    AgentIdlePolicyInput
+	task               EnqueueTaskInput
+	humanQuestion      HumanQuestionInput
+	peerQuestion       PeerQuestionInput
+	peerAnswer         PeerAnswerInput
+	peerStatusOffset   uint64
+	peerTargetOffset   uint64
+	peerExpectedHead   uint64
+	sendBack           SendBackInput
+	taskRecovery       TaskRecoveryInput
+	overseerTask       OverseerTaskCreateInput
+	overseerSnapshot   OverseerSnapshotInput
+	overseerTaskEdit   OverseerTaskUpdateInput
+	overseerAgent      OverseerAgentUpdateInput
+	overseerRun        OverseerRunStopInput
+	overseerReplace    OverseerRunReplaceInput
+	overseerMessage    OverseerWorkerMessageInput
+	overseerInterrupt  OverseerWorkerInterruptInput
+	overseerReply      OverseerHumanReplyInput
+	humanReply         OverseerHumanReplyInput
+	webClient          WebClientRevocationInput
+	webAfter           string
+	expectedRevision   uint64
+	enabled            bool
+	capacity           uint16
+	account            AccountLinkInput
+	selection          AgentAccountSelectInput
+	accountsOffset     uint32
+	modelSelection     AgentModelSelectInput
+	text               string
+	sourceTaskID       string
 }
 
 func (call Call) Kind() CallKind { return call.kind }
@@ -123,7 +126,7 @@ func (call Call) GoString() string {
 
 func (call Call) AttemptDigest() (AttemptDigest, bool) {
 	switch call.kind {
-	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
+	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -227,8 +230,11 @@ func (call Call) PeerQuestionInput() (PeerQuestionInput, bool) {
 func (call Call) PeerAnswerInput() (PeerAnswerInput, bool) {
 	return call.peerAnswer, call.kind == CallPeerAnswer
 }
-func (call Call) PeerStatusPage() (uint64, uint64, uint64, bool) {
-	return call.peerStatusOffset, call.peerTargetOffset, call.peerExpectedHead, call.kind == CallPeerStatus
+func (call Call) TerminalObserveInput() (TerminalObserveInput, bool) {
+	return call.terminalObserve, call.kind == CallTerminalObserve
+}
+func (call Call) PeerStatusPage() (uint64, uint64, uint64, bool, bool) {
+	return call.peerStatusOffset, call.peerTargetOffset, call.peerExpectedHead, call.peerIncludeTargets, call.kind == CallPeerStatus
 }
 
 // SendBackInput is the task and note of a send-back, from an orchestrator's
@@ -263,6 +269,7 @@ const (
 	replyRemoteStatus
 	replyOverseerSnapshot
 	replyPeerStatus
+	replyTerminalObservation
 	replyAccounts
 	replyTaskRecovery
 	replyHumanRequests
@@ -271,22 +278,23 @@ const (
 
 // Reply is constructed only through its fixed reply constructors.
 type Reply struct {
-	kind          replyKind
-	health        HealthStatus
-	snapshot      DashboardSnapshot
-	mutation      MutationResult
-	attemptTask   AttemptTask
-	attemptSource RetainedChangeHandoff
-	webStatus     WebStatus
-	webClients    WebClientPage
-	webRevoke     WebRevokeResult
-	remote        RemoteStatus
-	overseer      OverseerSnapshot
-	peerStatus    PeerStatus
-	accounts      Accounts
-	taskRecovery  TaskRecovery
-	humanRequests HumanRequestList
-	code          RemoteErrorCode
+	terminalObservation TerminalObservation
+	kind                replyKind
+	health              HealthStatus
+	snapshot            DashboardSnapshot
+	mutation            MutationResult
+	attemptTask         AttemptTask
+	attemptSource       RetainedChangeHandoff
+	webStatus           WebStatus
+	webClients          WebClientPage
+	webRevoke           WebRevokeResult
+	remote              RemoteStatus
+	overseer            OverseerSnapshot
+	peerStatus          PeerStatus
+	accounts            Accounts
+	taskRecovery        TaskRecovery
+	humanRequests       HumanRequestList
+	code                RemoteErrorCode
 }
 
 func (Reply) String() string   { return "Reply(<redacted>)" }
@@ -375,6 +383,14 @@ func NewAccountsReply(accounts Accounts) (Reply, error) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyAccounts, accounts: accounts}, nil
+}
+
+func NewTerminalObservationReply(value TerminalObservation) (Reply, error) {
+	if !validTerminalObservation(value) {
+		return Reply{}, ErrInvalidInput
+	}
+	value.Payload = append([]byte(nil), value.Payload...)
+	return Reply{kind: replyTerminalObservation, terminalObservation: value}, nil
 }
 
 func NewWebStatusReply(status WebStatus) (Reply, error) {
@@ -761,16 +777,20 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		}
 	case CallPeerStatus:
 		var input PeerStatusInput
-		if err := decodeExact(request.Params, &input); err != nil || input.Offset > uint64(^uint64(0)>>1)-1 || input.TargetOffset > uint64(^uint64(0)>>1)-4 || input.ExpectedHead > uint64(^uint64(0)>>1) || input.ExpectedHead == 0 && (input.Offset != 0 || input.TargetOffset != 0) {
+		if err := decodeExact(request.Params, &input); err != nil || input.Offset > uint64(^uint64(0)>>1)-1 || input.TargetOffset > uint64(^uint64(0)>>1)-4 || input.ExpectedHead > uint64(^uint64(0)>>1) || !input.IncludeTargets && input.TargetOffset != 0 || input.ExpectedHead == 0 && (input.Offset != 0 || input.TargetOffset != 0) {
 			return Call{}, RemoteInvalidRequest
 		}
-		call.peerStatusOffset, call.peerTargetOffset, call.peerExpectedHead = input.Offset, input.TargetOffset, input.ExpectedHead
+		call.peerStatusOffset, call.peerTargetOffset, call.peerExpectedHead, call.peerIncludeTargets = input.Offset, input.TargetOffset, input.ExpectedHead, input.IncludeTargets
 	case CallPeerAsk:
 		if err := decodeExact(request.Params, &call.peerQuestion); err != nil || !validID(call.peerQuestion.TargetTaskID) || !validID(call.peerQuestion.IdempotencyKey) || !validText(call.peerQuestion.Question, 1, 2048) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallPeerAnswer:
 		if err := decodeExact(request.Params, &call.peerAnswer); err != nil || !validID(call.peerAnswer.QuestionID) || !validID(call.peerAnswer.IdempotencyKey) || call.peerAnswer.ExpectedRevision == 0 || !validText(call.peerAnswer.Answer, 1, 2048) {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallTerminalObserve:
+		if err := decodeExact(request.Params, &call.terminalObserve); err != nil || !validTerminalObservationInput(call.terminalObserve) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallSendBack, CallSendBackTask:
@@ -882,6 +902,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallPeerAsk, attemptDomain
 	case "peer_answer":
 		return CallPeerAnswer, attemptDomain
+	case "terminal_observe":
+		return CallTerminalObserve, attemptDomain
 	case "send_back":
 		return CallSendBack, attemptDomain
 	case "send_back_task":
@@ -992,6 +1014,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyAttemptSource
 	case CallTaskRecovery:
 		return reply == replyTaskRecovery
+	case CallTerminalObserve:
+		return reply == replyTerminalObservation
 	case CallPeerStatus:
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
@@ -1050,6 +1074,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.remote)
 	case replyOverseerSnapshot:
 		data, err = json.Marshal(reply.overseer)
+	case replyTerminalObservation:
+		data, err = json.Marshal(reply.terminalObservation)
 	case replyPeerStatus:
 		data, err = json.Marshal(reply.peerStatus)
 	case replyAccounts:
