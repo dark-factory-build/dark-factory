@@ -152,7 +152,11 @@ func runSupervisorCodexFixture() error {
 			target = ""
 		}
 	}
-	if target != "" {
+	var sourcePaths []string
+	for _, target := range strings.Split(target, ";") {
+		if target == "" {
+			continue
+		}
 		expected := strings.Fields(target)
 		if len(expected) != 5 {
 			return fmt.Errorf("source target = %q", target)
@@ -192,6 +196,21 @@ func runSupervisorCodexFixture() error {
 		}
 		if _, err := os.ReadFile(filepath.Join(handoff.SourcePath, "payload.txt")); err != nil {
 			return fmt.Errorf("launch handoff source payload: %w", err)
+		}
+		again, err := client.Source(ctx, expected[0])
+		if err != nil || again != handoff {
+			return fmt.Errorf("repeat source receipt changed: %+v, %v", again, err)
+		}
+		sourcePaths = append(sourcePaths, handoff.SourcePath)
+	}
+	for i, path := range sourcePaths {
+		for _, earlier := range sourcePaths[:i] {
+			if earlier == path {
+				return errors.New("distinct source targets shared a path")
+			}
+		}
+		if body, err := os.ReadFile(filepath.Join(path, "payload.txt")); err != nil || string(body) != "exact source\n" {
+			return fmt.Errorf("earlier source was lost after another request: %q, %v", body, err)
 		}
 	}
 	for _, value := range append(append([]string(nil), os.Args[1:]...), os.Environ()...) {
@@ -447,12 +466,12 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 	fixture.assertReleased(t, run)
 }
 
-// The retained source is selected from durable state before the second,
-// independently admitted Codex launch.  Its own attempt receipt and targeted
-// overseer status must agree before the provider can read the Git-free tree.
+// One Codex overseer reads two independently retained Changes in the same
+// attempt. Each source receipt must agree with targeted status, and requesting
+// the second tree must preserve the first tree and its cached receipt.
 // This is intentionally not a projection-only test: it exercises the real
 // supervisor, Change worker, provider permission profile and attempt API.
-func TestSupervisorCodexOverseerLaunchReceivesExactRetainedChangeReceipt(t *testing.T) {
+func TestSupervisorCodexOverseerReadsMultipleExactRetainedChanges(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 	worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
@@ -464,6 +483,22 @@ func TestSupervisorCodexOverseerLaunchReceivesExactRetainedChangeReceipt(t *test
 		t.Fatalf("retained worker Change = %+v, found=%v, err=%v", changeState, found, err)
 	}
 
+	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+		ID: supervisorTaskID(t, 20), ProjectID: worker.ProjectID, AssignedAgentID: worker.AgentID,
+		IncarnationID: supervisorIncarnationID(t, 21), Title: "second source", Priority: 1,
+	}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("second worker RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	secondChange, found, err := fixture.store.Change(context.Background(), *second.ChangeID)
+	if err != nil || !found || secondChange.Selection == nil {
+		t.Fatalf("second retained Change = %+v, found=%v, err=%v", secondChange, found, err)
+	}
+
 	overseerID := supervisorAgentID(t, 9)
 	if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
 		ID: overseerID, ProjectID: worker.ProjectID, Name: "overseer", Role: kernel.RoleOrchestrator,
@@ -473,7 +508,7 @@ func TestSupervisorCodexOverseerLaunchReceivesExactRetainedChangeReceipt(t *test
 	}
 	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
 		ID: supervisorTaskID(t, 10), ProjectID: worker.ProjectID, AssignedAgentID: overseerID, IncarnationID: supervisorIncarnationID(t, 11),
-		Title: "review retained Change", Body: fmt.Sprintf("handoff %s %s %x %d %d", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
+		Title: "review retained Change", Body: fmt.Sprintf("handoff %s %s %x %d %d; %s %s %x %d %d", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64(), second.TaskID, secondChange.ID, secondChange.Selection.Commit().Bytes(), second.AdmittedTaskWorkRevision.Int64(), secondChange.Revision.Int64()), Priority: 1,
 	}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}

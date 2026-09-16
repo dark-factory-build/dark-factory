@@ -28,9 +28,6 @@ func (daemon *Daemon) materializeAttemptSource(ctx context.Context, live *liveAt
 	if path, ok := live.sourceSnapshots[handoff]; ok {
 		return path, nil
 	}
-	if len(live.sourceSnapshots) != 0 {
-		return "", kernel.ErrConflict
-	}
 	changeState, found, err := daemon.store.Change(ctx, handoff.ChangeID)
 	if err != nil {
 		return "", err
