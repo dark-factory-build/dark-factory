@@ -162,7 +162,7 @@ class AutonomyTest(unittest.TestCase):
                 runtime.observe(Path('/private/tmp/alternate-factory'))
 
     def test_real_deploy_process_emits_one_receipt_without_replaying_commands(self):
-        for initially_enabled, failing_action in ((False, ''), (True, ''), (True, 'off'), (True, 'on')):
+        for initially_enabled, failing_action, settling in ((False, '', False), (True, '', False), (True, 'off', False), (True, 'on', False), (True, '', True), (False, '', True)):
             with self.subTest(initially_enabled=initially_enabled, failing_action=failing_action), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 home = root / 'factory'
@@ -170,6 +170,8 @@ class AutonomyTest(unittest.TestCase):
                 with sqlite3.connect(home / 'factory.sqlite3') as connection:
                     connection.executescript('CREATE TABLE factory(singleton INTEGER, dispatch_enabled INTEGER, revision INTEGER); CREATE TABLE runs(phase TEXT);')
                     connection.execute('INSERT INTO factory VALUES(1, ?, 4)', (initially_enabled,))
+                    if settling:
+                        connection.execute("INSERT INTO runs VALUES('running')")
                 (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
                 (root / 'reinstall-service.sh').write_text('printf "%s\\n" "$*" >>"$DARK_FACTORY_SOCKET.install-calls"\necho installer-output\n')
                 (root / 'verify-live-runtime.py').write_text('import json, sys\nprint(json.dumps({"sha": sys.argv[-1], "healthy": True}))\n')
@@ -190,6 +192,9 @@ with sqlite3.connect(home / 'factory.sqlite3') as connection:
     target = int(sys.argv[2] == 'on')
     revision += int(enabled != target)
     connection.execute('UPDATE factory SET dispatch_enabled=?, revision=?', (target, revision))
+    if sys.argv[2] == 'off':
+        settled = connection.execute("UPDATE runs SET phase='terminal' WHERE phase <> 'terminal'").rowcount
+        connection.execute('UPDATE factory SET revision=revision+?', (settled,))
 print(json.dumps({'enabled': bool(target), 'revision': revision}))
 """.replace('FAILING_ACTION', repr(failing_action)))
                 control.chmod(0o700)
@@ -216,6 +221,52 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
             with self.assertRaisesRegex(ValueError, 'operator changed'):
                 deploy.deploy('a' * 40)
         self.assertFalse(any(Path(call.args[0][1]).name == 'reinstall-service.sh' and '--prepare' not in call.args[0] for call in run.call_args_list))
+
+    def test_runtime_settlements_during_pause_and_drain_restore_current_revision(self):
+        states = iter([(True, 4, 4), (False, 6, 3), (False, 7, 2), (False, 9, 0), (False, 9, 0), (True, 10, 0)])
+        def command(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'sha': 'a' * 40, 'healthy': True}), '')
+        with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), \
+             patch.object(deploy.subprocess, 'run', side_effect=command) as run, patch.object(deploy.time, 'sleep'):
+            deploy.deploy('a' * 40)
+        self.assertTrue(any(call.args[0][-3:] == ['on', '--revision', '9'] for call in run.call_args_list))
+
+    def test_runtime_operator_change_during_drain_never_installs_or_restores(self):
+        for changed in [(False, 7, 3), (True, 6, 4), (False, 6, 5)]:
+            with self.subTest(changed=changed):
+                states = iter([(True, 4, 4), (False, 5, 4), changed])
+                with patch.object(deploy, 'state', side_effect=lambda _home: next(states, changed)), \
+                     patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run, \
+                     patch.object(deploy, 'failure_receipt') as receipt, patch.object(deploy.time, 'monotonic', side_effect=[0, 301]):
+                    with self.assertRaisesRegex(ValueError, 'operator changed'):
+                        deploy.deploy('a' * 40)
+                self.assertFalse(any('--install-prepared' in call.args[0] or 'on' in call.args[0] for call in run.call_args_list))
+                receipt.assert_not_called()
+
+    def test_runtime_drain_timeout_restores_only_the_owned_pause(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                paused = 4 + int(enabled)
+                states = iter([(enabled, 4, 2), (False, paused, 2), (False, paused + 1, 1)])
+                with patch.object(deploy, 'state', side_effect=lambda _home: next(states, (False, paused + 1, 1))), \
+                     patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run, \
+                     patch.object(deploy.time, 'monotonic', side_effect=[0, 301]), \
+                     patch.object(deploy, 'failure_receipt') as receipt:
+                    with self.assertRaisesRegex(ValueError, 'runs did not drain'):
+                        deploy.deploy('a' * 40)
+                self.assertFalse(any('--install-prepared' in call.args[0] for call in run.call_args_list))
+                restore = [call.args[0] for call in run.call_args_list if 'on' in call.args[0]]
+                self.assertEqual(int(enabled), len(restore))
+                if enabled:
+                    self.assertEqual(['on', '--revision', str(paused + 1)], restore[0][-3:])
+                receipt.assert_not_called()
+
+    def test_runtime_operator_change_after_install_wins_over_restore(self):
+        states = iter([(True, 4, 2), (False, 5, 2), (False, 7, 0), (False, 9, 0), (False, 9, 0)])
+        with patch.object(deploy, 'state', side_effect=lambda _home: next(states)), \
+             patch.object(deploy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps({'sha': 'a' * 40, 'healthy': True}), '')) as run:
+            deploy.deploy('a' * 40)
+        self.assertFalse(any('on' in call.args[0] for call in run.call_args_list))
 
     def test_runtime_failure_records_a_safe_receipt(self):
         def timeout_install(argv, **_kwargs):
