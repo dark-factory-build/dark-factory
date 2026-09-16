@@ -1029,6 +1029,9 @@ func TestDaemonCloseCancelsCleanupWaitingForWriter(t *testing.T) {
 func TestRuntimeAbsentRecoveryHonorsCancellationWhileWriterHeld(t *testing.T) {
 	fixture := newRecoveryFixture(t, 0xc0)
 	before := fixture.currentRun(t)
+	// An unrelated live operation must not gate this runtime-absent transition.
+	fixture.daemon.operationMu.Lock()
+	defer fixture.daemon.operationMu.Unlock()
 	lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
 	if err != nil {
 		t.Fatal(err)

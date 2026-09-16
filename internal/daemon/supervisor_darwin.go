@@ -1045,8 +1045,8 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 // created. The caller must not have attempted CreateRuntime for this run;
 // trusted absence is exactly that precondition.
 func (daemon *Daemon) failRunBeforeRuntime(ctx context.Context, run kernel.Run, runtimeID kernel.ResourceID, code kernel.FailureCode, cause error) (kernel.Run, error) {
-	daemon.operationMu.Lock()
-	defer daemon.operationMu.Unlock()
+	// No runtime or live owner exists here. The kernel transaction checks the
+	// exact run/resource revisions; the live-operation gate adds no authority.
 	failure, err := kernel.NewFailureProposal(code, failureDetail(cause))
 	if err != nil {
 		return run, errors.Join(cause, err)
