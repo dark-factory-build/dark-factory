@@ -59,6 +59,9 @@ func startupDiagnostic(output func() string) string {
 	for _, line := range strings.Split(output(), "\n") {
 		if strings.HasPrefix(line, "factoryd:") {
 			diagnostic = line
+		} else if diagnostic != "" && line != "" {
+			// errors.Join formats its retained causes on subsequent lines.
+			diagnostic += "\n" + line
 		}
 	}
 	if diagnostic == "" {
@@ -281,7 +284,8 @@ func (fixture *blackBoxFixture) startFactoryd(t *testing.T) (*exec.Cmd, *syncBuf
 	t.Helper()
 	output := &syncBuffer{}
 	command := exec.Command(fixture.factoryd, "--home", fixture.home, "--development-browser-address", "127.0.0.1:0")
-	command.Stdout, command.Stderr = output, output
+	// Keep startup diagnostics separate from arbitrary standard output.
+	command.Stderr = output
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -320,6 +324,11 @@ func TestStartupDiagnosticShowsOnlyBoundedFactorydStartupOutput(t *testing.T) {
 	_, _ = output.Write([]byte("provider: secret\nfactoryd: browser: listen tcp4 127.0.0.1:43123: bind: address already in use\n"))
 	if got, want := startupDiagnostic(output.String), `"factoryd: browser: listen tcp4 127.0.0.1:43123: bind: address already in use"`; got != want {
 		t.Fatalf("startup diagnostic = %s, want %s", got, want)
+	}
+	joined := &syncBuffer{}
+	_, _ = joined.Write([]byte("earlier output\nfactoryd: home publication outcome is uncertain\nretained socket identity changed\n"))
+	if got, want := startupDiagnostic(joined.String), `"factoryd: home publication outcome is uncertain\nretained socket identity changed"`; got != want {
+		t.Fatalf("joined startup diagnostic = %s, want %s", got, want)
 	}
 	long := &syncBuffer{}
 	_, _ = long.Write([]byte("factoryd: " + strings.Repeat("x", maxStartupDiagnosticBytes+1)))
