@@ -1044,9 +1044,10 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
 	// running/finalizing boundary; notification carries no authority.
-	operationCtx, cancel := context.WithTimeout(ctx, liveAttemptStoreTimeout)
-	run, err := daemon.store.ProposeAttemptOutcome(operationCtx, kDigest, proposal, at)
-	cancel()
+	// A complete outcome mutation follows the authenticated request lifetime,
+	// not the live owner's short polling budget. Writer contention and durable
+	// validation must not discard an otherwise valid result after two seconds.
+	run, err := daemon.store.ProposeAttemptOutcome(ctx, kDigest, proposal, at)
 	var attempt *liveAttempt
 	if err == nil {
 		daemon.attemptMu.Lock()
