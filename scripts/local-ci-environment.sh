@@ -66,6 +66,8 @@ IFS=$ci_old_ifs
 
 ci_saved_df_gate_fault=${DF_GATE_FAULT-}
 ci_have_df_gate_fault=${DF_GATE_FAULT+yes}
+ci_saved_local_ci_directory=${DARK_FACTORY_LOCAL_CI_DIRECTORY-}
+ci_saved_local_ci_factoryctl=${DARK_FACTORY_FACTORYCTL-}
 ci_saved_local_ci_lease_held=${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}
 ci_have_local_ci_lease_held=${DARK_FACTORY_LOCAL_CI_LEASE_HELD+yes}
 ci_saved_local_ci_wait=${DARK_FACTORY_LOCAL_CI_WAIT-}
@@ -123,6 +125,10 @@ for ci_cache_child in $ci_cache_children; do
     [ -d "$ci_cache_path" ] || /bin/mkdir "$ci_cache_path"
 done
 
+if [ -n "$ci_saved_local_ci_directory" ]; then
+    export DARK_FACTORY_LOCAL_CI_DIRECTORY="$ci_saved_local_ci_directory"
+    if [ -n "$ci_saved_local_ci_factoryctl" ]; then export DARK_FACTORY_FACTORYCTL="$ci_saved_local_ci_factoryctl"; fi
+fi
 export DF_CI_NODE="$ci_node" DF_CI_COREPACK="$ci_corepack"
 export DARK_FACTORY_E2E_NODE="$ci_node" DARK_FACTORY_E2E_COREPACK="$ci_corepack"
 export DF_CI_CACHE_ROOT="$ci_cache_root"

@@ -18,14 +18,39 @@ LOCAL_CI_LEASE_MAX_FIELD_BYTES=256
 LOCAL_CI_LEASE_MAX_IDENTIFIER_BYTES=128
 
 local_ci_lease_common_dir() {
-    local_ci_lease_dir=$(git rev-parse --git-common-dir 2>/dev/null) || {
-        echo "local-ci: cannot resolve the git common directory" >&2
+    if [ -n "${DARK_FACTORY_LOCAL_CI_DIRECTORY-}" ]; then
+        local_ci_lease_dir=$DARK_FACTORY_LOCAL_CI_DIRECTORY
+        case "$local_ci_lease_dir" in
+            /*/dark-factory-local-ci) ;;
+            *) echo "local-ci: invalid dedicated lease directory" >&2; return 1 ;;
+        esac
+    else
+        local_ci_git_dir=$(git rev-parse --git-common-dir 2>/dev/null) || {
+            echo "local-ci: cannot resolve the git common directory" >&2
+            return 1
+        }
+        local_ci_git_dir=$(CDPATH= cd -- "$local_ci_git_dir" && pwd -P) || return 1
+        if [ -e "$local_ci_git_dir/.dark-factory-local-ci" ] || [ -L "$local_ci_git_dir/.dark-factory-local-ci" ]; then
+            echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
+            return 1
+        fi
+        local_ci_old_lock=$local_ci_git_dir/.dark-factory-local-ci.lock
+        local_ci_barrier=dark-factory-local-ci/.dark-factory-local-ci.lock
+        if [ "$(readlink "$local_ci_old_lock" 2>/dev/null || true)" != "$local_ci_barrier" ]; then
+            perl -e 'symlink($ARGV[0], $ARGV[1]) or exit 1' "$local_ci_barrier" "$local_ci_old_lock" || {
+                echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
+                return 1
+            }
+        fi
+        local_ci_lease_dir=$local_ci_git_dir/dark-factory-local-ci
+        (umask 077; mkdir "$local_ci_lease_dir") 2>/dev/null || [ -d "$local_ci_lease_dir" ] || return 1
+    fi
+    [ ! -L "$local_ci_lease_dir" ] && [ -d "$local_ci_lease_dir" ] || return 1
+    [ "$(CDPATH= cd -P -- "$local_ci_lease_dir" && pwd -P)" = "$local_ci_lease_dir" ] || return 1
+    [ "$(stat -f '%u:%Lp' "$local_ci_lease_dir")" = "$(id -u):700" ] || {
+        echo "local-ci: lease directory is not owned and protected" >&2
         return 1
     }
-    case "$local_ci_lease_dir" in
-        /*) ;;
-        *) local_ci_lease_dir=$(CDPATH= cd -- "$local_ci_lease_dir" && pwd -P) || return 1 ;;
-    esac
     printf '%s\n' "$local_ci_lease_dir"
 }
 
@@ -409,11 +434,26 @@ local_ci_lease_acquire_lock_object() {
     done
 }
 
+# The native runtime cannot exec macOS's setuid ps. Reuse its pinned factoryctl
+# and runner identity reader; host checkouts keep the system observer.
+local_ci_lease_process_identity() {
+    if [ -n "${DARK_FACTORY_LOCAL_CI_DIRECTORY-}" ] && [ -n "${DARK_FACTORY_FACTORYCTL-}" ]; then
+        local_ci_lease_observed=$("$DARK_FACTORY_FACTORYCTL" --local-ci-process-identity "$1") || return 1
+        case "$2" in
+            lstart=) printf 'native:%s\n' "${local_ci_lease_observed% *}" ;;
+            pgid=) printf '%s\n' "${local_ci_lease_observed##* }" ;;
+            *) return 1 ;;
+        esac
+    else
+        /bin/ps -p "$1" -o "$2"
+    fi
+}
+
 local_ci_lease_write_owner() {
     local_ci_lease_owner_record=$1
     local_ci_lease_worktree=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)
     local_ci_lease_started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    local_ci_lease_process_start=$(ps -p "$$" -o lstart= 2>/dev/null | sed 's/^ *//')
+    local_ci_lease_process_start=$(local_ci_lease_process_identity "$$" lstart= 2>/dev/null | sed 's/^ *//')
     local_ci_lease_head=$(git rev-parse HEAD 2>/dev/null || printf 'unknown')
     local_ci_lease_lock_identity=$(local_ci_lease_lock_identity || printf 'unknown')
     {
@@ -645,16 +685,16 @@ local_ci_lease_run() {
     local_ci_lease_holder_pgid=
     while [ -z "$local_ci_lease_holder_start" ] || [ -z "$local_ci_lease_holder_pgid" ]; do
         [ "$local_ci_lease_identity_attempts" -lt 100 ] || break
-        local_ci_lease_holder_start=$(/bin/ps -p "$local_ci_lease_holder_pid" -o lstart= 2>/dev/null | sed 's/^ *//')
-        local_ci_lease_holder_pgid=$(/bin/ps -p "$local_ci_lease_holder_pid" -o pgid= 2>/dev/null | tr -d ' ')
+        local_ci_lease_holder_start=$(local_ci_lease_process_identity "$local_ci_lease_holder_pid" lstart= 2>/dev/null | sed 's/^ *//')
+        local_ci_lease_holder_pgid=$(local_ci_lease_process_identity "$local_ci_lease_holder_pid" pgid= 2>/dev/null | tr -d ' ')
         local_ci_lease_identity_attempts=$((local_ci_lease_identity_attempts + 1))
         [ -n "$local_ci_lease_holder_start" ] && [ -n "$local_ci_lease_holder_pgid" ] || sleep 0.01
     done
 
     local_ci_lease_holder_is_owned() {
         [ -n "$local_ci_lease_holder_start" ] || return 1
-        local_ci_lease_current_start=$(/bin/ps -p "$local_ci_lease_holder_pid" -o lstart= 2>/dev/null | sed 's/^ *//')
-        local_ci_lease_current_pgid=$(/bin/ps -p "$local_ci_lease_holder_pid" -o pgid= 2>/dev/null | tr -d ' ')
+        local_ci_lease_current_start=$(local_ci_lease_process_identity "$local_ci_lease_holder_pid" lstart= 2>/dev/null | sed 's/^ *//')
+        local_ci_lease_current_pgid=$(local_ci_lease_process_identity "$local_ci_lease_holder_pid" pgid= 2>/dev/null | tr -d ' ')
         [ "$local_ci_lease_current_start" = "$local_ci_lease_holder_start" ] \
             && [ "$local_ci_lease_current_pgid" = "$local_ci_lease_holder_pgid" ] \
             && [ "$local_ci_lease_current_pgid" = "$local_ci_lease_holder_pid" ]

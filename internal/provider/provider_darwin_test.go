@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -904,6 +905,58 @@ func TestCodexToolchainSandbox(t *testing.T) {
 	if out, err := run("/bin/sh", "-c", script, "proof", software, secret); err != nil {
 		t.Fatalf("sandbox isolation: %v\n%s", err, out)
 	}
+	gitDirectory := filepath.Join(root, "repository.git")
+	leaseDirectory := filepath.Join(gitDirectory, "dark-factory-local-ci")
+	if err := os.MkdirAll(leaseDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"refs", "hooks", "objects"} {
+		if err := os.Mkdir(filepath.Join(gitDirectory, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gitDirectory, "config"), []byte("unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	request.runtime, err = request.runtime.WithLocalCILeaseDirectory(leaseDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseScript := `set -eu
+ printf lease > "$DARK_FACTORY_LOCAL_CI_DIRECTORY/proof"
+ for path in "$1/config" "$1/refs/injected" "$1/hooks/injected" "$1/objects/injected"; do
+   if (printf forbidden > "$path") 2>/dev/null; then exit 33; fi
+ done
+ `
+	if out, err := run("/bin/sh", "-c", leaseScript, "proof", gitDirectory); err != nil {
+		t.Fatalf("dedicated lease Git isolation: %v\n%s", err, out)
+	}
+	_, testSource, _, _ := goruntime.Caller(0)
+	leaseScripts := filepath.Join(request.workingDirectory, "scripts")
+	if err := os.Mkdir(leaseScripts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"local-ci-lease.sh", "with-local-ci-lease.sh"} {
+		body, err := os.ReadFile(filepath.Join(filepath.Dir(testSource), "..", "..", "scripts", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(leaseScripts, name), body, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request.runtime.factoryctl = filepath.Join(root, "factoryctl")
+	build := exec.Command("go", "build", "-o", request.runtime.factoryctl, "./cmd/factoryctl")
+	build.Dir = filepath.Join(filepath.Dir(testSource), "..", "..")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build lease observer fixture: %v\n%s", err, out)
+	}
+	if out, err := run("/bin/sh", "-c", "\"$DARK_FACTORY_FACTORYCTL\" --local-ci-process-identity $$"); err != nil {
+		t.Fatalf("lease process observation: %v\n%s", err, out)
+	}
+	if out, err := run("/bin/sh", "-c", "./scripts/with-local-ci-lease.sh /usr/bin/true"); err != nil {
+		t.Fatalf("generated-profile Git-free lease: %v\n%s", err, out)
+	}
 	request.runtime.toolchainReadRoots = ""
 	if out, err := run("/bin/cat", filepath.Join(software, "library")); err == nil {
 		t.Fatalf("baseline unexpectedly reads software: %s", out)
@@ -933,6 +986,31 @@ func TestCodexToolchainSandbox(t *testing.T) {
 			t.Fatalf("generated-profile private fixture: %v\n%s", err, out)
 		}
 		t.Logf("generated-profile private fixture: %s", out)
+	}
+}
+
+func TestCodexLocalCILeaseGrantExcludesGitMetadata(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	lease := "/private/repository/.git/dark-factory-local-ci"
+	withLease, err := runtime.WithLocalCILeaseDirectory(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := requestFor(t, kernel.ProviderCodex, installation, withLease, "", "")
+	policy, err := codexPermissions(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(policy, tomlBasicString(lease)+`="write"`) || strings.Contains(policy, tomlBasicString(filepath.Dir(lease))+`="write"`) {
+		t.Fatalf("lease permission is not narrow: %s", policy)
+	}
+	if !slices.Contains(withLease.environment(kernel.ProviderCodex), "DARK_FACTORY_LOCAL_CI_DIRECTORY="+lease) {
+		t.Fatal("lease path missing from launch environment")
+	}
+	for _, invalid := range []string{"/", "/private/repository/.git", "relative/dark-factory-local-ci", "/private/../dark-factory-local-ci"} {
+		if _, err := runtime.WithLocalCILeaseDirectory(invalid); err == nil {
+			t.Fatalf("accepted unsafe lease path %q", invalid)
+		}
 	}
 }
 

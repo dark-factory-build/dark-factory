@@ -44,6 +44,7 @@ type Config struct {
 	FactoryctlExecutable string
 	ToolPath             string
 	ToolchainReadRoots   string
+	LocalCILeaseDir      string
 	AccountHome          string
 	// AccountConfigDir is the linked provider login this run launches with.
 	// Empty means the provider's own default configuration directory.
@@ -110,6 +111,7 @@ type configWire struct {
 	FactoryctlExecutable string       `json:"factoryctl_executable"`
 	ToolPath             string       `json:"tool_path"`
 	ToolchainReadRoots   string       `json:"toolchain_read_roots,omitempty"`
+	LocalCILeaseDir      string       `json:"local_ci_lease_directory,omitempty"`
 	AccountHome          string       `json:"account_home"`
 	AccountConfigDir     string       `json:"account_config_dir"`
 	RepositoryRoot       string       `json:"repository_root"`
@@ -130,7 +132,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	wire := configWire{
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
-		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
+		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName, StagingName: config.StagingName,
 		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask),
@@ -170,7 +172,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	config := Config{
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
-		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
+		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName, StagingName: wire.StagingName,
 		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
@@ -187,6 +189,9 @@ func validateConfig(config Config) error {
 		if !validAbsolute(path, maximumLocatorBytes) {
 			return invalidContract(nil)
 		}
+	}
+	if config.LocalCILeaseDir != "" && (!validAbsolute(config.LocalCILeaseDir, maximumLocatorBytes) || filepath.Base(config.LocalCILeaseDir) != "dark-factory-local-ci") {
+		return ErrInvalidContract
 	}
 	if config.AccountConfigDir != "" && !validAbsolute(config.AccountConfigDir, maximumLocatorBytes) {
 		return invalidContract(nil)

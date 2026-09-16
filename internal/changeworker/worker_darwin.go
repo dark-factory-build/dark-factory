@@ -104,6 +104,11 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
+	runtimePaths, err = runtimePaths.WithLocalCILeaseDirectory(config.LocalCILeaseDir)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
 	// Only the daemon can materialize an explicitly requested source here.
 	runtimePaths, err = runtimePaths.WithReadOnlySources([]string{filepath.Join(config.RuntimePath, "retained-source")})
 	if err != nil {
