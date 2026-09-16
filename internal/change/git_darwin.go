@@ -111,6 +111,13 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 		return Selection{}, newGitError(gitFailureProcess)
 	}
 
+	revision, err = refreshTrackingRevision(ctx, spec, revision, func() error {
+		return verifyGitAuthority(repositoryRoot, repository, gitExecutable, gitIdentity)
+	})
+	if err != nil {
+		return Selection{}, err
+	}
+
 	spec.arguments = []string{"-C", repositoryRoot, "rev-parse", "--show-toplevel", "--show-object-format", "--verify", "--end-of-options", revision + "^{commit}"}
 	resolved, err := runGitCapture(ctx, spec, maxGitSelectionOutput)
 	if err != nil {
@@ -147,6 +154,91 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 		gitExecutable: gitExecutable, gitIdentity: gitIdentity,
 		format: format, base: base, manifest: manifest,
 	}, nil
+}
+
+// refreshTrackingRevision runs only for a fresh Change, before its commit is
+// pinned. Retained Changes and explicit local revisions never refresh source.
+func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
+	run := func(arguments ...string) ([]byte, error) {
+		spec.arguments = append([]string{"-C", spec.repository}, arguments...)
+		result, err := runGitCapture(ctx, spec, maxGitSelectionOutput)
+		if err != nil {
+			return nil, err
+		}
+		if err := verify(); err != nil {
+			return nil, err
+		}
+		if result.exitCode != 0 {
+			return nil, &ValidationError{Reason: "source refresh failed; configured remote source was not selected"}
+		}
+		return result.output, nil
+	}
+	var remote, branch string
+	if revision == "HEAD" {
+		// Empty upstream means a deliberately local project, including detached
+		// HEAD. This does not fall back when an actual configured fetch fails.
+		head, err := run("rev-parse", "--symbolic-full-name", "HEAD")
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(string(head)) == "HEAD" {
+			return revision, nil
+		}
+		revision = strings.TrimSpace(string(head))
+		output, err := run("for-each-ref", "--count=1", "--format=%(upstream) %(upstream:remotename) %(upstream:remoteref)", revision)
+		if err != nil {
+			return "", err
+		}
+		fields := strings.Fields(string(output))
+		if len(fields) == 0 {
+			// Git also prints an empty upstream for broken tracking config.
+			// Only genuinely unconfigured branches may use their local source.
+			for _, field := range []string{"remote", "merge"} {
+				value, err := run("config", "--default", "", "--get", "branch."+strings.TrimPrefix(revision, "refs/heads/")+"."+field)
+				if err != nil {
+					return "", err
+				}
+				if len(bytes.TrimSpace(value)) != 0 {
+					return "", &ValidationError{Reason: "configured source upstream is invalid"}
+				}
+			}
+			return revision, nil
+		}
+		if len(fields) != 3 {
+			return "", &ValidationError{Reason: "configured source upstream is invalid"}
+		}
+		revision, remote, branch = fields[0], fields[1], fields[2]
+	} else if suffix, ok := strings.CutPrefix(revision, "refs/remotes/"); ok {
+		var found bool
+		remote, branch, found = strings.Cut(suffix, "/")
+		if !found || remote == "" || branch == "" {
+			return "", &ValidationError{Reason: "configured remote source is invalid"}
+		}
+		branch = "refs/heads/" + branch
+	}
+	if remote == "" || remote == "." {
+		return revision, nil
+	}
+	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") {
+		return "", &ValidationError{Reason: "configured remote source is invalid"}
+	}
+	// Pin the remote observation before fetching objects. No shared ref or
+	// FETCH_HEAD is written, so simultaneous fresh starts cannot race a ref
+	// lock or rewrite an operator's branch through a custom fetch mapping.
+	observed, err := run("ls-remote", "--exit-code", "--refs", remote, branch)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(observed))
+	if len(fields) != 2 || fields[1] != branch {
+		return "", &ValidationError{Reason: "configured remote source was not observed exactly"}
+	}
+	commit, err := hex.DecodeString(fields[0])
+	if err != nil || (len(commit) != 20 && len(commit) != 32) {
+		return "", &ValidationError{Reason: "configured remote source commit is invalid"}
+	}
+	_, err = run("-c", "core.hooksPath=/dev/null", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--refmap=", remote, fields[0])
+	return fields[0], err
 }
 
 func validateRevision(revision string) error {

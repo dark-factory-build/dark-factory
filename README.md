@@ -51,6 +51,21 @@ Each project has agents and durable tasks. An admitted attempt gets a fresh
 provider process and a daemon-owned `.git`-free Change. The browser and CLI
 remain clients of the same local API; neither owns lifecycle or policy.
 
+Fresh Changes use `factoryd --base-revision HEAD` by default: a branch with a
+configured remote upstream is fetched before its exact commit is selected.
+The registered checkout is not moved. Use `--base-revision
+refs/remotes/upstream/main` to select another remote branch. Explicit local
+refs or commit IDs, detached HEAD, and branches without an upstream stay local.
+A failed configured fetch fails source preparation; cached source is not a
+fallback. Retained Changes preserve their original source and edits until an
+explicit integration. Runtime build identity and Change source identity remain
+separate. Fetching adds only the pinned objects, without updating tracking refs
+or `FETCH_HEAD`, so parallel starts and custom upstream mappings cannot overwrite
+operator branches. Git runs noninteractively with a private HOME and
+global/system Git configuration disabled. Private remotes need
+working authentication through their repository-local transport configuration;
+missing credentials fail preparation rather than borrowing a worker account.
+
 ## Installation
 
 The [installation guide](docs/install.md) covers the three binaries, managed

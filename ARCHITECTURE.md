@@ -285,7 +285,10 @@ preceding run is terminal.
 Fresh selection pins the exact repository root, Git administration directory,
 bounded local config, object-directory root, and trusted Git executable around
 each metadata process. It does not enumerate unrelated historical objects.
-Trusted Git resolves the revision once, the tree query names that exact commit,
+Fresh selection refreshes a configured remote upstream without moving the
+checkout; a fetch failure cannot reuse cached source. Local revision policies
+and retained Changes do not fetch. Trusted Git resolves the revision once,
+the tree query names that exact commit,
 and the manifest binds every path, mode, size, and blob object ID. Materializing
 each selected blob requires the expected object ID, type, and size and
 independently hashes its bytes before the `.git`-free tree is published.
