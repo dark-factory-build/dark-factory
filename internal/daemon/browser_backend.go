@@ -295,10 +295,21 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
 	}
-	if err := backend.prepareAgentInstruction(ctx, agentID, request.Instruction); err != nil {
+	mode := kernel.BrowserEnqueueNow
+	switch request.Mode {
+	case "queue":
+		mode = kernel.BrowserEnqueueQueue
+	case "any":
+		mode = kernel.BrowserEnqueueAnyWorker
+	}
+	if mode == kernel.BrowserEnqueueAnyWorker {
+		if err := prepareSharedTaskText("Direct instruction", request.Instruction); err != nil {
+			return browserprotocol.TaskEnqueueResult{}, browser.ErrTooLarge
+		}
+	} else if err := backend.prepareAgentInstruction(ctx, agentID, request.Instruction); err != nil {
 		return browserprotocol.TaskEnqueueResult{}, err
 	}
-	result, err := backend.store.EnqueueTaskForBrowserAgentMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, request.Instruction, request.Mode == "queue", at)
+	result, err := backend.store.EnqueueTaskForBrowserAgentMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, request.Instruction, mode, at)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
 	}
@@ -1014,6 +1025,10 @@ func projectPublicSnapshot(snapshot kernel.PublicSnapshot, providerDefaults func
 		result.Agents = append(result.Agents, projectAgent(item, homes[item.AccountID], providerDefaults))
 	}
 	for _, item := range snapshot.Tasks {
+		if item.AssignedAgentID == (kernel.AgentID{}) {
+			result.SharedTasks = append(result.SharedTasks, projectTask(item))
+			continue
+		}
 		result.Tasks = append(result.Tasks, projectTask(item))
 	}
 	for _, item := range snapshot.HumanRequests {
@@ -1065,7 +1080,7 @@ func projectAgent(item kernel.AgentSummary, configHome string, providerDefaults 
 }
 
 func projectTask(item kernel.TaskSummary) browserprotocol.TaskItem {
-	return browserprotocol.TaskItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), AssignedAgentID: item.AssignedAgentID.String(), Title: item.Title, Status: item.Status, Priority: item.Priority, Revision: decimalRevision(item.Revision), UpdatedAtMillis: decimalMillis(item.UpdatedAt)}
+	return browserprotocol.TaskItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), AssignedAgentID: optionalAgentText(item.AssignedAgentID), Title: item.Title, Status: item.Status, Priority: item.Priority, Revision: decimalRevision(item.Revision), UpdatedAtMillis: decimalMillis(item.UpdatedAt)}
 }
 
 func projectHumanRequest(item kernel.HumanRequestProjection) (browserprotocol.HumanRequestItem, error) {

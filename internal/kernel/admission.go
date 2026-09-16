@@ -43,15 +43,22 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if !factory.DispatchEnabled {
 		return rollbackNoAdmission(tx, NoAdmissionDispatchDisabled)
 	}
-	task, found, err := scanTask(tx.connection.QueryRowContext(ctx, `WITH delivered_successors AS MATERIALIZED (
+	// A task names one agent or none. An unassigned task is shared: any
+	// unarchived worker in its project is a candidate. Each agent prefers a
+	// replacement, then its own specific work, then shared work; the global
+	// choice across agents keeps the canonical queue order. The winning agent
+	// is written into the task below, inside this same reserved transaction,
+	// so two workers cannot claim one shared task.
+	var rawTaskID, rawAgentID []byte
+	err = tx.connection.QueryRowContext(ctx, `WITH delivered_successors AS MATERIALIZED (
 			SELECT DISTINCT successor_task_id
 			FROM task_interventions
 			WHERE state = 'delivered' AND successor_task_id IS NOT NULL
 		), eligible AS (
-			SELECT t.id, t.project_id, t.assigned_agent_id, t.incarnation_id, t.work_revision, t.title, t.body, t.sent_back_instruction_bytes, t.status, t.priority, t.blocked_reason, t.result, t.completed_at_ms, t.revision, t.created_at_ms, t.updated_at_ms,
+			SELECT t.id, a.id AS agent_id, t.assigned_agent_id IS NULL AS shared, t.priority, t.created_at_ms,
 				d.successor_task_id IS NOT NULL AS replacement
 			FROM tasks AS t
-			JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
+			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker')
 			LEFT JOIN delivered_successors AS d ON d.successor_task_id = t.id
 			WHERE t.status = 'queued'
 			  AND a.paused = 0 AND a.archived = 0
@@ -62,17 +69,18 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND phase <> 'terminal') < 1))
 		), next_for_worker AS (
 			SELECT *, ROW_NUMBER() OVER (
-				PARTITION BY assigned_agent_id
-				ORDER BY replacement DESC, `+taskQueueOrder+`
+				PARTITION BY agent_id
+				ORDER BY replacement DESC, shared ASC, `+taskQueueOrder+`
 			) AS rank
 			FROM eligible
 		)
-		SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms
+		SELECT id, agent_id
 		FROM next_for_worker
 		WHERE rank = 1
-		ORDER BY `+taskQueueOrder+`
-		LIMIT 1`, factory.Capacity))
-	if err != nil {
+		ORDER BY `+taskQueueOrder+`, agent_id ASC
+		LIMIT 1`, factory.Capacity).Scan(&rawTaskID, &rawAgentID)
+	found := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	if !found {
@@ -86,7 +94,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		var capacityBlocked int
 		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM tasks AS t
-			JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
+			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker')
 			WHERE t.status = 'queued' AND a.paused = 0 AND a.archived = 0 AND a.tool_calls_used < a.tool_budget_limit
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
@@ -100,14 +108,26 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		}
 		return rollbackNoAdmission(tx, NoAdmissionNoEligibleWork)
 	}
-	agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+	selectedTaskID, taskIDErr := TaskIDFromBytes(rawTaskID)
+	selectedAgentID, agentIDErr := AgentIDFromBytes(rawAgentID)
+	if taskIDErr != nil || agentIDErr != nil {
+		return AdmissionResult{}, tx.Rollback(ErrCorruptState)
+	}
+	task, found, err := taskByID(ctx, tx.connection, selectedTaskID)
 	if err != nil || !found {
 		if err == nil {
 			err = ErrCorruptState
 		}
 		return AdmissionResult{}, tx.Rollback(err)
 	}
-	if task.ProjectID != agent.ProjectID {
+	agent, found, err := agentByID(ctx, tx.connection, selectedAgentID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return AdmissionResult{}, tx.Rollback(err)
+	}
+	if task.ProjectID != agent.ProjectID || !task.AssignedAgentID.zero() && task.AssignedAgentID != agent.ID {
 		return AdmissionResult{}, tx.Rollback(ErrCorruptState)
 	}
 	if at.Int64() < task.UpdatedAt.Int64() {
@@ -148,8 +168,10 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	}
 
 	updatedTaskRevision := task.Revision.Int64() + 1
-	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET status = 'running', revision = revision + 1, updated_at_ms = ? WHERE id = ? AND project_id = ? AND incarnation_id = ? AND work_revision = ? AND status = 'queued' AND revision = ?`,
-		at.Int64(), task.ID.Bytes(), task.ProjectID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64(), task.Revision.Int64())
+	// The claim: a shared task takes the admitting agent here and keeps it
+	// through every later correction unless explicitly reassigned.
+	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET status = 'running', assigned_agent_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND project_id = ? AND incarnation_id = ? AND work_revision = ? AND status = 'queued' AND revision = ? AND (assigned_agent_id = ? OR assigned_agent_id IS NULL)`,
+		agent.ID.Bytes(), at.Int64(), task.ID.Bytes(), task.ProjectID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64(), task.Revision.Int64(), agent.ID.Bytes())
 	if err := requireOneRow(result, err); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}

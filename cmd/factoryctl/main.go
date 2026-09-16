@@ -52,7 +52,7 @@ const (
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl attempt send-back --task ID --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
-  factoryctl overseer task add --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+  factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
   factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel]
   factoryctl overseer task send-back --task ID --note TEXT
   factoryctl overseer agent pause|resume|archive|restore --agent ID --revision REVISION
@@ -74,7 +74,8 @@ const (
   factoryctl account link --provider claude_code|codex --home ABSOLUTE --label TEXT
   factoryctl agent select-account --agent ID --revision REVISION --account ID
   factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
-  factoryctl task add --project ID --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+  factoryctl task add --project ID --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+    --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
   factoryctl task recovery --task ID --incarnation ID
@@ -973,7 +974,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.maxRunSeconds = uint32(seconds)
-		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel) && validHumanRequestKey(value):
+		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
 			command.agent = value
 		case name == "--revision" && (command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel):
 			revision, ok := parseRevision(value)
@@ -1098,6 +1099,15 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	return command, false, true
 }
 
+// anyWorkerAgent maps the CLI's `--agent any` to the wire's empty assigned
+// agent: the task is queued for any eligible worker in its project.
+func anyWorkerAgent(agent string) string {
+	if agent == "any" {
+		return ""
+	}
+	return agent
+}
+
 func parseOverseer(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 2 && args[1] == "status" {
 		command := attemptCommand{kind: commandOverseerStatus}
@@ -1192,7 +1202,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 		index += 2
 		switch name {
 		case "--agent":
-			if !validHumanRequestKey(value) {
+			if !validHumanRequestKey(value) && !(command.kind == commandOverseerTaskAdd && value == "any") {
 				return attemptCommand{}, false, false
 			}
 			command.agent = value
@@ -1578,7 +1588,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "task add", err)
 			}
 		}
-		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, AssignedAgentID: command.agent, IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task add", callErr)
 		}
@@ -1673,7 +1683,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "overseer task add", idErr)
 			}
 		}
-		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: command.agent, IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
 	case commandOverseerTaskUpdate:
 		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel}
 		if command.title != "" {

@@ -273,7 +273,7 @@ func (client *OperatorClient) TaskRecovery(ctx context.Context, input TaskRecove
 }
 
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
-	if !validID(input.ID) || !validID(input.ProjectID) || !validID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
+	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "enqueue_task", input)
@@ -948,6 +948,10 @@ func validID(value string) bool {
 	return err == nil && value == strings.ToLower(value)
 }
 
+// validOptionalID accepts a task's assigned agent: empty is any eligible
+// worker in the project, until admission claims it for one.
+func validOptionalID(value string) bool { return value == "" || validID(value) }
+
 func validText(value string, minimum, maximum int) bool {
 	return utf8.ValidString(value) && !strings.ContainsRune(value, 0) && len(value) >= minimum && len(value) <= maximum
 }
@@ -967,7 +971,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		}
 	}
 	for _, task := range snapshot.Tasks {
-		if !validID(task.ID) || !validID(task.ProjectID) || !validID(task.AssignedAgentID) || !validID(task.IncarnationID) || task.WorkRevision == 0 || !validText(task.Title, 1, 1024) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || task.Revision == 0 {
+		if !validID(task.ID) || !validID(task.ProjectID) || !validOptionalID(task.AssignedAgentID) || !validID(task.IncarnationID) || task.WorkRevision == 0 || !validText(task.Title, 1, 1024) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || task.Revision == 0 {
 			return false
 		}
 	}
@@ -975,7 +979,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 }
 
 func validOverseerTaskCreateInput(input OverseerTaskCreateInput) bool {
-	return validID(input.ID) && validID(input.AssignedAgentID) && validID(input.IncarnationID) && input.ID != input.IncarnationID &&
+	return validID(input.ID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && input.ID != input.IncarnationID &&
 		validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000
 }
 
@@ -1010,7 +1014,7 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 		}
 	}
 	for _, task := range snapshot.Tasks {
-		if !validID(task.ID) || task.ProjectID != snapshot.ProjectID || !validID(task.AssignedAgentID) || !validText(task.Title, 1, 1024) || !validText(task.Objective, 0, 131072) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || !validText(task.BlockedReason, 0, 8192) || !validText(task.Result, 0, 131072) || task.Revision == 0 {
+		if !validID(task.ID) || task.ProjectID != snapshot.ProjectID || !validOptionalID(task.AssignedAgentID) || !validText(task.Title, 1, 1024) || !validText(task.Objective, 0, 131072) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || !validText(task.BlockedReason, 0, 8192) || !validText(task.Result, 0, 131072) || task.Revision == 0 {
 			return false
 		}
 	}

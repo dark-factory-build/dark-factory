@@ -42,7 +42,7 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 	}
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.TaskSummary{
-			ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(),
+			ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: optionalAgentText(task.AssignedAgentID),
 			IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()),
 		})
 	}
@@ -64,7 +64,7 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot, snapshots map[ker
 		result.Agents = append(result.Agents, item)
 	}
 	for _, task := range snapshot.Tasks {
-		result.Tasks = append(result.Tasks, api.OverseerTask{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(), Title: task.Title, Objective: task.Objective, ObjectiveTruncated: task.ObjectiveTruncated, Status: task.Status.String(), Priority: task.Priority, BlockedReason: task.BlockedReason, Result: task.Result, ResultTruncated: task.ResultTruncated, Revision: uint64(task.Revision.Int64())})
+		result.Tasks = append(result.Tasks, api.OverseerTask{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: optionalAgentText(task.AssignedAgentID), Title: task.Title, Objective: task.Objective, ObjectiveTruncated: task.ObjectiveTruncated, Status: task.Status.String(), Priority: task.Priority, BlockedReason: task.BlockedReason, Result: task.Result, ResultTruncated: task.ResultTruncated, Revision: uint64(task.Revision.Int64())})
 	}
 	for _, handoff := range snapshot.Handoffs {
 		sourcePath, granted := snapshots[handoff]
@@ -159,6 +159,24 @@ func parseAgentID(value string) (kernel.AgentID, error) {
 		return kernel.AgentID{}, err
 	}
 	return kernel.AgentIDFromBytes(decoded)
+}
+
+// optionalAgentText serves a task's assigned agent: the zero identity is an
+// empty string, an unclaimed task any eligible worker may take.
+func optionalAgentText(id kernel.AgentID) string {
+	if id == (kernel.AgentID{}) {
+		return ""
+	}
+	return id.String()
+}
+
+// parseOptionalAgentID reads a task's assigned agent: empty means any
+// eligible worker in the project.
+func parseOptionalAgentID(value string) (kernel.AgentID, error) {
+	if value == "" {
+		return kernel.AgentID{}, nil
+	}
+	return parseAgentID(value)
 }
 
 func parseAccountID(value string) (kernel.AccountID, error) {

@@ -55,6 +55,7 @@ export type IdlePolicy = "wait" | "standing_instruction";
 export type SpriteAppearance = { automatic: boolean; skin: number; hair: number; hair_colour: number; face: number; outfit: number; clothes_colour: number; shoes: number; tool: number; headwear: number };
 export type AgentItem = { id: string; project_id: string; name: string; role: "orchestrator" | "worker"; provider: "claude_code" | "codex" | "shell"; appearance: SpriteAppearance; paused: boolean; archived?: boolean; model: string; reasoning_effort: string; effective_model: string; effective_reasoning_effort: string; model_source: string; revision: bigint; account_id: string; idle_policy: IdlePolicy; idle_after_seconds: number; idle_instruction: string; idle_run_budget: number; idle_runs_used: number };
 export type AccountItem = { id: string; provider: "claude_code" | "codex"; home: string; label: string; revision: bigint };
+/** An empty `assigned_agent_id` is queued shared work no worker has claimed yet; it is served only in `shared_tasks`. */
 export type TaskItem = { id: string; project_id: string; assigned_agent_id: string; title: string; status: "queued" | "running" | "blocked" | "succeeded" | "failed" | "cancelled"; priority: number; revision: bigint; updated_at_ms?: bigint };
 export type HumanRequestItem = {
   id: string; project_id: string; agent_id: string; task_id: string;
@@ -71,6 +72,8 @@ export type StateSnapshotBody = {
   projects: ProjectItem[];
   agents: AgentItem[];
   tasks: TaskItem[];
+  /** Unclaimed shared work, additive so a console from before the shared queue ignores it. */
+  shared_tasks?: TaskItem[];
   human_requests: HumanRequestItem[];
   accounts: AccountItem[];
 };
@@ -83,7 +86,8 @@ export type HumanRequestReplyBody = { request_id: string; expected_revision: big
 export type HumanRequestReplyResultBody = { request_id: string; revision: bigint; status: "resolved" | "delivery_unknown" };
 export type HumanRequestCancelRunBody = { request_id: string; expected_request_revision: bigint; expected_run_revision: bigint };
 export type HumanRequestCancelRunResultBody = { run_id: string; run_revision: bigint; request_id: string; request_revision: bigint };
-export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" };
+/** `mode` "any" queues the instruction for any eligible worker in the pane agent's project. */
+export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any" };
 export type TaskEnqueueResultBody = { task_id: string; revision: bigint; agent_revision: bigint };
 export type AgentControlAction = "message" | "interrupt" | "stop" | "replace";
 export type AgentControlBody = { operation_id: string; task_id: string; run_id: string; expected_task_revision: bigint; expected_run_revision: bigint; action: AgentControlAction; instruction: string; successor_task_id: string; successor_incarnation_id: string };
@@ -387,7 +391,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "TASK_ENQUEUE": {
       requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["mode"]);
       const mode = present(body, "mode") ? body.mode : undefined;
-      if (mode !== undefined && mode !== "now" && mode !== "queue") malformed();
+      if (mode !== undefined && mode !== "now" && mode !== "queue" && mode !== "any") malformed();
       return { task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }) };
     }
     case "TASK_ENQUEUE_RESULT": requireKeys(body, ["task_id", "revision", "agent_revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), agent_revision: decimal(body.agent_revision, wire, true) };
@@ -481,20 +485,21 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
 
 function stateSnapshot(body: Record<string, unknown>, wire: boolean): StateSnapshotBody {
   // An older daemon sends no accounts at all; the console then shows none.
-  requireKeys(body, ["head", "factory", "projects", "agents", "tasks", "human_requests"], wire, ["accounts"]);
+  requireKeys(body, ["head", "factory", "projects", "agents", "tasks", "human_requests"], wire, ["accounts", "shared_tasks"]);
   const head = decimal(body.head, wire);
   if (!isObject(body.factory)) malformed();
   const factory = factoryItem(body.factory, wire);
   const projects = itemArray(body.projects, (item) => projectItem(item, wire));
   const agents = itemArray(body.agents, (item) => agentItem(item, wire));
   const tasks = itemArray(body.tasks, (item) => taskItem(item, wire));
+  const shared_tasks = present(body, "shared_tasks") ? itemArray(body.shared_tasks, (item) => sharedTaskItem(item, wire)) : undefined;
   const human_requests = itemArray(body.human_requests, (item) => humanRequestItem(item, wire));
   const accounts = present(body, "accounts") ? itemArray(body.accounts, (item) => accountItem(item, wire)) : [];
   // The bound is exact and fails closed. A server that cannot fit its state
   // returns a too_large error; it never sends a trimmed snapshot.
-  if (1 + projects.length + agents.length + tasks.length + human_requests.length + accounts.length > MAX_SNAPSHOT_ENTITIES) malformed();
-  for (const collection of [projects, agents, tasks, human_requests, accounts]) uniqueIDs(collection);
-  return { head, factory, projects, agents, tasks, human_requests, accounts };
+  if (1 + projects.length + agents.length + tasks.length + (shared_tasks?.length ?? 0) + human_requests.length + accounts.length > MAX_SNAPSHOT_ENTITIES) malformed();
+  for (const collection of [projects, agents, [...tasks, ...(shared_tasks ?? [])], human_requests, accounts]) uniqueIDs(collection);
+  return { head, factory, projects, agents, tasks, ...(shared_tasks === undefined ? {} : { shared_tasks }), human_requests, accounts };
 }
 function itemArray<T>(value: unknown, decode: (item: unknown) => T): T[] {
   if (!Array.isArray(value) || value.length > MAX_SNAPSHOT_ENTITIES) malformed();
@@ -606,6 +611,11 @@ function taskItem(value: unknown, wire: boolean): TaskItem {
   if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"], wire, ["updated_at_ms"]);
   if (typeof value.status !== "string" || !["queued", "running", "blocked", "succeeded", "failed", "cancelled"].includes(value.status)) malformed();
   return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), assigned_agent_id: dynamicID(value.assigned_agent_id), title: boundedText(value.title, 1, MAX_TASK_TITLE_BYTES), status: value.status as TaskItem["status"], priority: integer(value.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY), revision: decimal(value.revision, wire, true), ...(present(value, "updated_at_ms") ? { updated_at_ms: decimal(value.updated_at_ms, wire, true) } : {}) };
+}
+/** Unclaimed queued work: decoded as a task item, with its empty agent kept. */
+function sharedTaskItem(value: unknown, wire: boolean): TaskItem {
+  if (!isObject(value) || value.assigned_agent_id !== "" || value.status !== "queued") malformed();
+  return { ...taskItem({ ...value, assigned_agent_id: "f".repeat(32) }, wire), assigned_agent_id: "" };
 }
 function taskListItem(value: unknown, wire: boolean, agentID: string): TaskItem {
   if (!isObject(value)) malformed();

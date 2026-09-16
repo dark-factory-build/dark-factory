@@ -146,6 +146,15 @@ func optionalAccountID(raw []byte) (AccountID, error) {
 	return AccountIDFromBytes(raw)
 }
 
+// optionalAgentID reads tasks.assigned_agent_id: NULL is the zero identity,
+// a queued task any eligible worker in its project may claim.
+func optionalAgentID(raw []byte) (AgentID, error) {
+	if raw == nil {
+		return AgentID{}, nil
+	}
+	return AgentIDFromBytes(raw)
+}
+
 const accountColumns = `id, provider, home, label, revision, created_at_ms, updated_at_ms`
 
 func accountByID(ctx context.Context, connection *sql.Conn, id AccountID) (Account, bool, error) {
@@ -199,7 +208,7 @@ func scanTask(scanner rowScanner) (Task, bool, error) {
 	}
 	id, idErr := TaskIDFromBytes(rawID)
 	projectID, projectErr := ProjectIDFromBytes(rawProjectID)
-	agentID, agentErr := AgentIDFromBytes(rawAgentID)
+	agentID, agentErr := optionalAgentID(rawAgentID)
 	incarnationID, incarnationErr := IncarnationIDFromBytes(rawIncarnationID)
 	workRev, workRevisionErr := NewRevision(workRevision)
 	status, statusErr := parseTaskStatus(rawStatus)
@@ -208,6 +217,9 @@ func scanTask(scanner rowScanner) (Task, bool, error) {
 	updated, updatedErr := NewUnixMillis(updatedAt)
 	if idErr != nil || projectErr != nil || agentErr != nil || incarnationErr != nil || workRevisionErr != nil || statusErr != nil || revisionErr != nil || createdErr != nil || updatedErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || byteLen(body) > 131072 || priority < -1_000_000 || priority > 1_000_000 || updatedAt < createdAt {
 		return Task{}, false, fmt.Errorf("%w: invalid task row", ErrCorruptState)
+	}
+	if agentID.zero() && status != TaskQueued && status != TaskCancelled {
+		return Task{}, false, fmt.Errorf("%w: unclaimed task is %s", ErrCorruptState, status)
 	}
 	if sentBackInstructionBytes.Valid && (sentBackInstructionBytes.Int64 < 0 || sentBackInstructionBytes.Int64 > int64(byteLen(body)) || !strings.HasPrefix(body[sentBackInstructionBytes.Int64:], sentBackMarker)) {
 		return Task{}, false, fmt.Errorf("%w: invalid sent-back instruction boundary", ErrCorruptState)
@@ -434,7 +446,7 @@ func (store *Store) Snapshot(ctx context.Context) (DashboardSnapshot, error) {
 		}
 		id, idErr := TaskIDFromBytes(rawID)
 		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
-		agentID, agentErr := AgentIDFromBytes(rawAgentID)
+		agentID, agentErr := optionalAgentID(rawAgentID)
 		incarnationID, incarnationErr := IncarnationIDFromBytes(rawIncarnationID)
 		workRev, workRevisionErr := NewRevision(workRevision)
 		status, statusErr := parseTaskStatus(rawStatus)

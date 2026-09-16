@@ -123,17 +123,24 @@ func (store *Store) CreatePeerQuestionForAttempt(ctx context.Context, digest Att
 		}
 		return PeerQuestion{}, tx.Rollback(err)
 	}
-	agent, found, err := agentByID(ctx, tx.connection, target.AssignedAgentID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
+	// An unclaimed shared task is worker work with no agent yet; a claimed
+	// task's agent must be a real worker or overseer.
+	if !target.AssignedAgentID.zero() {
+		agent, found, err := agentByID(ctx, tx.connection, target.AssignedAgentID)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return PeerQuestion{}, tx.Rollback(err)
 		}
-		return PeerQuestion{}, tx.Rollback(err)
+		if agent.Role != RoleWorker && agent.Role != RoleOrchestrator {
+			return PeerQuestion{}, tx.Rollback(ErrUnauthorized)
+		}
 	}
 	// Collaboration is a project-local, task-linked durable record. Provider
 	// selection only decides whether a best-effort terminal notice is possible;
 	// it must not decide who can read the durable inbox.
-	if target.ProjectID != run.ProjectID || target.ID == run.TaskID || (agent.Role != RoleWorker && agent.Role != RoleOrchestrator) || (target.Status != TaskQueued && target.Status != TaskRunning) {
+	if target.ProjectID != run.ProjectID || target.ID == run.TaskID || (target.Status != TaskQueued && target.Status != TaskRunning) {
 		return PeerQuestion{}, tx.Rollback(ErrUnauthorized)
 	}
 	var raw [IDBytes]byte

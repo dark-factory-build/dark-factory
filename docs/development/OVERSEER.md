@@ -57,6 +57,9 @@ question, stop or replace its objective, send work back, and pause or resume
 future admission. These commands use your attempt credential; an operator
 credential is neither available nor required. Run a command with `--help` for
 its exact flags. All targets must remain in your project.
+`overseer task add --agent any` queues work for any eligible worker in the
+project; the first admitted worker keeps it through corrections, and `task
+update --agent ID` moves a queued task to one worker.
 `overseer task update --task ID --revision REVISION --title TEXT --body TEXT`
 edits only a queued worker task. The body replaces its base instruction while
 the latest retained send-back note remains attached as read-only review

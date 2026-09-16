@@ -34,6 +34,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "task add minimal", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "Tighten the queue ordering"}},
 		{name: "task add full", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--body", "b", "--priority", "-5"}},
 		{name: "task add supplied identities", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--task-id", id, "--incarnation-id", strings.Repeat("cd", 16)}},
+		{name: "task add any eligible worker", args: []string{"task", "add", "--project", id, "--agent", "any", "--title", "t"}},
 		{name: "status", args: []string{"status"}},
 		{name: "task send back", args: []string{"task", "send-back", "--task", id, "--note", "five findings"}},
 		{name: "dispatch on", args: []string{"dispatch", "on"}},
@@ -51,6 +52,13 @@ func TestParseExactOperatorCommands(t *testing.T) {
 	}
 	if command, _, _ := parse(valid[1].args); command.role != "worker" {
 		t.Fatalf("default role = %q", command.role)
+	}
+	// `--agent any` is the CLI spelling of the wire's empty assigned agent.
+	if command, _, _ := parse([]string{"task", "add", "--project", id, "--agent", "any", "--title", "t"}); command.agent != "any" || anyWorkerAgent(command.agent) != "" || anyWorkerAgent(id) != id {
+		t.Fatalf("any-worker task add = %+v", command)
+	}
+	if _, _, ok := parse([]string{"agent", "select-model", "--agent", "any", "--revision", "7", "--model", "m"}); ok {
+		t.Fatal("`any` accepted where one agent is required")
 	}
 	invalid := [][]string{
 		{"project", "create", "--name", "n"},

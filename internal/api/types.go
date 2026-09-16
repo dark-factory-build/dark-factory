@@ -420,7 +420,7 @@ func validTaskRecovery(value TaskRecovery) bool {
 	if value.State == "missing" {
 		return value.TaskID == "" && value.IncarnationID == "" && value.ProjectID == "" && value.AssignedAgentID == "" && value.WorkRevision == 0 && value.Revision == 0 && value.Status == "" && !value.NeedsOperatorRecovery && value.ChangeID == "" && value.ChangeRevision == 0 && value.ChangePhase == "" && value.SourceFormat == "" && value.SourceBaseCommit == "" && value.SourceRepositoryDev == 0 && value.SourceRepositoryInode == 0 && value.RunID == "" && value.RunRevision == 0 && value.ArtifactPaths != nil && len(value.ArtifactPaths) == 0
 	}
-	if value.State != "found" || !validID(value.TaskID) || !validID(value.IncarnationID) || !validID(value.ProjectID) || !validID(value.AssignedAgentID) || value.WorkRevision == 0 || value.Revision == 0 || !validTaskStatus(value.Status) || value.ArtifactPaths == nil || len(value.ArtifactPaths) > kernel.MaxRecoveryResources {
+	if value.State != "found" || !validID(value.TaskID) || !validID(value.IncarnationID) || !validID(value.ProjectID) || !validOptionalID(value.AssignedAgentID) || value.WorkRevision == 0 || value.Revision == 0 || !validTaskStatus(value.Status) || value.ArtifactPaths == nil || len(value.ArtifactPaths) > kernel.MaxRecoveryResources {
 		return false
 	}
 	if value.RunID == "" && value.RunRevision != 0 || value.RunID != "" && (!validID(value.RunID) || value.RunRevision == 0) {

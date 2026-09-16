@@ -186,8 +186,8 @@ func workerInvalidationTargetsAfter(ctx context.Context, connection *sql.Conn, p
 	}
 	rows, err := connection.QueryContext(ctx, `SELECT task_id FROM (
 		SELECT i.sequence, t.id AS task_id FROM invalidations AS i
-		JOIN tasks AS t ON t.id = i.entity_id JOIN agents AS a ON a.id = t.assigned_agent_id
-		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'task' AND t.project_id = ? AND a.project_id = t.project_id AND a.role = 'worker'
+		JOIN tasks AS t ON t.id = i.entity_id LEFT JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
+		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'task' AND t.project_id = ? AND (t.assigned_agent_id IS NULL OR a.role = 'worker')
 		UNION ALL SELECT i.sequence, r.task_id FROM invalidations AS i JOIN runs AS r ON r.id = i.entity_id
 		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'run' AND r.project_id = ? AND r.role = 'worker'
 		UNION ALL SELECT i.sequence, r.task_id FROM invalidations AS i JOIN human_requests AS h ON h.id = i.entity_id JOIN runs AS r ON r.id = h.run_id

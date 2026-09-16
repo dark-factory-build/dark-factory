@@ -239,11 +239,16 @@ type HumanRequestItem struct {
 // There is no partial, staged or continued form: a client either has a whole
 // snapshot or it has none.
 type StateSnapshot struct {
-	Head          Decimal            `json:"head"`
-	Factory       FactoryItem        `json:"factory"`
-	Projects      []ProjectItem      `json:"projects"`
-	Agents        []AgentItem        `json:"agents"`
-	Tasks         []TaskItem         `json:"tasks"`
+	Head     Decimal       `json:"head"`
+	Factory  FactoryItem   `json:"factory"`
+	Projects []ProjectItem `json:"projects"`
+	Agents   []AgentItem   `json:"agents"`
+	Tasks    []TaskItem    `json:"tasks"`
+	// SharedTasks is queued work no worker has claimed yet, so its items carry
+	// an empty assigned agent. It is a separate additive member because a
+	// console built before the shared queue requires an agent on every task
+	// item; such a console ignores this member instead of ending its session.
+	SharedTasks   []TaskItem         `json:"shared_tasks,omitempty"`
 	HumanRequests []HumanRequestItem `json:"human_requests"`
 	Accounts      []AccountItem      `json:"accounts"`
 }
@@ -350,7 +355,22 @@ func validateAccountItem(value AccountItem) error {
 }
 
 func validateTaskItem(value TaskItem) error {
-	if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateDynamicID(value.AssignedAgentID) != nil || validateBoundedText(value.Title, 1, MaxTaskTitleBytes) != nil || value.Priority < -MaxTaskPriority || value.Priority > MaxTaskPriority || value.Revision == 0 {
+	if validateDynamicID(value.AssignedAgentID) != nil {
+		return fmt.Errorf("%w: task item", ErrMalformed)
+	}
+	return validateTaskFields(value)
+}
+
+// validateSharedTaskItem accepts only unclaimed queued work: no agent yet.
+func validateSharedTaskItem(value TaskItem) error {
+	if value.AssignedAgentID != "" || value.Status != "queued" {
+		return fmt.Errorf("%w: shared task item", ErrMalformed)
+	}
+	return validateTaskFields(value)
+}
+
+func validateTaskFields(value TaskItem) error {
+	if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Title, 1, MaxTaskTitleBytes) != nil || value.Priority < -MaxTaskPriority || value.Priority > MaxTaskPriority || value.Revision == 0 {
 		return fmt.Errorf("%w: task item", ErrMalformed)
 	}
 	switch value.Status {
@@ -381,7 +401,7 @@ func validateStateSnapshot(value StateSnapshot) error {
 	if err := validateFactoryItem(value.Factory); err != nil {
 		return err
 	}
-	total := 1 + len(value.Projects) + len(value.Agents) + len(value.Tasks) + len(value.HumanRequests) + len(value.Accounts)
+	total := 1 + len(value.Projects) + len(value.Agents) + len(value.Tasks) + len(value.SharedTasks) + len(value.HumanRequests) + len(value.Accounts)
 	if total > MaxSnapshotEntities {
 		return fmt.Errorf("%w: snapshot entity count", ErrMalformed)
 	}
@@ -412,6 +432,14 @@ func validateStateSnapshot(value StateSnapshot) error {
 	}
 	for _, item := range value.Tasks {
 		if err := validateTaskItem(item); err != nil {
+			return err
+		}
+		if err := claim("task:", item.ID); err != nil {
+			return err
+		}
+	}
+	for _, item := range value.SharedTasks {
+		if err := validateSharedTaskItem(item); err != nil {
 			return err
 		}
 		if err := claim("task:", item.ID); err != nil {

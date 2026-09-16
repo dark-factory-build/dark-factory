@@ -244,6 +244,17 @@ func TestParseOverseerTaskUpdateKeepsPriority(t *testing.T) {
 	}
 }
 
+func TestParseOverseerTaskAddAcceptsAnyEligibleWorker(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	command, help, ok := parse([]string{"overseer", "task", "add", "--agent", "any", "--title", "shared"})
+	if !ok || help || command.kind != commandOverseerTaskAdd || command.agent != "any" || anyWorkerAgent(command.agent) != "" {
+		t.Fatalf("any-worker overseer task add = %+v, help=%t, ok=%t", command, help, ok)
+	}
+	if _, _, ok := parse([]string{"overseer", "task", "update", "--task", id, "--revision", "7", "--agent", "any"}); ok {
+		t.Fatal("reassignment to `any` accepted; a queued task is reassigned to one worker")
+	}
+}
+
 func TestParseOverseerStatusPaging(t *testing.T) {
 	id := "0123456789abcdef0123456789abcdef"
 	command, help, ok := parse([]string{"overseer", "status", "--task", id, "--offset", "4", "--text-offset", "4096", "--head", "7"})
