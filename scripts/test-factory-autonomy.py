@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 def module(name):
@@ -23,6 +23,86 @@ deploy = module('deploy-runtime')
 
 
 class AutonomyTest(unittest.TestCase):
+    def test_controller_source_refresh_preserves_edits_and_requires_matching_ancestry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            remote, checkout = root / 'remote', root / 'checkout'
+            def git(path, *args):
+                return subprocess.check_output(['git', '-C', str(path), *args], text=True, stderr=subprocess.DEVNULL).strip()
+            remote.mkdir()
+            git(remote, 'init', '-b', 'main')
+            git(remote, 'config', 'user.name', 'Fixture')
+            git(remote, 'config', 'user.email', 'fixture@example.invalid')
+            (remote / 'source').write_text('before')
+            git(remote, 'add', 'source')
+            git(remote, 'commit', '-m', 'before')
+            subprocess.run(['git', 'clone', str(remote), str(checkout)], check=True, capture_output=True)
+            original = git(checkout, 'rev-parse', 'HEAD')
+            url = 'https://github.com/fixture/controller.git'
+            git(checkout, 'remote', 'set-url', 'origin', url)
+            git(checkout, 'config', 'url.' + str(remote) + '.insteadOf', url)
+            # get-url expands insteadOf: fake only this identity read, retaining
+            # real Git fetch, ancestry, merge, dirty and branch behaviour.
+            run = subprocess.run
+            def transport(argv, **kwargs):
+                if argv[-3:] == ['remote', 'get-url', 'origin']:
+                    return subprocess.CompletedProcess(argv, 0, url, '')
+                return run(argv, **kwargs)
+            (remote / 'source').write_text('after')
+            git(remote, 'commit', '-am', 'after')
+            head = git(remote, 'rev-parse', 'HEAD')
+            config = {'repository': 'fixture/controller', 'base': 'main'}
+            receipt = {'state': 'verified', 'sha': head}
+            with patch.object(autonomy.subprocess, 'run', side_effect=transport):
+                (checkout / 'source').write_text('operator edits')
+                with self.assertRaisesRegex(ValueError, 'tracked edits'):
+                    autonomy.refresh_controller(checkout, config, receipt)
+                self.assertEqual(original, git(checkout, 'rev-parse', 'HEAD'))
+                self.assertEqual('operator edits', (checkout / 'source').read_text())
+                git(checkout, 'restore', 'source')
+                (checkout / 'untracked').write_text('keep')
+                autonomy.refresh_controller(checkout, config, receipt)
+                self.assertEqual(head, git(checkout, 'rev-parse', 'HEAD'))
+                self.assertEqual('after', (checkout / 'source').read_text())
+                self.assertEqual('keep', (checkout / 'untracked').read_text())
+                for prefix in ('https://github.com/', 'git@github.com:', 'ssh://git@github.com/'):
+                    for suffix in ('', '.git'):
+                        url = prefix + 'fixture/controller' + suffix
+                        git(checkout, 'remote', 'set-url', 'origin', url)
+                        git(checkout, 'config', 'url.' + str(remote) + '.insteadOf', url)
+                        autonomy.refresh_controller(checkout, config, receipt)
+                with self.assertRaisesRegex(ValueError, 'merge-base'):
+                    autonomy.refresh_controller(checkout, config, {'state': 'verified', 'sha': original})
+                with self.assertRaisesRegex(ValueError, 'configured release repository'):
+                    autonomy.refresh_controller(checkout, dict(config, repository='other/repository'), receipt)
+                git(checkout, 'checkout', '-b', 'operator')
+                with self.assertRaisesRegex(ValueError, 'release branch'):
+                    autonomy.refresh_controller(checkout, config, receipt)
+                self.assertEqual(head, git(checkout, 'rev-parse', 'HEAD'))
+
+    def test_verified_release_refreshes_source_and_reports_refusal_without_redeploying(self):
+        with tempfile.TemporaryDirectory() as directory:
+            release = Path(directory) / 'release.json'
+            release.write_text(json.dumps({'repository': 'fixture/controller', 'base': 'main'}))
+            config = {'release_configs': [str(release)]}
+            for state in ('planned', 'verified'):
+                receipt = {'state': state, 'sha': 'a' * 40}
+                responses = [subprocess.CompletedProcess([], 0, '{}', ''), subprocess.CompletedProcess([], 0, json.dumps(receipt), '')]
+                with patch.object(autonomy.subprocess, 'run', side_effect=responses) as run, \
+                     patch.object(autonomy.importlib.util, 'spec_from_file_location'), \
+                     patch.object(autonomy.importlib.util, 'module_from_spec', return_value=Mock()), \
+                     patch.object(autonomy, 'refresh_controller', side_effect=autonomy.ControllerSourceError('controller source has tracked edits')) as refresh:
+                    result = autonomy.tick(Path(directory) / 'config', config)
+                self.assertEqual(2, run.call_count)
+                self.assertEqual(2, len(result))
+                if state == 'verified':
+                    refresh.assert_called_once()
+                    self.assertFalse(result[-1]['ok'])
+                    self.assertIn('tracked edits', result[-1]['error'])
+                else:
+                    refresh.assert_not_called()
+                    self.assertTrue(result[-1]['ok'])
+
     def test_controller_excludes_another_job_for_the_same_factory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

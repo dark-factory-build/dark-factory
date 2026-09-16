@@ -397,10 +397,9 @@ func TestOutcomeReceiptIsExactAndRequired(t *testing.T) {
 	}{
 		{name: "wrong receipt", wantError: true, send: func(connection *net.UnixConn, receipt []byte) error {
 			receipt[0] ^= 0xff
-			if err := writeFrame(connection, receipt); err != nil {
-				return err
-			}
-			return connection.CloseWrite()
+			// A wrong receipt is rejected immediately, before client EOF.
+			// Half-closing here races the server's expected rejection/close.
+			return writeFrame(connection, receipt)
 		}},
 		{name: "dropped receipt", wantError: true, send: func(connection *net.UnixConn, _ []byte) error {
 			return connection.CloseWrite()
@@ -449,6 +448,9 @@ func TestOutcomeReceiptIsExactAndRequired(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := <-done
+			if test.name == "wrong receipt" && !errors.Is(result.err, ErrProtocol) {
+				t.Fatalf("wrong receipt must fail before client EOF: %v", result.err)
+			}
 			if result.call.Kind() != CallSucceed || (result.err != nil) != test.wantError {
 				t.Fatalf("outcome receipt = %v, %v", result.call.Kind(), result.err)
 			}
