@@ -977,6 +977,16 @@ func TestCodexToolchainSandbox(t *testing.T) {
 			t.Fatalf("installed toolchain: %v\n%s", err, out)
 		}
 		t.Logf("installed toolchain proof: %s", out)
+		if slices.Contains(filepath.SplitList(roots), "/Library/Developer/CommandLineTools") {
+			out, err := run("/bin/sh", "-c", `set -eu
+printf '#include <stdio.h>\nint main(void) { puts("sdk-ok"); return 0; }\n' > sdk-proof.c
+/Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk sdk-proof.c -o sdk-proof
+./sdk-proof`)
+			if err != nil || !strings.Contains(string(out), "sdk-ok") {
+				t.Fatalf("installed SDK compile: %v\n%s", err, out)
+			}
+			t.Logf("installed SDK compile: %s", out)
+		}
 	}
 	if fixture := os.Getenv("DARK_FACTORY_TEST_FIXTURE_BINARY"); fixture != "" {
 		request.runtime.sourceReadPaths = append(request.runtime.sourceReadPaths, fixture)

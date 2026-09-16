@@ -1,9 +1,11 @@
 package install
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -49,5 +51,34 @@ func TestToolchainReadRootsRequireCanonicalPrivateInstallation(t *testing.T) {
 	}
 	if CheckToolchainReadRoots(software, "") == nil {
 		t.Fatal("accepted group-writable software")
+	}
+}
+
+func TestToolchainReadRootsAcceptTrustedSystemInstallation(t *testing.T) {
+	root := trustedSystemToolchainRoot
+	info, err := os.Stat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skip("CommandLineTools is unavailable")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckToolchainReadRoots(root, ""); err != nil {
+		t.Fatalf("trusted system installation: %v", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != 0 {
+		t.Fatalf("test installation is not root-owned: %#v", info.Sys())
+	}
+	for _, untrusted := range []struct {
+		path string
+		uid  uint32
+	}{{filepath.Dir(root), 0}, {root + "/SDKs", 0}, {root, 501}} {
+		if trustedSystemToolchainOwnership(untrusted.path, untrusted.uid) {
+			t.Fatalf("accepted untrusted system installation %q uid %d", untrusted.path, untrusted.uid)
+		}
+	}
+	if CheckToolchainReadRoots(root, root) == nil || CheckToolchainReadRoots(root, "", root) == nil {
+		t.Fatal("system installation bypassed account/private exclusions")
 	}
 }
