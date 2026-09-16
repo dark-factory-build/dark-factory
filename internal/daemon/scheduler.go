@@ -255,7 +255,7 @@ func (daemon *Daemon) validateScheduledCompletion(changeParent string, unsettled
 		return kernel.NewOutcomeUnknownError(err)
 	}
 	if current.Phase == kernel.RunFinalizing && current.Proposal != nil {
-		settled, settleErr := daemon.settleRun(changeParent, current.ID)
+		settled, settleErr := daemon.settleRun(daemon.cleanupCtx, changeParent, current.ID)
 		if settleErr != nil {
 			if errors.Is(settleErr, kernel.ErrConflict) {
 				if unsettled != nil {

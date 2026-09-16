@@ -415,6 +415,9 @@ func (daemon *Daemon) liveAttemptForDigest(digest kernel.AttemptDigest) *liveAtt
 // and joins it. The Store remains the authority for recovery after an
 // abnormal daemon death; this method only covers normal in-process shutdown.
 func (daemon *Daemon) closeLiveAttempts() error {
+	if daemon != nil && daemon.cleanupCancel != nil {
+		daemon.cleanupCancel()
+	}
 	if daemon == nil {
 		return nil
 	}

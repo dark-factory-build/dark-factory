@@ -1178,6 +1178,18 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	if err != nil || !admission.Admitted() || admission.Run == nil {
 		t.Fatalf("admission = %+v, %v", admission, err)
 	}
+	// This is the live-owner failure edge, not the runtime-absent edge.
+	runtime, found, err := store.Resource(ctx, resource(216))
+	if err != nil || !found {
+		t.Fatalf("runtime resource: found=%v err=%v", found, err)
+	}
+	runtimeIdentity, err := kernel.NewPathResourceIdentity(100, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActivateResource(ctx, admission.Run.ID, runtime.ID, runtime.Revision, runtimeIdentity, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
 	daemon, err := newDaemon(store, time.Now)
 	if err != nil {
 		t.Fatal(err)
@@ -1188,7 +1200,7 @@ func TestFailRunSharesOperationGateWithTerminalEffects(t *testing.T) {
 	var failed kernel.Run
 	var failErr error
 	go func() {
-		failed, failErr = daemon.failRunBeforeRuntime(*admission.Run, resource(216), kernel.FailureInternal, failureCause)
+		failed, failErr = daemon.failRun(*admission.Run, kernel.FailureInternal, failureCause)
 		close(finished)
 	}()
 	select {
@@ -1266,7 +1278,7 @@ func TestDaemonCloseActivelyCancelsPreReleaseSupervisor(t *testing.T) {
 	case <-time.After(12 * time.Second):
 		t.Fatal("Close did not join canceled supervisor")
 	}
-	fixture.assertInterruptedTerminal(t, result.run)
+	fixture.assertRecoveredAfterClose(t, result.run)
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider executed before release: stat err=%v", err)
 	}
@@ -1325,7 +1337,7 @@ func TestDaemonCloseActivelyCancelsBeforeLiveRegistration(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("Close did not join canceled pre-live supervisor")
 	}
-	fixture.assertInterruptedTerminal(t, result.run)
+	fixture.assertRecoveredAfterClose(t, result.run)
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("provider executed after pre-live cancellation: stat err=%v", err)
 	}
@@ -2377,6 +2389,28 @@ func (fixture *supervisorFixture) assertTerminal(t *testing.T, run kernel.Run, k
 	}
 }
 
+// Close may cancel a durable writer wait after joining every process. The exact
+// retained run must remain discoverable and converge through normal boot recovery.
+func (fixture *supervisorFixture) assertRecoveredAfterClose(t *testing.T, run kernel.Run) {
+	t.Helper()
+	if run.ID == (kernel.RunID{}) {
+		t.Fatal("shutdown lost admitted run identity")
+	}
+	recoveredDaemon, err := newDaemon(fixture.store, fixture.daemon.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recoveredDaemon.Close()
+	if _, err := recoveredDaemon.RecoverAbandonedRuns(context.Background(), fixture.spec.RuntimeParent, fixture.spec.ChangeParent); err != nil {
+		t.Fatal(err)
+	}
+	current, found, err := fixture.store.Run(context.Background(), run.ID)
+	if err != nil || !found {
+		t.Fatalf("retained shutdown run: found=%v err=%v", found, err)
+	}
+	fixture.assertInterruptedTerminal(t, current)
+}
+
 func (fixture *supervisorFixture) assertInterruptedTerminal(t *testing.T, run kernel.Run) {
 	t.Helper()
 	if run.ID == (kernel.RunID{}) || run.Phase != kernel.RunTerminal || run.Terminal == nil || run.CredentialRevokedAt == nil || run.Proposal == nil {
@@ -2768,4 +2802,26 @@ func supervisorFDCount(t testing.TB) int {
 		t.Fatal(err)
 	}
 	return len(entries)
+}
+
+func TestSupervisorKeepsKnownRunWhenReturnedRecoveryIsCancelled(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	fixture.spec.afterAdmission = func() error { return errors.New("admitted setup failure") }
+	now := fixture.daemon.now
+	calls := 0
+	fixture.daemon.now = func() time.Time {
+		calls++
+		if calls == 3 {
+			fixture.daemon.cleanupCancel()
+		}
+		return now()
+	}
+	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if !errors.Is(err, context.Canceled) || run.ID == (kernel.RunID{}) || run.Phase != kernel.RunFinalizing {
+		t.Fatalf("known finalizing run lost on cancelled recovery: run=%+v err=%v", run, err)
+	}
+	current, found, readErr := fixture.store.Run(context.Background(), run.ID)
+	if readErr != nil || !found || current.ID != run.ID || current.Phase != kernel.RunFinalizing {
+		t.Fatalf("retained run: %+v found=%v err=%v", current, found, readErr)
+	}
 }
