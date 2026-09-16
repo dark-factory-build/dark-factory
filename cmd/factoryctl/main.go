@@ -1407,7 +1407,7 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 	case errors.Is(err, context.DeadlineExceeded):
 		message = "factoryctl: " + subject + " timed out\n"
 	case errors.As(err, &remote):
-		message = "factoryctl: " + subject + " was not accepted\n"
+		message = "factoryctl: " + subject + ": " + remote.Error() + "\n"
 	}
 	_, _ = io.WriteString(stderr, message)
 }
@@ -1806,13 +1806,7 @@ func writeWebFailure(stderr io.Writer, subject string, err error) int {
 	case errors.Is(err, context.DeadlineExceeded):
 		message = "factoryctl: " + subject + " timed out\n"
 	case errors.As(err, &remote):
-		if remote.Code() == api.RemoteCleanupUnresolved {
-			message = "factoryctl: web revoke committed but browser cleanup remains unresolved\n"
-		} else if remote.Code() == api.RemoteRevisionConflict {
-			message = "factoryctl: " + subject + " revision is stale\n"
-		} else {
-			message = "factoryctl: " + subject + " was not accepted\n"
-		}
+		message = "factoryctl: " + subject + ": " + remote.Error() + "\n"
 	}
 	_, _ = io.WriteString(stderr, message)
 	return exitFailure

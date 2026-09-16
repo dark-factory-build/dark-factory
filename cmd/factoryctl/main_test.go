@@ -590,24 +590,27 @@ func TestAcceptedOutputDoesNotClaimTerminalState(t *testing.T) {
 func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 	key := "0123456789abcdef0123456789abcdef"
 	question := "private-human-question-sentinel"
-	tests := []api.RemoteErrorCode{
-		api.RemoteInvalidRequest,
-		api.RemoteUnauthorized,
-		api.RemoteForbidden,
-		api.RemoteNotFound,
-		api.RemoteConflict,
-		api.RemoteRevisionConflict,
-		api.RemoteTooLarge,
-		api.RemoteUnavailable,
-		api.RemoteInternal,
+	tests := []struct {
+		code    api.RemoteErrorCode
+		message string
+	}{
+		{api.RemoteInvalidRequest, "local API rejected the request"},
+		{api.RemoteUnauthorized, "local API credential is unauthorized"},
+		{api.RemoteForbidden, "local API request is forbidden"},
+		{api.RemoteNotFound, "local API entity was not found"},
+		{api.RemoteConflict, "local API request conflicts with durable state"},
+		{api.RemoteRevisionConflict, "local API revision is stale"},
+		{api.RemoteTooLarge, "local API request exceeds a bound"},
+		{api.RemoteUnavailable, "local API is unavailable"},
+		{api.RemoteInternal, "local API failed internally"},
 	}
-	for _, code := range tests {
-		t.Run(string(code), func(t *testing.T) {
+	for _, test := range tests {
+		t.Run(string(test.code), func(t *testing.T) {
 			fixture := newAPIFixture(t)
 			defer fixture.close(t)
 			t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
 			done := serveOne(fixture.listener, func(api.Call) api.Reply {
-				reply, err := api.NewErrorReply(code)
+				reply, err := api.NewErrorReply(test.code)
 				if err != nil {
 					t.Errorf("new error reply: %v", err)
 				}
@@ -618,7 +621,7 @@ func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 			if result := awaitServer(t, done); result.err != nil {
 				t.Fatal(result.err)
 			}
-			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: human request was not accepted\n" {
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: human request: "+test.message+"\n" {
 				t.Fatalf("error output = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 			}
 			for _, private := range []string{fixture.socket, fixture.attemptPath, string(fixture.bearer[:]), key, question} {
