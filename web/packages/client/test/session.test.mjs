@@ -307,6 +307,14 @@ test("authenticated task enqueue mints exact IDs and correlates the durable resu
     agent_revision: 7n,
   }));
   await followUp;
+
+  // "any" queues the instruction for any eligible worker in the pane agent's project.
+  const shared = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "Whoever is free: fix the flaky test", mode: "any" });
+  const sharedFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(sharedFrame.body.mode, "any");
+  assert.equal(sharedFrame.body.agent_id, agentId);
+  socket.reply(encodeTaskEnqueueResult(sharedFrame.id, { task_id: sharedFrame.body.task_id, revision: 3n, agent_revision: 7n }));
+  await shared;
   session.close();
 });
 

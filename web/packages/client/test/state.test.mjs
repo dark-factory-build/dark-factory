@@ -76,12 +76,16 @@ test("the Go-produced snapshot fixture becomes one complete TypeScript state vie
   // The fixture is the cross-language contract: it carries one of every kind.
   assert.equal(view.projects.size, 1);
   assert.equal(view.agents.size, 1);
-  assert.equal(view.tasks.size, 1);
+  // One claimed task item plus one unclaimed shared task form one task view.
+  assert.equal(body.tasks.length, 1);
+  assert.equal(body.shared_tasks.length, 1);
+  assert.equal(view.tasks.size, 2);
+  assert.equal(view.tasks.get(body.shared_tasks[0].id).assigned_agent_id, "");
   assert.equal(view.humanRequests.size, 1);
   assert.equal(view.accounts.size, 1);
   const [project] = view.projects.values();
   const [agent] = view.agents.values();
-  const [task] = view.tasks.values();
+  const [task] = body.tasks.map((item) => view.tasks.get(item.id));
   const [request] = view.humanRequests.values();
   const [account] = view.accounts.values();
   assert.equal(agent.account_id, account.id);
@@ -110,6 +114,23 @@ test("task recency is optional for legacy snapshots and exact when served", () =
   assert.equal(legacy.tasks[0].updated_at_ms, undefined);
   const current = decodeServerControl(encodeStateSnapshot("state", snapshotBody({ tasks: [{ ...taskItem(), updated_at_ms: 17n }] }))).body;
   assert.equal(current.tasks[0].updated_at_ms, 17n);
+});
+
+test("unclaimed shared work arrives in shared_tasks and joins the one task view", () => {
+  const sharedID = rawID(77);
+  const body = decodeServerControl(encodeStateSnapshot("state", snapshotBody({ shared_tasks: [{ ...taskItem(), id: sharedID, assigned_agent_id: "" }] }))).body;
+  assert.equal(body.tasks.length, 1);
+  assert.deepEqual(body.shared_tasks.map((task) => [task.id, task.assigned_agent_id]), [[sharedID, ""]]);
+  const view = snapshotView(body);
+  assert.equal(view.tasks.get(ids.task).assigned_agent_id, ids.agent);
+  assert.equal(view.tasks.get(sharedID).assigned_agent_id, "");
+  assert.equal(snapshotView(decodeServerControl(encodeStateSnapshot("state", snapshotBody())).body).tasks.size, 1, "an older daemon sends no shared_tasks");
+  // A task item never lacks an agent; shared items are unclaimed and queued.
+  expectMalformed(() => encodeStateSnapshot("state", snapshotBody({ tasks: [{ ...taskItem(), assigned_agent_id: "" }] })));
+  expectMalformed(() => encodeStateSnapshot("state", snapshotBody({ shared_tasks: [{ ...taskItem(), id: sharedID, assigned_agent_id: "", status: "running" }] })));
+  expectMalformed(() => encodeStateSnapshot("state", snapshotBody({ shared_tasks: [{ ...taskItem(), id: sharedID }] })));
+  // One identity cannot be both claimed and shared.
+  expectMalformed(() => encodeStateSnapshot("state", snapshotBody({ shared_tasks: [{ ...taskItem(), assigned_agent_id: "" }] })));
 });
 
 test("factory capacity counts workers while active runs include the overseer", () => {
