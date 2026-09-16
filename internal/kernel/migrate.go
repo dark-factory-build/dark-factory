@@ -35,6 +35,7 @@ const (
 	v8UserVersion       = 8
 	v9UserVersion       = 9
 	v10UserVersion      = 10
+	v11UserVersion      = 11
 	v8HumanRequests     = `CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
@@ -295,7 +296,25 @@ func v10SchemaStatements() []string {
 	statements := append([]string(nil), schemaStatements...)
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
-			statements[i] = strings.Replace(statement, "\tarchived INTEGER NOT NULL CHECK (archived IN (0, 1)),\n", "", 1)
+			statement = strings.Replace(statement, "\tarchived INTEGER NOT NULL CHECK (archived IN (0, 1)),\n", "", 1)
+			statement = strings.Replace(statement, "idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0),", "idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0 AND idle_runs_used <= idle_run_budget),", 1)
+			statement = strings.Replace(statement, "CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> ''))", "CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> '' AND idle_run_budget >= 1))", 1)
+			statements[i] = statement
+		}
+	}
+	return statements
+}
+
+// v11 predates unlimited standing instructions. Keep its exact schema here so
+// an existing home is rebuilt rather than served with weaker constraints than
+// its recorded user_version promises.
+func v11SchemaStatements() []string {
+	statements := append([]string(nil), schemaStatements...)
+	for i, statement := range statements {
+		if _, name := schemaObjectIdentity(statement); name == "agents" {
+			statement = strings.Replace(statement, "idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0),", "idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0 AND idle_runs_used <= idle_run_budget),", 1)
+			statement = strings.Replace(statement, "CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> ''))", "CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> '' AND idle_run_budget >= 1))", 1)
+			statements[i] = statement
 		}
 	}
 	return statements
@@ -395,6 +414,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v9SchemaStatements(), true
 	case v10UserVersion:
 		return v10SchemaStatements(), true
+	case v11UserVersion:
+		return v11SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -420,7 +441,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -443,6 +464,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[8:]
 	case v10UserVersion:
 		steps = all[9:]
+	case v11UserVersion:
+		steps = all[10:]
 	default:
 		return connection.Close()
 	}
@@ -674,7 +697,21 @@ func migrateV10Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	columns := `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "agents", columns, "agents_id_project_unique", "archived", "0"); err != nil {
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v11SchemaStatements()), "agents", columns, "agents_id_project_unique", "archived", "0"); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v11UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v11UserVersion, v11SchemaStatements())
+}
+
+func migrateV11Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v11UserVersion, v11SchemaStatements()); err != nil {
+		return err
+	}
+	columns := `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, archived, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "agents", columns, "agents_id_project_unique", "", ""); err != nil {
 		return err
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {

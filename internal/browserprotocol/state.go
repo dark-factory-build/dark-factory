@@ -189,8 +189,8 @@ type AgentItem struct {
 	// means the provider's own default configuration directory, and so the
 	// default EffectiveModel above was read from.
 	AccountID string `json:"account_id"`
-	// The idle rule, as CONFIG shows and edits it. IdleRunsUsed counts only
-	// the runs the rule enqueued itself.
+	// The idle rule, as CONFIG shows and edits it. Zero IdleRunBudget means
+	// uncapped; IdleRunsUsed remains an audit count of self-enqueued runs.
 	IdlePolicy       string `json:"idle_policy"`
 	IdleAfterSeconds uint32 `json:"idle_after_seconds"`
 	IdleInstruction  string `json:"idle_instruction"`
@@ -334,8 +334,8 @@ func validateAgentItem(value AgentItem) error {
 	// No policy at all is a snapshot from before idle rules; it passes as it
 	// is, and the console reads it as wait.
 	if value.IdlePolicy != "" && !validIdlePolicy(value.IdlePolicy) || value.IdleAfterSeconds > MaxIdleAfterSeconds || validateBoundedText(value.IdleInstruction, 0, MaxTaskInstructionBytes) != nil ||
-		value.IdleRunBudget > MaxIdleRunBudget || value.IdleRunsUsed > value.IdleRunBudget ||
-		value.IdlePolicy == "standing_instruction" && (value.IdleAfterSeconds == 0 || value.IdleInstruction == "" || value.IdleRunBudget == 0) {
+		value.IdleRunBudget > MaxIdleRunBudget ||
+		value.IdlePolicy == "standing_instruction" && (value.IdleAfterSeconds == 0 || value.IdleInstruction == "") {
 		return fmt.Errorf("%w: agent idle rule", ErrMalformed)
 	}
 	return nil

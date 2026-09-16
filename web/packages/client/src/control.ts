@@ -535,7 +535,7 @@ function agentItem(value: unknown, wire: boolean): AgentItem {
   const idle_after_seconds = present(value, "idle_after_seconds") ? integer(value.idle_after_seconds, 0, MAX_IDLE_AFTER_SECONDS) : 0;
   const idle_instruction = present(value, "idle_instruction") ? boundedText(value.idle_instruction, 0, MAX_TASK_INSTRUCTION_BYTES) : "";
   const idle_run_budget = present(value, "idle_run_budget") ? integer(value.idle_run_budget, 0, MAX_IDLE_RUN_BUDGET) : 0;
-  const idle_runs_used = present(value, "idle_runs_used") ? integer(value.idle_runs_used, 0, idle_run_budget) : 0;
+  const idle_runs_used = present(value, "idle_runs_used") ? integer(value.idle_runs_used, 0, MAX_IDLE_RUN_BUDGET) : 0;
   const archived = present(value, "archived") ? value.archived : undefined;
   if (value.role !== "orchestrator" && value.role !== "worker" || typeof value.paused !== "boolean" || archived !== undefined && typeof archived !== "boolean") malformed();
   if (value.provider !== "claude_code" && value.provider !== "codex" && value.provider !== "shell") malformed();

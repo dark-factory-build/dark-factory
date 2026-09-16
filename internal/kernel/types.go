@@ -535,7 +535,7 @@ type Project struct {
 }
 
 // IdlePolicy is what an agent does with no run: wait for work, or enqueue a
-// standing instruction to itself after a quiet spell, within a run budget.
+// standing instruction to itself after a quiet spell, without a wake ceiling.
 type IdlePolicy string
 
 const (
@@ -552,7 +552,7 @@ func ParseIdlePolicy(value string) (IdlePolicy, error) {
 }
 
 // IdleRule is an agent's idle rule. IdleRunsUsed counts only the runs the
-// rule enqueued itself; a new budget starts the count again.
+// rule enqueued itself and is retained as history, including when uncapped.
 type IdleRule struct {
 	Policy       IdlePolicy
 	AfterSeconds uint32

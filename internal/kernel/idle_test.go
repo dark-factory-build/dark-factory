@@ -10,9 +10,9 @@ import (
 )
 
 // A standing instruction is enqueued to its agent once the quiet spell has
-// passed, spends one idle run each time, never stacks on queued work, and
-// stops at the budget until the operator sets a new one.
-func TestStandingInstructionEnqueuesItselfWithinItsBudget(t *testing.T) {
+// passed, records one idle run each time, never stacks on queued work, and
+// continues after the legacy allowance is exceeded.
+func TestStandingInstructionContinuesPastLegacyBudget(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newTestStore(t)
 	seedDurableAuthority(t, store)
@@ -56,29 +56,36 @@ func TestStandingInstructionEnqueuesItselfWithinItsBudget(t *testing.T) {
 	}
 	// Cancelling the task does not restart the clock (only an edit or a run's
 	// end does), so the quiet spell since the spend has long passed: the
-	// second run is the last the budget allows.
+	// The recorded allowance is not a mandatory ceiling.
 	tasks, err = store.EnqueueIdleInstructions(ctx, mustTime(t, 100_001+600_002))
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("second due round = %+v, %v", tasks, err)
 	}
-	second, _, _ := store.Agent(ctx, agent.ID)
 	if _, err := store.UpdateTask(ctx, tasks[0].ID, tasks[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 100_001+600_003)); err != nil {
 		t.Fatal(err)
 	}
-	if tasks, err := store.EnqueueIdleInstructions(ctx, mustTime(t, 100_001+10_000_000)); err != nil || len(tasks) != 0 {
-		t.Fatalf("round past the budget enqueued %d tasks, err=%v", len(tasks), err)
+	tasks, err = store.EnqueueIdleInstructions(ctx, mustTime(t, 100_001+10_000_000))
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("round past the recorded allowance enqueued %d tasks, err=%v", len(tasks), err)
 	}
-	// A new budget starts the count again; a paused agent stays quiet.
+	third, _, _ := store.Agent(ctx, agent.ID)
+	if third.Idle.RunsUsed != 3 {
+		t.Fatalf("run history after exceeding allowance = %+v", third.Idle)
+	}
+	if _, err := store.UpdateTask(ctx, tasks[0].ID, tasks[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 100_001+10_000_001)); err != nil {
+		t.Fatal(err)
+	}
+	// Editing the legacy allowance preserves history; a paused agent stays quiet.
 	paused := true
-	if _, err := store.UpdateAgent(ctx, agent.ID, second.Revision, AgentPatch{IdleRunBudget: &budget, Paused: &paused}, mustTime(t, 100_001+10_000_001)); err != nil {
+	if _, err := store.UpdateAgent(ctx, agent.ID, third.Revision, AgentPatch{IdleRunBudget: &budget, Paused: &paused}, mustTime(t, 100_001+10_000_002)); err != nil {
 		t.Fatal(err)
 	}
 	if tasks, err := store.EnqueueIdleInstructions(ctx, mustTime(t, 100_001+20_000_000)); err != nil || len(tasks) != 0 {
 		t.Fatalf("paused agent enqueued %d tasks, err=%v", len(tasks), err)
 	}
 	reset, _, _ := store.Agent(ctx, agent.ID)
-	if reset.Idle.RunsUsed != 0 || reset.Idle.RunBudget != budget {
-		t.Fatalf("new budget did not restart the count: %+v", reset.Idle)
+	if reset.Idle.RunsUsed != 3 || reset.Idle.RunBudget != budget {
+		t.Fatalf("budget edit changed history: %+v", reset.Idle)
 	}
 	// An agent admission would not take (its tool budget is spent) draws
 	// nothing either, unpaused or not.

@@ -17,7 +17,7 @@ import (
 )
 
 func TestLegacyHomeMigratesAndKeepsEveryRow(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion} {
 		for _, persistWAL := range []bool{false, true} {
 			t.Run(fmt.Sprintf("v%d/wal=%v", version, persistWAL), func(t *testing.T) {
 				testLegacyHomeMigratesAndKeepsEveryRow(t, version, persistWAL)
@@ -330,6 +330,8 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		agentColumnsFor = v7AgentColumns
 	} else if version == v10UserVersion {
 		agentColumnsFor = v10AgentColumns
+	} else if version == v11UserVersion {
+		agentColumnsFor = v11AgentColumns
 	}
 	if version != legacyUserVersion {
 		if err := rebuildTable(ctx, connection, legacy, "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
@@ -444,6 +446,8 @@ const testAgentColumnsV4 = `id, project_id, name, role, provider, model, reasoni
 
 const v10AgentColumns = `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
 
+const v11AgentColumns = `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, archived, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
+
 // testTaskColumns is the v4 task row, before a send-back boundary was stored.
 const testTaskColumns = `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms`
 
@@ -556,7 +560,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
+		{"current", schemaStatements, "78ff7808dc146c35383329f73c94559172e824e0b72484bc56db48291dbadefa"},
+		{"v11", v11SchemaStatements(), "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
 		{"v10", v10SchemaStatements(), "af5c61224274d2c62e8b78036e911239aa98d8b40154811cb9c4788ad224a603"},
 		{"v9", v9SchemaStatements(), "049dc8ff317e31a86157fd5366579954581a4468caaca63c5dd95ee2958ab4cb"},
 		{"v8", v8SchemaStatements(), "45606d5fa2b054c4ccee79c55f20b184f25ee0860ec5817099c0582174df676b"},
