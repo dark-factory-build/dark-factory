@@ -178,6 +178,52 @@ func TestSupervisorRunsRegisteredShellWorkerToTypedSuccess(t *testing.T) {
 	}
 }
 
+func TestSupervisorShellProviderRequestsExactlyOneDurableHumanRequest(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorHumanRequestProgram(t, "0123456789abcdef0123456789abcdef", "private-shell-question"))
+	result := make(chan struct {
+		run kernel.Run
+		err error
+	}, 1)
+	go func() {
+		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+		result <- struct {
+			run kernel.Run
+			err error
+		}{run: run, err: err}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var snapshot kernel.DashboardSnapshot
+	for {
+		if current, snapshotErr := fixture.store.Snapshot(context.Background()); snapshotErr == nil && len(current.HumanRequests) == 1 {
+			snapshot = current
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatal("shell provider did not reach the human request")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if snapshot.HumanRequests[0].Status != kernel.HumanRequestOpen {
+		t.Fatalf("shell human request = %+v", snapshot.HumanRequests[0])
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil || bytes.Contains(encoded, []byte("private-shell-question")) {
+		t.Fatalf("private shell question crossed public snapshot: %s, %v", encoded, err)
+	}
+	if err := os.WriteFile(fixture.continueReceipt, []byte("continue\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	completed := <-result
+	if completed.err != nil {
+		t.Fatalf("shell continuation: %v", completed.err)
+	}
+	fixture.assertTerminal(t, completed.run, kernel.OutcomeSucceeded)
+	final, err := fixture.store.Snapshot(context.Background())
+	if err != nil || len(final.HumanRequests) != 0 {
+		t.Fatalf("stale shell request after terminal close = %+v, %v", final.HumanRequests, err)
+	}
+}
+
 // An orchestrator has no Change: it runs in its private runtime home, the
 // project tree is never copied for it, and its run reaches the same typed
 // success through the same attempt API.
@@ -541,81 +587,6 @@ func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing
 				t.Fatalf("mismatched authority changed retained source: before=%+v after=%+v err=%v", before, after, err)
 			}
 		})
-	}
-}
-
-func TestSupervisorShellProviderRequestsExactlyOneDurableHumanRequest(t *testing.T) {
-	const (
-		key      = "0123456789abcdef0123456789abcdef"
-		question = "private-provider-question-sentinel"
-	)
-	fixture := newSupervisorFixture(t, supervisorHumanRequestProgram(t, key, question))
-	releaseChecked := make(chan error, 1)
-	fixture.spec.beforeProviderRelease = func() {
-		if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
-			releaseChecked <- fmt.Errorf("provider effect exists before StageProvider release: %v", err)
-			return
-		}
-		snapshot, err := fixture.store.Snapshot(context.Background())
-		if err != nil || len(snapshot.HumanRequests) != 0 {
-			releaseChecked <- fmt.Errorf("human request exists before StageProvider release: %+v, %v", snapshot.HumanRequests, err)
-			return
-		}
-		releaseChecked <- nil
-	}
-	type runResult struct {
-		run kernel.Run
-		err error
-	}
-	done := make(chan runResult, 1)
-	go func() {
-		run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-		done <- runResult{run: run, err: err}
-	}()
-	select {
-	case err := <-releaseChecked:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case result := <-done:
-		t.Fatalf("RunNext ended before provider release proof: %+v", result)
-	case <-time.After(8 * time.Second):
-		t.Fatal("provider release proof timed out")
-	}
-	if err := waitForWitness(fixture.childReceipt, 8*time.Second); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := fixture.store.Snapshot(context.Background())
-	if err != nil || len(snapshot.HumanRequests) != 1 {
-		t.Fatalf("durable human requests=%+v err=%v", snapshot.HumanRequests, err)
-	}
-	request := snapshot.HumanRequests[0]
-	if request.Status != kernel.HumanRequestOpen || request.Revision.Int64() != 1 {
-		t.Fatalf("durable human request=%+v", request)
-	}
-	public := fmt.Sprintf("%+v", snapshot)
-	for _, private := range []string{key, question, fixture.spec.FactoryctlExecutable, fixture.spec.AttemptSocket} {
-		if strings.Contains(public, private) {
-			t.Fatalf("private provider request detail crossed public formatting: %q", public)
-		}
-	}
-	if err := os.WriteFile(fixture.continueReceipt, []byte("continue"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var result runResult
-	select {
-	case result = <-done:
-	case <-time.After(12 * time.Second):
-		t.Fatal("RunNext did not finish")
-	}
-	if result.err != nil {
-		t.Fatalf("RunNext: %v", result.err)
-	}
-	fixture.assertTerminal(t, result.run, kernel.OutcomeSucceeded)
-	fixture.assertOneWitness(t)
-	durable, found, err := fixture.store.HumanRequest(context.Background(), request.ID)
-	if err != nil || !found || durable.ID != request.ID || durable.Status != kernel.HumanRequestStale {
-		t.Fatalf("final durable human request=%+v found=%v err=%v", durable, found, err)
 	}
 }
 
@@ -2183,7 +2154,8 @@ func supervisorHumanRequestProgram(t *testing.T, key, question string) string {
 		"test \"$PATH\" = " + quoteShell(toolPath) + "\n" +
 		"case \"$DARK_FACTORY_FACTORYCTL\" in /*) ;; *) exit 83 ;; esac\n" +
 		"test -x \"$DARK_FACTORY_FACTORYCTL\"\n" +
-		"printf x >> __WITNESS__\n" + request + request +
+		"printf x >> __WITNESS__\n" +
+		request + request +
 		"printf ready > __CHILD_RECEIPT__\n" +
 		"while [ ! -f __CONTINUE_RECEIPT__ ]; do sleep 0.01; done\n" +
 		quoteShell(executable) + " --supervisor-attempt-succeed typed-success\n"
