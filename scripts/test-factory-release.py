@@ -237,8 +237,9 @@ class ReleaseFixtures(unittest.TestCase):
             cfg = config(journal)
             observed = {"sha": OLD, "healthy": False}
             verified = {"sha": SHA, "healthy": True}
-            def command(argv, *unused):
+            def command(argv, *unused, **kwargs):
                 if argv[0] == "/bin/true":
+                    self.assertIsNone(kwargs["timeout"])
                     receipt = release.load(journal)["releases"]["633"]
                     self.assertEqual(receipt["delivery_sources"], [{"pr": 633, "merge_sha": SHA, "issue": 602, "reference": "refs"}])
                     self.assertEqual(release.load(journal)["live_tip"]["sha"], OLD)

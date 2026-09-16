@@ -62,17 +62,10 @@ def deploy(sha, home=None):
                        stdout=subprocess.DEVNULL)
 
     paused_state()
-    deadline = time.monotonic() + 300
     while True:
         drained_revision, active = paused_state()
         if active == 0:
             break
-        if time.monotonic() >= deadline:
-            # Installation has not started. Restore only this proven owned pause;
-            # the revision CAS refuses a racing operator change.
-            if enabled:
-                restore_dispatch(drained_revision)
-            raise ValueError('runs did not drain')
         time.sleep(1)
     try:
         subprocess.run(['/bin/sh', str(scripts / 'reinstall-service.sh'), '--home', str(home), '--install-prepared', sha], env=env, check=True, timeout=600,

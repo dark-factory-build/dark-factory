@@ -65,21 +65,22 @@ def refresh_controller(checkout, release_config, receipt):
     git('merge', '--ff-only', sha)
 
 
-def tick(config_path, config):
+def tick(config_path, config, release_only=False):
     scripts = Path(__file__).resolve().parent
     calls = []
-    calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
-    releases = config.get('release_configs', [])
+    if not release_only:
+        calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
+    releases = config.get('release_configs', []) if release_only else []
     for release_config in releases:
         calls.append([sys.executable, str(scripts / 'factory-release.py'), release_config, '--latest', '--once'])
-    if 'review_mirror_root' in config:
+    if not release_only and 'review_mirror_root' in config:
         if not isinstance(config['review_mirror_root'], str) or not Path(config['review_mirror_root']).is_absolute():
             raise ValueError('review_mirror_root must be an absolute path')
         calls.append([sys.executable, str(scripts / 'factory-review-intake.py'), str(config_path), '--once'])
     results = []
     for argv in calls:
         try:
-            completed = subprocess.run(argv, capture_output=True, text=True, timeout=None if Path(argv[1]).name == 'factory-review-intake.py' else 1300)
+            completed = subprocess.run(argv, capture_output=True, text=True, timeout=1300 if Path(argv[1]).name == 'factory-intake.py' else None)
             result = {'component': Path(argv[1]).stem, 'ok': completed.returncode == 0}
             if completed.returncode:
                 result['error'] = 'exit_' + str(completed.returncode)
@@ -92,7 +93,11 @@ def tick(config_path, config):
                     spec.loader.exec_module(delivery)
                     release_config = json.loads(Path(argv[2]).read_text())
                     delivery.deliver(config, release_config, receipt)
-                    refresh_controller(scripts.parent, release_config, receipt)
+                    # Checkout replacement must not overlap readers in the normal pass.
+                    refresh_lock = Path(str(Path(config['factory_home']).resolve()) + '.autonomy.lock')
+                    with refresh_lock.open('a+') as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX)
+                        refresh_controller(scripts.parent, release_config, receipt)
 
         except ControllerSourceError as error:
             result.update({'ok': False, 'error': str(error)})
@@ -103,8 +108,8 @@ def tick(config_path, config):
     return results
 
 
-def write_health(config, results):
-    path = Path(config['journal'] + '.autonomy.json')
+def write_health(config, results, release_only=False):
+    path = Path(config['journal'] + ('.release-autonomy.json' if release_only else '.autonomy.json'))
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
     try:
@@ -126,6 +131,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('config', type=Path)
     parser.add_argument('--once', action='store_true')
+    parser.add_argument('--release-only', action='store_true', help='Run the separately scheduled release and delivery pass.')
     parser.add_argument('--plist', action='store_true', help='Print a launchd plist; does not install or start it.')
     args = parser.parse_args()
     config_path = args.config.resolve(strict=True)
@@ -134,26 +140,25 @@ def main():
     interval = config.get('poll_seconds', 120)
     if type(interval) is not int or not 5 <= interval <= 86400:
         raise ValueError('poll_seconds must be 5..86400')
+    suffix = '.release' if args.release_only else ''
     # Use launchd StartInterval rather than keeping a second polling daemon.
     if args.plist:
-        log = str(Path(config['journal']).with_suffix('.service.log'))
-        plist = {'Label': 'build.darkfactory.autonomy.' + hashlib.sha256(str(config_path).encode()).hexdigest()[:12], 'ProgramArguments': [sys.executable, str(Path(__file__).resolve()), str(config_path), '--once'],
+        log = str(Path(config['journal']).with_suffix(suffix + '.service.log'))
+        plist = {'Label': 'build.darkfactory.autonomy.' + hashlib.sha256(str(config_path).encode()).hexdigest()[:12] + suffix, 'ProgramArguments': [sys.executable, str(Path(__file__).resolve()), str(config_path), '--once'] + (['--release-only'] if args.release_only else []),
                  'StartInterval': interval, 'RunAtLoad': True, 'ProcessType': 'Background',
                  'StandardOutPath': log, 'StandardErrorPath': log,
                  'EnvironmentVariables': {'PATH': os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')}}
         sys.stdout.buffer.write(plistlib.dumps(plist))
         return 0
-    # ponytail: one host controller at a time. A final cold review can occupy
-    # this job/lock for its 20-minute deadline; separate existing review
-    # scheduling only if intake/release latency justifies that additional job.
-    descriptor = os.open(Path(str(Path(config['factory_home']).resolve()) + '.autonomy.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+    # Release waits must not hold the intake/review scheduler's lock.
+    descriptor = os.open(Path(str(Path(config['factory_home']).resolve()) + suffix + '.autonomy.lock'), os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(descriptor, 'a+') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise ValueError('another controller owns this factory') from error
-        results = tick(config_path, config)
-        write_health(config, results)
+        results = tick(config_path, config, args.release_only)
+        write_health(config, results, args.release_only)
     print(json.dumps({'at': int(time.time()), 'components': results}), flush=True)
     return 0 if all(result['ok'] for result in results) else 1
 
