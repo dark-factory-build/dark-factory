@@ -27,7 +27,13 @@ no commit, push, pull-request, or repository-publication operation.
   task; Stop ends it; Start new preserves its history and queues a replacement.
   Completed output stays visible. Add to queue accepts later work while busy.
   Queues are grouped by agent and follow its admission order; numeric priority can be raised or
-  lowered explicitly. Recent Work stays collapsed without reading private details. Opening it loads
+  lowered explicitly. A task targets one worker or any eligible worker in its
+  project: ANY WORKER in an agent's pane, or `factoryctl task add --agent any`,
+  queues it under the project's Any eligible worker group until the first free
+  worker claims it at admission. Workers take their own assigned work first,
+  then shared work. The claim writes that worker into the task, which stays
+  with it through send-back corrections unless the queue row reassigns it to
+  another worker. Recent Work stays collapsed without reading private details. Opening it loads
   authorized details for the newest ten completed or blocked tasks, showing
   instruction and outcome excerpts; Show more loads the next ten. Expand a row
   for the full outcome, reported PR links, instruction, and review feedback,

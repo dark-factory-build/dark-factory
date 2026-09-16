@@ -21,6 +21,8 @@ Run:  admitted -> running -> finalizing -> terminal
 
 Send-back: terminal result -> queued at the next work revision, the note replacing an earlier one
 
+Assignment: one agent, or none (any eligible worker) -> claimed by the admitting worker, kept through send-back unless reassigned
+
 Resource: declared -> active -> releasing -> released
                                       \----> unresolved
 ```
@@ -62,7 +64,13 @@ unsupported before a provider runs.
    eligible work in the other. Dispatch still gates all new admission.
 5. The Store selects the canonical eligible task and agent globally by priority
    descending, creation time ascending, and exact 16-byte task-ID BLOB bytes
-   ascending. It validates the selected Change and binds the task incarnation,
+   ascending. A queued task names one agent or none; an unassigned task is a
+   candidate for every unarchived, unpaused worker in its project. Each agent's
+   candidate is its replacement, then its own assigned work, then shared work,
+   and the global choice keeps the canonical order. Admission writes the chosen
+   agent into a shared task in the same transaction, so a claim is exclusive
+   and durable and survives send-back until an explicit reassignment.
+   It validates the selected Change and binds the task incarnation,
    revision, provider, and launch facts before external effects. Repository or
    provider availability becomes typed post-admission failure, never a stale
    scheduler filter.
@@ -97,7 +105,10 @@ The browser reads one bounded, transactionally pinned active-state snapshot
 and is told only that the durable head moved. A client holds one coherent
 snapshot or none; a change notification carries only a head. Tasks include
 queued/running work, unresolved request origins, and the most recent completion
-per agent so terminal settlement remains visible. The console groups queues
+per agent so terminal settlement remains visible. Every task item names its
+agent; queued work no worker has claimed yet is served in the additive
+`shared_tasks` member, which a console built before the shared queue ignores
+while a current console folds it into the same task view. The console groups queues
 by agent; within each queue, the priority/creation-time/ID ordering matches
 admission, including an explicit replacement ahead of that agent's queued
 work. These groups do not predict the global order of starts across agents.
