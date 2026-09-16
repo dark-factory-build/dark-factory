@@ -51,7 +51,7 @@ project merely because the overseer woke. Status returns four entries from each 
 `next_offset` is set, continue with `overseer status --offset N --head HEAD`; reuse
 the returned head exactly. A stale head restarts at page one. Use `overseer status
 --task ID` for one task. Its objective and result arrive in 4,096-rune chunks;
-continue with `--text-offset N --head HEAD` while `next_text_offset` is set. Use the `overseer` commands to
+continue with `--text-offset N --head HEAD` while `next_text_offset` is set. Failed and cancelled tasks expose the exact settled run detail in `result`, while retaining their actual status. Read that report before deciding to retry: a failed review can contain actionable findings for the original worker, not an empty or crashed attempt. Use the `overseer` commands to
 assign or reorder queued work, message or interrupt a worker, answer its
 question, stop or replace its objective, send work back, and pause or resume
 future admission. These commands use your attempt credential; an operator
