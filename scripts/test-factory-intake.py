@@ -83,6 +83,12 @@ class IntakeTest(unittest.TestCase):
             with self.assertRaisesRegex(INTAKE.IntakeError, "configured project needs a Codex overseer"):
                 INTAKE.validate_factory(self.config)
 
+    def test_status_read_rejects_malformed_collections(self):
+        for value in ([], {}, {"projects": [1], "agents": []}, {"projects": [], "agents": None}, {"projects": [], "agents": [None]}):
+            with self.subTest(value=value), patch.object(INTAKE, "command", return_value=json.dumps(value)):
+                with self.assertRaises(INTAKE.IntakeError):
+                    INTAKE.validate_factory(self.config)
+
     def test_status_read_error_is_reported_as_installation_prerequisite(self):
         with patch.object(INTAKE, "command", side_effect=INTAKE.IntakeError("transport lost")):
             with self.assertRaisesRegex(INTAKE.IntakeError, "cannot verify configured factory limits"):

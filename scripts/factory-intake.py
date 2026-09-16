@@ -111,6 +111,8 @@ def validate_factory(config: dict) -> None:
         env["DARK_FACTORY_SOCKET"] = str(home / "runtimes" / "factory.sock")
         env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "operator.token")
         value = json.loads(command(["factoryctl", "status"], env=env, timeout=int(config.get("command_timeout", 30))))
+        if not isinstance(value, dict) or any(not isinstance(value.get(key), list) or any(not isinstance(item, dict) for item in value[key]) for key in ("projects", "agents")):
+            raise IntakeError("factory status response is invalid")
         project = next((item for item in value.get("projects", []) if item.get("id") == config["project_id"]), None)
         agent = next((item for item in value.get("agents", []) if item.get("id") == config["overseer_agent_id"]), None)
     except (json.JSONDecodeError, IntakeError, OSError) as exc:
@@ -120,7 +122,9 @@ def validate_factory(config: dict) -> None:
     duration = project.get("max_run_seconds")
     if type(duration) is not int or not 0 <= duration <= 86400:
         raise IntakeError("configured per-run duration is invalid")
-    if project.get("run_budget_limit", 0) != 0 and project.get("runs_used", 0) >= project["run_budget_limit"]:
+    if any(type(project.get(key)) is not int or not 0 <= project[key] <= 2**63 - 1 for key in ("run_budget_limit", "runs_used")):
+        raise IntakeError("configured run budget is invalid")
+    if project["run_budget_limit"] != 0 and project["runs_used"] >= project["run_budget_limit"]:
         raise IntakeError("project run allowance is exhausted")
 
 
