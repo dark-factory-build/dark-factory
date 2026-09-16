@@ -80,7 +80,16 @@ if [ -n "$evidence" ] && [ ! -f "$evidence" ]; then
     echo "no review evidence file: $evidence" >&2
     exit 2
 fi
-bridge=$(command -v dark-factory-maintainer-mcp-bridge) || { echo "maintainer bridge is not on PATH" >&2; exit 2; }
+if [ -n "${DARK_FACTORY_MAINTAINER_BRIDGE:-}" ]; then
+    bridge=$DARK_FACTORY_MAINTAINER_BRIDGE
+    bridge_mode=$(stat -f '%Lp' "$bridge" 2>/dev/null) || bridge_mode=
+    [ -f "$bridge" ] && [ -x "$bridge" ] && [ -n "$bridge_mode" ] && [ $((bridge_mode & 22)) -eq 0 ] || {
+        echo "maintainer bridge supplied by the factory is not a safe executable" >&2
+        exit 2
+    }
+else
+    bridge=$(command -v dark-factory-maintainer-mcp-bridge) || { echo "maintainer bridge is not on PATH" >&2; exit 2; }
+fi
 provider=${DARK_FACTORY_REVIEW_PROVIDER:-codex}
 case "$provider" in
     codex | claude) ;;

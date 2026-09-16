@@ -359,6 +359,15 @@ status=0
     PATH="$bridge_only:/usr/bin:/bin" "$repository_root/scripts/cold-review.sh" owner/repo 7 "$head" "$base" "$body" >/dev/null 2>&1) || status=$?
 [ "$status" -eq 2 ] || fail "missing codex exited $status, want 2"
 [ ! -s "$args" ] || fail "a missing codex still started a session"
+# A factory-launched overseer supplies the exact bridge path. The review can
+# therefore run with a provider-only PATH and does not rediscover publication
+# authority from the host environment.
+provider_only=$temporary/provider-only
+mkdir -p "$provider_only"
+cp "$tools/codex" "$provider_only/"
+: >"$args"
+(cd "$run" && TMPDIR="$scratch" DARK_FACTORY_REVIEW_REMOTE="file://$remote" DARK_FACTORY_MAINTAINER_BRIDGE="$tools/dark-factory-maintainer-mcp-bridge" DARK_FACTORY_FAKE_CLAUDE_ARGS="$args" DARK_FACTORY_FAKE_CLAUDE_REPLY="$reply" DARK_FACTORY_REVIEW_OPERATION_ID=0f0f0f0f-0f0f-0f0f-0f0f0f0f0f0f \
+    PATH="$provider_only:/usr/bin:/bin" "$repository_root/scripts/cold-review.sh" owner/repo 7 "$head" "$base" "$body" >/dev/null 2>&1) || fail "factory-supplied bridge did not run the review"
 status=0
 review owner/repo 7x "$head" "$base" "$body" || status=$?
 [ "$status" -eq 2 ] || fail "non-numeric pull request exited $status, want 2"

@@ -286,6 +286,7 @@ func Build(request Request) (Launch, error) {
 		// account configuration and Change-local .mcp.json cannot add servers.
 		argv = append(argv, "--strict-mcp-config")
 		servers := map[string]any{}
+		environment := request.runtime.environment(request.provider)
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -295,6 +296,7 @@ func Build(request Request) (Launch, error) {
 				return Launch{}, errors.Join(err, fmt.Errorf("%s on %s", maintainerBridge, request.runtime.toolPath))
 			}
 			servers["maintainer"] = map[string]string{"command": bridge}
+			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
 		if len(servers) > 0 {
 			config, err := json.Marshal(map[string]any{"mcpServers": servers})
@@ -305,7 +307,7 @@ func Build(request Request) (Launch, error) {
 		}
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryStartupTerminal,
+			environment: environment, taskDelivery: TaskDeliveryStartupTerminal,
 		}, nil
 	case kernel.ProviderCodex:
 		permissions, err := codexPermissions(request)
@@ -331,21 +333,21 @@ func Build(request Request) (Launch, error) {
 		if request.reasoningEffort != "" {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
+		environment := request.runtime.environment(request.provider)
+		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
 			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
 			if err != nil {
 				return Launch{}, err
 			}
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(bridge)+`,enabled=true,required=true,default_tools_approval_mode="approve"}`)
-		}
-		prompt := codexBootstrapPrompt
-		if request.role == kernel.RoleOrchestrator {
+			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 			prompt += " You are the project overseer. Use the factory tool with overseer status to inspect workers, tasks, questions and intervention history. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool's description for flags. Read docs/development/OVERSEER.md inside the task checkout or the repository clone specified by the task; if neither is available, report the missing checkout; publish through your Maintainer App. Respect direct operator interventions. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
 		argv = append(argv, prompt)
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryAttemptAPI,
+			environment: environment, taskDelivery: TaskDeliveryAttemptAPI,
 		}, nil
 	default:
 		return Launch{}, ErrInvalid

@@ -713,6 +713,13 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.dark_factory_maintainer={command=") {
 		t.Fatal("overseer lost its explicit Maintainer tools")
 	}
+	bridgePath := filepath.Join(filepath.SplitList(runtime.toolPath)[0], maintainerBridge)
+	if !slices.Contains(overseer.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+bridgePath) {
+		t.Fatalf("overseer did not export its exact Maintainer bridge: %q", overseer.Environment())
+	}
+	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+bridgePath) {
+		t.Fatal("worker inherited the overseer's Maintainer bridge")
+	}
 	if strings.Contains(strings.Join(workerArgs, " "), "mcp_servers.dark_factory_maintainer=") {
 		t.Fatal("worker was granted publication tool approvals")
 	}
