@@ -347,9 +347,12 @@ func TestDispatchExplicitRevisionDoesNotRefreshOrOverrideTheGuard(t *testing.T) 
 		code    api.RemoteErrorCode
 		message string
 	}{
-		{api.RemoteConflict, "was not accepted"},
-		{api.RemoteRevisionConflict, "revision is stale"},
-		{api.RemoteInternal, "was not accepted"},
+		{api.RemoteConflict, "local API request conflicts with durable state"},
+		{api.RemoteRevisionConflict, "local API revision is stale"},
+		{api.RemoteInternal, "local API failed internally"},
+		{api.RemoteUnauthorized, "local API credential is unauthorized"},
+		{api.RemoteForbidden, "local API request is forbidden"},
+		{api.RemoteUnavailable, "local API is unavailable"},
 	} {
 		t.Run(string(test.code), func(t *testing.T) {
 			fixture := newAPIFixture(t)
@@ -370,7 +373,7 @@ func TestDispatchExplicitRevisionDoesNotRefreshOrOverrideTheGuard(t *testing.T) 
 			if result := awaitServer(t, done); result.err != nil {
 				t.Fatal(result.err)
 			}
-			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: dispatch "+test.message+"\n" {
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: dispatch: "+test.message+"\n" {
 				t.Fatalf("guarded stale dispatch = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 			}
 		})
@@ -414,7 +417,7 @@ func TestOperatorRemoteRejectionIsReportedWithoutFabricatedSuccess(t *testing.T)
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"agent", "create", "--project", strings.Repeat("11", 16), "--name", "Builder", "--provider", "shell", "--tool-budget", "10"}, webEnvironment(fixture), &stdout, &stderr)
 	awaitServer(t, done)
-	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "agent create was not accepted") {
+	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "agent create: local API request conflicts with durable state") {
 		t.Fatalf("rejection = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
