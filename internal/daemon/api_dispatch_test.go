@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,11 +25,12 @@ import (
 )
 
 type dispatchFixture struct {
-	daemon   *Daemon
-	store    *kernel.Store
-	listener *api.Listener
-	socket   string
-	operator string
+	databasePath string
+	daemon       *Daemon
+	store        *kernel.Store
+	listener     *api.Listener
+	socket       string
+	operator     string
 }
 
 func newDispatchFixture(t *testing.T) *dispatchFixture {
@@ -99,7 +101,7 @@ func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 		_ = home.Close()
 	})
 	socket := install.LocalAPISocketPath(authHomePath)
-	return &dispatchFixture{daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
+	return &dispatchFixture{databasePath: databasePath, daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
 }
 
 func (fixture *dispatchFixture) serve(t *testing.T) <-chan error {
@@ -321,6 +323,118 @@ func TestDaemonDispatchesAttemptOutcomeAfterCommit(t *testing.T) {
 		t.Fatal("revoked attempt credential remained usable")
 	}
 	waitDispatch(t, done)
+}
+
+func TestDaemonOutcomeWaitsForWriterWithoutLosingResult(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 11)
+	lock, err := sql.Open("sqlite3", "file:"+fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	entered := make(chan struct{})
+	var once sync.Once
+	fixture.daemon.now = func() time.Time { once.Do(func() { close(entered) }); return time.UnixMilli(1000) }
+	const resultText = "Implemented the exact provider permission correction; focused tests passed and delivery remains pending."
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	done := fixture.serve(t)
+	result := make(chan error, 1)
+	go func() { _, err := active.client.Succeed(ctx, resultText); result <- err }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("outcome did not reach daemon")
+	}
+	// Hold real writer contention past the live owner's polling timeout. A
+	// complete authenticated mutation must use its request lifetime instead.
+	select {
+	case err := <-result:
+		t.Fatalf("outcome abandoned before writer release: %v", err)
+	case <-time.After(liveAttemptStoreTimeout + 300*time.Millisecond):
+	}
+	if _, err := lock.Exec("ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("outcome after writer release: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("outcome remained blocked")
+	}
+	waitDispatch(t, done)
+	run, found, err := fixture.store.Run(context.Background(), active.run.ID)
+	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Result() != resultText {
+		t.Fatalf("durable exact result = %+v, found=%v, err=%v", run, found, err)
+	}
+}
+
+func TestDaemonContendedOutcomeHonorsRequestCancellation(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 11)
+	lock, err := sql.Open("sqlite3", "file:"+fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	entered := make(chan struct{})
+	var once sync.Once
+	fixture.daemon.now = func() time.Time { once.Do(func() { close(entered) }); return time.UnixMilli(1000) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		connection, err := fixture.listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		done <- fixture.daemon.HandleConnection(ctx, connection)
+	}()
+	result := make(chan error, 1)
+	go func() {
+		_, err := active.client.Succeed(context.Background(), "cancelled request must not commit")
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("outcome did not reach daemon")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled request succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled request remained blocked")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled handler remained blocked")
+	}
+	if _, err := lock.Exec("ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	run, found, err := fixture.store.Run(context.Background(), active.run.ID)
+	if err != nil || !found || run.Phase != kernel.RunRunning || run.Proposal != nil {
+		t.Fatalf("cancelled durable outcome = %+v, found=%v, err=%v", run, found, err)
+	}
 }
 
 // A send-back reaches the kernel through both domains with the kernel's own
