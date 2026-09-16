@@ -77,6 +77,30 @@ test("an idle configured agent accepts one compact instruction", async () => {
   }
 });
 
+test("an instruction can be queued for any eligible worker in the project", async () => {
+  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    const submitted = [];
+    let renderer;
+    await act(async () => {
+      renderer = create(createElement(AgentInstruction, {
+        terminal: terminalView({ phase: "idle", writable: false }),
+        onSubmit: async (instruction, mode) => { submitted.push([instruction, mode]); return true; },
+      }));
+    });
+    await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "Whoever is free: fix the flaky test" } }); });
+    const anyWorker = renderer.root.findAllByType("button").find((button) => button.props.children === "ANY WORKER");
+    assert.equal(anyWorker.props["aria-label"], "Queue for any eligible worker in Builder One's project");
+    await act(async () => { anyWorker.props.onClick(); });
+    assert.deepEqual(submitted, [["Whoever is free: fix the flaky test", "any"]]);
+    assert.equal(renderer.root.findByType("textarea").props.value, "");
+    await act(async () => { renderer.unmount(); });
+  } finally {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
+  }
+});
+
 test("paused agents remain identifiable without a false input", () => {
   const markup = renderToStaticMarkup(createElement(AgentInstruction, {
     terminal: terminalView({ phase: "idle", writable: false, paused: true }),

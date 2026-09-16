@@ -768,7 +768,7 @@ function ProjectsSection({ state }: { state: StateView | undefined }) {
                       <li key={task.id}>
                         <div className="dfConsoleRow">
                           <span className="dfConsoleRow__title">{task.title}</span>
-                          <span className="dfConsoleRow__agent">{entityName(state.agents, task.assigned_agent_id, "agent")}</span>
+                          <span className="dfConsoleRow__agent">{task.assigned_agent_id === "" ? "any eligible worker" : entityName(state.agents, task.assigned_agent_id, "agent")}</span>
                           <StageMeter stage={task.status} />
                         </div>
                       </li>
