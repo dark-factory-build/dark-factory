@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -39,6 +40,18 @@ class IntakeTest(unittest.TestCase):
             return json.dumps([{ "number": 7 }] if self.source["state"] == "OPEN" and "factory:ready" in [label["name"] for label in self.source["labels"]] else [])
         if argv[:3] == ["gh", "issue", "view"]:
             return json.dumps(self.source)
+        if argv == ["factoryctl", "status"]:
+            with sqlite3.connect(Path(self.config["factory_home"]) / "factory.sqlite3") as database:
+                project = database.execute("SELECT id, run_budget_limit, runs_used, max_run_seconds FROM projects").fetchone()
+                agent = database.execute("SELECT id, project_id, role, provider FROM agents").fetchone()
+            return json.dumps({"projects": [{"id": project[0].hex(), "run_budget_limit": project[1], "runs_used": project[2], "max_run_seconds": project[3]}], "agents": [{"id": agent[0].hex(), "project_id": agent[1].hex(), "role": agent[2], "provider": agent[3]}]})
+        if argv[:3] == ["factoryctl", "task", "recovery"]:
+            task_id = argv[argv.index("--task") + 1]
+            incarnation = argv[argv.index("--incarnation") + 1]
+            state = self.states.get(task_id)
+            if state is None:
+                return json.dumps({"state": "missing"})
+            return json.dumps({"state": "found", "task_id": task_id, "incarnation_id": incarnation, "project_id": self.config["project_id"], "assigned_agent_id": self.config["overseer_agent_id"], "status": state["status"], "needs_operator_recovery": state.get("needs_operator_recovery", False)})
         task_id, incarnation = argv[argv.index("--task-id") + 1], argv[argv.index("--incarnation-id") + 1]
         self.states[task_id] = {"status": "queued", "id": task_id, "incarnation": incarnation}
         return json.dumps({"id": task_id, "incarnation_id": incarnation})
@@ -50,7 +63,7 @@ class IntakeTest(unittest.TestCase):
             database.execute("INSERT INTO projects VALUES (?, 0, 999, 2700)", (project,))
             database.execute("INSERT INTO agents VALUES (?, ?, 'orchestrator', 'codex')", (bytes.fromhex(self.config["overseer_agent_id"]), project))
             database.commit()
-            for limit, used, duration, error in [(0, 999, 2700, None), (2, 1, 2700, None), (2, 2, 2700, "exhausted"), (2, 3, 2700, "exhausted"), (0, 999, 0, "duration"), (2, 1, 0, "duration")]:
+            for limit, used, duration, error in [(0, 999, 2700, None), (2, 1, 2700, None), (2, 2, 2700, "exhausted"), (2, 3, 2700, "exhausted"), (0, 999, 0, None), (2, 1, 0, None)]:
                 with self.subTest(limit=limit, used=used, duration=duration):
                     database.execute("UPDATE projects SET run_budget_limit=?, runs_used=?, max_run_seconds=?", (limit, used, duration))
                     database.commit()
@@ -59,10 +72,42 @@ class IntakeTest(unittest.TestCase):
                     else:
                         with self.assertRaisesRegex(INTAKE.IntakeError, error):
                             INTAKE.validate_factory(self.config)
-        self.assertEqual([], self.calls, "limit verification performs no provider or network action")
+        self.assertEqual(6, self.calls.count(["factoryctl", "status"]), "limit verification uses only the supported status read")
 
     def factory_calls(self):
         return [call for call in self.calls if call[0] == "factoryctl"]
+
+    def test_status_read_rejects_mismatched_identity(self):
+        status = {"projects": [{"id": "2" * 32, "run_budget_limit": 0, "runs_used": 0, "max_run_seconds": 2700}], "agents": []}
+        with patch.object(INTAKE, "command", return_value=json.dumps(status)):
+            with self.assertRaisesRegex(INTAKE.IntakeError, "configured project needs a Codex overseer"):
+                INTAKE.validate_factory(self.config)
+
+    def test_status_read_rejects_malformed_collections(self):
+        for value in ([], {}, {"projects": [1], "agents": []}, {"projects": [], "agents": None}, {"projects": [], "agents": [None]}):
+            with self.subTest(value=value), patch.object(INTAKE, "command", return_value=json.dumps(value)):
+                with self.assertRaises(INTAKE.IntakeError):
+                    INTAKE.validate_factory(self.config)
+
+    def test_status_read_error_is_reported_as_installation_prerequisite(self):
+        with patch.object(INTAKE, "command", side_effect=INTAKE.IntakeError("transport lost")):
+            with self.assertRaisesRegex(INTAKE.IntakeError, "cannot verify configured factory limits"):
+                INTAKE.validate_factory(self.config)
+
+    def test_recovery_read_rejects_mismatched_identity(self):
+        operation = {"task_id": "4" * 32, "incarnation_id": "5" * 32}
+        value = {"state": "found", "task_id": operation["task_id"], "incarnation_id": operation["incarnation_id"], "project_id": "2" * 32, "assigned_agent_id": self.config["overseer_agent_id"], "status": "queued", "needs_operator_recovery": False}
+        with patch.object(INTAKE, "command", return_value=json.dumps(value)):
+            with self.assertRaisesRegex(INTAKE.IntakeError, "identity conflicts"):
+                self.real_state(self.config, operation)
+
+    def test_recovery_read_rejects_incomplete_output(self):
+        operation = {"task_id": "4" * 32, "incarnation_id": "5" * 32}
+        value = {"state": "found", "task_id": operation["task_id"], "incarnation_id": operation["incarnation_id"], "project_id": self.config["project_id"], "assigned_agent_id": self.config["overseer_agent_id"]}
+        for malformed in ([], {"state": "present"}, value):
+            with self.subTest(value=malformed), patch.object(INTAKE, "command", return_value=json.dumps(malformed)):
+                with self.assertRaises(INTAKE.IntakeError):
+                    self.real_state(self.config, operation)
 
     def test_one_source_task_replays_after_lost_response(self):
         def lost(argv, **kwargs):

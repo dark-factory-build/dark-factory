@@ -240,6 +240,20 @@ func (client *OperatorClient) SendBackTask(ctx context.Context, input SendBackIn
 	return client.client.mutate(ctx, "send_back_task", input)
 }
 
+func (client *OperatorClient) TaskRecovery(ctx context.Context, input TaskRecoveryInput) (TaskRecovery, error) {
+	if !validID(input.TaskID) || !validID(input.IncarnationID) {
+		return TaskRecovery{}, ErrInvalidInput
+	}
+	var result TaskRecovery
+	if err := client.client.call(ctx, "task_recovery", input, &result); err != nil {
+		return TaskRecovery{}, err
+	}
+	if !validTaskRecovery(result) || result.State == "found" && (result.TaskID != input.TaskID || result.IncarnationID != input.IncarnationID) {
+		return TaskRecovery{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
 	if !validID(input.ID) || !validID(input.ProjectID) || !validID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
 		return MutationResult{}, ErrInvalidInput

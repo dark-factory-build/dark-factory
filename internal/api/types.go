@@ -278,6 +278,79 @@ type TaskSummary struct {
 	Revision        uint64 `json:"revision"`
 }
 
+type TaskRecoveryInput struct {
+	TaskID        string `json:"task_id"`
+	IncarnationID string `json:"incarnation_id"`
+}
+
+type TaskRecovery struct {
+	State                 string   `json:"state"`
+	TaskID                string   `json:"task_id"`
+	IncarnationID         string   `json:"incarnation_id"`
+	ProjectID             string   `json:"project_id"`
+	AssignedAgentID       string   `json:"assigned_agent_id"`
+	WorkRevision          uint64   `json:"work_revision"`
+	Revision              uint64   `json:"revision"`
+	Status                string   `json:"status"`
+	NeedsOperatorRecovery bool     `json:"needs_operator_recovery"`
+	ChangeID              string   `json:"change_id,omitempty"`
+	ChangeRevision        uint64   `json:"change_revision,omitempty"`
+	ChangePhase           string   `json:"change_phase,omitempty"`
+	SourceFormat          string   `json:"source_format,omitempty"`
+	SourceBaseCommit      string   `json:"source_base_commit,omitempty"`
+	SourceRepositoryDev   int64    `json:"source_repository_dev,omitempty"`
+	SourceRepositoryInode int64    `json:"source_repository_inode,omitempty"`
+	RunID                 string   `json:"run_id,omitempty"`
+	RunRevision           uint64   `json:"run_revision,omitempty"`
+	ArtifactPaths         []string `json:"artifact_paths"`
+}
+
+func validTaskRecovery(value TaskRecovery) bool {
+	if value.State == "missing" {
+		return value.TaskID == "" && value.IncarnationID == "" && value.ProjectID == "" && value.AssignedAgentID == "" && value.WorkRevision == 0 && value.Revision == 0 && value.Status == "" && !value.NeedsOperatorRecovery && value.ChangeID == "" && value.ChangeRevision == 0 && value.ChangePhase == "" && value.SourceFormat == "" && value.SourceBaseCommit == "" && value.SourceRepositoryDev == 0 && value.SourceRepositoryInode == 0 && value.RunID == "" && value.RunRevision == 0 && value.ArtifactPaths != nil && len(value.ArtifactPaths) == 0
+	}
+	if value.State != "found" || !validID(value.TaskID) || !validID(value.IncarnationID) || !validID(value.ProjectID) || !validID(value.AssignedAgentID) || value.WorkRevision == 0 || value.Revision == 0 || !validTaskStatus(value.Status) || value.ArtifactPaths == nil || len(value.ArtifactPaths) > kernel.MaxRecoveryResources {
+		return false
+	}
+	if value.RunID == "" && value.RunRevision != 0 || value.RunID != "" && (!validID(value.RunID) || value.RunRevision == 0) {
+		return false
+	}
+	if value.ChangeID == "" {
+		if value.ChangeRevision != 0 || value.ChangePhase != "" || value.SourceFormat != "" {
+			return false
+		}
+	} else {
+		if !validID(value.ChangeID) || value.ChangeRevision == 0 {
+			return false
+		}
+		switch value.ChangePhase {
+		case "reserved", "prepared", "available", "retained", "abandoned":
+		default:
+			return false
+		}
+	}
+	if value.SourceFormat == "" {
+		if value.SourceBaseCommit != "" || value.SourceRepositoryDev != 0 || value.SourceRepositoryInode != 0 {
+			return false
+		}
+	} else {
+		if !(value.SourceFormat == "sha1" && len(value.SourceBaseCommit) == 40 || value.SourceFormat == "sha256" && len(value.SourceBaseCommit) == 64) || value.SourceRepositoryDev < 0 || value.SourceRepositoryInode <= 0 {
+			return false
+		}
+		for _, ch := range value.SourceBaseCommit {
+			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+				return false
+			}
+		}
+	}
+	for _, path := range value.ArtifactPaths {
+		if value.RunID == "" || !validCanonicalPath(path, 4096) {
+			return false
+		}
+	}
+	return true
+}
+
 // DashboardSnapshot deliberately contains only the bounded public Store
 // projection. Roots, task bodies/results, models, credentials and source data
 // have no representable field here.

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -183,6 +184,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.setAgentIdlePolicy(ctx, call)
 	case api.CallEnqueueTask:
 		return daemon.enqueueTask(ctx, call)
+	case api.CallTaskRecovery:
+		return daemon.taskRecovery(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
 	case api.CallSetCapacity:
@@ -285,6 +288,56 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	default:
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+}
+
+func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.TaskRecoveryInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseTaskID(input.TaskID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	incarnation, err := parseIncarnationID(input.IncarnationID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	recovery, found, err := daemon.store.TaskRecovery(ctx, id, incarnation)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	value := api.TaskRecovery{ArtifactPaths: []string{}}
+	if !found {
+		value.State = "missing"
+	} else {
+		value.State, value.TaskID, value.IncarnationID = "found", recovery.Task.ID.String(), recovery.Incarnation.String()
+		value.ProjectID, value.AssignedAgentID = recovery.Task.ProjectID.String(), recovery.Task.AssignedAgentID.String()
+		value.WorkRevision, value.Revision, value.Status = uint64(recovery.Task.WorkRevision.Int64()), uint64(recovery.Task.Revision.Int64()), recovery.Task.Status.String()
+		value.NeedsOperatorRecovery = recovery.NeedsOperatorRecovery
+		if recovery.Change != nil {
+			value.ChangeID, value.ChangeRevision, value.ChangePhase = recovery.Change.ID.String(), uint64(recovery.Change.Revision.Int64()), recovery.Change.Phase.String()
+			if recovery.Change.Selection != nil {
+				value.SourceFormat = recovery.Change.Selection.ObjectFormat().String()
+				value.SourceBaseCommit = hex.EncodeToString(recovery.Change.Selection.Commit().Bytes())
+				value.SourceRepositoryDev = recovery.Change.Selection.RepositoryIdentity().Device()
+				value.SourceRepositoryInode = recovery.Change.Selection.RepositoryIdentity().Inode()
+			}
+		}
+		if recovery.Run != nil {
+			value.RunID, value.RunRevision = recovery.Run.ID.String(), uint64(recovery.Run.Revision.Int64())
+		}
+		for _, resource := range recovery.Artifacts {
+			if resource.Path != "" {
+				value.ArtifactPaths = append(value.ArtifactPaths, resource.Path)
+			}
+		}
+	}
+	reply, err := api.NewTaskRecoveryReply(value)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
 }
 
 func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply {

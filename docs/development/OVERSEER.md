@@ -12,7 +12,9 @@ independent review, returned fixes, required checks and the observed merge.
 Worker success is a handoff, not completion. Use existing task identities and
 send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
-admission limits. The overseer lane is not an extra worker slot. Do not infer
+admission limits. A configured `max_run_seconds: 0` disables the run deadline;
+intake honors that operator choice and does not require a finite duration.
+The overseer lane is not an extra worker slot. Do not infer
 capacity from the number of visible terminals or raise limits to clear a queue.
 
 On each supervision wake, reconcile the current objective and its outstanding
