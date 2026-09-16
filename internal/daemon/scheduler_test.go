@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -120,6 +121,63 @@ func TestSchedulerWakeAndPollCannotRaceHeldUnobservedProbe(t *testing.T) {
 	cancel()
 	if err := waitSchedulerDone(t, done); err != nil {
 		t.Fatalf("scheduler shutdown = %v", err)
+	}
+}
+
+func TestSchedulerCancellationBeforeAdmissionObservation(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	for iteration := 0; iteration < 32; iteration++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		polling, returning := make(chan struct{}), make(chan struct{})
+		polls := make(chan time.Time, 1)
+		polls <- time.Now()
+		clockCalls := 0
+		daemon.now = func() time.Time {
+			clockCalls++
+			if clockCalls == 1 {
+				return time.Now()
+			}
+			close(polling)
+			<-returning
+			// Let the canceled probe enqueue completion while the scheduler
+			// is still handling its poll, so both select inputs are ready.
+			runtime.Gosched()
+			return time.Now()
+		}
+		spec := SupervisorSpec{schedulerPoll: polls, scheduledAttempt: func(ctx context.Context, _ SupervisorSpec) (kernel.Run, error) {
+			<-polling
+			cancel()
+			close(returning)
+			return kernel.Run{}, ctx.Err()
+		}}
+		err := daemon.RunScheduler(ctx, spec)
+		cancel()
+		if err != nil {
+			t.Fatalf("iteration %d: canceled unobserved probe = %v", iteration, err)
+		}
+	}
+}
+
+func TestSchedulerUnobservedCompletionPreservesUnexpectedErrors(t *testing.T) {
+	for _, stopping := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stopping=%t", stopping), func(t *testing.T) {
+			daemon := newSchedulerTestDaemon(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cause := error(context.Canceled)
+			if stopping {
+				cause = errors.New("unrelated probe failure")
+			}
+			spec := SupervisorSpec{scheduledAttempt: func(context.Context, SupervisorSpec) (kernel.Run, error) {
+				if stopping {
+					cancel()
+				}
+				return kernel.Run{}, cause
+			}}
+			if err := daemon.RunScheduler(ctx, spec); !errors.Is(err, kernel.ErrCorruptState) || !errors.Is(err, cause) {
+				t.Fatalf("unobserved completion lost unexpected failure: %v", err)
+			}
+		})
 	}
 }
 

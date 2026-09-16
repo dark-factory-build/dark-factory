@@ -165,7 +165,9 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					probeID = 0
 				}
 				if !owner.observed {
-					if !(stopping && errors.Is(event.err, context.Canceled)) {
+					// Completion can beat the cancellation select arm. The context,
+					// not which event was selected first, determines cancellation.
+					if cancellation := ownedCtx.Err(); cancellation == nil || !errors.Is(event.err, cancellation) {
 						resultErr = errors.Join(resultErr, event.err, fmt.Errorf("%w: attempt ended before admission was observed", kernel.ErrCorruptState))
 					}
 				} else if owner.admitted {
