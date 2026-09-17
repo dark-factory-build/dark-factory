@@ -58,6 +58,10 @@ func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
 	if bytes.Contains(got, []byte("multiline-secret")) || !bytes.Contains(got, []byte("next")) {
 		t.Fatalf("multiline lookbehind redaction = %q", got)
 	}
+	liveTail, omitted := redactTerminalWindow([]byte("ret\n"), 0, terminalLookbehind{start: 22, bytes: []byte("Authorization: Bearer sec")})
+	if bytes.Contains(liveTail, []byte("ret")) || omitted != 0 || len(liveTail) != len("ret\n") {
+		t.Fatalf("live lookbehind redaction = %q omitted=%d", liveTail, omitted)
+	}
 	for _, key := range []string{"message", "login", "version", "monkey"} {
 		benign := []byte("{\"" + key + "\":\n\"visible\"}\n")
 		keyLineEnd := bytes.IndexByte(benign, '\n')
@@ -108,7 +112,7 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 		{"cursor inside secret", active, uint64(strings.Index(string(data), "secret-value") + 3), 65536, uint64(len(data)), false, false, false, false, "done\n"},
 		{"fixed snapshot excludes new output", active, 0, 65536, 8, false, false, false, false, "compile\n"},
 		{"empty at head", active, uint64(len(data)), 65536, uint64(len(data)), false, false, true, false, ""},
-		{"live output after attachment", active, 8, 65536, 8, false, false, false, true, "live\n"},
+		{"live credential continuation after attachment", active, 40, 65536, 40, false, false, false, true, "***\n"},
 		{"expired replay cursor", active, 0, 65536, uint64(len(data)), true, false, false, false, ""},
 		{"future cursor rejected attach", active, 99, 65536, 12, false, true, false, false, ""},
 	}
@@ -142,8 +146,9 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 			} else if test.rejected {
 				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: test.cursor, Head: test.head, Status: string(runner.TerminalResultRejected)})
 			} else if test.live {
-				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: test.cursor, Head: test.head, Status: string(runner.TerminalResultOK)})
-				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalOutput), Start: test.head, End: test.head + 5, Payload: []byte("live\n")})
+				context := []byte("Authorization: Bearer sec")
+				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: test.cursor, Head: test.head, Status: string(runner.TerminalResultOK), ContextStart: test.head - uint64(len(context)), Context: context})
+				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalOutput), Start: test.head, End: test.head + 4, Payload: []byte("ret\n")})
 				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalPTYEOF)})
 			} else {
 				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: test.cursor, Head: test.head, Status: string(runner.TerminalResultOK)})
@@ -172,7 +177,7 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 				return
 			}
 			if test.live {
-				if got.err != nil || got.value.Source != "live" || string(got.value.Payload) != test.want || got.value.Head != test.head+5 || got.value.NextCursor != test.head+5 || got.value.Gap {
+				if got.err != nil || got.value.Source != "live" || string(got.value.Payload) != test.want || got.value.Head != test.head+4 || got.value.NextCursor != test.head+4 || got.value.Gap {
 					t.Fatalf("live observation=%+v err=%v", got.value, got.err)
 				}
 				return

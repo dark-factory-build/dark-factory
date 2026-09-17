@@ -29,6 +29,19 @@ type terminalLookbehind struct {
 
 func redactTerminalWindow(payload []byte, start uint64, lookbehind ...terminalLookbehind) ([]byte, uint64) {
 	original := len(payload)
+	if start == 0 && len(lookbehind) != 0 && len(lookbehind[0].bytes) != 0 {
+		prefixLen := len(lookbehind[0].bytes)
+		end := bytes.LastIndexByte(payload, '\n')
+		if end < 0 {
+			return nil, uint64(original)
+		}
+		combined := append(append([]byte(nil), lookbehind[0].bytes...), payload[:end+1]...)
+		redact := func(match []byte) []byte { return bytes.Repeat([]byte("*"), len(match)) }
+		result := terminalJSONSecret.ReplaceAllFunc(combined, redact)
+		result = terminalJSONPrivatePath.ReplaceAllFunc(result, redact)
+		result = terminalPrivateText.ReplaceAllFunc(result, redact)
+		return result[prefixLen:], uint64(original - (end + 1))
+	}
 	var droppedKeyLine []byte
 	if start != 0 {
 		end := bytes.IndexByte(payload, '\n')
