@@ -268,7 +268,7 @@ export function FactoryConsole({
                 onPanel={onAgentPanel}
               />}
             </div>
-            <ProjectLibrary state={state} call={ready ? onProjectContent : undefined} draft={ready ? onDraftLibraryTask : undefined} />
+            {ready && onProjectContent !== undefined ? <ProjectLibrary state={state} call={onProjectContent} draft={onDraftLibraryTask} /> : null}
           </aside>
         </div>
       </main>

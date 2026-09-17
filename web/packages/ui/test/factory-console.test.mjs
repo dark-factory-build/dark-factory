@@ -1318,7 +1318,7 @@ function expand(node, result = []) {
   if (!isValidElement(node)) return result;
   if (typeof node.type === "function") {
     // Stateful surfaces have their own renderer checks; this walk tests sibling intent callbacks.
-    if (["QueuePanel", "FactoryFloor"].includes(node.type.name)) return result;
+    if (["QueuePanel", "FactoryFloor", "ProjectLibrary"].includes(node.type.name)) return result;
     expand(node.type(node.props), result);
     return result;
   }
