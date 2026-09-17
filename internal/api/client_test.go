@@ -1110,19 +1110,21 @@ func TestAttemptClientPinsRetainedCredentialAcrossRotation(t *testing.T) {
 	first := testCredential('A')
 	second := testCredential('B')
 	directory := privateTestDirectory(t)
-	token := filepath.Join(directory, "token")
-	writeTestToken(t, token, first)
+	tokenA := filepath.Join(directory, "run-a.token")
+	tokenB := filepath.Join(directory, "run-b.token")
+	writeTestToken(t, tokenA, first)
+	writeTestToken(t, tokenB, second)
 	listener, socket := testListener(t, directory)
 	defer listener.Close()
-	t.Setenv(attemptTokenFileEnv, token)
-	client, err := NewAttemptClientFromEnvironment(socket)
+	t.Setenv(attemptTokenFileEnv, tokenA)
+	clientA, err := NewAttemptClientFromEnvironment(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() {
-		responses := []string{successResponse(`{"task":"exact"}`), successResponse(`{"head":1,"revision":1}`), successResponse(`{"head":2,"revision":2}`)}
-		want := []credential{first, second, second}
+		responses := []string{successResponse(`{"task":"exact"}`), successResponse(`{"head":1,"revision":1}`), successResponse(`{"head":2,"revision":2}`), `{"ok":false,"error":"unauthorized"}`, `{"ok":false,"error":"unauthorized"}`, `{"ok":false,"error":"unauthorized"}`}
+		want := []credential{first, second, second, first, first, first}
 		for index := range responses {
 			connection, acceptErr := listener.Accept()
 			if acceptErr != nil {
@@ -1144,34 +1146,39 @@ func TestAttemptClientPinsRetainedCredentialAcrossRotation(t *testing.T) {
 		}
 		done <- nil
 	}()
-	if _, err := client.Task(context.Background()); err != nil {
+	if _, err := clientA.Task(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	replacement := filepath.Join(directory, "replacement")
-	writeTestToken(t, replacement, second)
-	if err := os.Rename(replacement, token); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := client.Task(context.Background()); !errors.Is(err, ErrInvalidClient) {
-		t.Fatalf("retained client task after token rotation = %v", err)
-	}
-	write := PeerQuestionInput{TargetTaskID: strings.Repeat("1", 32), IdempotencyKey: strings.Repeat("2", 32), Question: "write"}
-	if _, err := client.PeerAsk(context.Background(), write); !errors.Is(err, ErrInvalidClient) {
-		t.Fatalf("retained client control after token rotation = %v", err)
-	}
-	if _, err := client.Succeed(context.Background(), "stale write"); !errors.Is(err, ErrInvalidClient) {
-		t.Fatalf("retained client outcome after token rotation = %v", err)
-	}
-	current, err := NewAttemptClientFromEnvironment(socket)
+	t.Setenv(attemptTokenFileEnv, tokenB)
+	clientB, err := NewAttemptClientFromEnvironment(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := current.PeerAsk(context.Background(), write); err != nil {
+	write := PeerQuestionInput{TargetTaskID: strings.Repeat("1", 32), IdempotencyKey: strings.Repeat("2", 32), Question: "write"}
+	if _, err := clientB.PeerAsk(context.Background(), write); err != nil {
 		t.Fatal(err)
 	}
 	write.IdempotencyKey = strings.Repeat("3", 32)
-	if _, err := current.PeerAsk(context.Background(), write); err != nil {
+	if _, err := clientB.PeerAsk(context.Background(), write); err != nil {
 		t.Fatal(err)
+	}
+
+	// A fresh client created from the old run's environment remains bound to A;
+	// constructing it after B starts must not retarget it to the new run.
+	t.Setenv(attemptTokenFileEnv, tokenA)
+	freshA, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := freshA.Task(context.Background()); err == nil {
+		t.Fatalf("fresh client from old run task after new run = %v", err)
+	}
+	write.IdempotencyKey = strings.Repeat("4", 32)
+	if _, err := freshA.PeerAsk(context.Background(), write); err == nil {
+		t.Fatalf("fresh client from old run control after new run = %v", err)
+	}
+	if _, err := freshA.Succeed(context.Background(), "stale write"); err == nil {
+		t.Fatalf("fresh client from old run outcome after new run = %v", err)
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
