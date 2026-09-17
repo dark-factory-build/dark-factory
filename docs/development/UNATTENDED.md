@@ -55,9 +55,12 @@ instructions. Supply product priorities and explicit closure criteria.
 - A worker's success is input to review, not issue completion. Inspect its
   tree and receipts, run repository gates and independent exact-head review,
   and send findings back. Never author an ALLOW for your own work.
-- Allow at most two repair rounds for the same unresolved failure. Repeated
-  publication failures, missing authority, or unclear requirements become one
-  human decision. Do not spawn fresh tasks to evade admission limits.
+- Allow at most two repair rounds for the same unresolved failure. A review
+  finding returns to the original task/Change and must be independently
+  re-reviewed at its corrected head; do not create a retry duplicate.
+  Repeated publication failures, missing authority, or unclear requirements
+  become one human decision. Do not spawn fresh tasks to evade admission
+  limits.
 - Reuse the source issue when publishing. Observe stable operation IDs before
   retrying writes. Report merged separately from deployed; acceptance criteria
   that require deployment need a verified host deployment receipt.

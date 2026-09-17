@@ -632,12 +632,19 @@ type OverseerQuestion struct {
 // OverseerTaskCreateInput intentionally has no project selector: the daemon
 // derives it from the live orchestrator attempt.
 type OverseerTaskCreateInput struct {
-	ID              string `json:"id"`
-	AssignedAgentID string `json:"assigned_agent_id"`
-	IncarnationID   string `json:"incarnation_id"`
-	Title           string `json:"title"`
-	Body            string `json:"body"`
-	Priority        int64  `json:"priority"`
+	ID              string                  `json:"id"`
+	AssignedAgentID string                  `json:"assigned_agent_id"`
+	IncarnationID   string                  `json:"incarnation_id"`
+	Title           string                  `json:"title"`
+	Body            string                  `json:"body"`
+	Priority        int64                   `json:"priority"`
+	Prerequisites   []TaskPrerequisiteInput `json:"prerequisites,omitempty"`
+	ConflictPaths   []string                `json:"conflict_paths,omitempty"`
+}
+
+type TaskPrerequisiteInput struct {
+	TaskID       string `json:"task_id"`
+	WorkRevision uint64 `json:"work_revision"`
 }
 
 type OverseerTaskUpdateInput struct {
@@ -755,13 +762,15 @@ func validCreateAgentInput(input CreateAgentInput) bool {
 }
 
 type EnqueueTaskInput struct {
-	ID              string `json:"id"`
-	ProjectID       string `json:"project_id"`
-	AssignedAgentID string `json:"assigned_agent_id"`
-	IncarnationID   string `json:"incarnation_id"`
-	Title           string `json:"title"`
-	Body            string `json:"body"`
-	Priority        int64  `json:"priority"`
+	ID              string                  `json:"id"`
+	ProjectID       string                  `json:"project_id"`
+	AssignedAgentID string                  `json:"assigned_agent_id"`
+	IncarnationID   string                  `json:"incarnation_id"`
+	Title           string                  `json:"title"`
+	Body            string                  `json:"body"`
+	Priority        int64                   `json:"priority"`
+	Prerequisites   []TaskPrerequisiteInput `json:"prerequisites,omitempty"`
+	ConflictPaths   []string                `json:"conflict_paths,omitempty"`
 }
 
 // HumanQuestionInput is the bounded provider-authored portion of a
