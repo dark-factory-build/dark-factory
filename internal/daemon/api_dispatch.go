@@ -1382,6 +1382,24 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 		}
 		assignedAgentID = &agentID
 	}
+	if input.Retry {
+		if assignedAgentID == nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		if err := prepareTaskRetry(ctx, daemon.store, id, expected, *assignedAgentID); err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		at, err := daemon.timestamp()
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		task, err := daemon.store.RetryTaskForOverseer(ctx, digest, id, expected, *assignedAgentID, at)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		daemon.notifyScheduler()
+		return daemon.mutation(ctx, task.Revision)
+	}
 	patch := kernel.TaskPatch{Title: input.Title, Body: input.Body, Priority: input.Priority, AssignedAgentID: assignedAgentID, Cancel: input.Cancel}
 	if err := daemon.store.AuthorizeWorkerTaskForOverseer(ctx, digest, id); err != nil {
 		return newErrorReply(remoteErrorCode(err))

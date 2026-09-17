@@ -996,6 +996,70 @@ func retryQueuedWorker(t *testing.T, taskUpdatedAt int64) (*Store, Run, AgentID,
 	return store, terminal, agentID, keys
 }
 
+func TestRetryTaskForOverseerAtomicallyReassignsSettledTask(t *testing.T) {
+	ctx := context.Background()
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+	project, found, err := store.Project(ctx, terminal.ProjectID)
+	if err != nil || !found {
+		t.Fatalf("project = %+v, found=%v, err=%v", project, found, err)
+	}
+
+	replacement, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 244), ProjectID: project.ID, Name: "replacement", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 34))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 245), ProjectID: project.ID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 35))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 246), ProjectID: project.ID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 247), Title: "oversee"}, mustTime(t, 36))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseerKeys := admissionKeys(t, 248, nil)
+	overseerAdmission, err := store.AdmitNext(ctx, overseerKeys, mustTime(t, 37))
+	if err != nil || !overseerAdmission.Admitted() {
+		t.Fatalf("overseer admission = %+v, %v", overseerAdmission, err)
+	}
+	_, runningOverseer := activateAllResources(t, store, *overseerAdmission.Run, overseerKeys, 38)
+	session := terminalSessionForRunTest(t, store, runningOverseer.ID)
+	runningOverseer, err = store.ActivateRun(ctx, runningOverseer.ID, session.ID, runningOverseer.Revision, session.Revision, mustTime(t, 42))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeTask, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found {
+		t.Fatalf("terminal task = %+v, found=%v, err=%v", beforeTask, found, err)
+	}
+	beforeHistory, err := store.TaskInterventions(ctx, terminal.ProjectID, terminal.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := store.RetryTaskForOverseer(ctx, overseerKeys.AttemptDigest, terminal.TaskID, terminal.Revision, replacement.ID, mustTime(t, 43))
+	if err != nil {
+		t.Fatalf("atomic retry = %v", err)
+	}
+	nextWorkRevision, _ := NewRevision(beforeTask.WorkRevision.Int64() + 1)
+	nextRevision, _ := NewRevision(beforeTask.Revision.Int64() + 1)
+	if retried.ID != beforeTask.ID || retried.IncarnationID != beforeTask.IncarnationID || retried.AssignedAgentID != replacement.ID || retried.Status != TaskQueued || retried.WorkRevision != nextWorkRevision || retried.Revision != nextRevision {
+		t.Fatalf("retry changed task identity or revisions: before=%+v after=%+v", beforeTask, retried)
+	}
+	afterHistory, err := store.TaskInterventions(ctx, terminal.ProjectID, terminal.TaskID)
+	if err != nil || len(afterHistory) != len(beforeHistory) {
+		t.Fatalf("retry changed intervention history: before=%d after=%d err=%v", len(beforeHistory), len(afterHistory), err)
+	}
+
+	// Admission observes the single committed state; the old worker cannot win
+	// an interleaved admission between reassignment and the retry transition.
+	newKeys := admissionKeys(t, 30, nil)
+	admission, err := store.AdmitNext(ctx, newKeys, mustTime(t, 44))
+	if err != nil || !admission.Admitted() || admission.Run.AgentID != replacement.ID || admission.Run.TaskID != terminal.TaskID || admission.Run.AdmittedTaskWorkRevision != retried.WorkRevision {
+		t.Fatalf("post-retry admission = %+v, %v", admission, err)
+	}
+}
+
 func queueRetryForTerminal(t *testing.T, store *Store, terminal Run, taskUpdatedAt int64) (AgentID, AdmissionKeys) {
 	return queueRetryForTerminalSeed(t, store, terminal, taskUpdatedAt, 220)
 }

@@ -63,6 +63,30 @@ func prepareSharedTaskText(title, body string) error {
 	return nil
 }
 
+// prepareTaskRetry applies the provider-fit check used by ordinary queue
+// edits, while leaving terminal-state and authority decisions to the atomic
+// kernel mutation.
+func prepareTaskRetry(ctx context.Context, store *kernel.Store, id kernel.TaskID, expected kernel.Revision, assigned kernel.AgentID) error {
+	task, found, err := store.Task(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return kernel.ErrNotFound
+	}
+	if task.Revision != expected {
+		return kernel.ErrRevisionConflict
+	}
+	agent, found, err := store.Agent(ctx, assigned)
+	if err != nil {
+		return err
+	}
+	if !found || agent.ProjectID != task.ProjectID || agent.Role != kernel.RoleWorker {
+		return kernel.ErrUnauthorized
+	}
+	return prepareTaskText(agent.Provider, task.Title, task.Body)
+}
+
 // Existing IDs and unauthorized targets go straight to the kernel's canonical
 // replay and authority checks. Provider preparation applies only to new work.
 func prepareTaskEnqueue(ctx context.Context, store *kernel.Store, task kernel.NewTask, workerOnly bool) error {

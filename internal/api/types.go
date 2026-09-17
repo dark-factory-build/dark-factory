@@ -618,6 +618,7 @@ type OverseerTaskUpdateInput struct {
 	Priority         *int64  `json:"priority,omitempty"`
 	AssignedAgentID  *string `json:"assigned_agent_id,omitempty"`
 	Cancel           bool    `json:"cancel,omitempty"`
+	Retry            bool    `json:"retry,omitempty"`
 }
 
 type OverseerAgentUpdateInput struct {
