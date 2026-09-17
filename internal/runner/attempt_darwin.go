@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -41,6 +42,8 @@ const (
 // AttemptController is the daemon side of one fixed attempt-runner protocol.
 // Its peer is the sole control capability accepted by --attempt-runner.
 type AttemptController struct {
+	operation     sync.Mutex
+	readFailed    bool
 	file          *os.File
 	state         attemptControllerState
 	attemptID     string
@@ -127,6 +130,10 @@ func NewAttemptController() (*AttemptController, *os.File, error) {
 }
 
 func (c *AttemptController) Configure(spec AttemptSpec) error {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	if c == nil || c.file == nil || c.state != controllerNew || spec.Wrapper == nil {
 		return ErrState
 	}
@@ -160,6 +167,10 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 }
 
 func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	if c == nil || c.file == nil {
 		return AttemptEvent{}, ErrState
 	}
@@ -172,6 +183,7 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 	defer c.file.SetReadDeadline(time.Time{})
 	var frame attemptFrame
 	if err := readFrame(c.file, &frame, maxConfigBytes); err != nil {
+		c.readFailed = true // A partial read cannot be reconstructed by a replacement controller.
 		// These two errors, and only these two, mean the read stopped because
 		// the stream ended: readFrame gets them from io.ReadFull, and
 		// decodeFrameBody renames the decoder's identically-named answers so a
@@ -271,6 +283,10 @@ func isTerminalEventKind(kind string) bool {
 // without consuming any frame bytes. A timeout is an ordinary false result;
 // callers invoke Next once with its full frame timeout only after readiness.
 func (c *AttemptController) NextReady(timeout time.Duration) (bool, error) {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	if c == nil || c.file == nil || timeout < 0 {
 		return false, ErrState
 	}
@@ -310,6 +326,10 @@ func (c *AttemptController) acceptCheckpoint(frame attemptFrame, stage AttemptSt
 }
 
 func (c *AttemptController) Release(stage AttemptStage) error {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	if c == nil || c.file == nil {
 		return ErrState
 	}
@@ -342,6 +362,10 @@ func (c *AttemptController) Release(stage AttemptStage) error {
 // call and serializes it with its other lifecycle operations; this method does
 // not add a concurrent RPC abstraction or a background writer.
 func (c *AttemptController) SendTerminalCommand(command TerminalCommand) error {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	if c == nil || c.file == nil || c.state != controllerProviderReleased || !c.terminalReady {
 		return ErrState
 	}
@@ -352,6 +376,10 @@ func (c *AttemptController) SendTerminalCommand(command TerminalCommand) error {
 }
 
 func (c *AttemptController) Terminate() error {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	if c == nil || c.file == nil || c.state < controllerInnerReady || c.state >= controllerResult {
 		return ErrState
 	}
@@ -362,6 +390,10 @@ func (c *AttemptController) Terminate() error {
 // of the documented same-UID pathname race. Production controllers never see
 // this frame because production LaunchSpecs cannot enable the seam.
 func (c *AttemptController) acknowledgeCurrentExecCheck() error {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	if c == nil || c.file == nil || c.state != controllerProviderReleased {
 		return ErrState
 	}
@@ -377,12 +409,20 @@ func (c *AttemptController) acknowledgeCurrentExecCheck() error {
 // matching sentinels in an error tree any decoder or subprocess could have
 // contributed to.
 func (c *AttemptController) Spent() bool {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	return c != nil && c.state == controllerSpent
 }
 
 // Closed reports that the capability is gone, however it ended. Spent says
 // which of the two ways.
 func (c *AttemptController) Closed() bool {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	return c == nil || c.file == nil
 }
 
@@ -391,12 +431,59 @@ func (c *AttemptController) Closed() bool {
 // when the close itself fails, so no caller can be handed a descriptor it
 // might use again.
 func (c *AttemptController) Close() error {
+	if c != nil {
+		c.operation.Lock()
+		defer c.operation.Unlock()
+	}
 	if c == nil || c.file == nil {
 		return nil
 	}
 	err := c.file.Close()
 	c.file = nil
 	return err
+}
+
+// AttemptControllerHandover contains only the parser state needed alongside the
+// original control descriptor. It is not authority to create a new connection.
+type AttemptControllerHandover struct {
+	AttemptID string
+	Inner     Identity
+}
+
+// DetachForHandover moves the sole control descriptor out of this controller.
+// The supervisor must serialize this with Next and all control operations, as
+// it already does for terminal commands. Complete, unread replies remain in the
+// same socket; no command is retried. A spent or pre-provider stream cannot move.
+// The recipient owns the returned descriptor, including closing it on failure.
+func (c *AttemptController) DetachForHandover() (*os.File, AttemptControllerHandover, error) {
+	if c == nil || !c.operation.TryLock() {
+		return nil, AttemptControllerHandover{}, ErrState
+	}
+	defer c.operation.Unlock()
+	if c == nil || c.file == nil || c.state != controllerProviderReleased || !c.terminalReady || c.readFailed {
+		return nil, AttemptControllerHandover{}, ErrState
+	}
+	file := c.file
+	state := AttemptControllerHandover{AttemptID: c.attemptID, Inner: c.inner}
+	c.file = nil
+	return file, state, nil
+}
+
+// AdoptAttemptController resumes a descriptor moved by DetachForHandover.
+// Delivery of that descriptor and authentication of its state belong to the
+// supervisor handover; this function neither reconnects nor launches a runner.
+// On success ownership moves to the controller; on error it stays with caller.
+func AdoptAttemptController(file *os.File, state AttemptControllerHandover) (*AttemptController, error) {
+	if file == nil || !state.Inner.Valid() || state.Inner.PID != state.Inner.PGID {
+		return nil, ErrIdentity
+	}
+	if err := validateAttemptName(state.AttemptID, 256); err != nil {
+		return nil, err
+	}
+	if _, err := commitControl(file); err != nil {
+		return nil, err
+	}
+	return &AttemptController{file: file, state: controllerProviderReleased, attemptID: state.AttemptID, inner: state.Inner, terminalReady: true}, nil
 }
 
 type workerState uint8
