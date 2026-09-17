@@ -26,6 +26,7 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 type HandoverTransport struct {
 	Replacements <-chan *os.File
 	Current      *os.File
+	Stop         func()
 }
 
 // handoverDetachedGrace bounds how long the owner loop waits, unattended, for
@@ -307,19 +308,10 @@ func (o *terminalOwner) serve() (bool, error) {
 		}
 		switch ev.source {
 		case sourceTick:
-			if o.handover != nil {
-				// A buffered replacement is taken while attached too: the
-				// endpoint has already consumed its grant, so the old owner
-				// is over either way and must be fenced now, not whenever it
-				// happens to quiesce or die.
-				if err := o.adoptReplacement(); err != nil {
-					return o.daemonOpen, err
-				}
+			if stopped, err := o.handoverStep(); stopped || err != nil {
+				return o.daemonOpen, err
 			}
 			if o.detached {
-				if time.Since(o.detachedAt) >= handoverGrace() {
-					return o.daemonOpen, o.stop()
-				}
 				continue
 			}
 			if err := o.submitPending(); err != nil {
@@ -327,6 +319,15 @@ func (o *terminalOwner) serve() (bool, error) {
 			}
 		case sourceChild:
 			if err := o.rejectHumanReply(); err != nil {
+				return o.daemonOpen, err
+			}
+			if o.handover != nil && o.handover.Stop != nil {
+				o.handover.Stop()
+			}
+			// A takeover may already be authenticated and queued while the
+			// provider exits. Consume it before finalization; there may be no
+			// later PTY read or idle tick on which to fence and attach it.
+			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
 			}
 			// First converge the exact process group and perform the sole Wait;
@@ -338,10 +339,16 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.drainPTY(); err != nil {
 				return o.daemonOpen, err
 			}
+			if stopped, err := o.handoverStep(); stopped || err != nil {
+				return o.daemonOpen, err
+			}
 			return o.daemonOpen, nil
 		case sourcePTY:
 			o.lastOutput = time.Now()
 			if err := o.consumePTY(ev.bytes, ev.err); err != nil {
+				return o.daemonOpen, err
+			}
+			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
 			}
 			if !o.detached {
@@ -379,6 +386,27 @@ func (o *terminalOwner) serve() (bool, error) {
 			}
 		}
 	}
+}
+
+// handoverStep takes a buffered replacement and enforces the detached grace.
+// A buffered replacement is taken while attached too: the endpoint has
+// already consumed its grant, so the old owner is over either way and must
+// be fenced now, not whenever it happens to quiesce or die. The step runs on
+// the idle tick and after every PTY read: the tick exists only when nothing
+// is readable, and a provider that never stops writing (a TUI redrawing)
+// keeps the PTY readable for as long as it runs, so a step that lived on the
+// tick alone was never reached under exactly the output a live worker makes.
+func (o *terminalOwner) handoverStep() (stopped bool, err error) {
+	if o.handover == nil {
+		return false, nil
+	}
+	if err := o.adoptReplacement(); err != nil {
+		return false, err
+	}
+	if o.detached && time.Since(o.detachedAt) >= handoverGrace() {
+		return true, o.stop()
+	}
+	return false, nil
 }
 
 type terminalReady struct {

@@ -9,8 +9,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // This uses an actual long-running PTY child. The endpoint's grant check is
@@ -55,7 +59,8 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 	}
 	defer reads.processOnly()
 	replacements := make(chan *os.File, 1)
-	transport := &HandoverTransport{Replacements: replacements, Current: oldRunner}
+	admissionStopped := false
+	transport := &HandoverTransport{Replacements: replacements, Current: oldRunner, Stop: func() { admissionStopped = true }}
 	owner := &terminalOwner{child: child, daemon: oldRunner, reads: reads, daemonOpen: true, ptyOpen: true, ring: &terminalByteRing{}, handover: transport}
 	done := make(chan error, 1)
 	go func() { _, err := owner.serve(); done <- err }()
@@ -118,7 +123,20 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 		t.Fatal(err)
 	}
 	waitFile(t, after)
-	if err := finalOwner.Terminate(); err != nil {
+	// Queue a replacement before the provider exits. The owner must consume
+	// it from the handover channel on the child-exit path; there is no PTY
+	// read or idle tick left to trigger the usual handover step.
+	exitRunner, exitDaemon, err := newControlPair("exit-runner", "exit-daemon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitOwner, err := AdoptHandoverControl(exitDaemon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exitOwner.Close()
+	replacements <- exitRunner
+	if err := unix.Kill(-identity.PGID, unix.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -129,8 +147,38 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 	case <-time.After(6 * time.Second):
 		t.Fatal("reattached owner did not converge")
 	}
-	if transport.Current != finalRunner {
+	readTakeoverAccept(t, exitDaemon)
+	if event, err := exitOwner.Next(4 * time.Second); err != nil || event.Kind != AttemptHandoverAttached {
+		t.Fatalf("exit-path reattach=%+v err=%v", event, err)
+	}
+	if transport.Current != exitRunner {
 		t.Fatal("final result authority did not follow the replacement connection")
+	}
+	if !admissionStopped {
+		t.Fatal("handover admission was not stopped before exit-path adoption")
+	}
+	// Finalization must notify the adopted daemon. The original daemon socket
+	// was fenced during adoption, so using it here would publish a durable
+	// spool without delivering the result that settles the live run.
+	cfg := attemptConfig{AttemptID: "attempt-handover-settlement", ResultName: AttemptResultSpoolName, ResultProof: testResultProofHex()}
+	if err := finishAttemptWithExit(child, f.dir, cfg, reads, transport.Current, true, nil); err != nil {
+		t.Fatalf("finish adopted attempt: %v", err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		result, err := exitOwner.Next(time.Until(deadline))
+		if err != nil {
+			t.Fatalf("adopted result notification err=%v", err)
+		}
+		if result.Kind == AttemptResultReady {
+			if result.Result == nil {
+				t.Fatal("adopted result notification had no notice")
+			}
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("adopted result notification=%+v", result)
+		}
 	}
 	output, _, err := owner.ring.Read(owner.ring.Floor())
 	if err != nil || string(output) != "before-handover\r\nafter-handover\r\n" {
@@ -185,11 +233,30 @@ func startHandoverFixture(t *testing.T, attemptID string) *handoverFixture {
 	ready := filepath.Join(f.root, "provider.ready")
 	continued := filepath.Join(f.root, "provider.continue")
 	after := filepath.Join(f.root, "provider.after")
+	script := fmt.Sprintf("printf 'before-handover\\n'; printf x > %q; while test ! -f %q; do sleep 0.01; done; printf 'after-handover\\n'; printf x > %q; exec /bin/sleep 30", ready, continued, after)
+	hf := startHandoverProvider(t, f, attemptID, script, ready)
+	hf.continued, hf.after = continued, after
+	return hf
+}
+
+// startBusyHandoverFixture is the same endpoint behind a provider that never
+// stops writing: a numbered line as fast as the shell can print it, the way
+// a TUI redraw keeps the PTY readable, so the owner loop's idle tick never
+// fires while it runs.
+func startBusyHandoverFixture(t *testing.T, attemptID string) *handoverFixture {
+	t.Helper()
+	f := newFixtureAt(t, shortRuntimeRoot(t))
+	ready := filepath.Join(f.root, "provider.ready")
+	script := fmt.Sprintf("printf x > %q; i=0; while :; do i=$((i+1)); printf 'line %%d\\n' $i; done", ready)
+	return startHandoverProvider(t, f, attemptID, script, ready)
+}
+
+func startHandoverProvider(t *testing.T, f *fixture, attemptID, script, ready string) *handoverFixture {
+	t.Helper()
 	gate, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := fmt.Sprintf("printf 'before-handover\\n'; printf x > %q; while test ! -f %q; do sleep 0.01; done; printf 'after-handover\\n'; printf x > %q; exec /bin/sleep 30", ready, continued, after)
 	spec, err := PrepareExecSpec(ExecSpec{Target: "/bin/sh", Args: []string{"-c", script}, Env: []string{"PATH=/usr/bin:/bin", "LANG=C"}, Cwd: f.cwd})
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +295,7 @@ func startHandoverFixture(t *testing.T, attemptID string) *handoverFixture {
 	go func() { _, err := owner.serve(); done <- err }()
 	old := &AttemptController{file: oldDaemon, state: controllerProviderReleased, terminalReady: true}
 	t.Cleanup(func() { _ = old.Close() })
-	return &handoverFixture{f: f, identity: identity, owner: owner, transport: transport, old: old, done: done, continued: continued, after: after}
+	return &handoverFixture{f: f, identity: identity, owner: owner, transport: transport, old: old, done: done}
 }
 
 // startQuiescedHandoverFixture is the same fixture after the original daemon
@@ -304,6 +371,57 @@ func dialTakeover(t *testing.T, root, runID, token string) (net.Conn, takeoverRe
 		t.Fatal(err)
 	}
 	return conn, response
+}
+
+func TestTakeoverShutdownRejectsQueuedCandidate(t *testing.T) {
+	f := newFixtureAt(t, shortRuntimeRoot(t))
+	const attemptID = "attempt-takeover-shutdown"
+	transport, closeEndpoint := startTakeoverEndpoint(f.dir, attemptID)
+	if transport == nil {
+		t.Fatal("startTakeoverEndpoint degraded to no transport in a short-root fixture")
+	}
+	token := readTakeoverToken(t, f.root)
+	conn, err := net.Dial("unix", filepath.Join(f.root, TakeoverSocketName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	body, err := json.Marshal(takeoverGrant{RunID: attemptID, Token: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(append(body, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for readTakeoverToken(t, f.root) == token {
+		if !time.Now().Before(deadline) {
+			t.Fatal("takeover request was not authenticated before shutdown")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Shutdown joins the accept loop, then rejects the authenticated descriptor
+	// that was queued after the owner stopped consuming replacements.
+	closeEndpoint()
+	if err := conn.SetReadDeadline(time.Now().Add(4 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	line, err := readTakeoverLine(conn, maxTakeoverBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response takeoverResponse
+	if err := json.Unmarshal(line, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Accepted || response.Error != "runner-exiting" {
+		t.Fatalf("shutdown response=%+v, want runner-exiting refusal", response)
+	}
+	for _, name := range []string{TakeoverSocketName, TakeoverGrantName} {
+		if _, err := os.Stat(filepath.Join(f.root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("shutdown left %s: %v", name, err)
+		}
+	}
 }
 
 func awaitHandoverConverge(t *testing.T, done <-chan error) {
@@ -456,5 +574,70 @@ func TestTakeoverFencesAttachedOwnerBeforeAccepting(t *testing.T) {
 	output, _, err := hf.owner.ring.Read(hf.owner.ring.Floor())
 	if err != nil || string(output) != "before-handover\r\nafter-handover\r\n" {
 		t.Fatalf("ordered PTY output=%q err=%v", output, err)
+	}
+}
+
+// TestTakeoverAdoptsUnderContinuousProviderOutput is the production failure
+// of 17 Sep 2026: every worker's provider was a TUI that never stopped
+// drawing, the replacement daemon's dial rotated the grant and then timed
+// out unanswered, and the sweep concluded live-holder while the only idle
+// provider, the overseer's, was adopted. The owner loop took replacements
+// only on a kevent-timeout tick, which a continuously readable PTY never
+// produces. A replacement must be answered within the daemon's 3s handshake
+// budget under exactly that output, the provider and its output must carry
+// across unchanged, and the detached grace must still converge the provider
+// when no replacement stays.
+func TestTakeoverAdoptsUnderContinuousProviderOutput(t *testing.T) {
+	withShortHandoverGrace(t, 300*time.Millisecond)
+	const attemptID = "attempt-takeover-busy"
+	hf := startBusyHandoverFixture(t, attemptID)
+	if err := hf.old.SendHandoverQuiesce(); err != nil {
+		t.Fatal(err)
+	}
+	if quiesced, err := hf.old.Next(4 * time.Second); err != nil || quiesced.Kind != AttemptHandoverQuiesced {
+		t.Fatalf("quiesced=%+v err=%v", quiesced, err)
+	}
+	token := readTakeoverToken(t, hf.f.root)
+	started := time.Now()
+	conn, response := dialTakeover(t, hf.f.root, attemptID, token)
+	if !response.Accepted {
+		t.Fatalf("takeover under continuous output rejected: %+v", response)
+	}
+	// The daemon's takeoverDialTimeout is 3s; a reply that needs the
+	// provider to pause is a reply the daemon never sees.
+	if elapsed := time.Since(started); elapsed >= 3*time.Second {
+		t.Fatalf("takeover answered after %v, past the daemon's handshake budget", elapsed)
+	}
+	var attached attemptFrame
+	if err := readFrame(conn, &attached, maxConfigBytes); err != nil || attached.Kind != "handover-attached" || attached.Floor > attached.Head {
+		t.Fatalf("attached frame=%+v err=%v", attached, err)
+	}
+	if got, err := readIdentity(hf.identity.PID); err != nil || got != hf.identity {
+		t.Fatalf("provider changed under the replacement: identity=%+v err=%v", got, err)
+	}
+	// Losing the replacement with nothing behind it leaves the run to the
+	// detached grace, which must converge the provider under this output too.
+	_ = conn.Close()
+	awaitHandoverConverge(t, hf.done)
+	if _, err := readIdentity(hf.identity.PID); err == nil {
+		t.Fatal("busy provider still running after the detached grace ceiling")
+	}
+	// The ring kept filling past the adoption, in order, with no restart:
+	// the numbered lines after the floor are consecutive.
+	output, _, err := hf.owner.ring.Read(hf.owner.ring.Floor())
+	if err != nil || hf.owner.ring.Head() <= attached.Head {
+		t.Fatalf("ring after adoption: head %d (attached at %d) err=%v", hf.owner.ring.Head(), attached.Head, err)
+	}
+	lines := strings.Split(string(output), "\r\n")
+	if len(lines) < 3 {
+		t.Fatalf("retained output too short: %q", output)
+	}
+	expected := 0
+	for _, line := range lines[1 : len(lines)-1] { // the first and last lines may be partial
+		number, convErr := strconv.Atoi(strings.TrimPrefix(line, "line "))
+		if convErr != nil || (expected != 0 && number != expected) {
+			t.Fatalf("retained output broke at %q (want line %d): %v", line, expected, convErr)
+		}
+		expected = number + 1
 	}
 }

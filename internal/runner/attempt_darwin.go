@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -1192,6 +1193,9 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 	// capability nothing answers, and the runtime is removable from the
 	// instant the result exists.
 	closeTakeover()
+	if transport != nil && transport.Current != nil {
+		daemon = transport.Current
+	}
 	return finishAttemptWithExit(child, dir, cfg, &reads, daemon, daemonOpen, err)
 }
 
@@ -1257,14 +1261,33 @@ func startTakeoverEndpoint(dir *os.File, runID string) (*HandoverTransport, func
 	}
 	replacements := make(chan *os.File, 1)
 	done := make(chan struct{})
-	go serveTakeover(listener.(*net.UnixListener), int(dir.Fd()), runID, token, replacements, done)
+	stopped := make(chan struct{})
+	go func() {
+		serveTakeover(listener.(*net.UnixListener), int(dir.Fd()), runID, token, replacements, done)
+		close(stopped)
+	}()
+	var stopOnce sync.Once
+	stopAdmission := func() {
+		stopOnce.Do(func() {
+			close(done)
+			_ = listener.Close()
+			<-stopped
+		})
+	}
 	cleanup := func() {
-		close(done)
-		_ = listener.Close()
+		stopAdmission()
+		select {
+		case file := <-replacements:
+			if file != nil {
+				_ = writeTakeoverResponse(file, false, "runner-exiting")
+				_ = file.Close()
+			}
+		default:
+		}
 		_ = unix.Unlinkat(int(dir.Fd()), TakeoverSocketName, 0)
 		_ = unix.Unlinkat(int(dir.Fd()), TakeoverGrantName, 0)
 	}
-	return &HandoverTransport{Replacements: replacements}, cleanup
+	return &HandoverTransport{Replacements: replacements, Stop: stopAdmission}, cleanup
 }
 
 func newTakeoverToken() (string, error) {
@@ -1358,8 +1381,14 @@ func handleTakeoverConn(conn net.Conn, dirFD int, runID, token string, replaceme
 	}
 	select {
 	case replacements <- file:
+		return next
+	default:
+	}
+	select {
 	case <-done:
+		_ = writeTakeoverResponse(file, false, "runner-exiting")
 		_ = file.Close()
+	case replacements <- file:
 	}
 	return next
 }
