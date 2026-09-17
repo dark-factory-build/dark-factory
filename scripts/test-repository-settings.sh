@@ -237,12 +237,13 @@ scope_case true false false ui web/packages/ui/test/console-view.test.mjs
 scope_case true false false full web/packages/ui/src/factory-app-controller.ts
 scope_case true false false full web/packages/client/src/state.ts
 scope_case true false false full web/fixtures/state.mjs
+scope_case true false true full relay/fixtures/tokens.json
 scope_case true false false full protocol/browser/fixtures/agent_control.json
 scope_case true false false full internal/buildinfo/buildinfo.go
 scope_case true false false full internal/install/install_darwin.go
 scope_case true false false full cmd/factoryctl/main.go
 scope_case true false false full web/package.json
-scope_case true false false release VERSION
+scope_case true false false full VERSION
 scope_case true false false release scripts/package-release.sh
 scope_case true false false runtime internal/kernel/store.go
 scope_case true true false runtime control-plane/src/lib.rs internal/kernel/store.go

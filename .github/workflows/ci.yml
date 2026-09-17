@@ -110,13 +110,19 @@ jobs:
               .github/workflows/deploy-control-plane.yml)
                 control_plane=true
                 ;;
+              relay/fixtures/*)
+                macos=true; select_macos_mode full; relay=true
+                ;;
               relay|relay/*)
                 relay=true
                 ;;
               .github/workflows/ci.yml)
                 macos=true; select_macos_mode full; control_plane=true; relay=true
                 ;;
-              VERSION|scripts/package-release.sh|scripts/prepare-release-source.sh|scripts/publish-release.sh|scripts/render-homebrew-formula.sh|scripts/test-package-release.sh|scripts/test-prepare-release-source.sh|scripts/test-publish-release.sh)
+              VERSION)
+                macos=true; select_macos_mode full
+                ;;
+              scripts/package-release.sh|scripts/prepare-release-source.sh|scripts/publish-release.sh|scripts/render-homebrew-formula.sh|scripts/test-package-release.sh|scripts/test-prepare-release-source.sh|scripts/test-publish-release.sh)
                 macos=true; select_macos_mode release
                 ;;
               .gitignore|scripts/bootstrap-maintainer-v2.sh)
