@@ -89,28 +89,13 @@ func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID 
 		// interval: path-based writes fail, while existing handles are confined
 		// to the quarantined inode. Restore the name after the durable edge.
 		var frozenPath string
-		snapshotInstalled := false
 		if run.Proposal.Kind() == kernel.OutcomeSucceeded && changeState.HeadCommit != nil {
 			path := filepath.Join(changeParent, changeState.ID.String())
 			frozenPath = path + ".settling"
 			if err := os.Rename(path, frozenPath); err != nil {
 				return run, errors.Join(fmt.Errorf("%w: could not fence Change worktree", kernel.ErrConflict), err)
 			}
-			if err := os.Mkdir(path, 0o700); err != nil {
-				_ = os.Rename(frozenPath, path)
-				return run, errors.Join(fmt.Errorf("%w: could not create fenced Change snapshot", kernel.ErrConflict), err)
-			}
-			if err := os.CopyFS(path, os.DirFS(frozenPath)); err != nil {
-				_ = os.RemoveAll(path)
-				_ = os.Rename(frozenPath, path)
-				return run, errors.Join(fmt.Errorf("%w: could not copy fenced Change snapshot", kernel.ErrConflict), err)
-			}
-			snapshotInstalled = true
-			defer func() {
-				if snapshotInstalled {
-					_ = os.RemoveAll(frozenPath)
-				}
-			}()
+			defer func() { _ = os.Rename(frozenPath, path) }()
 			if daemon.beforeWorkerFinalize != nil {
 				daemon.beforeWorkerFinalize()
 			}

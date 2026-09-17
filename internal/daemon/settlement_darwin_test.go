@@ -313,14 +313,9 @@ func TestSuccessfulSettlementRefusesRealWriteBeforeFinalize(t *testing.T) {
 	ctx := context.Background()
 	changeState, path := fixture.settlementWorktree(t)
 	fixture.failBeforeRuntime(t)
-	openSource, err := os.OpenFile(filepath.Join(path, "payload.txt"), os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer openSource.Close()
 	fixture.daemon.beforeWorkerFinalize = func() {
-		if _, err := openSource.WriteString("raced after clean inspection\n"); err != nil {
-			t.Fatal(err)
+		if err := os.WriteFile(filepath.Join(path, "raced.txt"), []byte("raced\n"), 0o644); err == nil {
+			t.Fatal("worker write crossed the settlement fence")
 		}
 	}
 	settled, err := fixture.daemon.settleRun(ctx, fixture.changeParent, fixture.run.ID)
