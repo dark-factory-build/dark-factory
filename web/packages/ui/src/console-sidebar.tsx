@@ -575,21 +575,9 @@ export function SettingsDialog({
           onUpdate={onUpdateAccount}
           onRefresh={onLoadAccounts}
         />
-        <div className="dfConsoleSidebar__section" aria-label="BUILDING">
-          <h3>Factory controls</h3>
-          {state === undefined ? <p className="dfFactoryConsole__empty">BUILDING STATE UNAVAILABLE</p> : (
-            <dl className="dfFactoryConsole__metrics">
-              <div><dt>DISPATCH</dt><dd>{state.factory.dispatch_enabled ? "ENABLED" : "PAUSED"}</dd></div>
-              <div><dt>WORKER SLOTS</dt><dd>{String(state.factory.capacity)}</dd></div>
-              <div><dt>ACTIVE RUNS</dt><dd>{`${state.factory.active_runs} TOTAL`}</dd></div>
-            </dl>
-          )}
-        </div>
-        <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
-        <details className="dfConsoleSidebar__section" aria-label="This factory">
-          <summary>Diagnostics</summary>
-          <p className="dfConsoleSidebar__address">{address}</p>
-          {state === undefined ? null : <p>Revision {state.factory.revision.toString()}</p>}
+        <details className="dfConsoleSidebar__section" aria-label="Run limits">
+          <summary>Run limits</summary>
+          <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
         </details>
 
       </div>
@@ -681,8 +669,8 @@ function AccountsSection({
   const unlinked = (accounts ?? []).filter((login) => login.linked_id === "");
   return (
     <div className="dfConsoleSidebar__section" aria-label="ACCOUNTS">
-      <h3>ACCOUNTS</h3>
-      <details><summary>ADD ACCOUNT</summary><p>Sign in with your provider CLI on this Mac. For another login, use a separate profile directory named .codex-name or .claude-name in your home folder. Then refresh and link it below.</p></details>
+      <h3>PROVIDER LOGINS</h3>
+      <p className="dfConsoleSidebar__inherit">{accounts !== undefined && linked.length === 0 && unlinked.length === 0 ? "Sign in with your provider CLI on this Mac, then refresh." : "Link a login already available on this Mac."}</p>
       <button type="button" disabled={pending || onRefresh === undefined} onClick={onRefresh}>{pending ? "REFRESHING" : "REFRESH ACCOUNTS"}</button>
       {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{EDIT_ERRORS.get(error) ?? "THE FACTORY REFUSED THIS"}</p>}
       {linked.length === 0 ? <p className="dfFactoryConsole__empty">NO ACCOUNTS LINKED</p> : (
@@ -693,9 +681,8 @@ function AccountsSection({
             return (
               <li key={`${account.id}:${account.revision}`} className="dfConsoleSidebar__account">
                 <p className="dfConsoleRow__title">{account.label} · {account.provider}</p>
-                <p>{identity === "" ? account.home : identity}</p>
-                {login?.default_model ? <p className="dfConsoleSidebar__inherit">CLI default: {login.default_model}</p> : null}
-                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again in this directory, then refresh.</p>}
+                <p>{identity === "" ? `${account.provider} login linked` : identity}</p>
+                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again using <code>{account.home}</code>, then refresh.</p>}
                 <div className="dfConsoleSidebar__taskActions">
                   <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-linked-account-${account.id}`}>Label for {account.label}</label>
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />
@@ -709,18 +696,18 @@ function AccountsSection({
         </ul>
       )}
       <p className="dfConsoleSidebar__inherit">Unlinking keeps the provider login and credentials.</p>
-      <h3>AVAILABLE TO LINK</h3>
+      <h3>AVAILABLE LOGINS</h3>
       {accounts === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOOKING" : "NOT LOOKED YET"}</p>
         : unlinked.length === 0 ? <p className="dfFactoryConsole__empty">NO UNLINKED LOGINS FOUND</p> : (
         <ul className="dfFactoryConsole__list">
-          {unlinked.map((login) => (
+          {unlinked.map((login, index) => (
             <li key={login.home} className="dfConsoleSidebar__account">
-              <p className="dfConsoleRow__title">{login.home}</p>
-              <p className="dfFactoryConsole__eyebrow">{[login.provider, login.email, login.default_model].filter((part) => part !== "").join(" · ")}</p>
+              <p className="dfConsoleRow__title">{login.provider} login</p>
+              <p className="dfFactoryConsole__eyebrow">{[login.email, login.organization].filter((part) => part !== "").join(" · ") || "Ready to link"}</p>
               <div className="dfConsoleSidebar__taskActions">
-                <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-account-label-${login.home}`}>Label for {login.home}</label>
+                <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-account-label-${login.provider}-${index}`}>Label for {login.provider} login</label>
                 <input
-                  id={`df-account-label-${login.home}`}
+                  id={`df-account-label-${login.provider}-${index}`}
                   value={labels[login.home] ?? login.label}
                   disabled={pending || onLink === undefined}
                   onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [login.home]: value })); }}
