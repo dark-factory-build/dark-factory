@@ -29,6 +29,10 @@ class ReviewError(Exception):
     pass
 
 
+class Unproven(Exception):
+    """A footer claims a source this pass cannot prove; only that PR is skipped."""
+
+
 def review_provider(config):
     """Return the operator-selected installed review route.
 
@@ -60,7 +64,19 @@ def mirror(config):
     return path
 
 
-def linked_issue(body, journal, repository):
+def app_receipt(body, kinds, number):
+    """True when the body's App marker is a completed receipt that created or rewrote object `number`."""
+    marker = publication.APP_MARKER_TRAILER.search(body)
+    if marker is None:
+        return False
+    value = observe_operation(marker.group(1))
+    result = value.get("result")
+    return value["state"] == "completed" and value.get("kind") in kinds and value.get("request_digest") == marker.group(2) \
+        and isinstance(result, dict) and result.get("number") == number
+
+
+def linked_issue(config, pr, journal, existing=None):
+    body = pr["body"]
     if not isinstance(body, str):
         raise ReviewError("pull request body is invalid")
     footer = publication.terminal_footer(body)
@@ -72,7 +88,21 @@ def linked_issue(body, journal, repository):
     if footer is None:
         return None
     issue = int(footer.group(2))
-    return issue if issue in known else None
+    if issue in known:
+        return issue
+    if matched:
+        raise Unproven("terminal footer #" + str(issue) + " is not the tracked source #" + str(min(matched)) + " the body also links")
+    if existing is not None and existing.get("source_marker") == intake.source_marker(config, {"number": issue}):
+        return issue
+    # An overseer tracking issue never enters the intake journal (it has no
+    # intake label), so prove the App wrote both objects: the PR's own marker
+    # is a completed publication receipt for this PR number, and the footer
+    # issue's marker is the completed create_issue receipt for that number.
+    if not app_receipt(body, {"create_pull_request", "update_pull_request_body"}, pr["number"]):
+        raise Unproven("footer #" + str(issue) + " is not an intake-managed source and PR #" + str(pr["number"]) + " has no completed App publication receipt")
+    if not app_receipt(intake.exact_issue(config, issue)["body"], {"create_issue"}, issue):
+        raise Unproven("footer #" + str(issue) + " is neither an intake-managed source nor an App-created tracking issue (no completed create_issue receipt)")
+    return issue
 
 
 def list_prs(config):
@@ -309,11 +339,15 @@ def run_locked(config, path, journal, journal_path):
     messages = []
     launched = False
     for pr in list_prs(config):
-        issue = linked_issue(pr["body"], journal, config["repository"])
-        if issue is None:
-            continue
         key = str(pr["number"]) + ":" + pr["headRefOid"]
         existing = receipts["pulls"].get(key)
+        try:
+            issue = linked_issue(config, pr, journal, existing)
+        except Unproven as exc:
+            messages.append("skipped PR #" + str(pr["number"]) + ": " + str(exc))
+            continue
+        if issue is None:
+            continue
         if existing is None:
             operation = ready(config, path, pr, issue)
             operation["provider"] = provider
