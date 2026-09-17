@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"unicode/utf8"
 )
 
@@ -151,17 +152,30 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 			break
 		}
 		// Failed/cancelled task rows have no result; their exact settled run
-		// retains the report needed to diagnose and route the next action.
+		// retains the report needed to diagnose and route the next action. A
+		// run the provider left without an outcome adds the provider's exit
+		// and running time, since that exit alone says nothing about effects.
 		if task.Status == TaskFailed || task.Status == TaskCancelled {
-			var detail sql.NullString
-			err := read.connection.QueryRowContext(ctx, `SELECT terminal_detail FROM runs
+			var detail, code sql.NullString
+			var exitCode, exitSignal, runningAt, terminalAt sql.NullInt64
+			err := read.connection.QueryRowContext(ctx, `SELECT terminal_detail, terminal_code, provider_exit_code, provider_exit_signal, running_at_ms, terminal_at_ms FROM runs
 				WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ? AND phase = 'terminal'
-				ORDER BY terminal_at_ms DESC, id DESC LIMIT 1`, task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64()).Scan(&detail)
+				ORDER BY terminal_at_ms DESC, id DESC LIMIT 1`, task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64()).Scan(&detail, &code, &exitCode, &exitSignal, &runningAt, &terminalAt)
 			if err != nil && err != sql.ErrNoRows {
 				tasks.Close()
 				return OverseerSnapshot{}, err
 			}
 			task.Result = detail.String
+			if code.String == FailureProviderExit.String() {
+				if exitCode.Valid {
+					task.Result += fmt.Sprintf("; provider exit code %d", exitCode.Int64)
+				} else if exitSignal.Valid {
+					task.Result += fmt.Sprintf("; provider exit signal %d", exitSignal.Int64)
+				}
+				if runningAt.Valid && terminalAt.Valid {
+					task.Result += fmt.Sprintf("; ran %d ms after activation", terminalAt.Int64-runningAt.Int64)
+				}
+			}
 		}
 		objective, objectiveTruncated, objectiveMore := overseerTaskText(task.Body, request.TaskID == nil, request.TextOffset)
 		resultText, resultTruncated, resultMore := overseerTaskText(task.Result, request.TaskID == nil, request.TextOffset)

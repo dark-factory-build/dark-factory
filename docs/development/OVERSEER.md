@@ -24,7 +24,22 @@ Return actionable findings to the responsible worker and review its resulting
 head again. Record the next action and its existing task, Change, PR or operation
 identity in the retained result so a later pass can continue without duplication.
 An unavailable authority or exhausted repair allowance needs a precise escalation,
-not a claim that delegation completed the objective.
+not a claim that delegation completed the objective. A worker run that ended
+`failed` with `provider exited before an attempt outcome` proves nothing about
+effects: a provider can act and then exit before reporting. Read the settled
+run's evidence first: `overseer status --task` gives the failed task's exact
+run detail with its provider exit and how long it ran after activation, its
+retained handoff gives the Change head to compare against the head the worker
+was handed, and its task names any operation receipts. Only a refusal before
+execution is a retry candidate (an exit within seconds of activation, an
+unchanged head, no receipts): retry it once through the same task (`overseer
+task update --retry`, which keeps its worker, or a send-back). Anything else
+is reconciled from its receipts, never replayed, and escalated when uncertain.
+A retry that fails the same way, or an uncertain effect, becomes a human
+request raised in that same pass naming the task, the run and its exit, then
+other work continues. Deferring it to a later wake records no disposition:
+`factoryctl task recovery` shows the task as notification scheduled,
+disposition none, and the operator has no Needs You to answer.
 
 After a verified merge, include housekeeping in that same pass. Pause an obsolete
 worker only after checking that it has neither active nor queued work and is not

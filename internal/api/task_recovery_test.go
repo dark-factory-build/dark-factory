@@ -12,7 +12,7 @@ import (
 )
 
 func TestTaskRecoveryWireValidation(t *testing.T) {
-	valid := TaskRecovery{State: "found", TaskID: id('1'), IncarnationID: id('2'), ProjectID: id('3'), AssignedAgentID: id('4'), WorkRevision: 1, Revision: 1, Status: "queued", ArtifactPaths: []string{}}
+	valid := TaskRecovery{State: "found", TaskID: id('1'), IncarnationID: id('2'), ProjectID: id('3'), AssignedAgentID: id('4'), WorkRevision: 1, Revision: 1, Status: "queued", ArtifactPaths: []string{}, Disposition: "queued", OverseerNotification: "none"}
 	invalidText := valid
 	invalidText.Status, invalidText.Result = "succeeded", "\xff"
 	if _, err := NewTaskRecoveryReply(invalidText); !errors.Is(err, ErrInvalidInput) {
@@ -50,6 +50,34 @@ func TestTaskRecoveryWireValidation(t *testing.T) {
 		}, false},
 		{"future work run", func(v *TaskRecovery) { v.RunID = id('5'); v.RunRevision = 1; v.RunWorkRevision = 2 }, true},
 		{"run revision", func(v *TaskRecovery) { v.RunID = id('5') }, true},
+		{"pending overseer", func(v *TaskRecovery) {
+			v.OverseerNotification, v.OverseerAgentID = "pending", id('6')
+			v.OverseerTaskID, v.OverseerTaskStatus, v.OverseerTaskTitle = id('7'), "running", "Coordinate release"
+		}, false},
+		{"older daemon without additive fields", func(v *TaskRecovery) { v.Disposition, v.OverseerNotification = "", "" }, false},
+		{"scheduled", func(v *TaskRecovery) { v.OverseerNotification, v.OverseerAgentID = "scheduled", id('6') }, false},
+		{"delivered is not a claim", func(v *TaskRecovery) { v.OverseerNotification, v.OverseerAgentID = "delivered", id('6') }, true},
+		{"notification without overseer", func(v *TaskRecovery) { v.OverseerNotification = "scheduled" }, true},
+		{"overseer without notification", func(v *TaskRecovery) { v.OverseerAgentID = id('6') }, true},
+		{"overseer task without overseer", func(v *TaskRecovery) {
+			v.OverseerTaskID, v.OverseerTaskStatus, v.OverseerTaskTitle = id('7'), "queued", "t"
+		}, true},
+		{"needs you", func(v *TaskRecovery) { v.Disposition, v.HumanRequestID = "needs_you", id('9') }, false},
+		{"needs you without request", func(v *TaskRecovery) { v.Disposition = "needs_you" }, true},
+		{"request without needs you", func(v *TaskRecovery) { v.HumanRequestID = id('9') }, true},
+		{"disposition", func(v *TaskRecovery) { v.Disposition = "handled" }, true},
+		{"run evidence", func(v *TaskRecovery) {
+			v.RunID, v.RunRevision, v.RunWorkRevision, v.RunOutcome, v.RunDetail = id('5'), 1, 1, "failed", "provider exited before an attempt outcome"
+			v.RunProviderExit, v.RunRunningMs = "code 1", 3000
+		}, false},
+		{"exit without run", func(v *TaskRecovery) { v.RunProviderExit = "code 1" }, true},
+		{"malformed exit", func(v *TaskRecovery) {
+			v.RunID, v.RunRevision, v.RunWorkRevision, v.RunProviderExit = id('5'), 1, 1, "code one"
+		}, true},
+		{"head without change", func(v *TaskRecovery) { v.ChangeHeadCommit = strings.Repeat("a", 40) }, true},
+		{"missing with disposition", func(v *TaskRecovery) {
+			*v = TaskRecovery{State: "missing", ArtifactPaths: []string{}, Disposition: "none"}
+		}, true},
 		{"relative path", func(v *TaskRecovery) {
 			v.RunID = id('5')
 			v.RunRevision = 1
@@ -86,7 +114,7 @@ func TestTaskRecoveryWireValidation(t *testing.T) {
 }
 
 func TestTaskRecoveryReplyOwnsArtifacts(t *testing.T) {
-	value := TaskRecovery{State: "found", TaskID: id('1'), IncarnationID: id('2'), ProjectID: id('3'), AssignedAgentID: id('4'), WorkRevision: 1, Revision: 1, Status: "running", RunID: id('5'), RunRevision: 1, RunWorkRevision: 1, ArtifactPaths: []string{"/private/runtime"}}
+	value := TaskRecovery{State: "found", TaskID: id('1'), IncarnationID: id('2'), ProjectID: id('3'), AssignedAgentID: id('4'), WorkRevision: 1, Revision: 1, Status: "running", RunID: id('5'), RunRevision: 1, RunWorkRevision: 1, ArtifactPaths: []string{"/private/runtime"}, Disposition: "running", OverseerNotification: "none"}
 	reply, err := NewTaskRecoveryReply(value)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +126,7 @@ func TestTaskRecoveryReplyOwnsArtifacts(t *testing.T) {
 }
 
 func TestTaskRecoveryMaximumEscapedTextFitsFrame(t *testing.T) {
-	value := TaskRecovery{State: "found", TaskID: id('1'), IncarnationID: id('2'), ProjectID: id('3'), AssignedAgentID: id('4'), WorkRevision: 1, Revision: 1, Status: "succeeded", Result: strings.Repeat("<", MaxRecoveryResultBytes), ResultTruncated: true, RunID: id('5'), RunRevision: 1, RunWorkRevision: 1, RunOutcome: "succeeded", ArtifactPaths: []string{}}
+	value := TaskRecovery{State: "found", TaskID: id('1'), IncarnationID: id('2'), ProjectID: id('3'), AssignedAgentID: id('4'), WorkRevision: 1, Revision: 1, Status: "succeeded", Result: strings.Repeat("<", MaxRecoveryResultBytes), ResultTruncated: true, RunID: id('5'), RunRevision: 1, RunWorkRevision: 1, RunOutcome: "succeeded", ArtifactPaths: []string{}, Disposition: "succeeded", OverseerNotification: "scheduled", OverseerAgentID: id('6'), OverseerTaskID: id('7'), OverseerTaskStatus: "queued", OverseerTaskTitle: strings.Repeat("<", 1024), LastProgressAtMs: 1 << 62, RunProviderExit: "signal 9", RunRunningMs: 1 << 62}
 	for range 16 {
 		value.ArtifactPaths = append(value.ArtifactPaths, "/"+strings.Repeat("<", 4095))
 	}

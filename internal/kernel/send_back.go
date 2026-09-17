@@ -163,12 +163,13 @@ func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDi
 	return updated, nil
 }
 
-// RetryTaskForOverseer atomically reassigns a settled blocked/failed worker
-// task and returns that same task identity to the queue. Keeping the
-// assignment change and retry transition in one validated write prevents the
-// old worker from being admitted between two operator calls.
+// RetryTaskForOverseer atomically returns a settled blocked/failed worker
+// task to the queue under the same task identity, reassigned when a
+// replacement worker is named and otherwise kept with its current worker.
+// Keeping the assignment change and retry transition in one validated write
+// prevents the old worker from being admitted between two operator calls.
 func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
-	if id.zero() || expected.Int64() < 1 || assigned.zero() {
+	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -198,6 +199,9 @@ func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDige
 	}
 	if at.Int64() < task.UpdatedAt.Int64() {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if assigned.zero() {
+		assigned = task.AssignedAgentID
 	}
 	original, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
 	if err != nil {
