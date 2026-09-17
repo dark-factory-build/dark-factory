@@ -17,6 +17,7 @@ import {
   type StateView,
 } from "@dark-factory/client";
 import { AgentStrip, QueueScreen, StageMeter } from "../console-screens.js";
+import { AnswerControls } from "../console-interactions.js";
 import {
   FACTORY_UNREACHABLE,
   INVITATION_SPENT,
@@ -523,30 +524,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
             {detail.detail === undefined ? null : (
               <>
                 <p className="dfRemote__questionText">{detail.detail.question}</p>
-                {detail.detail.options.length === 0 ? null : <div className="dfFactoryConsole__answerOptions" role="group" aria-label="Suggested answers">
-                  {detail.detail.options.map((option, index) => <button type="button" key={option} disabled={busy(detail) || !detail.detail?.canReply || !actionable(detail.nodeId)} onClick={() => changeReply(option)}>{option}{index === 0 ? " · RECOMMENDED" : ""}</button>)}
-                </div>}
-                {detail.detail.canReply ? (
-                  <div className="dfRemote__reply">
-                    <label htmlFor="dfRemoteReply">YOUR ANSWER</label>
-                    <textarea
-                      id="dfRemoteReply"
-                      className="dfRemote__replyText"
-                      value={detail.reply}
-                      maxLength={detail.detail.replyMaxBytes}
-                      disabled={busy(detail) || !actionable(detail.nodeId)}
-                      onChange={(event) => changeReply(event.currentTarget.value)}
-                    />
-                    <button
-                      type="button"
-                      className="dfRemote__replyAction"
-                      disabled={busy(detail) || !actionable(detail.nodeId) || detail.reply.trim().length === 0}
-                      onClick={reply}
-                    >
-                      {detail.phase === "replying" ? "REPLYING…" : "REPLY"}
-                    </button>
-                  </div>
-                ) : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
+                <AnswerControls surface="remote" options={detail.detail.options} canReply={detail.detail.canReply} reply={detail.reply} replyMaxBytes={detail.detail.replyMaxBytes} busy={busy(detail)} disabled={!actionable(detail.nodeId)} onReplyChange={changeReply} onReply={reply} submitLabel="REPLY" submittingLabel="REPLYING…" />
+                {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
                 {detail.detail.cancelRun === null ? null : cancelPhrase === undefined ? (
                   <button
                     type="button"
