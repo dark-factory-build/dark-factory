@@ -4,54 +4,12 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"testing"
-	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
-
-type subscriptionInterruptError struct{}
-
-func (subscriptionInterruptError) Error() string { return "independent driver interruption" }
-
-func TestBrowserStateSubscriptionOwnerCancellationIgnoresDriverInterrupt(t *testing.T) {
-	subscription, backend := newBrowserStateSubscriptionLoopTest()
-	started := make(chan struct{})
-	go subscription.runReading(func() (kernel.EventSequence, error) {
-		close(started)
-		<-subscription.ctx.Done()
-		return kernel.EventSequence{}, subscriptionInterruptError{}
-	})
-
-	<-started
-	subscription.Cancel()
-	waitBrowserStateSubscriptionLoopTest(t, subscription)
-	if err := subscription.Err(); err != nil {
-		t.Fatalf("owner-cancelled subscription error = %v", err)
-	}
-	assertBrowserStateSubscriptionUnregistered(t, backend, subscription)
-}
-
-func TestBrowserStateSubscriptionPreservesErrorClassifiedWhileOwnerLive(t *testing.T) {
-	subscription, backend := newBrowserStateSubscriptionLoopTest()
-	want := errors.New("independent Store failure")
-	go subscription.runReading(func() (kernel.EventSequence, error) {
-		return kernel.EventSequence{}, want
-	})
-
-	waitBrowserStateSubscriptionLoopTest(t, subscription)
-	if err := subscription.Err(); !errors.Is(err, want) {
-		t.Fatalf("live-context subscription error = %v, want %v", err, want)
-	}
-	subscription.Cancel()
-	if err := subscription.Err(); !errors.Is(err, want) {
-		t.Fatalf("later cancellation erased subscription error: %v", err)
-	}
-	assertBrowserStateSubscriptionUnregistered(t, backend, subscription)
-}
 
 func TestBrowserRuntimeCloseJoinsDisconnectedActiveStateSubscription(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
@@ -145,35 +103,14 @@ func TestConnectedStateWatchMapsStoreCloseToRetryableLifecycleError(t *testing.T
 	_ = fixture.backend.close()
 }
 
-func newBrowserStateSubscriptionLoopTest() (*browserStateWatch, *browserBackend) {
+func TestBrowserStateWatchCoalescesWhenSubscriberIsSlow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	backend := &browserBackend{subs: make(map[*browserStateWatch]struct{})}
-	subscription := &browserStateWatch{
-		backend: backend,
-		ctx:     ctx,
-		cancel:  cancel,
-		updates: make(chan browser.StateUpdate, browserStateWatchQueue),
-		done:    make(chan struct{}),
+	defer cancel()
+	watch := &browserStateWatch{ctx: ctx, updates: make(chan browser.StateUpdate, browserStateWatchQueue)}
+	if !watch.send(browser.StateUpdate{Head: 1}) || !watch.send(browser.StateUpdate{Head: 2}) {
+		t.Fatal("slow subscriber blocked or rejected latest update")
 	}
-	backend.subs[subscription] = struct{}{}
-	return subscription, backend
-}
-
-func waitBrowserStateSubscriptionLoopTest(t *testing.T, subscription *browserStateWatch) {
-	t.Helper()
-	select {
-	case <-subscription.Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("subscription did not join")
-	}
-}
-
-func assertBrowserStateSubscriptionUnregistered(t *testing.T, backend *browserBackend, subscription *browserStateWatch) {
-	t.Helper()
-	backend.subMu.Lock()
-	_, registered := backend.subs[subscription]
-	backend.subMu.Unlock()
-	if registered {
-		t.Fatal("joined subscription remained registered")
+	if got := <-watch.updates; got.Head != 2 {
+		t.Fatalf("coalesced head = %d, want 2", got.Head)
 	}
 }

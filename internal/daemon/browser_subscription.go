@@ -25,11 +25,12 @@ type browserStateWatch struct {
 	// notified is the greatest head already delivered to this subscriber.
 	notified kernel.EventSequence
 
-	ctx     context.Context
-	cancel  context.CancelFunc
-	updates chan browser.StateUpdate
-	done    chan struct{}
-	once    sync.Once
+	ctx        context.Context
+	cancel     context.CancelFunc
+	updates    chan browser.StateUpdate
+	done       chan struct{}
+	once       sync.Once
+	finishOnce sync.Once
 
 	errMu sync.Mutex
 	err   error
@@ -82,8 +83,12 @@ func (backend *browserBackend) WatchState(ctx context.Context, rawClient [browse
 		ctx: ownerContext, cancel: cancel, updates: make(chan browser.StateUpdate, browserStateWatchQueue), done: make(chan struct{}),
 	}
 	backend.subs[watch] = struct{}{}
+	backend.startObserverLocked()
+	select {
+	case backend.observerWake <- struct{}{}:
+	default:
+	}
 	backend.subMu.Unlock()
-	go watch.run()
 	return watch, nil
 }
 
@@ -116,80 +121,23 @@ func (watch *browserStateWatch) Err() error {
 	return watch.err
 }
 
-func (watch *browserStateWatch) run() {
-	watch.runReading(watch.readHead)
-}
-
-func (watch *browserStateWatch) runReading(readHead func() (kernel.EventSequence, error)) {
-	var result error
-	defer func() {
-		watch.errMu.Lock()
-		watch.err = result
-		watch.errMu.Unlock()
-		close(watch.updates)
-		watch.backend.removeSubscription(watch)
-		close(watch.done)
-	}()
-
-	for {
-		if watch.ctx.Err() != nil {
-			return
-		}
-		head, err := readHead()
-		if err != nil {
-			if watch.ctx.Err() != nil {
-				return
-			}
-			result = err
-			return
-		}
-		if head.Int64() > watch.notified.Int64() {
-			watch.notified = head
-			if !watch.send(browser.StateUpdate{Head: decimalSequence(head)}) {
-				return
-			}
-			continue
-		}
-		if !watch.wait() {
-			return
-		}
-	}
-}
-
-func (watch *browserStateWatch) readHead() (kernel.EventSequence, error) {
-	// Authority is reloaded on every head read, so revocation terminates the
-	// producer rather than leaving a watcher observing a revoked client.
-	_, release, _, err := watch.backend.authorize(watch.ctx, watch.clientID, kernel.BrowserCapabilityObserve)
-	if err != nil {
-		return kernel.EventSequence{}, err
-	}
-	defer release()
-	state, err := watch.backend.store.Factory(watch.ctx)
-	if err != nil {
-		return kernel.EventSequence{}, mapBrowserError(err)
-	}
-	return state.Head, nil
-}
-
 func (watch *browserStateWatch) send(update browser.StateUpdate) bool {
 	select {
 	case watch.updates <- update:
 		return true
 	case <-watch.ctx.Done():
 		return false
-	}
-}
-
-// wait is the bounded change poll. Cancellation is the only other way out, so
-// a cancelled subscription joins within one poll interval at worst.
-func (watch *browserStateWatch) wait() bool {
-	timer := time.NewTimer(browserStatePollInterval)
-	defer timer.Stop()
-	select {
-	case <-watch.ctx.Done():
-		return false
-	case <-timer.C:
-		return true
+	default:
+		select {
+		case <-watch.updates:
+		default:
+		}
+		select {
+		case watch.updates <- update:
+			return true
+		case <-watch.ctx.Done():
+			return false
+		}
 	}
 }
 
@@ -197,6 +145,91 @@ func (backend *browserBackend) removeSubscription(watch *browserStateWatch) {
 	backend.subMu.Lock()
 	delete(backend.subs, watch)
 	backend.subMu.Unlock()
+}
+
+func (backend *browserBackend) startObserverLocked() {
+	if backend.observerCancel != nil {
+		select {
+		case <-backend.observerDone:
+			backend.observerCancel, backend.observerDone = nil, nil
+		default:
+			return
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	backend.observerCancel, backend.observerDone, backend.observerWake = cancel, make(chan struct{}), make(chan struct{}, 1)
+	go backend.observe(ctx, backend.observerDone)
+}
+
+func (backend *browserBackend) observe(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(browserStatePollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-backend.observerWake:
+		}
+		state, err := backend.store.Factory(ctx)
+		if err != nil {
+			watches := backend.snapshotSubscriptions()
+			for _, watch := range watches {
+				backend.finishWatch(watch, mapBrowserError(err))
+			}
+			return
+		}
+		watches := backend.snapshotSubscriptions()
+		for _, watch := range watches {
+			if watch.ctx.Err() != nil {
+				backend.finishWatch(watch, nil)
+				continue
+			}
+			_, release, _, authErr := backend.authorize(watch.ctx, watch.clientID, kernel.BrowserCapabilityObserve)
+			if authErr != nil {
+				backend.finishWatch(watch, authErr)
+				continue
+			}
+			release()
+			if state.Head.Int64() > watch.notified.Int64() {
+				watch.notified = state.Head
+				watch.send(browser.StateUpdate{Head: decimalSequence(state.Head)})
+			}
+		}
+		backend.subMu.Lock()
+		empty := len(backend.subs) == 0
+		backend.subMu.Unlock()
+		if empty {
+			return
+		}
+	}
+}
+
+func (backend *browserBackend) finishWatch(watch *browserStateWatch, result error) {
+	watch.finishOnce.Do(func() {
+		watch.cancel()
+		watch.errMu.Lock()
+		watch.err = result
+		watch.errMu.Unlock()
+		if watch.updates != nil {
+			close(watch.updates)
+		}
+		backend.removeSubscription(watch)
+		if watch.done != nil {
+			close(watch.done)
+		}
+	})
+}
+
+func (backend *browserBackend) snapshotSubscriptions() []*browserStateWatch {
+	backend.subMu.Lock()
+	defer backend.subMu.Unlock()
+	result := make([]*browserStateWatch, 0, len(backend.subs))
+	for watch := range backend.subs {
+		result = append(result, watch)
+	}
+	return result
 }
 
 func (backend *browserBackend) close() error {
@@ -223,6 +256,15 @@ func (backend *browserBackend) close() error {
 	backend.subMu.Unlock()
 	for _, watch := range watches {
 		watch.Cancel()
+	}
+	if backend.observerCancel != nil {
+		backend.observerCancel()
+		<-backend.observerDone
+		backend.observerCancel = nil
+		backend.observerDone = nil
+	}
+	for _, watch := range watches {
+		backend.finishWatch(watch, nil)
 	}
 	for _, watch := range watches {
 		<-watch.done
