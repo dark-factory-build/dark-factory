@@ -595,5 +595,15 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 	if run.Provider != ProviderShell && effectiveTask == "" {
 		effectiveTask = relationships.task.Title
 	}
-	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, task: effectiveTask}, nil
+	var currentChangeRevision *Revision
+	var baseCommit []byte
+	if relationships.change != nil {
+		current := relationships.change.Revision
+		currentChangeRevision = &current
+		if relationships.change.Selection == nil {
+			return AttemptAuthority{}, fmt.Errorf("%w: running worker Change has no selected base", ErrCorruptState)
+		}
+		baseCommit = relationships.change.Selection.Commit().Bytes()
+	}
+	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, AdmittedTaskWorkRevision: run.AdmittedTaskWorkRevision, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, AdmittedChangeRevision: run.AdmittedChangeRevision, CurrentChangeRevision: currentChangeRevision, BaseCommit: baseCommit, task: effectiveTask}, nil
 }

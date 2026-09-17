@@ -438,7 +438,20 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	reply, err := api.NewAttemptTaskReply(api.AttemptTask{Task: authority.Task()})
+	assignment := api.AttemptTask{Task: authority.Task()}
+	if authority.Role == kernel.RoleWorker {
+		if authority.ChangeID == nil || authority.AdmittedChangeRevision == nil || authority.CurrentChangeRevision == nil || len(authority.BaseCommit) == 0 {
+			return newErrorReply(api.RemoteInternal)
+		}
+		assignment.TaskID = authority.TaskID.String()
+		assignment.IncarnationID = authority.TaskIncarnation.String()
+		assignment.WorkRevision = uint64(authority.AdmittedTaskWorkRevision.Int64())
+		assignment.ChangeID = authority.ChangeID.String()
+		assignment.AdmittedChangeRevision = uint64(authority.AdmittedChangeRevision.Int64())
+		assignment.ChangeRevision = uint64(authority.CurrentChangeRevision.Int64())
+		assignment.BaseCommit = hex.EncodeToString(authority.BaseCommit)
+	}
+	reply, err := api.NewAttemptTaskReply(assignment)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

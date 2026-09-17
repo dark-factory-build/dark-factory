@@ -845,6 +845,41 @@ func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed 
 	return activeAttempt{client: client, run: active, bearer: append([]byte(nil), bearer...)}
 }
 
+func TestDaemonServesCurrentWorkerAssignmentReceipt(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 201, testID(201), "worker")
+	ctx := context.Background()
+
+	done := fixture.serve(t)
+	receipt, err := active.client.Task(ctx)
+	if err != nil {
+		t.Fatalf("worker task receipt = %v", err)
+	}
+	waitDispatch(t, done)
+
+	change, found, err := fixture.store.Change(ctx, *active.run.ChangeID)
+	if err != nil || !found || change.Selection == nil {
+		t.Fatalf("worker Change = %+v, found=%v, err=%v", change, found, err)
+	}
+	wantBase := hex.EncodeToString(change.Selection.Commit().Bytes())
+	want := api.AttemptTask{
+		Task:                   "private",
+		TaskID:                 active.run.TaskID.String(),
+		IncarnationID:          active.run.TaskIncarnationID.String(),
+		WorkRevision:           uint64(active.run.AdmittedTaskWorkRevision.Int64()),
+		ChangeID:               active.run.ChangeID.String(),
+		AdmittedChangeRevision: uint64(active.run.AdmittedChangeRevision.Int64()),
+		ChangeRevision:         uint64(change.Revision.Int64()),
+		BaseCommit:             wantBase,
+	}
+	if receipt != want {
+		t.Fatalf("worker assignment receipt = %+v, want %+v", receipt, want)
+	}
+	if receipt.AdmittedChangeRevision == receipt.ChangeRevision {
+		t.Fatalf("worker receipt did not distinguish admitted/current Change revisions: %+v", receipt)
+	}
+}
+
 func TestDaemonOverseerTaskUpdateAuthorizesBeforeProviderPreflight(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttempt(t, fixture, 171)
