@@ -414,6 +414,8 @@ test("every generated person layer is reachable, including fallbacks", () => {
     for (const name of workerFrames(fallback, { action: "walking", direction, frame })) reached.add(name);
   }
   for (const frame of [0, 1]) for (const name of workerFrames(fallback, { action: "interacting", frame })) reached.add(name);
+  reached.add("person.ambient.seated");
+  for (let skin = 0; skin < spriteOptions.skin.length; skin++) for (const facing of ["left", "right"]) reached.add(`person.ambient.face.${skin}.${facing}`);
   const personFrames = Object.keys(spriteAtlas.frames).filter((name) => name.startsWith("person."));
   assert.deepEqual([...reached].sort(), personFrames.sort());
 });

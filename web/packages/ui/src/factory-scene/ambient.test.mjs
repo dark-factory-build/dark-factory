@@ -80,3 +80,19 @@ test("ambient scheduling stops for hidden, reduced-motion, disconnected and inel
     if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
   }
 });
+
+test("the occupied shared table shows seated workers facing one another", () => {
+  const topology = { digest: "ambient-pair", nodes: [{ id: "room", path: ".", label: "Room", kind: "repository", sizeBucket: "large" }] };
+  const workers = Array.from({ length: 6 }, (_, index) => ({ id: `rest-${index}`, name: `Rest ${index}`, role: "worker", activity: "idle", location: "resting" }));
+  let scene;
+  try {
+    act(() => { scene = create(createElement(FactoryScene, { topology, workers, appearance: { ...DEFAULT_FLOOR_APPEARANCE, animation: "off" } })); });
+    const pair = scene.root.findAll((element) => element.props["data-ambient-pose"] === "chat");
+    assert.deepEqual(pair.map((element) => element.props["data-facing"]).sort(), ["left", "right"]);
+    for (const element of pair) {
+      const frames = element.findAll((child) => typeof child.props.href === "string").map((child) => child.props.href);
+      assert.ok(frames.includes("#df-frame-person.ambient.seated"));
+      assert.ok(frames.some((frame) => frame.endsWith(`.${element.props["data-facing"]}`)));
+    }
+  } finally { act(() => { scene?.unmount(); }); }
+});

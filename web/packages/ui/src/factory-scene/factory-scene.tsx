@@ -11,7 +11,7 @@ import {
   type SceneTopology,
   type SceneWorker,
 } from "./scene.js";
-import { workerFrames } from "./appearance.js";
+import { resolvedAppearance, workerFrames } from "./appearance.js";
 import { ambientPlacements } from "./ambient.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
@@ -194,6 +194,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
   const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && (placement.bayId !== undefined || layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface)))).map((worker) => worker.id)), [workers, placements, layout]);
   const positions = useSceneMotion(layout, placements, geometryKey, connected && animationEnabled, active);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
+  const tablePair = placements.filter((placement) => placement.ambientSocial).sort((left, right) => left.x - right.x);
   return <>{placements.map((placement) => {
         const worker = workerById.get(placement.id);
         if (worker === undefined) return null;
@@ -211,6 +212,8 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
 
         const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
         const frames = workerFrames(worker, position.motion);
+        const seated = placement.ambient === "shared-table" && position.motion.action !== "walking";
+        const facing = tablePair.length === 2 && placement.ambientSocial ? tablePair[0]?.id === placement.id ? "right" : "left" : undefined;
         return (
           <g
             key={worker.id}
@@ -218,6 +221,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
             data-worker-location={worker.location ?? "resting"}
             data-worker-action={position.motion.action}
             data-ambient-pose={placement.ambientSocial ? "chat" : placement.ambient}
+            data-facing={seated ? facing : undefined}
             transform={`translate(${position.x} ${position.y})`}
             className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
           >
@@ -225,7 +229,10 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
               <title>{`${worker.name} · ${location}`}</title>
               <rect x={-12} y={-12} width="24" height="24" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
-              <g data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
+              <g data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
+                {seated ? <Frame name="person.ambient.seated" x={-8} y={-8} /> : null}
+                {facing && seated ? <Frame name={`person.ambient.face.${resolvedAppearance(worker).skin}.${facing}`} x={-8} y={-8} /> : null}
+              </g>
             </g>
             {position.motion.action === "walking" || placement.ambient === undefined ? null : <g aria-hidden="true">
               {placement.ambientSocial ? <Frame name="indicator.chat" x={-8} y={-26} />

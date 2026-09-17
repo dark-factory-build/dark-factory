@@ -320,6 +320,15 @@ so`), 12, 3);
   draw(pixels, grid(`ll`), 2, step === 0 ? 1 : 2);
   draw(pixels, grid(`ll`), 12, step === 0 ? 2 : 1);
 });
+// A shared table has two seated silhouettes that turn toward one another.
+// Small overlays keep each worker's existing clothes and hair layers.
+for (const direction of ['left', 'right']) for (const [index, tone] of skinTones.entries()) add(`person.ambient.face.${index}.${direction}`, pixels => {
+  const profile = grid('ooaaa.\n.aaoo.\naaaa..\n.aa...');
+  draw(pixels, (direction === 'left' ? profile : mirror(profile)).map(row => row.replaceAll('a', tone.skin)), 5, 4);
+});
+add('person.ambient.seated', pixels => {
+  draw(pixels, grid('..mmmmmm..\n.oommmmmoo\n.oossssoo.\n.oo....oo.'), 3, 12);
+});
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const portrait = (activity, appearance = {}) => {
   const v = { skin: 1, hair: 0, hair_colour: 1, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0, ...appearance };
