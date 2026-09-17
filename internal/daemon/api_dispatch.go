@@ -994,7 +994,10 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
+	spec, err := newTaskSpec(id, projectID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1004,6 +1007,23 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	}
 	daemon.notifyScheduler()
 	return daemon.mutation(ctx, task.Revision)
+}
+
+func newTaskSpec(id kernel.TaskID, projectID kernel.ProjectID, agentID kernel.AgentID, incarnationID kernel.IncarnationID, title, body string, priority int64, prerequisites []api.TaskPrerequisiteInput, paths []string) (kernel.NewTask, error) {
+	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: title, Body: body, Priority: priority, ConflictPaths: append([]string(nil), paths...)}
+	spec.Prerequisites = make([]kernel.TaskPrerequisite, 0, len(prerequisites))
+	for _, input := range prerequisites {
+		taskID, err := parseTaskID(input.TaskID)
+		if err != nil {
+			return kernel.NewTask{}, err
+		}
+		workRevision, err := kernel.NewRevision(int64(input.WorkRevision))
+		if err != nil {
+			return kernel.NewTask{}, err
+		}
+		spec.Prerequisites = append(spec.Prerequisites, kernel.TaskPrerequisite{TaskID: taskID, WorkRevision: workRevision})
+	}
+	return spec, nil
 }
 
 func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply {
@@ -1357,7 +1377,10 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	spec := kernel.NewTask{ID: id, ProjectID: authority.ProjectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
+	spec, err := newTaskSpec(id, authority.ProjectID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, true); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}

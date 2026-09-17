@@ -499,6 +499,15 @@ type NewTask struct {
 	Title           string
 	Body            string
 	Priority        int64
+	Prerequisites   []TaskPrerequisite
+	ConflictPaths   []string
+}
+
+// TaskPrerequisite pins a consumer to the producer's particular corrected
+// work revision. A later send-back cannot silently satisfy this edge.
+type TaskPrerequisite struct {
+	TaskID       TaskID
+	WorkRevision Revision
 }
 
 type FactoryState struct {
