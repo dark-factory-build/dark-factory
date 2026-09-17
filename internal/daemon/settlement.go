@@ -84,20 +84,20 @@ func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID 
 		if err != nil {
 			return run, err
 		}
-		// The provider has converged before settlement. Atomically remove the
-		// clean worktree from its worker-visible name for the irreversible
-		// interval: path-based writes fail, while existing handles are confined
-		// to the quarantined inode. Restore the name after the durable edge.
-		var frozenPath string
-		if run.Proposal.Kind() == kernel.OutcomeSucceeded && changeState.HeadCommit != nil {
-			path := filepath.Join(changeParent, changeState.ID.String())
-			frozenPath = path + ".settling"
-			if err := os.Rename(path, frozenPath); err != nil {
-				return run, errors.Join(fmt.Errorf("%w: could not fence Change worktree", kernel.ErrConflict), err)
-			}
-			defer func() { _ = os.Rename(frozenPath, path) }()
+		// The provider has already converged before settlement. Re-inspect after
+		// all earlier settlement work and immediately before FinalizeWorkerRun;
+		// this is the final source fence, so a real write in the last interval
+		// becomes a refusal rather than a durable success.
+		if run.Proposal.Kind() == kernel.OutcomeSucceeded {
 			if daemon.beforeWorkerFinalize != nil {
 				daemon.beforeWorkerFinalize()
+			}
+			inspectionCtx, cancel = context.WithTimeout(ctx, supervisorInspectionWindow)
+			inspectionCtx = context.WithValue(inspectionCtx, successSettlementContextKey{}, true)
+			settlement, err = settleRetained(inspectionCtx, changeParent, changeState)
+			cancel()
+			if err != nil {
+				return run, err
 			}
 		}
 		at, err := daemon.timestamp()
