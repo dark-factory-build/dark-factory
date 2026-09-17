@@ -188,6 +188,65 @@ class ReleaseFixtures(unittest.TestCase):
             command.assert_not_called()
             self.assertEqual(release.load(journal)["unresolved_deployment"]["pr"], 633)
 
+    def test_legacy_opaque_blocked_receipt_from_old_config_blocks_newer_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            old_cfg = dict(cfg, deploy_argv=["/bin/false"])
+            entry = {"pr": 633, "sha": SHA, "state": "blocked",
+                     "config_fingerprint": release.config_fingerprint(old_cfg),
+                     "error": "deployment outcome is ambiguous"}
+            release.atomic_json(journal, {"version": 1, "releases": {"633": entry}})
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "earlier deployment is unresolved"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(release.load(journal)["unresolved_deployment"]["pr"], 633)
+
+    def test_reconcile_settles_exact_healthy_deployment_without_hook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            fingerprint = release.config_fingerprint(dict(cfg, deploy_argv=["/bin/false"]))
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "blocked",
+                         "config_fingerprint": fingerprint}},
+                "live_tip": {"sha": OLD, "healthy": True},
+                "unresolved_deployment": {"pr": 633, "sha": SHA,
+                                            "config_fingerprint": fingerprint,
+                                            "error": "ambiguous"}})
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([{"pr": 633, "merge_sha": SHA,
+                                                                                "issue": 602, "reference": "refs"}], "range")), \
+                 mock.patch.object(release, "run") as command:
+                result = release.reconcile(cfg, 633, SHA)
+            self.assertEqual(result["state"], "verified")
+            self.assertNotIn("unresolved_deployment", release.load(journal))
+            command.assert_not_called()
+
+    def test_legacy_predeploy_blocked_receipt_can_be_recovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            fingerprint = release.config_fingerprint(cfg)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "blocked",
+                         "config_fingerprint": fingerprint,
+                         "error": "live probe unavailable or malformed before deployment"}
+            }})
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "run") as command:
+                result = release.once(cfg, 633, retry=True)
+            self.assertEqual(result["state"], "verified")
+            command.assert_not_called()
+            self.assertNotIn("unresolved_deployment", release.load(journal))
+
     def test_hook_crash_leaves_barrier_before_any_hook_effect(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "release.json"

@@ -328,6 +328,23 @@ def clear_unresolved(journal, entry):
         journal.pop("unresolved_deployment", None)
 
 
+def predeploy_blocked(receipt):
+    """Return whether a blocked receipt is known to predate the hook.
+
+    Receipts written by the current controller carry an explicit phase.  The
+    error checks preserve recovery for older receipts created by the
+    pre-deployment gates, while an otherwise opaque legacy receipt remains a
+    barrier: it may have been written after the hook started.
+    """
+    if receipt.get("phase") == "predeploy":
+        return True
+    return receipt.get("error") in {
+        "live probe unavailable or malformed before deployment",
+        "live revision changed outside the release journal",
+        "configured default branch moved after planning",
+    }
+
+
 def once(config, number, retry=False):
     journal_path = Path(config["journal"])
     lock_path = Path(str(journal_path) + ".lock")
@@ -340,7 +357,8 @@ def once(config, number, retry=False):
         fingerprint = config_fingerprint(config)
         journal = load(journal_path)
         entry = journal["releases"].get(str(number))
-        if entry and entry.get("config_fingerprint") != fingerprint:
+        if (entry and entry.get("config_fingerprint") != fingerprint
+                and not (retry and entry.get("state") == "blocked" and predeploy_blocked(entry))):
             raise ReleaseError("journal receipt belongs to a different repository or hook configuration")
         unresolved = journal.get("unresolved_deployment")
         # Older journals recorded ``running`` before invoking the hook but did
@@ -370,9 +388,14 @@ def once(config, number, retry=False):
                         or (isinstance(live_tip, dict) and live_tip.get("sha") == receipt.get("sha")
                             and live_tip.get("healthy") is True))
 
+            # An opaque historical blocked receipt may have been written after
+            # the hook started.  It remains a global barrier even when the
+            # operator changes hooks or other configuration; filtering it by
+            # the current fingerprint would let a newer release replay the
+            # unresolved deployment.
             legacy_blocked = [receipt for receipt in journal["releases"].values()
                               if isinstance(receipt, dict) and receipt.get("state") == "blocked"
-                              and receipt.get("config_fingerprint") == fingerprint and not recovered(receipt)]
+                              and not predeploy_blocked(receipt) and not recovered(receipt)]
             legacy_uncertain = all_running + legacy_blocked
             if legacy_uncertain:
                 if len(legacy_uncertain) != 1:
@@ -386,13 +409,12 @@ def once(config, number, retry=False):
         if unresolved is not None:
             unresolved_pr = unresolved.get("pr") if isinstance(unresolved, dict) else None
             receipt = journal["releases"].get(str(unresolved_pr))
-            if (not isinstance(unresolved, dict) or unresolved.get("config_fingerprint") != fingerprint
+            if (not isinstance(unresolved, dict)
                     or not isinstance(unresolved_pr, int)
                     or not SHA.fullmatch(str(unresolved.get("sha", "")))
                     or not isinstance(receipt, dict)
                     or receipt.get("pr") != unresolved_pr
                     or receipt.get("sha") != unresolved.get("sha")
-                    or receipt.get("config_fingerprint") != fingerprint
                     or receipt.get("state") not in {"blocked", "running"}):
                 raise ReleaseError("release journal has an invalid unresolved deployment barrier")
             if unresolved_pr != number:
@@ -437,7 +459,8 @@ def once(config, number, retry=False):
             raise ReleaseError("journal has a different SHA for this pull request")
         review_gate(config, pr["headRefOid"], reviews)
         entry = entry or {"pr": number, "sha": sha, "state": "planned"}
-        entry.update({"sha": sha, "state": "planned", "config_fingerprint": fingerprint, "updated_at": int(time.time())})
+        entry.update({"sha": sha, "state": "planned", "phase": "predeploy",
+                      "config_fingerprint": fingerprint, "updated_at": int(time.time())})
         journal["releases"][str(number)] = entry
         atomic_json(journal_path, journal)
         try:
@@ -482,6 +505,7 @@ def once(config, number, retry=False):
             atomic_json(journal_path, journal)
             raise ReleaseError(entry["error"])
         entry["state"] = "running"
+        entry["phase"] = "deploying"
         # The barrier must be durable in the same journal before the hook is
         # started. A process termination during the hook must not let a later
         # ``--latest`` invocation replay it against the same runtime.
@@ -503,6 +527,55 @@ def once(config, number, retry=False):
         return entry
 
 
+def reconcile(config, number, observed_sha):
+    """Settle an already-applied deployment without invoking the deploy hook."""
+    if not SHA.fullmatch(observed_sha):
+        raise ReleaseError("observed SHA is invalid")
+    journal_path = Path(config["journal"])
+    lock_path = Path(str(journal_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ReleaseError("another release invocation is running") from exc
+        journal = load(journal_path)
+        entry = journal["releases"].get(str(number))
+        unresolved = journal.get("unresolved_deployment")
+        if not isinstance(entry, dict) or entry.get("pr") != number:
+            raise ReleaseError("pull request has no release receipt to reconcile")
+        if entry.get("state") not in {"blocked", "running"}:
+            raise ReleaseError("release receipt is already settled")
+        if (not isinstance(unresolved, dict) or unresolved.get("pr") != number
+                or unresolved.get("sha") != entry.get("sha")):
+            raise ReleaseError("release receipt is not the unresolved deployment")
+        pr, default, reviews, checks = gh_snapshot(config, number)
+        merge_sha = pr.get("mergeCommitSha")
+        merge_gate(pr, default, reviews, checks, config, merge_sha)
+        if merge_sha != observed_sha or entry.get("sha") != observed_sha:
+            raise ReleaseError("observed SHA does not match the exact unresolved merge")
+        review_gate(config, pr["headRefOid"], reviews)
+        value = probe(config, observed_sha)
+        if value.get("sha") != observed_sha or value.get("healthy") is not True:
+            raise ReleaseError("live probe did not prove the observed SHA is healthy")
+        prior_tip = journal.get("live_tip")
+        if prior_tip is not None and prior_tip.get("sha") == observed_sha:
+            sources, delivery_mode = [], "unchanged"
+        else:
+            previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
+            if not isinstance(previous, str) or not SHA.fullmatch(previous):
+                raise ReleaseError("release journal has no valid prior live tip for reconciliation")
+            sources, delivery_mode = range_sources(config, previous, observed_sha)
+        entry.update({"state": "verified", "verification": value,
+                      "delivery_from_sha": prior_tip.get("sha") if isinstance(prior_tip, dict) else observed_sha,
+                      "delivery_sources": sources, "delivery_mode": delivery_mode,
+                      "verified_at": int(time.time()), "config_fingerprint": config_fingerprint(config)})
+        record_live_tip(journal, value)
+        clear_unresolved(journal, entry)
+        atomic_json(journal_path, journal)
+        return entry
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=Path)
@@ -511,6 +584,8 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--retry", action="store_true")
+    parser.add_argument("--reconcile", action="store_true")
+    parser.add_argument("--observed-sha")
     args = parser.parse_args(argv)
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -518,6 +593,11 @@ def main(argv=None):
         path = Path(config["journal"])
         if args.status:
             print(json.dumps(load(path), indent=2, sort_keys=True))
+            return 0
+        if args.reconcile:
+            if args.pr is None or args.latest or args.retry or args.observed_sha is None:
+                raise ReleaseError("--reconcile requires --pr and --observed-sha and cannot use --latest or --retry")
+            print(json.dumps(reconcile(config, args.pr, args.observed_sha), sort_keys=True))
             return 0
         if (args.pr is None) == (not args.latest):
             raise ReleaseError("choose exactly one of --pr or --latest")
