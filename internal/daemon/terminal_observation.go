@@ -12,7 +12,11 @@ import (
 // Only complete lines are exposed. Starting inside a retained page discards
 // its first line, and a partial final line is omitted, so a caller cannot
 // bypass credential labels by requesting a cursor inside their value.
-var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)[[:blank:]]*[:=][[:blank:]]*)[^\r\n]+|(?:/Users/|/home/|/private/|~/)[^[:space:]]+`)
+var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:blank:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|~/)[^[:space:]]+`)
+var terminalJSONSecret = regexp.MustCompile(`(?is)"(?:api[_-]?key|password|token|secret)"[[:space:]]*:[[:space:]]*"[^"]{0,512}"`)
+var terminalJSONPrivatePath = regexp.MustCompile(`(?is)"[^"]{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|~/)[^"]{0,512}"`)
+var terminalJSONOrphanSecret = regexp.MustCompile(`(?im)^[^:\r\n]{0,512}(?:secret|token|password|bearer|api[_-]?key)[^:\r\n]{0,512}"[[:space:]]*[},]`)
+var terminalJSONOrphanPath = regexp.MustCompile(`(?im)^[[:space:]]*(?:\.|/Users/|/home/|/private/|~/)[^:\r\n]{0,512}"[[:space:]]*[},]`)
 
 func redactTerminalWindow(payload []byte, start uint64) ([]byte, uint64) {
 	original := len(payload)
@@ -28,7 +32,17 @@ func redactTerminalWindow(payload []byte, start uint64) ([]byte, uint64) {
 		return nil, uint64(original)
 	}
 	payload = payload[:end+1]
-	result := terminalPrivateText.ReplaceAllFunc(payload, func(match []byte) []byte { return bytes.Repeat([]byte("*"), len(match)) })
+	redact := func(match []byte) []byte { return bytes.Repeat([]byte("*"), len(match)) }
+	result := terminalJSONSecret.ReplaceAllFunc(payload, redact)
+	result = terminalJSONPrivatePath.ReplaceAllFunc(result, redact)
+	if start != 0 {
+		// A cursor can begin on the value line after a JSON key was omitted.
+		// Hide that orphaned quoted fragment so split credentials and paths
+		// cannot be recovered by choosing a later cursor.
+		result = terminalJSONOrphanSecret.ReplaceAllFunc(result, redact)
+		result = terminalJSONOrphanPath.ReplaceAllFunc(result, redact)
+	}
+	result = terminalPrivateText.ReplaceAllFunc(result, redact)
 	return result, uint64(original - len(payload))
 }
 
@@ -102,8 +116,13 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 	defer attachment.Close()
 	result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: input.Cursor, Source: "none"}
 	raw := make([]byte, 0, input.MaxBytes)
+	var attachedHead uint64
 	finish := func() api.Reply {
-		result.Payload, result.Omitted = redactTerminalWindow(raw, input.Cursor)
+		redactionStart := input.Cursor
+		if result.Source == "live" && input.Cursor == attachedHead {
+			redactionStart = 0
+		}
+		result.Payload, result.Omitted = redactTerminalWindow(raw, redactionStart)
 		reply, err := api.NewTerminalObservationReply(result)
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
@@ -120,21 +139,30 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 			}
 			switch event.Kind {
 			case TerminalEventAttached:
-				result.Floor, result.Head = event.Floor, event.Head
+				result.Floor, result.Head, attachedHead = event.Floor, event.Head, event.Head
 				if input.Cursor > event.Head {
-					return newErrorReply(api.RemoteConflict)
-				}
-				if input.Cursor == event.Head {
+					// A rejected attach reports the current head before the
+					// attachment closes. Rebase a future cursor to that head so
+					// the caller receives a bounded, explicit reset observation.
+					result.Cursor, result.NextCursor, result.Gap = event.Head, event.Head, true
 					return finish()
 				}
 			case TerminalEventOutput:
 				if event.Start != result.NextCursor || event.End < event.Start {
 					return newErrorReply(api.RemoteUnavailable)
 				}
-				count := min(len(event.Payload), int(input.MaxBytes)-len(raw), int(result.Head-result.NextCursor))
+				live := event.Start >= attachedHead
+				if live {
+					result.Source = "live"
+					if event.End > result.Head {
+						result.Head = event.End
+					}
+				} else {
+					result.Source = "stored"
+				}
+				count := min(len(event.Payload), int(input.MaxBytes)-len(raw), int(event.End-result.NextCursor))
 				raw = append(raw, event.Payload[:count]...)
 				result.NextCursor += uint64(count)
-				result.Source = "stored"
 				if len(raw) == int(input.MaxBytes) || result.NextCursor == result.Head {
 					return finish()
 				}
