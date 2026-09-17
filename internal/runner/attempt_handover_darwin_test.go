@@ -59,7 +59,8 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 	}
 	defer reads.processOnly()
 	replacements := make(chan *os.File, 1)
-	transport := &HandoverTransport{Replacements: replacements, Current: oldRunner}
+	admissionStopped := false
+	transport := &HandoverTransport{Replacements: replacements, Current: oldRunner, Stop: func() { admissionStopped = true }}
 	owner := &terminalOwner{child: child, daemon: oldRunner, reads: reads, daemonOpen: true, ptyOpen: true, ring: &terminalByteRing{}, handover: transport}
 	done := make(chan error, 1)
 	go func() { _, err := owner.serve(); done <- err }()
@@ -152,6 +153,9 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 	}
 	if transport.Current != exitRunner {
 		t.Fatal("final result authority did not follow the replacement connection")
+	}
+	if !admissionStopped {
+		t.Fatal("handover admission was not stopped before exit-path adoption")
 	}
 	// Finalization must notify the adopted daemon. The original daemon socket
 	// was fenced during adoption, so using it here would publish a durable

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -1265,10 +1266,16 @@ func startTakeoverEndpoint(dir *os.File, runID string) (*HandoverTransport, func
 		serveTakeover(listener.(*net.UnixListener), int(dir.Fd()), runID, token, replacements, done)
 		close(stopped)
 	}()
+	var stopOnce sync.Once
+	stopAdmission := func() {
+		stopOnce.Do(func() {
+			close(done)
+			_ = listener.Close()
+			<-stopped
+		})
+	}
 	cleanup := func() {
-		close(done)
-		_ = listener.Close()
-		<-stopped
+		stopAdmission()
 		select {
 		case file := <-replacements:
 			if file != nil {
@@ -1280,7 +1287,7 @@ func startTakeoverEndpoint(dir *os.File, runID string) (*HandoverTransport, func
 		_ = unix.Unlinkat(int(dir.Fd()), TakeoverSocketName, 0)
 		_ = unix.Unlinkat(int(dir.Fd()), TakeoverGrantName, 0)
 	}
-	return &HandoverTransport{Replacements: replacements}, cleanup
+	return &HandoverTransport{Replacements: replacements, Stop: stopAdmission}, cleanup
 }
 
 func newTakeoverToken() (string, error) {
@@ -1374,8 +1381,14 @@ func handleTakeoverConn(conn net.Conn, dirFD int, runID, token string, replaceme
 	}
 	select {
 	case replacements <- file:
+		return next
+	default:
+	}
+	select {
 	case <-done:
+		_ = writeTakeoverResponse(file, false, "runner-exiting")
 		_ = file.Close()
+	case replacements <- file:
 	}
 	return next
 }

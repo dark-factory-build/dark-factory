@@ -26,6 +26,7 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 type HandoverTransport struct {
 	Replacements <-chan *os.File
 	Current      *os.File
+	Stop         func()
 }
 
 // handoverDetachedGrace bounds how long the owner loop waits, unattended, for
@@ -319,6 +320,9 @@ func (o *terminalOwner) serve() (bool, error) {
 		case sourceChild:
 			if err := o.rejectHumanReply(); err != nil {
 				return o.daemonOpen, err
+			}
+			if o.handover != nil && o.handover.Stop != nil {
+				o.handover.Stop()
 			}
 			// A takeover may already be authenticated and queued while the
 			// provider exits. Consume it before finalization; there may be no
