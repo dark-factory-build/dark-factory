@@ -236,11 +236,6 @@ type liveAttemptResult struct {
 	notice            *runner.AttemptResultNotice
 	err               error
 	observersRetained bool
-	// handedOver reports a clean protocol-2 shutdown handover: the runner
-	// still owns a live provider under a fresh takeover grant, the run stays
-	// durably running, and this daemon makes no further Store mutation for
-	// it. notice and err are unused when this is set.
-	handedOver bool
 }
 
 // liveAttempt is intentionally concrete. Except for the receipt fence named
@@ -255,14 +250,23 @@ type liveAttempt struct {
 	pathsSince kernel.UnixMillis
 	sessionID  kernel.TerminalSessionID
 	controller *runner.AttemptController
-	// sourceOps counts explicit source requests in flight for this attempt,
-	// so shutdown refuses new ones and waits for admitted ones to finish.
+	// sourceSnapshots binds explicitly requested immutable source identities to
+	// private per-run materializations. A later work or Change revision cannot
+	// reuse an older grant; no live run reads the shared Changes parent.
+	sourceSnapshots    map[kernel.RetainedChangeHandoff]string
+	sourceRoot         string
+	sourceMu           sync.Mutex
+	sourceGate         chan struct{}
 	sourceOpsMu        sync.Mutex
 	sourceOpsDone      chan struct{}
 	sourceCloseStarted chan struct{}
 	sourceOps          int
 	sourceClosing      bool
 	attemptDigest      kernel.AttemptDigest
+	diagnosticMu       sync.Mutex
+	diagnosticFloor    uint64
+	diagnosticHead     uint64
+	diagnosticPayload  []byte
 
 	commands chan liveAttemptCommand
 	wake     chan struct{}
@@ -292,15 +296,11 @@ type liveAttempt struct {
 	terminationDelivered bool
 	resultReturned       bool
 	shutdownRequested    bool
-	// handedOver is set once a released, terminal-ready controller has
-	// cleanly quiesced onto the runner's own takeover endpoint. See
-	// convergeForShutdown.
-	handedOver        bool
-	resultNotice      *runner.AttemptResultNotice
-	creditOutstanding uint64
-	finalErr          error
-	binding           terminalBinding
-	effectLimit       time.Duration
+	resultNotice         *runner.AttemptResultNotice
+	creditOutstanding    uint64
+	finalErr             error
+	binding              terminalBinding
+	effectLimit          time.Duration
 	// These exact seams are fixed before the owner starts. Production uses the
 	// concrete Store renewal below; daemon tests replace it or pause one phase
 	// to prove ambiguous Store and operation-gate schedules causally.
@@ -310,13 +310,38 @@ type liveAttempt struct {
 	beforeProviderStateCheck func() error
 }
 
+func (attempt *liveAttempt) retainDiagnosticOutput(start, end uint64, payload []byte) {
+	if attempt == nil || end < start {
+		return
+	}
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	if len(payload) != 0 {
+		attempt.diagnosticPayload = append(attempt.diagnosticPayload, payload...)
+		if len(attempt.diagnosticPayload) > kernel.MaxTerminalDiagnosticsBytes {
+			attempt.diagnosticPayload = append([]byte(nil), attempt.diagnosticPayload[len(attempt.diagnosticPayload)-kernel.MaxTerminalDiagnosticsBytes:]...)
+		}
+	}
+	attempt.diagnosticHead = end
+	if uint64(len(attempt.diagnosticPayload)) > attempt.diagnosticHead {
+		attempt.diagnosticPayload = nil
+	}
+	attempt.diagnosticFloor = attempt.diagnosticHead - uint64(len(attempt.diagnosticPayload))
+}
+
+func (attempt *liveAttempt) diagnosticSnapshot() (uint64, uint64, []byte) {
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	return attempt.diagnosticFloor, attempt.diagnosticHead, append([]byte(nil), attempt.diagnosticPayload...)
+}
+
 func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.TerminalSessionID, controller *runner.AttemptController) *liveAttempt {
 	attempt := &liveAttempt{
 		daemon: daemon, runID: runID, sessionID: sessionID, controller: controller,
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), result: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
-		sourceOpsDone: make(chan struct{}), sourceCloseStarted: make(chan struct{}),
+		sourceGate: make(chan struct{}, 1), sourceOpsDone: make(chan struct{}), sourceCloseStarted: make(chan struct{}),
 		effectLimit: liveAttemptEffectLimit,
 	}
 	if daemon != nil && daemon.store != nil {
@@ -624,4 +649,13 @@ func (attempt *liveAttempt) waitResult() liveAttemptResult {
 		return liveAttemptResult{err: ErrTerminalClosed}
 	}
 	return <-attempt.result
+}
+
+func (attempt *liveAttempt) acquireSourceGate(ctx context.Context) bool {
+	select {
+	case attempt.sourceGate <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

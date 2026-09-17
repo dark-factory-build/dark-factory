@@ -11,7 +11,6 @@ import re
 import shutil
 import stat
 import subprocess
-from urllib.parse import urlparse
 import uuid
 
 
@@ -27,20 +26,6 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class ReviewError(Exception):
     pass
-
-
-def review_provider(config):
-    """Return the operator-selected installed review route.
-
-    Codex is the durable default because it is the only current factory route
-    that can obtain an exact retained-source receipt.  The explicit config
-    escape hatch is for a later installed Claude source capability; ambient
-    environment state must never change a queued review's route.
-    """
-    value = config.get("review_provider", "codex")
-    if value not in {"codex", "claude"}:
-        raise ReviewError("review_provider must be codex or claude")
-    return value
 
 
 def mirror(config):
@@ -116,113 +101,32 @@ def verify_existing(path, pr, operation):
     intake.command(["git", "-C", str(path), "cat-file", "-e", base + "^{commit}"])
 
 
-def bridge_call(name, arguments):
+def observe_review(operation):
     bridge = os.environ.get("DARK_FACTORY_MAINTAINER_BRIDGE") or shutil.which("dark-factory-maintainer-mcp-bridge")
     if not bridge or not os.path.isabs(bridge):
         raise ReviewError("maintainer bridge is unavailable")
     metadata = Path(bridge).stat()
     if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & stat.S_IXUSR or metadata.st_mode & 0o022:
         raise ReviewError("maintainer bridge is not a safe executable")
-    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "observe_operation", "arguments": {"operation_id": operation["review_operation"]}}}
     try:
         response = subprocess.run([bridge], input=json.dumps(request) + "\n", capture_output=True, text=True, timeout=40, check=True)
         reply = json.loads(response.stdout)
-        result = reply["result"]
+        value = reply["result"]["structuredContent"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
-        raise ReviewError(name + " unavailable") from exc
-    if reply.get("id") != 1 or not isinstance(result, dict):
-        raise ReviewError(name + " reply invalid")
-    return result
-
-
-def observe_operation(operation_id):
-    result = bridge_call("observe_operation", {"operation_id": operation_id})
-    value = result.get("structuredContent")
-    returned_id = value.get("operation_id") if isinstance(value, dict) else None
-    # The App canonicalizes operation_id to lowercase before journal lookup and
-    # returns that canonical form, so a persisted id that is not already
-    # lowercase must still compare equal here.
-    if result.get("isError") or not isinstance(returned_id, str) or returned_id.lower() != operation_id.lower():
-        raise ReviewError("operation observation invalid")
+        raise ReviewError("review operation observation unavailable") from exc
+    if reply.get("id") != 1 or reply["result"].get("isError") or not isinstance(value, dict) or value.get("operation_id") != operation["review_operation"]:
+        raise ReviewError("review operation observation invalid")
     state = value.get("state")
-    if state not in {"completed", "missing", "planned", "executing", "indeterminate"}:
-        raise ReviewError("operation state invalid")
-    return value
-
-
-def observe_review(config, operation):
-    value = observe_operation(operation["review_operation"])
-    if value["state"] != "completed":
-        return value["state"]
-    result = value.get("result")
-    # The App review result names no PR number, only its GitHub URL: bind that
-    # path to this exact PR (as exact_issue does) so another PR sharing the same
-    # head cannot lend its verdict. GitHub's review anchor is the one fragment.
-    url = urlparse(result.get("url", "")) if isinstance(result, dict) and isinstance(result.get("url"), str) else None
-    if value.get("kind") != "submit_pull_request_review" or url is None or url.scheme != "https" or url.netloc != "github.com" \
-            or url.path.lower() != ("/" + config["repository"] + "/pull/" + str(operation["pr"])).lower() or url.query or not re.fullmatch(r"(pullrequestreview-[0-9]+)?", url.fragment) \
-            or result.get("head_sha") != operation["head"] or result.get("verdict") not in {"allow", "block"}:
-        raise ReviewError("review receipt does not match the exact head and pull request")
-    return result["verdict"]
-
-
-def enqueue_request_digest(config, operation):
-    # Matches the App's own request_digest: the canonical (unsorted, struct-
-    # order) JSON of the exact EnqueuePullRequest fields, sha256-hexed. The
-    # App's analogous observe_pull_request_merge guard compares this same way
-    # (control-plane/src/github_app.rs:2752-2769) before trusting a completed
-    # enqueue observation. EnqueuePullRequest::validate canonicalizes
-    # operation_id to lowercase before that digest is computed
-    # (control-plane/src/github_app.rs:3069-3073, canonical_operation_id at
-    # :3351-3365), so an uppercase persisted id must be lowercased here too.
-    expected = {"repository": config["repository"].lower(), "operation_id": operation["enqueue_operation"].lower(),
-                "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"]}
-    return hashlib.sha256(json.dumps(expected, separators=(",", ":")).encode()).hexdigest()
-
-
-def observe_enqueue(config, operation):
-    value = observe_operation(operation["enqueue_operation"])
-    if value["state"] != "completed":
-        return value["state"]
-    result = value.get("result")
-    if value.get("kind") != "enqueue_pull_request" or value.get("request_digest") != enqueue_request_digest(config, operation) \
-            or not isinstance(result, dict) or result.get("head_sha") != operation["head"] or result.get("pull_number") != operation["pr"]:
-        raise ReviewError("enqueue receipt does not match the exact head")
-    return "queued"
-
-
-def enqueue_allowed(config, operation, journal_path, receipts):
-    # One durable id per exact head, journaled before the write; an id an
-    # operator already recorded is kept so a repair is never replayed.
-    operation.setdefault("enqueue_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-enqueue:" + config["repository"] + ":" + str(operation["pr"]) + ":" + operation["head"])))
-    operation.setdefault("enqueue_base", config.get("base", "main"))
-    intake.atomic_json(journal_path, receipts)
-    state = observe_enqueue(config, operation)
-    if state == "missing" and not operation.get("enqueue_attempted"):
-        operation["enqueue_attempted"] = True
-        intake.atomic_json(journal_path, receipts)
-        result = bridge_call("enqueue_pull_request", {"repository": config["repository"], "operation_id": operation["enqueue_operation"],
-                                                      "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"]})
-        value = result.get("structuredContent")
-        if result.get("isError"):
-            # The App names refusals and conflicts; only those are concrete. An
-            # indeterminate or unavailable write is observed on the next pass.
-            text = str((result.get("content") or [{}])[0].get("text", ""))
-            operation["enqueue_refusal"] = text[:1000]
-            state = "refused" if text.split(":", 1)[0] in {"refused", "conflict", "invalid_input"} else "unresolved"
-        elif not isinstance(value, dict) or value.get("head_sha") != operation["head"] or value.get("pull_number") != operation["pr"]:
-            raise ReviewError("enqueue result does not match the exact head")
-        else:
-            state = "queued"
-    elif state in {"missing", "planned"} and operation.get("enqueue_state") == "refused":
-        # The App itself persists a released refusal claim as journal state
-        # "planned", not "missing"; either must keep the concrete refusal
-        # already recorded rather than degrade to generic "unresolved".
-        state = "refused"
-    elif state != "queued":
-        state = "unresolved"
-    operation["enqueue_state"] = state
-    intake.atomic_json(journal_path, receipts)
+    if state == "completed":
+        result = value.get("result")
+        if value.get("kind") != "submit_pull_request_review" or not isinstance(result, dict) or result.get("head_sha") != operation["head"] or result.get("verdict") not in {"allow", "block"}:
+            raise ReviewError("review receipt does not match the exact head")
+        return result["verdict"]
+    if state not in {"missing", "planned", "executing", "indeterminate"}:
+        raise ReviewError("review operation state invalid")
+    return state
 
 
 def launch_review(config, path, pr, operation):
@@ -232,8 +136,7 @@ def launch_review(config, path, pr, operation):
     directory.mkdir(mode=0o700, exist_ok=True)
     body = directory / "body.md"
     body.write_text(pr["body"])
-    env = dict(os.environ, DARK_FACTORY_REVIEW_PROVIDER=operation.get("provider", review_provider(config)),
-               DARK_FACTORY_REVIEW_OPERATION_ID=operation["review_operation"],
+    env = dict(os.environ, DARK_FACTORY_REVIEW_OPERATION_ID=operation["review_operation"],
                DARK_FACTORY_REVIEW_REMOTE="file://" + str(path.parent.parent))
     env.pop("DARK_FACTORY_REVIEW_EVIDENCE_FILE", None)
     with (directory / "launch.log").open("w") as output:
@@ -245,35 +148,18 @@ def launch_review(config, path, pr, operation):
 
 def review_followup(config, operation, state):
     task = {"priority": operation["priority"], "title": "Resume publication review for GitHub PR #" + str(operation["pr"])}
-    enqueue = operation.get("enqueue_state", "")
-    task["task_id"] = intake.sha_id("review-result", config["project_id"], config["repository"], str(operation["pr"]), operation["head"], state + (":" + enqueue if enqueue else ""))
+    task["task_id"] = intake.sha_id("review-result", config["project_id"], config["repository"], str(operation["pr"]), operation["head"], state)
     task["incarnation_id"] = intake.sha_id("incarnation", task["task_id"])
-    if state == "allow":
-        action = ("Host intake enqueued this exact head onto " + operation["enqueue_base"] + " with App operation " + operation["enqueue_operation"] + " (state " + enqueue + "). " +
-                  ("Observe the merge with observe_pull_request_merge using that enqueue operation; the merge queue and required CI stay authoritative. Never enqueue again yourself. " if enqueue == "queued" else
-                   "The App refused it: " + operation.get("enqueue_refusal", "") + " Do not retry blindly; report the concrete refusal or raise a human request. " if enqueue == "refused" else
-                   "Its outcome is unresolved. Observe that same operation; never replay the write or derive a replacement id. "))
-    elif state == "block":
-        action = "Read that exact operation and its GitHub review; route blocking findings to the original task. "
-    else:
-        action = "The launch or submission is unresolved. Observe this operation; do not start another reviewer or invent a verdict. Report the concrete infrastructure blocker. "
     task["body"] = ("Resume publication for " + operation["source_marker"] + ". Host independent review for PR #" + str(operation["pr"]) +
                     " at exact head " + operation["head"] + " and base " + operation["base"] +
-                    " has App operation " + operation["review_operation"] + " with state " + state + ". Host review exit: " + str(operation.get("review_exit", "not launched")) + ". " + action +
+                    " has App operation " + operation["review_operation"] + " with state " + state + ". Host review exit: " + str(operation.get("review_exit", "not launched")) + ". " +
+                    ("Read that exact operation and its GitHub review; route blocking findings to the original task, or resume protected enqueue after ALLOW. " if state in {"allow", "block"} else
+                     "The launch or submission is unresolved. Observe this operation; do not start another reviewer or invent a verdict. Report the concrete infrastructure blocker. ") +
                     "Never submit your own verdict or run a nested cold-review. Merge and deployment remain separate delivery gates.")
     return task
 
 
 def config_fingerprint(config):
-    value = {key: config.get(key) for key in ("repository", "project_id", "overseer_agent_id", "review_mirror_root", "review_provider")}
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def legacy_config_fingerprint(config):
-    # Pre-review_provider version-2 receipts were fingerprinted without that
-    # field. Recognize their existing digest so upgrading this script does
-    # not invalidate every journal already on disk; a receipt only earns the
-    # new, provider-bound digest the next time it is written.
     value = {key: config.get(key) for key in ("repository", "project_id", "overseer_agent_id", "review_mirror_root")}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -295,14 +181,12 @@ def run_once(config):
 
 
 def run_locked(config, path, journal, journal_path):
-    provider = review_provider(config)
     if journal_path.exists():
         try:
             receipts = json.loads(journal_path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ReviewError("review receipt is unreadable") from exc
-        if receipts.get("version") != 2 or not isinstance(receipts.get("pulls"), dict) \
-                or receipts.get("config_fingerprint") not in (config_fingerprint(config), legacy_config_fingerprint(config)):
+        if receipts.get("version") != 2 or not isinstance(receipts.get("pulls"), dict) or receipts.get("config_fingerprint") != config_fingerprint(config):
             raise ReviewError("review receipt is invalid")
     else:
         receipts = {"version": 2, "config_fingerprint": config_fingerprint(config), "pulls": {}}
@@ -316,16 +200,13 @@ def run_locked(config, path, journal, journal_path):
         existing = receipts["pulls"].get(key)
         if existing is None:
             operation = ready(config, path, pr, issue)
-            operation["provider"] = provider
             receipts["pulls"][key] = operation
             intake.atomic_json(journal_path, receipts)
         else:
             operation = existing
-            if operation.get("provider", "codex") != provider:
-                raise ReviewError("review provider changed for an existing exact-head receipt")
             verify_existing(path, pr, operation)
         operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
-        state = observe_review(config, operation)
+        state = observe_review(operation)
         if state == "missing" and not operation.get("review_attempted"):
             if launched:
                 continue
@@ -336,13 +217,11 @@ def run_locked(config, path, journal, journal_path):
             launched = True
             operation["review_exit"] = launch_review(config, path, pr, operation)
             intake.atomic_json(journal_path, receipts)
-            state = observe_review(config, operation)
+            state = observe_review(operation)
         if state not in {"allow", "block"}:
             state = "unresolved"
         operation["review_state"] = state
         intake.atomic_json(journal_path, receipts)
-        if state == "allow":
-            enqueue_allowed(config, operation, journal_path, receipts)
         followup = review_followup(config, operation, state)
         if intake.task_state(config, followup) is None:
             intake.enqueue(config, followup)

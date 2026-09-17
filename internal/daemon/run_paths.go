@@ -119,24 +119,20 @@ func (daemon *Daemon) rememberedRunPaths(runID kernel.RunID, now time.Time) ([]s
 	return entry.paths, ok
 }
 
-// RememberSupervisorAccount records the one changes root, the one account
-// home, and the one Git executable the supervisor was given. The daemon does
-// not own the operational home layout and never derives any of them; these
-// are the same values every run in the process is published under, so the
-// stores are lock-free publications that RunNext never waits on. Boot calls
-// this once before the recovery sweep so a leftover retained-Change
-// settlement does not need a live attempt to have run first; RunNext calls it
-// again on every attempt, which is an idempotent republish of the same
-// values.
-func (daemon *Daemon) RememberSupervisorAccount(parent, accountHome, gitExecutable string) {
+// rememberSupervisorAccount records the one changes root and the one account
+// home the supervisor was given. The daemon does not own the operational home
+// layout and never derives either; these are the same values every run in the
+// process is published under, so the stores are lock-free publications that
+// RunNext never waits on.
+func (daemon *Daemon) rememberSupervisorAccount(parent, accountHome string) {
 	daemon.changeParent.Store(&parent)
 	daemon.accountHome.Store(&accountHome)
-	daemon.gitExecutable.Store(&gitExecutable)
 }
 
 // changedDirectories returns the deepest directory of every file modified
-// after the given moment, deduplicated and sorted. It is a hint about where
-// the worker is, read without running Git in its worktree. Every stop --
+// after the given moment, deduplicated and sorted. A published change
+// directory is a plain materialized tree with no repository metadata, so the
+// modification time is the only evidence of the worker's edits. Every stop --
 // a missing tree, an unreadable entry, an exhausted budget -- answers with
 // what was found rather than an error, so there is nothing to report.
 func changedDirectories(ctx context.Context, root string, since time.Time) []string {

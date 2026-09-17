@@ -1120,7 +1120,7 @@ func stopSubscription(subscription StateSubscription) error {
 	defer timer.Stop()
 	select {
 	case <-done:
-		if err := subscription.Err(); err != nil && !errors.Is(err, context.Canceled) {
+		if err := subscription.Err(); err != nil {
 			return fmt.Errorf("%w: %w", ErrSubscriptionUnresolved, err)
 		}
 		return nil

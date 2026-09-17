@@ -340,8 +340,6 @@ lock_path="$common_dir/.dark-factory-local-ci.lock"
 # regular-file or symlink pathname.
 outside_lock="$temporary/outside-lock"
 : >"$outside_lock"
-/bin/rm -f "$lock_path/descriptor"
-/bin/rmdir "$lock_path"
 ln -s "$outside_lock" "$lock_path"
 if (cd "$first" && ./scripts/with-local-ci-lease.sh true) 2>"$temporary/initial-symlink.stderr"; then
     fail "initial lock-object symlink was followed"
@@ -585,12 +583,12 @@ held_descriptor_identity=$(stat -f '%d:%i' "$lock_path/descriptor")
 # It must not acquire its former pathname while a dedicated holder is live.
 if mkdir "$legacy_lock" 2>/dev/null; then fail "old helper could open a second lock domain"; fi
 [ -L "$legacy_lock" ] || fail "old helper would accept the migrated lock object"
-# A Change worktree receives the exact same dedicated subtree from the daemon.
+# A Git-free Change receives the exact same dedicated subtree from the daemon.
 mkdir "$temporary/git-free"
 if (cd "$temporary/git-free" && DARK_FACTORY_LOCAL_CI_DIRECTORY="$common_dir" DARK_FACTORY_LOCAL_CI_WAIT=0 "$first/scripts/with-local-ci-lease.sh" true) 2>"$temporary/git-free.stderr"; then
-    fail "Change worktree bypassed the host lease"
+    fail "Git-free Change bypassed the host lease"
 fi
-grep -Fq 'DARK_FACTORY_LOCAL_CI_WAIT=0' "$temporary/git-free.stderr" || fail "Change contention did not reach the shared lock"
+grep -Fq 'DARK_FACTORY_LOCAL_CI_WAIT=0' "$temporary/git-free.stderr" || fail "Git-free contention did not reach the shared lock"
 (
     cd "$second"
     ./scripts/with-local-ci-lease.sh "$short_command" "$waiter_marker"
@@ -608,7 +606,7 @@ wait_checked "ordinary waiter" "$waiter_pid"
 [ "$(wc -c <"$waiter_stderr" | tr -d ' ')" -le 2300 ] || fail "owner diagnostic was not bounded"
 grep -Fq "head=$head" "$waiter_stderr" || fail "owner head was not reported"
 ! grep -Fq SECRET "$waiter_stderr" || fail "hostile owner labels leaked"
-(cd "$temporary/git-free" && DARK_FACTORY_LOCAL_CI_DIRECTORY="$common_dir" "$first/scripts/with-local-ci-lease.sh" true) || fail "Change worktree could not acquire the released lease"
+(cd "$temporary/git-free" && DARK_FACTORY_LOCAL_CI_DIRECTORY="$common_dir" "$first/scripts/with-local-ci-lease.sh" true) || fail "Git-free Change could not acquire the released lease"
 
 # Identifier punctuation is not an owner-record escape hatch.
 start_holder "$first" "$temporary/invalid-id-held" 2 'ghp_secret' 'agent:token'

@@ -1123,22 +1123,6 @@ func mapBrowserError(err error) error {
 		// was attempted. That is retryable busyness, not a fault: the same
 		// request converges when it is made again with a budget it fits in.
 		return browser.ErrRateLimited
-	case errors.Is(err, kernel.ErrStoreClosed):
-		// A connected browser's state watch can observe the store closing
-		// during the bounded daemon handoff; that plain condition is lifecycle
-		// busyness, not a permanent internal fault, so it is retryable. But a
-		// human-reply acknowledgement or lease renewal that raced a closed
-		// Store joins this same kernel.ErrStoreClosed with its own
-		// terminal/uncertain effect marker (terminal_effects.go); that owner
-		// verdict must survive, exactly as the context arm above preserves
-		// its own. Unlike that arm's cause, a revision conflict or other
-		// case below is never joined with ErrStoreClosed, so this guard is
-		// scoped to this case alone and leaves every other case's ordering
-		// untouched (see TestReleaseAfterCancelIsStaleNotInternal).
-		if terminalEffectVerdict(err) {
-			return err
-		}
-		return browser.ErrRateLimited
 	case errors.Is(err, kernel.ErrUnauthorized):
 		return browser.ErrUnauthorized
 	case errors.Is(err, kernel.ErrNotFound):

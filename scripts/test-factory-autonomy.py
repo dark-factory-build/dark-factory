@@ -2,7 +2,6 @@
 import importlib.util
 import json
 from pathlib import Path
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -321,10 +320,10 @@ class AutonomyTest(unittest.TestCase):
                 home = root / 'factory'
                 home.mkdir()
                 with sqlite3.connect(home / 'factory.sqlite3') as connection:
-                    connection.executescript('CREATE TABLE factory(singleton INTEGER, dispatch_enabled INTEGER, revision INTEGER); CREATE TABLE runs(phase TEXT, id BLOB);')
+                    connection.executescript('CREATE TABLE factory(singleton INTEGER, dispatch_enabled INTEGER, revision INTEGER); CREATE TABLE runs(phase TEXT);')
                     connection.execute('INSERT INTO factory VALUES(1, ?, 4)', (initially_enabled,))
                     if settling:
-                        connection.execute("INSERT INTO runs VALUES('running', X'0123456789ABCDEF0123456789ABCDEF')")
+                        connection.execute("INSERT INTO runs VALUES('running')")
                 (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
                 (root / 'reinstall-service.sh').write_text('printf "%s\\n" "$*" >>"$DARK_FACTORY_SOCKET.install-calls"\necho installer-output\n')
                 (root / 'verify-live-runtime.py').write_text('import json, sys\nprint(json.dumps({"sha": sys.argv[-1], "healthy": True}))\n')
@@ -366,27 +365,6 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual({'sha': 'a' * 40, 'healthy': True, 'dispatch_enabled': initially_enabled}, json.loads(result.stdout))
                     self.assertEqual(1, len(result.stdout.splitlines()))
-
-    def test_runtime_drain_counts_only_runs_a_new_daemon_cannot_adopt(self):
-        # Short root: sockaddr_un's sun_path is 104 bytes, and the default
-        # temporary directory plus a runtime name already crowds it.
-        with tempfile.TemporaryDirectory(dir='/private/tmp') as directory:
-            home = Path(directory) / 'f'
-            (home / 'runtimes').mkdir(parents=True)
-            with sqlite3.connect(home / 'factory.sqlite3') as connection:
-                connection.executescript('CREATE TABLE factory(singleton INTEGER, dispatch_enabled INTEGER, revision INTEGER); CREATE TABLE runs(phase TEXT, id BLOB);')
-                connection.execute('INSERT INTO factory VALUES(1, 0, 4)')
-                connection.execute("INSERT INTO runs VALUES('running', X'0123456789ABCDEF0123456789ABCDEF')")
-                connection.execute("INSERT INTO runs VALUES('finalizing', X'FEDCBA9876543210FEDCBA9876543210')")
-            self.assertEqual(2, deploy.state(home)[2])
-            for name in ('0123456789abcdef0123456789abcdef', 'fedcba9876543210fedcba9876543210'):
-                (home / 'runtimes' / name).mkdir()
-            with socket.socket(socket.AF_UNIX) as running, socket.socket(socket.AF_UNIX) as finalizing:
-                running.bind(str(home / 'runtimes/0123456789abcdef0123456789abcdef/takeover.sock'))
-                finalizing.bind(str(home / 'runtimes/fedcba9876543210fedcba9876543210/takeover.sock'))
-                # Only the running one is adoptable; a finalizing run drains
-                # whatever its runner still publishes.
-                self.assertEqual(1, deploy.state(home)[2])
 
     def test_runtime_operator_change_after_pause_never_installs(self):
         states = iter([(True, 4, 0), (False, 6, 0)])

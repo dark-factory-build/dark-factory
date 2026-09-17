@@ -60,9 +60,4 @@ Not lazy about: understanding the problem (read it fully and trace the real flow
 
 ## Factory-owned Change handoffs
 
-A factory-owned Change is a linked Git worktree of this repository on its own
-`factory/<12 hex>` branch. Commit your work on that branch before settlement:
-the settled branch head is what the overseer publishes and the reviewer reads.
-Remove generated dependencies, outputs, caches, and empty leftover directories
-that `.gitignore` does not cover, then provide a nonempty durable result that
-records the checks run and the head you left.
+Factory-owned Changes are not Git worktrees: before settlement, remove generated dependencies, outputs, caches, and empty leftover directories while preserving source and refused evidence, then provide a nonempty durable result that records the checks run.

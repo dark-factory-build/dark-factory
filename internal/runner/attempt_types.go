@@ -35,13 +35,10 @@ type AttemptSpec struct {
 type AttemptEventKind string
 
 const (
-	AttemptInnerReady       AttemptEventKind = "inner-ready"
-	AttemptCheckpoint       AttemptEventKind = "checkpoint"
-	AttemptResultReady      AttemptEventKind = "attempt-result-ready"
-	AttemptTerminalFrame    AttemptEventKind = "terminal-frame"
-	AttemptHandoverQuiesced AttemptEventKind = "handover-quiesced"
-	AttemptHandoverAttached AttemptEventKind = "handover-attached"
-	AttemptHandoverRejected AttemptEventKind = "handover-rejected"
+	AttemptInnerReady    AttemptEventKind = "inner-ready"
+	AttemptCheckpoint    AttemptEventKind = "checkpoint"
+	AttemptResultReady   AttemptEventKind = "attempt-result-ready"
+	AttemptTerminalFrame AttemptEventKind = "terminal-frame"
 )
 
 // TerminalCommandKind and TerminalEventKind are intentionally closed unions.
@@ -243,8 +240,6 @@ type AttemptEvent struct {
 	Payload  []byte
 	Result   *AttemptResultNotice
 	Frame    *TerminalFrame
-	Floor    uint64
-	Head     uint64
 }
 
 const attemptControlTimeout = 4 * time.Second

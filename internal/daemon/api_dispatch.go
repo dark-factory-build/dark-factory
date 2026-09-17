@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,11 +75,10 @@ type Daemon struct {
 	// the account every run launches under, published the same way and for the
 	// same reason. runPathsMu guards only the map of bounded directory walks,
 	// never a walk itself.
-	changeParent  atomic.Pointer[string]
-	accountHome   atomic.Pointer[string]
-	gitExecutable atomic.Pointer[string]
-	runPathsMu    sync.Mutex
-	runPaths      map[kernel.RunID]runPathsResult
+	changeParent atomic.Pointer[string]
+	accountHome  atomic.Pointer[string]
+	runPathsMu   sync.Mutex
+	runPaths     map[kernel.RunID]runPathsResult
 
 	attemptMu sync.Mutex
 	attempts  map[kernel.RunID]*liveAttempt
@@ -471,10 +471,10 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	// Only providers with the protected retained-source receipt route may
-	// receive this immutable snapshot. Unsupported providers fail before target
-	// parsing, so a reassignment cannot silently admit doomed work.
-	if !kernel.RetainedSourceReviewSupported(authority.Provider) {
+	// Only the Codex launch currently enforces a read-only local-command
+	// boundary for this private snapshot. Claude and shell must not receive a
+	// mutable path described as an immutable source handoff.
+	if authority.Provider != kernel.ProviderCodex {
 		return newErrorReply(api.RemoteUnavailable)
 	}
 	taskIDText, ok := call.AttemptSourceTaskID()
@@ -502,11 +502,15 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if !found {
 		return newErrorReply(api.RemoteNotFound)
 	}
-	projected, err := daemon.attemptSourceHandoff(ctx, handoff)
+	path, err := daemon.materializeAttemptSource(ctx, live, handoff)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	reply, err := api.NewAttemptSourceReply(projected)
+	projected, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: path})
+	if err != nil || len(projected) != 1 {
+		return newErrorReply(api.RemoteUnavailable)
+	}
+	reply, err := api.NewAttemptSourceReply(projected[0])
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -1295,11 +1299,17 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	}
 	daemon.attemptMu.Lock()
 	live := daemon.attempts[authority.RunID]
+	var snapshots map[kernel.RetainedChangeHandoff]string
+	if live != nil {
+		live.sourceMu.Lock()
+		snapshots = maps.Clone(live.sourceSnapshots)
+		live.sourceMu.Unlock()
+	}
 	daemon.attemptMu.Unlock()
 	if live == nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
-	projected, err := projectOverseerSnapshot(snapshot)
+	projected, err := projectOverseerSnapshot(snapshot, snapshots)
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
@@ -1371,24 +1381,6 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
 		assignedAgentID = &agentID
-	}
-	if input.Retry {
-		if assignedAgentID == nil {
-			return newErrorReply(api.RemoteInvalidRequest)
-		}
-		if err := prepareTaskRetry(ctx, daemon.store, id, expected, *assignedAgentID); err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
-		at, err := daemon.timestamp()
-		if err != nil {
-			return newErrorReply(api.RemoteInternal)
-		}
-		task, err := daemon.store.RetryTaskForOverseer(ctx, digest, id, expected, *assignedAgentID, at)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
-		daemon.notifyScheduler()
-		return daemon.mutation(ctx, task.Revision)
 	}
 	patch := kernel.TaskPatch{Title: input.Title, Body: input.Body, Priority: input.Priority, AssignedAgentID: assignedAgentID, Cancel: input.Cancel}
 	if err := daemon.store.AuthorizeWorkerTaskForOverseer(ctx, digest, id); err != nil {

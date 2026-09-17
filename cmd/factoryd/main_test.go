@@ -554,13 +554,8 @@ func TestDeriveSupervisorSpecResolvesSymlinkedSelfToCommittedSiblings(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	supportedPath, supportedRoots := install.SupportedToolchain(accountHome)
-	wantToolPath := filepath.Join(accountHome, ".local", "bin") + string(filepath.ListSeparator)
-	if supportedPath != "" {
-		wantToolPath += supportedPath + string(filepath.ListSeparator)
-	}
-	wantToolPath += defaultToolPath
-	if spec.GitExecutable != defaultGitExecutable || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != wantToolPath || spec.ToolchainReadRoots != supportedRoots || spec.AccountHome != accountHome {
+	wantToolPath := filepath.Join(accountHome, ".local", "bin") + string(filepath.ListSeparator) + defaultToolPath
+	if spec.GitExecutable != defaultGitExecutable || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != wantToolPath || spec.AccountHome != accountHome {
 		t.Fatalf("boot inputs = %+v", spec)
 	}
 	if spec.ChangeParent != filepath.Join(home, "changes") || spec.AttemptSocket != install.LocalAPISocketPath(home) {

@@ -25,41 +25,6 @@ func TestToolchainReadRootsRejectAuthorityExpansion(t *testing.T) {
 	}
 }
 
-func TestSupportedToolchainNamesOnlyPinnedPrivateInstallations(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodeRoot := filepath.Join(root, ".nvm", "versions", "node", supportedNodeVersion)
-	for _, path := range []string{filepath.Join(nodeRoot, "bin"), filepath.Join(root, ".cargo", "bin"), filepath.Join(root, ".rustup")} {
-		if err := os.MkdirAll(path, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	path, roots := SupportedToolchain(root)
-	wantPath := []string{filepath.Join(nodeRoot, "bin"), filepath.Join(root, ".cargo", "bin")}
-	wantRoots := []string{nodeRoot, filepath.Join(root, ".cargo", "bin"), filepath.Join(root, ".rustup")}
-	for _, libexec := range []string{filepath.Join("/opt/homebrew/Cellar/go", supportedGoVersion, "libexec"), filepath.Join("/usr/local/Cellar/go", supportedGoVersion, "libexec")} {
-		if canonicalDirectory(libexec) {
-			wantRoots = append(wantRoots, libexec)
-		}
-	}
-	for _, libexec := range []string{filepath.Join("/opt/homebrew/Cellar/go", supportedGoVersion, "libexec"), filepath.Join("/usr/local/Cellar/go", supportedGoVersion, "libexec")} {
-		if goBin := filepath.Join(libexec, "bin"); canonicalDirectory(goBin) {
-			wantPath = append(wantPath, goBin)
-		}
-	}
-	if path != strings.Join(wantPath, string(filepath.ListSeparator)) {
-		t.Fatalf("tool path=%q", path)
-	}
-	if roots != strings.Join(wantRoots, string(filepath.ListSeparator)) {
-		t.Fatalf("read roots=%q", roots)
-	}
-	if strings.Contains(path, root+string(filepath.Separator)+".nvm"+string(filepath.Separator)+"versions"+string(filepath.Separator)+"node"+string(filepath.Separator)+"v22.16.0") {
-		t.Fatal("unpinned Node installation leaked into the capability contract")
-	}
-}
-
 func TestToolchainReadRootsRequireCanonicalPrivateInstallation(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

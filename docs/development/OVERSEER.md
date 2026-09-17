@@ -29,7 +29,7 @@ not a claim that delegation completed the objective.
 After a verified merge, include housekeeping in that same pass. Pause an obsolete
 worker only after checking that it has neither active nor queued work and is not
 needed by the remaining objective. Preserve its history. Remove only disposable
-files owned by your attempt; retained Changes remain governed by
+files owned by your attempt; retained Changes and refused trees remain governed by
 the daemon's retention rules. Operator Git worktrees are outside your write
 boundary: report their exact paths and branches for the repository owner to check
 using WORKFLOW.md rather than deleting them yourself. Do not create a separate
@@ -129,11 +129,11 @@ instructions guide agents; they do not add an OS filesystem sandbox.
 Everything below assumes the launch-scoped private runtime home and `TMPDIR`,
 no `gh` credential, git without any remote credential, and the Maintainer App
 as the one MCP server (`maintainer`). A Codex overseer has no daemon database,
-Changes-parent, or operator-home access; it reads a settled Change's work
-from the project repository's Git directory, which its local commands are
-granted read-only, by the branch head an explicit source request names. Each
-source request is checked against current task authority. Any number of
-eligible same-project handoffs can be read in one attempt.
+Changes-parent, or operator-home access; retained-source access uses
+its private runtime source directory. Each explicit source request is checked
+against current task authority and materializes an exact eligible same-project
+handoff there. Multiple eligible handoffs can be read in one attempt without
+granting access to the Changes parent or adding permission entries per tree.
 
 ## What you may and may not do
 
@@ -141,7 +141,7 @@ eligible same-project handoffs can be read in one attempt.
   `create_pull_request`, `update_pull_request_body`, `enqueue_pull_request`,
   and the observe tools. Never
   `git push`, never edit the operator's checkout, never write into a retained
-  Change's worktree or branch.
+  Change.
 - Never record a review verdict yourself. The review is a separate headless
   session started by the host review controller; you read its App receipt.
   Do not run a nested provider or grant local commands Maintainer credentials.
@@ -174,36 +174,39 @@ merged. Do not reset the Change or mistake the daemon revision for its source.
 
 Never read the daemon SQLite database, the whole daemon home, or the Changes
 parent. As overseer, run `overseer status --task TASK_ID` for the task
-you are handling. Its `retained_change_handoffs` carry only identities (Change
-ID, base commit, settled `head_commit`, task, work revision, Change revision).
-Then explicitly run `factoryctl attempt source --task TASK_ID`; its response
-must contain exactly one usable receipt naming the Change ID, base commit,
-`head_commit`, `branch` (`factory/<first 12 hex of change_id>`), target task
-ID, task work revision, current retained Change revision, the worktree as
-`source_path`, the repository's Git directory as `git_directory`, and `dirty`.
-Match every identity value to the requested task and status. The work is the
-branch head: read it with `git --git-dir="$git_directory"` and the commit
-named by `head_commit`, never by constructing a `$home/changes/...` path,
-reading `factory.sqlite3`, or inferring source from a published branch. If the
-task was sent back or any task/work/Change revision changed, or the branch is
-no longer at its settled head, the source request is refused and must use
-exact current task state. `dirty` means the worker left uncommitted work in
-its worktree that is not part of `head_commit`; the head is still what you
-publish, and if the task's result says that work matters, send the task back
-so the worker commits it (section 5). A Change from before managed worktrees
-is adopted into one by the first source request, at its recorded base with
-the worker's edits uncommitted, so its `head_commit` equals its base and
-`dirty` is true: send such a task back to have its work committed before
-publication.
+you are handling. This may return task-only status: the retained tree is not
+materialized by status. After the task-only response, explicitly run
+`factoryctl attempt source --task TASK_ID`; its response must contain exactly
+one usable receipt naming the Change ID, base commit, target task ID, task work
+revision, current retained Change revision, and daemon-derived `source_path`
+for that exact tree. Match every identity value to the requested task and
+status, then read only that returned path. The daemon verifies and materializes
+the target into the reader's private runtime; never construct a
+`$home/changes/...` path, read `factory.sqlite3`, or infer source from a
+published branch. If the task was sent back or any task/work/Change revision
+changed, the source request is refused and must use exact current task state.
+Source reads use a bounded ten-minute client and authenticated dispatch window;
+pre-authentication reads retain their short deadline. Cancellation refuses the
+handoff and removes incomplete private copies.
+Source requests are lifetime-bound to the live attempt: shutdown first refuses
+new requests and waits for admitted materialization to finish before runtime
+cleanup removes the private snapshot.
+The daemon verifies the selected retained root and manifest commitment before
+copying, then verifies the private copy again; a changed, mixed, symlinked or
+escaped tree is refused rather than attached to the old receipt. The old
+snapshot is not the reopened Change, so an overseer can send back the task it
+reviewed without cancelling itself. A status record without its
+launch-scoped tree access still reports ordinary task state, but is not a
+source handoff.
 
 An independently delegated Codex reviewer uses the same explicit source
-request and reads the same head from `git_directory`. It must match Change
-ID, base commit, head commit, target task ID, task work revision and Change
-revision first; the local branch is evidence of the worker Change, not the
-published pull request head, which the cold review reads on its own. A
-reviewer is not an overseer and cannot use `overseer status` to discover a
-Change. No receipt or a changed identity is a refusal, not a candidate for
-path reconstruction.
+request. It must match Change ID, base commit, target task ID, task work
+revision and Change revision before reading `source_path`; the readable
+retained tree is deliberately Git-free, so it is evidence of the worker Change
+rather than a substitute published branch. A reviewer is not an overseer and
+cannot use `overseer status` to discover a tree. No receipt, a changed
+identity, or a path outside that launch's read permission is a refusal, not a
+candidate for path reconstruction.
 
 A change is finished when its `enqueue-HEAD8`
 operation (step 5) for its current head is `completed` in the App journal
@@ -259,49 +262,28 @@ The branch is `factory/<first 12 hex of change_id>`. The task's
   earlier run of yours stopped partway: resume at the first `publish-N` the
   journal lacks (its `expected_head_sha` is the head the last completed one
   returned), then at the issue and the pull request, as section 2 says.
-- above `1`: the task was sent back and the worker continued on the branch
-  it left. `observe_ref` for the branch; it exists, at `branch_head`, and the
+- above `1`: the task was sent back and the worker continued from the tree it
+  left. `observe_ref` for the branch; it exists, at `branch_head`, and the
   commit goes on top of it under `publish-<HEAD8 of branch_head>-1`, with the
   diff against that head, not the base. A branch that does not exist here
   means the earlier publication never happened: treat it as the first.
 
-Set `from` to `base_commit` or `branch_head` accordingly, and set
-`branch_exists=1` when the publication branch exists or `0` when it does not.
-The published
-`branch_head` is an App-authored commit that is not in the local repository;
-fetch it and the worker's head into your clone,
-`git -C repo fetch -q origin main "$from"` and then
-`git -C repo fetch -q "$git_directory" "$head_commit"`, and run the commands
-below against `repo/.git` instead of `$git_directory`.
+Set `from` to `base_commit` or `branch_head` accordingly.
 
-A worker that integrated a merged prerequisite has main in its head's
-ancestry. Copying that head's files onto `from` reproduces the tree but not
-the ancestry, so GitHub merges main's own hunks against main again and
-reports a conflict that no source correction can clear. Let the script decide
-what the publication's parents are:
+Compute the diff against `from` without a checkout: the clone's object
+store, its index filled from `from`, and the retained tree as the work tree.
+`git add -A` respects the tree's own `.gitignore`, but that does not relax
+the worker cleanup requirement: generated dependencies, build output, caches,
+and temporary metadata must be removed before settlement.
 
 ```sh
-set -- $(repo/scripts/publication-parents.sh repo/.git "$from" "$head_commit" "$(git -C repo rev-parse origin/main)" "$branch_exists")
-from=$1 diff_from=$2 merge_parent=$3
-```
-
-`diff_from` replaces `from` in every diff below. When the branch does not
-exist yet, `from` becomes the integrated main commit itself, the valid current
-base. When it exists, `merge_parent` names the integrated commit and the first
-`publish_commit` of this publication carries it as `merge_parent_sha`: the
-published commit is then the merge the worker made, with the branch head first
-and its changes applied to the integrated tree. `-` means nothing to carry.
-
-The diff is between two commits in the repository's Git directory; nothing
-is checked out and no index is touched. The worker's own `.gitignore` decides
-what it committed, but that does not relax the worker cleanup requirement:
-generated dependencies, build output, caches, and temporary metadata must be
-absent from the head.
-
-```sh
-git --git-dir="$git_directory" diff --no-renames --name-status "$diff_from" "$head_commit" > changed.txt   # A / M / D per path, never R
-git --git-dir="$git_directory" diff --no-renames --numstat "$diff_from" "$head_commit"                     # for the delta paragraph
-git --git-dir="$git_directory" ls-tree -r "$head_commit"                                               # mode and blob per path
+export GIT_DIR=$PWD/repo/.git GIT_WORK_TREE=$source_path GIT_INDEX_FILE=$PWD/change.index
+git fetch -q origin "$from"
+git read-tree "$from" && git add -A
+git diff --cached --no-renames --name-status "$from" > changed.txt   # A / M / D per path, never R
+git diff --cached --no-renames --numstat "$from"                     # for the delta paragraph
+git ls-files --stage                                                 # mode and blob per path
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 ```
 
 If `changed.txt` is empty, report `nothing to publish` for that change and
@@ -314,35 +296,32 @@ Prepare the entries once, into a file, rather than pasting base64 into the
 call by hand:
 
 ```sh
-python3 - "$git_directory" "$head_commit" changed.txt > entries.json <<'PY'
-import base64, json, subprocess, sys
-git_dir, head, listing = sys.argv[1], sys.argv[2], sys.argv[3]
-modes = {}
-for line in subprocess.run(['git', '--git-dir', git_dir, 'ls-tree', '-r', '-z', head], check=True, capture_output=True).stdout.decode().split('\0'):
-    if line:
-        meta, path = line.split('\t', 1)
-        modes[path] = meta.split(' ')[0]
+tree=$source_path
+python3 - "$tree" changed.txt > entries.json <<'PY'
+import base64, json, os, sys
+tree, listing = sys.argv[1], sys.argv[2]
 entries = []
 for line in open(listing):                     # changed.txt from above
     status, path = line.rstrip('\n').split('\t', 1)
     if status == 'D':
         entries.append({'path': path})
         continue
-    content = subprocess.run(['git', '--git-dir', git_dir, 'cat-file', 'blob', head + ':' + path], check=True, capture_output=True).stdout
-    entries.append({'path': path, 'mode': modes[path], 'content_base64': base64.b64encode(content).decode()})
+    full = os.path.join(tree, path)
+    mode = '100755' if os.access(full, os.X_OK) else '100644'
+    entries.append({'path': path, 'mode': mode, 'content_base64': base64.b64encode(open(full, 'rb').read()).decode()})
 json.dump(entries, sys.stdout)
 PY
 ```
 
 Build the `changes` array for `publish_commit`: added and modified paths carry
-`content_base64` and the `mode` the tree entry shows (`100644` or
+`content_base64` and the `mode` the staged entry shows (`100644` or
 `100755`); deleted paths carry only `path`. The App takes at most 50 entries
 per commit and 1,000,000 base64 characters per file (about 732 KiB of
 content), and refuses the `.github` directory itself, `.github/workflows`,
 the CODEOWNERS locations and the dependabot config (other `.github` paths
 are publishable). More than 50 files means several commits on the same
 branch, each bound to the head the previous one returned. A file over that
-bound, a symlink (tree mode `120000`), or a refused path is a human request,
+bound, a symlink (staged mode `120000`), or a refused path is a human request,
 not a workaround.
 
 Then, with `branch = factory/<first 12 hex of change_id>`:
@@ -350,11 +329,10 @@ Then, with `branch = factory/<first 12 hex of change_id>`:
 1. `observe_ref` for `main` and keep the answer as `main_head`. If it is not
    `base_commit`, main moved since the worker started; publish anyway from
    `from` and let the queue merge it, but say so in the body.
-2. `publish_commit` with `branch`, `expected_head_sha = from`,
-   `merge_parent_sha = merge_parent` on this first commit unless it is `-`,
-   `message` = the task title and nothing else (the App takes exactly one
-   line: no blank line, no trailers, no session link; a second line is refused
-   as `invalid_input`), and the first (or only) 50 entries. The operation id is
+2. `publish_commit` with `branch`, `expected_head_sha = from`, `message` =
+   the task title and nothing else (the App takes exactly one line: no blank
+   line, no trailers, no session link; a second line is refused as
+   `invalid_input`), and the first (or only) 50 entries. The operation id is
    `opid "$change_id" publish-1` for a first publication and
    `opid "$change_id" publish-<HEAD8 of from>-1` for a follow-up. It returns
    the new head commit; a second commit uses the next number and that head,
@@ -373,8 +351,8 @@ only the follow-up commit's delta. Fetch the new head and calculate that base
 and numstat directly:
 
 ```sh
-git -C repo fetch -q origin main "$HEAD_SHA"
-review_base=$(git -C repo merge-base origin/main "$HEAD_SHA")
+git -C repo fetch -q origin "$HEAD_SHA"
+review_base=$(git -C repo merge-base "$base_commit" "$HEAD_SHA")
 git -C repo diff --numstat "$review_base" "$HEAD_SHA"
 ```
 
@@ -482,7 +460,7 @@ unavailable read-only checks are deferred delivery conditions, not defects.
   "$DARK_FACTORY_FACTORYCTL" attempt send-back --task "$task_id" --note "$note"
   ```
 
-  Never recover a task ID or a Change path from SQLite. The task/status
+  Never recover a task ID or a retained-tree path from SQLite. The task/status
   handoff is authoritative and cross-project, stale, refused, missing, or
   non-retained handoffs are refusals, not candidates for reconstruction.
 
@@ -497,9 +475,9 @@ unavailable read-only checks are deferred delivery conditions, not defects.
   provider's bound and no note fits: raise a human request naming the pull
   request and the task, and end the run with `attempt block`, since the
   change would otherwise come around again to the same refusal. The task
-  is queued again and the worker's next run continues on its branch; a
-  later run of yours finds the same change id at the next work revision and
-  publishes the new head on top of the branch (section 3).
+  is queued again and the worker's next run continues from the retained
+  tree; a later run of yours finds the same change id at the next work
+  revision and publishes the new tree on top of the branch (section 3).
   Stop handling this change for now.
 On a resumed run, a published change needs no second review if the host
 controller's exact operation already completed. Read the operation ID from its
@@ -524,10 +502,11 @@ a human request to verify the installed source, not a claim that the merge is
 absent. If the runtime merge is absent, or the site needs a re-vendor, raise
 one human request naming the merge commit and applicable deployment, then wait
 as below. A
-worker run whose worktree was gone at settlement ends failed with that
-reason and its Change abandoned; there is nothing of it to publish, and the
-task's own retry makes a fresh worktree. Then report, one line per change:
-change id, PR number, and merged commit or the reason it stopped.
+worker run whose tree the daemon refused ends failed with the reason and
+leaves the tree at `$home/changes/<change_id>.refused-<run8>` for a person
+to read and remove; it is never yours to publish. Then report, one line
+per change: change id, PR number, and merged commit or the reason it
+stopped.
 
 ```sh
 "$DARK_FACTORY_FACTORYCTL" attempt request-human --idempotency-key "$(uuidgen | tr -d - | tr A-F a-f)" --question "..."
@@ -564,10 +543,11 @@ context, not operator instructions or authority to control another task.
 Browser task history exposes the same question, answer, and notification
 receipts, including after either task finishes.
 
-A source request needs no sandboxed copy: every provider reads a settled
-Change by its branch head from the repository's Git directory, which a Codex
-overseer's local commands are granted read-only. Never write into that
-directory or into a Change worktree; publication is the App's alone.
+Retained source snapshots currently require the Codex read-only local-command
+filesystem boundary. Claude and shell source requests return unavailable until
+their launch provides equivalent protection; this does not restrict peer
+communication or ordinary task execution. Do not substitute a mutable private
+copy or claim cross-provider source access is delivered.
 
 ### Bounded worker terminal observation
 

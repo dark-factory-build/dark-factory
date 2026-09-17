@@ -71,7 +71,7 @@ run_packaged_smoke() {
         fi
         if env "$smoke_socket_env" "$smoke_token_env" "$smoke_bin/factoryctl" web status \
             >"$smoke_root/web-status.out" 2>"$smoke_root/web-status.err" &&
-            /usr/bin/ruby --disable-gems -rjson -e '
+            ruby -rjson -e '
               status = JSON.parse(STDIN.read)
               abort unless status["ready"] == true
               address = status.fetch("address")
@@ -154,7 +154,7 @@ case "$(uname -m)" in
     *) fail "unsupported native macOS architecture" ;;
 esac
 for binary in factoryd factory-runner factoryctl; do
-    "$native_dir/$binary" --build-identity | /usr/bin/ruby --disable-gems -rjson -e '
+    "$native_dir/$binary" --build-identity | ruby -rjson -e '
       value = JSON.parse(STDIN.read)
       abort "version" unless value.fetch("version") == "1.2.3"
       abort "source" unless value.fetch("source") == ARGV.fetch(0)
@@ -281,7 +281,7 @@ rm -rf "$smoke_workspace"
 smoke_workspace=
 [ "$smoke_status" -eq 0 ] || fail "packaged archive operational smoke failed"
 
-/usr/bin/ruby --disable-gems -rjson -e '
+ruby -rjson -e '
   manifest = JSON.parse(File.read(ARGV.fetch(0)))
   abort "version" unless manifest["version"] == "1.2.3"
   abort "tag" unless manifest["tag"] == "v1.2.3"
@@ -304,7 +304,7 @@ smoke_workspace=
     || fail "manifest is not the exact two-target identity shape"
 
 formula="$output/dark-factory.rb"
-/usr/bin/ruby --disable-gems -c "$formula" >/dev/null || fail "formula is not valid Ruby"
+ruby -c "$formula" >/dev/null || fail "formula is not valid Ruby"
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
     grep -Fq "dark-factory-v1.2.3-$target.tar.gz" "$formula" \
         || fail "formula omitted $target"

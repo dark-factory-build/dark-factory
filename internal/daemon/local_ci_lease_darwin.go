@@ -11,29 +11,22 @@ import (
 	"syscall"
 )
 
-// resolveGitCommonDir resolves the registered repository's Git directory
-// once on the host: where a Change worktree's refs, index and objects live,
-// and the one directory a provider's local commands are granted for them.
-func resolveGitCommonDir(ctx context.Context, gitExecutable, repository string) (string, error) {
+// Resolve the registered repository once on the host. Workers receive only the
+// owned lease subtree; refs, objects, hooks and configuration remain outside it.
+func prepareLocalCILeaseDirectory(ctx context.Context, gitExecutable, repository string) (string, error) {
 	command := exec.CommandContext(ctx, gitExecutable, "-C", repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	command.Env = []string{"HOME=/var/empty", "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0"}
 	output, err := command.Output()
 	if err != nil {
-		return "", fmt.Errorf("resolve repository Git directory: %w", err)
+		return "", fmt.Errorf("resolve local CI lease repository: %w", err)
 	}
 	common, err := filepath.EvalSymlinks(strings.TrimSpace(string(output)))
 	if err != nil {
-		return "", fmt.Errorf("invalid repository Git directory: %w", err)
+		return "", fmt.Errorf("invalid local CI lease repository: %w", err)
 	}
-	if !filepath.IsAbs(common) || common != filepath.Join(repository, ".git") {
-		return "", errors.New("repository Git directory is not the project's own .git")
+	if !filepath.IsAbs(common) {
+		return "", errors.New("local CI lease repository is not absolute")
 	}
-	return common, nil
-}
-
-// prepareLocalCILeaseDirectory installs the shared CI lease subtree below the
-// repository's Git directory.
-func prepareLocalCILeaseDirectory(common string) (string, error) {
 	if _, err := os.Lstat(filepath.Join(common, ".dark-factory-local-ci")); !errors.Is(err, os.ErrNotExist) {
 		return "", errors.New("drain and clean the legacy local CI lease before enabling the dedicated lease directory")
 	}

@@ -682,13 +682,16 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	}
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
+	digest := changeTreeDigest(t, 2)
 	repository, _ := NewFileIdentity(61, 62)
-	selection, _ := NewChangeSelection(format, commit, repository)
-	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, mustTime(t, 32))
+	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
+	stage, _ := NewFileIdentity(3, 4)
+	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, stage, mustTime(t, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, selection.commit, mustTime(t, 33)); err != nil {
+	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
+	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, availability, mustTime(t, 33)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 34)); err != nil {
@@ -937,14 +940,17 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 	if candidate != nil {
 		format, _ := NewObjectFormat("sha1")
 		commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
+		digest := changeTreeDigest(t, 2)
 		repository, _ := NewFileIdentity(61, 62)
-		selection, _ := NewChangeSelection(format, commit, repository)
-		prepared, err := store.RecordChangePrepared(context.Background(), *candidate, mustRevision(t, 1), selection, mustTime(t, 12))
+		selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
+		stage, _ := NewFileIdentity(3, 4)
+		prepared, err := store.RecordChangePrepared(context.Background(), *candidate, mustRevision(t, 1), selection, stage, mustTime(t, 12))
 		if err != nil {
 			store.Close()
 			t.Fatal(err)
 		}
-		if _, err := store.MarkChangeAvailable(context.Background(), *candidate, prepared.Revision, selection.commit, mustTime(t, 13)); err != nil {
+		availability, _ := NewChangeAvailability(digest, 1, 1, stage)
+		if _, err := store.MarkChangeAvailable(context.Background(), *candidate, prepared.Revision, availability, mustTime(t, 13)); err != nil {
 			store.Close()
 			t.Fatal(err)
 		}
@@ -1009,10 +1015,14 @@ func finalizeTestRun(t *testing.T, store *Store, run Run, at int64) (Run, error)
 		}
 		return result, nil
 	}
-	if change.Selection == nil {
+	if change.Selection == nil || change.TreeIdentity == nil {
 		return Run{}, fmt.Errorf("read worker Change for settlement: %w", ErrCorruptState)
 	}
-	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
+	availability, err := NewChangeAvailability(change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
+	if err != nil {
+		return Run{}, err
+	}
+	settlement, err := NewRetainedChangeSettlement(change.Revision, availability)
 	if err != nil {
 		return Run{}, err
 	}

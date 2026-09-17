@@ -33,11 +33,10 @@ func TestV8PendingQuestionSurvivesOptionsMigration(t *testing.T) {
 	if err := rebuildTable(ctx, connection, expectedSchemaOf(v8SchemaStatements()), "tasks", testTaskColumnsV5, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(v8SchemaStatements()), "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
-		"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
+	if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
+	if _, err := connection.ExecContext(ctx, "DROP TABLE terminal_diagnostics"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {

@@ -795,30 +795,38 @@ func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var legacyColumns int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('changes') WHERE name IN ('entry_count', 'total_bytes', 'tree_digest', 'tree_dev', 'tree_inode', 'file_count')`).Scan(&legacyColumns); err != nil {
+	var entryColumns, legacyColumns int
+	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('changes') WHERE name = 'entry_count'`).Scan(&entryColumns); err != nil {
 		t.Fatal(err)
 	}
-	if legacyColumns != 0 {
-		t.Fatalf("Git-free tree fact columns survived: %d", legacyColumns)
+	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('changes') WHERE name = 'file_count'`).Scan(&legacyColumns); err != nil {
+		t.Fatal(err)
+	}
+	if entryColumns != 1 || legacyColumns != 0 {
+		t.Fatalf("change count columns entry=%d legacy=%d", entryColumns, legacyColumns)
 	}
 	change := changeID(t, 5)
 	if _, err := store.writer.Exec(`INSERT INTO changes(
 	            id, project_id, task_id, task_incarnation_id, phase,
 	            object_format, base_commit, repository_dev, repository_inode, prepared_at_ms,
-	            head_commit, available_at_ms, revision, created_at_ms, updated_at_ms
-	        ) VALUES(?, ?, ?, ?, 'available', 'sha1', ?, 0, 1, 6, ?, 7, 3, 4, 7)`,
-		change.Bytes(), project.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x11}, 20), bytes.Repeat([]byte{0x22}, 20)); err != nil {
-		t.Fatalf("insert available worktree Change: %v", err)
+	            tree_digest, entry_count, total_bytes, tree_dev, tree_inode, available_at_ms,
+	            revision, created_at_ms, updated_at_ms
+	        ) VALUES(?, ?, ?, ?, 'available', 'sha1', ?, 0, 1, 6, ?, ?, ?, 0, 2, 7, 3, 4, 7)`,
+		change.Bytes(), project.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x11}, 20), bytes.Repeat([]byte{0x22}, DigestBytes), MaxChangeTreeEntries, MaxChangeTreeBlobBytes); err != nil {
+		t.Fatalf("insert exact cap: %v", err)
 	}
-	if _, err := store.writer.Exec(`UPDATE changes SET head_commit = ? WHERE id = ?`, bytes.Repeat([]byte{0x33}, 32), change.Bytes()); err == nil {
-		t.Fatal("head of another object format succeeded")
+	if _, err := store.writer.Exec(`UPDATE changes SET entry_count = ? WHERE id = ?`, MaxChangeTreeEntries+1, change.Bytes()); err == nil {
+		t.Fatal("entry cap plus one succeeded")
 	}
-	if _, err := store.writer.Exec(`UPDATE changes SET head_commit = NULL, phase = 'prepared', available_at_ms = NULL WHERE id = ?`, change.Bytes()); err != nil {
-		t.Fatalf("a prepared Change has no head: %v", err)
+	if _, err := store.writer.Exec(`UPDATE changes SET total_bytes = ? WHERE id = ?`, MaxChangeTreeBlobBytes+1, change.Bytes()); err == nil {
+		t.Fatal("aggregate byte cap plus one succeeded")
 	}
-	if _, err := store.writer.Exec(`UPDATE changes SET head_commit = ? WHERE id = ?`, bytes.Repeat([]byte{0x11}, 20), change.Bytes()); err == nil {
-		t.Fatal("head before the worktree exists succeeded")
+	var entries, totalBytes int64
+	if err := store.readers.QueryRow(`SELECT entry_count, total_bytes FROM changes WHERE id = ?`, change.Bytes()).Scan(&entries, &totalBytes); err != nil {
+		t.Fatal(err)
+	}
+	if entries != MaxChangeTreeEntries || totalBytes != MaxChangeTreeBlobBytes {
+		t.Fatalf("failed cap mutations changed commitment: entries=%d bytes=%d", entries, totalBytes)
 	}
 }
 

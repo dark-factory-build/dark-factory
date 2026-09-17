@@ -79,7 +79,7 @@ func TestRegisteredShellWorkerCompletesExactFourReleaseSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Format.Name() != "sha1" || result.Base.Hex() != fixture.base || result.Head != nil {
+	if result.EntryCount != 1 || result.BlobBytes == 0 {
 		t.Fatalf("result=%+v", result)
 	}
 	populationEvent := fixture.release(t, runner.StagePopulation, runner.StagePopulation)
@@ -384,60 +384,53 @@ func TestInitialRuntimeChildValidationPrecedesSelectionEffects(t *testing.T) {
 	}
 }
 
-// Between the worktree being made and the provider being released nothing
-// may move the Change's branch; a commit that appears there is refused
-// before any provider effect.
-func TestFinalRecheckRejectsABranchMovedBeforeTheProvider(t *testing.T) {
+func TestFinalReinspectionRejectsLateGitMetadata(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	fixture.start(t)
 	fixture.release(t, runner.StageSelection, runner.StageSelection)
 	fixture.release(t, runner.StagePreparation, runner.StagePreparation)
 	fixture.release(t, runner.StagePopulation, runner.StagePopulation)
 	published := filepath.Join(fixture.changeParent, fixture.finalName)
-	if err := os.WriteFile(filepath.Join(published, "early.txt"), []byte("early\n"), 0o644); err != nil {
+	if err := os.Mkdir(filepath.Join(published, ".GiT"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, fixture.git, "-C", published, "add", "early.txt")
-	runGit(t, fixture.git, "-C", published, "commit", "-q", "-m", "moved before provider")
 	if err := fixture.controller.Release(runner.StageProvider); err != nil {
 		t.Fatal(err)
 	}
 	record := fixture.finish(t, false)
-	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "Change worktree moved before the provider ran") {
-		t.Fatalf("missing exact moved-branch rejection: %q", diagnostic)
+	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "invalid Change input: .git path components are forbidden") {
+		t.Fatalf("missing exact late-metadata rejection: %q", diagnostic)
 	}
 	if code, ok := record.Result().Code(); ok && code == 0 {
-		t.Fatalf("moved branch reached provider: %+v", record.Result())
+		t.Fatalf("late forbidden metadata reached provider: %+v", record.Result())
 	}
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("provider witness exists after failed final recheck")
+		t.Fatal("provider witness exists after failed final scan")
 	}
 }
 
-// A worktree that stops being one of the project repository (its gitfile
-// replaced by a repository of its own) is not the Change and is refused.
-func TestFinalRecheckRejectsAReplacedGitfile(t *testing.T) {
+func TestFinalReinspectionRejectsSameSizeContentMutation(t *testing.T) {
 	fixture := newWorkerFixture(t)
 	fixture.start(t)
 	fixture.release(t, runner.StageSelection, runner.StageSelection)
 	fixture.release(t, runner.StagePreparation, runner.StagePreparation)
 	fixture.release(t, runner.StagePopulation, runner.StagePopulation)
-	published := filepath.Join(fixture.changeParent, fixture.finalName)
-	if err := os.Remove(filepath.Join(published, ".git")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(published, ".git"), 0o700); err != nil {
+	payload := filepath.Join(fixture.changeParent, fixture.finalName, "payload.txt")
+	if err := os.WriteFile(payload, []byte("wrong bytes!\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.controller.Release(runner.StageProvider); err != nil {
 		t.Fatal(err)
 	}
 	record := fixture.finish(t, false)
+	if diagnostic := fixture.output(); !strings.Contains(diagnostic, "invalid Change input: published Change facts changed") {
+		t.Fatalf("missing exact content rejection: %q", diagnostic)
+	}
 	if code, ok := record.Result().Code(); ok && code == 0 {
-		t.Fatalf("replaced gitfile reached provider: %+v", record.Result())
+		t.Fatalf("mutated content reached provider: %+v", record.Result())
 	}
 	if _, err := os.Stat(fixture.witness); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("provider witness exists after failed final recheck")
+		t.Fatal("provider witness exists after changed content")
 	}
 }
 
@@ -477,7 +470,6 @@ func TestFinalRuntimeRecheckRejectsFixedChildReplacement(t *testing.T) {
 }
 
 type workerFixture struct {
-	base, git                                     string
 	root, repositoryRoot, changeParent, finalName string
 	witness, cwdWitness, envWitness               string
 	factoryctl, toolPath                          string
@@ -539,7 +531,6 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	}
 	runGit(t, git, "-C", repository, "add", "payload.txt")
 	runGit(t, git, "-C", repository, "commit", "-m", "base")
-	base := strings.TrimSpace(runGitOutput(t, git, "-C", repository, "rev-parse", "HEAD"))
 	stat, err := os.Stat(repository)
 	if err != nil {
 		t.Fatal(err)
@@ -591,9 +582,7 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 	// The exact program arrives on the deliberate fd 11 capability. The PTY is
 	// untouched until an authenticated terminal command writes interactive data.
-	// The provider works in a linked worktree of the project on the Change's
-	// own branch, and can commit there with the factory's identity.
-	program := []byte(fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ntest -e /dev/fd/11\ntest ! -e \"$TMPDIR/.provider-task\"\ntest -f .git\n[ \"$(git symbolic-ref --short HEAD)\" = %s ] || exit 81\ntest \"$(git rev-parse HEAD)\" = %s || exit 82\nprintf work > work.txt\ngit add work.txt\ngit commit -q -m work || exit 83\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(change.BranchName("published")), quote(base), quote(witness), quote(cwdWitness), quote(envWitness)))
+	program := []byte(fmt.Sprintf("set -eu\nfor n in 3 9; do test ! -e /dev/fd/$n; done\ntest -e /dev/fd/10\ntest -e /dev/fd/11\ntest ! -e \"$TMPDIR/.provider-task\"\ngit rev-parse --is-inside-work-tree >/dev/null 2>&1 && exit 81 || :\nprintf x > %s\npwd > %s\nenv | sort > %s\nexit\n", quote(witness), quote(cwdWitness), quote(envWitness)))
 	if input != nil {
 		program = input(witness, cwdWitness, envWitness)
 	}
@@ -601,7 +590,7 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := changeworker.Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, AgentID: "agent-fixture", TaskIncarnationID: "incarnation-fixture", RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, AccountHome: filepath.Join(root, "account"), RepositoryRoot: repository, RepositoryIdentity: repositoryID, GitCommonDir: filepath.Join(repository, ".git"), Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", ProviderTask: providerTask}
+	config := changeworker.Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, AccountHome: filepath.Join(root, "account"), RepositoryRoot: repository, RepositoryIdentity: repositoryID, Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", StagingName: ".stage", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", ProviderTask: providerTask}
 	workerConfig, err := changeworker.EncodeConfig(config)
 	if err != nil {
 		t.Fatal(err)
@@ -646,7 +635,7 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &workerFixture{root: root, repositoryRoot: repository, base: base, git: git, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, toolPath: toolPath, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, home: operationalHome, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
+	f := &workerFixture{root: root, repositoryRoot: repository, changeParent: changeParent, finalName: "published", witness: witness, cwdWitness: cwdWitness, envWitness: envWitness, factoryctl: factoryctl, toolPath: toolPath, repositoryIdentity: repositoryID, runtime: runtimeValue, parent: parent, home: operationalHome, dir: dir, lifetime: lifetime, lease: lease, controller: controller, child: child, diagnostic: diagnostic}
 	t.Cleanup(f.close)
 	return f
 }
@@ -800,17 +789,6 @@ func nativeGit(t testing.TB) string {
 	}
 	return change.TrustedGitExecutable
 }
-func runGitOutput(t testing.TB, git string, args ...string) string {
-	t.Helper()
-	command := exec.Command(git, args...)
-	command.Env = []string{"HOME=/var/empty", "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.invalid", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.invalid"}
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, output)
-	}
-	return string(output)
-}
-
 func runGit(t testing.TB, git string, args ...string) {
 	t.Helper()
 	command := exec.Command(git, args...)

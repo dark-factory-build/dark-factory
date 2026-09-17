@@ -26,10 +26,10 @@ func TestNullableDurableBlobsPreservePresenceAndFailClosed(t *testing.T) {
 			},
 		},
 		{
-			name: "Change head commit",
+			name: "Change tree digest",
 			corrupt: func(t *testing.T, store *Store) {
 				change := seedReservedChange(t, store)
-				corruptSQL(t, store, `UPDATE changes SET head_commit = zeroblob(0) WHERE id = ?`, change.ID.Bytes())
+				corruptSQL(t, store, `UPDATE changes SET tree_digest = zeroblob(0) WHERE id = ?`, change.ID.Bytes())
 			},
 			directRead: func(t *testing.T, store *Store) error {
 				_, _, err := store.Change(context.Background(), changeID(t, 35))
@@ -113,6 +113,9 @@ func TestNullableBlobRejectsWrongSQLiteStorageClass(t *testing.T) {
 
 func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 	selection := testChangeSelection(t)
+	stage, _ := NewFileIdentity(70, 80)
+	digest, _ := TreeDigestFromBytes(bytes.Repeat([]byte{0x81}, DigestBytes))
+	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
 	pathIdentity, _ := NewPathResourceIdentity(90, 100)
 	processIdentity := processIdentity(t, 101)
 	failure, _ := NewFailureProposal(FailureInternal, "failure")
@@ -145,11 +148,11 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			return err
 		}},
 		{name: "RecordChangePrepared", invoke: func(store *Store) error {
-			_, err := store.RecordChangePrepared(context.Background(), changeID(t, 225), mustRevision(t, 1), selection, at)
+			_, err := store.RecordChangePrepared(context.Background(), changeID(t, 225), mustRevision(t, 1), selection, stage, at)
 			return err
 		}},
 		{name: "MarkChangeAvailable", invoke: func(store *Store) error {
-			_, err := store.MarkChangeAvailable(context.Background(), changeID(t, 225), mustRevision(t, 1), selection.commit, at)
+			_, err := store.MarkChangeAvailable(context.Background(), changeID(t, 225), mustRevision(t, 1), availability, at)
 			return err
 		}},
 		{name: "ActivateResource", invoke: func(store *Store) error {
@@ -335,13 +338,15 @@ func TestChangePreparedAndReplayRefusePreexistingOwnershipCorruption(t *testing.
 			}
 			selection := testChangeSelection(t)
 			if replay {
-				if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, mustTime(t, 11)); err != nil {
+				tree, _ := NewFileIdentity(70, 80)
+				if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, tree, mustTime(t, 11)); err != nil {
 					t.Fatal(err)
 				}
 			}
 			corruptSQL(t, store, `UPDATE resources SET path = '/' WHERE kind = 'runtime_root'`)
 			before := captureWriteFootprint(t, store)
-			if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, mustTime(t, 20)); !errors.Is(err, ErrCorruptState) {
+			tree, _ := NewFileIdentity(70, 80)
+			if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, tree, mustTime(t, 20)); !errors.Is(err, ErrCorruptState) {
 				t.Fatalf("RecordChangePrepared = %v", err)
 			}
 			if after := captureWriteFootprint(t, store); after != before {
@@ -392,7 +397,7 @@ func testChangeSelection(t *testing.T) ChangeSelection {
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{0x71}, format.oidLength()))
 	repository, _ := NewFileIdentity(61, 62)
-	selection, err := NewChangeSelection(format, commit, repository)
+	selection, err := NewChangeSelection(format, commit, changeTreeDigest(t, 0x81), 1, 1, repository)
 	if err != nil {
 		t.Fatal(err)
 	}

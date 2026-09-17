@@ -100,31 +100,14 @@ func TestCheckpointConversionsBindExactStoreFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if durable.ObjectFormat().String() != result.Format.Name() ||
-		string(durable.Commit().Bytes()) != string(result.Base.Bytes()) ||
+		string(durable.Commit().Bytes()) != string(result.Base.Bytes()) || string(durable.Commitment().Bytes()) != string(result.Commitment.Bytes()) ||
+		durable.EntryCount() != uint32(result.EntryCount) || durable.TotalBytes() != result.BlobBytes ||
 		durable.RepositoryIdentity().Device() != int64(repository.Device()) || durable.RepositoryIdentity().Inode() != int64(repository.Inode()) {
 		t.Fatalf("selection facts were rebound: %+v", durable)
 	}
-	format, base, err := changeCommit(durable.Commit())
-	if err != nil || format.Name() != result.Format.Name() || base.Hex() != result.Base.Hex() {
-		t.Fatalf("commit reversal = %s %s, %v", format.Name(), base.Hex(), err)
-	}
-	commit, err := kernelCommit(base)
-	if err != nil || string(commit.Bytes()) != string(result.Base.Bytes()) || commit.Format() != durable.ObjectFormat() {
-		t.Fatalf("kernel commit = %+v, %v", commit, err)
-	}
-	// A retained checkpoint carries the head only once the Change has one.
-	available := kernel.Change{Phase: kernel.ChangeAvailable, Selection: &durable}
-	checkpoint, gotRepository, err := retainedWorkerCheckpoint(available)
-	if err != nil || checkpoint.Head != nil || checkpoint.Base.Hex() != result.Base.Hex() || !gotRepository.Equal(repository) {
-		t.Fatalf("Git-free retained checkpoint = %+v %+v, %v", checkpoint, gotRepository, err)
-	}
-	available.HeadCommit = &commit
-	checkpoint, _, err = retainedWorkerCheckpoint(available)
-	if err != nil || checkpoint.Head == nil || checkpoint.Head.Hex() != result.Base.Hex() {
-		t.Fatalf("worktree retained checkpoint = %+v, %v", checkpoint, err)
-	}
-	if _, _, err := retainedWorkerCheckpoint(kernel.Change{Phase: kernel.ChangeRetained, Selection: &durable}); !errors.Is(err, errInvalidContract) {
-		t.Fatalf("settled Change checkpoint = %v", err)
+	format, base, stage, err := inspectPublishedArguments(durable, mustKernelFileIdentity(t, 13, 14))
+	if err != nil || format.Name() != result.Format.Name() || base.Hex() != result.Base.Hex() || stage.Device() != 13 || stage.Inode() != 14 {
+		t.Fatalf("InspectPublished arguments = %s %s %+v, %v", format.Name(), base.Hex(), stage, err)
 	}
 }
 
@@ -138,16 +121,29 @@ func workerResultFixture(t testing.TB) (changeworker.Result, change.RepositoryId
 	if err != nil {
 		t.Fatal(err)
 	}
+	commitment, err := change.ParseCommitment(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
 	repository, err := change.NewRepositoryIdentity(11, 12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return changeworker.Result{Format: format, Base: base}, repository
+	return changeworker.Result{Format: format, Base: base, Commitment: commitment, EntryCount: 7, BlobBytes: 99, Tree: mustStageIdentity(t, 21, 22)}, repository
 }
 
 func mustKernelFileIdentity(t testing.TB, device, inode int64) kernel.FileIdentity {
 	t.Helper()
 	identity, err := kernel.NewFileIdentity(device, inode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity
+}
+
+func mustStageIdentity(t testing.TB, device, inode uint64) change.StageIdentity {
+	t.Helper()
+	identity, err := change.NewStageIdentity(device, inode)
 	if err != nil {
 		t.Fatal(err)
 	}
