@@ -4426,6 +4426,8 @@ impl Authority {
                 message: request.marked_message()?,
                 tree: &tree,
                 parents: [&request.expected_head_sha],
+                author: CommitIdentity::NEUTRAL,
+                committer: CommitIdentity::NEUTRAL,
             }),
         )
         .await?;
@@ -6115,12 +6117,29 @@ struct GitTreeEntry {
     sha: String,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Serialize)]
+struct CommitIdentity {
+    name: &'static str,
+    email: &'static str,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl CommitIdentity {
+    const NEUTRAL: Self = Self {
+        name: "Automation",
+        email: "noreply@github.com",
+    };
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize)]
 struct CommitRequest<'a> {
     message: String,
     tree: &'a str,
     parents: [&'a str; 1],
+    author: CommitIdentity,
+    committer: CommitIdentity,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -8987,6 +9006,27 @@ mod tests {
         different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
         assert_ne!(trailer, different_tree.trailer().unwrap());
         assert!(forged("Two\nlines").validate().is_err());
+    }
+
+    #[test]
+    fn published_commit_request_sets_neutral_author_and_committer() {
+        let request = CommitRequest {
+            message: "message".into(),
+            tree: "a",
+            parents: ["b"],
+            author: CommitIdentity::NEUTRAL,
+            committer: CommitIdentity::NEUTRAL,
+        };
+        let json = serde_json::to_value(request).unwrap();
+        for field in ["author", "committer"] {
+            assert_eq!(
+                json.get(field),
+                Some(&serde_json::json!({
+                    "name": "Automation",
+                    "email": "noreply@github.com"
+                }))
+            );
+        }
     }
 
     #[test]
