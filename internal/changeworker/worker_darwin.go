@@ -108,9 +108,13 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	// The Change worktree's commits live in the project's Git directory: a
-	// worker writes it, an orchestrator reads settled Changes from it.
-	runtimePaths, err = runtimePaths.WithGitCommonDirectory(config.GitCommonDir, config.Role == kernel.RoleWorker)
+	// Workers write only their private administration. Overseers retain
+	// read access to the project's metadata, including settled private heads.
+	gitDirectory := config.GitCommonDir
+	if config.Role == kernel.RoleWorker {
+		gitDirectory = change.GitDirectoryForChange(config.RepositoryRoot, publishedPath)
+	}
+	runtimePaths, err = runtimePaths.WithGitCommonDirectory(gitDirectory, config.Role == kernel.RoleWorker)
 	if err != nil {
 		_ = cwd.Close()
 		return err
@@ -152,6 +156,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 	if err != nil {
 		_ = cwd.Close()
 		return err
+	}
+	if config.Role == kernel.RoleWorker {
+		if err := spec.ProtectSourceWrites(config.RepositoryRoot, config.ChangeParent, gitDirectory, config.LocalCILeaseDir); err != nil {
+			_ = cwd.Close()
+			return err
+		}
 	}
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
@@ -228,7 +238,7 @@ func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, con
 	if err != nil {
 		return nil, err
 	}
-	if facts.Branch() != expected.Branch() || !facts.Head().Equal(expected.Head()) {
+	if facts.Branch() != expected.Branch() || !facts.Head().Equal(expected.Head()) || facts.GitDirectory() != change.GitDirectoryForChange(config.RepositoryRoot, path) {
 		return nil, errors.Join(ErrWorker, errors.New("Change worktree moved before the provider ran"))
 	}
 	cwd, err := openWorktreeDirectory(path)
@@ -391,7 +401,7 @@ func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, conf
 		return change.WorktreeFacts{}, err
 	}
 	path := filepath.Join(config.ChangeParent, config.FinalName)
-	facts, err := change.AddWorktree(ctx, selection, path, change.BranchName(config.FinalName))
+	facts, err := change.AddPrivateWorktree(ctx, selection, path, change.BranchName(config.FinalName))
 	if err != nil {
 		return change.WorktreeFacts{}, err
 	}
@@ -448,6 +458,12 @@ func openRetainedChange(ctx context.Context, control *runner.WorkerControl, conf
 			}
 		}
 	}
+	if err != nil {
+		return change.WorktreeFacts{}, errors.Join(err, ErrWorker)
+	}
+	// Only a quiescent retained Change reaches population. Existing running
+	// workers keep their original administration through settlement.
+	facts, err = change.IsolateWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path, branch, facts.Head())
 	if err != nil {
 		return change.WorktreeFacts{}, errors.Join(err, ErrWorker)
 	}

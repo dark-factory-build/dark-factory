@@ -297,11 +297,14 @@ makes that path an ordinary linked Git worktree of the project repository,
 checked out at one exact selected commit on the Change's own branch,
 `factory/<first 12 hex of the Change ID>`, before the provider can execute.
 The provider works in that worktree: it edits, tests and commits there with
-the factory's fixed Git identity, and its local commands are granted the
-repository's Git directory for that (written by a worker, read by an
-orchestrator) and nothing else of the repository. The provider environment
-carries no Git credential helper, SSH command or prompt; a worktree isolates
-changes, it is not a security sandbox. An orchestrator run binds no Change: it
+the factory's fixed Git identity. Each new worker has self-contained private
+Git administration under `.git/dark-factory-changes/<Change ID>/.git`, using
+native bare Git initialization, an exact-base fetch, and a linked worktree.
+The macOS launch fence allows writes to its Change and private administration
+but denies project and sibling writes, except the shared CI lease. The same
+fence wraps both providers. Orchestrators read project Git administration.
+The provider environment carries no Git credential helper, SSH command or
+prompt. An orchestrator run binds no Change: it
 works in its private runtime home, and publication of a worker's retained
 Change is the Maintainer App's, reached through the one MCP server an
 orchestrator's session is given, from the Change's branch and head. Factoryd
@@ -326,6 +329,16 @@ without moving the checkout; a fetch failure cannot reuse cached source. Local
 revision policies and retained Changes do not fetch. Trusted Git resolves the
 revision once, and `git worktree add` checks out that exact commit. A
 concurrent attempt in the same repository contends only for Git's own locks.
+
+A retained legacy worktree is converted only during a later quiescent
+population. A native local bare clone without hardlinks retains all objects,
+including dangling operation-state objects; copied
+per-worktree administration preserves the index, split-index and operation
+state. A durable preparation precedes the atomic Gitfile replacement. Original
+canonical refs and registration remain intact, while new commits stay private.
+Settlement and source receipts report the actual Git directory; publication
+needs no canonical-ref import. Unsupported or conflicting administration fails
+closed without resetting source files.
 
 Changes made before managed worktrees are Git-free copies of their base with
 the worker's edits in them. They stay readable, reviewable and resumable: the

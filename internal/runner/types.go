@@ -130,6 +130,8 @@ func (commitment ExecutableCommitment) Path() string {
 
 type LaunchSpec struct {
 	commit           launchCommitment
+	sandbox          *ExecutableCommitment
+	sandboxProfile   string
 	stdin            []byte
 	stdout           *os.File
 	stderr           *os.File

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -80,6 +81,49 @@ func PrepareCommittedExecSpec(executable ExecutableCommitment, argv, environment
 		Argv:       append([]string(nil), argv...),
 		Env:        append([]string(nil), environment...),
 	}}, nil
+}
+
+// ProtectSourceWrites applies the same inherited macOS boundary to every
+// provider. Git arguments and environment cannot grant writes to another
+// Change or the project, whose only writable exception is the shared CI lease.
+// The Change must already have private Git administration before this is used.
+func (spec *LaunchSpec) ProtectSourceWrites(repository, changes, gitDirectory, lease string) error {
+	if spec == nil || spec.sandbox != nil {
+		return ErrState
+	}
+	for _, path := range []string{repository, changes} {
+		resolved, err := canonical(path)
+		if err != nil || resolved != path || path == "/" || path == spec.commit.Cwd.Path {
+			return ErrIdentity
+		}
+	}
+	if filepath.Dir(spec.commit.Cwd.Path) != changes || lease != "" && lease != filepath.Join(repository, ".git", "dark-factory-local-ci") {
+		return ErrIdentity
+	}
+	if gitDirectory != filepath.Join(repository, ".git", "dark-factory-changes", filepath.Base(spec.commit.Cwd.Path), ".git") {
+		return ErrIdentity
+	}
+	if resolved, err := canonical(gitDirectory); err != nil || resolved != gitDirectory {
+		return ErrIdentity
+	}
+	profile := "(version 1)(allow default)"
+	for _, root := range []string{repository, changes} {
+		profile += "(deny file-write* (require-all (subpath " + strconv.Quote(root) + ") (require-not (subpath " + strconv.Quote(spec.commit.Cwd.Path) + ")) (require-not (subpath " + strconv.Quote(gitDirectory) + "))"
+		if lease != "" {
+			profile += " (require-not (subpath " + strconv.Quote(lease) + "))"
+		}
+		profile += "))"
+	}
+	sandbox, err := CommitExecutableLocator("/usr/bin/sandbox-exec")
+	if err != nil {
+		return err
+	}
+	argv := append([]string{sandbox.Path(), "-p", profile}, spec.commit.Argv...)
+	if err := validateArgv(argv, sandbox.Path()); err != nil {
+		return err
+	}
+	spec.sandbox, spec.sandboxProfile = &sandbox, profile
+	return nil
 }
 
 func validateArgv(argv []string, executable string) error {

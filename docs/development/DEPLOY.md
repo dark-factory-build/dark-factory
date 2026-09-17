@@ -57,6 +57,13 @@ Preparation does not back up, migrate a browser profile, or alter the service.
 
 ## Order matters
 
+**Worker Git write isolation.** Its initial installation requires every old
+attempt to be terminal, even if its runner has a takeover endpoint. Pause
+dispatch and drain fully: handover preserves the old provider's enforcement
+profile. Retained source is migrated only on its next quiescent population,
+without changing active workers or resetting edits. Verify the installed build
+and fresh Codex and Claude source-write denial before claiming enforcement.
+
 **Pairing capability mask.** Both ends accept any subset of the five known
 capability bits with `observe` set, and reject any other bit as malformed:
 `knownCapabilities` in `internal/browserprotocol/wire.go` and `capabilities()`

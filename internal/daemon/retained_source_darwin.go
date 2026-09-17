@@ -79,7 +79,7 @@ func (daemon *Daemon) attemptSourceHandoff(ctx context.Context, handoff kernel.R
 	projected.HeadCommit = head.Hex()
 	projected.Branch = branch
 	projected.SourcePath = path
-	projected.GitDirectory = filepath.Join(project.Root, ".git")
+	projected.GitDirectory = facts.GitDirectory()
 	projected.Dirty = facts.Dirty()
 	return projected, nil
 }

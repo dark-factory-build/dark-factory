@@ -179,12 +179,18 @@ selecting lower work.
 admission reserves one daemon-derived path for one task incarnation, and a
 registered wrapper makes it a linked Git worktree of the project repository
 at one exact committed revision on the Change's own branch before the
-provider can execute. The provider's local commands are granted that worktree
-and the repository's Git directory (writable for a worker, read-only for an
-orchestrator) so they can commit, read and diff; they receive no Git
+provider can execute. New workers have a self-contained private Git directory
+under the project's `.git/dark-factory-changes/<Change ID>/.git`; the project
+refs, objects, indexes and sibling Change directories are not writable by
+their processes. An inherited macOS `sandbox-exec` profile enforces this for
+both Codex and Claude, independent of cwd, Git flags, environment overrides,
+or direct filesystem writes. Only the worker's Change, its private Git admin,
+and the shared local-CI lease are writable within those protected trees.
+An orchestrator retains read-only project Git access. Providers receive no Git
 credential helper, SSH command, prompt or `gh` configuration, so nothing in
-the provider can push or publish. A worktree isolates changes; it is not a
-security sandbox. Factoryd exposes no repository status, commit, push,
+the provider can push or publish. This is a source-write boundary, not a
+general isolation claim for same-user credentials, processes or sockets.
+Factoryd exposes no repository status, commit, push,
 pull-request, or publication operation of its own.
 
 A retained Change is identified by its branch and the head the daemon read at
@@ -192,6 +198,12 @@ settlement; a reopen or source request that finds the branch elsewhere is
 refused rather than described by a stale receipt. Factory worktrees are
 removed only by an operator after the merge and disuse proof in the
 development workflow; never by the daemon.
+
+Legacy worktrees remain readable and settle in their original layout. Only
+a terminal Change's next population converts its administration, preserving
+source files and index bytes and retaining the canonical refs/registration.
+The first enforcement deployment must drain old worker attempts: adopting an
+old runner does not retrofit a sandbox onto its live provider.
 
 ## Build and storage boundary
 

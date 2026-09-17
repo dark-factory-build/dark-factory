@@ -180,7 +180,7 @@ Then explicitly run `factoryctl attempt source --task TASK_ID`; its response
 must contain exactly one usable receipt naming the Change ID, base commit,
 `head_commit`, `branch` (`factory/<first 12 hex of change_id>`), target task
 ID, task work revision, current retained Change revision, the worktree as
-`source_path`, the repository's Git directory as `git_directory`, and `dirty`.
+`source_path`, the Change's actual Git directory as `git_directory`, and `dirty`.
 Match every identity value to the requested task and status. The work is the
 branch head: read it with `git --git-dir="$git_directory"` and the commit
 named by `head_commit`, never by constructing a `$home/changes/...` path,
