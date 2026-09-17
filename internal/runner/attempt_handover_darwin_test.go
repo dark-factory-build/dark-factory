@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // This uses an actual long-running PTY child. The endpoint's grant check is
@@ -120,7 +122,20 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 		t.Fatal(err)
 	}
 	waitFile(t, after)
-	if err := finalOwner.Terminate(); err != nil {
+	// Queue a replacement before the provider exits. The owner must consume
+	// it from the handover channel on the child-exit path; there is no PTY
+	// read or idle tick left to trigger the usual handover step.
+	exitRunner, exitDaemon, err := newControlPair("exit-runner", "exit-daemon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitOwner, err := AdoptHandoverControl(exitDaemon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exitOwner.Close()
+	replacements <- exitRunner
+	if err := unix.Kill(-identity.PGID, unix.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -131,7 +146,11 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 	case <-time.After(6 * time.Second):
 		t.Fatal("reattached owner did not converge")
 	}
-	if transport.Current != finalRunner {
+	readTakeoverAccept(t, exitDaemon)
+	if event, err := exitOwner.Next(4 * time.Second); err != nil || event.Kind != AttemptHandoverAttached {
+		t.Fatalf("exit-path reattach=%+v err=%v", event, err)
+	}
+	if transport.Current != exitRunner {
 		t.Fatal("final result authority did not follow the replacement connection")
 	}
 	// Finalization must notify the adopted daemon. The original daemon socket
@@ -143,7 +162,7 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 	}
 	deadline := time.Now().Add(4 * time.Second)
 	for {
-		result, err := finalOwner.Next(time.Until(deadline))
+		result, err := exitOwner.Next(time.Until(deadline))
 		if err != nil {
 			t.Fatalf("adopted result notification err=%v", err)
 		}

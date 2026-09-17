@@ -320,6 +320,12 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.rejectHumanReply(); err != nil {
 				return o.daemonOpen, err
 			}
+			// A takeover may already be authenticated and queued while the
+			// provider exits. Consume it before finalization; there may be no
+			// later PTY read or idle tick on which to fence and attach it.
+			if stopped, err := o.handoverStep(); stopped || err != nil {
+				return o.daemonOpen, err
+			}
 			// First converge the exact process group and perform the sole Wait;
 			// only then is PTY tail output drained. PTY EOF is emitted exclusively
 			// from an actual EOF/EIO read, never from child exit.
@@ -327,6 +333,9 @@ func (o *terminalOwner) serve() (bool, error) {
 				return o.daemonOpen, err
 			}
 			if err := o.drainPTY(); err != nil {
+				return o.daemonOpen, err
+			}
+			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
 			}
 			return o.daemonOpen, nil
