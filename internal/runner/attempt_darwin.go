@@ -191,6 +191,19 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 		}
 		return AttemptEvent{}, err
 	}
+	if frame.Kind == string(AttemptHandoverQuiesced) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
+		floor, head := frame.Floor, frame.Head
+		if err := c.spend(); err != nil {
+			return AttemptEvent{}, err
+		}
+		return AttemptEvent{Kind: AttemptHandoverQuiesced, Floor: floor, Head: head}, nil
+	}
+	if frame.Kind == string(AttemptHandoverAttached) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
+		return AttemptEvent{Kind: AttemptHandoverAttached, Floor: frame.Floor, Head: frame.Head}, nil
+	}
+	if frame.Kind == string(AttemptHandoverRejected) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
+		return AttemptEvent{Kind: AttemptHandoverRejected, Floor: frame.Floor, Head: frame.Head}, nil
+	}
 	if frame.Version != 1 {
 		return AttemptEvent{}, ErrIdentity
 	}
@@ -349,6 +362,30 @@ func (c *AttemptController) SendTerminalCommand(command TerminalCommand) error {
 		return err
 	}
 	return c.writeFrame(terminalCommandFrame(command), maxFrameBytes)
+}
+
+// SendHandoverQuiesce asks a protocol-2 runner to finish all preceding control
+// commands and close this owner capability. The caller must consume the
+// HandoverQuiesced event before granting replacement control. Protocol-1
+// runners reject the frame and must be drained before switching.
+func (c *AttemptController) SendHandoverQuiesce() error {
+	if c == nil || c.file == nil || c.state != controllerProviderReleased || !c.terminalReady {
+		return ErrState
+	}
+	return c.writeFrame(attemptFrame{Version: 2, Kind: "handover-quiesce"}, maxFrameBytes)
+}
+
+// AdoptHandoverControl wraps a duplex stream already authenticated and fenced
+// by the protocol-2 takeover endpoint. This method does not authenticate the
+// stream; callers must never pass an unverified connection.
+func AdoptHandoverControl(file *os.File) (*AttemptController, error) {
+	if file == nil {
+		return nil, ErrState
+	}
+	if _, err := commitControl(file); err != nil {
+		return nil, err
+	}
+	return &AttemptController{file: file, state: controllerProviderReleased, terminalReady: true}, nil
 }
 
 func (c *AttemptController) Terminate() error {
