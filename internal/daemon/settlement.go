@@ -138,16 +138,6 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 		if facts.Dirty() {
 			return kernel.NewRefusedChangeSettlement(changeState.Revision, fmt.Sprintf("%s: commit it or clean it up before reporting success", errDirtyWorkerChange))
 		}
-		if daemon.beforeSuccessSettlement != nil {
-			daemon.beforeSuccessSettlement()
-		}
-		facts, err = change.InspectWorktree(ctx, *git, project.Root, repository, path)
-		if err != nil {
-			return kernel.ChangeSettlement{}, errors.Join(fmt.Errorf("%w: Change worktree did not verify after success snapshot", kernel.ErrConflict), err)
-		}
-		if facts.Dirty() {
-			return kernel.NewRefusedChangeSettlement(changeState.Revision, fmt.Sprintf("%s: commit it or clean it up before reporting success", errDirtyWorkerChange))
-		}
 	}
 	head, err := kernelCommit(facts.Head())
 	if err != nil {
