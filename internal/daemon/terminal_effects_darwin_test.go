@@ -43,6 +43,8 @@ type terminalEffectWireFrame struct {
 	Submit       bool                 `json:"submit,omitempty"`
 	Status       string               `json:"status,omitempty"`
 	Payload      []byte               `json:"payload,omitempty"`
+	ContextStart uint64               `json:"context_start,omitempty"`
+	Context      []byte               `json:"context,omitempty"`
 	FileIdentity *runner.FileIdentity `json:"file_identity,omitempty"`
 	Digest       string               `json:"digest,omitempty"`
 }
