@@ -306,6 +306,58 @@ def record_live_tip(journal, value):
     journal["live_tip"] = {"sha": value["sha"], "healthy": value["healthy"], "observed_at": int(time.time())}
 
 
+def reconcile(config, number, expected):
+    if not SHA.fullmatch(expected):
+        raise ReleaseError("observed SHA must be a full commit SHA")
+    journal_path = Path(config["journal"])
+    lock_path = Path(str(journal_path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ReleaseError("another release invocation is running") from exc
+        fingerprint = config_fingerprint(config)
+        journal = load(journal_path)
+        if journal.get("unresolved_deployment") is not None:
+            raise ReleaseError("release journal has an unresolved deployment")
+        if any(isinstance(entry, dict) and entry.get("state") == "running"
+               for entry in journal["releases"].values()):
+            raise ReleaseError("release journal has an unresolved running deployment")
+        entry = journal["releases"].get(str(number))
+        if entry and entry.get("config_fingerprint") != fingerprint:
+            raise ReleaseError("journal receipt belongs to a different repository or hook configuration")
+        pr, default, reviews, checks = gh_snapshot(config, number)
+        sha = pr.get("mergeCommitSha")
+        merge_gate(pr, default, reviews, checks, config, sha)
+        if sha != expected:
+            raise ReleaseError("observed SHA does not match the merged pull request")
+        if entry and entry.get("sha") != sha:
+            raise ReleaseError("journal has a different SHA for this pull request")
+        review_gate(config, pr["headRefOid"], reviews)
+        value = probe(config, expected)
+        if value.get("sha") != expected or value.get("healthy") is not True:
+            raise ReleaseError("live probe did not prove the expected healthy SHA")
+        prior_tip = journal.get("live_tip")
+        previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
+        if previous is not None and previous == expected:
+            sources, delivery_mode = [], "unchanged"
+        elif previous is None:
+            sources, delivery_mode = [], "baseline_current"
+        else:
+            sources, delivery_mode = range_sources(config, previous, expected)
+        entry = entry or {"pr": number}
+        entry.update({"sha": expected, "state": "verified", "config_fingerprint": fingerprint,
+                      "delivery_from_sha": previous or expected, "delivery_sources": sources,
+                      "delivery_mode": delivery_mode, "verification": value,
+                      "reconciliation": {"mode": "operator_observed", "observed_sha": expected},
+                      "verified_at": int(time.time()), "updated_at": int(time.time())})
+        journal["releases"][str(number)] = entry
+        record_live_tip(journal, value)
+        atomic_json(journal_path, journal)
+        return entry
+
+
 def once(config, number, retry=False):
     journal_path = Path(config["journal"])
     lock_path = Path(str(journal_path) + ".lock")
@@ -411,6 +463,8 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--retry", action="store_true")
+    parser.add_argument("--reconcile", action="store_true")
+    parser.add_argument("--observed-sha")
     args = parser.parse_args(argv)
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -419,15 +473,18 @@ def main(argv=None):
         if args.status:
             print(json.dumps(load(path), indent=2, sort_keys=True))
             return 0
-        if (args.pr is None) == (not args.latest):
+        if args.reconcile and (args.pr is None or args.latest or args.observed_sha is None):
+            raise ReleaseError("--reconcile requires --pr and --observed-sha")
+        if not args.reconcile and (args.pr is None) == (not args.latest):
             raise ReleaseError("choose exactly one of --pr or --latest")
-        number = latest_pr(config) if args.latest else args.pr
+        number = args.pr if args.reconcile else (latest_pr(config) if args.latest else args.pr)
         if number is None:
             print(json.dumps({"state": "no release available"}, sort_keys=True))
             return 0
         if number < 1:
             raise ReleaseError("pull request number is invalid")
-        print(json.dumps(once(config, number, args.retry), sort_keys=True))
+        result = reconcile(config, number, args.observed_sha) if args.reconcile else once(config, number, args.retry)
+        print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, json.JSONDecodeError, ReleaseError) as exc:
         print(f"factory-release: {exc}", file=sys.stderr)
