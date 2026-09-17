@@ -404,6 +404,32 @@ type codexRolloutMeta struct {
 	} `json:"payload"`
 }
 
+// canonicalUUID reports whether value is a lowercase 8-4-4-4-12 hyphenated
+// hex UUID: the exact text shape formatUUID produces and codex resume's own
+// SESSION_ID argument expects. A rollout's recorded payload.id is untrusted
+// file content; anything of another shape (oversized, containing NULs,
+// uppercase, or simply not a UUID) is never placed in argv, where the
+// runner's own argument-size guard would otherwise turn a malformed
+// recorded id into a failed launch instead of codexSessionSelection's
+// intended fallback to a fresh session.
+func canonicalUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if value[i] != '-' {
+				return false
+			}
+			continue
+		}
+		if c := value[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // codexSessionSelection looks for the newest Codex rollout recorded for the
 // exact cwd under this launch's CODEX_HOME, newest calendar day first within
 // maxCodexScanDays, and resumes it while it is under the shared rotation
@@ -434,7 +460,7 @@ func codexSessionSelection(runtime RuntimePaths, cwd string) (id string, resume 
 				slices.Reverse(rollouts)
 				for _, rollout := range rollouts {
 					meta, size, err := readCodexRolloutMeta(rollout)
-					if err != nil || meta.Payload.Cwd != cwd || meta.Payload.ID == "" {
+					if err != nil || meta.Payload.Cwd != cwd || !canonicalUUID(meta.Payload.ID) {
 						continue
 					}
 					if size < nativeSessionRotateBytes {

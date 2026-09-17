@@ -607,6 +607,52 @@ func TestCodexWorkerIgnoresRolloutsForOtherCwds(t *testing.T) {
 	}
 }
 
+// A rollout's payload.id is untrusted file content. An oversized, NUL-laced,
+// or otherwise non-UUID value must never reach argv, where the runner's own
+// argument-size guard would fail the whole launch instead of
+// codexSessionSelection's intended fallback to a fresh session; it is
+// skipped like any other unusable candidate, and the launch stays fresh.
+// The rollout's own filename stays well-formed regardless: only the CLI's
+// own recorded content is untrusted, and codexSessionSelection never reads
+// an id out of a filename.
+func TestCodexWorkerIgnoresRolloutsWithAMalformedSessionID(t *testing.T) {
+	for name, id := range map[string]string{
+		"oversized":          strings.Repeat("a", runner.MaxArgumentBytes+1),
+		"embedded NUL":       "01a00000-0000-7000-8000-00000000\x0000",
+		"not a UUID":         "not-a-uuid-at-all",
+		"uppercase hex":      "01A00000-0000-7000-8000-000000000ABC",
+		"wrong hyphen shape": "01a000000-000-7000-8000-000000000abc",
+	} {
+		t.Run(name, func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+			cwd := filepath.Join(t.TempDir(), "change")
+			dayDirectory := filepath.Join(codexConfigHome(runtime), "sessions", "2026", "09", "17")
+			if err := os.MkdirAll(dayDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			line, err := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": id, "cwd": cwd}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dayDirectory, "rollout-2026-09-17T08-00-00-malformed.jsonl")
+			if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			launch, err := Build(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if launch.Argv()[1] == "resume" {
+				t.Fatalf("worker argv = %q, want no resume of a malformed session id", launch.Argv())
+			}
+		})
+	}
+}
+
 // Bounding growth: once the newest matching rollout has reached the shared
 // rotation ceiling, Build starts fresh rather than resuming it or falling
 // back to an older, smaller rollout for the same cwd.
