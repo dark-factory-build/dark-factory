@@ -136,11 +136,12 @@ func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Priority: 10, Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := store.AdmitNext(ctx, admissionKeys(t, 231, nil), mustTime(t, 63))
+	consumerKeys := admissionKeys(t, 231, nil)
+	result, err := store.AdmitNext(ctx, consumerKeys, mustTime(t, 63))
 	if err != nil || !result.Admitted() || result.Run.TaskID != consumer.ID {
 		t.Fatalf("consumer admission = %+v, %v", result, err)
 	}
@@ -182,6 +183,52 @@ func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	}
 	connection.Close()
 	corruptSQL(t, store, `UPDATE task_prerequisites SET consumed_run_id = ? WHERE task_id = ?`, producer.ID.Bytes(), consumer.ID.Bytes())
+
+	// Complete the consumer through the supported lifecycle, then send it back.
+	// Its prerequisite still points at the immutable successful producer receipt
+	// even though the producer has already advanced to work revision 2.
+	running := activateAllResourcesUnique(t, store, *result.Run, 70, 700)
+	session := terminalSessionForRunTest(t, store, result.Run.ID)
+	running, err = store.ActivateRun(ctx, result.Run.ID, session.ID, running.Revision, session.Revision, mustTime(t, 80))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerProposal, err := NewSuccessProposal("consumer result")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err = store.ProposeAttemptOutcome(ctx, consumerKeys.AttemptDigest, consumerProposal, mustTime(t, 90))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing = observeMissingProcessExits(t, store, running.ID, 91)
+	for index, resource := range resourcesForRunTest(t, store, running.ID) {
+		if resource.State == ResourceReleased {
+			continue
+		}
+		if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(100+index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeTerminalSessionAtCurrent(t, store, running.ID, 104)
+	current, found, err := store.Run(ctx, running.ID)
+	if err != nil || !found {
+		t.Fatalf("read consumer for finalization: %+v, found=%v, err=%v", current, found, err)
+	}
+	if _, err := finalizeTestRun(t, store, current, 105); err != nil {
+		t.Fatal(err)
+	}
+	consumerTask, found, err := store.Task(ctx, consumer.ID)
+	if err != nil || !found {
+		t.Fatalf("consumer task after success: %+v, found=%v, err=%v", consumerTask, found, err)
+	}
+	if _, err := store.SendBackTask(ctx, consumer.ID, consumerTask.Revision, "correct consumer", mustTime(t, 106)); err != nil {
+		t.Fatal(err)
+	}
+	corrected, err := store.AdmitNext(ctx, admissionKeys(t, 240, nil), mustTime(t, 107))
+	if err != nil || !corrected.Admitted() || corrected.Run.TaskID != consumer.ID {
+		t.Fatalf("corrected consumer admission = %+v, %v", corrected, err)
+	}
 }
 
 func TestAdmissionAllowsIndependentConflictPathsInParallel(t *testing.T) {
