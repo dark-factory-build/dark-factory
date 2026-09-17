@@ -210,6 +210,14 @@ func TestBrowserEffectVerdictSurvivesItsDeadlineCause(t *testing.T) {
 		if !errors.Is(mapped, verdict) || retryable(mapped) {
 			t.Fatalf("%v mapped to %v", verdict, mapped)
 		}
+		// A human-reply acknowledgement or lease renewal that raced a closed
+		// Store joins its uncertainty marker with kernel.ErrStoreClosed (see
+		// terminal_effects.go). That must keep its uncertain verdict, not be
+		// relabelled as the state-watch path's retryable rate_limited.
+		mapped = mapBrowserError(errors.Join(verdict, kernel.ErrStoreClosed))
+		if !errors.Is(mapped, verdict) || retryable(mapped) {
+			t.Fatalf("%v joined with a closed store mapped to %v", verdict, mapped)
+		}
 	}
 	unknown := kernel.NewOutcomeUnknownError(context.DeadlineExceeded)
 	if mapped := mapBrowserError(unknown); !errors.Is(mapped, unknown) || retryable(mapped) {
