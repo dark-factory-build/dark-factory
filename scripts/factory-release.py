@@ -178,13 +178,11 @@ def check_runs_ok(checks):
     return successful
 
 
-def merge_gate(pr, default_sha, reviews, checks, config, expected):
+def reviewed_merge_gate(pr, reviews, checks, config, expected):
     if not isinstance(expected, str) or not SHA.fullmatch(expected) or not isinstance(pr, dict) or str(pr.get("state", "")).upper() != "MERGED":
         raise ReleaseError("pull request is not merged")
     if pr.get("baseRefName") != config["base"] or pr.get("mergeCommitSha") != expected:
         raise ReleaseError("merged pull request does not name the exact configured base and SHA")
-    if default_sha != expected:
-        raise ReleaseError("configured default branch is not at the merged SHA")
     head = pr.get("headRefOid")
     if not SHA.fullmatch(str(head or "")):
         raise ReleaseError("pull request head is invalid")
@@ -193,6 +191,23 @@ def merge_gate(pr, default_sha, reviews, checks, config, expected):
     if not any(f"Dark-Factory-Review: allow {head}" in str(item.get("body", "")) and str(item.get("commit_id")) == head and str((item.get("user") or {}).get("id", "")) == "319516570" for item in reviews):
         raise ReleaseError("no exact independent Maintainer ALLOW review at the pull request head")
     return head
+
+
+def merge_gate(pr, default_sha, reviews, checks, config, expected):
+    head = reviewed_merge_gate(pr, reviews, checks, config, expected)
+    if default_sha != expected:
+        raise ReleaseError("configured default branch is not at the merged SHA")
+    return head
+
+
+def target_is_ancestor(config, target, default):
+    value = json.loads(run(["gh", "api", f"repos/{config['repository']}/compare/{target}...{default}"]))
+    if not isinstance(value, dict) or value.get("status") not in {"ahead", "identical"}:
+        raise ReleaseError("reconciliation target is not an ancestor of the current default branch")
+    merge_base = (value.get("merge_base_commit") or {}).get("sha")
+    if merge_base != target:
+        raise ReleaseError("reconciliation target has an unexpected merge base")
+    return value
 
 
 def verify_output(raw, expected):
@@ -329,9 +344,10 @@ def reconcile(config, number, expected):
             raise ReleaseError("journal receipt belongs to a different repository or hook configuration")
         pr, default, reviews, checks = gh_snapshot(config, number)
         sha = pr.get("mergeCommitSha")
-        merge_gate(pr, default, reviews, checks, config, sha)
+        reviewed_merge_gate(pr, reviews, checks, config, sha)
         if sha != expected:
             raise ReleaseError("observed SHA does not match the merged pull request")
+        target_is_ancestor(config, sha, default)
         if entry and entry.get("sha") != sha:
             raise ReleaseError("journal has a different SHA for this pull request")
         review_gate(config, pr["headRefOid"], reviews)
