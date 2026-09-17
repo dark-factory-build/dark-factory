@@ -2896,17 +2896,41 @@ impl CreatePullRequest {
     }
 
     fn marked_body(&self) -> Result<String, OperationError> {
-        let closes = if self.close_on_merge {
+        let footer = if self.close_on_merge {
             format!("Closes #{}", self.issue_number)
         } else {
             format!("Refs #{}", self.issue_number)
         };
-        if self.body.is_empty() {
-            Ok(format!("{}\n\n{}", closes, self.marker()?))
+        let mut body = self.body.trim_end_matches(|character: char| {
+            character == '\n' || character == '\r' || character == ' ' || character == '\t'
+        });
+        while let Some(line) = body.rsplit('\n').next() {
+            let Some((kind, issue_number)) = pull_request_footer(line) else {
+                break;
+            };
+            let expected_kind = if self.close_on_merge { "Closes" } else { "Refs" };
+            if kind != expected_kind || issue_number != self.issue_number {
+                return Err(OperationError::InvalidInput);
+            }
+            body = body[..body.len() - line.len()]
+                .trim_end_matches(|character: char| character == '\n' || character == '\r');
+        }
+        if body.is_empty() {
+            Ok(format!("{}\n\n{}", footer, self.marker()?))
         } else {
-            Ok(format!("{}\n\n{}\n\n{}", self.body, closes, self.marker()?))
+            Ok(format!("{}\n\n{}\n\n{}", body, footer, self.marker()?))
         }
     }
+}
+
+fn pull_request_footer(line: &str) -> Option<(&str, i64)> {
+    let line = line.trim();
+    let (kind, issue) = line.split_once(" #")?;
+    if kind != "Refs" && kind != "Closes" {
+        return None;
+    }
+    let issue_number = issue.parse::<i64>().ok()?;
+    (issue_number > 0).then_some((kind, issue_number))
 }
 
 impl UpdatePullRequestBody {
@@ -9422,6 +9446,25 @@ mod tests {
         };
         assert!(create.validate().is_ok());
         assert!(create.marked_body().unwrap().contains("Closes #390"));
+        let mut supplied_footer = create.clone();
+        supplied_footer.body.push_str("\n\nCloses #390\n");
+        let rendered = supplied_footer.marked_body().unwrap();
+        assert_eq!(rendered.matches("Closes #390").count(), 1);
+        assert!(rendered.ends_with(&supplied_footer.marker().unwrap()));
+        supplied_footer.body.push_str("Closes #390\n");
+        assert_eq!(
+            supplied_footer.marked_body().unwrap().matches("Closes #390").count(),
+            1
+        );
+        let mut conflicting_footer = create.clone();
+        conflicting_footer.body.push_str("\n\nRefs #391\n");
+        assert_eq!(
+            conflicting_footer.marked_body().err(),
+            Some(OperationError::InvalidInput)
+        );
+        let mut inline_reference = create.clone();
+        inline_reference.body.push_str("\nRelated context: Refs #391");
+        assert!(inline_reference.marked_body().unwrap().contains("Refs #391"));
         let mut references = create.clone();
         references.close_on_merge = false;
         assert!(references.marked_body().unwrap().contains("Refs #390"));
