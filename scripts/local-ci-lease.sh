@@ -38,7 +38,7 @@ local_ci_lease_common_dir() {
         local_ci_old_lock=$local_ci_git_dir/.dark-factory-local-ci.lock
         local_ci_barrier=dark-factory-local-ci/.dark-factory-local-ci.lock
         if [ "$(readlink "$local_ci_old_lock" 2>/dev/null || true)" != "$local_ci_barrier" ]; then
-            /usr/bin/ruby --disable-gems -e 'File.symlink(ARGV[0], ARGV[1])' "$local_ci_barrier" "$local_ci_old_lock" || {
+            perl -e 'symlink($ARGV[0], $ARGV[1]) or exit 1' "$local_ci_barrier" "$local_ci_old_lock" || {
                 echo "local-ci: drain and clean the legacy lease before switching helpers" >&2
                 return 1
             }
@@ -461,15 +461,15 @@ local_ci_lease_start_child() {
     # The background function execs this helper, so the session leader remains
     # the wrapper's direct waitable child. No detached grandchild can survive
     # if startup aborts before the release handshake.
-    [ -x /usr/bin/ruby ] || {
-        echo "local-ci: Ruby is required to establish the command process group" >&2
+    command -v perl >/dev/null 2>&1 || {
+        echo "local-ci: Perl is required to establish the command process group" >&2
         return 1
     }
     local_ci_lease_pid_file=$1
     local_ci_lease_release_fifo=$2
     shift 2
-    exec /usr/bin/ruby --disable-gems -e \
-        'pid_file, release_fifo = ARGV.shift(2); Process.setsid; File.open(pid_file, "w") { |file| file.write("#{Process.pid}\n") }; File.open(release_fifo, "r") { |file| file.gets }; exec(*ARGV)' \
+    exec perl -MPOSIX -e \
+        'my ($pid_file, $release_fifo) = splice @ARGV, 0, 2; POSIX::setsid() == -1 and die "setsid: $!\n"; open my $fh, ">", $pid_file or die "pid file: $!\n"; print $fh "$$\n"; close $fh; open my $release, "<", $release_fifo or die "release fifo: $!\n"; <$release>; close $release; exec @ARGV or die "exec: $!\n"' \
         -- "$local_ci_lease_pid_file" "$local_ci_lease_release_fifo" "$@"
 }
 
