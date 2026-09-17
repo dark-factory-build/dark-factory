@@ -139,8 +139,14 @@ func TestMain(m *testing.M) {
 }
 
 // codexFixtureSessionID stands in for the id the real Codex CLI would assign
-// itself at creation; only its presence and exact reuse across argv matter.
-const codexFixtureSessionID = "session-fixture-01a0ffff-ffff-7fff-bfff-fffffffffffe"
+// itself at creation. provider.canonicalUUID requires an exact 36-character
+// lowercase 8-4-4-4-12 hex UUID, so this is one, with this exact fixture
+// invocation's own PID as its last group: deterministic per process, so a
+// test reading two separate fixture processes' own rollouts back from disk
+// can tell them apart without sharing a hardcoded id.
+func codexFixtureSessionID() string {
+	return fmt.Sprintf("00000000-0000-7000-8000-%012x", uint64(os.Getpid()))
+}
 
 func runSupervisorCodexFixture() error {
 	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
@@ -245,9 +251,7 @@ func runSupervisorCodexFixture() error {
 	}
 	// Stand in for the real CLI's own rollout write, so a later launch's
 	// discovery (provider.codexSessionSelection) can find this exact cwd the
-	// same way it would against the real tool. codexFixtureSessionID is
-	// arbitrary: nothing here needs it to be a real UUID, only non-empty and
-	// consistently the value a resuming launch's argv is checked against.
+	// same way it would against the real tool.
 	// resumed_from is this fixture's own diagnostic field, not one
 	// codexSessionSelection reads: it records what this exact invocation's
 	// own argv named, so a test can independently confirm what a later
@@ -259,7 +263,7 @@ func runSupervisorCodexFixture() error {
 	if codexHome, cwd := os.Getenv("CODEX_HOME"), func() string { path, _ := os.Getwd(); return path }(); codexHome != "" && cwd != "" {
 		day := filepath.Join(codexHome, "sessions", time.Now().UTC().Format("2006/01/02"))
 		if err := os.MkdirAll(day, 0o700); err == nil {
-			line, marshalErr := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": codexFixtureSessionID, "cwd": cwd, "resumed_from": resumedFrom}})
+			line, marshalErr := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": codexFixtureSessionID(), "cwd": cwd, "resumed_from": resumedFrom}})
 			if marshalErr == nil {
 				// A PID suffix keeps this run's filename distinct from any
 				// other rollout this fixture wrote in the same wall-clock
@@ -722,10 +726,11 @@ func TestSupervisorCodexOrchestratorResumesFromPreviousRunsWorkingDirectory(t *t
 		t.Fatalf("first RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, first, kernel.OutcomeSucceeded)
-	firstRollouts := codexRolloutResumedFromValues(t, sessionsRoot)
-	if len(firstRollouts) != 1 || firstRollouts[0] != "" {
-		t.Fatalf("first run rollouts = %v, want exactly one with no resume", firstRollouts)
+	firstRollouts := codexRolloutSummaries(t, sessionsRoot)
+	if len(firstRollouts) != 1 || firstRollouts[0].ResumedFrom != "" || firstRollouts[0].ID == "" {
+		t.Fatalf("first run rollouts = %+v, want exactly one fresh rollout with an id", firstRollouts)
 	}
+	firstSessionID := firstRollouts[0].ID
 
 	queueSupervisorRetry(t, fixture, first)
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
@@ -733,33 +738,38 @@ func TestSupervisorCodexOrchestratorResumesFromPreviousRunsWorkingDirectory(t *t
 		t.Fatalf("second RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
-	secondRollouts := codexRolloutResumedFromValues(t, sessionsRoot)
+	secondRollouts := codexRolloutSummaries(t, sessionsRoot)
 	if len(secondRollouts) != 2 {
-		t.Fatalf("second run rollouts = %v, want two", secondRollouts)
+		t.Fatalf("second run rollouts = %+v, want two", secondRollouts)
 	}
 	resumedSomething := false
-	for _, value := range secondRollouts {
-		if value == codexFixtureSessionID {
+	for _, rollout := range secondRollouts {
+		if rollout.ResumedFrom == firstSessionID {
 			resumedSomething = true
 		}
 	}
 	if !resumedSomething {
-		t.Fatalf("second orchestrator run did not resume the first run's session: %v", secondRollouts)
+		t.Fatalf("second orchestrator run did not resume the first run's session %q: %+v", firstSessionID, secondRollouts)
 	}
 	fixture.assertReleased(t, first)
 	fixture.assertReleased(t, second)
 }
 
-// codexRolloutResumedFromValues reads every fake rollout's own diagnostic
-// resumed_from field (see runSupervisorCodexFixture), the exact session id,
-// if any, that invocation's own argv named to resume.
-func codexRolloutResumedFromValues(t *testing.T, sessionsRoot string) []string {
+// codexRolloutSummary is one fake rollout's own recorded id and its own
+// diagnostic resumed_from field (see runSupervisorCodexFixture): the exact
+// session id, if any, that invocation's own argv named to resume.
+type codexRolloutSummary struct {
+	ID          string
+	ResumedFrom string
+}
+
+func codexRolloutSummaries(t *testing.T, sessionsRoot string) []codexRolloutSummary {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(sessionsRoot, "*", "*", "*", "rollout-*.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	values := make([]string, 0, len(matches))
+	summaries := make([]codexRolloutSummary, 0, len(matches))
 	for _, path := range matches {
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -771,15 +781,16 @@ func codexRolloutResumedFromValues(t *testing.T, sessionsRoot string) []string {
 		}
 		var meta struct {
 			Payload struct {
+				ID          string `json:"id"`
 				ResumedFrom string `json:"resumed_from"`
 			} `json:"payload"`
 		}
 		if err := json.Unmarshal(line, &meta); err != nil {
 			t.Fatal(err)
 		}
-		values = append(values, meta.Payload.ResumedFrom)
+		summaries = append(summaries, codexRolloutSummary{ID: meta.Payload.ID, ResumedFrom: meta.Payload.ResumedFrom})
 	}
-	return values
+	return summaries
 }
 
 // One Codex overseer reads blocked and failed retained Changes in the same
