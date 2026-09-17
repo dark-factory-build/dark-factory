@@ -42,7 +42,7 @@ printf 'one\n2\n3\n' > "$root/shared"
 g add shared && g commit -qm integrate
 head=$(g rev-parse HEAD)
 [ "$(g rev-parse HEAD^2)" = "$main" ]
-set -- $("$script_dir/publication-parents.sh" "$git_dir" "$base" "$head" "$main")
+set -- $("$script_dir/publication-parents.sh" "$git_dir" "$base" "$head" "$main" 0)
 [ "$1 $2 $3" = "$main $main -" ] || { echo "first publication chose: $*" >&2; exit 1; }
 published=$(publish "$head" "$1" "$2" "$3")
 [ "$(g rev-parse "$published^{tree}")" = "$(g rev-parse "$head^{tree}")" ]
@@ -51,7 +51,7 @@ g merge-tree --write-tree "$main" "$published" > /dev/null
 # A follow-up after an earlier publication that predates the prerequisite:
 # the copied single-parent form conflicts, the merge form does not.
 previous=$(g commit-tree "$(g rev-parse "$base^{tree}")" -p "$base" -m earlier)
-set -- $("$script_dir/publication-parents.sh" "$git_dir" "$previous" "$head" "$main")
+set -- $("$script_dir/publication-parents.sh" "$git_dir" "$previous" "$head" "$main" 1)
 [ "$1 $2 $3" = "$previous $main $main" ] || { echo "follow-up chose: $*" >&2; exit 1; }
 copied=$(publish "$head" "$previous" "$previous" -)
 [ "$(g rev-parse "$copied^{tree}")" = "$(g rev-parse "$head^{tree}")" ]
@@ -65,6 +65,11 @@ g merge-tree --write-tree "$main" "$published" > /dev/null
 [ "$(g diff --numstat "$main" "$published" | wc -l | tr -d ' ')" = 1 ]
 
 # Nothing integrated: the branch head stays the only parent and diff base.
-set -- $("$script_dir/publication-parents.sh" "$git_dir" "$previous" "$(g rev-parse worker~1)" "$base")
+set -- $("$script_dir/publication-parents.sh" "$git_dir" "$previous" "$(g rev-parse worker~1)" "$base" 1)
 [ "$1 $2 $3" = "$previous $previous -" ] || { echo "plain publication chose: $*" >&2; exit 1; }
+
+# An existing branch at an ancestor of integrated main keeps that branch as
+# the exact-head precondition and carries main as the merge parent.
+set -- $("$script_dir/publication-parents.sh" "$git_dir" "$base" "$head" "$main" 1)
+[ "$1 $2 $3" = "$base $main $main" ] || { echo "existing ancestor chose: $*" >&2; exit 1; }
 echo "publication parents: ok"

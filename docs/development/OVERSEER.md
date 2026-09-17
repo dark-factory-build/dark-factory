@@ -265,7 +265,9 @@ The branch is `factory/<first 12 hex of change_id>`. The task's
   diff against that head, not the base. A branch that does not exist here
   means the earlier publication never happened: treat it as the first.
 
-Set `from` to `base_commit` or `branch_head` accordingly. The published
+Set `from` to `base_commit` or `branch_head` accordingly, and set
+`branch_exists=1` when the publication branch exists or `0` when it does not.
+The published
 `branch_head` is an App-authored commit that is not in the local repository;
 fetch it and the worker's head into your clone,
 `git -C repo fetch -q origin main "$from"` and then
@@ -279,7 +281,7 @@ reports a conflict that no source correction can clear. Let the script decide
 what the publication's parents are:
 
 ```sh
-set -- $(repo/scripts/publication-parents.sh repo/.git "$from" "$head_commit" "$(git -C repo rev-parse origin/main)")
+set -- $(repo/scripts/publication-parents.sh repo/.git "$from" "$head_commit" "$(git -C repo rev-parse origin/main)" "$branch_exists")
 from=$1 diff_from=$2 merge_parent=$3
 ```
 
