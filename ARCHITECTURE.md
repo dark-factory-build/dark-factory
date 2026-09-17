@@ -227,6 +227,19 @@ If preparation or activation fails, the run enters `finalizing`; a provider
 must never execute first and become durable later. The runner is a
 provider-blind effect host, not a second lifecycle owner.
 
+A released runner publishes a private takeover endpoint in its own runtime
+directory: a one-shot bearer in `takeover.json` and `takeover.sock`. On
+shutdown the daemon asks its released, terminal-ready runner to quiesce that
+control connection, makes no durable mutation, and leaves the run `running`
+with every resource active and the outer child reparented. The next daemon's
+recovery sweep finds that busy runtime, presents the on-disk grant, and adopts
+the runner as an ordinary live attempt; the endpoint rotates its bearer on
+every accepted takeover, so one grant admits one replacement. Unclaimed, the
+runner converges the provider itself after a bounded grace. A compatible
+upgrade therefore adopts running runners instead of draining them; a runner
+with no endpoint is drained exactly as before, and a killed runner's endpoint
+files are ordinary runtime residue the recovery sweep removes.
+
 A successful attempt outcome commits `finalizing` together with one in-memory
 response fence. The daemon sends a fresh random receipt after the outcome
 response; the attempt client validates the reply, echoes that receipt on the
