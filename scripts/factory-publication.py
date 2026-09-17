@@ -3,7 +3,7 @@ import re
 
 
 APP_MARKER_TRAILER = re.compile(
-    r"(?mi)^<!-- dark-factory-operation:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}:[0-9a-f]{64} -->\s*\Z"
+    r"(?mi)^<!-- dark-factory-operation:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}):([0-9a-f]{64}) -->\s*\Z"
 )
 TERMINAL_FOOTER = re.compile(
     r"(?mi)^(Refs|Closes)[ \t]+#([1-9][0-9]*)[ \t]*(?:\r?\n[ \t]*)*\Z"

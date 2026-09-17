@@ -217,6 +217,7 @@ test("a device with no factory explains how to pair one", async () => {
     const copy = sectionText(renderer, "dfRemote__none");
     assert.match(copy, /PAIR A PHONE/);
     assert.match(copy, /on this phone/);
+    assert.doesNotMatch(copy, /Add to Home Screen/);
     assert.equal(buttons(renderer, "dfRemote__factory").length, 0);
     assert.equal(buttons(renderer, "dfRemote__pasteOpen").length, 1);
   });
@@ -720,7 +721,7 @@ test("alerts turn on through the host's subscription and off with the device", a
 
   await withApp(props(fakeManager([])), (renderer) => {
     assert.equal(buttons(renderer, "dfRemote__forgetDevice").length, 0, "nothing to forget on an empty device");
-    assert.match(textOf(renderer), /Add to Home Screen/);
+    assert.doesNotMatch(textOf(renderer), /Add to Home Screen/);
   });
 });
 
