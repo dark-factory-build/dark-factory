@@ -18,7 +18,6 @@ import {
   type AgentControlAction,
   type TaskHistoryView,
   type TaskDetailView,
-  type HumanRequestDetail,
   type HumanRequestItem,
   type SessionErrorCode,
   type SessionStatus,
@@ -33,6 +32,7 @@ import {
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
 import { FactorySettingsCoordinator, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
+import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
 type BrowserEndpoint = Readonly<{ url: string; host: string }>;
@@ -55,7 +55,7 @@ const TOPOLOGY_POLL_TICKS = 6;
 
 export type FactoryHumanRequestView = Readonly<{
   request: HumanRequestItem;
-  phase: "loading" | "ready" | "replying" | "cancelling";
+  phase: Exclude<HumanRequestPhase, "ended">;
   question?: string;
   options: readonly string[];
   canReply: boolean;
@@ -168,14 +168,6 @@ export type FactoryAppControllerOptions = {
   clientFactory?: ClientFactory;
 };
 
-type Selection = {
-  request: HumanRequestItem;
-  detail?: HumanRequestDetail;
-  phase: FactoryHumanRequestView["phase"];
-  reply: string;
-  token: number;
-};
-
 type AgentTerminalSelection = {
   agent: AgentItem;
   head: bigint;
@@ -235,9 +227,15 @@ export class FactoryAppController {
   #lastStatus: FactoryAppStatus | undefined;
   #state: StateView | undefined;
   #error: SessionError | ProtocolError | undefined;
-  #selection: Selection | undefined;
-  #selectionToken = 0;
-  #detailPending = false;
+  readonly #human = new HumanRequestFlow<void>({
+    active: () => !this.#closed && this.#status === "ready",
+    currentRequest: (_scope, requestID) => this.#state?.humanRequests.get(requestID),
+    session: () => this.#client?.session,
+    onChange: () => this.#publish(),
+    onError: (error) => { this.#error = error; },
+    afterAction: "clear",
+    unavailableError: new SessionError("stale"),
+  });
   #selectedAgent: AgentTerminalSelection | undefined;
   #terminal: TerminalController | undefined;
   #terminalSurface: TerminalSurface | undefined;
@@ -330,7 +328,7 @@ export class FactoryAppController {
     this.#closed = true;
     this.#discardTaskEditConfirmation();
     ++this.#generation;
-    this.#clearSelection();
+    this.#human.clear(true);
     this.#selectedAgent = undefined;
     this.#terminalReplacement = undefined;
     this.#dropPendingTerminalInput();
@@ -853,113 +851,20 @@ export class FactoryAppController {
     this.#flushTerminalResize();
   }
 
-  async selectHumanRequest(request: HumanRequestItem): Promise<void> {
-    if (this.#closed || this.#status !== "ready" || this.#detailPending || this.#selection !== undefined) return;
-    const current = this.#state?.humanRequests.get(request.id);
-    const session = this.#client?.session;
-    if (current === undefined || current.revision !== request.revision || session === undefined) {
-      this.#error = new SessionError("stale");
-      this.#publish();
-      return;
-    }
-
-    const generation = this.#generation;
-    const token = ++this.#selectionToken;
-    this.#selection = { request: current, phase: "loading", reply: "", token };
-    this.#detailPending = true;
-    this.#error = undefined;
-    this.#publish();
-    try {
-      const detail = await session.getHumanRequestDetail({ requestId: current.id, expectedRevision: current.revision });
-      if (!this.#ownsSelection(generation, token)) return;
-      const latest = this.#state?.humanRequests.get(current.id);
-      if (latest === undefined || latest.revision !== current.revision) {
-        this.#clearSelection();
-      } else {
-        this.#selection = { request: latest, detail, phase: "ready", reply: "", token };
-      }
-      this.#publish();
-    } catch (error) {
-      if (!this.#ownsSelection(generation, token)) return;
-      this.#clearSelection();
-      this.#error = finiteError(error);
-      this.#publish();
-    } finally {
-      this.#detailPending = false;
-    }
-  }
+  async selectHumanRequest(request: HumanRequestItem): Promise<void> { this.#error = undefined; return this.#human.open(undefined, request); }
 
   setHumanReply(reply: string): void {
-    const selection = this.#selection;
-    const maximum = selection?.detail?.replyMaxBytes;
-    if (selection?.phase !== "ready" || maximum === undefined) return;
-    if (reply.length > maximum || new TextEncoder().encode(reply).length > maximum) {
-      this.#error = new SessionError("too_large");
-      this.#publish();
-      return;
-    }
-    selection.reply = reply;
     this.#error = undefined;
-    this.#publish();
+    this.#human.setReply(reply);
   }
 
   clearHumanRequest(): void {
-    if (this.#selection?.phase === "replying" || this.#selection?.phase === "cancelling") return;
-    this.#clearSelection();
-    this.#publish();
+    this.#human.clear();
   }
 
-  async replyHumanRequest(): Promise<void> {
-    const selection = this.#selection;
-    const session = this.#client?.session;
-    if (selection?.phase !== "ready" || selection.detail === undefined || session === undefined) return;
-    const generation = this.#generation;
-    const token = selection.token;
-    const detail = selection.detail;
-    const reply = selection.reply;
-    if (reply.length === 0) {
-      this.#error = new SessionError("invalid_request");
-      this.#publish();
-      return;
-    }
-    selection.phase = "replying";
-    this.#error = undefined;
-    this.#publish();
-    try {
-      await session.replyHumanRequest(detail, reply);
-      if (!this.#ownsSelection(generation, token)) return;
-      this.#clearSelection();
-      this.#publish();
-    } catch (error) {
-      if (!this.#ownsSelection(generation, token)) return;
-      this.#clearSelection();
-      this.#error = finiteError(error);
-      this.#publish();
-    }
-  }
+  async replyHumanRequest(): Promise<void> { this.#error = undefined; return this.#human.reply(); }
 
-  async cancelHumanRequest(): Promise<void> {
-    const selection = this.#selection;
-    const session = this.#client?.session;
-    const cancelRun = selection?.detail?.cancelRun;
-    if (selection?.phase !== "ready" || cancelRun === undefined || cancelRun === null || session === undefined) return;
-    const generation = this.#generation;
-    const token = selection.token;
-    selection.phase = "cancelling";
-    this.#error = undefined;
-    this.#publish();
-    try {
-      await session.cancelHumanRequest(cancelRun);
-      if (!this.#ownsSelection(generation, token)) return;
-      this.#clearSelection();
-      this.#publish();
-    } catch (error) {
-      if (!this.#ownsSelection(generation, token)) return;
-      this.#clearSelection();
-      this.#error = finiteError(error);
-      this.#publish();
-    }
-  }
+  async cancelHumanRequest(): Promise<void> { this.#error = undefined; return this.#human.cancel(); }
 
   #connect(generation: number): void {
     const client = this.#client;
@@ -969,7 +874,7 @@ export class FactoryAppController {
       this.#status = "closed";
       this.#error = finiteError(error);
       this.#statusReason = this.#error.code;
-      this.#clearSelection();
+      this.#human.clear(true);
       this.#terminalReplacement = undefined;
       this.#dropPendingTerminalInput();
       if (this.#terminal !== undefined) this.#closeTerminal();
@@ -983,7 +888,7 @@ export class FactoryAppController {
     this.#statusReason = status === "closed" ? this.#error?.code ?? "closed" : undefined;
     if (status !== "ready") {
       this.#discardTaskEditConfirmation();
-      this.#clearSelection();
+      this.#human.clear(true);
       // A reconnect must not show a code minted for the connection that dropped.
       this.#settings.clearRemoteInvite();
     }
@@ -1054,12 +959,7 @@ export class FactoryAppController {
         }
       }
     }
-    const selected = this.#selection;
-    if (selected !== undefined) {
-      const current = state.humanRequests.get(selected.request.id);
-      if (current === undefined || current.revision !== selected.request.revision) this.#clearSelection();
-      else selected.request = current;
-    }
+    this.#human.reconcile();
     this.#publish();
     this.#reconcileTerminal();
   }
@@ -1073,15 +973,6 @@ export class FactoryAppController {
 
   #current(generation: number): boolean {
     return !this.#closed && generation === this.#generation;
-  }
-
-  #ownsSelection(generation: number, token: number): boolean {
-    return this.#current(generation) && this.#selection?.token === token;
-  }
-
-  #clearSelection(): void {
-    ++this.#selectionToken;
-    this.#selection = undefined;
   }
 
   #discardTaskEditConfirmation(): void {
@@ -1475,7 +1366,7 @@ export class FactoryAppController {
   }
 
   #snapshot(): FactoryAppSnapshot {
-    const selection = this.#selection;
+    const selection = this.#human.selection;
     return {
       status: this.#status,
       state: this.#state,
@@ -1484,7 +1375,7 @@ export class FactoryAppController {
       runPaths: this.#runPaths,
       lastRunPaths: this.#lastRunPaths,
       edit: this.#edit,
-      selectedHumanRequest: selection === undefined ? undefined : {
+      selectedHumanRequest: selection === undefined || selection.phase === "ended" ? undefined : {
         request: selection.request,
         phase: selection.phase,
         question: selection.detail?.question,
