@@ -198,6 +198,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.overseerInterruptWorker(ctx, call)
 	case api.CallOverseerReplyHuman:
 		return daemon.overseerReplyHuman(ctx, call)
+	case api.CallContentCreate, api.CallContentRevise, api.CallContentDeprecate, api.CallContentList, api.CallContentRead, api.CallContentBody, api.CallContentEvidence, api.CallContentAttach:
+		return daemon.content(ctx, call)
 	case api.CallWebStatus:
 		status, err := daemon.WebStatus(ctx)
 		if err != nil {

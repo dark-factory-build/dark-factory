@@ -39,6 +39,15 @@ const (
 
 	usage = `usage:
   factoryctl attempt task
+  factoryctl content create --project ID --kind procedure|acceptance_scenario --title TEXT --author TEXT [--description TEXT] [--body TEXT|--body-file PATH] [--source-references TEXT]
+  factoryctl attempt content create --project ID --kind procedure|acceptance_scenario --title TEXT --author TEXT [--description TEXT] [--body TEXT|--body-file PATH] [--source-references TEXT]
+  factoryctl [attempt] content revise --project ID --id ID --revision N --kind procedure|acceptance_scenario --title TEXT --author TEXT [--description TEXT] [--body TEXT|--body-file PATH] [--source-references TEXT]
+  factoryctl [attempt] content deprecate --project ID --id ID --revision N --author TEXT
+  factoryctl [attempt] content list --project ID [--kind procedure|acceptance_scenario] [--offset N] [--limit N]
+  factoryctl [attempt] content read --id ID --revision N
+  factoryctl [attempt] content body --id ID --revision N --offset N --limit N
+  factoryctl [attempt] content evidence --project ID --id ID --revision N --tested-source TEXT --environment TEXT --result passed|failed|incomplete|not_run --location TEXT --evaluator TEXT --judgment TEXT
+  factoryctl [attempt] content attach --project ID --task ID --id ID --revision N
   factoryctl attempt succeed [--result TEXT]
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
@@ -94,6 +103,14 @@ const (
 	commandPeerAnswer
 	commandSendBack
 	commandAttemptTask
+	commandContentCreate
+	commandContentRevise
+	commandContentDeprecate
+	commandContentList
+	commandContentRead
+	commandContentBody
+	commandContentEvidence
+	commandContentAttach
 	commandWebStatus
 	commandWebListClients
 	commandWebRevoke
@@ -137,39 +154,51 @@ type attemptCommand struct {
 	after            string
 	expectedRevision uint64
 
-	label           string
-	plistDir        string
-	relayOrigin     string
-	browserAddress  string
-	name            string
-	root            string
-	project         string
-	agent           string
-	role            string
-	provider        string
-	model           string
-	reasoningEffort string
-	account         string
-	title           string
-	body            string
-	bodySet         bool
-	toolBudget      uint64
-	capacity        uint16
-	maxRunSeconds   uint32
-	priority        int64
-	prioritySet     bool
-	offset          uint64
-	head            uint64
-	textOffset      uint64
-	enabled         bool
-	operationID     string
-	taskRevision    uint64
-	runRevision     uint64
-	run             string
-	paused          bool
-	archived        bool
-	archiveSet      bool
-	cancel          bool
+	label            string
+	plistDir         string
+	relayOrigin      string
+	browserAddress   string
+	name             string
+	root             string
+	project          string
+	agent            string
+	role             string
+	provider         string
+	model            string
+	reasoningEffort  string
+	account          string
+	title            string
+	body             string
+	bodySet          bool
+	bodyFile         string
+	contentKind      string
+	contentID        string
+	contentRevision  uint64
+	description      string
+	sourceReferences string
+	testedSource     string
+	environment      string
+	contentResult    string
+	location         string
+	evaluator        string
+	judgment         string
+	toolBudget       uint64
+	capacity         uint16
+	maxRunSeconds    uint32
+	priority         int64
+	prioritySet      bool
+	offset           uint64
+	head             uint64
+	textOffset       uint64
+	enabled          bool
+	operationID      string
+	taskRevision     uint64
+	runRevision      uint64
+	run              string
+	paused           bool
+	archived         bool
+	archiveSet       bool
+	cancel           bool
 }
 
 func main() {
@@ -226,6 +255,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
+	if command.kind >= commandContentCreate && command.kind <= commandContentAttach && len(args) > 0 && args[0] == "content" {
+		return runOperator(ctx, command, getenv, stdout, stderr)
+	}
 	if command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman {
 		return runOverseer(ctx, command, getenv, stdout, stderr)
 	}
@@ -263,6 +295,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		}
 		return writeJSON(stdout, result)
 	}
+	if command.kind >= commandContentCreate && command.kind <= commandContentAttach {
+		return runContentAttempt(callContext, client, command, stdout, stderr)
+	}
 	var result api.MutationResult
 	switch command.kind {
 	case commandSucceed:
@@ -296,6 +331,114 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	return 0
 }
 
+func contentBody(command attemptCommand) (string, error) {
+	if command.bodyFile == "" {
+		return command.body, nil
+	}
+	if command.bodyFile == "-" {
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20+1))
+		if err != nil || len(b) > 1<<20 {
+			return "", api.ErrInvalidInput
+		}
+		return string(b), nil
+	}
+	b, err := os.ReadFile(command.bodyFile)
+	if err != nil || len(b) > 1<<20 {
+		return "", api.ErrInvalidInput
+	}
+	return string(b), nil
+}
+
+func contentInput(command attemptCommand, body string) api.ContentInput {
+	return api.ContentInput{ID: command.contentID, ProjectID: command.project, Kind: command.contentKind, Title: command.title, Description: command.description, Body: body, Author: command.name, SourceReferences: command.sourceReferences, ExpectedRevision: command.contentRevision}
+}
+
+func runContentAttempt(ctx context.Context, client *api.AttemptClient, command attemptCommand, stdout, stderr io.Writer) int {
+	body, err := contentBody(command)
+	if err != nil {
+		return writeWebFailure(stderr, "content", err)
+	}
+	var value any
+	switch command.kind {
+	case commandContentCreate:
+		id, e := newOperatorID()
+		if e != nil {
+			return writeWebFailure(stderr, "content create", e)
+		}
+		in := contentInput(command, body)
+		in.ID = id
+		value, err = client.ContentCreate(ctx, in)
+	case commandContentRevise:
+		value, err = client.ContentRevise(ctx, contentInput(command, body))
+	case commandContentDeprecate:
+		value, err = client.ContentDeprecate(ctx, contentInput(command, ""))
+	case commandContentList:
+		value, err = client.ContentList(ctx, api.ContentListInput{ProjectID: command.project, Kind: command.contentKind, Offset: command.offset, Limit: command.head})
+	case commandContentRead:
+		value, err = client.ContentRead(ctx, api.ContentReadInput{ID: command.contentID, Revision: command.contentRevision})
+	case commandContentBody:
+		value, err = client.ContentBody(ctx, api.ContentBodyInput{ID: command.contentID, Revision: command.contentRevision, Offset: command.offset, Limit: command.head})
+	case commandContentEvidence:
+		id, e := newOperatorID()
+		if e != nil {
+			return writeWebFailure(stderr, "content evidence", e)
+		}
+		value, err = client.ContentEvidence(ctx, api.ContentEvidenceInput{ID: id, ProjectID: command.project, ContentID: command.contentID, ContentRevision: command.contentRevision, TestedSource: command.testedSource, Environment: command.environment, Result: command.contentResult, Location: command.location, Evaluator: command.evaluator, Judgment: command.judgment})
+	case commandContentAttach:
+		err = client.ContentAttach(ctx, api.ContentAttachInput{TaskID: command.id, ProjectID: command.project, ContentID: command.contentID, ContentRevision: command.contentRevision})
+	}
+	if err != nil {
+		return writeWebFailure(stderr, "content", err)
+	}
+	if value != nil {
+		return writeJSON(stdout, value)
+	}
+	return 0
+}
+
+func runContentOperator(ctx context.Context, client *api.OperatorClient, command attemptCommand, stdout, stderr io.Writer) int {
+	body, err := contentBody(command)
+	if err != nil {
+		return writeWebFailure(stderr, "content", err)
+	}
+	var value any
+	switch command.kind {
+	case commandContentCreate:
+		id, e := newOperatorID()
+		if e != nil {
+			return writeWebFailure(stderr, "content create", e)
+		}
+		in := contentInput(command, body)
+		in.ID = id
+		value, err = client.ContentCreate(ctx, in)
+	case commandContentRevise:
+		value, err = client.ContentRevise(ctx, contentInput(command, body))
+	case commandContentDeprecate:
+		value, err = client.ContentDeprecate(ctx, contentInput(command, ""))
+	case commandContentList:
+		value, err = client.ContentList(ctx, api.ContentListInput{ProjectID: command.project, Kind: command.contentKind, Offset: command.offset, Limit: command.head})
+	case commandContentRead:
+		value, err = client.ContentRead(ctx, api.ContentReadInput{ID: command.contentID, Revision: command.contentRevision})
+	case commandContentBody:
+		value, err = client.ContentBody(ctx, api.ContentBodyInput{ID: command.contentID, Revision: command.contentRevision, Offset: command.offset, Limit: command.head})
+	case commandContentEvidence:
+		id, e := newOperatorID()
+		if e != nil {
+			return writeWebFailure(stderr, "content evidence", e)
+		}
+		value, err = client.ContentEvidence(ctx, api.ContentEvidenceInput{ID: id, ProjectID: command.project, ContentID: command.contentID, ContentRevision: command.contentRevision, TestedSource: command.testedSource, Environment: command.environment, Result: command.contentResult, Location: command.location, Evaluator: command.evaluator, Judgment: command.judgment})
+	case commandContentAttach:
+		err = client.ContentAttach(ctx, api.ContentAttachInput{TaskID: command.id, ProjectID: command.project, ContentID: command.contentID, ContentRevision: command.contentRevision})
+	}
+	if err != nil {
+		return writeWebFailure(stderr, "content", err)
+	}
+	if value != nil {
+		return writeJSON(stdout, value)
+	}
+	return 0
+}
+
 func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) == 1 && helpFlag(args[0]) {
 		return attemptCommand{}, true, true
@@ -315,7 +458,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 1 && args[0] == "service" {
 		return parseServiceCommand(args)
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "content") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -348,6 +491,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 
 	if args[0] == "web" {
 		return parseWeb(args)
+	}
+	if args[1] == "content" {
+		return parseContent(args)
 	}
 	switch args[1] {
 	case "task":
@@ -428,6 +574,207 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		}
 	}
 	return attemptCommand{}, false, false
+}
+
+func parseContent(args []string) (attemptCommand, bool, bool) {
+	start := 0
+	if args[0] == "attempt" {
+		start = 1
+	}
+	if len(args) < start+2 || args[start] != "content" {
+		return attemptCommand{}, false, false
+	}
+	command := attemptCommand{}
+	switch args[start+1] {
+	case "create":
+		command.kind = commandContentCreate
+	case "revise":
+		command.kind = commandContentRevise
+	case "deprecate":
+		command.kind = commandContentDeprecate
+	case "list":
+		command.kind = commandContentList
+	case "read":
+		command.kind = commandContentRead
+	case "body":
+		command.kind = commandContentBody
+	case "evidence":
+		command.kind = commandContentEvidence
+	case "attach":
+		command.kind = commandContentAttach
+	default:
+		return attemptCommand{}, false, false
+	}
+	if len(args) == start+3 && helpFlag(args[start+2]) {
+		return attemptCommand{}, true, true
+	}
+	seen := map[string]bool{}
+	for i := start + 2; i < len(args); i += 2 {
+		if i+1 >= len(args) || seen[args[i]] {
+			return attemptCommand{}, false, false
+		}
+		seen[args[i]] = true
+		name, value := args[i], args[i+1]
+		switch name {
+		case "--project":
+			if validHumanRequestKey(value) {
+				command.project = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--kind":
+			if value == "procedure" || value == "acceptance_scenario" {
+				command.contentKind = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--id":
+			if validHumanRequestKey(value) {
+				command.contentID = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--task":
+			if validHumanRequestKey(value) {
+				command.id = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--revision":
+			n, ok := parseRevision(value)
+			if !ok {
+				return attemptCommand{}, false, false
+			}
+			command.contentRevision = n
+		case "--offset":
+			n, ok := parseRevision(value)
+			if !ok {
+				return attemptCommand{}, false, false
+			}
+			command.offset = n
+		case "--limit":
+			n, ok := parseRevision(value)
+			if !ok || n > 64*1024 {
+				return attemptCommand{}, false, false
+			}
+			command.head = n
+		case "--title":
+			if validOperatorText(value, 1, 1024) {
+				command.title = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--description":
+			if validOperatorText(value, 0, 4096) {
+				command.description = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--author":
+			if validOperatorText(value, 1, 256) {
+				command.name = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--body":
+			if validOperatorText(value, 0, 1<<20) {
+				command.body, command.bodySet = value, true
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--body-file":
+			if validOperatorText(value, 1, 4096) {
+				command.bodyFile = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--source-references":
+			if validOperatorText(value, 0, 32768) {
+				command.sourceReferences = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--tested-source":
+			if validOperatorText(value, 1, 4096) {
+				command.testedSource = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--environment":
+			if validOperatorText(value, 0, 4096) {
+				command.environment = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--result":
+			if value == "passed" || value == "failed" || value == "incomplete" || value == "not_run" {
+				command.contentResult = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--location":
+			if validOperatorText(value, 0, 4096) {
+				command.location = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--evaluator":
+			if validOperatorText(value, 1, 256) {
+				command.evaluator = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--judgment":
+			if validOperatorText(value, 0, 8192) {
+				command.judgment = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		default:
+			return attemptCommand{}, false, false
+		}
+	}
+	if command.bodySet && command.bodyFile != "" {
+		return attemptCommand{}, false, false
+	}
+	if args[0] == "attempt" && command.project == "" && command.kind != commandContentRead && command.kind != commandContentBody {
+		return attemptCommand{}, false, false
+	}
+	switch command.kind {
+	case commandContentCreate:
+		if command.project == "" || command.contentKind == "" || command.title == "" || command.name == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandContentRevise:
+		if command.project == "" || command.contentID == "" || command.contentRevision == 0 || command.contentKind == "" || command.title == "" || command.name == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandContentDeprecate:
+		if command.project == "" || command.contentID == "" || command.contentRevision == 0 || command.name == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandContentList:
+		if command.project == "" || command.offset > uint64(^uint64(0)>>1) {
+			return attemptCommand{}, false, false
+		}
+	case commandContentRead:
+		if command.contentID == "" || command.contentRevision == 0 {
+			return attemptCommand{}, false, false
+		}
+	case commandContentBody:
+		if command.contentID == "" || command.contentRevision == 0 || command.head == 0 || command.head > 64*1024 {
+			return attemptCommand{}, false, false
+		}
+	case commandContentEvidence:
+		if command.project == "" || command.contentID == "" || command.contentRevision == 0 || command.testedSource == "" || command.contentResult == "" || command.evaluator == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandContentAttach:
+		if command.project == "" || command.id == "" || command.contentID == "" || command.contentRevision == 0 {
+			return attemptCommand{}, false, false
+		}
+	}
+	return command, false, true
 }
 
 func parseServiceCommand(args []string) (attemptCommand, bool, bool) {
@@ -731,6 +1078,9 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 }
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
+	if len(args) >= 2 && args[0] == "content" {
+		return parseContent(args)
+	}
 	if len(args) == 1 && args[0] == "status" {
 		return attemptCommand{kind: commandStatus}, false, true
 	}
@@ -1224,6 +1574,9 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	}
 	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
 	defer cancel()
+	if command.kind >= commandContentCreate && command.kind <= commandContentAttach {
+		return runContentOperator(callContext, client, command, stdout, stderr)
+	}
 	switch command.kind {
 	case commandStatus:
 		snapshot, callErr := client.Snapshot(callContext)

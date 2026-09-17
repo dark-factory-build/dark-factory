@@ -150,6 +150,90 @@ type AttemptTask struct {
 	Task string `json:"task"`
 }
 
+// Project content is deliberately a small wire DTO. Bodies are never placed
+// in list responses; callers use the explicit bounded body reader.
+type Content struct {
+	ID               string `json:"id"`
+	ProjectID        string `json:"project_id"`
+	Kind             string `json:"kind"`
+	Title            string `json:"title"`
+	Description      string `json:"description"`
+	Body             string `json:"body,omitempty"`
+	Author           string `json:"author"`
+	SourceReferences string `json:"source_references"`
+	Revision         uint64 `json:"revision"`
+	Deprecated       bool   `json:"deprecated"`
+}
+type ContentList struct {
+	Items      []Content `json:"items"`
+	NextOffset uint64    `json:"next_offset,omitempty"`
+}
+type ContentBody struct {
+	ID         string `json:"id"`
+	Revision   uint64 `json:"revision"`
+	Offset     uint64 `json:"offset"`
+	Body       string `json:"body"`
+	NextOffset uint64 `json:"next_offset,omitempty"`
+	Complete   bool   `json:"complete"`
+}
+type ContentEvidence struct {
+	ID              string `json:"id"`
+	ProjectID       string `json:"project_id"`
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
+	TestedSource    string `json:"tested_source"`
+	Environment     string `json:"environment"`
+	Result          string `json:"result"`
+	Location        string `json:"location"`
+	Evaluator       string `json:"evaluator"`
+	Judgment        string `json:"judgment"`
+}
+type ContentInput struct {
+	ID               string `json:"id"`
+	ProjectID        string `json:"project_id"`
+	Kind             string `json:"kind"`
+	Title            string `json:"title"`
+	Description      string `json:"description"`
+	Body             string `json:"body"`
+	Author           string `json:"author"`
+	SourceReferences string `json:"source_references"`
+	ExpectedRevision uint64 `json:"expected_revision,omitempty"`
+}
+type ContentListInput struct {
+	ProjectID string `json:"project_id,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Offset    uint64 `json:"offset,omitempty"`
+	Limit     uint64 `json:"limit,omitempty"`
+}
+type ContentReadInput struct {
+	ID       string `json:"id"`
+	Revision uint64 `json:"revision"`
+}
+type ContentBodyInput struct {
+	ID       string `json:"id"`
+	Revision uint64 `json:"revision"`
+	Offset   uint64 `json:"offset"`
+	Limit    uint64 `json:"limit"`
+}
+type ContentEvidenceInput struct {
+	ID              string `json:"id"`
+	ProjectID       string `json:"project_id"`
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
+	TestedSource    string `json:"tested_source"`
+	Environment     string `json:"environment"`
+	Result          string `json:"result"`
+	Location        string `json:"location"`
+	Evaluator       string `json:"evaluator"`
+	Judgment        string `json:"judgment"`
+}
+type ContentAttachInput struct {
+	TaskID          string `json:"task_id"`
+	ProjectID       string `json:"project_id"`
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
+}
+
 func (AttemptTask) String() string   { return "AttemptTask(<redacted>)" }
 func (AttemptTask) GoString() string { return "AttemptTask(<redacted>)" }
 

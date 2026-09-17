@@ -35,6 +35,7 @@ const (
 	v8UserVersion       = 8
 	v9UserVersion       = 9
 	v10UserVersion      = 10
+	v11UserVersion      = 11
 	v8HumanRequests     = `CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
@@ -281,7 +282,7 @@ func v8SchemaStatements() []string {
 
 // v9SchemaStatements predates durable sprite appearance.
 func v9SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := append([]string(nil), v11SchemaStatements()...)
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statements[i] = v7Agents
@@ -292,10 +293,23 @@ func v9SchemaStatements() []string {
 
 // v10 predates worker archiving.
 func v10SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := append([]string(nil), v11SchemaStatements()...)
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statements[i] = strings.Replace(statement, "\tarchived INTEGER NOT NULL CHECK (archived IN (0, 1)),\n", "", 1)
+		}
+	}
+	return statements
+}
+
+// v11 is the pre-procedure schema. The current schema adds only the bounded
+// project content and task-reference tables.
+func v11SchemaStatements() []string {
+	statements := append([]string(nil), schemaStatements...)
+	for i := len(statements) - 1; i >= 0; i-- {
+		_, name := schemaObjectIdentity(statements[i])
+		if name == "project_content_revisions" || name == "project_content_revisions_project_kind" || name == "project_content_evidence" || name == "task_content_references" {
+			statements = append(statements[:i], statements[i+1:]...)
 		}
 	}
 	return statements
@@ -395,6 +409,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v9SchemaStatements(), true
 	case v10UserVersion:
 		return v10SchemaStatements(), true
+	case v11UserVersion:
+		return v11SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -420,7 +436,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -443,6 +459,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[8:]
 	case v10UserVersion:
 		steps = all[9:]
+	case v11UserVersion:
+		steps = all[10:]
 	default:
 		return connection.Close()
 	}
@@ -674,8 +692,24 @@ func migrateV10Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	columns := `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "agents", columns, "agents_id_project_unique", "archived", "0"); err != nil {
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v11SchemaStatements()), "agents", columns, "agents_id_project_unique", "archived", "0"); err != nil {
 		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v11UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v11UserVersion, v11SchemaStatements())
+}
+
+func migrateV11Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v11UserVersion, v11SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	for _, name := range []string{"project_content_revisions", "project_content_revisions_project_kind", "project_content_evidence", "task_content_references"} {
+		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
+			return fmt.Errorf("create %s: %w", name, err)
+		}
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err

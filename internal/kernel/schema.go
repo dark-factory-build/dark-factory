@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 11
+	userVersion   = 12
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -109,6 +109,44 @@ var schemaStatements = []string{
 	`CREATE UNIQUE INDEX tasks_id_project_incarnation_unique ON tasks(id, project_id, incarnation_id)`,
 	`CREATE UNIQUE INDEX tasks_incarnation_unique ON tasks(incarnation_id)`,
 	`CREATE INDEX tasks_canonical_queue ON tasks(status, priority DESC, created_at_ms ASC, id ASC)`,
+	`CREATE TABLE project_content_revisions (
+    id BLOB NOT NULL CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    kind TEXT NOT NULL CHECK (length(CAST(kind AS BLOB)) BETWEEN 1 AND 64),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 1024),
+    description TEXT NOT NULL CHECK (length(CAST(description AS BLOB)) <= 4096),
+    body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 1048576),
+    author TEXT NOT NULL CHECK (length(CAST(author AS BLOB)) BETWEEN 1 AND 256),
+    source_references TEXT NOT NULL CHECK (length(CAST(source_references AS BLOB)) <= 32768),
+    deprecated INTEGER NOT NULL CHECK (deprecated IN (0, 1)),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (id, revision)
+) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX project_content_revisions_project_kind ON project_content_revisions(project_id, kind, id, revision DESC)`,
+	`CREATE TABLE project_content_evidence (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    content_id BLOB NOT NULL CHECK (length(content_id) = 16),
+    content_revision INTEGER NOT NULL CHECK (content_revision >= 1),
+    tested_source TEXT NOT NULL CHECK (length(CAST(tested_source AS BLOB)) BETWEEN 1 AND 4096),
+    environment TEXT NOT NULL CHECK (length(CAST(environment AS BLOB)) <= 4096),
+    result TEXT NOT NULL CHECK (result IN ('passed', 'failed', 'incomplete', 'not_run')),
+    location TEXT NOT NULL CHECK (length(CAST(location AS BLOB)) <= 4096),
+    evaluator TEXT NOT NULL CHECK (length(CAST(evaluator AS BLOB)) BETWEEN 1 AND 256),
+    judgment TEXT NOT NULL CHECK (length(CAST(judgment AS BLOB)) <= 8192),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    FOREIGN KEY (content_id, content_revision) REFERENCES project_content_revisions(id, revision)
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE task_content_references (
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
+    content_id BLOB NOT NULL CHECK (length(content_id) = 16),
+    content_revision INTEGER NOT NULL CHECK (content_revision >= 1),
+    attached_at_ms INTEGER NOT NULL CHECK (attached_at_ms >= 0),
+    PRIMARY KEY (task_id, content_id, content_revision),
+    FOREIGN KEY (content_id, content_revision) REFERENCES project_content_revisions(id, revision)
+) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE changes (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
