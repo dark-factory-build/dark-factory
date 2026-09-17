@@ -340,6 +340,8 @@ lock_path="$common_dir/.dark-factory-local-ci.lock"
 # regular-file or symlink pathname.
 outside_lock="$temporary/outside-lock"
 : >"$outside_lock"
+/bin/rm -f "$lock_path/descriptor"
+/bin/rmdir "$lock_path"
 ln -s "$outside_lock" "$lock_path"
 if (cd "$first" && ./scripts/with-local-ci-lease.sh true) 2>"$temporary/initial-symlink.stderr"; then
     fail "initial lock-object symlink was followed"
