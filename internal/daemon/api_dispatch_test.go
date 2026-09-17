@@ -287,6 +287,31 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	}
 }
 
+func TestDaemonDispatchesContentCreateWithoutScheduling(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	done := fixture.serve(t)
+	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: testID(240), Name: "content", Root: filepath.Join(filepath.Dir(fixture.socket), "content-root")}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	done = fixture.serve(t)
+	content, err := client.ContentCreate(ctx, api.ContentInput{ID: testID(241), ProjectID: testID(240), Kind: "procedure", Title: "procedure", Body: "steps"})
+	if err != nil || content.Revision != 1 || content.Body != "" {
+		t.Fatalf("content create = %+v, %v", content, err)
+	}
+	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
+	snapshot, err := fixture.store.Snapshot(ctx)
+	if err != nil || len(snapshot.Tasks) != 0 {
+		t.Fatalf("content changed task admission: %+v, %v", snapshot, err)
+	}
+}
+
 func assertSchedulerWake(t *testing.T, daemon *Daemon) {
 	t.Helper()
 	select {

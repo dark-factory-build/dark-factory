@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +62,18 @@ func TestContentCommandParsing(t *testing.T) {
 	body, err = contentBody(command)
 	if err != nil || body != "stdin body" {
 		t.Fatalf("stdin body read = %q, %v", body, err)
+	}
+}
+
+func TestContentCallerBoundsAndDerivedProvenance(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	for _, argv := range [][]string{
+		{"attempt", "content", "body", "--id", id, "--revision", "1", "--limit", "65537"},
+		{"attempt", "content", "evidence", "--project", id, "--id", id, "--revision", "1", "--tested-source", "source", "--result", "passed", "--evaluator", "operator"},
+		{"attempt", "content", "create", "--project", id, "--kind", "procedure", "--title", "safe", "--body", strings.Repeat("x", 1<<20+1)},
+	} {
+		if _, _, ok := parse(argv); ok {
+			t.Fatal("accepted out-of-bounds input or caller-supplied provenance")
+		}
 	}
 }
