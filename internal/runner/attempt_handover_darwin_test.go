@@ -369,6 +369,57 @@ func dialTakeover(t *testing.T, root, runID, token string) (net.Conn, takeoverRe
 	return conn, response
 }
 
+func TestTakeoverShutdownRejectsQueuedCandidate(t *testing.T) {
+	f := newFixtureAt(t, shortRuntimeRoot(t))
+	const attemptID = "attempt-takeover-shutdown"
+	transport, closeEndpoint := startTakeoverEndpoint(f.dir, attemptID)
+	if transport == nil {
+		t.Fatal("startTakeoverEndpoint degraded to no transport in a short-root fixture")
+	}
+	token := readTakeoverToken(t, f.root)
+	conn, err := net.Dial("unix", filepath.Join(f.root, TakeoverSocketName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	body, err := json.Marshal(takeoverGrant{RunID: attemptID, Token: token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(append(body, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for readTakeoverToken(t, f.root) == token {
+		if !time.Now().Before(deadline) {
+			t.Fatal("takeover request was not authenticated before shutdown")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Shutdown joins the accept loop, then rejects the authenticated descriptor
+	// that was queued after the owner stopped consuming replacements.
+	closeEndpoint()
+	if err := conn.SetReadDeadline(time.Now().Add(4 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	line, err := readTakeoverLine(conn, maxTakeoverBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response takeoverResponse
+	if err := json.Unmarshal(line, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Accepted || response.Error != "runner-exiting" {
+		t.Fatalf("shutdown response=%+v, want runner-exiting refusal", response)
+	}
+	for _, name := range []string{TakeoverSocketName, TakeoverGrantName} {
+		if _, err := os.Stat(filepath.Join(f.root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("shutdown left %s: %v", name, err)
+		}
+	}
+}
+
 func awaitHandoverConverge(t *testing.T, done <-chan error) {
 	t.Helper()
 	select {

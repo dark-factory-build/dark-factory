@@ -1269,18 +1269,14 @@ func startTakeoverEndpoint(dir *os.File, runID string) (*HandoverTransport, func
 		close(done)
 		_ = listener.Close()
 		<-stopped
-		for {
-			select {
-			case file := <-replacements:
-				if file != nil {
-					_ = writeTakeoverResponse(file, false, "runner-exiting")
-					_ = file.Close()
-				}
-			default:
-				goto drained
+		select {
+		case file := <-replacements:
+			if file != nil {
+				_ = writeTakeoverResponse(file, false, "runner-exiting")
+				_ = file.Close()
 			}
+		default:
 		}
-	drained:
 		_ = unix.Unlinkat(int(dir.Fd()), TakeoverSocketName, 0)
 		_ = unix.Unlinkat(int(dir.Fd()), TakeoverGrantName, 0)
 	}
