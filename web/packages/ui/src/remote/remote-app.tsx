@@ -6,7 +6,6 @@ import {
   createRemoteManager,
   createRemoteStore,
   parseInvitation,
-  type HumanRequestDetail,
   type HumanRequestItem,
   type PushSubscribeBody,
   type RemoteFactoryView,
@@ -17,13 +16,14 @@ import {
   type StateView,
 } from "@dark-factory/client";
 import { AgentStrip, QueueScreen, StageMeter } from "../console-screens.js";
+import { AnswerControls } from "../console-interactions.js";
+import { HumanRequestFlow, type HumanRequestFlowSelection } from "../human-request-flow.js";
 import {
   FACTORY_UNREACHABLE,
   INVITATION_SPENT,
   INVITATION_UNREADABLE,
   REMOTE_STATUS_GLYPH,
   REQUEST_CLOSED,
-  REQUEST_UNAVAILABLE,
   remoteActionable,
   remoteDeliveryNotice,
   remoteFactoryBanner,
@@ -73,16 +73,11 @@ type Pairing =
   | Readonly<{ phase: "pairing" }>
   | Readonly<{ phase: "failed"; copy: string }>;
 
-type Detail = {
+type RemoteScope = {
   nodeId: string;
   label: string;
-  request: HumanRequestItem;
-  phase: "loading" | "ready" | "replying" | "cancelling" | "ended";
-  detail?: HumanRequestDetail;
-  reply: string;
-  notice?: string;
-  token: number;
 };
+type Detail = HumanRequestFlowSelection<RemoteScope>;
 
 type Confirm = Readonly<{ kind: "factory"; nodeId: string }> | Readonly<{ kind: "device" }>;
 
@@ -97,7 +92,7 @@ const IDLE: Pairing = { phase: "idle" };
  * TUI.
  */
 export function RemoteApp(props: RemoteAppProps = {}) {
-  const [, setVersion] = useState(0);
+  const [version, setVersion] = useState(0);
   const [pairing, setPairing] = useState<Pairing>(IDLE);
   const [pasting, setPasting] = useState(false);
   const [link, setLink] = useState("");
@@ -107,18 +102,26 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   const [alerts, setAlerts] = useState<{ phase: "idle" | "working" | "failed"; copy?: string }>({ phase: "idle" });
   const [online, setOnline] = useState(() => (props.navigator ?? globalThis.navigator)?.onLine !== false);
   const manager = useRef<RemoteManager | undefined>(undefined);
-  const token = useRef(0);
   // Read and cleared once per mount, not once per effect run.
   const arrival = useRef<{ attempted: boolean; invitation: RemoteInvitation | null } | undefined>(undefined);
-  // The selection is read back inside one-shot handlers, so it must be current
-  // in the same tick a control is used, not on the next render.
-  const selection = useRef<Detail | undefined>(undefined);
-
   const bump = () => { if (manager.current !== undefined) setVersion((value) => value + 1); };
-  const putDetail = (next: Detail | undefined) => {
-    selection.current = next;
-    if (manager.current !== undefined) setDetailState(next);
-  };
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  const human = useRef<HumanRequestFlow<RemoteScope> | undefined>(undefined);
+  if (human.current === undefined) {
+    const flow = new HumanRequestFlow<RemoteScope>({
+      active: (scope) => remoteActionable(manager.current?.factories().find((factory) => factory.nodeId === scope.nodeId)?.status, onlineRef.current),
+      currentRequest: (scope, requestID) => manager.current?.factories().find((factory) => factory.nodeId === scope.nodeId)?.state?.humanRequests.get(requestID),
+      session: (scope) => manager.current?.client(scope.nodeId)?.session,
+      onChange: () => { if (manager.current !== undefined) setDetailState(flow.selection); },
+      afterAction: "refresh",
+      replaceReady: true,
+      unavailableNotice: FACTORY_UNREACHABLE,
+      absentNotice: REQUEST_CLOSED,
+      actionFailureNotice: remoteDeliveryNotice,
+    });
+    human.current = flow;
+  }
 
   useEffect(() => {
     // A host that states the device's connectivity owns it; only when none is
@@ -188,6 +191,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   const byNode = new Map(factories.map((factory) => [factory.nodeId, factory] as const));
   const actionable = (nodeId: string) => remoteActionable(byNode.get(nodeId)?.status, online);
 
+  useEffect(() => { human.current?.reconcile(); }, [version]);
+
   async function pairWith(target: RemoteManager, invitation: RemoteInvitation): Promise<void> {
     setPairing({ phase: "pairing" });
     try {
@@ -216,107 +221,22 @@ export function RemoteApp(props: RemoteAppProps = {}) {
     bump();
   };
 
-  /**
-   * Reads the private detail for one question at one exact revision. It is the
-   * only place detail is ever fetched, so a reply, a cancellation and a first
-   * open all converge on the same fresh authority.
-   */
-  const load = async (next: Detail, notice: string | undefined, absent = REQUEST_UNAVAILABLE): Promise<void> => {
-    putDetail({ ...next, notice });
-    const session = manager.current?.client(next.nodeId)?.session;
-    if (session === undefined) {
-      putDetail({ ...next, phase: "ended", detail: undefined, notice: notice ?? FACTORY_UNREACHABLE });
-      return;
-    }
-    try {
-      const fetched = await session.getHumanRequestDetail({
-        requestId: next.request.id,
-        expectedRevision: next.request.revision,
-      });
-      if (selection.current?.token !== next.token) return;
-      putDetail({ ...next, phase: "ready", detail: fetched, reply: "", notice });
-    } catch {
-      if (selection.current?.token !== next.token) return;
-      putDetail({ ...next, phase: "ended", detail: undefined, notice: notice ?? absent });
-    }
-  };
-
   const open = (nodeId: string, label: string, request: HumanRequestItem) => {
-    // Two ANSWER controls can be on screen for one question, and the daemon
-    // allows one human operation per request at a time: a tap while a read or
-    // an effect is still in flight would race it, and the loser reads as a
-    // failure — or worse, moves the detail out from under an answer coming back.
-    const current = selection.current;
-    if (!actionable(nodeId) || (current !== undefined && busy(current))) return;
+    if (!actionable(nodeId)) return;
     setCancelPhrase(undefined);
-    void load({ nodeId, label, request, phase: "loading", reply: "", token: ++token.current }, undefined);
+    human.current?.open({ nodeId, label }, request);
   };
-
-  /**
-   * After a one-shot effect the answer is whatever the factory now says, so the
-   * detail is read again — once. Nothing here ever repeats the effect itself.
-   */
-  const refresh = (after: Detail, notice: string | undefined) => {
-    const current = manager.current?.factories().find((factory) => factory.nodeId === after.nodeId);
-    const request = current?.state?.humanRequests.get(after.request.id);
-    if (request === undefined) {
-      // Whatever notice the effect left stands: the request may be missing
-      // because the factory closed it, or because there is no snapshot to look
-      // in at all, and this cannot tell those apart.
-      putDetail({ ...after, phase: "ended", detail: undefined, notice: notice ?? REQUEST_CLOSED });
-      return;
-    }
-    // An effect that landed moves the question's revision on, so a refused
-    // re-read here means it is answered, not that anything went wrong.
-    void load({ ...after, request, phase: "loading", reply: "", detail: undefined }, notice, REQUEST_CLOSED);
-  };
-
-  const reply = () => {
-    const current = selection.current;
-    const detailValue = current?.detail;
-    if (current === undefined || current.phase !== "ready" || detailValue === undefined) return;
-    if (!actionable(current.nodeId) || current.reply.trim().length === 0) return;
-    const session = manager.current?.client(current.nodeId)?.session;
-    if (session === undefined) { putDetail({ ...current, phase: "ended", detail: undefined, notice: FACTORY_UNREACHABLE }); return; }
-    const answer = current.reply;
-    putDetail({ ...current, phase: "replying", notice: undefined });
-    void (async () => {
-      let notice: string | undefined;
-      try { await session.replyHumanRequest(detailValue, answer); } catch (error) { notice = remoteDeliveryNotice(error); }
-      if (selection.current?.token !== current.token) return;
-      setCancelPhrase(undefined);
-      refresh(current, notice);
-    })();
-  };
-
-  const changeReply = (value: string) => {
-    const current = selection.current;
-    const currentDetail = current?.detail;
-    if (current === undefined || current.phase !== "ready" || currentDetail === undefined || !currentDetail.canReply || !actionable(current.nodeId)) return;
-    if (new TextEncoder().encode(value).length > currentDetail.replyMaxBytes) return;
-    putDetail({ ...current, reply: value });
-  };
-
+  const reply = () => { setCancelPhrase(undefined); human.current?.reply(); };
+  const changeReply = (value: string) => human.current?.setReply(value);
   const cancelRun = () => {
-    const current = selection.current;
-    const descriptor = current?.detail?.cancelRun;
-    if (current === undefined || current.phase !== "ready" || descriptor === undefined || descriptor === null) return;
-    if (!actionable(current.nodeId) || cancelPhrase?.trim().toUpperCase() !== CANCEL_PHRASE) return;
-    const session = manager.current?.client(current.nodeId)?.session;
-    if (session === undefined) { putDetail({ ...current, phase: "ended", detail: undefined, notice: FACTORY_UNREACHABLE }); return; }
-    putDetail({ ...current, phase: "cancelling", notice: undefined });
-    void (async () => {
-      let notice: string | undefined;
-      try { await session.cancelHumanRequest(descriptor); } catch (error) { notice = remoteDeliveryNotice(error); }
-      if (selection.current?.token !== current.token) return;
-      setCancelPhrase(undefined);
-      refresh(current, notice);
-    })();
+    if (cancelPhrase?.trim().toUpperCase() !== CANCEL_PHRASE) return;
+    setCancelPhrase(undefined);
+    human.current?.cancel();
   };
 
   const forget = (nodeId: string) => {
     setConfirm(undefined);
-    if (selection.current?.nodeId === nodeId) putDetail(undefined);
+    if (detail?.scope.nodeId === nodeId) human.current?.clear(true);
     void (async () => {
       try { await manager.current?.forget(nodeId); } catch { /* the binding is gone either way */ }
       bump();
@@ -343,7 +263,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
 
   const forgetDevice = () => {
     setConfirm(undefined);
-    putDetail(undefined);
+    human.current?.clear(true);
     void (async () => {
       try { await manager.current?.forgetDevice(); } catch { /* the bindings are gone either way */ }
       bump();
@@ -497,7 +417,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                     <button
                       type="button"
                       className="dfRemote__answer"
-                      aria-pressed={detail !== undefined && detail.nodeId === item.nodeId && detail.request.id === item.request.id}
+                      aria-pressed={detail !== undefined && detail.scope.nodeId === item.nodeId && detail.request.id === item.request.id}
                       disabled={!actionable(item.nodeId) || working}
                       onClick={() => open(item.nodeId, item.label, item.request)}
                     >
@@ -513,7 +433,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         {detail === undefined ? null : (
           <article className="dfFactoryConsole__section dfRemote__detail" aria-label="Selected question" aria-live="polite">
             <div className="dfFactoryConsole__sectionHeading">
-              <h2>{detail.label}</h2>
+              <h2>{detail.scope.label}</h2>
               <span>{detail.phase === "replying" ? "REPLYING" : detail.phase === "cancelling" ? "CANCELLING" : detail.phase.toUpperCase()}</span>
             </div>
             {detail.notice === undefined ? null : (
@@ -523,35 +443,13 @@ export function RemoteApp(props: RemoteAppProps = {}) {
             {detail.detail === undefined ? null : (
               <>
                 <p className="dfRemote__questionText">{detail.detail.question}</p>
-                {detail.detail.options.length === 0 ? null : <div className="dfFactoryConsole__answerOptions" role="group" aria-label="Suggested answers">
-                  {detail.detail.options.map((option, index) => <button type="button" key={option} disabled={busy(detail) || !detail.detail?.canReply || !actionable(detail.nodeId)} onClick={() => changeReply(option)}>{option}{index === 0 ? " · RECOMMENDED" : ""}</button>)}
-                </div>}
-                {detail.detail.canReply ? (
-                  <div className="dfRemote__reply">
-                    <label htmlFor="dfRemoteReply">YOUR ANSWER</label>
-                    <textarea
-                      id="dfRemoteReply"
-                      className="dfRemote__replyText"
-                      value={detail.reply}
-                      maxLength={detail.detail.replyMaxBytes}
-                      disabled={busy(detail) || !actionable(detail.nodeId)}
-                      onChange={(event) => changeReply(event.currentTarget.value)}
-                    />
-                    <button
-                      type="button"
-                      className="dfRemote__replyAction"
-                      disabled={busy(detail) || !actionable(detail.nodeId) || detail.reply.trim().length === 0}
-                      onClick={reply}
-                    >
-                      {detail.phase === "replying" ? "REPLYING…" : "REPLY"}
-                    </button>
-                  </div>
-                ) : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
+                <AnswerControls surface="remote" options={detail.detail.options} canReply={detail.detail.canReply} reply={detail.reply} replyMaxBytes={detail.detail.replyMaxBytes} busy={busy(detail)} disabled={!actionable(detail.scope.nodeId)} onReplyChange={changeReply} onReply={reply} submitLabel="REPLY" submittingLabel="REPLYING…" />
+                {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
                 {detail.detail.cancelRun === null ? null : cancelPhrase === undefined ? (
                   <button
                     type="button"
                     className="dfRemote__cancelOpen"
-                    disabled={busy(detail) || !actionable(detail.nodeId)}
+                    disabled={busy(detail) || !actionable(detail.scope.nodeId)}
                     onClick={() => setCancelPhrase("")}
                   >
                     CANCEL RUN
@@ -563,14 +461,14 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                       id="dfRemoteCancel"
                       className="dfRemote__cancelText"
                       value={cancelPhrase}
-                      disabled={busy(detail) || !actionable(detail.nodeId)}
+                      disabled={busy(detail) || !actionable(detail.scope.nodeId)}
                       onChange={(event) => setCancelPhrase(event.currentTarget.value)}
                     />
                     <div className="dfRemote__actions">
                       <button
                         type="button"
                         className="dfRemote__cancelAction"
-                        disabled={busy(detail) || !actionable(detail.nodeId) || cancelPhrase.trim().toUpperCase() !== CANCEL_PHRASE}
+                        disabled={busy(detail) || !actionable(detail.scope.nodeId) || cancelPhrase.trim().toUpperCase() !== CANCEL_PHRASE}
                         onClick={cancelRun}
                       >
                         {detail.phase === "cancelling" ? "CANCELLING…" : CANCEL_PHRASE}
@@ -592,7 +490,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               type="button"
               className="dfRemote__close"
               disabled={busy(detail)}
-              onClick={() => { setCancelPhrase(undefined); putDetail(undefined); }}
+              onClick={() => { setCancelPhrase(undefined); human.current?.clear(true); }}
             >
               CLOSE
             </button>
@@ -604,7 +502,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
             factory={selected}
             online={online}
             working={working}
-            selectedRequestId={detail !== undefined && detail.nodeId === selected.nodeId ? detail.request.id : undefined}
+            selectedRequestId={detail !== undefined && detail.scope.nodeId === selected.nodeId ? detail.request.id : undefined}
             confirming={confirm?.kind === "factory" && confirm.nodeId === selected.nodeId}
             onOpenRequest={(request) => open(selected.nodeId, selected.label, request)}
             onConfirmForget={() => setConfirm({ kind: "factory", nodeId: selected.nodeId })}

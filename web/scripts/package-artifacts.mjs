@@ -51,6 +51,7 @@ const inventory = {
     "transcript.d.ts", "transcript.js", "provenance.json",
   ],
   ui: [
+    "console-interactions.d.ts", "console-interactions.js",
     "console-screens.d.ts", "console-screens.js", "console-sidebar.d.ts", "console-sidebar.js",
     "console-view.d.ts", "console-view.js",
     "factory-settings-coordinator.d.ts", "factory-settings-coordinator.js",
@@ -62,6 +63,7 @@ const inventory = {
     "factory-scene/scene.d.ts", "factory-scene/scene.js",
     "factory-scene/sprite-editor.d.ts", "factory-scene/sprite-editor.js",
     "factory-scene/sprites/sprites.generated.d.ts", "factory-scene/sprites/sprites.generated.js",
+    "human-request-flow.d.ts", "human-request-flow.js",
     "index.d.ts", "index.js",
     "remote-invite.d.ts", "remote-invite.js",
     "remote/remote-app.d.ts", "remote/remote-app.js", "remote/remote-view.d.ts", "remote/remote-view.js",
