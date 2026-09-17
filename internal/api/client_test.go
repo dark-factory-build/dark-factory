@@ -1106,7 +1106,7 @@ func TestTokenAndSocketPathsFailClosed(t *testing.T) {
 	})
 }
 
-func TestAttemptClientFollowsRotatedSessionTokenAcrossReadAndWrites(t *testing.T) {
+func TestAttemptClientPinsRetainedCredentialAcrossRotation(t *testing.T) {
 	first := testCredential('A')
 	second := testCredential('B')
 	directory := privateTestDirectory(t)
@@ -1121,11 +1121,7 @@ func TestAttemptClientFollowsRotatedSessionTokenAcrossReadAndWrites(t *testing.T
 	}
 	done := make(chan error, 1)
 	go func() {
-		responses := []string{
-			successResponse(`{"task":"exact"}`),
-			successResponse(`{"head":1,"revision":1}`),
-			successResponse(`{"head":2,"revision":2}`),
-		}
+		responses := []string{successResponse(`{"task":"exact"}`), successResponse(`{"head":1,"revision":1}`), successResponse(`{"head":2,"revision":2}`)}
 		want := []credential{first, second, second}
 		for index := range responses {
 			connection, acceptErr := listener.Accept()
@@ -1139,15 +1135,6 @@ func TestAttemptClientFollowsRotatedSessionTokenAcrossReadAndWrites(t *testing.T
 			}
 			if readErr == nil {
 				readErr = writeTestResponse(connection, wireAttemptDomain, responses[index])
-			}
-			if readErr == nil && index > 0 {
-				readErr = writeTestPayload(connection, make([]byte, outcomeReceiptBytes), nil)
-				if readErr == nil {
-					readErr = connection.(*net.UnixConn).CloseWrite()
-				}
-				if readErr == nil {
-					_, readErr = readTestFrame(connection)
-				}
 			}
 			_ = connection.Close()
 			if readErr != nil {
@@ -1165,11 +1152,88 @@ func TestAttemptClientFollowsRotatedSessionTokenAcrossReadAndWrites(t *testing.T
 	if err := os.Rename(replacement, token); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Succeed(context.Background(), "first write"); err != nil {
+	if _, err := client.Task(context.Background()); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("retained client task after token rotation = %v", err)
+	}
+	write := PeerQuestionInput{TargetTaskID: strings.Repeat("1", 32), IdempotencyKey: strings.Repeat("2", 32), Question: "write"}
+	if _, err := client.PeerAsk(context.Background(), write); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("retained client control after token rotation = %v", err)
+	}
+	if _, err := client.Succeed(context.Background(), "stale write"); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("retained client outcome after token rotation = %v", err)
+	}
+	current, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Block(context.Background(), "second write"); err != nil {
+	if _, err := current.PeerAsk(context.Background(), write); err != nil {
 		t.Fatal(err)
+	}
+	write.IdempotencyKey = strings.Repeat("3", 32)
+	if _, err := current.PeerAsk(context.Background(), write); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAttemptClientRejectsResponseAfterTokenRotation(t *testing.T) {
+	first := testCredential('C')
+	second := testCredential('D')
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, first)
+	listener, socket := testListener(t, directory)
+	defer listener.Close()
+	t.Setenv(attemptTokenFileEnv, token)
+	client, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan error, 1)
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			received <- acceptErr
+			done <- acceptErr
+			return
+		}
+		defer connection.Close()
+		frame, readErr := readTestFrame(connection)
+		if readErr == nil && (len(frame) < wireRequestPrelude || !bytes.Equal(frame[1:wireRequestPrelude], first[:])) {
+			readErr = fmt.Errorf("in-flight request did not carry run A credential")
+		}
+		received <- readErr
+		if readErr != nil {
+			done <- readErr
+			return
+		}
+		<-release
+		if err := writeTestResponse(connection, wireAttemptDomain, successResponse(`{"task":"late"}`)); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+	callDone := make(chan error, 1)
+	go func() {
+		_, callErr := client.Task(context.Background())
+		callDone <- callErr
+	}()
+	if err := <-received; err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(directory, "replacement")
+	writeTestToken(t, replacement, second)
+	if err := os.Rename(replacement, token); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-callDone; !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("response after token rotation = %v", err)
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
