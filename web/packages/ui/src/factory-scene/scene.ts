@@ -150,12 +150,13 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     }
     const room = worker.nodeId === undefined ? undefined : rooms.get(worker.nodeId);
     if (room === undefined) { areas.outside.push(worker); continue; }
-    const slot = roomCounts.get(room.id) ?? 0;
     const bay = worker.observedBayId !== undefined && room.contents.some((item) => item.targetId === worker.observedBayId)
       ? worker.observedBayId : undefined;
+    const occupancy = JSON.stringify([room.id, bay ?? null]);
+    const slot = roomCounts.get(occupancy) ?? 0;
     const positions = workPositions(room, bay);
     if (slot >= positions.length) { areas.overflow.push(worker); continue; }
-    roomCounts.set(room.id, slot + 1);
+    roomCounts.set(occupancy, slot + 1);
     placed.push({ id: worker.id, area: "room", roomId: room.id, ...(bay === undefined ? {} : { bayId: bay }), ...positions[slot]! });
   }
   let top = layout.restingTop;

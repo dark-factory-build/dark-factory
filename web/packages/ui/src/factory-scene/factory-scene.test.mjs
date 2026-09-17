@@ -864,6 +864,15 @@ test("named direct-child bays are bounded and only exact observations occupy the
   assert.equal(exact.bayId, "child-1");
   assert.equal(representative.bayId, undefined);
   assert.notDeepEqual({ x: exact.x, y: exact.y }, { x: representative.x, y: representative.y });
+  const occupied = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [
+    { ...workers[0], id: "a", nodeId: node.id, observedBayId: "child-0" },
+    { ...workers[0], id: "b", nodeId: node.id, observedBayId: "child-1" },
+    { ...workers[0], id: "c", nodeId: node.id, observedBayId: "child-0" },
+    { ...workers[0], id: "d", nodeId: node.id, observedBayId: "not-pictured" },
+  ]);
+  assert.deepEqual(occupied.map(({ id, area, bayId }) => [id, area, bayId]), [
+    ["a", "room", "child-0"], ["b", "room", "child-1"], ["c", "overflow", undefined], ["d", "room", undefined],
+  ]);
   assert.equal(layoutScene({ digest: "parent", nodes: [{ ...node, id: "parent", parentId: "root" }] }).rooms[0].arrangement, "parent");
   assert.equal(layoutScene({ digest: "leaf", nodes: [{ ...node, id: "leaf", parentId: "root", components: [] }] }).rooms[0].arrangement, "bench");
   const hall = layoutScene({ digest: "hall", nodes: [{ ...node, sizeBucket: "large" }] }).rooms[0];
