@@ -402,6 +402,46 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 	}
 }
 
+func TestCodexAttemptMCPNamesAreBoundToRuntimeHome(t *testing.T) {
+	installation, firstRuntime, _ := nativeFixture(t, kernel.ProviderCodex)
+	secondRuntime := runtimeFixture(t, firstRuntime.toolPath, firstRuntime.accountHome)
+	first, err := Build(requestFor(t, kernel.ProviderCodex, installation, firstRuntime, "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Build(requestFor(t, kernel.ProviderCodex, installation, secondRuntime, "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuredName := func(argv []string) string {
+		for _, arg := range argv {
+			if !strings.HasPrefix(arg, "mcp_servers.factory_attempt_") {
+				continue
+			}
+			name, _, _ := strings.Cut(strings.TrimPrefix(arg, "mcp_servers."), "=")
+			return name
+		}
+		t.Fatalf("Codex launch has no attempt MCP server: %q", argv)
+		return ""
+	}
+	firstName := configuredName(first.Argv())
+	secondName := configuredName(second.Argv())
+	if firstName == secondName {
+		t.Fatalf("distinct runtime homes configured the same MCP server %q", firstName)
+	}
+	for _, test := range []struct {
+		name string
+		argv []string
+	}{
+		{name: firstName, argv: first.Argv()},
+		{name: secondName, argv: second.Argv()},
+	} {
+		if !strings.Contains(strings.Join(test.argv, "\n"), test.name+".factory tool") {
+			t.Fatalf("bootstrap prompt does not name its configured server %q: %q", test.name, test.argv)
+		}
+	}
+}
+
 // A worker's Claude Code launch starts a fresh, deterministic session when
 // nothing is on disk yet for its exact cwd, and never for an orchestrator.
 func TestClaudeWorkerSessionStartsFreshWhenNoTranscriptExists(t *testing.T) {
