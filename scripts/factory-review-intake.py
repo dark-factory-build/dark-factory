@@ -18,8 +18,10 @@ HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("factory_intake", HERE / "factory-intake.py")
 intake = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(intake)
+PUBLICATION_SPEC = importlib.util.spec_from_file_location("factory_publication", HERE / "factory-publication.py")
+publication = importlib.util.module_from_spec(PUBLICATION_SPEC)
+PUBLICATION_SPEC.loader.exec_module(publication)
 SHA = re.compile(r"^[0-9a-f]{40}$")
-FOOTER = re.compile(r"(?im)^(?:refs|closes)\s+#([1-9][0-9]*)\s*$")
 
 
 class ReviewError(Exception):
@@ -46,12 +48,16 @@ def mirror(config):
 def linked_issue(body, journal, repository):
     if not isinstance(body, str):
         raise ReviewError("pull request body is invalid")
-    numbers = {int(value) for value in FOOTER.findall(body)}
+    footer = publication.terminal_footer(body)
+    numbers = {int(value) for value in publication.FOOTER.findall(body)}
     known = {record.get("number") for record in journal["issues"].values() if isinstance(record, dict) and record.get("managed")}
     matched = numbers & known
     if len(matched) > 1:
         raise ReviewError("pull request links multiple tracked source issues")
-    return next(iter(matched), None)
+    if footer is None:
+        return None
+    issue = int(footer.group(2))
+    return issue if issue in known else None
 
 
 def list_prs(config):

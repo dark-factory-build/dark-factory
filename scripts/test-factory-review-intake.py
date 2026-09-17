@@ -46,11 +46,36 @@ class ReviewIntakeTest(unittest.TestCase):
         receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())
         self.assertEqual("allow", receipt['pulls']['9:' + SHA]["review_state"])
 
+    def test_crlf_terminal_footer_links_managed_pr(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        self.assertEqual(7, review.linked_issue("Summary\r\nRefs #7\r\n", journal, 'o/r'))
+
     def test_unlinked_pr_is_not_woken(self):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'untrusted Refs #8'}]), \
              patch.object(review, 'ready') as ready:
             self.assertEqual([], review.run_once(self.config))
         ready.assert_not_called()
+
+    def test_managed_footer_is_not_omitted_because_body_mentions_unmanaged_issue(self):
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #8\nRefs #7'}]), \
+             patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            self.assertEqual([], review.run_once(self.config))
+        self.assertEqual(7, review.linked_issue('Refs #8\nRefs #7', json.loads(Path(self.config['journal']).read_text()), 'o/r'))
+
+    def test_managed_earlier_footer_is_ignored_when_unmanaged_footer_is_terminal(self):
+        body = 'Refs #7\n\nRelated context: Refs #8\n'
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': body}]), \
+             patch.object(review, 'ready') as ready:
+            self.assertEqual([], review.run_once(self.config))
+        ready.assert_not_called()
+        self.assertIsNone(review.linked_issue(body, json.loads(Path(self.config['journal']).read_text()), 'o/r'))
+
+    def test_multiple_managed_footers_fail_closed(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        journal['issues']['o/r#8'] = {'number': 8, 'managed': True}
+        with self.assertRaisesRegex(review.ReviewError, 'multiple tracked'):
+            review.linked_issue('Refs #7\nCloses #8', journal, 'o/r')
 
     def test_mirror_must_match_app_reported_head(self):
         def command(argv, **_kwargs):
