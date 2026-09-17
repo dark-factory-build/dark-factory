@@ -32,6 +32,12 @@ const render = (props = {}) => renderToStaticMarkup(createElement(FactoryConsole
   ...props,
 }));
 
+function consoleElements(props) {
+  let tree;
+  act(() => { tree = create(createElement(FactoryConsole, props)); });
+  return tree.root.findAll((node) => typeof node.type === "string").map((node) => ({ type: node.type, props: node.props }));
+}
+
 const VIEWS = ["floor", "agents"];
 
 const agentSelection = (id = ids.agent) => {
@@ -100,13 +106,13 @@ test("floor appearance waits for storage, changes while disconnected, and resets
     let tree;
     act(() => { tree = create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); });
     assert.deepEqual(writes, [], "loading never writes defaults");
-    const selects = tree.root.findAllByType("select");
+    const selects = tree.root.findAllByType("select").slice(-5);
     assert.equal(selects[0].props.value, "subtle");
     assert.equal(selects[1].props.value, "overview");
     assert.equal(selects[2].props.value, "names");
     assert.equal(selects[3].props.value, "on");
     act(() => { selects[0].props.onChange({ currentTarget: { value: "off" } }); });
-    assert.deepEqual(JSON.parse(entries.get("dark-factory.floor-appearance")), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "off" });
+    assert.deepEqual(JSON.parse(entries.get("dark-factory.floor-appearance")), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", dependencyLinks: "overview", animation: "off" });
     act(() => { tree.root.findAllByType("button").find((button) => button.props.children === "Reset floor appearance").props.onClick(); });
     assert.equal(entries.has("dark-factory.floor-appearance"), false);
     assert.equal(entries.get("dark-factory.pairing"), "keep");
@@ -157,7 +163,7 @@ test("a selected decision names the action and keeps one collapse control", () =
 
 test("suggested answers fill the reply without sending it", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value) }));
+  const elements = consoleElements({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value) });
   elements.find((element) => element.type === "button" && Array.isArray(element.props.children) && element.props.children[0] === "Continue").props.onClick();
   assert.deepEqual(calls, ["Continue"]);
   const markup = render({ selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }) });
@@ -1304,17 +1310,17 @@ test("request, reply, cancel, and summary collapse forward only presentation int
     onCloseHumanRequest: () => calls.push(["close"]),
   };
 
-  const requestElements = expand(FactoryConsole(baseProps));
+  const requestElements = consoleElements(baseProps);
   requestElements.find((element) => element.type === "summary" && element.props.className === "dfConsoleItem__summary").props.onClick({ preventDefault() {} });
   assert.equal(calls[0][0], "select");
   assert.equal(calls[0][1], request);
-  const busyElements = expand(FactoryConsole({ ...baseProps, selectedHumanRequest: selectedRequest({ phase: "replying" }) }));
+  const busyElements = consoleElements({ ...baseProps, selectedHumanRequest: selectedRequest({ phase: "replying" }) });
   const busySummary = busyElements.find((element) => element.type === "summary" && element.props.className === "dfConsoleItem__summary");
   assert.equal(busySummary.props["aria-disabled"], true);
   busySummary.props.onClick({ preventDefault() {} });
   assert.equal(calls.length, 1, "an in-flight answer cannot be collapsed or switched");
 
-  const selectedElements = expand(FactoryConsole({ ...baseProps, selectedHumanRequest: selectedRequest() }));
+  const selectedElements = consoleElements({ ...baseProps, selectedHumanRequest: selectedRequest() });
   selectedElements.find((element) => element.type === "textarea").props.onChange({ currentTarget: { value: "Proceed." } });
   let prevented = false;
   selectedElements.find((element) => element.type === "form").props.onSubmit({ preventDefault: () => { prevented = true; } });
@@ -1352,12 +1358,12 @@ test("agent and question terminal actions expose only current public intent", as
 
 test("the view toggle and settings forward exactly one intent each", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({
+  const elements = consoleElements({
     status: "ready",
     state: baseState(),
     onView: (value) => calls.push(["view", value]),
     onToggleSettings: () => calls.push(["settings"]),
-  }));
+  });
   const chrome = elements.filter((element) => element.type === "button" && element.props.disabled !== true);
   assert.deepEqual(chrome.map((element) => element.props.children), ["Settings", "Floor", "Agents"]);
   chrome[0].props.onClick();
@@ -1855,9 +1861,9 @@ test("a viewed module shows direct contents beside distinct child subtrees", () 
 
 test("mobile navigation switches presentation without mutating work", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({ status: "ready", state: fixtureState, detail: "floor", onDetail: (value) => calls.push(value) }));
+  const elements = consoleElements({ status: "ready", state: fixtureState, detail: "floor", onDetail: (value) => calls.push(value) });
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
-  const buttons = expand(nav).filter((element) => element.type === "button");
+  const buttons = nav.props.children.filter((element) => element.type === "button");
   assert.equal(buttons[0].props["aria-pressed"], true);
   buttons[2].props.onClick();
   assert.deepEqual(calls, ["queue"]);
@@ -1948,6 +1954,19 @@ test("nested observed areas follow visible served ancestors without duplicating 
   const archived = { ...fixtureState, agents: new Map(fixtureState.agents).set(ids.agent, { ...fixtureState.agents.get(ids.agent), archived: true }) };
   assert.equal(floorScene(archived, fixtureTopologies, samples).workers.some((worker) => worker.id === ids.agent), false);
   assert.equal(floorScene(archived, fixtureTopologies, samples).tasks.some((task) => task.id === ids.task), false);
+});
+
+test("a deep observation stays on its displayed parent's shared workbench", () => {
+  const root = fixtureTopology.nodes[0];
+  const store = fixtureTopology.nodes.find((node) => node.path === "internal/kernel/store");
+  const deep = { id: "e5".repeat(32), parent_id: store.id, kind: "directory", path: "internal/kernel/store/deep", label: "deep", language: "go", size_bucket: "tiny" };
+  const topology = served({ ...fixtureTopology, nodes: [...fixtureTopology.nodes, deep] });
+  const samples = new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/store/deep/file.go"])]]);
+  const scene = floorScene(fixtureState, topology, samples, undefined, `${ids.project}:${root.id}`);
+  const worker = scene.workers.find((entry) => entry.id === ids.agent);
+  assert.equal(worker.nodeId, `${ids.project}:${fixtureTopology.nodes[1].id}`);
+  assert.equal(worker.locationWithin, true);
+  assert.equal(worker.observedBayId, undefined, "an ancestor's pictured child is not the exact observed component");
 });
 
 test("paging reaches all served siblings and leaf inspection; stale scopes and pages reconcile", () => {
