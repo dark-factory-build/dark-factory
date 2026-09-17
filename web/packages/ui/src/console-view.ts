@@ -262,6 +262,11 @@ export function projectFloor(state: StateView | undefined, selected: ReturnType<
     const display = work?.displayRoomId;
     const displayedObservation = display === undefined || visibleAncestor(live) === display ? live
       : work?.roomIds.find((id) => visibleAncestor(id) === display);
+    let observedBayId: string | undefined;
+    if (selected.navigation.scopeId !== undefined && display !== undefined && displayedObservation !== undefined) {
+      const pictured = roomByID.get(displayedObservation);
+      if (pictured?.parentId === display) observedBayId = pictured.id;
+    }
     if (live !== undefined) liveRooms.add(display ?? live);
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
     const room = location === "working" ? roomByID.get(displayedObservation!) : location === "last-observed" ? roomByID.get(last!) : undefined;
@@ -275,7 +280,15 @@ export function projectFloor(state: StateView | undefined, selected: ReturnType<
       paused: agent.paused,
       location,
       ...(room === undefined ? {} : { locationLabel: room.label }),
-      ...(location === "working" && live !== undefined ? { nodeId: display ?? live, locationWithin: display !== undefined && display !== displayedObservation } : {}),
+      ...(location === "working" && live !== undefined ? {
+        nodeId: display ?? live,
+        locationWithin: display !== undefined && display !== displayedObservation,
+        // An ancestor summary is not evidence that an arbitrary descendant is
+        // pictured. Only its exact direct child may receive a named bay.
+        // The all-projects overview is a subtree preview, not a second child
+        // hierarchy. Named bays begin only after entering a served scope.
+        ...(observedBayId === undefined ? {} : { observedBayId }),
+      } : {}),
     };
   });
   const observedTasks = tasks.filter((task) => task.status === "running" && task.roomIds.length > 0);

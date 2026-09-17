@@ -3,6 +3,7 @@ set -eu
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 temporary=$(/usr/bin/mktemp -d /private/tmp/dark-factory-go-gates.XXXXXXXX)
+export DF_CI_CACHE_ROOT="$temporary/cache"
 # Each fixture selects the Node/Corepack pair supplied by its own PATH. The
 # authoritative gate exports its selected pair, so discard that parent-only
 # implementation detail before exercising the isolated boundaries below.
