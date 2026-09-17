@@ -676,6 +676,15 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 	if err != nil {
 		return daemon.SupervisorSpec{}, err
 	}
+	if !configuration.toolPathExplicit {
+		supportedPath, supportedRoots := install.SupportedToolchain(accountHome)
+		if supportedPath != "" {
+			configuration.toolPath = supportedPath + string(filepath.ListSeparator) + configuration.toolPath
+		}
+		if configuration.toolchainReadRoots == "" {
+			configuration.toolchainReadRoots = supportedRoots
+		}
+	}
 	if err := install.CheckToolchainReadRoots(configuration.toolchainReadRoots, accountHome, configuration.home, install.ChangesPath(configuration.home)); err != nil {
 		return daemon.SupervisorSpec{}, fmt.Errorf("factoryd: invalid toolchain read roots: %w", err)
 	}
