@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -43,6 +44,11 @@ const (
 	// RecoveredLiveHolder observed a held runtime lifetime lease and concluded
 	// nothing: the attempt tree is alive.
 	RecoveredLiveHolder RecoveredRunAction = "live-holder"
+	// RecoveredAdopted dialed a running attempt's protocol-2 takeover
+	// endpoint, was granted its control capability, and registered a live
+	// attempt owner for it in this daemon. The run stays running; a
+	// background goroutine carries it to its normal terminal convergence.
+	RecoveredAdopted RecoveredRunAction = "adopted"
 	// RecoveredConverged found no actionable residue this pass.
 	RecoveredConverged RecoveredRunAction = "already-converged"
 	// RecoveredUncertain is the fail-closed disposition: evidence conflicted
@@ -183,6 +189,13 @@ func (daemon *Daemon) recoverRun(ctx context.Context, parent *RuntimeParent, cha
 	recovered, err := OpenRecoveredRuntime(ctx, parent, run.ID.String(), fileIdentity)
 	if err != nil {
 		if errors.Is(err, errRuntimeBusy) {
+			if run.Phase == kernel.RunRunning && runnerProcess.State == kernel.ResourceActive {
+				if adopted, adoptErr := daemon.adoptHandoverRun(ctx, parent, changeParent, recoverable, runnerProcess, runtimeRoot, fileIdentity); adoptErr != nil {
+					return RecoveredUncertain, adoptErr
+				} else if adopted {
+					return RecoveredAdopted, nil
+				}
+			}
 			return RecoveredLiveHolder, nil
 		}
 		if runtimeRoot.State == kernel.ResourceReleasing && errors.Is(err, errRecoveredRuntimeLayout) {
@@ -680,4 +693,155 @@ func runtimeChildPresent(parent *RuntimeParent, basename string) (present bool, 
 		return false, nil
 	}
 	return false, err
+}
+
+// handoverAdoptionPoll is the steady-state cadence for the adopted-run
+// absence poll: the runner is reparented and no longer waitable, so its
+// convergence can only be observed, not collected.
+const handoverAdoptionPoll = 250 * time.Millisecond
+
+// pollRunnerAbsence blocks until the exact identity is positively absent (or
+// reused), polling at a fixed cadence. It never returns a false absence: an
+// observation error or a still-present process just polls again.
+func pollRunnerAbsence(ctx context.Context, identity runner.Identity) error {
+	for {
+		observation := runner.ObserveProcess(identity)
+		if observation.Presence == runner.Absent || observation.Presence == runner.Reused {
+			return nil
+		}
+		timer := time.NewTimer(handoverAdoptionPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// adoptHandoverRun dials a busy runtime's protocol-2 takeover endpoint and,
+// on acceptance, registers this daemon as the run's live control owner: a
+// released, terminal-ready liveAttempt exactly like one runNext would have
+// built, started so it serves browser attach, human reply, and the attempt
+// API through the same daemon.attempts lookup as any other running attempt.
+// It returns (false, nil) for every pre-acceptance outcome — no socket, no
+// grant, a dial or handshake failure, or an explicit refusal — so the caller
+// keeps today's RecoveredLiveHolder behaviour unchanged. Once the runner has
+// accepted, any further failure is returned as an error rather than a silent
+// fallback: the runner already believes this daemon owns it.
+func (daemon *Daemon) adoptHandoverRun(ctx context.Context, parent *RuntimeParent, changeParent string, recoverable kernel.RecoverableRun, runnerProcess, runtimeRoot kernel.Resource, fileIdentity runner.FileIdentity) (adopted bool, resultErr error) {
+	run := recoverable.Run
+	locator, err := parent.runtimeLocator(run.ID.String())
+	if err != nil {
+		return false, nil
+	}
+	dir, child, err := openAdoptedRuntimeDirectory(parent, run.ID.String(), fileIdentity)
+	if err != nil {
+		return false, nil
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			resultErr = errors.Join(resultErr, dir.Close(), child.Close())
+		}
+	}()
+	file, dialErr := dialTakeoverGrant(dir, locator, run.ID.String())
+	if dialErr != nil || file == nil {
+		return false, nil
+	}
+	controller, err := runner.AdoptHandoverControl(file)
+	if err != nil {
+		_ = file.Close()
+		return false, err
+	}
+	closeController := true
+	defer func() {
+		if closeController {
+			resultErr = errors.Join(resultErr, controller.Close())
+		}
+	}()
+	runnerIdent, err := runnerIdentity(runnerProcess.Identity)
+	if err != nil {
+		return false, err
+	}
+	session := recoverable.TerminalSession
+	if session.ID == (kernel.TerminalSessionID{}) || session.State != kernel.TerminalSessionActive {
+		return false, fmt.Errorf("%w: adopted run has no active terminal session", errInvalidContract)
+	}
+	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
+	if run.Role == kernel.RoleWorker && recoverable.Change != nil && recoverable.Change.AvailableAt != nil && run.RunningAt != nil {
+		live.agentID, live.changeID = run.AgentID, recoverable.Change.ID
+		live.pathsSince = *recoverable.Change.AvailableAt
+		if run.RunningAt.Int64() > live.pathsSince.Int64() {
+			live.pathsSince = *run.RunningAt
+		}
+	}
+	live.attemptDigest = run.CredentialDigest
+	live.releaseSent = true
+	if err := daemon.registerLiveAttempt(live); err != nil {
+		return false, err
+	}
+	closeController = false
+	startLiveAttempt(live, ctx)
+	keep = true
+	go daemon.awaitAdoptedResult(ctx, parent, changeParent, run, runnerProcess, runtimeRoot, runnerIdent, live, dir, child)
+	return true, nil
+}
+
+// awaitAdoptedResult is the adopted run's tail: the same authenticate,
+// consume, close-terminal, remove, and settle convergence runNext runs after
+// live.waitResult(), reached here in its own goroutine because nothing else
+// is synchronously waiting for this recovered attempt. The runner is
+// reparented and unwaitable, so its convergence is a bounded absence poll
+// instead of an owned exit; runtimeDirectory and child are this run's
+// lease-free opener, released once the tail is done with them.
+func (daemon *Daemon) awaitAdoptedResult(ctx context.Context, parent *RuntimeParent, changeParent string, run kernel.Run, runnerProcess, runtimeRoot kernel.Resource, runnerIdent runner.Identity, live *liveAttempt, runtimeDirectory *os.File, child *runtimeParentChild) {
+	released := false
+	closeRuntime := func() error {
+		if released {
+			return nil
+		}
+		released = true
+		return errors.Join(runtimeDirectory.Close(), child.Close())
+	}
+	// The adopted opener is this goroutine's alone, and RuntimeParent.Close
+	// blocks until every child is released: it must be released on every
+	// exit, not only the tail's own success.
+	defer func() { _ = closeRuntime() }()
+	resultOutcome := live.waitResult()
+	if resultOutcome.handedOver {
+		// This daemon is itself shutting down before the run finished; the
+		// next daemon adopts it in turn. No Store mutation, and the runtime
+		// directory stays exactly as this adoption found it.
+		return
+	}
+	absenceConfirmed := false
+	awaitConvergence := func() error {
+		if absenceConfirmed {
+			return nil
+		}
+		if err := pollRunnerAbsence(ctx, runnerIdent); err != nil {
+			return err
+		}
+		absenceConfirmed = true
+		return nil
+	}
+	recordConvergence := func() (kernel.Run, error) {
+		if err := awaitConvergence(); err != nil {
+			return kernel.Run{}, err
+		}
+		return daemon.recordRecoveredRunnerAbsence(ctx, run.ID, runnerProcess.ID, runnerProcess.Identity)
+	}
+	settled, tailErr := daemon.attemptResultTail(ctx, parent, changeParent, run, live, resultOutcome, runtimeDirectory, runtimeRoot.Identity, runnerProcess.ID, runtimeRoot.ID, awaitConvergence, recordConvergence, closeRuntime)
+	if tailErr == nil && settled.Phase == kernel.RunTerminal {
+		return
+	}
+	// A tail that stopped short leaves this run finalizing with a proposal and
+	// no owner, and nothing else is waiting on it: a scheduled run's shortfall
+	// reaches factoryd's UnsettledCompletion, but this one was never
+	// scheduled. Continue it here through the same bounded continuation that
+	// callback starts, after releasing the opener the continuation re-takes.
+	_ = live.close()
+	_ = closeRuntime()
+	_ = daemon.ContinueUnsettledRun(ctx, parent, changeParent, run.ID)
 }

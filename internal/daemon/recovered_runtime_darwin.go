@@ -122,6 +122,59 @@ func openRecoveredRuntime(ctx context.Context, parent *RuntimeParent, basename s
 	return recovered, nil
 }
 
+// openAdoptedRuntimeDirectory opens an exact recovered runtime directory for
+// the boot-handover adoption path only. It verifies the exact identity like
+// every other opener, but deliberately never opens or locks the runtime
+// lifetime file: the adopted runner still holds that lease, and this is the
+// smallest opener that gives the daemon-side takeover dial and later result
+// authentication a verified directory without taking it. The caller closes
+// the returned directory and releases the child when it is done.
+func openAdoptedRuntimeDirectory(parent *RuntimeParent, basename string, expected runner.FileIdentity) (dir *os.File, child *runtimeParentChild, resultErr error) {
+	if parent == nil || !validRuntimeName(basename) || expected.Device == 0 || expected.Inode == 0 {
+		return nil, nil, invalidContract(nil)
+	}
+	operation, err := parent.begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if child == nil {
+			resultErr = errors.Join(resultErr, operation.Close())
+		}
+	}()
+	ownedParent, err := operation.directory()
+	if err != nil {
+		return nil, nil, err
+	}
+	parentFD := int(ownedParent.Fd())
+	named, err := inspectNamedPrivateDirectory(parentFD, basename)
+	if err != nil || named.fileIdentity() != expected {
+		return nil, nil, invalidContract(err)
+	}
+	fd, err := unix.Openat(parentFD, basename, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return nil, nil, invalidContract(err)
+	}
+	opened := os.NewFile(uintptr(fd), "adopted-attempt-runtime")
+	keepDir := false
+	defer func() {
+		if !keepDir {
+			resultErr = errors.Join(resultErr, opened.Close())
+		}
+	}()
+	identity, err := inspectExpectedDirectory(fd, expected)
+	if err != nil || identity != named || verifyNamedChild(parentFD, basename, identity) != nil {
+		return nil, nil, invalidContract(err)
+	}
+	transferred, err := operation.transfer()
+	if err != nil {
+		return nil, nil, err
+	}
+	keepDir = true
+	child = transferred
+	return opened, transferred, nil
+}
+
 // AcknowledgeTerminal removes exactly the inspected spool only after the
 // caller supplies a durable Store postcondition for the same run and exact
 // released provider process/group. Exit time is deliberately not compared:
@@ -332,10 +385,20 @@ func hasRecoveredFile(files map[string]unix.Stat_t, name string) bool {
 }
 
 func validRecoveredRuntimeFile(name string, stat unix.Stat_t, device uint64) bool {
-	if stat.Dev == 0 || stat.Ino == 0 || !validRuntimeOrdinaryFile(stat, device) {
+	if stat.Dev == 0 || stat.Ino == 0 {
+		return false
+	}
+	if name == runner.TakeoverSocketName {
+		return validRuntimeTakeoverSocket(stat, device)
+	}
+	if !validRuntimeOrdinaryFile(stat, device) {
 		return false
 	}
 	switch name {
+	case runner.TakeoverGrantName:
+		// The grant is one small fixed JSON object; a torn rotation may be
+		// shorter, and only its content ever authorizes anything.
+		return stat.Size >= 0 && stat.Size <= 1024
 	case attemptTokenName:
 		return stat.Size == 32
 	case runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,

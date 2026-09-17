@@ -155,7 +155,7 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 		var stat unix.Stat_t
 		if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
 			continue
-		} else if err != nil || !validRuntimeOrdinaryFile(stat, rootIdentity.device) {
+		} else if err != nil || !validRemovableRuntimeEntry(name, stat, rootIdentity.device) {
 			return false, invalidContract(err)
 		}
 		if err := unix.Unlinkat(fd, name, 0); err != nil {
@@ -210,6 +210,7 @@ func isRemovableRuntimeFile(name string) bool {
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
 		runner.TerminalScratchName,
+		runner.TakeoverGrantName, runner.TakeoverSocketName,
 		runner.RuntimeLifetimeLeaseName:
 		return true
 	default:
@@ -394,4 +395,19 @@ func validRuntimeOrdinaryName(stat unix.Stat_t, device uint64) bool {
 // at exactly 0600.
 func validRuntimeOrdinaryFile(stat unix.Stat_t, device uint64) bool {
 	return stat.Mode&unix.S_IFMT == unix.S_IFREG && uint64(stat.Dev) == device && stat.Uid == uint32(os.Geteuid()) && stat.Nlink == 1 && stat.Mode&0o7777 == 0o600
+}
+
+// validRemovableRuntimeEntry checks the one removable child that is not an
+// ordinary file: a killed runner's takeover socket.
+func validRemovableRuntimeEntry(name string, stat unix.Stat_t, device uint64) bool {
+	if name == runner.TakeoverSocketName {
+		return validRuntimeTakeoverSocket(stat, device)
+	}
+	return validRuntimeOrdinaryFile(stat, device)
+}
+
+// validRuntimeTakeoverSocket is the exact shape of the runner's own takeover
+// endpoint: a private socket the runner bound in its runtime root.
+func validRuntimeTakeoverSocket(stat unix.Stat_t, device uint64) bool {
+	return stat.Mode&unix.S_IFMT == unix.S_IFSOCK && uint64(stat.Dev) == device && stat.Uid == uint32(os.Geteuid()) && stat.Nlink == 1 && stat.Mode&0o7777 == 0o600
 }

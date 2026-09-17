@@ -236,6 +236,11 @@ type liveAttemptResult struct {
 	notice            *runner.AttemptResultNotice
 	err               error
 	observersRetained bool
+	// handedOver reports a clean protocol-2 shutdown handover: the runner
+	// still owns a live provider under a fresh takeover grant, the run stays
+	// durably running, and this daemon makes no further Store mutation for
+	// it. notice and err are unused when this is set.
+	handedOver bool
 }
 
 // liveAttempt is intentionally concrete. Except for the receipt fence named
@@ -287,11 +292,15 @@ type liveAttempt struct {
 	terminationDelivered bool
 	resultReturned       bool
 	shutdownRequested    bool
-	resultNotice         *runner.AttemptResultNotice
-	creditOutstanding    uint64
-	finalErr             error
-	binding              terminalBinding
-	effectLimit          time.Duration
+	// handedOver is set once a released, terminal-ready controller has
+	// cleanly quiesced onto the runner's own takeover endpoint. See
+	// convergeForShutdown.
+	handedOver        bool
+	resultNotice      *runner.AttemptResultNotice
+	creditOutstanding uint64
+	finalErr          error
+	binding           terminalBinding
+	effectLimit       time.Duration
 	// These exact seams are fixed before the owner starts. Production uses the
 	// concrete Store renewal below; daemon tests replace it or pause one phase
 	// to prove ambiguous Store and operation-gate schedules causally.

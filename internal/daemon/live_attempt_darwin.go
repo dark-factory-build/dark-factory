@@ -37,18 +37,26 @@ func (attempt *liveAttempt) run(ctx context.Context) {
 	err = errors.Join(err, cleanupErr)
 	attempt.closeSourceOperations()
 	if !attempt.resultReturned {
-		if err == nil {
-			err = ErrTerminalClosed
-		}
-		observersRetained := !attempt.shutdownRequested
-		attempt.resultReturned = true
-		attempt.result <- liveAttemptResult{err: err, observersRetained: observersRetained}
-		if observersRetained {
-			// The result notice is best-effort. Keep the existing observers owned
-			// while the supervisor reaps the runner and authenticates the exact
-			// result artifact; it will either submit the committed exit or close us
-			// while unwinding a rejected artifact.
-			err = errors.Join(err, attempt.awaitCommittedExit())
+		if attempt.handedOver {
+			// A clean handover: the runner still owns a live provider under a
+			// fresh grant, and the run stays durably running. There is no
+			// result to wait for or broadcast; the next daemon adopts it.
+			attempt.resultReturned = true
+			attempt.result <- liveAttemptResult{handedOver: true}
+		} else {
+			if err == nil {
+				err = ErrTerminalClosed
+			}
+			observersRetained := !attempt.shutdownRequested
+			attempt.resultReturned = true
+			attempt.result <- liveAttemptResult{err: err, observersRetained: observersRetained}
+			if observersRetained {
+				// The result notice is best-effort. Keep the existing observers owned
+				// while the supervisor reaps the runner and authenticates the exact
+				// result artifact; it will either submit the committed exit or close us
+				// while unwinding a rejected artifact.
+				err = errors.Join(err, attempt.awaitCommittedExit())
+			}
 		}
 	}
 	attempt.finalErr = err
@@ -233,7 +241,14 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		return false, nil
 	}
 	if ctx.Err() != nil {
-		return false, attempt.terminateController()
+		if err := attempt.convergeForShutdown(); err != nil {
+			return false, err
+		}
+		// A released, terminal-ready controller that just handed off stops
+		// this owner immediately: there is no result to wait for. Anything
+		// else (an ordinary terminate, or a result that arrived in the same
+		// instant) keeps the ordinary polling loop running below.
+		return attempt.handedOver, nil
 	}
 	if attempt.daemon == nil || attempt.daemon.store == nil {
 		return false, nil
@@ -288,6 +303,75 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 		return false, attempt.terminateController()
 	}
 	return false, nil
+}
+
+// handoverQuiesceTimeout bounds how long shutdown waits for a released,
+// terminal-ready controller to quiesce onto the runner's own takeover
+// endpoint before falling back to the ordinary terminate convergence.
+const handoverQuiesceTimeout = 3 * time.Second
+
+// convergeForShutdown is the convergence a released controller takes when
+// this process's own context is cancelled — factoryd is stopping, and only
+// that. A protocol-2 runner that has reached terminal-ready gets one bounded
+// chance to hand its control capability to its own takeover endpoint: the run
+// stays running and discoverable, and the next daemon adopts it. An ineligible
+// controller, a rejection, the bound elapsing, or any transport failure keeps
+// today's terminate convergence; a result that arrives in the same instant is
+// routed through the ordinary completion path instead of being discarded.
+func (attempt *liveAttempt) convergeForShutdown() error {
+	if attempt.terminationSent || attempt.handedOver {
+		return nil
+	}
+	// Only a still-running attempt with nothing of its own owed may be handed
+	// on. A committed outcome awaiting its receipt fence, or a retained
+	// refused proposal, is this daemon's to finish, not the next daemon's to
+	// adopt.
+	if attempt.outcomeReceiptPending || attempt.pendingOutcome != nil {
+		return attempt.terminateController()
+	}
+	if err := attempt.controller.SendHandoverQuiesce(); err != nil {
+		return attempt.terminateController()
+	}
+	deadline := time.Now().Add(handoverQuiesceTimeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return attempt.terminateController()
+		}
+		poll := liveAttemptPoll
+		if remaining < poll {
+			poll = remaining
+		}
+		ready, err := attempt.controller.NextReady(poll)
+		if err != nil {
+			return attempt.terminateController()
+		}
+		if !ready {
+			continue
+		}
+		event, err := attempt.controller.Next(remaining)
+		if err != nil {
+			return attempt.terminateController()
+		}
+		switch event.Kind {
+		case runner.AttemptHandoverQuiesced:
+			attempt.handedOver = true
+			return nil
+		case runner.AttemptResultReady:
+			// The provider finished in the same instant shutdown began. This
+			// is a genuine outcome, not quiesce residue; route it through the
+			// normal completion path rather than discarding it.
+			_, err := attempt.handleRunnerEvent(event)
+			return err
+		case runner.AttemptTerminalFrame:
+			// Output already in flight when the quiesce request was sent.
+			// This daemon is shutting down and keeps no observer for it;
+			// keep waiting for the quiesce reply within the same bound.
+			continue
+		default:
+			return attempt.terminateController()
+		}
+	}
 }
 
 func (attempt *liveAttempt) terminateController() error {
@@ -349,6 +433,9 @@ func (attempt *liveAttempt) handleRunningCommand(command liveAttemptCommand) (bo
 		command.result <- nil
 		return true, nil
 	case liveCommandShutdown:
+		// Not a handover point: this command also converges a cancellation
+		// or a fence error, where the run is this daemon's to finish. Only
+		// the process's own cancelled context hands a live attempt on.
 		attempt.shutdownRequested = true
 		err := attempt.shutdownController()
 		command.result <- err
@@ -573,7 +660,9 @@ func (attempt *liveAttempt) shutdownController() error {
 	}
 	var result error
 	attempt.binding = terminalBinding{}
-	if !attempt.resultReturned {
+	if !attempt.resultReturned && !attempt.handedOver {
+		// A handed-over controller belongs to the runner's takeover endpoint
+		// now; terminating it would kill the provider this handover keeps.
 		result = attempt.terminateController()
 	}
 	if closeErr := attempt.controller.Close(); closeErr != nil && !errors.Is(closeErr, runner.ErrState) {
@@ -584,6 +673,17 @@ func (attempt *liveAttempt) shutdownController() error {
 
 func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, error) {
 	switch event.Kind {
+	case runner.AttemptHandoverAttached:
+		// Only a boot-adopted attempt is ever started already released, so
+		// this is exactly the runner's first frame on the newly adopted
+		// control stream — the same milestone TerminalReady marks for a
+		// freshly launched attempt. The runner's own live ring, not a cursor
+		// cached here, is the authority a later attach replays from.
+		if attempt.readySeen {
+			return false, runner.ErrState
+		}
+		attempt.readySeen = true
+		return false, nil
 	case runner.AttemptTerminalFrame:
 		if event.Frame == nil {
 			return false, runner.ErrState
