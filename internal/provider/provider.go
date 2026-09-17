@@ -158,6 +158,17 @@ func ConfigHome(kind kernel.Provider, accountHome string) string {
 	return filepath.Join(accountHome, name)
 }
 
+// codexConfigHome is the exact CODEX_HOME a Codex launch reads, and the one
+// place that rule is spelled: the launch environment and Codex session
+// discovery both ask here, so discovery cannot look in a different account
+// than the one a launch actually uses.
+func codexConfigHome(runtime RuntimePaths) string {
+	if runtime.accountConfig != "" {
+		return runtime.accountConfig
+	}
+	return ConfigHome(kernel.ProviderCodex, runtime.accountHome)
+}
+
 func (Installation) String() string   { return "provider installation (private)" }
 func (Installation) GoString() string { return "provider.Installation{private}" }
 
@@ -229,6 +240,25 @@ type Request struct {
 	role              kernel.AgentRole
 	agentID           string
 	taskIncarnationID string
+	// previousWorkingDirectory is set only for an orchestrator, from the
+	// same agent's most recent terminal run (see
+	// kernel.Store.LatestTerminalRuntimeRoot). See WithPreviousWorkingDirectory.
+	previousWorkingDirectory string
+}
+
+// WithPreviousWorkingDirectory names the working directory a previous run of
+// the same orchestrator agent launched its provider in. An orchestrator's own
+// working directory is a fresh runtime root every run (unlike a worker's
+// stable Change directory), so it could never itself be found again; Build
+// uses this instead to look for that previous run's own Codex session. Empty
+// means no known previous run, and is the value every non-orchestrator
+// request keeps by leaving this unset.
+func (request Request) WithPreviousWorkingDirectory(path string) (Request, error) {
+	if path != "" && !validAbsolute(path, maxPathBytes) {
+		return Request{}, ErrInvalid
+	}
+	request.previousWorkingDirectory = path
+	return request, nil
 }
 
 // agentID and taskIncarnationID name the exact agent and task incarnation this
@@ -281,17 +311,27 @@ const (
 )
 
 const (
-	// claudeSessionRotateBytes bounds one native Claude Code transcript before
-	// Build starts a fresh session instead of resuming it.
+	// nativeSessionRotateBytes bounds one native provider transcript before
+	// Build starts a fresh session instead of resuming it, for both Claude
+	// Code and Codex.
 	// ponytail: a single size ceiling is the simplest measurable growth bound
 	// across an unbounded run of send-back retries on one task incarnation;
 	// revisit if 32 MiB proves too eager or too late for real transcripts.
-	claudeSessionRotateBytes = 32 << 20
+	nativeSessionRotateBytes = 32 << 20
 	// maxClaudeSessionGenerations bounds the rotation search below. Reaching
 	// it would mean thousands of rotations on one incarnation; ponytail:
 	// defensive ceiling only, never expected to bind in practice.
 	maxClaudeSessionGenerations = 1000
 	maxSessionKeyPartBytes      = 128
+	// maxCodexScanDays bounds how far back codexSessionSelection looks for a
+	// matching rollout: a session worth resuming was active recently, and
+	// this keeps discovery a bounded directory walk, not an unbounded one
+	// growing with the account's whole history.
+	maxCodexScanDays = 30
+	// maxCodexRolloutHeaderBytes bounds the read of a rollout's first JSON
+	// line (its session_meta record); Codex's own recorded metadata is small,
+	// so a candidate whose first line does not fit is skipped, not trusted.
+	maxCodexRolloutHeaderBytes = 64 << 10
 )
 
 // claudeSessionNamespace is a fixed, arbitrary namespace for the UUID v5 IDs
@@ -314,7 +354,7 @@ func claudeSessionSelection(runtime RuntimePaths, cwd, agentID, taskIncarnationI
 	for generation := 0; generation < maxClaudeSessionGenerations; generation++ {
 		candidate := formatUUID(uuidV5(claudeSessionNamespace, []byte(fmt.Sprintf("%s\x00%d", seed, generation))))
 		info, statErr := os.Stat(filepath.Join(projectDir, candidate+".jsonl"))
-		if statErr == nil && info.Size() < claudeSessionRotateBytes {
+		if statErr == nil && info.Size() < nativeSessionRotateBytes {
 			return candidate, true, nil
 		}
 		if statErr != nil {
@@ -351,6 +391,118 @@ func uuidV5(namespace [sha256.Size]byte, name []byte) [16]byte {
 
 func formatUUID(id [16]byte) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
+}
+
+// codexRolloutMeta is the first JSON line of a Codex rollout file, the exact
+// fields codexSessionSelection needs: the launch cwd, to match a candidate
+// against a working directory, and the resumable session/thread id (its
+// filename's own trailing UUID for an ordinary, non-subagent session).
+type codexRolloutMeta struct {
+	Payload struct {
+		ID  string `json:"id"`
+		Cwd string `json:"cwd"`
+	} `json:"payload"`
+}
+
+// codexSessionSelection looks for the newest Codex rollout recorded for the
+// exact cwd under this launch's CODEX_HOME, newest calendar day first within
+// maxCodexScanDays, and resumes it while it is under the shared rotation
+// ceiling. Unlike Claude Code, Codex assigns its own session id at creation
+// (see docs/providers.md: no CLI flag or config key chooses or names one), so
+// there is nothing to derive; this only discovers an existing rollout already
+// on disk. It never fails a launch: an unreadable or malformed candidate is
+// skipped, and an unresolvable case answers fresh, the same as no session
+// existing at all.
+func codexSessionSelection(runtime RuntimePaths, cwd string) (id string, resume bool) {
+	if cwd == "" {
+		return "", false
+	}
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	scanned := 0
+	for _, year := range sortedNumericEntriesDescending(sessionsRoot) {
+		for _, month := range sortedNumericEntriesDescending(filepath.Join(sessionsRoot, year)) {
+			for _, day := range sortedNumericEntriesDescending(filepath.Join(sessionsRoot, year, month)) {
+				if scanned >= maxCodexScanDays {
+					return "", false
+				}
+				scanned++
+				rollouts, err := filepath.Glob(filepath.Join(sessionsRoot, year, month, day, "rollout-*.jsonl"))
+				if err != nil {
+					continue
+				}
+				slices.Sort(rollouts)
+				slices.Reverse(rollouts)
+				for _, rollout := range rollouts {
+					meta, size, err := readCodexRolloutMeta(rollout)
+					if err != nil || meta.Payload.Cwd != cwd || meta.Payload.ID == "" {
+						continue
+					}
+					if size < nativeSessionRotateBytes {
+						return meta.Payload.ID, true
+					}
+					// The newest matching rollout is over the ceiling: rotate
+					// to fresh rather than resume an older, smaller one and
+					// jump the conversation backward.
+					return "", false
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// sortedNumericEntriesDescending lists a Codex sessions tree's YYYY/MM/DD
+// child directories, newest first; their zero-padded names sort correctly as
+// plain strings. A missing or unreadable directory answers no entries rather
+// than an error: an account with no session history yet is not a fault.
+func sortedNumericEntriesDescending(directory string) []string {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() && allDigits(entry.Name()) {
+			names = append(names, entry.Name())
+		}
+	}
+	slices.Sort(names)
+	slices.Reverse(names)
+	return names
+}
+
+func allDigits(value string) bool {
+	return value != "" && !strings.ContainsFunc(value, func(r rune) bool { return r < '0' || r > '9' })
+}
+
+// readCodexRolloutMeta reads and decodes only a rollout's first line, bounded
+// to maxCodexRolloutHeaderBytes, and returns the file's exact size alongside
+// it for the rotation check; codexSessionSelection never needs more.
+func readCodexRolloutMeta(path string) (codexRolloutMeta, int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return codexRolloutMeta{}, 0, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return codexRolloutMeta{}, 0, err
+	}
+	defer file.Close()
+	header, err := io.ReadAll(io.LimitReader(file, maxCodexRolloutHeaderBytes+1))
+	if err != nil {
+		return codexRolloutMeta{}, 0, err
+	}
+	line := header
+	if index := bytes.IndexByte(header, '\n'); index >= 0 {
+		line = header[:index]
+	} else if int64(len(header)) > maxCodexRolloutHeaderBytes {
+		return codexRolloutMeta{}, 0, ErrInvalid
+	}
+	var meta codexRolloutMeta
+	if err := json.Unmarshal(line, &meta); err != nil {
+		return codexRolloutMeta{}, 0, err
+	}
+	return meta, info.Size(), nil
 }
 
 // Build is the one closed provider-selection switch.
@@ -436,7 +588,24 @@ func Build(request Request) (Launch, error) {
 		if err != nil {
 			return Launch{}, err
 		}
-		argv := []string{path, "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions=" + tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins"}
+		// A worker's launch cwd is its task incarnation's retained Change
+		// directory, which a send-back retry reuses, so its own prior rollout
+		// is found there directly. An orchestrator's launch cwd is a fresh
+		// runtime root every run and could never itself be found again;
+		// previousWorkingDirectory instead names the same agent's most recent
+		// terminal run's cwd, so its standing tasks share one continuing
+		// session. Neither ever changes argv beyond an optional leading
+		// "resume <id>": Codex assigns its own session id, there is nothing
+		// to derive.
+		discoveryCwd := request.workingDirectory
+		if request.role == kernel.RoleOrchestrator {
+			discoveryCwd = request.previousWorkingDirectory
+		}
+		argv := []string{path}
+		if id, resume := codexSessionSelection(request.runtime, discoveryCwd); resume {
+			argv = append(argv, "resume", id)
+		}
+		argv = append(argv, "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		argv = append(argv, "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
 			args := make([]string, len(browserArgs))
@@ -719,11 +888,7 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 	// as it was.
 	switch kind {
 	case kernel.ProviderCodex:
-		codexHome := ConfigHome(kind, runtime.accountHome)
-		if runtime.accountConfig != "" {
-			codexHome = runtime.accountConfig
-		}
-		environment = append(environment, "CODEX_HOME="+codexHome,
+		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime),
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
 			"GOMODCACHE="+filepath.Join(runtime.home, "go", "pkg", "mod"),

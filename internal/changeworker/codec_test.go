@@ -66,6 +66,7 @@ func TestRetainedConfigRoundTripPreservesExactPublicationAuthority(t *testing.T)
 func TestOrchestratorConfigCarriesNoChange(t *testing.T) {
 	config := configFixture(t)
 	config.Role, config.FinalName = kernel.RoleOrchestrator, ""
+	config.PreviousWorkingDirectory = "/private/previous-runtime-home/home"
 	encoded, err := EncodeConfig(config)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +82,9 @@ func TestOrchestratorConfigCarriesNoChange(t *testing.T) {
 	withChange.Retained = &retained
 	worker := configFixture(t)
 	worker.FinalName = ""
-	for name, bad := range map[string]Config{"orchestrator with a name": named, "orchestrator with a retained tree": withChange, "worker without a name": worker} {
+	workerWithHint := configFixture(t)
+	workerWithHint.PreviousWorkingDirectory = config.PreviousWorkingDirectory
+	for name, bad := range map[string]Config{"orchestrator with a name": named, "orchestrator with a retained tree": withChange, "worker without a name": worker, "worker with a previous-working-directory hint": workerWithHint} {
 		if _, err := EncodeConfig(bad); !errors.Is(err, ErrInvalidContract) {
 			t.Fatalf("%s encoded: %v", name, err)
 		}
@@ -239,6 +242,10 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { v.AgentID = "" },
 		func(v *Config) { v.TaskIncarnationID = "" },
 		func(v *Config) { v.AgentID = strings.Repeat("x", maximumSessionKeyPartBytes+1) },
+		func(v *Config) { v.PreviousWorkingDirectory = "/private/previous" }, // worker carrying an orchestrator-only hint
+		func(v *Config) { // and, for an otherwise-valid orchestrator, a malformed one
+			v.Role, v.FinalName, v.PreviousWorkingDirectory = kernel.RoleOrchestrator, "", "relative"
+		},
 		func(v *Config) { v.RepositoryRoot = "relative" },
 		func(v *Config) { v.FactoryctlExecutable = "" },
 		func(v *Config) { v.FactoryctlExecutable = "relative/factoryctl" },

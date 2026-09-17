@@ -487,7 +487,7 @@ func TestClaudeWorkerSessionRotatesWhenTranscriptExceedsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := oversized.Truncate(claudeSessionRotateBytes); err != nil {
+	if err := oversized.Truncate(nativeSessionRotateBytes); err != nil {
 		t.Fatal(err)
 	}
 	if err := oversized.Close(); err != nil {
@@ -510,6 +510,161 @@ func TestClaudeWorkerSessionRotatesWhenTranscriptExceedsLimit(t *testing.T) {
 	}
 	if i := slices.Index(launch.Argv(), "--session-id"); i < 0 || launch.Argv()[i+1] != secondGeneration {
 		t.Fatalf("worker argv = %q, want --session-id %q", launch.Argv(), secondGeneration)
+	}
+}
+
+// writeFakeCodexRollout creates a minimal Codex rollout file whose first
+// JSON line records the given session id and cwd, the two fields
+// codexSessionSelection reads. size, when nonzero, pads the file (sparsely)
+// to an exact total size for rotation tests; it must be at least the header
+// line's own length.
+func writeFakeCodexRollout(t *testing.T, dayDirectory, timestamp, id, cwd string, size int64) string {
+	t.Helper()
+	if err := os.MkdirAll(dayDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dayDirectory, fmt.Sprintf("rollout-%s-%s.jsonl", timestamp, id))
+	line, err := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": id, "cwd": cwd}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(append(line, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if size > 0 {
+		if err := file.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A worker's Codex launch is unchanged (no "resume" leading argv) when its
+// account has no rollout history at all yet for its exact cwd.
+func TestCodexWorkerStartsFreshWhenNoRolloutExists(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	cwd := filepath.Join(t.TempDir(), "change")
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] == "resume" {
+		t.Fatalf("worker argv = %q, want no resume with no rollout on disk", launch.Argv())
+	}
+}
+
+// A worker's Codex launch resumes the newest rollout recorded for its exact
+// cwd, ahead of any older rollout for that same cwd and any rollout, however
+// new, for a different one.
+func TestCodexWorkerResumesTheNewestRolloutForItsExactCwd(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	cwd := filepath.Join(t.TempDir(), "change")
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T09-00-00", "01a00000-0000-7000-8000-00000000fefe", "/unrelated/cwd", 0)
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "16"), "2026-09-16T08-00-00", "01a00000-0000-7000-8000-000000000aaa", cwd, 0)
+	const newest = "01a00000-0000-7000-8000-000000000bbb"
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T08-00-00", newest, cwd, 0)
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] != "resume" || launch.Argv()[2] != newest {
+		t.Fatalf("worker argv = %q, want a leading resume of %q", launch.Argv(), newest)
+	}
+}
+
+// A rollout recorded for a different cwd is never mistaken for this one's own.
+func TestCodexWorkerIgnoresRolloutsForOtherCwds(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	cwd := filepath.Join(t.TempDir(), "change")
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T08-00-00", "01a00000-0000-7000-8000-000000000ccc", filepath.Join(t.TempDir(), "other-change"), 0)
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] == "resume" {
+		t.Fatalf("worker argv = %q, want no resume of an unrelated cwd's rollout", launch.Argv())
+	}
+}
+
+// Bounding growth: once the newest matching rollout has reached the shared
+// rotation ceiling, Build starts fresh rather than resuming it or falling
+// back to an older, smaller rollout for the same cwd.
+func TestCodexWorkerRotatesWhenNewestMatchingRolloutExceedsLimit(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	cwd := filepath.Join(t.TempDir(), "change")
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "16"), "2026-09-16T08-00-00", "01a00000-0000-7000-8000-000000000ddd", cwd, 0)
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T08-00-00", "01a00000-0000-7000-8000-000000000eee", cwd, nativeSessionRotateBytes)
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] == "resume" {
+		t.Fatalf("worker argv = %q, want fresh once the newest matching rollout is over the ceiling", launch.Argv())
+	}
+}
+
+// An orchestrator's own cwd is a fresh runtime root every run, so it cannot
+// carry a resumable session itself; WithPreviousWorkingDirectory (the same
+// agent's last terminal run's cwd, durable through kernel.Store) is what lets
+// its standing tasks share one continuing Codex session.
+func TestCodexOrchestratorResumesFromPreviousWorkingDirectory(t *testing.T) {
+	installation, runtime, locator := nativeFixture(t, kernel.ProviderCodex)
+	bridge := filepath.Join(filepath.Dir(locator), maintainerBridge)
+	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(t.TempDir(), "previous-runtime-home")
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	const previousSession = "01a00000-0000-7000-8000-0000000000ff"
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T08-00-00", previousSession, previous, 0)
+	current := filepath.Join(t.TempDir(), "current-runtime-home")
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, current, kernel.RoleOrchestrator, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutHint, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutHint.Argv()[1] == "resume" {
+		t.Fatalf("orchestrator argv = %q, want no resume without a previous working directory", withoutHint.Argv())
+	}
+	request, err = request.WithPreviousWorkingDirectory(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] != "resume" || launch.Argv()[2] != previousSession {
+		t.Fatalf("orchestrator argv = %q, want a leading resume of %q", launch.Argv(), previousSession)
 	}
 }
 

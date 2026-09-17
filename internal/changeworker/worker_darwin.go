@@ -127,6 +127,13 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
+	if config.PreviousWorkingDirectory != "" {
+		request, err = request.WithPreviousWorkingDirectory(config.PreviousWorkingDirectory)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
+	}
 	launch, err := provider.Build(request)
 	if err != nil {
 		_ = cwd.Close()

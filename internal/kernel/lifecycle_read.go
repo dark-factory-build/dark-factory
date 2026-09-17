@@ -455,6 +455,36 @@ func (store *Store) Resource(ctx context.Context, id ResourceID) (Resource, bool
 	return resource, true, nil
 }
 
+// LatestTerminalRuntimeRoot returns the runtime_root resource path of the
+// given agent's most recently terminal run, or found=false when the agent
+// has none yet. A resource row is retained after release (see
+// internal/kernel/schema.go: resources has no path-clearing transition), so
+// this stays readable long after the directory itself is gone; the daemon
+// uses it only as a durable text key, such as matching a past provider
+// transcript recorded against that exact path, not to reopen the directory.
+func (store *Store) LatestTerminalRuntimeRoot(ctx context.Context, agentID AgentID) (string, bool, error) {
+	if agentID.zero() {
+		return "", false, fmt.Errorf("%w: zero agent identifier", ErrInvalidValue)
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Close()
+	var path string
+	err = tx.connection.QueryRowContext(ctx, `SELECT resources.path FROM resources
+	    JOIN runs ON runs.id = resources.run_id
+	    WHERE runs.agent_id = ? AND runs.phase = 'terminal' AND resources.kind = 'runtime_root' AND resources.path IS NOT NULL
+	    ORDER BY runs.terminal_at_ms DESC, runs.id DESC LIMIT 1`, agentID.Bytes()).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return path, true, nil
+}
+
 func resourcesForRun(ctx context.Context, connection *sql.Conn, runID RunID) ([]Resource, error) {
 	return resourcesForRunWithLimit(ctx, connection, runID, 0)
 }

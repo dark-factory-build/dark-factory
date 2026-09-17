@@ -136,19 +136,53 @@ in the same native conversation instead of a fresh one that only repeats the
 brief. The UUID is derived (UUID v5, RFC 4122) from provider, agent ID and
 task incarnation ID, so no extra state records which session belongs to which
 task, and `--resume` is chosen only when that exact transcript file already
-exists on disk; a first attempt, or a transcript past the rotation ceiling
-in `internal/provider/provider.go` (`claudeSessionRotateBytes`), gets a fresh
-`--session-id` instead. This does not yet apply to an orchestrator launch:
-its working directory is a fresh runtime root on every run (see
-`internal/daemon/supervisor_darwin.go` and `internal/changeworker/worker_darwin.go`),
-so no chosen ID could ever be found again; giving the orchestrator role a
-stable per-agent working directory across runs is a separate, larger change.
-Codex offers no way to choose or discover a session's ID at creation (no
-`--session-id`/`--name` flag on `codex`, `codex exec`, or any config key), and
-its rollout files are bucketed by wall-clock date rather than launch
-directory, so native Codex session persistence is not implemented; it needs
-either an upstream Codex feature or a provider-boundary-breaking post-exit
-discovery hook.
+exists on disk; a first attempt, or a transcript past the shared rotation
+ceiling in `internal/provider/provider.go` (`nativeSessionRotateBytes`), gets
+a fresh `--session-id` instead. This does not apply to a Claude Code
+orchestrator launch: its working directory is a fresh runtime root on every
+run (see `internal/daemon/supervisor_darwin.go` and
+`internal/changeworker/worker_darwin.go`), so no chosen ID could ever be found
+again; giving the orchestrator role a stable per-agent working directory
+across runs is a separate, larger change, so a Claude orchestrator's launch
+argv is unaffected.
+
+Codex offers no way to choose or name a session's ID at creation (no
+`--session-id`/`--name` flag or config key on `codex`, `codex exec`, or any
+subcommand), so a Codex worker or orchestrator launch instead discovers an
+already-recorded session and resumes it with a leading `codex resume
+SESSION_ID` (all of it added before the same `-c` overrides the launch always
+carries; `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` accepts every one of
+them identically to bare `codex`, confirmed from its own `--help`). Codex's
+own rollout files live under `CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`,
+bucketed by wall-clock date rather than launch directory; each one's first
+JSON line records `payload.cwd` and `payload.id` (the resumable session id;
+for an ordinary, non-subagent Dark Factory launch this equals the filename's
+own trailing UUID and Codex's `session_id`, so a rollout's own filename is
+never trusted alone). `codexSessionSelection` walks day directories newest
+first, bounded to the newest 30 days (`maxCodexScanDays`), and within a day
+reads only each rollout's bounded first line looking for the newest one whose
+`cwd` matches; the newest match is resumed while under the same
+`nativeSessionRotateBytes` ceiling, otherwise the launch is a fresh one
+(unchanged argv), never falling back to an older, smaller match for the same
+cwd. A worker's launch cwd is its retained Change worktree (as for Claude),
+so a send-back retry finds its own rollout directly. An orchestrator's launch
+cwd is a fresh runtime root every run like Claude's, but `codex resume
+SESSION_ID` does not require the resuming launch's own cwd to match (cwd
+filtering is a convenience of the interactive picker and `--last`, which
+`resume --all` exists to disable; an explicit SESSION_ID resolves regardless
+of cwd), so Build instead searches by `previousWorkingDirectory`: the same
+agent's most recently terminal run's own working directory. That path is
+found from `kernel.Store.LatestTerminalRuntimeRoot`, a minimal read joining
+`runs` and `resources` for the newest terminal run's `runtime_root` resource
+path (retained in that row after release, so it stays readable long after the
+directory itself is reclaimed), joined with `changeworker.HomeName`
+(`.../home`, the exact directory Codex was launched in) and threaded through
+`changeworker.Config.PreviousWorkingDirectory` and
+`provider.Request.WithPreviousWorkingDirectory`. This is how an overseer's
+distinct standing tasks share one continuing Codex context despite each one's
+own fresh runtime root. A first-ever orchestrator run, or one whose prior
+Codex session cannot be found, launches unaffected, the same as a worker's
+first attempt.
 
 Codex receives the daemon-authorized Change worktree as an invocation-only
 project override with `trust_level="untrusted"`. This suppresses Codex's
