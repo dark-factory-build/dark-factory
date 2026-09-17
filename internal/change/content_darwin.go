@@ -16,6 +16,11 @@ import (
 
 const maxContentSourceBytes = 1 << 20
 
+func contentWriteGitArguments(repositoryRoot string, arguments ...string) []string {
+	result := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsync=all", "-c", "core.fsyncMethod=fsync", "-C", repositoryRoot}
+	return append(result, arguments...)
+}
+
 // PinContentSource verifies one regular UTF-8 repository file at commit and
 // creates a private durable ref to the commit. It never accepts a branch name
 // as a durable source and never writes the worktree or creates a commit.
@@ -107,6 +112,9 @@ func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot strin
 			}
 			return ContentSource{}, err
 		}
+		if err := updateContentRef(ctx, authority, durableRef, existing.Commit, existing.Commit.Format()); err != nil {
+			return ContentSource{}, err
+		}
 		return existing, nil
 	}
 	formatOutput, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", repositoryRoot, "rev-parse", "--show-object-format")
@@ -136,7 +144,7 @@ func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot strin
 	if err := os.WriteFile(bodyFile, []byte(body), 0o600); err != nil {
 		return ContentSource{}, newGitError(gitFailurePrivateIO)
 	}
-	blobOutput, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", repositoryRoot, "hash-object", "-w", "--no-filters", "--", bodyFile)
+	blobOutput, err := authority.succeed(ctx, maxGitSelectionOutput, contentWriteGitArguments(repositoryRoot, "hash-object", "-w", "--no-filters", "--", bodyFile)...)
 	if err != nil {
 		return ContentSource{}, err
 	}
@@ -152,7 +160,7 @@ func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot strin
 	if _, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, env, "-C", repositoryRoot, "update-index", "--add", "--cacheinfo", "100644,"+blob.Hex()+","+file); err != nil {
 		return ContentSource{}, err
 	}
-	treeOutput, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, env, "-C", repositoryRoot, "write-tree")
+	treeOutput, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, env, contentWriteGitArguments(repositoryRoot, "write-tree")...)
 	if err != nil {
 		return ContentSource{}, err
 	}
@@ -161,7 +169,7 @@ func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot strin
 		return ContentSource{}, err
 	}
 	commitEnv := append(env, "GIT_AUTHOR_NAME=Dark Factory", "GIT_AUTHOR_EMAIL=dark-factory@localhost", "GIT_COMMITTER_NAME=Dark Factory", "GIT_COMMITTER_EMAIL=dark-factory@localhost")
-	commitOutput, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, commitEnv, "-C", repositoryRoot, "commit-tree", tree.Hex(), "-p", baseID.Hex(), "-m", "Update project content")
+	commitOutput, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, commitEnv, contentWriteGitArguments(repositoryRoot, "commit-tree", tree.Hex(), "-p", baseID.Hex(), "-m", "Update project content")...)
 	if err != nil {
 		return ContentSource{}, err
 	}
@@ -248,13 +256,16 @@ func updateContentRef(ctx context.Context, authority *gitAuthority, durableRef s
 		if parseErr != nil || !existing.Equal(id) {
 			return &ValidationError{Reason: "content durable ref already names another commit"}
 		}
-		return nil
+		// Republish an exact replay under the current durability policy. Content
+		// objects created by this writer were already fsynced; this refreshes a
+		// retained ref before a legacy SQL body can be retired.
+		return publishContentRef(ctx, authority, durableRef, id, id.Hex())
 	}
 	if current.exitCode != 1 {
 		return newGitError(gitFailureProcess)
 	}
 	zero := strings.Repeat("0", format.OIDLength()*2)
-	if err := authority.rewriteConfig(ctx, maxGitSelectionOutput, "-C", authority.repositoryRoot, "update-ref", "--no-deref", durableRef, id.Hex(), zero); err == nil {
+	if err := publishContentRef(ctx, authority, durableRef, id, zero); err == nil {
 		return nil
 	}
 	current, err = authority.run(ctx, maxGitSelectionOutput, "-C", authority.repositoryRoot, "rev-parse", "--verify", "--quiet", "--end-of-options", durableRef+"^{commit}")
@@ -269,6 +280,10 @@ func updateContentRef(ctx context.Context, authority *gitAuthority, durableRef s
 		return &ValidationError{Reason: "content durable ref already names another commit"}
 	}
 	return nil
+}
+
+func publishContentRef(ctx context.Context, authority *gitAuthority, durableRef string, id ObjectID, expected string) error {
+	return authority.rewriteConfig(ctx, maxGitSelectionOutput, contentWriteGitArguments(authority.repositoryRoot, "update-ref", "--no-deref", durableRef, id.Hex(), expected)...)
 }
 
 func regularContentTreeEntry(value []byte, file string) bool {

@@ -37,6 +37,14 @@ type fixtureFile struct {
 	data []byte
 }
 
+func TestContentWriteGitArgumentsForceDurabilityAndDisableHooks(t *testing.T) {
+	want := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsync=all", "-c", "core.fsyncMethod=fsync", "-C", "/repository", "update-ref", "ref", "new", "old"}
+	got := contentWriteGitArguments("/repository", "update-ref", "ref", "new", "old")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("content write arguments = %q, want %q", got, want)
+	}
+}
+
 func TestSelectGitRealSHA1AndSHA256WithoutBlobReads(t *testing.T) {
 	for _, formatName := range []string{"sha1", "sha256"} {
 		t.Run(formatName, func(t *testing.T) {

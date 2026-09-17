@@ -78,6 +78,15 @@ func TestPinContentSourceKeepsAnExactFileReachableAfterBranchCleanup(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	hook := filepath.Join(repository, ".git", "hooks", "reference-transaction")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 97\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(git, "-C", repository, "update-ref", "refs/test/hook-refusal", commit)
+	command.Env = []string{"HOME=" + root, "TMPDIR=" + root, "LC_ALL=C", "LANG=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
+	if output, runErr := command.CombinedOutput(); runErr == nil {
+		t.Fatalf("reference-transaction refusal hook did not reject ordinary update-ref: %s", output)
+	}
 	ref := "refs/dark-factory/content/00112233445566778899aabbccddeeff/1"
 	source, err := change.PinContentSource(context.Background(), git, repository, identity, commit, "procedure.md", ref)
 	if err != nil {
@@ -99,6 +108,9 @@ func TestPinContentSourceKeepsAnExactFileReachableAfterBranchCleanup(t *testing.
 	}
 	if _, err := change.WriteContentSource(context.Background(), git, repository, identity, nil, generated.Path, "different\n", "refs/dark-factory/content/00112233445566778899aabbccddeeff/2"); err == nil {
 		t.Fatal("different body reused immutable content ref")
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
 	}
 	if status := runExternalGit(t, root, git, repository, "status", "--porcelain"); status != "" {
 		t.Fatalf("content writer changed worktree: %q", status)
