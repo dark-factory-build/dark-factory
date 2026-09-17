@@ -165,7 +165,7 @@ for ci_private_child in data state; do
 done
 /bin/mkdir -p "$ci_private_root/data" "$ci_private_root/state"
 /bin/chmod 700 "$ci_private_root"
-/bin/mkdir -p "$ci_cache_root"
+/bin/mkdir -p -m 700 "$ci_cache_root"
 ci_cache_children='corepack go-build go-mod go cache npm pnpm-store'
 for ci_cache_child in $ci_cache_children; do
     ci_cache_path="$ci_cache_root/$ci_cache_child"
@@ -174,7 +174,6 @@ for ci_cache_child in $ci_cache_children; do
         return 1
     fi
 done
-/bin/chmod 700 "$ci_cache_root"
 for ci_cache_child in $ci_cache_children; do
     ci_cache_path="$ci_cache_root/$ci_cache_child"
     [ -d "$ci_cache_path" ] || /bin/mkdir "$ci_cache_path"

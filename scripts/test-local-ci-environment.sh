@@ -136,8 +136,10 @@ printf '%s\n' "$state_output" | grep -F 'refusing unsafe .tools/local-ci-state p
 /bin/mkdir -p "$temporary/explicit-cache"
 explicit_root="$temporary_root/explicit-cache/root"
 /bin/mkdir "$temporary/explicit-cache/root"
+/bin/chmod 750 "$temporary/explicit-cache/root"
 explicit_output=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" DF_CI_CACHE_ROOT="$explicit_root" /bin/sh ./scripts/entry.sh)
 [ "$explicit_output" = "$explicit_root" ] || fail "explicit cache root was discarded"
+[ "$(/usr/bin/stat -f '%Lp' "$explicit_root")" = 750 ] || fail "existing cache-root permissions were changed"
 for invalid_root in / /// relative "$fixture_root/cache" "$fixture_root/../cache"; do
     if (CDPATH='' cd -- "$fixture" && DF_CI_CACHE_ROOT="$invalid_root" /bin/sh ./scripts/entry.sh) >"$temporary/invalid.out" 2>&1; then
         fail "unsafe cache root was accepted: $invalid_root"
