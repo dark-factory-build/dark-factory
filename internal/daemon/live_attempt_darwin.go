@@ -730,6 +730,7 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 		return attempt.replenishCredit(uint64(len(frame.Payload)))
 	case runner.TerminalReset:
 		if frame.Correlation == 0 {
+			attempt.resetDiagnosticOutput(frame.Floor, frame.Head)
 			for subscriber := range attempt.subs {
 				attempt.resetSubscriber(subscriber, frame)
 			}
