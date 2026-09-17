@@ -1086,3 +1086,65 @@ func TestUnsettledContinuationPreservesFailureAlongsideCancellation(t *testing.T
 		t.Fatalf("cancelled continuation = %v, want retained store failure and caller cancellation", err)
 	}
 }
+
+// TestContinueUnsettledRunOutlivesRuntimeWriter is the #726 shape end to end:
+// the consumed result's runtime cannot be removed while a provider
+// descendant keeps writing under tmp, and the exact-run continuation must
+// still settle the run once that writer stops instead of stopping on a
+// contract refusal and leaving the run finalizing with its worker slot held.
+func TestContinueUnsettledRunOutlivesRuntimeWriter(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x4c)
+	fixture.stageRuntime(t)
+	fixture.beginRunnerStart(t)
+	fixture.activateRunner(t)
+	fixture.writeMarker(t, runner.OuterActivationMarkerName)
+	body, err := json.Marshal(forgedResultWire{Version: 1, AttemptID: fixture.run.ID.String(), Kind: "inner_unregistered_converged", Proof: hex.EncodeToString(fixture.proof[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeArtifact(t, body)
+	work := filepath.Join(fixture.parentPath, fixture.run.ID.String(), runtimeTempName, "go-build")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A `go build` look-alike: create and delete action directories and
+	// their outputs as fast as the filesystem allows, for a bounded window.
+	writerCtx, stopWriter := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer stopWriter()
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for round := 0; writerCtx.Err() == nil; round++ {
+			for index := 0; index < 64; index++ {
+				action := filepath.Join(work, fmt.Sprintf("b%03d", index))
+				_ = os.Mkdir(action, 0o755)
+				_ = os.WriteFile(filepath.Join(action, "importcfg"), nil, 0o644)
+				_ = os.WriteFile(filepath.Join(action, "_pkg_.a"), nil, 0o644)
+			}
+			for index := 0; index < 64; index += 2 {
+				_ = os.RemoveAll(filepath.Join(work, fmt.Sprintf("b%03d", index)))
+			}
+		}
+	}()
+	first := fixture.sweep(t)
+	if first.Action != RecoveredResultConsumed && first.Action != RecoveredResultConsumedUnsettled {
+		t.Fatalf("consumed-result pass = %+v", first)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID); err != nil {
+		t.Fatalf("continuation stopped: %v", err)
+	}
+	<-writerDone
+	if run := fixture.currentRun(t); run.Phase != kernel.RunTerminal || run.Terminal == nil {
+		t.Fatalf("unsettled run: %+v", run)
+	}
+	for kind, resource := range fixture.resourceStates(t) {
+		if resource.State != kernel.ResourceReleased {
+			t.Fatalf("%s retained: %+v", kind, resource)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fixture.parentPath, fixture.run.ID.String())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime persists: %v", err)
+	}
+}

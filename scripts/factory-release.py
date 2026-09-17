@@ -178,13 +178,11 @@ def check_runs_ok(checks):
     return successful
 
 
-def merge_gate(pr, default_sha, reviews, checks, config, expected):
+def reviewed_merge_gate(pr, reviews, checks, config, expected):
     if not isinstance(expected, str) or not SHA.fullmatch(expected) or not isinstance(pr, dict) or str(pr.get("state", "")).upper() != "MERGED":
         raise ReleaseError("pull request is not merged")
     if pr.get("baseRefName") != config["base"] or pr.get("mergeCommitSha") != expected:
         raise ReleaseError("merged pull request does not name the exact configured base and SHA")
-    if default_sha != expected:
-        raise ReleaseError("configured default branch is not at the merged SHA")
     head = pr.get("headRefOid")
     if not SHA.fullmatch(str(head or "")):
         raise ReleaseError("pull request head is invalid")
@@ -193,6 +191,23 @@ def merge_gate(pr, default_sha, reviews, checks, config, expected):
     if not any(f"Dark-Factory-Review: allow {head}" in str(item.get("body", "")) and str(item.get("commit_id")) == head and str((item.get("user") or {}).get("id", "")) == "319516570" for item in reviews):
         raise ReleaseError("no exact independent Maintainer ALLOW review at the pull request head")
     return head
+
+
+def merge_gate(pr, default_sha, reviews, checks, config, expected):
+    head = reviewed_merge_gate(pr, reviews, checks, config, expected)
+    if default_sha != expected:
+        raise ReleaseError("configured default branch is not at the merged SHA")
+    return head
+
+
+def target_is_ancestor(config, target, default):
+    value = json.loads(run(["gh", "api", f"repos/{config['repository']}/compare/{target}...{default}"]))
+    if not isinstance(value, dict) or value.get("status") not in {"ahead", "identical"}:
+        raise ReleaseError("reconciliation target is not an ancestor of the current default branch")
+    merge_base = (value.get("merge_base_commit") or {}).get("sha")
+    if merge_base != target:
+        raise ReleaseError("reconciliation target has an unexpected merge base")
+    return value
 
 
 def verify_output(raw, expected):
@@ -304,6 +319,7 @@ def range_sources(config, previous, target):
 
 def record_live_tip(journal, value):
     journal["live_tip"] = {"sha": value["sha"], "healthy": value["healthy"], "observed_at": int(time.time())}
+
 
 
 def record_unresolved(journal, entry, error):
@@ -527,10 +543,9 @@ def once(config, number, retry=False):
         return entry
 
 
-def reconcile(config, number, observed_sha):
-    """Settle an already-applied deployment without invoking the deploy hook."""
-    if not SHA.fullmatch(observed_sha):
-        raise ReleaseError("observed SHA is invalid")
+def reconcile(config, number, expected):
+    if not SHA.fullmatch(expected):
+        raise ReleaseError("observed SHA must be a full commit SHA")
     journal_path = Path(config["journal"])
     lock_path = Path(str(journal_path) + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -539,41 +554,65 @@ def reconcile(config, number, observed_sha):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ReleaseError("another release invocation is running") from exc
+        fingerprint = config_fingerprint(config)
         journal = load(journal_path)
         entry = journal["releases"].get(str(number))
+        if entry is not None and not isinstance(entry, dict):
+            raise ReleaseError("release journal has an invalid release receipt")
         unresolved = journal.get("unresolved_deployment")
-        if not isinstance(entry, dict) or entry.get("pr") != number:
-            raise ReleaseError("pull request has no release receipt to reconcile")
-        if entry.get("state") not in {"blocked", "running"}:
-            raise ReleaseError("release receipt is already settled")
-        if (not isinstance(unresolved, dict) or unresolved.get("pr") != number
-                or unresolved.get("sha") != entry.get("sha")):
-            raise ReleaseError("release receipt is not the unresolved deployment")
+        if (entry and entry.get("config_fingerprint") != fingerprint
+                and not (isinstance(unresolved, dict)
+                         and unresolved.get("pr") == number
+                         and unresolved.get("sha") == entry.get("sha"))):
+            raise ReleaseError("journal receipt belongs to a different repository or hook configuration")
+        matching_unresolved = False
+        if unresolved is not None:
+            if (not isinstance(unresolved, dict) or not isinstance(unresolved.get("pr"), int)
+                    or not SHA.fullmatch(str(unresolved.get("sha", "")))):
+                raise ReleaseError("release journal has an invalid unresolved deployment barrier")
+            if unresolved["pr"] != number:
+                raise ReleaseError("an earlier unresolved deployment blocks reconciliation")
+            if (entry is None or entry.get("state") not in {"blocked", "running"}
+                    or entry.get("sha") != unresolved["sha"]):
+                raise ReleaseError("release receipt is not the unresolved deployment")
+            matching_unresolved = True
+        for receipt_number, receipt in journal["releases"].items():
+            if isinstance(receipt, dict) and receipt.get("state") == "running":
+                if not (matching_unresolved and str(receipt_number) == str(number) and receipt is entry):
+                    raise ReleaseError("release journal has an unresolved running deployment")
         pr, default, reviews, checks = gh_snapshot(config, number)
-        merge_sha = pr.get("mergeCommitSha")
-        merge_gate(pr, default, reviews, checks, config, merge_sha)
-        if merge_sha != observed_sha or entry.get("sha") != observed_sha:
-            raise ReleaseError("observed SHA does not match the exact unresolved merge")
+        sha = pr.get("mergeCommitSha")
+        reviewed_merge_gate(pr, reviews, checks, config, sha)
+        if sha != expected:
+            raise ReleaseError("observed SHA does not match the merged pull request")
+        target_is_ancestor(config, sha, default)
+        if entry and entry.get("sha") != sha:
+            raise ReleaseError("journal has a different SHA for this pull request")
         review_gate(config, pr["headRefOid"], reviews)
-        value = probe(config, observed_sha)
-        if value.get("sha") != observed_sha or value.get("healthy") is not True:
-            raise ReleaseError("live probe did not prove the observed SHA is healthy")
+        value = probe(config, expected)
+        if value.get("sha") != expected or value.get("healthy") is not True:
+            raise ReleaseError("live probe did not prove the expected healthy SHA")
         prior_tip = journal.get("live_tip")
-        if prior_tip is not None and prior_tip.get("sha") == observed_sha:
+        previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
+        if previous is not None and previous == expected:
             sources, delivery_mode = [], "unchanged"
+        elif previous is None:
+            sources, delivery_mode = [], "baseline_current"
         else:
-            previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
-            if not isinstance(previous, str) or not SHA.fullmatch(previous):
-                raise ReleaseError("release journal has no valid prior live tip for reconciliation")
-            sources, delivery_mode = range_sources(config, previous, observed_sha)
-        entry.update({"state": "verified", "verification": value,
-                      "delivery_from_sha": prior_tip.get("sha") if isinstance(prior_tip, dict) else observed_sha,
-                      "delivery_sources": sources, "delivery_mode": delivery_mode,
-                      "verified_at": int(time.time()), "config_fingerprint": config_fingerprint(config)})
+            sources, delivery_mode = range_sources(config, previous, expected)
+        entry = entry or {"pr": number}
+        entry.update({"sha": expected, "state": "verified", "config_fingerprint": fingerprint,
+                      "delivery_from_sha": previous or expected, "delivery_sources": sources,
+                      "delivery_mode": delivery_mode, "verification": value,
+                      "reconciliation": {"mode": "operator_observed", "observed_sha": expected},
+                      "verified_at": int(time.time()), "updated_at": int(time.time())})
+        journal["releases"][str(number)] = entry
         record_live_tip(journal, value)
-        clear_unresolved(journal, entry)
+        if matching_unresolved:
+            clear_unresolved(journal, entry)
         atomic_json(journal_path, journal)
         return entry
+
 
 
 def main(argv=None):
@@ -597,17 +636,16 @@ def main(argv=None):
         if args.reconcile:
             if args.pr is None or args.latest or args.retry or args.observed_sha is None:
                 raise ReleaseError("--reconcile requires --pr and --observed-sha and cannot use --latest or --retry")
-            print(json.dumps(reconcile(config, args.pr, args.observed_sha), sort_keys=True))
-            return 0
-        if (args.pr is None) == (not args.latest):
+        if not args.reconcile and (args.pr is None) == (not args.latest):
             raise ReleaseError("choose exactly one of --pr or --latest")
-        number = latest_pr(config) if args.latest else args.pr
+        number = args.pr if args.reconcile else (latest_pr(config) if args.latest else args.pr)
         if number is None:
             print(json.dumps({"state": "no release available"}, sort_keys=True))
             return 0
         if number < 1:
             raise ReleaseError("pull request number is invalid")
-        print(json.dumps(once(config, number, args.retry), sort_keys=True))
+        result = reconcile(config, number, args.observed_sha) if args.reconcile else once(config, number, args.retry)
+        print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, json.JSONDecodeError, ReleaseError) as exc:
         print(f"factory-release: {exc}", file=sys.stderr)
