@@ -1659,7 +1659,10 @@ impl AppAuthority {
         // `verify_publish_precondition` already reports a moved head as a
         // conflict. Rewriting every other failure into one too told the caller
         // to refetch a head that had not moved.
-        let branch_exists = self.0.verify_publish_precondition(&token, &request).await?;
+        let branch_exists = self
+            .0
+            .verify_publish_precondition(&token, &request, &repository.default_branch)
+            .await?;
         match journal
             .mark_operation(&operation, OperationTransition::Executing)
             .await
@@ -4410,6 +4413,7 @@ impl Authority {
         &self,
         token: &RepositoryToken,
         request: &PublishCommit,
+        default_branch: &str,
     ) -> Result<bool, OperationError> {
         let branch_exists = match self.read_ref_optional(token, &request.branch).await? {
             Some(reference) => (reference.object.sha == request.expected_head_sha)
@@ -4431,8 +4435,34 @@ impl Authority {
         // 422 from the commit write; every other input is checked first.
         if let Some(parent) = request.merge_parent_sha.as_deref() {
             self.read_commit(token, parent).await?;
+            let default_head = self.read_ref(token, default_branch).await?;
+            if default_head.object.kind != "commit" {
+                return Err(OperationError::Conflict);
+            }
+            self.verify_ancestor(token, parent, &default_head.object.sha)
+                .await?;
         }
         Ok(branch_exists)
+    }
+
+    async fn verify_ancestor(
+        &self,
+        token: &RepositoryToken,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<(), OperationError> {
+        let comparison: GitComparison = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/compare/{ancestor}...{descendant}",
+                token.repository.owner, token.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        comparison
+            .proves_ancestor()
+            .then_some(())
+            .ok_or(OperationError::Conflict)
     }
 
     async fn push_commit(
@@ -6167,6 +6197,22 @@ struct GitCommit {
     message: String,
     tree: GitObjectId,
     parents: Vec<GitParent>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct GitComparison {
+    status: String,
+    ahead_by: i64,
+    behind_by: i64,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl GitComparison {
+    fn proves_ancestor(&self) -> bool {
+        (self.status == "ahead" && self.ahead_by >= 1 && self.behind_by == 0)
+            || (self.status == "identical" && self.ahead_by == 0 && self.behind_by == 0)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -9019,6 +9065,36 @@ mod tests {
         for refused in ["a".repeat(40), "B".repeat(40), "b".repeat(39)] {
             merge.merge_parent_sha = Some(refused);
             assert_eq!(merge.validate().err(), Some(OperationError::InvalidInput));
+        }
+    }
+
+    #[test]
+    fn a_merge_parent_requires_default_branch_ancestry() {
+        assert!(
+            GitComparison {
+                status: "ahead".into(),
+                ahead_by: 1,
+                behind_by: 0,
+            }
+            .proves_ancestor()
+        );
+        assert!(
+            GitComparison {
+                status: "identical".into(),
+                ahead_by: 0,
+                behind_by: 0,
+            }
+            .proves_ancestor()
+        );
+        for status in ["behind", "diverged", "identical"] {
+            assert!(
+                !GitComparison {
+                    status: status.into(),
+                    ahead_by: if status == "identical" { 1 } else { 0 },
+                    behind_by: 1,
+                }
+                .proves_ancestor()
+            );
         }
     }
 

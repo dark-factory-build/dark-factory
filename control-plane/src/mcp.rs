@@ -757,7 +757,7 @@ fn tools() -> Value {
     }, {
         "name": "publish_commit",
         "title": "Publish an exact-head commit",
-        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted, so a mode may only be stated alongside content. With merge_parent_sha the commit is a merge of the branch head and that commit, and changes are applied to that commit's tree: supply the diff from it, not a copy of it. The .github tree itself, .github/workflows, CODEOWNERS and dependabot config cannot be written. Replays require the same operation UUID and request.",
+        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted, so a mode may only be stated alongside content. With merge_parent_sha the commit is a merge of the branch head and a commit proven to be in the live default branch, and changes are applied to that commit's tree: supply the diff from it, not a copy of it. The .github tree itself, .github/workflows, CODEOWNERS and dependabot config cannot be written. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
