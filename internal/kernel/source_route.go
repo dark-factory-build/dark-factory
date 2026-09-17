@@ -5,14 +5,6 @@ import (
 	"strings"
 )
 
-// retainedSourceReview reports the one durable task shape used for an
-// independent review of a retained worker Change. Keeping this predicate at
-// the queue boundary makes an operator reassignment observable before it can
-// be admitted; ordinary worker tasks remain provider-agnostic.
-func retainedSourceReview(task NewTask) bool {
-	return strings.HasPrefix(strings.TrimSpace(task.Body), "review handoff ")
-}
-
 // RetainedSourceReviewSupported reports the installed provider routes that
 // can obtain an exact, read-only retained-source receipt. Claude's launch is
 // fixture-proven but lacks the protected local-command boundary required for
