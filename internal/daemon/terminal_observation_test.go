@@ -35,9 +35,38 @@ func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
 	if got, _ := redactTerminalWindow([]byte("{\"path\":\"/Users/operator/\n.secret\"}\n"), 0); bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte(".secret")) {
 		t.Fatalf("split JSON path leaked: %q", got)
 	}
-	benign := []byte("{\"message\":\n\"visible\"}\n")
-	if got, _ := redactTerminalWindow(benign[1:], 1); !bytes.Contains(got, []byte("visible")) {
-		t.Fatalf("cursor-boundary benign JSON was over-redacted: %q", got)
+	for _, secretKey := range []string{"token", "secret", "password"} {
+		markerFree := []byte("{\"" + secretKey + "\":\n\"hunter2\"}\nnext\n")
+		keyLineEnd := bytes.IndexByte(markerFree, '\n')
+		for cursor := 1; cursor < keyLineEnd; cursor++ {
+			got, _ := redactTerminalWindow(markerFree[cursor:], uint64(cursor), terminalLookbehind{start: 0, bytes: markerFree[:cursor]})
+			if bytes.Contains(got, []byte("hunter2")) || !bytes.Contains(got, []byte("next")) {
+				t.Fatalf("marker-free split JSON %s cursor=%d handling = %q", secretKey, cursor, got)
+			}
+		}
+		if secretKey == "token" {
+			// If replay begins above the key's opening byte, the ambiguous final
+			// suffix is conservatively suppressed rather than exposed.
+			if got, _ := redactTerminalWindow(markerFree[6:], 6); bytes.Contains(got, []byte("hunter2")) || !bytes.Contains(got, []byte("next")) {
+				t.Fatalf("floor-loss ambiguous split JSON secret handling = %q", got)
+			}
+		}
+	}
+	multiline := []byte("ordinary one\nordinary two\n{\"token\":\n\"multiline-secret\"}\nnext\n")
+	keyCursor := bytes.Index(multiline, []byte("token")) + 2
+	got, _ = redactTerminalWindow(multiline[keyCursor:], uint64(keyCursor), terminalLookbehind{start: 0, bytes: multiline[:keyCursor]})
+	if bytes.Contains(got, []byte("multiline-secret")) || !bytes.Contains(got, []byte("next")) {
+		t.Fatalf("multiline lookbehind redaction = %q", got)
+	}
+	for _, key := range []string{"message", "login", "version", "monkey"} {
+		benign := []byte("{\"" + key + "\":\n\"visible\"}\n")
+		keyLineEnd := bytes.IndexByte(benign, '\n')
+		for cursor := 1; cursor < keyLineEnd; cursor++ {
+			got, _ := redactTerminalWindow(benign[cursor:], uint64(cursor), terminalLookbehind{start: 0, bytes: benign[:cursor]})
+			if !bytes.Contains(got, []byte("visible")) {
+				t.Fatalf("cursor-boundary benign %s JSON was over-redacted at cursor %d: %q", key, cursor, got)
+			}
+		}
 	}
 }
 
