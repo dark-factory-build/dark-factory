@@ -28,6 +28,20 @@ class ReviewError(Exception):
     pass
 
 
+def review_provider(config):
+    """Return the operator-selected installed review route.
+
+    Codex is the durable default because it is the only current factory route
+    that can obtain an exact retained-source receipt.  The explicit config
+    escape hatch is for a later installed Claude source capability; ambient
+    environment state must never change a queued review's route.
+    """
+    value = config.get("review_provider", "codex")
+    if value not in {"codex", "claude"}:
+        raise ReviewError("review_provider must be codex or claude")
+    return value
+
+
 def mirror(config):
     root = config.get("review_mirror_root")
     if not isinstance(root, str) or not os.path.isabs(root):
@@ -136,7 +150,8 @@ def launch_review(config, path, pr, operation):
     directory.mkdir(mode=0o700, exist_ok=True)
     body = directory / "body.md"
     body.write_text(pr["body"])
-    env = dict(os.environ, DARK_FACTORY_REVIEW_OPERATION_ID=operation["review_operation"],
+    env = dict(os.environ, DARK_FACTORY_REVIEW_PROVIDER=operation.get("provider", review_provider(config)),
+               DARK_FACTORY_REVIEW_OPERATION_ID=operation["review_operation"],
                DARK_FACTORY_REVIEW_REMOTE="file://" + str(path.parent.parent))
     env.pop("DARK_FACTORY_REVIEW_EVIDENCE_FILE", None)
     with (directory / "launch.log").open("w") as output:
@@ -160,7 +175,7 @@ def review_followup(config, operation, state):
 
 
 def config_fingerprint(config):
-    value = {key: config.get(key) for key in ("repository", "project_id", "overseer_agent_id", "review_mirror_root")}
+    value = {key: config.get(key) for key in ("repository", "project_id", "overseer_agent_id", "review_mirror_root", "review_provider")}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -181,6 +196,7 @@ def run_once(config):
 
 
 def run_locked(config, path, journal, journal_path):
+    provider = review_provider(config)
     if journal_path.exists():
         try:
             receipts = json.loads(journal_path.read_text())
@@ -200,10 +216,13 @@ def run_locked(config, path, journal, journal_path):
         existing = receipts["pulls"].get(key)
         if existing is None:
             operation = ready(config, path, pr, issue)
+            operation["provider"] = provider
             receipts["pulls"][key] = operation
             intake.atomic_json(journal_path, receipts)
         else:
             operation = existing
+            if operation.get("provider", "codex") != provider:
+                raise ReviewError("review provider changed for an existing exact-head receipt")
             verify_existing(path, pr, operation)
         operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
         state = observe_review(operation)

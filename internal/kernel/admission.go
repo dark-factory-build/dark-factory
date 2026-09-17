@@ -65,6 +65,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			  AND a.tool_calls_used < a.tool_budget_limit
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
+			  AND NOT (t.body LIKE 'review handoff %' AND a.provider <> 'codex')
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') < ?)
 			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND phase <> 'terminal') < 1))
 		), next_for_worker AS (
@@ -90,6 +91,16 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		}
 		if queued == 0 {
 			return rollbackNoAdmission(tx, NoAdmissionQueueEmpty)
+		}
+		var sourceRouteUnavailable int
+		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM tasks AS t JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
+			WHERE t.status = 'queued' AND t.body LIKE 'review handoff %' AND a.provider <> 'codex'
+		)`).Scan(&sourceRouteUnavailable); err != nil {
+			return AdmissionResult{}, tx.Rollback(err)
+		}
+		if sourceRouteUnavailable != 0 {
+			return rollbackNoAdmission(tx, NoAdmissionSourceRouteUnavailable)
 		}
 		var capacityBlocked int
 		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(

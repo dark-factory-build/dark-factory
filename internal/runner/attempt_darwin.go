@@ -1417,6 +1417,17 @@ func protocolError(want string, got attemptSource, err error) error {
 	return fmt.Errorf("runner: expected %s (source %d): %w", want, got, err)
 }
 
+// providerExecErrorFrame is the only diagnostic frame a worker may send while
+// the runner is waiting for provider exec. Keep its envelope check here with
+// the attempt protocol validators so every lifecycle edge applies the same
+// bounded, private-error rule.
+func providerExecErrorFrame(frame attemptFrame) error {
+	if frame.Version != 1 || frame.Kind != "provider-exec-error" || !noLegacyFields(frame) || !noTerminalFields(frame) || len(frame.Payload) == 0 || len(frame.Payload) > maxProviderErrorBytes || !utf8.Valid(frame.Payload) {
+		return ErrState
+	}
+	return fmt.Errorf("runner: provider exec: %s", frame.Payload)
+}
+
 func validReleaseFrame(frame attemptFrame, stage AttemptStage) bool {
 	return frame.Version == 1 && frame.Kind == "release" && frame.Stage == stage && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.FileIdentity == nil && frame.Digest == "" && noTerminalFields(frame)
 }

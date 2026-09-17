@@ -182,6 +182,9 @@ func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewT
 			return Task{}, ErrConflict
 		}
 	}
+	if err := validateRetainedSourceReviewRoute(spec.Body, agent); err != nil {
+		return Task{}, err
+	}
 	if _, err := connection.ExecContext(ctx, `INSERT INTO tasks(
         id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body,
 		sent_back_instruction_bytes,

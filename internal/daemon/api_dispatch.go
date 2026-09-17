@@ -471,6 +471,12 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
+	// Only providers with the protected retained-source receipt route may
+	// receive this immutable snapshot. Unsupported providers fail before target
+	// parsing, so a reassignment cannot silently admit doomed work.
+	if !kernel.RetainedSourceReviewSupported(authority.Provider) {
+		return newErrorReply(api.RemoteUnavailable)
+	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
