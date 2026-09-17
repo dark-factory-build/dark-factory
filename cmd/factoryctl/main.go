@@ -328,7 +328,10 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 
 	socket := getenv("DARK_FACTORY_SOCKET")
 	if socket == "" {
-		_, _ = io.WriteString(stderr, "factoryctl: attempt client configuration is invalid\n")
+		// A Codex session's shell does not receive the attempt variables; its
+		// attempt-scoped factory tool does. Say so instead of sending the
+		// provider to read the source for the cause.
+		_, _ = io.WriteString(stderr, "factoryctl: attempt client configuration is invalid\nfactoryctl: DARK_FACTORY_SOCKET is not set in this shell; a Codex session runs attempt commands through its factory tool\n")
 		return exitFailure
 	}
 	client, err := api.NewAttemptClientFromEnvironment(socket)
@@ -1691,7 +1694,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandOverseerTaskUpdate:
-		if command.id == "" || command.expectedRevision == 0 || command.retry && (command.agent == "" || command.title != "" || command.bodySet || command.prioritySet || command.cancel) || !command.retry && !command.cancel && command.agent == "" && command.title == "" && !command.bodySet && !command.prioritySet {
+		if command.id == "" || command.expectedRevision == 0 || command.retry && (command.title != "" || command.bodySet || command.prioritySet || command.cancel) || !command.retry && !command.cancel && command.agent == "" && command.title == "" && !command.bodySet && !command.prioritySet {
 			return attemptCommand{}, false, false
 		}
 	case commandOverseerTaskSendBack:

@@ -602,7 +602,7 @@ func TestAttemptTaskInvalidEnvironmentFailsNormally(t *testing.T) {
 				}
 				return ""
 			}, &stdout, &stderr)
-			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: attempt client configuration is invalid\n" {
+			if exit != exitFailure || stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), "factoryctl: attempt client configuration is invalid\n") || (test.socket == "") != strings.Contains(stderr.String(), "factory tool") {
 				t.Fatalf("invalid environment = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 			}
 		})
@@ -681,7 +681,7 @@ func TestMissingSocketOrAttemptTokenCannotFallBack(t *testing.T) {
 		t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", "/private/missing-attempt-token")
 		var stdout, stderr bytes.Buffer
 		exit := run(context.Background(), []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question"}, func(string) string { return "" }, &stdout, &stderr)
-		if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: attempt client configuration is invalid\n" {
+		if exit != exitFailure || stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), "factoryctl: attempt client configuration is invalid\nfactoryctl: DARK_FACTORY_SOCKET is not set in this shell") {
 			t.Fatalf("missing socket = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 		}
 	})

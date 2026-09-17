@@ -383,12 +383,20 @@ func claudeSessionSelection(runtime RuntimePaths, cwd, agentID, taskIncarnationI
 	return "", false, ErrInvalid
 }
 
-// escapeClaudeProjectPath mirrors the CLI's own cwd-to-directory-name mapping
-// closely enough for this existence check: worst case an imperfect escape
-// only misses a resumable session and Build starts fresh, exactly as if none
-// existed yet.
+// escapeClaudeProjectPath is the CLI's own cwd-to-directory-name mapping:
+// every character outside [A-Za-z0-9] becomes '-' (observed: a Change under
+// `.dark-factory-recovered/changes/` is recorded under
+// `-dark-factory-recovered-changes-`). It must match exactly, because a miss
+// does not merely start fresh: the retry relaunches `--session-id` with the
+// same derived id, which the CLI refuses as already in use and exits 1 before
+// any attempt outcome.
 func escapeClaudeProjectPath(cwd string) string {
-	return strings.ReplaceAll(cwd, "/", "-")
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, cwd)
 }
 
 // uuidV5 and formatUUID implement RFC 4122 UUID version 5 (SHA-1 name-based)

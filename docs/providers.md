@@ -129,7 +129,12 @@ configuration and capability boundaries are described below.
 A worker's Claude Code launch adds `--session-id UUID` or `--resume UUID`
 right after `--dangerously-skip-permissions`. The CLI keys a conversation's
 own transcript by the exact launch directory under its effective
-configuration directory (`<config-home>/projects/<escaped-cwd>/<uuid>.jsonl`):
+configuration directory (`<config-home>/projects/<escaped-cwd>/<uuid>.jsonl`,
+where every byte of the directory outside `A-Za-z0-9` becomes `-`, so
+`~/.dark-factory/changes/ID` is `-Users-op--dark-factory-changes-ID`; the
+escape must match the CLI exactly, because a `--session-id` the CLI already
+knows is refused as already in use and the provider exits 1 before any
+attempt outcome):
 `HOME/.claude` by default, or a linked account's own directory when one is
 selected, exactly the directory the launch environment names
 `CLAUDE_CONFIG_DIR` (`claudeConfigHome` in `internal/provider/provider.go` is
@@ -332,7 +337,10 @@ ready, as a keystroke of its own once the CLI's output has been quiet for half
 a second (after a one-second floor, or at five seconds regardless), because a
 CLI reads text and newline arriving together as a paste, and a paste does not
 submit. The complete prepared input must fit 8 KiB; a partial or uncertain
-write of the text fails the attempt and is never replayed.
+write of the text fails the attempt and is never replayed. A daemon-delivered
+human reply or overseer message reaches Claude and Codex the same way: the
+text as one write, then the runner's own Enter once the output is quiet, so
+the CLI submits it instead of holding it in its input box.
 
 Codex starts from a fixed, non-secret positional instruction to run
 `factoryctl attempt task` first. That command authenticates with the attempt's

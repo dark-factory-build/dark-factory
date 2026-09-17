@@ -374,7 +374,10 @@ func (daemon *Daemon) deliverHumanReply(ctx context.Context, delivery kernel.Hum
 		return 0, errors.Join(err, unknownErr)
 	}
 	payload := append([]byte(nil), delivery.Reply...)
-	result := attempt.submitEffect(ctx, terminalEffect{kind: terminalEffectHumanReply, payload: payload, submit: delivery.Provider == kernel.ProviderCodex})
+	// Every interactive CLI reads text arriving in one write as a paste, which
+	// does not submit; the runner sends the Enter as its own later keystroke.
+	// Shell reads raw stdin and is owed no keystroke.
+	result := attempt.submitEffect(ctx, terminalEffect{kind: terminalEffectHumanReply, payload: payload, submit: delivery.Provider != kernel.ProviderShell})
 	effectErr := result.effectError(len(payload))
 	if effectErr != nil {
 		unknownErr := daemon.markHumanReplyUnknown(delivery.RequestID, delivery.DeliveryID, delivery.Revision)
@@ -489,7 +492,7 @@ func (daemon *Daemon) deliverIntervention(ctx context.Context, receipt kernel.Ta
 	if err != nil {
 		return daemon.resolveIntervention(receipt, kernel.TaskInterventionRejected, "terminal intervention is unavailable")
 	}
-	payload, submit := []byte(receipt.Payload), run.Provider == kernel.ProviderCodex
+	payload, submit := []byte(receipt.Payload), true
 	if receipt.Kind == kernel.TaskInterventionInterrupt {
 		payload, submit = []byte{0x1b}, false
 	}
