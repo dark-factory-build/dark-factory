@@ -98,7 +98,7 @@ func TestAdmissionSerializesOnlyDeclaredConflictPaths(t *testing.T) {
 
 func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
 	ctx := context.Background()
-	store, _, project, producerAgent := newAdmissionStore(t, RoleWorker, 2)
+	store, _, project, producerAgent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
 	consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 215), ProjectID: project.ID, Name: "consumer", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
 	if err != nil {
@@ -120,6 +120,41 @@ func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
 	}
 	if task, found, err := store.Task(ctx, consumer.ID); err != nil || !found || task.Status != TaskQueued {
 		t.Fatalf("consumer state = %+v, %t, %v", task, found, err)
+	}
+}
+
+func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
+	ctx := context.Background()
+	proposal, _ := NewSuccessProposal("producer result")
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, proposal)
+	defer store.Close()
+	producer, err := finalizeTestRun(t, store, finalizing, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: producer.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 231, nil), mustTime(t, 63))
+	if err != nil || !result.Admitted() || result.Run.TaskID != consumer.ID {
+		t.Fatalf("consumer admission = %+v, %v", result, err)
+	}
+	var consumed []byte
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.QueryRowContext(ctx, `SELECT consumed_run_id FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&consumed); err != nil {
+		t.Fatal(err)
+	}
+	if string(consumed) != string(producer.ID.Bytes()) {
+		t.Fatalf("consumed run = %x, want %x", consumed, producer.ID.Bytes())
 	}
 }
 

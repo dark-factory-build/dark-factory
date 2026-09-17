@@ -52,7 +52,7 @@ const (
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl attempt send-back --task ID --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
-  factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+	factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]
   factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
   factoryctl overseer task send-back --task ID --note TEXT
   factoryctl overseer agent pause|resume|archive|restore --agent ID --revision REVISION
@@ -200,6 +200,8 @@ type attemptCommand struct {
 	archiveSet      bool
 	cancel          bool
 	retry           bool
+	prerequisites   []api.TaskPrerequisiteInput
+	conflictPaths   []string
 }
 
 func main() {
@@ -1203,7 +1205,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			index++
 			continue
 		}
-		if index+1 >= len(args) || seen[name] {
+		if index+1 >= len(args) || seen[name] && name != "--prerequisite" && name != "--conflict-path" {
 			return attemptCommand{}, false, false
 		}
 		seen[name] = true
@@ -1267,6 +1269,24 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			}
 			command.priority = priority
 			command.prioritySet = true
+		case "--prerequisite":
+			if command.kind != commandOverseerTaskAdd {
+				return attemptCommand{}, false, false
+			}
+			parts := strings.Split(value, ":")
+			if len(parts) != 2 || !validHumanRequestKey(parts[0]) {
+				return attemptCommand{}, false, false
+			}
+			revision, ok := parseRevision(parts[1])
+			if !ok {
+				return attemptCommand{}, false, false
+			}
+			command.prerequisites = append(command.prerequisites, api.TaskPrerequisiteInput{TaskID: parts[0], WorkRevision: revision})
+		case "--conflict-path":
+			if command.kind != commandOverseerTaskAdd || !validOperatorText(value, 1, 4096) || strings.HasPrefix(value, "/") {
+				return attemptCommand{}, false, false
+			}
+			command.conflictPaths = append(command.conflictPaths, value)
 		case "--revision":
 			revision, ok := parseRevision(value)
 			if !ok {
@@ -1692,7 +1712,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "overseer task add", idErr)
 			}
 		}
-		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority, Prerequisites: command.prerequisites, ConflictPaths: command.conflictPaths})
 	case commandOverseerTaskUpdate:
 		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry}
 		if command.title != "" {
