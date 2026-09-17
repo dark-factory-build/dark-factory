@@ -308,17 +308,22 @@ func TestSuccessfulWorkerOutcomeRefusesUnavailableSourceFacts(t *testing.T) {
 	}
 }
 
-func TestSuccessfulSettlementRefusesRealWriteBeforeFinalize(t *testing.T) {
+func TestSuccessfulSettlementRefusesRealWriteBetweenSnapshots(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0xae, kernel.RoleWorker)
 	ctx := context.Background()
 	changeState, path := fixture.settlementWorktree(t)
 	fixture.failBeforeRuntime(t)
-	fixture.daemon.beforeWorkerFinalize = func() {
+	fixture.daemon.beforeSuccessSettlement = func() {
 		if err := os.WriteFile(filepath.Join(path, "raced.txt"), []byte("raced\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	settled, err := fixture.daemon.settleRun(ctx, fixture.changeParent, fixture.run.ID)
+	inspectionCtx := context.WithValue(ctx, successSettlementContextKey{}, true)
+	settlement, err := fixture.daemon.retainedSettlement(inspectionCtx, fixture.changeParent, changeState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled, err := fixture.store.FinalizeWorkerRun(ctx, fixture.run.ID, fixture.currentRun(t).Revision, settlement, mustKernelTime(t, 600))
 	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Code() != kernel.FailureSource || !strings.Contains(settled.Terminal.Detail(), "uncommitted implementation") {
 		t.Fatalf("raced dirty settlement = %+v err=%v", settled, err)
 	}
