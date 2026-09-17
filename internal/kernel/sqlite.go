@@ -472,9 +472,9 @@ func (store *Store) beginValidatedWrite(ctx context.Context) (*writeTx, error) {
 }
 
 // beginUncheckedWrite reserves the writer without validating retained history.
-// Enqueue polls may inspect candidates and roll back a true no-op. Every
-// mutation must validateDurableControls before its first write; ordinary
-// mutations use beginValidatedWrite.
+// Enqueue polls may inspect candidates and roll back a true no-op. Account
+// link/update transactions validate affected rows and references locally;
+// other mutations use beginValidatedWrite or validateDurableControls first.
 func (store *Store) beginUncheckedWrite(ctx context.Context) (*writeTx, error) {
 	if err := store.acquireWriter(ctx); err != nil {
 		return nil, err
