@@ -45,10 +45,22 @@ set -eu
 case "$1:${2-}" in
     env:GOVERSION) /bin/cat "$(/usr/bin/dirname "$0")/../go-version" ;;
     mod:download|mod:verify) ;;
+    list:./...)
+        printf '%s\n' \
+            github.com/dark-factory-build/dark-factory/cmd/cloudflare-admin \
+            github.com/dark-factory-build/dark-factory/internal/change \
+            github.com/dark-factory-build/dark-factory/internal/changeworker \
+            github.com/dark-factory-build/dark-factory/internal/daemon \
+            github.com/dark-factory-build/dark-factory/internal/e2e \
+            github.com/dark-factory-build/dark-factory/internal/newpackage
+        ;;
     vet:./...)
         [ "${DF_GATE_FAULT-}" != vet ] || { echo 'fixture vet failure' >&2; exit 1; }
         ;;
     test:*)
+        case "$*" in
+            *internal/newpackage*) echo 'fixture selected unknown package' ;;
+        esac
         [ "${DF_GATE_FAULT-}" != go-test ] || { echo 'fixture Go test failure' >&2; exit 1; }
         ;;
     *) echo "unexpected fake go command: $*" >&2; exit 1 ;;
@@ -155,6 +167,15 @@ set -e
 [ "$process_status" -ne 0 ] || fail "failing process test passed"
 printf '%s\n' "$process_output" | /usr/bin/grep -F 'fixture Go test failure' >/dev/null \
     || fail "process failure was unclear: $process_output"
+
+set +e
+process_output=$(CDPATH= cd -- "$process" && \
+    PATH="$process/bin:/usr/bin:/bin" /bin/sh ./scripts/go-ci-owned.sh 2>&1)
+process_status=$?
+set -e
+[ "$process_status" -eq 0 ] || fail "successful process fixture failed: $process_output"
+printf '%s\n' "$process_output" | /usr/bin/grep -F 'fixture selected unknown package' >/dev/null \
+    || fail "new process package was not selected: $process_output"
 
 . "$repository_root/scripts/go-gate-environment.sh"
 leaker="$temporary/leaker"
@@ -283,6 +304,12 @@ local_fixture="$temporary/local"
 /usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null /usr/bin/git init -q "$local_fixture"
 /bin/cp "$repository_root/scripts/local-ci.sh" "$local_fixture/scripts/local-ci.sh"
 /bin/cp "$repository_root/scripts/local-ci-environment.sh" "$local_fixture/scripts/local-ci-environment.sh"
+/bin/cat >"$local_fixture/scripts/with-local-ci-lease.sh" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$local_fixture/lease-calls"
+exec "\$@"
+EOF
+/bin/chmod 755 "$local_fixture/scripts/with-local-ci-lease.sh"
 /bin/cat >"$local_fixture/scripts/stub" <<'EOF'
 #!/bin/sh
 name=$(/usr/bin/basename "$0")
@@ -295,6 +322,7 @@ if [ "${DF_GATE_FAULT-}" = env ]; then
 fi
 case "${DF_GATE_FAULT-}:$name" in
     release:test-package-release.sh) echo 'fixture release proof failure' >&2; exit 1 ;;
+    ui:go-check.sh) echo 'fixture UI source proof failure' >&2; exit 1 ;;
 esac
 EOF
 /bin/cat >"$local_fixture/poison/dirname" <<'EOF'
@@ -327,6 +355,10 @@ exit 1
 EOF
 /bin/cat >"$local_fixture/scripts/go-check.sh" <<EOF
 #!/bin/sh
+if [ "\${DF_GATE_FAULT-}" = ui ]; then
+    echo 'fixture UI source proof failure' >&2
+    exit 1
+fi
 if go --version >"$local_fixture/observed-go" 2>&1; then
     :
 fi
@@ -344,6 +376,7 @@ for local_child in \
     test-github-step-summary.sh test-verify-adversarial-review.sh \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
+    go-browser-e2e.sh \
     test-prepare-release-source.sh test-publish-release.sh test-package-release.sh \
     test-publication-parents.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
@@ -411,6 +444,23 @@ run_local_mode() {
 }
 run_local_mode --runtime
 run_local_mode --release
+: >"$local_fixture/lease-calls"
+local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
+    PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+    /bin/sh ./scripts/local-ci.sh --ui 2>&1)
+printf '%s\n' "$local_output" | /usr/bin/grep -F 'local-ci: PASS (ui)' >/dev/null \
+    || fail "UI gate did not complete: $local_output"
+/usr/bin/grep -F './scripts/go-browser-e2e.sh' "$local_fixture/lease-calls" >/dev/null \
+    || fail "UI browser smoke did not use the existing lease helper"
+set +e
+local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
+    DF_GATE_FAULT=ui PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+    /bin/sh ./scripts/local-ci.sh --ui 2>&1)
+local_status=$?
+set -e
+[ "$local_status" -ne 0 ] || fail "failing UI source proof passed"
+printf '%s\n' "$local_output" | /usr/bin/grep -F 'fixture UI source proof failure' >/dev/null \
+    || fail "UI failure was unclear: $local_output"
 
 /bin/mkdir "$local_fixture/mismatch"
 /bin/cat >"$local_fixture/mismatch/node" <<'EOF'
