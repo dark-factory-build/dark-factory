@@ -95,10 +95,12 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 			if _, err = f.store.ReviseContent(ctx, first.Revision, spec, adapterTime(t, 12)); err != nil {
 				t.Fatal(err)
 			}
+			sequence := 0
 			send := func(operation string, input map[string]any) browserprotocol.ControlFrame {
 				t.Helper()
+				sequence++
 				raw, _ := json.Marshal(input)
-				wire, e := browserprotocol.EncodeProjectContent("library", browserprotocol.ProjectContent{Operation: operation, Input: raw})
+				wire, e := browserprotocol.EncodeProjectContent(fmt.Sprintf("library-%d", sequence), browserprotocol.ProjectContent{Operation: operation, Input: raw})
 				if e != nil {
 					t.Fatal(e)
 				}
