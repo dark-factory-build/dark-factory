@@ -194,8 +194,20 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 			if frame.Type != browserprotocol.TypeProjectContentResult {
 				t.Fatalf("create = %+v", frame)
 			}
-			if err := json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &meta); err != nil || meta.Author != "browser:"+f.client.ID.String() || meta.ID != newID.String() {
+			if err := json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &meta); err != nil || meta.Author != "browser:"+f.client.ID.String() || meta.ID != newID.String() || meta.Commit == "" || meta.Path == "" {
 				t.Fatalf("browser provenance = %+v %v", meta, err)
+			}
+			frame = send("body", map[string]any{"project_id": project.String(), "id": newID.String(), "revision": 1, "limit": 8192})
+			if frame.Type != browserprotocol.TypeProjectContentResult || json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &body) != nil || body.Body != "human contribution" {
+				t.Fatalf("browser-created body = %+v, body=%+v", frame, body)
+			}
+			frame = send("revise", map[string]any{"project_id": project.String(), "id": newID.String(), "kind": "procedure", "title": "browser revision", "body": "human revision", "expected_revision": 1})
+			if frame.Type != browserprotocol.TypeProjectContentResult || json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &meta) != nil || meta.Revision != 2 || meta.Author != "browser:"+f.client.ID.String() {
+				t.Fatalf("browser revision = %+v, metadata=%+v", frame, meta)
+			}
+			frame = send("body", map[string]any{"project_id": project.String(), "id": newID.String(), "revision": 2, "limit": 8192})
+			if frame.Type != browserprotocol.TypeProjectContentResult || json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &body) != nil || body.Body != "human revision" {
+				t.Fatalf("browser-revised body = %+v, body=%+v", frame, body)
 			}
 			if _, err := f.store.RevokeBrowserClient(ctx, f.client.ID, f.client.Revision, adapterTime(t, 2100)); err != nil {
 				t.Fatal(err)

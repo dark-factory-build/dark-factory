@@ -340,7 +340,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 }
 
 func validBrowserContentWrite(input browserContentInput) bool {
-	return len(input.Kind) >= 1 && len(input.Kind) <= 64 && len(input.Title) >= 1 && len(input.Title) <= 1024 && len(input.Description) <= 4096 && len(input.Body) <= 1<<20 && len(input.SourceReferences) <= 32768 && utf8.ValidString(input.Kind) && utf8.ValidString(input.Title) && utf8.ValidString(input.Description) && utf8.ValidString(input.Body) && utf8.ValidString(input.SourceReferences) && (input.Commit == "") == (input.Path == "") && (input.Commit == "" || input.Body == "")
+	return len(input.Kind) >= 1 && len(input.Kind) <= 64 && len(input.Title) >= 1 && len(input.Title) <= 1024 && len(input.Description) <= 4096 && len(input.Body) <= 1<<20 && len(input.SourceReferences) <= 32768 && utf8.ValidString(input.Kind) && utf8.ValidString(input.Title) && utf8.ValidString(input.Description) && utf8.ValidString(input.Body) && utf8.ValidString(input.SourceReferences) && (input.Commit == "") == (input.Path == "") && (input.Commit == "" || input.Body == "" && len(input.Commit) >= 40 && len(input.Commit) <= 64 && len(input.Path) >= 1 && len(input.Path) <= 4096 && utf8.ValidString(input.Path))
 }
 
 var _ browser.ContentBackend = (*browserBackend)(nil)
