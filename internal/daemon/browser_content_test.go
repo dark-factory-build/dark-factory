@@ -7,9 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,30 +14,12 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
-	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 func browserContentProjectFixture(t *testing.T, f *adapterFixture, id kernel.ProjectID, name string) string {
 	t.Helper()
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-browser-content-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	for _, args := range [][]string{{"init", root}, {"-C", root, "config", "user.name", "Dark Factory Test"}, {"-C", root, "config", "user.email", "test@invalid"}} {
-		if output, runErr := exec.Command(change.TrustedGitExecutable, args...).CombinedOutput(); runErr != nil {
-			t.Fatalf("git %v: %v: %s", args, runErr, output)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("content source\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{{"-C", root, "add", "README.md"}, {"-C", root, "commit", "-m", "initial"}} {
-		if output, runErr := exec.Command(change.TrustedGitExecutable, args...).CombinedOutput(); runErr != nil {
-			t.Fatalf("git %v: %v: %s", args, runErr, output)
-		}
-	}
+	root := contentRepositoryFixture(t)
 	if _, err := f.store.CreateProject(context.Background(), kernel.NewProject{ID: id, Name: name, Root: root}, adapterTime(t, 10)); err != nil {
 		t.Fatal(err)
 	}

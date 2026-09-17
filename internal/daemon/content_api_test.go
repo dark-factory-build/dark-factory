@@ -15,14 +15,8 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	projectID := testID(230)
+func contentRepositoryFixture(t *testing.T) string {
+	t.Helper()
 	root, err := os.MkdirTemp("/private/tmp", "dark-factory-content-")
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +35,18 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 			t.Fatalf("git %v: %v: %s", args, err, output)
 		}
 	}
+	return root
+}
+
+func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	projectID := testID(230)
+	root := contentRepositoryFixture(t)
 	done := fixture.serve(t)
 	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "content", Root: root}); err != nil {
 		t.Fatal(err)

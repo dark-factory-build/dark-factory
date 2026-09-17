@@ -295,7 +295,7 @@ func TestDaemonDispatchesContentCreateWithoutScheduling(t *testing.T) {
 	}
 	ctx := context.Background()
 	done := fixture.serve(t)
-	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: testID(240), Name: "content", Root: filepath.Join(filepath.Dir(fixture.socket), "content-root")}); err != nil {
+	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: testID(240), Name: "content", Root: contentRepositoryFixture(t)}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
