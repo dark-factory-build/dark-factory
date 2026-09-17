@@ -272,8 +272,7 @@ func TestSuccessfulWorkerOutcomeRefusesUnavailableSourceFacts(t *testing.T) {
 			}
 		},
 		"repository identity": func(fixture *recoveryFixture, _ string) {
-			execSupervisorSQL(t, fixture.storePath, `PRAGMA ignore_check_constraints = ON`)
-			execSupervisorSQL(t, fixture.storePath, `UPDATE changes SET repository_inode = 0 WHERE id = ?`, fixture.run.ChangeID.Bytes())
+			execSupervisorSQL(t, fixture.storePath, `UPDATE changes SET repository_inode = CASE WHEN repository_inode = 9223372036854775807 THEN repository_inode - 1 ELSE repository_inode + 1 END WHERE id = ?`, fixture.run.ChangeID.Bytes())
 			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {
 				t.Fatalf("refusal = %v", err)
