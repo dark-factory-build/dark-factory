@@ -475,6 +475,21 @@ func runSupervisorClaudeFixture() error {
 	if typed != task.Task {
 		return fmt.Errorf("typed task is %d bytes, the attempt's is %d", len(typed), len(task.Task))
 	}
+	// Stand in for the real CLI's own transcript write, so a later launch's
+	// on-disk check (provider.claudeSessionSelection) can observe this exact
+	// session the same way it would against the real tool. The escaping here
+	// mirrors provider.escapeClaudeProjectPath.
+	if home, cwd := os.Getenv("HOME"), func() string { path, _ := os.Getwd(); return path }(); home != "" && cwd != "" {
+		for i, arg := range os.Args {
+			if (arg == "--session-id" || arg == "--resume") && i+1 < len(os.Args) {
+				dir := filepath.Join(home, ".claude", "projects", strings.ReplaceAll(cwd, "/", "-"))
+				if err := os.MkdirAll(dir, 0o700); err == nil {
+					_ = os.WriteFile(filepath.Join(dir, os.Args[i+1]+".jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o600)
+				}
+				break
+			}
+		}
+	}
 	_, err = client.Succeed(ctx, "exact")
 	return err
 }
@@ -503,6 +518,52 @@ func TestSupervisorClaudeReceivesALongTaskThroughTheTerminal(t *testing.T) {
 		t.Fatalf("Claude receipt = %+v", run.Proposal)
 	}
 	fixture.assertReleased(t, run)
+}
+
+// A send-back retry re-queues the same task incarnation and reuses the same
+// retained Change directory (see TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree),
+// so a Claude Code worker's deterministic native session id is stable across
+// it: the retry resumes the first attempt's own conversation on disk instead
+// of starting an unrelated fresh one.
+func TestSupervisorClaudeWorkerReusesNativeSessionAcrossSendBack(t *testing.T) {
+	fixture := newSupervisorFixture(t, "unused shell task")
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "claude"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeSucceeded)
+	changePath := filepath.Join(fixture.changeParent, fixture.changeName(t, first))
+	projectDir := filepath.Join(fixture.spec.AccountHome, ".claude", "projects", strings.ReplaceAll(changePath, "/", "-"))
+	firstSessions, err := os.ReadDir(projectDir)
+	if err != nil || len(firstSessions) != 1 {
+		t.Fatalf("first native session files = %v, err=%v, want exactly one", firstSessions, err)
+	}
+
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("retry RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	if first.ChangeID == nil || second.ChangeID == nil || *first.ChangeID != *second.ChangeID {
+		t.Fatalf("send-back retry changed the retained Change: first=%v second=%v", first.ChangeID, second.ChangeID)
+	}
+	secondSessions, err := os.ReadDir(projectDir)
+	if err != nil || len(secondSessions) != 1 || secondSessions[0].Name() != firstSessions[0].Name() {
+		t.Fatalf("retry native session files = %v (want %q alone), err=%v", secondSessions, firstSessions[0].Name(), err)
+	}
+	fixture.assertReleased(t, first)
+	fixture.assertReleased(t, second)
 }
 
 // The provider inherits the daemon's umask. The service runs under 077, so

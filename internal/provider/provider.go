@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -219,23 +220,31 @@ func (RuntimePaths) String() string   { return "provider runtime paths (private)
 func (RuntimePaths) GoString() string { return "provider.RuntimePaths{private}" }
 
 type Request struct {
-	provider         kernel.Provider
-	installation     Installation
-	model            string
-	reasoningEffort  string
-	runtime          RuntimePaths
-	workingDirectory string
-	role             kernel.AgentRole
+	provider          kernel.Provider
+	installation      Installation
+	model             string
+	reasoningEffort   string
+	runtime           RuntimePaths
+	workingDirectory  string
+	role              kernel.AgentRole
+	agentID           string
+	taskIncarnationID string
 }
 
-func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths, workingDirectory string, role kernel.AgentRole) (Request, error) {
+// agentID and taskIncarnationID name the exact agent and task incarnation this
+// attempt belongs to. Build uses them only for Claude Code worker launches, to
+// derive a deterministic native-session key (see claudeSessionSelection); every
+// caller still supplies them so one validation rule covers every request.
+func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths, workingDirectory string, role kernel.AgentRole, agentID, taskIncarnationID string) (Request, error) {
 	if kernel.ValidateProviderLaunchControls(kind, model, reasoningEffort) != nil || installation.provider != kind || installation.executable.Path() == "" || !runtime.valid() || role.String() == "" ||
+		!validValue(agentID, maxSessionKeyPartBytes) || !validValue(taskIncarnationID, maxSessionKeyPartBytes) ||
 		kind == kernel.ProviderCodex && (!validAbsolute(workingDirectory, maxPathBytes) || len(codexUntrustedProjectConfig(workingDirectory)) > runner.MaxArgumentBytes) {
 		return Request{}, ErrInvalid
 	}
 	return Request{
 		provider: kind, installation: installation,
 		model: model, reasoningEffort: reasoningEffort, runtime: runtime, workingDirectory: workingDirectory, role: role,
+		agentID: agentID, taskIncarnationID: taskIncarnationID,
 	}, nil
 }
 
@@ -271,6 +280,79 @@ const (
 	TaskDeliveryAttemptAPI
 )
 
+const (
+	// claudeSessionRotateBytes bounds one native Claude Code transcript before
+	// Build starts a fresh session instead of resuming it.
+	// ponytail: a single size ceiling is the simplest measurable growth bound
+	// across an unbounded run of send-back retries on one task incarnation;
+	// revisit if 32 MiB proves too eager or too late for real transcripts.
+	claudeSessionRotateBytes = 32 << 20
+	// maxClaudeSessionGenerations bounds the rotation search below. Reaching
+	// it would mean thousands of rotations on one incarnation; ponytail:
+	// defensive ceiling only, never expected to bind in practice.
+	maxClaudeSessionGenerations = 1000
+	maxSessionKeyPartBytes      = 128
+)
+
+// claudeSessionNamespace is a fixed, arbitrary namespace for the UUID v5 IDs
+// claudeSessionSelection derives; it need not be registered, only stable.
+var claudeSessionNamespace = sha256.Sum256([]byte("dark-factory.claude-code.session"))
+
+// claudeSessionSelection derives the native Claude Code session this worker
+// launch should use and decides fresh vs resume by whether that session's
+// transcript already exists on disk. Claude Code keys a conversation's
+// transcript by the exact launch cwd under the account home
+// (HOME/.claude/projects/<escaped-cwd>/<uuid>.jsonl, see docs/providers.md),
+// and a worker's cwd is its task incarnation's Change directory, which a
+// send-back retry reuses (internal/kernel/change.go: one Change row per
+// project+task+incarnation). Deriving the id from provider+agent+incarnation
+// means no extra state is needed to remember which session belongs to which
+// task: the same retry always recomputes the same id.
+func claudeSessionSelection(runtime RuntimePaths, cwd, agentID, taskIncarnationID string) (id string, resume bool, err error) {
+	projectDir := filepath.Join(ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome), "projects", escapeClaudeProjectPath(cwd))
+	seed := "claude-code\x00" + agentID + "\x00" + taskIncarnationID
+	for generation := 0; generation < maxClaudeSessionGenerations; generation++ {
+		candidate := formatUUID(uuidV5(claudeSessionNamespace, []byte(fmt.Sprintf("%s\x00%d", seed, generation))))
+		info, statErr := os.Stat(filepath.Join(projectDir, candidate+".jsonl"))
+		if statErr == nil && info.Size() < claudeSessionRotateBytes {
+			return candidate, true, nil
+		}
+		if statErr != nil {
+			// Missing, or some other stat failure: nothing provably resumable
+			// exists at this generation, so start fresh with this exact id
+			// rather than fail a launch over an absent or unreadable file.
+			return candidate, false, nil
+		}
+	}
+	return "", false, ErrInvalid
+}
+
+// escapeClaudeProjectPath mirrors the CLI's own cwd-to-directory-name mapping
+// closely enough for this existence check: worst case an imperfect escape
+// only misses a resumable session and Build starts fresh, exactly as if none
+// existed yet.
+func escapeClaudeProjectPath(cwd string) string {
+	return strings.ReplaceAll(cwd, "/", "-")
+}
+
+// uuidV5 and formatUUID implement RFC 4122 UUID version 5 (SHA-1 name-based)
+// generation; the standard library has no UUID package.
+func uuidV5(namespace [sha256.Size]byte, name []byte) [16]byte {
+	hash := sha1.New()
+	hash.Write(namespace[:16])
+	hash.Write(name)
+	sum := hash.Sum(nil)
+	var id [16]byte
+	copy(id[:], sum)
+	id[6] = (id[6] & 0x0f) | 0x50
+	id[8] = (id[8] & 0x3f) | 0x80
+	return id
+}
+
+func formatUUID(id [16]byte) string {
+	return fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
+}
+
 // Build is the one closed provider-selection switch.
 func Build(request Request) (Launch, error) {
 	if err := request.installation.executable.Verify(); err != nil {
@@ -305,6 +387,17 @@ func Build(request Request) (Launch, error) {
 		}, nil
 	case kernel.ProviderClaudeCode:
 		argv := []string{path, "--dangerously-skip-permissions"}
+		if request.role == kernel.RoleWorker {
+			id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID)
+			if err != nil {
+				return Launch{}, err
+			}
+			if resume {
+				argv = append(argv, "--resume", id)
+			} else {
+				argv = append(argv, "--session-id", id)
+			}
+		}
 		if request.model != "" {
 			argv = append(argv, "--model", request.model)
 		}

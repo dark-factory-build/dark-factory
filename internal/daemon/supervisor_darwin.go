@@ -361,6 +361,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	config := changeworker.Config{
 		Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
+		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(),
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity, GitCommonDir: gitCommonDir,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName,

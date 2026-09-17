@@ -75,13 +75,36 @@ func requestFor(t *testing.T, kind kernel.Provider, installation Installation, r
 	return roleRequestFor(t, kind, installation, runtime, model, effort, kernel.RoleWorker)
 }
 
+// testAgentID and testIncarnationID stand in for the durable agent and task
+// incarnation identifiers a real supervisor call site always supplies.
+const (
+	testAgentID       = "agent-fixture"
+	testIncarnationID = "incarnation-fixture"
+)
+
 func roleRequestFor(t *testing.T, kind kernel.Provider, installation Installation, runtime RuntimePaths, model, effort string, role kernel.AgentRole) Request {
 	t.Helper()
-	request, err := NewRequest(kind, installation, model, effort, runtime, filepath.Join(t.TempDir(), "change"), role)
+	request, err := NewRequest(kind, installation, model, effort, runtime, filepath.Join(t.TempDir(), "change"), role, testAgentID, testIncarnationID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return request
+}
+
+// wantClaudeWorkerSessionFlag computes the exact --session-id/--resume pair
+// Build derives for a Claude Code worker request, so exact-argv tests can
+// splice in the value without hardcoding a UUID that depends on per-test
+// temp-directory paths.
+func wantClaudeWorkerSessionFlag(t *testing.T, request Request) []string {
+	t.Helper()
+	id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume {
+		return []string{"--resume", id}
+	}
+	return []string{"--session-id", id}
 }
 
 // An orchestrator's Claude session is handed the Maintainer bridge as its one
@@ -89,12 +112,15 @@ func roleRequestFor(t *testing.T, kind kernel.Provider, installation Installatio
 // an orchestrator without the bridge is not launched at all.
 func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	installation, runtime, locator := nativeFixture(t, kernel.ProviderClaudeCode)
-	worker, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleWorker))
+	workerRequest := roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleWorker)
+	worker, err := Build(workerRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(worker.Argv(), []string{"/usr/bin/true", "--dangerously-skip-permissions", "--strict-mcp-config"}) {
-		t.Fatalf("worker argv = %q, want strict MCP with no server", worker.Argv())
+	wantWorkerArgv := append([]string{"/usr/bin/true", "--dangerously-skip-permissions"}, wantClaudeWorkerSessionFlag(t, workerRequest)...)
+	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config")
+	if !reflect.DeepEqual(worker.Argv(), wantWorkerArgv) {
+		t.Fatalf("worker argv = %q, want %q", worker.Argv(), wantWorkerArgv)
 	}
 	if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("orchestrator without the bridge = %v, want ErrUnavailable", err)
@@ -142,8 +168,16 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) || errors.Is(err, errBridgeUnfit) {
 		t.Fatalf("missing bridge = %v, want ErrUnavailable alone", err)
 	}
-	if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.AgentRole(0)); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.AgentRole(0), testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("request without a role = %v, want ErrInvalid", err)
+	}
+	for _, part := range []string{"", string([]byte{0xff}), "id\x00suffix"} {
+		if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.RoleWorker, part, testIncarnationID); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("request with agent id %q = %v, want ErrInvalid", part, err)
+		}
+		if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.RoleWorker, testAgentID, part); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("request with task incarnation id %q = %v, want ErrInvalid", part, err)
+		}
 	}
 }
 
@@ -290,6 +324,9 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				t.Fatalf("task delivery=%d, want %d", launch.TaskDelivery(), test.wantDelivery)
 			}
 			wantArgv := test.wantArgv
+			if test.kind == kernel.ProviderClaudeCode {
+				wantArgv = slices.Insert(slices.Clone(wantArgv), 2, wantClaudeWorkerSessionFlag(t, request)...)
+			}
 			if test.kind == kernel.ProviderCodex {
 				permissions, err := codexPermissions(request)
 				if err != nil {
@@ -361,6 +398,118 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+// A worker's Claude Code launch starts a fresh, deterministic session when
+// nothing is on disk yet for its exact cwd, and never for an orchestrator.
+func TestClaudeWorkerSessionStartsFreshWhenNoTranscriptExists(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	cwd := filepath.Join(t.TempDir(), "change")
+	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume {
+		t.Fatal("resume=true with no transcript on disk")
+	}
+	request, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(launch.Argv(), "--session-id") || slices.Contains(launch.Argv(), "--resume") {
+		t.Fatalf("worker argv = %q, want --session-id %q and no --resume", launch.Argv(), id)
+	}
+	if i := slices.Index(launch.Argv(), "--session-id"); i < 0 || launch.Argv()[i+1] != id {
+		t.Fatalf("worker argv = %q, want --session-id %q", launch.Argv(), id)
+	}
+	// TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge covers the
+	// orchestrator side: its exact worker/orchestrator argv comparison shows
+	// no --session-id/--resume reaches an orchestrator launch. Its cwd is a
+	// fresh directory on every run (internal/daemon: the runtime root behind
+	// it), so a chosen id could never be found again; this is not wired up
+	// as a no-op that would never fire.
+}
+
+// A worker's retry (send-back on the same task incarnation, reusing the same
+// Change directory: see internal/kernel/change.go) resumes its own
+// conversation once that conversation's transcript exists on disk, instead of
+// starting an unrelated one.
+func TestClaudeWorkerSessionResumesWhenTranscriptExistsUnderLimit(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	cwd := filepath.Join(t.TempDir(), "change")
+	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	if err != nil || resume {
+		t.Fatalf("initial selection id=%q resume=%v err=%v", id, resume, err)
+	}
+	transcriptDir := filepath.Join(ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome), "projects", escapeClaudeProjectPath(cwd))
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(transcriptDir, id+".jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(launch.Argv(), "--resume"); i < 0 || launch.Argv()[i+1] != id {
+		t.Fatalf("worker argv = %q, want --resume %q", launch.Argv(), id)
+	}
+	if slices.Contains(launch.Argv(), "--session-id") {
+		t.Fatalf("worker argv = %q, want no --session-id once a transcript exists", launch.Argv())
+	}
+}
+
+// Bounding growth: a generation whose transcript has reached the rotation
+// ceiling is retired in favor of a fresh one, the simplest measurable rule
+// for a task incarnation with an unbounded number of send-back retries.
+func TestClaudeWorkerSessionRotatesWhenTranscriptExceedsLimit(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	cwd := filepath.Join(t.TempDir(), "change")
+	firstGeneration, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	if err != nil || resume {
+		t.Fatalf("initial selection id=%q resume=%v err=%v", firstGeneration, resume, err)
+	}
+	transcriptDir := filepath.Join(ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome), "projects", escapeClaudeProjectPath(cwd))
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oversized, err := os.Create(filepath.Join(transcriptDir, firstGeneration+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oversized.Truncate(claudeSessionRotateBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := oversized.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secondGeneration, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume || secondGeneration == firstGeneration {
+		t.Fatalf("rotation id=%q resume=%v, want a fresh id distinct from %q", secondGeneration, resume, firstGeneration)
+	}
+	request, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(launch.Argv(), "--session-id"); i < 0 || launch.Argv()[i+1] != secondGeneration {
+		t.Fatalf("worker argv = %q, want --session-id %q", launch.Argv(), secondGeneration)
 	}
 }
 
@@ -436,30 +585,30 @@ func TestNewRequestRejectsMismatchedProviderAndControls(t *testing.T) {
 		{effort: "high"},
 		{model: "model-sentinel", effort: "high"},
 	} {
-		if _, err := NewRequest(kernel.ProviderShell, shell, controls.model, controls.effort, shellRuntime, "/private/change", kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderShell, shell, controls.model, controls.effort, shellRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Shell controls %+v error=%v, want ErrInvalid", controls, err)
 		}
 	}
-	if _, err := NewRequest(kernel.ProviderCodex, shell, "", "", shellRuntime, "/private/change", kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRequest(kernel.ProviderCodex, shell, "", "", shellRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("mismatched installation error=%v, want ErrInvalid", err)
 	}
 	claude, claudeRuntime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
 	for _, effort := range []string{"ultra", "speculative"} {
-		if _, err := NewRequest(kernel.ProviderClaudeCode, claude, "", effort, claudeRuntime, "/private/change", kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderClaudeCode, claude, "", effort, claudeRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Claude effort %q error=%v, want ErrInvalid", effort, err)
 		}
 	}
 	codex, codexRuntime, _ := nativeFixture(t, kernel.ProviderCodex)
-	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "ultra", codexRuntime, "/private/change", kernel.RoleWorker); err != nil {
+	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "ultra", codexRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); err != nil {
 		t.Fatalf("Codex durable ultra effort rejected: %v", err)
 	}
 	for _, model := range []string{string([]byte{0xff}), "model\x00suffix"} {
-		if _, err := NewRequest(kernel.ProviderCodex, codex, model, "", codexRuntime, "/private/change", kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderCodex, codex, model, "", codexRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("model %x error=%v, want ErrInvalid", []byte(model), err)
 		}
 	}
 	for _, workingDirectory := range []string{"", "relative/change", "/", "/private/../change", "/private/change\x00suffix", string([]byte{0xff})} {
-		if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, workingDirectory, kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, workingDirectory, kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("working directory %q error=%v, want ErrInvalid", workingDirectory, err)
 		}
 	}
@@ -467,7 +616,7 @@ func TestNewRequestRejectsMismatchedProviderAndControls(t *testing.T) {
 	if len(codexUntrustedProjectConfig(tooLarge)) <= runner.MaxArgumentBytes {
 		t.Fatalf("expanded project config=%d, want larger than argv bound", len(codexUntrustedProjectConfig(tooLarge)))
 	}
-	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, tooLarge, kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, tooLarge, kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized encoded working directory error=%v, want ErrInvalid", err)
 	}
 }
@@ -836,7 +985,7 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	for _, root := range []string{runtime.accountHome, runtime.gitCeiling, runtime.home, runtime.temp} {
 		invalid := runtime
 		invalid.toolchainReadRoots = root
-		if _, err := NewRequest(kernel.ProviderCodex, installation, "", "", invalid, request.workingDirectory, kernel.RoleWorker); err == nil {
+		if _, err := NewRequest(kernel.ProviderCodex, installation, "", "", invalid, request.workingDirectory, kernel.RoleWorker, testAgentID, testIncarnationID); err == nil {
 			t.Fatalf("accepted private read root %q", root)
 		}
 	}

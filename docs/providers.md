@@ -124,6 +124,32 @@ The launch arguments are defined in `internal/provider/provider.go` and guarded
 by the exact-argv checks in `internal/provider/provider_darwin_test.go`. The
 configuration and capability boundaries are described below.
 
+### Native session persistence
+
+A worker's Claude Code launch adds `--session-id UUID` or `--resume UUID`
+right after `--dangerously-skip-permissions`. The CLI keys a conversation's
+own transcript by the exact launch directory under the account home
+(`HOME/.claude/projects/<escaped-cwd>/<uuid>.jsonl`); a worker's launch
+directory is its task incarnation's Change worktree, which a send-back retry
+reuses (see `internal/kernel/change.go`), so the same UUID keeps a correction
+in the same native conversation instead of a fresh one that only repeats the
+brief. The UUID is derived (UUID v5, RFC 4122) from provider, agent ID and
+task incarnation ID, so no extra state records which session belongs to which
+task, and `--resume` is chosen only when that exact transcript file already
+exists on disk; a first attempt, or a transcript past the rotation ceiling
+in `internal/provider/provider.go` (`claudeSessionRotateBytes`), gets a fresh
+`--session-id` instead. This does not yet apply to an orchestrator launch:
+its working directory is a fresh runtime root on every run (see
+`internal/daemon/supervisor_darwin.go` and `internal/changeworker/worker_darwin.go`),
+so no chosen ID could ever be found again; giving the orchestrator role a
+stable per-agent working directory across runs is a separate, larger change.
+Codex offers no way to choose or discover a session's ID at creation (no
+`--session-id`/`--name` flag on `codex`, `codex exec`, or any config key), and
+its rollout files are bucketed by wall-clock date rather than launch
+directory, so native Codex session persistence is not implemented; it needs
+either an upstream Codex feature or a provider-boundary-breaking post-exit
+discovery hook.
+
 Codex receives the daemon-authorized Change worktree as an invocation-only
 project override with `trust_level="untrusted"`. This suppresses Codex's
 interactive directory-trust screen while explicitly refusing project-local
