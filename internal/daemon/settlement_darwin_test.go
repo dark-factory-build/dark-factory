@@ -234,29 +234,38 @@ func TestSuccessfulWorkerOutcomeRefusesUnavailableSourceFacts(t *testing.T) {
 	}
 	tests := map[string]func(*recoveryFixture, string){
 		"Store.Run": func(fixture *recoveryFixture, _ string) {
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			err := fixture.daemon.validateSuccessSource(ctx, &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			fixture.daemon.successSourceRun = func(context.Context, kernel.RunID) (kernel.Run, bool, error) {
+				return kernel.Run{}, false, errors.New("injected Store.Run failure")
+			}
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {
 				t.Fatalf("refusal = %v", err)
 			}
 		},
 		"Change": func(fixture *recoveryFixture, _ string) {
-			execSupervisorSQL(t, fixture.storePath, `UPDATE changes SET base_commit = zeroblob(1) WHERE id = ?`, fixture.run.ChangeID.Bytes())
+			fixture.daemon.successSourceChange = func(context.Context, kernel.ChangeID) (kernel.Change, bool, error) {
+				return kernel.Change{}, false, errors.New("injected Change read failure")
+			}
 			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {
 				t.Fatalf("refusal = %v", err)
 			}
 		},
 		"Selection": func(fixture *recoveryFixture, _ string) {
-			execSupervisorSQL(t, fixture.storePath, `PRAGMA ignore_check_constraints = ON; UPDATE changes SET base_commit = zeroblob(1) WHERE id = ?`, fixture.run.ChangeID.Bytes())
+			fixture.daemon.successSourceChange = func(ctx context.Context, id kernel.ChangeID) (kernel.Change, bool, error) {
+				state, found, err := fixture.store.Change(ctx, id)
+				state.Selection = nil
+				return state, found, err
+			}
 			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {
 				t.Fatalf("refusal = %v", err)
 			}
 		},
 		"Store.Project": func(fixture *recoveryFixture, _ string) {
-			execSupervisorSQL(t, fixture.storePath, `UPDATE projects SET root = '' WHERE id = ?`, fixture.run.ProjectID.Bytes())
+			fixture.daemon.successSourceProject = func(context.Context, kernel.ProjectID) (kernel.Project, bool, error) {
+				return kernel.Project{}, false, errors.New("injected Project read failure")
+			}
 			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {
 				t.Fatalf("refusal = %v", err)

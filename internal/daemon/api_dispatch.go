@@ -39,6 +39,11 @@ type Daemon struct {
 	// scheduledRun is a package-test-only seam for the scheduler's terminal
 	// completion reread. Production reads from the concrete Store.
 	scheduledRun func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	// successSource* are package-test-only seams for failure-injection coverage;
+	// production source validation always reads the concrete Store.
+	successSourceRun     func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	successSourceChange  func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
+	successSourceProject func(context.Context, kernel.ProjectID) (kernel.Project, bool, error)
 
 	browserMu          sync.Mutex
 	browserLifecycleMu sync.Mutex

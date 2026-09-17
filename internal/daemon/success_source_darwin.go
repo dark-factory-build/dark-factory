@@ -21,7 +21,11 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if daemon == nil || daemon.store == nil {
 		return unverifiableSuccessSource("daemon store is unavailable")
 	}
-	run, found, err := daemon.store.Run(ctx, live.runID)
+	readRun := daemon.store.Run
+	if daemon.successSourceRun != nil {
+		readRun = daemon.successSourceRun
+	}
+	run, found, err := readRun(ctx, live.runID)
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("run facts unavailable: %v", err))
 	}
@@ -34,7 +38,11 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if run.ChangeID == nil {
 		return unverifiableSuccessSource("worker has no Change identity")
 	}
-	changeState, found, err := daemon.store.Change(ctx, *run.ChangeID)
+	readChange := daemon.store.Change
+	if daemon.successSourceChange != nil {
+		readChange = daemon.successSourceChange
+	}
+	changeState, found, err := readChange(ctx, *run.ChangeID)
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("Change facts unavailable: %v", err))
 	}
@@ -52,7 +60,11 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if git == nil || *git == "" || parent == nil || *parent == "" {
 		return unverifiableSuccessSource("Change worktree path or Git executable is unavailable")
 	}
-	project, found, err := daemon.store.Project(ctx, changeState.ProjectID)
+	readProject := daemon.store.Project
+	if daemon.successSourceProject != nil {
+		readProject = daemon.successSourceProject
+	}
+	project, found, err := readProject(ctx, changeState.ProjectID)
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("project facts unavailable: %v", err))
 	}
