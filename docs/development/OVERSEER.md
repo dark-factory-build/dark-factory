@@ -433,7 +433,8 @@ Write that body to a file; the review needs it.
 ## 5. Get the cold review, then merge
 
 The existing host `factory-review-intake.py` controller handles independent
-review for published PRs linked to tracked source issues. It pins the observed
+review for published PRs linked to tracked source issues, including the tracking
+issues you create through the App. It pins the observed
 PR head and base in its review journal, runs at most one fresh
 `cold-review.sh` per pass, and sends an idempotent task containing the exact
 Maintainer operation and its result. Intake and release checks run first.
