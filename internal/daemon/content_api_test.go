@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
@@ -134,5 +135,26 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 	waitDispatch(t, done)
 	if len(secondPage.Items) == 0 || secondPage.NextOffset != 0 {
 		t.Fatalf("second content page = %+v", secondPage)
+	}
+}
+
+func TestPageContentBodyContinuesFromGitSizedOffsets(t *testing.T) {
+	body := strings.Repeat("a", 64*1024) + "£tail"
+	id, err := contentID(strings.Repeat("01", 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := revision(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := kernel.ContentRevision{ID: id, Revision: rev, Body: body}
+	first, err := pageContentBody(content, 0, 64*1024)
+	if err != nil || first.Complete || first.NextOffset != 64*1024 {
+		t.Fatalf("first page = %+v, %v", first, err)
+	}
+	second, err := pageContentBody(content, first.NextOffset, 64*1024)
+	if err != nil || !second.Complete || second.Body != "£tail" {
+		t.Fatalf("second page = %+v, %v", second, err)
 	}
 }

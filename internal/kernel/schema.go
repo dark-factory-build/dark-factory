@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 16
+	userVersion   = 17
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -123,9 +123,13 @@ var schemaStatements = []string{
     body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 1048576),
     author TEXT NOT NULL CHECK (length(CAST(author AS BLOB)) BETWEEN 1 AND 256),
     source_references TEXT NOT NULL CHECK (length(CAST(source_references AS BLOB)) <= 32768),
-    deprecated INTEGER NOT NULL CHECK (deprecated IN (0, 1)),
+	object_format TEXT CHECK (object_format IS NULL OR object_format IN ('sha1', 'sha256')),
+	commit_oid TEXT CHECK (commit_oid IS NULL OR length(CAST(commit_oid AS BLOB)) BETWEEN 40 AND 64),
+	path TEXT CHECK (path IS NULL OR (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) <> '/' AND instr(path, char(0)) = 0)),
+	deprecated INTEGER NOT NULL CHECK (deprecated IN (0, 1)),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    PRIMARY KEY (id, revision)
+	PRIMARY KEY (id, revision),
+	CHECK ((object_format IS NULL AND commit_oid IS NULL AND path IS NULL) OR (object_format IS NOT NULL AND commit_oid IS NOT NULL AND path IS NOT NULL))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE INDEX project_content_revisions_project_kind ON project_content_revisions(project_id, kind, id, revision DESC)`,
 	`CREATE TABLE project_content_evidence (
