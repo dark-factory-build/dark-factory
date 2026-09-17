@@ -39,6 +39,7 @@ const (
 	v12UserVersion      = 12
 	v13UserVersion      = 13
 	v14UserVersion      = 14
+	v15UserVersion      = 15
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -413,9 +414,21 @@ func v13SchemaStatements() []string {
 
 func v14SchemaStatements() []string {
 	statements := make([]string, 0, len(schemaStatements)-3)
-	for _, statement := range schemaStatements {
+	for _, statement := range v15SchemaStatements() {
 		_, name := schemaObjectIdentity(statement)
 		if !strings.Contains(statement, "task_prerequisites") && name != "task_conflict_paths" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
+
+// v15 predates the optional project library. No existing table is changed.
+func v15SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-5)
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if !strings.HasPrefix(name, "project_content_") && name != "task_content_references" {
 			statements = append(statements, statement)
 		}
 	}
@@ -524,6 +537,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v13SchemaStatements(), true
 	case v14UserVersion:
 		return v14SchemaStatements(), true
+	case v15UserVersion:
+		return v15SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -549,7 +564,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -580,6 +595,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[12:]
 	case v14UserVersion:
 		steps = all[13:]
+	case v15UserVersion:
+		steps = all[14:]
 	default:
 		return connection.Close()
 	}
@@ -877,6 +894,24 @@ func migrateV14Transaction(ctx context.Context, connection *sql.Conn) error {
 	for _, name := range []string{"task_prerequisites", "task_prerequisites_upstream", "task_conflict_paths"} {
 		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
 			return err
+		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v15UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v15UserVersion, v15SchemaStatements())
+}
+
+func migrateV15Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v15UserVersion, v15SchemaStatements()); err != nil {
+		return err
+	}
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if strings.HasPrefix(name, "project_content_") || name == "task_content_references" {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {

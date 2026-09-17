@@ -46,7 +46,7 @@ func TestAttemptMCPUsesExistingAuthAndExactTask(t *testing.T) {
 		t.Fatal("MCP changed authentication or task identity")
 	}
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 3 || !strings.Contains(lines[1], "attempt succeed") || strings.Contains(lines[1], "project create") {
+	if len(lines) != 3 || !strings.Contains(lines[1], "attempt succeed") || !strings.Contains(lines[1], "attempt content create") || strings.Contains(lines[1], "factoryctl content create") || strings.Contains(lines[1], "body-file") || strings.Contains(lines[1], "project create") {
 		t.Fatalf("unexpected discovery: %s", output.String())
 	}
 	var response struct {
@@ -65,7 +65,7 @@ func TestAttemptMCPUsesExistingAuthAndExactTask(t *testing.T) {
 }
 
 func TestAttemptMCPRefusesOperatorShellRecursiveAndInvalidCommands(t *testing.T) {
-	for _, argv := range [][]string{{"status"}, {"dispatch", "off"}, {"service", "stop", "--home", "/private/tmp/factory"}, {"attempt", "mcp"}, {"attempt", "succeed", "--result-file", "/secret"}, {"sh", "-c", "echo unsafe"}, {"--help"}} {
+	for _, argv := range [][]string{{"status"}, {"dispatch", "off"}, {"service", "stop", "--home", "/private/tmp/factory"}, {"attempt", "mcp"}, {"attempt", "succeed", "--result-file", "/secret"}, {"attempt", "content", "create", "--project", "0123456789abcdef0123456789abcdef", "--kind", "procedure", "--title", "x", "--body-file", "/secret"}, {"content", "read", "--id", "0123456789abcdef0123456789abcdef", "--revision", "1"}, {"sh", "-c", "echo unsafe"}, {"--help"}} {
 		request, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "factory", "arguments": map[string]any{"argv": argv}}})
 		var output bytes.Buffer
 		if runAttemptMCP(context.Background(), bytes.NewReader(request), &output, func(string) string { t.Fatal("forbidden command reached environment"); return "" }) != 0 || !strings.Contains(output.String(), `"isError":true`) {
@@ -75,6 +75,33 @@ func TestAttemptMCPRefusesOperatorShellRecursiveAndInvalidCommands(t *testing.T)
 	var output bytes.Buffer
 	if runAttemptMCP(context.Background(), strings.NewReader(strings.Repeat("x", 1<<20)), &output, func(string) string { return "" }) != exitFailure || output.Len() != 0 {
 		t.Fatal("oversized input accepted")
+	}
+}
+
+func TestAttemptMCPContentListUsesAttemptAuthority(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	id := "0123456789abcdef0123456789abcdef"
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.ContentListInput()
+		if !ok || input.ProjectID != id || call.Kind() != api.CallContentList {
+			t.Errorf("unexpected content list call: %v", call)
+		}
+		return api.NewContentReply(api.ContentList{Items: []api.Content{}})
+	})
+	request := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"factory","arguments":{"argv":["attempt","content","list","--project","%s"]}}}`+"\n", id)
+	var output bytes.Buffer
+	if runAttemptMCP(context.Background(), strings.NewReader(request), &output, func(string) string { return fixture.socket }) != 0 {
+		t.Fatal("MCP content list failed")
+	}
+	call := awaitServer(t, done)
+	digest, ok := call.call.AttemptDigest()
+	if call.err != nil || !ok || digest.Bytes() != sha256.Sum256(fixture.bearer[:]) {
+		t.Fatalf("content list did not use attempt authentication: err=%v authenticated=%v", call.err, ok)
+	}
+	if strings.Contains(output.String(), `"isError":true`) {
+		t.Fatalf("content list returned error: %s", output.String())
 	}
 }
 
@@ -94,6 +121,15 @@ func TestAttemptMCPCommandCatalogueParity(t *testing.T) {
 		{"attempt peer ask", []string{"attempt", "peer", "ask", "--task", id, "--idempotency-key", id, "--question", "question"}},
 		{"attempt peer answer", []string{"attempt", "peer", "answer", "--question", id, "--revision", "1", "--idempotency-key", id, "--answer", "answer"}},
 		{"attempt send-back", []string{"attempt", "send-back", "--task", id, "--note", "note"}},
+		{"attempt content create", []string{"attempt", "content", "create", "--project", id, "--kind", "procedure", "--title", "title"}},
+		{"attempt content revise", []string{"attempt", "content", "revise", "--project", id, "--id", id, "--revision", "1", "--kind", "procedure", "--title", "title"}},
+		{"attempt content list", []string{"attempt", "content", "list", "--project", id}},
+		{"attempt content read", []string{"attempt", "content", "read", "--id", id, "--revision", "1"}},
+		{"attempt content body", []string{"attempt", "content", "body", "--id", id, "--revision", "1", "--offset", "0", "--limit", "1"}},
+		{"attempt content evidence", []string{"attempt", "content", "evidence", "--project", id, "--id", id, "--revision", "1", "--tested-source", "check", "--result", "passed"}},
+		{"attempt content evidence list", []string{"attempt", "content", "evidence-list", "--id", id, "--revision", "1"}},
+		{"attempt content attach", []string{"attempt", "content", "attach", "--project", id, "--task", id, "--id", id, "--revision", "1"}},
+		{"attempt content attachments", []string{"attempt", "content", "attachments", "--task", id, "--revision", "1"}},
 		{"overseer status", []string{"overseer", "status"}},
 		{"overseer task add", []string{"overseer", "task", "add", "--agent", id, "--title", "title"}},
 		{"overseer task update", []string{"overseer", "task", "update", "--task", id, "--revision", "1", "--title", "title"}},
