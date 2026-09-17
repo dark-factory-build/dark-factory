@@ -18,10 +18,9 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/install"
 )
 
-// handoverTicks is how many one-second numbered lines the provider prints
-// before it reports its own success: long enough that one whole daemon
-// generation ends and the next adopts it mid-sequence.
-const handoverTicks = 40
+// handoverMaxTicks bounds a failed handover. The normal path stops on the
+// completion marker as soon as the adopting daemon has proved continuity.
+const handoverMaxTicks = 40
 
 // terminalObservation mirrors the one display document `factoryctl terminal
 // observe` prints. It is the only terminal evidence this test takes, and it
@@ -54,7 +53,7 @@ func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) 
 	projectID := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "project", "create", "--name", "handover", "--root", fixture.repo))
 	agentID := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "agent", "create", "--project", projectID, "--name", "builder", "--provider", "shell", "--tool-budget", "4"))
 	fixture.runFactoryctl(t, 0, "dispatch", "on")
-	taskID := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", projectID, "--agent", agentID, "--title", "survive a daemon replacement", "--body", fixture.tickingBody(handoverTicks)))
+	taskID := fixture.operatorID(t, fixture.runFactoryctl(t, 0, "task", "add", "--project", projectID, "--agent", agentID, "--title", "survive a daemon replacement", "--body", fixture.tickingBody(handoverMaxTicks)))
 	fixture.awaitTaskStatus(t, client, taskID, "running", 90*time.Second)
 
 	// The provider records its own PID before its first tick, so the exact
@@ -122,6 +121,9 @@ func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) 
 		t.Fatalf("adopted terminal replaced or replayed its history:\nbefore %q\nafter  %q", before.Payload, after.Payload)
 	}
 	assertTickSequence(t, "after the handover", after.Payload, countTicks(before.Payload)+1)
+	if err := os.WriteFile(fixture.handoverCompletePath(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Logf("handover: provider pid %d and runner pids %v unchanged across factoryd %d -> %d; terminal ticks %d -> %d, head %d -> %d, no gap, no replay",
 		providerPID, runnersBefore, daemonA.Process.Pid, daemonB.Process.Pid,
 		countTicks(before.Payload), countTicks(after.Payload), before.Head, after.Head)
@@ -163,32 +165,34 @@ func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) 
 	}
 }
 
-// tickingBody is a provider task that publishes its own PID, prints one
-// numbered line a second, and then declares its outcome through the local API
-// — which by then belongs to a different daemon process than the one that
-// started it. Between ticks a background spinner keeps the terminal busy the
-// way a TUI redraw does: a line every 10ms never leaves the 100ms gap the
-// runner's idle tick needs, so the handover has to work under continuous
-// output. It is one process: a shell loop forking sleep per line pauses far
-// longer than that under the provider sandbox.
+// tickingBody is a provider task that publishes its own PID, prints numbered
+// lines while a background spinner keeps the terminal continuously busy, and
+// declares its outcome after the test has proved adoption and continuity. The
+// completion marker is a bounded readiness handshake; the max tick count only
+// protects the failure path from an indefinitely live provider.
 func (fixture *blackBoxFixture) tickingBody(ticks int) string {
 	return fmt.Sprintf(`set -eu
 printf '%%s\n' "$$" > '%s'
 /usr/bin/perl -e '$|=1; while (1) { print "spin\n"; select(undef, undef, undef, 0.01) }' &
 spinner=$!
 i=1
-while [ "$i" -le %d ]; do
+while [ ! -e '%s' ] && [ "$i" -le %d ]; do
 	printf 'tick %%d\n' "$i"
 	i=$((i + 1))
 	sleep 1
 done
 kill "$spinner"
+[ -e '%s' ] || exit 1
 "$DARK_FACTORY_FACTORYCTL" attempt succeed --result 'handover survived'
-`, fixture.providerPIDPath(), ticks)
+`, fixture.providerPIDPath(), fixture.handoverCompletePath(), ticks, fixture.handoverCompletePath())
 }
 
 func (fixture *blackBoxFixture) providerPIDPath() string {
 	return filepath.Join(fixture.root, "provider.pid")
+}
+
+func (fixture *blackBoxFixture) handoverCompletePath() string {
+	return filepath.Join(fixture.root, "handover.complete")
 }
 
 func (fixture *blackBoxFixture) providerPID(t *testing.T) int {
