@@ -59,7 +59,7 @@ class ReviewIntakeTest(unittest.TestCase):
 
     def test_crlf_terminal_footer_links_managed_pr(self):
         journal = json.loads(Path(self.config['journal']).read_text())
-        self.assertEqual(7, review.linked_issue("Summary\r\nRefs #7\r\n", journal, 'o/r'))
+        self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': "Summary\r\nRefs #7\r\n"}, journal))
 
     def test_unlinked_pr_is_not_woken(self):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'untrusted Refs #8'}]), \
@@ -72,7 +72,7 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
             self.assertEqual([], review.run_once(self.config))
-        self.assertEqual(7, review.linked_issue('Refs #8\nRefs #7', json.loads(Path(self.config['journal']).read_text()), 'o/r'))
+        self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': 'Refs #8\nRefs #7'}, json.loads(Path(self.config['journal']).read_text())))
 
     def test_managed_earlier_footer_is_ignored_when_unmanaged_footer_is_terminal(self):
         body = 'Refs #7\n\nRelated context: Refs #8\n'
@@ -80,13 +80,13 @@ class ReviewIntakeTest(unittest.TestCase):
              patch.object(review, 'ready') as ready:
             self.assertEqual([], review.run_once(self.config))
         ready.assert_not_called()
-        self.assertIsNone(review.linked_issue(body, json.loads(Path(self.config['journal']).read_text()), 'o/r'))
+        self.assertIsNone(review.linked_issue(self.config, {'number': 9, 'body': body}, json.loads(Path(self.config['journal']).read_text())))
 
     def test_multiple_managed_footers_fail_closed(self):
         journal = json.loads(Path(self.config['journal']).read_text())
         journal['issues']['o/r#8'] = {'number': 8, 'managed': True}
         with self.assertRaisesRegex(review.ReviewError, 'multiple tracked'):
-            review.linked_issue('Refs #7\nCloses #8', journal, 'o/r')
+            review.linked_issue(self.config, {'number': 9, 'body': 'Refs #7\nCloses #8'}, journal)
 
     def test_mirror_must_match_app_reported_head(self):
         def command(argv, **_kwargs):
@@ -387,6 +387,98 @@ class ReviewIntakeTest(unittest.TestCase):
             with self.assertRaisesRegex(review.ReviewError, 'exact head'):
                 review.observe_enqueue(self.config, operation)
 
+
+    PR_OP, ISSUE_OP = '22222222-2222-5222-8222-222222222222', '33333333-3333-5333-8333-333333333333'
+    MARK = '\n\n<!-- dark-factory-operation:%s:%s -->\n'
+
+    def app_bridge(self, receipts, enqueue_states):
+        """Fake bridge: App publication/issue receipts by operation id, then the enqueue fake for everything else."""
+        enqueue_call, writes = self.enqueue_bridge(enqueue_states, {'structuredContent': {'pull_number': 9, 'head_sha': SHA, 'entry_id': 'e', 'state_when_recorded': 'QUEUED'}, 'isError': False})
+        observed = []
+        def bridge_call(name, arguments):
+            receipt = receipts.get(arguments.get('operation_id')) if name == 'observe_operation' else None
+            if receipt is None:
+                return enqueue_call(name, arguments)
+            observed.append(arguments['operation_id'])
+            return {'structuredContent': dict(receipt, operation_id=arguments['operation_id']), 'isError': False}
+        return bridge_call, writes, observed
+
+    def test_app_published_pr_on_app_created_issue_reaches_review_then_enqueue(self):
+        # Issue #20 was created by the App at the overseer's request and never
+        # labelled, so intake never journaled it; PR #9 is the App's own
+        # publication for it. Provenance is the two completed receipts.
+        body = 'Change\n\nRefs #20' + self.MARK % (self.PR_OP, 'a' * 64)
+        issue_body = 'Track it' + self.MARK % (self.ISSUE_OP, 'b' * 64)
+        receipts = {self.PR_OP: {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64, 'result': {'number': 9, 'head_sha': SHA, 'url': 'https://github.com/o/r/pull/9'}},
+                    self.ISSUE_OP: {'state': 'completed', 'kind': 'create_issue', 'request_digest': 'b' * 64, 'result': {'number': 20, 'url': 'https://github.com/o/r/issues/20'}}}
+        bridge_call, writes, observed = self.app_bridge(receipts, ['missing', 'completed'])
+        self.observe.side_effect = ['missing', 'allow', 'allow']
+        operation = dict(self.operation, source_marker='FACTORY_SOURCE o/r#20')
+        def ready(_config, _path, _pr, issue):
+            self.assertEqual(20, issue)
+            return dict(operation)
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': body}]), \
+             patch.object(review, 'ready', side_effect=ready), patch.object(review, 'verify_existing'), patch.object(review, 'bridge_call', side_effect=bridge_call), \
+             patch.object(review.intake, 'exact_issue', return_value={'number': 20, 'body': issue_body}) as exact, \
+             patch.object(review, 'launch_review', return_value=0) as launch, \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), patch.object(review.intake, 'enqueue') as task:
+            self.assertEqual(['woke PR #9 review allow'], review.run_once(self.config))
+            self.assertEqual([], review.run_once(self.config))
+        self.assertEqual(1, launch.call_count)
+        self.assertEqual(str(review.uuid.uuid5(review.uuid.NAMESPACE_URL, 'dark-factory:host-review:o/r:9:' + SHA)), launch.call_args.args[3]['review_operation'])
+        self.assertEqual([str(review.uuid.uuid5(review.uuid.NAMESPACE_URL, 'dark-factory:host-enqueue:o/r:9:' + SHA))], [write['operation_id'] for write in writes])
+        self.assertIn('FACTORY_SOURCE o/r#20', task.call_args.args[1]['body'])
+        # Provenance is proven once per exact head; the receipt carries it afterwards.
+        self.assertEqual(([self.PR_OP, self.ISSUE_OP], 1), (observed, exact.call_count))
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertEqual(('allow', 'queued'), (receipt['review_state'], receipt['enqueue_state']))
+
+    def test_unproven_footers_are_refused_with_reason_and_never_reviewed(self):
+        pr_receipt = {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64, 'result': {'number': 9, 'head_sha': SHA, 'url': 'https://github.com/o/r/pull/9'}}
+        issue_receipt = {'state': 'completed', 'kind': 'create_issue', 'request_digest': 'b' * 64, 'result': {'number': 20, 'url': 'https://github.com/o/r/issues/20'}}
+        marked = 'Refs #20' + self.MARK % (self.PR_OP, 'a' * 64)
+        tracked = 'Track it' + self.MARK % (self.ISSUE_OP, 'b' * 64)
+        cases = [
+            ('Refs #20', {}, tracked, 'no completed App publication receipt'),                                   # not App-published
+            (marked, {self.PR_OP: dict(pr_receipt, result={'number': 10, 'head_sha': SHA})}, tracked, 'no completed App publication receipt'),  # receipt for another PR
+            (marked, {self.PR_OP: dict(pr_receipt, request_digest='c' * 64)}, tracked, 'no completed App publication receipt'),  # marker digest differs
+            (marked, {self.PR_OP: pr_receipt}, 'plain issue', 'no completed create_issue receipt'),            # human issue
+            (marked, {self.PR_OP: pr_receipt, self.ISSUE_OP: dict(issue_receipt, result={'number': 21})}, tracked, 'no completed create_issue receipt'),
+            (marked, {self.PR_OP: pr_receipt, self.ISSUE_OP: dict(issue_receipt, kind='resolve_issue')}, tracked, 'no completed create_issue receipt'),
+            (marked, {self.PR_OP: pr_receipt, self.ISSUE_OP: dict(issue_receipt, state='indeterminate')}, tracked, 'no completed create_issue receipt'),
+            ('Refs #7\n\nRefs #20' + self.MARK % (self.PR_OP, 'a' * 64), {self.PR_OP: pr_receipt, self.ISSUE_OP: issue_receipt}, tracked, 'not the tracked source #7'),
+        ]
+        for body, receipts, issue_body, reason in cases:
+            bridge_call, _writes, _observed = self.app_bridge(receipts, [])
+            with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': body}]), \
+                 patch.object(review, 'ready') as ready, patch.object(review, 'bridge_call', side_effect=bridge_call), \
+                 patch.object(review.intake, 'exact_issue', return_value={'number': 20, 'body': issue_body}), patch.object(review, 'launch_review') as launch:
+                messages = review.run_once(self.config)
+            self.assertEqual(1, len(messages), body)
+            self.assertTrue(messages[0].startswith('skipped PR #9: footer #20') or messages[0].startswith('skipped PR #9: terminal footer #20'), messages)
+            self.assertIn(reason, messages[0])
+            ready.assert_not_called()
+            launch.assert_not_called()
+            self.assertFalse(Path(self.config['journal'] + '.reviews.json').exists() and '9:' + SHA in json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls'])
+
+    def test_foreign_or_ambiguous_app_urls_are_refused(self):
+        body = 'Refs #20' + self.MARK % (self.PR_OP, 'a' * 64)
+        issue_body = 'Track it' + self.MARK % (self.ISSUE_OP, 'b' * 64)
+        base_pr = {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64,
+                   'result': {'number': 9, 'head_sha': SHA, 'url': 'https://github.com/o/r/pull/9'}}
+        base_issue = {'state': 'completed', 'kind': 'create_issue', 'request_digest': 'b' * 64,
+                      'result': {'number': 20, 'url': 'https://github.com/o/r/issues/20'}}
+        for url in ('https://github.com/other/repo/pull/9', 'http://github.com/o/r/pull/9',
+                    'https://github.com/o/r/pull/9?x=1', 'https://user@github.com/o/r/pull/9'):
+            receipts = {self.PR_OP: dict(base_pr, result=dict(base_pr['result'], url=url)), self.ISSUE_OP: base_issue}
+            bridge_call, _writes, _observed = self.app_bridge(receipts, [])
+            with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': body}]), \
+                 patch.object(review, 'bridge_call', side_effect=bridge_call), \
+                 patch.object(review.intake, 'exact_issue', return_value={'number': 20, 'body': issue_body}), patch.object(review, 'ready') as ready:
+                messages = review.run_once(self.config)
+            self.assertEqual(1, len(messages), url)
+            self.assertIn('no completed App publication receipt', messages[0])
+            ready.assert_not_called()
 
 
 if __name__ == '__main__':
