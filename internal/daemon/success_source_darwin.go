@@ -75,7 +75,13 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("repository identity unavailable: %v", err))
 	}
-	facts, err := change.InspectWorktree(ctx, *git, project.Root, repository, filepath.Join(*parent, changeState.ID.String()))
+	inspect := func(ctx context.Context, git, root string, repository change.RepositoryIdentity, path string) (change.WorktreeFacts, error) {
+		return change.InspectWorktree(ctx, git, root, repository, path)
+	}
+	if daemon.successSourceInspect != nil {
+		inspect = daemon.successSourceInspect
+	}
+	facts, err := inspect(ctx, *git, project.Root, repository, filepath.Join(*parent, changeState.ID.String()))
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("Change worktree facts unavailable: %v", err))
 	}

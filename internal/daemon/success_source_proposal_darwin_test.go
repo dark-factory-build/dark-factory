@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -26,6 +27,16 @@ func TestProposeOutcomeRefusesBeforeDurableProposalForLiveWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(active.run.ID, live) })
+	parent := t.TempDir()
+	fixture.daemon.RememberSupervisorAccount(parent, "", "git")
+	inspections := 0
+	fixture.daemon.successSourceInspect = func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error) {
+		inspections++
+		if inspections == 2 {
+			return change.WorktreeFacts{}, errors.New("injected source mutation after clean snapshot")
+		}
+		return change.WorktreeFacts{}, nil
+	}
 
 	done := fixture.serve(t)
 	if _, err := active.client.Succeed(context.Background(), "dirty implementation"); err == nil {
@@ -40,6 +51,9 @@ func TestProposeOutcomeRefusesBeforeDurableProposalForLiveWorker(t *testing.T) {
 	observed, found, err := fixture.store.Run(context.Background(), active.run.ID)
 	if err != nil || !found || observed.Phase != kernel.RunRunning || observed.Proposal != nil {
 		t.Fatalf("refusal changed durable run: %+v found=%v err=%v", observed, found, err)
+	}
+	fixture.daemon.successSourceInspect = func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error) {
+		return change.WorktreeFacts{}, nil
 	}
 	// The correction removes the uncommitted source claim; the same bearer and
 	// live owner can retry, and the exact run can then settle normally.
