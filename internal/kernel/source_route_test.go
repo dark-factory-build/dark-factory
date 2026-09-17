@@ -161,3 +161,77 @@ func TestRetainedSourceReviewRouteResolvesLegacyQueuedTasks(t *testing.T) {
 		t.Fatalf("legacy task not reassigned to codex: %+v", reassigned)
 	}
 }
+
+// TestRetainedSourceReviewRouteAdmissionRequiresWorkerRole proves AdmitNext's
+// SQL predicate mirrors validateRetainedSourceReviewRoute's full requirement
+// (Codex provider AND worker role), not just the provider half: a queued
+// review-handoff task assigned to a Codex orchestrator must not be admitted,
+// while the same task body assigned to a Codex worker is admitted normally.
+// The orchestrator row is inserted directly, bypassing insertTaskOnConnection's
+// guard, since that guard already refuses this pair at creation; admission
+// must independently refuse a legacy row that reached the queue some other
+// way (e.g. before the guard existed).
+func TestRetainedSourceReviewRouteAdmissionRequiresWorkerRole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kernel.db")
+	store, err := createTestStore(context.Background(), path, FactoryConfig{DispatchEnabled: true, Capacity: 5}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "project", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 2), ProjectID: project.ID, Name: "codex-orchestrator", Role: RoleOrchestrator,
+		Provider: ProviderCodex, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
+	}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 3), ProjectID: project.ID, Name: "codex-worker", Role: RoleWorker,
+		Provider: ProviderCodex, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
+	}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "review handoff " + strings.Repeat("a", 32)
+	// Bypass the Go-side guard entirely: a task like this could never be
+	// created through insertTaskOnConnection (it requires RoleWorker), so the
+	// only way it reaches the queue is as legacy data.
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO tasks(
+		id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body,
+		sent_back_instruction_bytes,
+		status, priority, blocked_reason, result, completed_at_ms, revision,
+		created_at_ms, updated_at_ms
+	    ) VALUES(?, ?, ?, ?, 1, ?, ?, NULL, 'queued', 0, NULL, NULL, NULL, 1, ?, ?)`,
+		taskID(t, 4).Bytes(), project.ID.Bytes(), orchestrator.ID.Bytes(), incarnationID(t, 4).Bytes(), "legacy review", body, int64(5), int64(5)); err != nil {
+		t.Fatalf("insert legacy orchestrator review handoff: %v", err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 5), ProjectID: project.ID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 5),
+		Title: "task", Body: body, Priority: 0,
+	}, mustTime(t, 6)); err != nil {
+		t.Fatalf("review handoff task assigned to codex worker rejected: %v", err)
+	}
+
+	result, err := store.AdmitNext(ctx, admissionKeys(t, 7, nil), mustTime(t, 7))
+	if err != nil || !result.Admitted() || result.Run.AgentID != worker.ID {
+		t.Fatalf("codex worker review handoff not admitted: %+v, %v", result, err)
+	}
+
+	result, err = store.AdmitNext(ctx, admissionKeys(t, 8, nil), mustTime(t, 8))
+	if err != nil || result.Admitted() {
+		t.Fatalf("codex orchestrator review handoff wrongly admitted: %+v, %v", result, err)
+	}
+	if result.Reason != NoAdmissionSourceRouteUnavailable {
+		t.Fatalf("unexpected no-admission reason for orchestrator review handoff: %v", result.Reason)
+	}
+
+	orchestratorTask, found, err := store.Task(ctx, taskID(t, 4))
+	if err != nil || !found || orchestratorTask.Status != TaskQueued || orchestratorTask.AssignedAgentID != orchestrator.ID {
+		t.Fatalf("orchestrator review handoff task unexpectedly changed: %+v found=%v err=%v", orchestratorTask, found, err)
+	}
+}
