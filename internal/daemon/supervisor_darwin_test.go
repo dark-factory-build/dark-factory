@@ -789,9 +789,8 @@ func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
 
 func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing.T) {
 	for _, test := range []struct {
-		name            string
-		terminalFailure bool
-		mutate          func(*testing.T, *supervisorFixture, kernel.Run)
+		name   string
+		mutate func(*testing.T, *supervisorFixture, kernel.Run)
 	}{
 		{
 			name: "repository identity",
@@ -806,8 +805,14 @@ func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing
 			},
 		},
 		{
-			name:            "repository replacement at provider release",
-			terminalFailure: true,
+			// Under the worktree model, settling a retained Change reads the
+			// worktree through the repository, unlike the old published-tree
+			// copy: a repository fault is one retainedSettlement documents as
+			// transient ("may pass tomorrow and leaves the run finalizing"),
+			// not a terminal refusal. So this case now behaves like the other
+			// durable-authority mismatches above: RunNext surfaces the fault
+			// rather than reaching the provider or settling gracefully.
+			name: "repository replacement at provider release",
 			mutate: func(t *testing.T, fixture *supervisorFixture, _ kernel.Run) {
 				fixture.spec.beforeProviderRelease = func() {
 					repository := filepath.Join(fixture.root, "repository")
@@ -857,13 +862,7 @@ func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing
 			}
 			queueSupervisorRetry(t, fixture, first)
 			test.mutate(t, fixture, first)
-			second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-			if test.terminalFailure {
-				if err != nil {
-					t.Fatalf("post-release retained verification = %v", err)
-				}
-				fixture.assertTerminal(t, second, kernel.OutcomeFailed)
-			} else if err == nil {
+			if _, err := fixture.daemon.RunNext(context.Background(), fixture.spec); err == nil {
 				t.Fatal("mismatched retained authority reached provider")
 			}
 			if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "x" {
@@ -2408,6 +2407,10 @@ func (fixture *supervisorFixture) assertRecoveredAfterClose(t *testing.T, run ke
 		t.Fatal(err)
 	}
 	defer recoveredDaemon.Close()
+	// Boot remembers the Git executable before the sweep runs, exactly as
+	// cmd/factoryd does; a leftover retained-Change settlement must not need
+	// a live attempt to have run first.
+	recoveredDaemon.RememberSupervisorAccount(fixture.spec.ChangeParent, fixture.spec.AccountHome, fixture.spec.GitExecutable)
 	if _, err := recoveredDaemon.RecoverAbandonedRuns(context.Background(), fixture.spec.RuntimeParent, fixture.spec.ChangeParent); err != nil {
 		t.Fatal(err)
 	}

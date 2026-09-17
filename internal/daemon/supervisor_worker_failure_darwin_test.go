@@ -33,7 +33,7 @@ func TestSupervisorPersistsEarlyWorkerFailure(t *testing.T) {
 					}
 					return child.Activate()
 				}
-				want = "Change path already exists"
+				want = "Change path is taken by something that is not its worktree"
 			}
 			run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 			if err == nil || !strings.Contains(err.Error(), want) {
