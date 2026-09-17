@@ -156,6 +156,32 @@ func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
 	if string(consumed) != string(producer.ID.Bytes()) {
 		t.Fatalf("consumed run = %x, want %x", consumed, producer.ID.Bytes())
 	}
+	producerTask, found, err := store.Task(ctx, producer.TaskID)
+	if err != nil || !found {
+		t.Fatalf("producer task after success: %+v, %v", producerTask, err)
+	}
+	if _, err := store.SendBackTask(ctx, producer.TaskID, producerTask.Revision, "correct producer", mustTime(t, 64)); err != nil {
+		t.Fatal(err)
+	}
+	connection.Close()
+	connection, err = store.readerConnection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDurableControls(ctx, connection); err != nil {
+		t.Fatalf("receipt invalid after producer send-back: %v", err)
+	}
+	connection.Close()
+	corruptSQL(t, store, `UPDATE task_prerequisites SET consumed_run_id = ? WHERE task_id = ?`, result.Run.ID.Bytes(), consumer.ID.Bytes())
+	connection, err = store.readerConnection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDurableControls(ctx, connection); err == nil {
+		t.Fatal("mismatched consumed receipt accepted")
+	}
+	connection.Close()
+	corruptSQL(t, store, `UPDATE task_prerequisites SET consumed_run_id = ? WHERE task_id = ?`, producer.ID.Bytes(), consumer.ID.Bytes())
 }
 
 func TestAdmissionAllowsIndependentConflictPathsInParallel(t *testing.T) {

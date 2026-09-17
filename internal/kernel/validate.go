@@ -1155,8 +1155,6 @@ func validateTaskScheduling(ctx context.Context, connection *sql.Conn) error {
 				OR consumed.admitted_task_work_revision <> prerequisite.upstream_work_revision
 				OR consumed.phase <> 'terminal'
 				OR consumed.terminal_kind <> 'succeeded'
-				OR producer.status <> 'succeeded'
-				OR producer.work_revision <> prerequisite.upstream_work_revision
 			)
 	)`).Scan(&invalid)
 	if err != nil {
