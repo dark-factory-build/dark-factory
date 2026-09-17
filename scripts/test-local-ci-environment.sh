@@ -6,6 +6,7 @@ boundary=$repository_root/scripts/local-ci-environment.sh
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-local-ci-environment.XXXXXX")
 temporary_root=$(CDPATH= cd -- "$temporary" && pwd -P)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+unset DF_CI_CACHE_ROOT
 
 fail() {
     echo "local-ci environment test failed: $*" >&2
@@ -92,7 +93,7 @@ grep -F -x 'NPM_CONFIG_GLOBALCONFIG=/var/empty/.npmrc-global' "$child_environmen
     || fail "safe global npm config was not installed"
 grep -F -x "NPM_CONFIG_CACHE=$temporary_root/host-home/Library/Caches/dark-factory/local-ci/trusted/npm" "$child_environment" >/dev/null \
     || fail "reusable npm cache was not installed"
-grep -F -x "NPM_CONFIG_STORE_DIR=$temporary_root/host-home/Library/Caches/dark-factory/local-ci/trusted/pnpm-store" "$child_environment" >/dev/null \
+grep -F -x "pnpm_config_store_dir=$temporary_root/host-home/Library/Caches/dark-factory/local-ci/trusted/pnpm-store" "$child_environment" >/dev/null \
     || fail "reusable pnpm store was not installed"
 grep -F -x 'NETRC=/dev/null' "$child_environment" >/dev/null \
     || fail "safe netrc boundary was not installed"
@@ -117,10 +118,8 @@ EOF
 /bin/chmod 755 "$fixture/scripts/entry.sh"
 
 cache_root_one=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh)
-cache_root_two=$cache_root_one
 fixture_root=$(CDPATH='' cd -- "$fixture" && pwd -P)
 [ "$cache_root_one" = "$temporary_root/fixture-home/Library/Caches/dark-factory/local-ci/trusted" ] || fail "direct cache root changed"
-[ "$cache_root_two" = "$cache_root_one" ] || fail "nested cache root changed"
 
 /bin/rm -rf "$fixture/.tools"
 /bin/mkdir -p "$fixture/.tools"
@@ -139,6 +138,14 @@ explicit_root="$temporary_root/explicit-cache/root"
 /bin/mkdir "$temporary/explicit-cache/root"
 explicit_output=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" DF_CI_CACHE_ROOT="$explicit_root" /bin/sh ./scripts/entry.sh)
 [ "$explicit_output" = "$explicit_root" ] || fail "explicit cache root was discarded"
+for invalid_root in / /// relative "$fixture_root/cache" "$fixture_root/../cache"; do
+    if (CDPATH='' cd -- "$fixture" && DF_CI_CACHE_ROOT="$invalid_root" /bin/sh ./scripts/entry.sh) >"$temporary/invalid.out" 2>&1; then
+        fail "unsafe cache root was accepted: $invalid_root"
+    fi
+done
+if (CDPATH='' cd -- "$fixture" && HOME= /bin/sh ./scripts/entry.sh) >"$temporary/invalid.out" 2>&1; then
+    fail "missing HOME silently selected a shared cache"
+fi
 /bin/rm -rf "$temporary/explicit-cache/root"
 /bin/ln -s "$fixture/.tools-target" "$temporary/explicit-cache/root"
 set +e

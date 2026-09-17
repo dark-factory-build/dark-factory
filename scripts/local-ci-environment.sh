@@ -125,7 +125,7 @@ case "$ci_cache_root" in
 esac
 while [ "${ci_cache_root%/}" != "$ci_cache_root" ]; do ci_cache_root=${ci_cache_root%/}; done
 case "$ci_cache_root" in
-    */../*|*/..|*/./*|*/.)
+    ''|*/../*|*/..|*/./*|*/.)
         echo "local-ci: cache root must be canonical and non-root" >&2
         return 1
         ;;
@@ -195,10 +195,10 @@ export COREPACK_HOME="$ci_cache_root/corepack"
 export npm_config_userconfig=/var/empty/.npmrc NPM_CONFIG_USERCONFIG=/var/empty/.npmrc
 export npm_config_globalconfig=/var/empty/.npmrc-global NPM_CONFIG_GLOBALCONFIG=/var/empty/.npmrc-global
 export npm_config_cache="$ci_cache_root/npm" NPM_CONFIG_CACHE="$ci_cache_root/npm"
-export npm_config_store_dir="$ci_cache_root/pnpm-store" NPM_CONFIG_STORE_DIR="$ci_cache_root/pnpm-store"
+export pnpm_config_store_dir="$ci_cache_root/pnpm-store"
 export NETRC=/dev/null
 export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build" GOMODCACHE="$ci_cache_root/go-mod"
-# Keep disposable checkout caches removable by ordinary worktree cleanup.
+# Keep module directories removable when retiring a cache root.
 export GOFLAGS=-modcacherw
 export LC_ALL=C
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0
