@@ -88,28 +88,37 @@ func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID 
 		// clean worktree from its worker-visible name for the irreversible
 		// interval: path-based writes fail, while existing handles are confined
 		// to the quarantined inode. Restore the name after the durable edge.
-		var frozenPath string
-		snapshotInstalled := false
+		var frozenPath, snapshotPath, worktreePath string
+		durable := false
 		if run.Proposal.Kind() == kernel.OutcomeSucceeded && changeState.HeadCommit != nil {
-			path := filepath.Join(changeParent, changeState.ID.String())
-			frozenPath = path + ".settling"
-			if err := os.Rename(path, frozenPath); err != nil {
+			worktreePath = filepath.Join(changeParent, changeState.ID.String())
+			frozenPath = worktreePath + ".settling-original"
+			snapshotPath = worktreePath + ".settling-snapshot"
+			if err := os.Rename(worktreePath, frozenPath); err != nil {
 				return run, errors.Join(fmt.Errorf("%w: could not fence Change worktree", kernel.ErrConflict), err)
 			}
-			if err := os.Mkdir(path, 0o700); err != nil {
-				_ = os.Rename(frozenPath, path)
+			if err := os.Mkdir(worktreePath, 0o700); err != nil {
+				_ = os.Rename(frozenPath, worktreePath)
 				return run, errors.Join(fmt.Errorf("%w: could not create fenced Change snapshot", kernel.ErrConflict), err)
 			}
-			if err := os.CopyFS(path, os.DirFS(frozenPath)); err != nil {
-				_ = os.RemoveAll(path)
-				_ = os.Rename(frozenPath, path)
+			if err := os.CopyFS(worktreePath, os.DirFS(frozenPath)); err != nil {
+				_ = os.RemoveAll(worktreePath)
+				_ = os.Rename(frozenPath, worktreePath)
 				return run, errors.Join(fmt.Errorf("%w: could not copy fenced Change snapshot", kernel.ErrConflict), err)
 			}
-			snapshotInstalled = true
+			if err := os.Rename(worktreePath, snapshotPath); err != nil {
+				_ = os.RemoveAll(worktreePath)
+				_ = os.Rename(frozenPath, worktreePath)
+				return run, errors.Join(fmt.Errorf("%w: could not close fenced Change pathname", kernel.ErrConflict), err)
+			}
 			defer func() {
-				if snapshotInstalled {
+				if durable {
+					_ = os.Rename(snapshotPath, worktreePath)
 					_ = os.RemoveAll(frozenPath)
+					return
 				}
+				_ = os.RemoveAll(snapshotPath)
+				_ = os.Rename(frozenPath, worktreePath)
 			}()
 			if daemon.beforeWorkerFinalize != nil {
 				daemon.beforeWorkerFinalize()
@@ -121,6 +130,9 @@ func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID 
 		}
 
 		final, err := daemon.store.FinalizeWorkerRun(ctx, run.ID, run.Revision, settlement, at)
+		if err == nil && snapshotPath != "" {
+			durable = true
+		}
 		return final, err
 	default:
 		return run, fmt.Errorf("%w: change %s is not settleable for a finalizing run", kernel.ErrCorruptState, changeState.Phase.String())
