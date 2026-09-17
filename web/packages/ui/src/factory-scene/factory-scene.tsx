@@ -184,7 +184,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
-  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, placements, layout]);
+  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && (placement.bayId !== undefined || layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface)))).map((worker) => worker.id)), [workers, placements, layout]);
   const positions = useSceneMotion(layout, placements, geometryKey, connected, active);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   return <>{placements.map((placement) => {
@@ -194,7 +194,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, se
         const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
         const picturedSurface = layout.rooms.find((candidate) => candidate.id === placement.roomId)?.contents.some((item) => item.workSurface);
         const location = worker.location === "working"
-          ? `representative location${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? picturedSurface ? "at the pictured work surface" : "at a general work position; inventory unavailable or empty" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
+          ? `${placement.bayId === undefined ? "representative location" : "exact observed direct child"}${worker.locationWithin ? " within this component; more specific observed area" : " near observed changes"}${worker.locationLabel === undefined && room === undefined ? "" : ` in ${worker.locationLabel ?? room?.label}`}; ${placement.area === "room" ? placement.bayId === undefined ? picturedSurface ? "at the shared pictured workbench" : "at a general work position; inventory unavailable or empty" : "at the pictured child bay" : placement.area === "outside" ? "outside displayed rooms" : "worker area at capacity"}`
           : worker.location === "unobserved" ? "working; location not yet observed"
           : worker.location === "last-observed" && worker.locationLabel !== undefined ? `last observed near changes in ${worker.locationLabel}; resting area`
           : worker.paused ? "paused in resting area" : "ready in resting area";
@@ -311,7 +311,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
         const task = work.find((order) => order.id === selectedTaskId) ?? work[0];
         const canEnter = onEnterRoom !== undefined && enterable.has(room.id);
         return (
-          <g key={room.id} data-room-id={room.id}>
+          <g key={room.id} data-room-id={room.id} data-room-arrangement={room.arrangement}>
             <title>{node.path}</title>
             <rect x={room.x} y={room.y} width={room.width} height={room.height} fill="#17252f" />
             <path d={`M${room.x + 4} ${room.y + 40}H${room.x + room.width - 4}`} stroke="#31434d" strokeWidth="2" />
@@ -333,6 +333,7 @@ export function FactoryScene({ topology, workers, omittedLocations = 0, enterabl
               <title>{item.kind === "component" ? item.label : `${item.count} scanned ${item.label.toLowerCase()} files represented by this group`}</title>
               <Equipment item={item} positions={item.workSurface ? workPositions(room) : []} />
             </g>)}
+            {room.omittedBayCount === 0 ? null : <text data-omitted-bays={room.omittedBayCount} x={room.x + room.width - 8} y={room.y + 44} textAnchor="end" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">+{room.omittedBayCount} BAYS</text>}
             {node.inventory === undefined ? <text x={room.x + 12} y={room.y + room.height - 52} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">INVENTORY UNAVAILABLE</text> : contents.length === 0 ? <text x={room.x + 12} y={room.y + 62} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">NO SCANNED FILES</text> : null}
             {(node.dependencies?.links.length ?? 0) === 0 ? null : <g {...sceneAction(() => setSelectedRoomId(room.id))} aria-label={`Inspect static dependencies of ${node.label}`}>
               <rect x={room.x + room.width - 28} y={room.y + 18} width="24" height="24" fill="transparent" />
@@ -422,8 +423,8 @@ function Equipment({ item, positions }: { item: RoomContent; positions: readonly
     <rect x="2" y="3" width={width} height={height} fill={ink} opacity=".6" />
     <rect width={width} height={height} fill="#384e5a" stroke="#8197a0" strokeWidth="2" />
     <path d={`M4 4h${width - 8}v${height - 8}H4Z`} fill="#263b47" stroke="#5f7681" />
-    <path d="M8 8h12v10H8Z M20 13h8" fill="none" stroke="#9cb9bf" strokeWidth="2" />
-    <text x="6" y={height - 5} fill="#e0e4d7" fontSize="9" fontFamily="ui-monospace, monospace">{shortLabel(item.label.split("/").at(-1) || item.label, Math.floor((width - 10) / 5.4))}</text>
+    <path d={`M8 8h${Math.max(12, width - 16)}v${Math.max(10, height - 22)}H8Z`} fill="none" stroke="#9cb9bf" strokeWidth="2" />
+    <text x="6" y={height - 6} fill="#e0e4d7" fontSize="10" fontFamily="ui-monospace, monospace">{shortLabel(item.label.split("/").at(-1) || item.label, Math.floor((width - 10) / 6))}</text>
   </g>;
   const tint = kind === "tests" ? "#c5ae78" : kind === "documentation" ? "#c5ac88" : kind === "assets" ? "#b7a4ca" : kind === "source" ? "#8db2bd" : "#acaa9c";
   const objectX = workSurface ? width - 36 : 4;
