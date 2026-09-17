@@ -2908,7 +2908,11 @@ impl CreatePullRequest {
             let Some((kind, issue_number)) = pull_request_footer(line) else {
                 break;
             };
-            let expected_kind = if self.close_on_merge { "Closes" } else { "Refs" };
+            let expected_kind = if self.close_on_merge {
+                "Closes"
+            } else {
+                "Refs"
+            };
             if kind != expected_kind || issue_number != self.issue_number {
                 return Err(OperationError::InvalidInput);
             }
@@ -9454,7 +9458,11 @@ mod tests {
         assert!(rendered.ends_with(&supplied_footer.marker().unwrap()));
         supplied_footer.body.push_str("Closes #390\n");
         assert_eq!(
-            supplied_footer.marked_body().unwrap().matches("Closes #390").count(),
+            supplied_footer
+                .marked_body()
+                .unwrap()
+                .matches("Closes #390")
+                .count(),
             1
         );
         let mut conflicting_footer = create.clone();
@@ -9484,8 +9492,15 @@ mod tests {
             1
         );
         let mut inline_reference = create.clone();
-        inline_reference.body.push_str("\nRelated context: Refs #391");
-        assert!(inline_reference.marked_body().unwrap().contains("Refs #391"));
+        inline_reference
+            .body
+            .push_str("\nRelated context: Refs #391");
+        assert!(
+            inline_reference
+                .marked_body()
+                .unwrap()
+                .contains("Refs #391")
+        );
         let mut references = create.clone();
         references.close_on_merge = false;
         assert!(references.marked_body().unwrap().contains("Refs #390"));
