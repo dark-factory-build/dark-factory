@@ -430,7 +430,8 @@ human request, not a retry.
 - Production-line delta: added minus deleted outside tests, docs and fixtures,
   from the numstat, with the largest files named.
 - How it was verified: what the worker's result text says it ran, and that
-  the merge queue runs `scripts/local-ci.sh`. Claim nothing you did not see.
+  the merge queue runs the selected `scripts/local-ci.sh` mode on the combined
+  tree. Claim nothing you did not see.
 - Never an email, an org name, an account id, or a `/Users/<name>` path.
 - End with the repository's generated-with line and nothing after it. You
   have no session link; never invent one.
