@@ -241,15 +241,29 @@ func TestSuccessfulWorkerOutcomeRefusesUnavailableSourceFacts(t *testing.T) {
 				t.Fatalf("refusal = %v", err)
 			}
 		},
-		"Change/Selection": func(fixture *recoveryFixture, _ string) {
+		"Change": func(fixture *recoveryFixture, _ string) {
 			execSupervisorSQL(t, fixture.storePath, `UPDATE changes SET base_commit = zeroblob(1) WHERE id = ?`, fixture.run.ChangeID.Bytes())
 			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {
 				t.Fatalf("refusal = %v", err)
 			}
 		},
-		"Store.Project/repository identity": func(fixture *recoveryFixture, _ string) {
+		"Selection": func(fixture *recoveryFixture, _ string) {
+			execSupervisorSQL(t, fixture.storePath, `PRAGMA ignore_check_constraints = ON; UPDATE changes SET base_commit = zeroblob(1) WHERE id = ?`, fixture.run.ChangeID.Bytes())
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+		"Store.Project": func(fixture *recoveryFixture, _ string) {
 			execSupervisorSQL(t, fixture.storePath, `UPDATE projects SET root = '' WHERE id = ?`, fixture.run.ProjectID.Bytes())
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+		"repository identity": func(fixture *recoveryFixture, _ string) {
+			execSupervisorSQL(t, fixture.storePath, `PRAGMA ignore_check_constraints = ON; UPDATE changes SET repository_inode = 0 WHERE id = ?`, fixture.run.ChangeID.Bytes())
 			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {
 				t.Fatalf("refusal = %v", err)
