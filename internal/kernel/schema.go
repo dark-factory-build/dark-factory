@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 17
+	userVersion   = 18
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -113,6 +113,19 @@ var schemaStatements = []string{
 	`CREATE TABLE task_prerequisites (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), upstream_task_id BLOB NOT NULL CHECK (length(upstream_task_id) = 16) REFERENCES tasks(id), upstream_work_revision INTEGER NOT NULL CHECK (upstream_work_revision >= 1), consumed_run_id BLOB CHECK (consumed_run_id IS NULL OR length(consumed_run_id) = 16) REFERENCES runs(id), PRIMARY KEY (task_id, upstream_task_id), CHECK (task_id <> upstream_task_id)) STRICT, WITHOUT ROWID`,
 	`CREATE INDEX task_prerequisites_upstream ON task_prerequisites(upstream_task_id, upstream_work_revision)`,
 	`CREATE TABLE task_conflict_paths (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), path TEXT NOT NULL CHECK (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) <> '/' AND instr(path, char(0)) = 0), PRIMARY KEY (task_id, path)) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE project_outcome_revisions (
+    id BLOB NOT NULL CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    document TEXT NOT NULL CHECK (length(CAST(document AS BLOB)) BETWEEN 1 AND 32768),
+    author TEXT NOT NULL CHECK (length(CAST(author AS BLOB)) BETWEEN 1 AND 256),
+    authority TEXT NOT NULL CHECK (length(CAST(authority AS BLOB)) BETWEEN 1 AND 64),
+    objective_hash BLOB NOT NULL CHECK (length(objective_hash) = 32),
+    objective_work_revision INTEGER NOT NULL CHECK (objective_work_revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (id, revision)
+) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX project_outcome_revisions_project ON project_outcome_revisions(project_id, id, revision DESC)`,
 	`CREATE TABLE project_content_revisions (
     id BLOB NOT NULL CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
@@ -126,10 +139,12 @@ var schemaStatements = []string{
 	object_format TEXT CHECK (object_format IS NULL OR object_format IN ('sha1', 'sha256')),
 	commit_oid TEXT CHECK (commit_oid IS NULL OR length(CAST(commit_oid AS BLOB)) BETWEEN 40 AND 64),
 	path TEXT CHECK (path IS NULL OR (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) <> '/' AND instr(path, char(0)) = 0)),
+	repository_dev INTEGER CHECK (repository_dev IS NULL OR repository_dev >= 0),
+	repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
 	deprecated INTEGER NOT NULL CHECK (deprecated IN (0, 1)),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
 	PRIMARY KEY (id, revision),
-	CHECK ((object_format IS NULL AND commit_oid IS NULL AND path IS NULL) OR (object_format IS NOT NULL AND commit_oid IS NOT NULL AND path IS NOT NULL))
+	CHECK ((object_format IS NULL AND commit_oid IS NULL AND path IS NULL AND repository_dev IS NULL AND repository_inode IS NULL) OR (object_format IS NOT NULL AND commit_oid IS NOT NULL AND path IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE INDEX project_content_revisions_project_kind ON project_content_revisions(project_id, kind, id, revision DESC)`,
 	`CREATE TABLE project_content_evidence (

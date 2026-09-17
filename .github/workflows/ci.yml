@@ -11,6 +11,12 @@ on:
   # persistent Mac. A conflict-free merge is not followed by a duplicate
   # full gate: the PR and merge-queue trees already supplied that evidence.
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Mac runner (hosted can seed the main-branch cache)
+        type: choice
+        default: dark-factory-mac
+        options: [dark-factory-mac, macos-latest]
 
 permissions:
   contents: read
@@ -41,16 +47,18 @@ jobs:
           git diff --check "$BASE_SHA" "$GITHUB_SHA"
 
   # This classifier lives in the CODEOWNED workflow, not in a PR-publishable
-  # script. The two root files consumed by both source trees run both gates;
-  # unclassified paths fail closed through Darwin. The diff is the queue's
-  # whole combined tree, so entries ahead of this one cannot escape its
-  # selected gates.
+  # script. The diff is the queue's whole combined tree, so entries ahead of
+  # this one cannot escape its selected gates. Only presentation source gets
+  # the narrow UI mode; runtime paths use the runtime gate, release paths use
+  # the release gate, and protocol, dependency, CI, or unknown paths use the
+  # full Darwin gate.
   scope:
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       macos: ${{ steps.select.outputs.macos }}
+      macos_mode: ${{ steps.select.outputs.macos_mode }}
       control_plane: ${{ steps.select.outputs.control_plane }}
       relay: ${{ steps.select.outputs.relay }}
     steps:
@@ -64,6 +72,7 @@ jobs:
             for gate in macos control_plane relay; do
               printf '%s=true\n' "$gate"
             done >>"$GITHUB_OUTPUT"
+            printf 'macos_mode=full\n' >>"$GITHUB_OUTPUT"
           }
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             emit_all
@@ -83,11 +92,23 @@ jobs:
             >"$RUNNER_TEMP/changed-paths"
 
           macos=false
+          macos_mode=none
           control_plane=false
           relay=false
+          select_macos_mode() {
+            if [ "$macos_mode" = none ] || [ "$macos_mode" = "$1" ]; then
+              macos_mode=$1
+            else
+              macos_mode=full
+            fi
+          }
           while IFS= read -r -d '' path; do
             case "$path" in
               docs/*|README.md|ARCHITECTURE.md|CONTRIBUTING.md|ROADMAP.md|SECURITY.md|CLAUDE.md|LICENSE|LICENSE.*|launchd/README.md)
+                ;;
+              web/packages/ui/src/*.tsx|web/packages/ui/src/*.css|web/packages/ui/src/factory-scene/*|web/packages/ui/test/*)
+                macos=true
+                select_macos_mode ui
                 ;;
               control-plane|control-plane/*)
                 control_plane=true
@@ -95,32 +116,50 @@ jobs:
               .github/workflows/deploy-control-plane.yml)
                 control_plane=true
                 ;;
+              relay/fixtures/*|relay/src/*)
+                macos=true; select_macos_mode full; relay=true
+                ;;
               relay|relay/*)
                 relay=true
                 ;;
               .github/workflows/ci.yml)
-                macos=true; control_plane=true; relay=true
+                macos=true; select_macos_mode full; control_plane=true; relay=true
+                ;;
+              VERSION)
+                macos=true; select_macos_mode full
+                ;;
+              scripts/package-release.sh|scripts/prepare-release-source.sh|scripts/publish-release.sh|scripts/render-homebrew-formula.sh|scripts/test-package-release.sh|scripts/test-prepare-release-source.sh|scripts/test-publish-release.sh)
+                macos=true; select_macos_mode release
                 ;;
               .gitignore|scripts/bootstrap-maintainer-v2.sh)
-                macos=true; control_plane=true
+                macos=true; select_macos_mode full; control_plane=true
+                ;;
+              protocol/*|web/fixtures/*|spikes/browser-connectivity/*|internal/browser/*|internal/browserprotocol/*|internal/buildinfo/*|internal/install/*|cmd/factoryctl/*|scripts/reinstall-service.sh|launchd/*)
+                macos=true; select_macos_mode full
+                ;;
+              cmd/*|internal/*|launchd/*|spikes/*)
+                macos=true
+                select_macos_mode runtime
                 ;;
               *)
-                macos=true
+                macos=true; select_macos_mode full
                 ;;
             esac
           done <"$RUNNER_TEMP/changed-paths"
           {
             printf 'macos=%s\n' "$macos"
+            printf 'macos_mode=%s\n' "$macos_mode"
             printf 'control_plane=%s\n' "$control_plane"
             printf 'relay=%s\n' "$relay"
           } >>"$GITHUB_OUTPUT"
 
-  # Darwin runtime changes use the existing gate unchanged. Documentation and
+  # Darwin runtime changes use the source and process gates. Presentation-only web
+  # changes use the source and browser smoke gates; documentation and
   # control-plane-only changes never allocate a hosted Mac.
   checks:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
-    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || 'dark-factory-mac' }}
+    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
@@ -207,7 +246,28 @@ jobs:
           key: ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}
 
       - name: Run the macOS source gate
-        run: ./scripts/local-ci.sh
+        env:
+          MACOS_MODE: ${{ needs.scope.outputs.macos_mode }}
+        run: |
+          set -euo pipefail
+          case "$MACOS_MODE" in
+            ui)
+              ./scripts/local-ci.sh --ui
+              ;;
+            runtime)
+              ./scripts/local-ci.sh --runtime
+              ;;
+            release)
+              ./scripts/local-ci.sh --release
+              ;;
+            full)
+              ./scripts/local-ci.sh
+              ;;
+            *)
+              echo "unknown macOS gate mode: $MACOS_MODE" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Publish bounded workflow summary
         if: always()

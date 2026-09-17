@@ -3,13 +3,14 @@ package kernel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
 
 func contentSpec(t *testing.T, project ProjectID, seed byte, body string) NewContent {
 	t.Helper()
-	return NewContent{ID: contentID(t, seed), ProjectID: project, Kind: ContentKind("custom_kind"), Title: "procedure", Description: "description", Body: body, Author: "operator", SourceReferences: "source"}
+	return NewContent{ID: contentID(t, seed), ProjectID: project, Kind: ContentKind("custom_kind"), Title: "procedure", Description: "description", Author: "operator", SourceReferences: "source", ObjectFormat: "sha1", Commit: strings.Repeat(fmt.Sprintf("%02x", seed), 20), Path: ".dark-factory/content/item.md", RepositoryDevice: 1, RepositoryInode: 2}
 }
 
 func contentID(t *testing.T, seed byte) ContentID {
@@ -71,17 +72,18 @@ func TestContentExportRetiresLegacyBodyAndReplays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md"); err != nil {
+	corruptSQL(t, store, `UPDATE project_content_revisions SET body = 'legacy', object_format = NULL, commit_oid = NULL, path = NULL WHERE id = ? AND revision = 1`, created.ID.Bytes())
+	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", 1, 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md"); err != nil {
+	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", 1, 2); err != nil {
 		t.Fatalf("export replay: %v", err)
 	}
 	got, err := store.Content(ctx, created.ID, 1)
-	if err != nil || got.Body != "" || got.Commit != strings.Repeat("a", 40) {
+	if err != nil || got.Commit != strings.Repeat("a", 40) {
 		t.Fatalf("exported content = %+v, %v", got, err)
 	}
-	if _, err := store.LegacyContent(ctx, created.ID, 1); !errors.Is(err, ErrConflict) {
+	if _, _, err := store.LegacyContent(ctx, created.ID, 1); !errors.Is(err, ErrConflict) {
 		t.Fatalf("exported revision remained a legacy body: %v", err)
 	}
 }

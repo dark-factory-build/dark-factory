@@ -17,14 +17,15 @@ const (
 )
 
 type ContentRevision struct {
-	ID                                                 ContentID
-	ProjectID                                          ProjectID
-	Kind                                               ContentKind
-	Revision, LatestRevision                           Revision
-	Title, Description, Body, Author, SourceReferences string
-	ObjectFormat, Commit, Path                         string
-	Deprecated                                         bool
-	CreatedAt                                          UnixMillis
+	ID                                           ContentID
+	ProjectID                                    ProjectID
+	Kind                                         ContentKind
+	Revision, LatestRevision                     Revision
+	Title, Description, Author, SourceReferences string
+	ObjectFormat, Commit, Path                   string
+	RepositoryDevice, RepositoryInode            int64
+	Deprecated                                   bool
+	CreatedAt                                    UnixMillis
 }
 
 type NewContent struct {
@@ -33,6 +34,7 @@ type NewContent struct {
 	Kind                                               ContentKind
 	Title, Description, Body, Author, SourceReferences string
 	ObjectFormat, Commit, Path                         string
+	RepositoryDevice, RepositoryInode                  int64
 }
 
 type ContentPage struct {
@@ -82,7 +84,7 @@ type TaskContentReference struct {
 const contentPageSize = 64
 
 func validateContent(spec NewContent) error {
-	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(string(spec.Kind)) < 1 || byteLen(string(spec.Kind)) > 64 || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Description) > 4096 || byteLen(spec.Body) > 1<<20 || byteLen(spec.Author) < 1 || byteLen(spec.Author) > 256 || byteLen(spec.SourceReferences) > 32768 || !utf8.ValidString(string(spec.Kind)) || !utf8.ValidString(spec.Title) || !utf8.ValidString(spec.Description) || !utf8.ValidString(spec.Body) || !utf8.ValidString(spec.Author) || !utf8.ValidString(spec.SourceReferences) || (spec.Commit != "" && (spec.ObjectFormat == "" || spec.Path == "")) {
+	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(string(spec.Kind)) < 1 || byteLen(string(spec.Kind)) > 64 || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Description) > 4096 || spec.Body != "" || byteLen(spec.Author) < 1 || byteLen(spec.Author) > 256 || byteLen(spec.SourceReferences) > 32768 || !utf8.ValidString(string(spec.Kind)) || !utf8.ValidString(spec.Title) || !utf8.ValidString(spec.Description) || !utf8.ValidString(spec.Author) || !utf8.ValidString(spec.SourceReferences) || spec.Commit == "" || spec.ObjectFormat == "" || spec.Path == "" || spec.RepositoryDevice < 0 || spec.RepositoryInode <= 0 {
 		return fmt.Errorf("%w: invalid project content", ErrInvalidValue)
 	}
 	return nil
@@ -120,7 +122,7 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 	} else if err != ErrNotFound {
 		return ContentRevision{}, tx.Rollback(err)
 	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, object_format, commit_oid, path, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), string(spec.Kind), spec.Title, spec.Description, spec.Body, spec.Author, spec.SourceReferences, nullableString(spec.ObjectFormat), nullableString(spec.Commit), nullableString(spec.Path), at.Int64()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, object_format, commit_oid, path, repository_dev, repository_inode, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), string(spec.Kind), spec.Title, spec.Description, spec.Body, spec.Author, spec.SourceReferences, nullableString(spec.ObjectFormat), nullableString(spec.Commit), nullableString(spec.Path), spec.RepositoryDevice, spec.RepositoryInode, at.Int64()); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, 1)
@@ -185,7 +187,7 @@ func reviseContentTx(ctx context.Context, tx *writeTx, expected Revision, spec N
 	if deprecated {
 		deprecatedValue = 1
 	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, object_format, commit_oid, path, deprecated, created_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), string(spec.Kind), next, spec.Title, spec.Description, spec.Body, spec.Author, spec.SourceReferences, nullableString(spec.ObjectFormat), nullableString(spec.Commit), nullableString(spec.Path), deprecatedValue, at.Int64()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, object_format, commit_oid, path, repository_dev, repository_inode, deprecated, created_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), string(spec.Kind), next, spec.Title, spec.Description, spec.Body, spec.Author, spec.SourceReferences, nullableString(spec.ObjectFormat), nullableString(spec.Commit), nullableString(spec.Path), spec.RepositoryDevice, spec.RepositoryInode, deprecatedValue, at.Int64()); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, next)
@@ -212,7 +214,7 @@ func deprecateContentTx(ctx context.Context, tx *writeTx, id ContentID, project 
 	if err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
-	return reviseContentTx(ctx, tx, expected, NewContent{ID: id, ProjectID: project, Kind: current.Kind, Title: current.Title, Description: current.Description, Body: current.Body, Author: author, SourceReferences: current.SourceReferences, ObjectFormat: current.ObjectFormat, Commit: current.Commit, Path: current.Path}, true, at)
+	return reviseContentTx(ctx, tx, expected, NewContent{ID: id, ProjectID: project, Kind: current.Kind, Title: current.Title, Description: current.Description, Author: author, SourceReferences: current.SourceReferences, ObjectFormat: current.ObjectFormat, Commit: current.Commit, Path: current.Path, RepositoryDevice: current.RepositoryDevice, RepositoryInode: current.RepositoryInode}, true, at)
 }
 
 func (store *Store) Content(ctx context.Context, id ContentID, revision int64) (ContentRevision, error) {
@@ -228,26 +230,33 @@ func (store *Store) Content(ctx context.Context, id ContentID, revision int64) (
 }
 
 // LegacyContent returns the body only for a pre-Git revision awaiting export.
-func (store *Store) LegacyContent(ctx context.Context, id ContentID, revision int64) (ContentRevision, error) {
+func (store *Store) LegacyContent(ctx context.Context, id ContentID, revision int64) (ContentRevision, string, error) {
 	if id.zero() || revision < 1 {
-		return ContentRevision{}, fmt.Errorf("%w: invalid content revision", ErrInvalidValue)
+		return ContentRevision{}, "", fmt.Errorf("%w: invalid content revision", ErrInvalidValue)
 	}
 	tx, err := store.beginRead(ctx)
 	if err != nil {
-		return ContentRevision{}, err
+		return ContentRevision{}, "", err
 	}
 	defer tx.Close()
-	content, err := contentByRevision(ctx, tx.connection, id, revision)
-	if err == nil && content.Commit != "" {
-		err = ErrConflict
+	content, err := contentMetadataByRevision(ctx, tx.connection, id, revision)
+	if err != nil {
+		return ContentRevision{}, "", err
 	}
-	return content, err
+	if content.Commit != "" {
+		return ContentRevision{}, "", ErrConflict
+	}
+	var body string
+	if err := tx.connection.QueryRowContext(ctx, `SELECT body FROM project_content_revisions WHERE id = ? AND revision = ? AND commit_oid IS NULL`, id.Bytes(), revision).Scan(&body); err != nil {
+		return ContentRevision{}, "", err
+	}
+	return content, body, nil
 }
 
 // CompleteContentExport installs an immutable Git pin and retires the legacy
 // SQLite body. The body comparison makes replay safe without another journal.
-func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, revision int64, body, objectFormat, commit, path string) error {
-	if id.zero() || revision < 1 || objectFormat == "" || commit == "" || path == "" {
+func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, revision int64, body, objectFormat, commit, path string, repositoryDevice, repositoryInode int64) error {
+	if id.zero() || revision < 1 || objectFormat == "" || commit == "" || path == "" || repositoryDevice < 0 || repositoryInode <= 0 {
 		return fmt.Errorf("%w: invalid content export", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -255,7 +264,7 @@ func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, rev
 		return err
 	}
 	defer tx.Close()
-	result, err := tx.connection.ExecContext(ctx, `UPDATE project_content_revisions SET body = '', object_format = ?, commit_oid = ?, path = ? WHERE id = ? AND revision = ? AND body = ? AND commit_oid IS NULL`, objectFormat, commit, path, id.Bytes(), revision, body)
+	result, err := tx.connection.ExecContext(ctx, `UPDATE project_content_revisions SET body = '', object_format = ?, commit_oid = ?, path = ?, repository_dev = ?, repository_inode = ? WHERE id = ? AND revision = ? AND body = ? AND commit_oid IS NULL`, objectFormat, commit, path, repositoryDevice, repositoryInode, id.Bytes(), revision, body)
 	if err != nil {
 		return tx.Rollback(err)
 	}
@@ -265,8 +274,9 @@ func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, rev
 	}
 	if changed != 1 {
 		var existingFormat, existingCommit, existingPath, existingBody string
-		err = tx.connection.QueryRowContext(ctx, `SELECT COALESCE(object_format, ''), COALESCE(commit_oid, ''), COALESCE(path, ''), body FROM project_content_revisions WHERE id = ? AND revision = ?`, id.Bytes(), revision).Scan(&existingFormat, &existingCommit, &existingPath, &existingBody)
-		if err != nil || existingFormat != objectFormat || existingCommit != commit || existingPath != path || existingBody != "" {
+		var existingDevice, existingInode int64
+		err = tx.connection.QueryRowContext(ctx, `SELECT COALESCE(object_format, ''), COALESCE(commit_oid, ''), COALESCE(path, ''), body, COALESCE(repository_dev, -1), COALESCE(repository_inode, -1) FROM project_content_revisions WHERE id = ? AND revision = ?`, id.Bytes(), revision).Scan(&existingFormat, &existingCommit, &existingPath, &existingBody, &existingDevice, &existingInode)
+		if err != nil || existingFormat != objectFormat || existingCommit != commit || existingPath != path || existingBody != "" || existingDevice != repositoryDevice || existingInode != repositoryInode {
 			if err == nil {
 				err = ErrConflict
 			}
@@ -277,7 +287,7 @@ func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, rev
 }
 
 func contentMetadataByRevision(ctx context.Context, connection *sql.Conn, id ContentID, revision int64) (ContentRevision, error) {
-	return scanContent(connection.QueryRowContext(ctx, `SELECT id, project_id, kind, revision, title, description, '', author, source_references, object_format, commit_oid, path, deprecated, created_at_ms, (SELECT MAX(revision) FROM project_content_revisions WHERE id = ?) FROM project_content_revisions WHERE id = ? AND revision = ?`, id.Bytes(), id.Bytes(), revision))
+	return scanContent(connection.QueryRowContext(ctx, `SELECT id, project_id, kind, revision, title, description, '', author, source_references, object_format, commit_oid, path, repository_dev, repository_inode, deprecated, created_at_ms, (SELECT MAX(revision) FROM project_content_revisions WHERE id = ?) FROM project_content_revisions WHERE id = ? AND revision = ?`, id.Bytes(), id.Bytes(), revision))
 }
 
 func (store *Store) ListContent(ctx context.Context, project ProjectID, kind ContentKind, offset, limit int) (ContentPage, error) {
@@ -296,9 +306,8 @@ func listContentOnConnection(ctx context.Context, connection *sql.Conn, project 
 	if limit == 0 {
 		limit = contentPageSize
 	}
-	// Lists are metadata-only. Complete bodies are available only through the
-	// explicit bounded ReadContentBody path.
-	query := `SELECT c.id, c.project_id, c.kind, c.revision, c.title, c.description, '', c.author, c.source_references, c.object_format, c.commit_oid, c.path, c.deprecated, c.created_at_ms, c.revision FROM project_content_revisions c JOIN (SELECT id, MAX(revision) revision FROM project_content_revisions WHERE project_id = ? GROUP BY id) latest ON latest.id = c.id AND latest.revision = c.revision WHERE c.project_id = ?`
+	// Lists are metadata-only. Bodies live in the pinned Git source.
+	query := `SELECT c.id, c.project_id, c.kind, c.revision, c.title, c.description, '', c.author, c.source_references, c.object_format, c.commit_oid, c.path, c.repository_dev, c.repository_inode, c.deprecated, c.created_at_ms, c.revision FROM project_content_revisions c JOIN (SELECT id, MAX(revision) revision FROM project_content_revisions WHERE project_id = ? GROUP BY id) latest ON latest.id = c.id AND latest.revision = c.revision WHERE c.project_id = ?`
 	args := []any{project.Bytes(), project.Bytes()}
 	if kind != "" {
 		query += " AND c.kind = ?"
@@ -327,7 +336,7 @@ func listContentOnConnection(ctx context.Context, connection *sql.Conn, project 
 }
 
 func contentByRevision(ctx context.Context, connection *sql.Conn, id ContentID, revision int64) (ContentRevision, error) {
-	return scanContent(connection.QueryRowContext(ctx, `SELECT id, project_id, kind, revision, title, description, body, author, source_references, object_format, commit_oid, path, deprecated, created_at_ms, (SELECT MAX(revision) FROM project_content_revisions WHERE id = ?) FROM project_content_revisions WHERE id = ? AND revision = ?`, id.Bytes(), id.Bytes(), revision))
+	return contentMetadataByRevision(ctx, connection, id, revision)
 }
 
 func scanContent(scanner rowScanner) (ContentRevision, error) {
@@ -335,7 +344,8 @@ func scanContent(scanner rowScanner) (ContentRevision, error) {
 	var kind, title, description, body, author, refs string
 	var objectFormat, commit_oid, path sql.NullString
 	var revision, deprecated, created, latest int64
-	if err := scanner.Scan(&rawID, &rawProject, &kind, &revision, &title, &description, &body, &author, &refs, &objectFormat, &commit_oid, &path, &deprecated, &created, &latest); err != nil {
+	var repositoryDevice, repositoryInode sql.NullInt64
+	if err := scanner.Scan(&rawID, &rawProject, &kind, &revision, &title, &description, &body, &author, &refs, &objectFormat, &commit_oid, &path, &repositoryDevice, &repositoryInode, &deprecated, &created, &latest); err != nil {
 		if err == sql.ErrNoRows {
 			return ContentRevision{}, ErrNotFound
 		}
@@ -361,11 +371,11 @@ func scanContent(scanner rowScanner) (ContentRevision, error) {
 	if err != nil || latest < revision {
 		return ContentRevision{}, ErrCorruptState
 	}
-	return ContentRevision{ID: id, ProjectID: project, Kind: ContentKind(kind), Revision: rev, LatestRevision: latestRevision, Title: title, Description: description, Body: body, Author: author, SourceReferences: refs, ObjectFormat: objectFormat.String, Commit: commit_oid.String, Path: path.String, Deprecated: deprecated != 0, CreatedAt: timestamp}, nil
+	return ContentRevision{ID: id, ProjectID: project, Kind: ContentKind(kind), Revision: rev, LatestRevision: latestRevision, Title: title, Description: description, Author: author, SourceReferences: refs, ObjectFormat: objectFormat.String, Commit: commit_oid.String, Path: path.String, RepositoryDevice: repositoryDevice.Int64, RepositoryInode: repositoryInode.Int64, Deprecated: deprecated != 0, CreatedAt: timestamp}, nil
 }
 
 func contentMatches(existing ContentRevision, spec NewContent, deprecated bool) bool {
-	return existing.ProjectID == spec.ProjectID && existing.Kind == spec.Kind && existing.Title == spec.Title && existing.Description == spec.Description && existing.Body == spec.Body && existing.Author == spec.Author && existing.SourceReferences == spec.SourceReferences && existing.ObjectFormat == spec.ObjectFormat && existing.Commit == spec.Commit && existing.Path == spec.Path && existing.Deprecated == deprecated
+	return existing.ProjectID == spec.ProjectID && existing.Kind == spec.Kind && existing.Title == spec.Title && existing.Description == spec.Description && existing.Author == spec.Author && existing.SourceReferences == spec.SourceReferences && existing.ObjectFormat == spec.ObjectFormat && existing.Commit == spec.Commit && existing.Path == spec.Path && existing.RepositoryDevice == spec.RepositoryDevice && existing.RepositoryInode == spec.RepositoryInode && existing.Deprecated == deprecated
 }
 
 func (store *Store) beginContentAttemptWrite(ctx context.Context, digest AttemptDigest, at UnixMillis) (*writeTx, AttemptAuthority, error) {

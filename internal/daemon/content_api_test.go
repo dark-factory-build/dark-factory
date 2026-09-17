@@ -4,11 +4,14 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -20,8 +23,26 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 	}
 	ctx := context.Background()
 	projectID := testID(230)
+	root, err := os.MkdirTemp("/private/tmp", "dark-factory-content-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	for _, args := range [][]string{{"init", root}, {"-C", root, "config", "user.name", "Dark Factory Test"}, {"-C", root, "config", "user.email", "test@invalid"}} {
+		if output, err := exec.Command(change.TrustedGitExecutable, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("content source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "README.md"}, {"-C", root, "commit", "-m", "initial"}} {
+		if output, err := exec.Command(change.TrustedGitExecutable, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
 	done := fixture.serve(t)
-	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "content", Root: filepath.Join(t.TempDir(), "source")}); err != nil {
+	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "content", Root: root}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
@@ -148,12 +169,12 @@ func TestPageContentBodyContinuesFromGitSizedOffsets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	content := kernel.ContentRevision{ID: id, Revision: rev, Body: body}
-	first, err := pageContentBody(content, 0, 64*1024)
+	content := kernel.ContentRevision{ID: id, Revision: rev}
+	first, err := pageContentBody(content, body, 0, 64*1024)
 	if err != nil || first.Complete || first.NextOffset != 64*1024 {
 		t.Fatalf("first page = %+v, %v", first, err)
 	}
-	second, err := pageContentBody(content, first.NextOffset, 64*1024)
+	second, err := pageContentBody(content, body, first.NextOffset, 64*1024)
 	if err != nil || !second.Complete || second.Body != "£tail" {
 		t.Fatalf("second page = %+v, %v", second, err)
 	}

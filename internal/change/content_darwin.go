@@ -170,7 +170,15 @@ func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot strin
 		return ContentSource{}, err
 	}
 	if err := updateContentRef(ctx, authority, durableRef, commitID, format); err != nil {
-		return ContentSource{}, err
+		existing, found, readErr := existingContentSource(ctx, authority, durableRef, file)
+		if readErr != nil || !found {
+			return ContentSource{}, err
+		}
+		stored, readErr := readContentSource(ctx, authority, existing)
+		if readErr != nil || stored != body {
+			return ContentSource{}, err
+		}
+		return existing, nil
 	}
 	return ContentSource{Commit: commitID, Path: file}, nil
 }
@@ -196,6 +204,13 @@ func existingContentSource(ctx context.Context, authority *gitAuthority, durable
 	}
 	id, err := parseGitOID(format, bytes.TrimSpace(current.output))
 	if err != nil {
+		return ContentSource{}, false, err
+	}
+	tree, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", authority.repositoryRoot, "ls-tree", "-z", id.Hex(), "--", file)
+	if err != nil || !regularContentTreeEntry(tree, file) {
+		if err == nil {
+			err = &ValidationError{Reason: "content source must be a regular file"}
+		}
 		return ContentSource{}, false, err
 	}
 	return ContentSource{Commit: id, Path: file}, true, nil

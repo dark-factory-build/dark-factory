@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -17,7 +18,7 @@ import (
 )
 
 func TestLegacyHomeMigratesAndKeepsEveryRow(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion} {
 		for _, persistWAL := range []bool{false, true} {
 			t.Run(fmt.Sprintf("v%d/wal=%v", version, persistWAL), func(t *testing.T) {
 				testLegacyHomeMigratesAndKeepsEveryRow(t, version, persistWAL)
@@ -152,6 +153,36 @@ func TestV15LibraryMigrationPreservesDelegation(t *testing.T) {
 		if err := store.readers.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("new optional table %s: count=%d error=%v", table, count, err)
 		}
+	}
+}
+
+func TestV16OutcomeMigrationPreservesLibrary(t *testing.T) {
+	ctx := context.Background()
+	path, _ := newLegacyDatabase(t, false, v16UserVersion)
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, firstBody, err := store.LegacyContent(ctx, contentID(t, 212), 1)
+	if err != nil || firstBody != "original definition" {
+		t.Fatalf("original revision: %+v %v", first, err)
+	}
+	second, secondBody, err := store.LegacyContent(ctx, contentID(t, 212), 2)
+	if err != nil || secondBody != "corrected definition" {
+		t.Fatalf("corrected revision: %+v %v", second, err)
+	}
+	evidence, err := store.ListContentEvidence(ctx, projectID(t, 1), contentID(t, 212), mustRevision(t, 1), 0, 4)
+	if err != nil || len(evidence.Items) != 1 || evidence.Items[0].Result != "passed" {
+		t.Fatalf("retained evidence: %+v %v", evidence, err)
+	}
+	refs, err := store.TaskContentReferences(ctx, projectID(t, 1), taskID(t, 210), mustRevision(t, 1))
+	if err != nil || len(refs) != 1 || refs[0].ContentRevision.Int64() != 1 {
+		t.Fatalf("retained attachment: %+v %v", refs, err)
+	}
+	var count int
+	if err := store.readers.QueryRow("SELECT COUNT(*) FROM project_outcome_revisions").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("optional outcome table: %d %v", count, err)
 	}
 }
 
@@ -294,6 +325,22 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
+	if version >= v16UserVersion {
+		id := contentID(t, 212)
+		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, '', 'original definition', 'operator:local', '', 0, 9)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
+		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 2, ?, '', 'corrected definition', 'operator:local', '', 0, 10)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
+		content := ContentRevision{ID: id, ProjectID: project, Revision: mustRevision(t, 1)}
+		evidence, err := ContentEvidenceIDFromBytes(bytes.Repeat([]byte{213}, IDBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.CreateContentEvidence(ctx, NewContentEvidence{ID: evidence, ProjectID: project, ContentID: content.ID, ContentRevision: content.Revision, TestedSource: "retained-source", Result: "passed", Evaluator: "operator:local"}, mustTime(t, 11)); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AttachContentToTask(ctx, taskID(t, 210), project, content.ID, content.Revision, mustTime(t, 12)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, agent := range []struct {
 		seed     byte
 		provider Provider
@@ -406,7 +453,16 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	downgrade := []string{"DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	if version >= v16UserVersion && version < userVersion {
+		columns := "id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms"
+		if err := rebuildTable(ctx, connection, legacy, "project_content_revisions", columns, "project_content_revisions_project_kind", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	downgrade := []string{"DROP TABLE project_outcome_revisions", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	if version < v16UserVersion {
+		downgrade = append([]string{"DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions"}, downgrade...)
+	}
 	if version < v15UserVersion {
 		downgrade = append([]string{"DROP TABLE task_conflict_paths", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites"}, downgrade...)
 	}
@@ -610,8 +666,9 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "ffc18f54c172a7974cbc7492336f32aa292b52328b4f819b5f5d6b2b3a01ebb0"},
-		{"v16", v16SchemaStatements(), "f152e867cb536520df8c41c029df6081cc7bd6b06f8d634bf7ea24b7e9237e91"},
+		{"current", schemaStatements, "23ad7fd21132cb214d7aa507e6d9092db94066589ed7cab316fb86a93922fb7e"},
+		{"v17", v17SchemaStatements(), "8e566e2483f36de3f9b9d13722bbab6fb58293787b77f201ab16d98c7084ff54"},
+		{"v16", v16SchemaStatements(), "2547d01bcfd2878245cb3e6d27c0116cb6ebb9a032bf4816834b2138892d8705"},
 		{"v15", v15SchemaStatements(), "4657aab650b20fbf6ff2dac4e57d334d954321da14b5e14224aab200247cb4dc"},
 		{"v13", v13SchemaStatements(), "f38d4c5ac959eb2c3b23e3c0ace78faa1859201688cb12314c0c4fa721db56db"},
 		{"v12", v12SchemaStatements(), "78ff7808dc146c35383329f73c94559172e824e0b72484bc56db48291dbadefa"},
@@ -637,7 +694,7 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 // that reaches inside the migration transaction: the two above are rejected by
 // the preflight, on its disposable copy, before any pool exists.
 func TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t, version)
 		})

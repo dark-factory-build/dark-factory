@@ -841,9 +841,10 @@ func TestContinueUnsettledRunFinishesBoundedRuntimeRemoval(t *testing.T) {
 	}
 	fixture.writeArtifact(t, body)
 	root := filepath.Join(fixture.parentPath, fixture.run.ID.String())
-	// Each pass removes at most 256 entries and yields for 25ms. This tree
-	// necessarily exceeds two four-second passes even on a fast filesystem.
-	for i := 0; i < 110000; i++ {
+	// Each pass removes at most 256 entries and yields for 25ms. 45,000 entries
+	// exceed the roughly 40,000-entry four-second budget while avoiding extra
+	// fixture creation that does not strengthen the bounded-pass assertion.
+	for i := 0; i < 45000; i++ {
 		if err := os.WriteFile(filepath.Join(root, runtimeHomeName, fmt.Sprintf("file-%05d", i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}

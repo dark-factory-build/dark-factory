@@ -91,23 +91,24 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 		return kernel.NewContent{}, err
 	}
 	spec.Body, spec.ObjectFormat, spec.Commit, spec.Path = "", source.Commit.Format().Name(), source.Commit.Hex(), source.Path
+	spec.RepositoryDevice, spec.RepositoryInode = int64(identity.Device()), int64(identity.Inode())
 	return spec, nil
 }
 
 func (daemon *Daemon) exportLegacyContent(ctx context.Context, id kernel.ContentID, revision int64) (kernel.ContentRevision, error) {
-	legacy, err := daemon.store.LegacyContent(ctx, id, revision)
+	legacy, body, err := daemon.store.LegacyContent(ctx, id, revision)
 	if err != nil {
 		if err == kernel.ErrConflict {
 			return daemon.store.Content(ctx, id, revision)
 		}
 		return kernel.ContentRevision{}, err
 	}
-	spec := kernel.NewContent{ID: legacy.ID, ProjectID: legacy.ProjectID, Body: legacy.Body}
+	spec := kernel.NewContent{ID: legacy.ID, ProjectID: legacy.ProjectID, Body: body}
 	pinned, err := daemon.writeContentSource(ctx, spec, uint64(revision))
 	if err != nil {
 		return kernel.ContentRevision{}, err
 	}
-	if err := daemon.store.CompleteContentExport(ctx, id, revision, legacy.Body, pinned.ObjectFormat, pinned.Commit, pinned.Path); err != nil {
+	if err := daemon.store.CompleteContentExport(ctx, id, revision, body, pinned.ObjectFormat, pinned.Commit, pinned.Path, pinned.RepositoryDevice, pinned.RepositoryInode); err != nil {
 		return kernel.ContentRevision{}, err
 	}
 	return daemon.store.Content(ctx, id, revision)
@@ -115,7 +116,7 @@ func (daemon *Daemon) exportLegacyContent(ctx context.Context, id kernel.Content
 
 func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.ContentRevision) (string, error) {
 	if content.Commit == "" {
-		return content.Body, nil
+		return "", kernel.ErrConflict
 	}
 	project, found, err := daemon.store.Project(ctx, content.ProjectID)
 	if err != nil || !found {
@@ -128,7 +129,7 @@ func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.Cont
 	if configured := daemon.gitExecutable.Load(); configured != nil && *configured != "" {
 		git = *configured
 	}
-	identity, err := inspectRepositoryIdentity(project.Root)
+	identity, err := change.NewRepositoryIdentity(uint64(content.RepositoryDevice), uint64(content.RepositoryInode))
 	if err != nil {
 		return "", err
 	}
@@ -309,17 +310,23 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
+		var sourceBody string
 		if content.Commit == "" {
-			content, err = daemon.exportLegacyContent(ctx, content.ID, content.Revision.Int64())
+			_, sourceBody, err = daemon.store.LegacyContent(ctx, content.ID, content.Revision.Int64())
 			if err != nil {
 				return newErrorReply(remoteErrorCode(err))
 			}
+			if migrated, exportErr := daemon.exportLegacyContent(ctx, content.ID, content.Revision.Int64()); exportErr == nil {
+				content = migrated
+				sourceBody, err = daemon.readContentSource(ctx, content)
+			}
+		} else {
+			sourceBody, err = daemon.readContentSource(ctx, content)
 		}
-		content.Body, err = daemon.readContentSource(ctx, content)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
-		v, err := pageContentBody(content, int(body.Offset), int(body.Limit))
+		v, err := pageContentBody(content, sourceBody, int(body.Offset), int(body.Limit))
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
@@ -450,25 +457,25 @@ func (daemon *Daemon) contentForCaller(ctx context.Context, operator bool, diges
 	return daemon.store.ContentForAttempt(ctx, digest, id, revision)
 }
 
-func pageContentBody(content kernel.ContentRevision, offset, limit int) (kernel.ContentBodyPage, error) {
-	if offset < 0 || limit <= 0 || limit > 64*1024 || offset > len(content.Body) || (offset < len(content.Body) && !utf8.RuneStart(content.Body[offset])) {
+func pageContentBody(content kernel.ContentRevision, sourceBody string, offset, limit int) (kernel.ContentBodyPage, error) {
+	if offset < 0 || limit <= 0 || limit > 64*1024 || offset > len(sourceBody) || (offset < len(sourceBody) && !utf8.RuneStart(sourceBody[offset])) {
 		return kernel.ContentBodyPage{}, kernel.ErrInvalidValue
 	}
 	end := offset + limit
-	if end > len(content.Body) {
-		end = len(content.Body)
+	if end > len(sourceBody) {
+		end = len(sourceBody)
 	}
-	for end > offset && end < len(content.Body) && !utf8.RuneStart(content.Body[end]) {
+	for end > offset && end < len(sourceBody) && !utf8.RuneStart(sourceBody[end]) {
 		end--
 	}
-	if end == offset && end < len(content.Body) {
+	if end == offset && end < len(sourceBody) {
 		return kernel.ContentBodyPage{}, kernel.ErrInvalidValue
 	}
 	next := 0
-	if end < len(content.Body) {
+	if end < len(sourceBody) {
 		next = end
 	}
-	return kernel.ContentBodyPage{ID: content.ID, Revision: content.Revision, Offset: offset, Body: content.Body[offset:end], NextOffset: next, Complete: next == 0}, nil
+	return kernel.ContentBodyPage{ID: content.ID, Revision: content.Revision, Offset: offset, Body: sourceBody[offset:end], NextOffset: next, Complete: next == 0}, nil
 }
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
