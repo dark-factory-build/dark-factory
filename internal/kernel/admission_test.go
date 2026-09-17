@@ -69,6 +69,83 @@ func TestAdmitNextSelectsGlobalPriorityWithoutCallerNomination(t *testing.T) {
 	}
 }
 
+func TestAdmissionSerializesOnlyDeclaredConflictPaths(t *testing.T) {
+	ctx := context.Background()
+	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	secondAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 201), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 202), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 203), Title: "first", Priority: 2, ConflictPaths: []string{"internal/kernel/admission.go"}}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 204, nil), mustTime(t, 6)); err != nil || !admitted.Admitted() || admitted.Run.TaskID != first.ID {
+		t.Fatalf("first = %+v, %v", admitted, err)
+	}
+	blocked, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 205), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 206), Title: "same file", Priority: 3, ConflictPaths: []string{"internal/kernel/admission.go"}}, mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 207, nil), mustTime(t, 8)); err != nil || admitted.Admitted() || admitted.Reason != NoAdmissionNoEligibleWork {
+		t.Fatalf("overlap admission = %+v, %v", admitted, err)
+	}
+	if fresh, found, err := store.Task(ctx, blocked.ID); err != nil || !found || fresh.Status != TaskQueued {
+		t.Fatalf("blocked task = %+v, %t, %v", fresh, found, err)
+	}
+}
+
+func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
+	ctx := context.Background()
+	store, _, project, producerAgent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 215), ProjectID: project.ID, Name: "consumer", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 216), ProjectID: project.ID, AssignedAgentID: producerAgent.ID, IncarnationID: incarnationID(t, 217), Title: "producer"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 218), ProjectID: project.ID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 219), Title: "consumer", Priority: 9, Prerequisites: []TaskPrerequisite{{TaskID: producer.ID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 220, nil), mustTime(t, 7)); err != nil || !admitted.Admitted() || admitted.Run.TaskID != producer.ID {
+		t.Fatalf("producer admission = %+v, %v", admitted, err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 221, nil), mustTime(t, 8)); err != nil || admitted.Admitted() || admitted.Reason != NoAdmissionNoEligibleWork {
+		t.Fatalf("consumer admitted without result = %+v, %v", admitted, err)
+	}
+	if task, found, err := store.Task(ctx, consumer.ID); err != nil || !found || task.Status != TaskQueued {
+		t.Fatalf("consumer state = %+v, %t, %v", task, found, err)
+	}
+}
+
+func TestAdmissionAllowsIndependentConflictPathsInParallel(t *testing.T) {
+	ctx := context.Background()
+	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	secondAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 208), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 209), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 210), Title: "first", ConflictPaths: []string{"a.go"}}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdmitNext(ctx, admissionKeys(t, 211, nil), mustTime(t, 6)); err != nil {
+		t.Fatal(err)
+	}
+	independent, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 212), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 213), Title: "second", ConflictPaths: []string{"b.go"}}, mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 220, nil), mustTime(t, 8)); err != nil || !admitted.Admitted() || admitted.Run.TaskID != independent.ID {
+		t.Fatalf("independent admission = %+v, %v", admitted, err)
+	}
+}
+
 func TestAdmitNextUsesSeparateWorkerAndOverseerSlots(t *testing.T) {
 	ctx := context.Background()
 	store, _, project, worker := newAdmissionStore(t, RoleWorker, 1)

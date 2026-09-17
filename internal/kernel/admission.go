@@ -65,6 +65,8 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			  AND a.tool_calls_used < a.tool_budget_limit
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
+			  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND NOT EXISTS (SELECT 1 FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded' WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision))
+			  AND NOT EXISTS (SELECT 1 FROM task_conflict_paths AS candidate_path JOIN task_conflict_paths AS active_path ON active_path.path = candidate_path.path JOIN tasks AS active ON active.id = active_path.task_id WHERE candidate_path.task_id = t.id AND active.project_id = t.project_id AND active.status = 'running')
 			  AND NOT (t.body LIKE 'review handoff %' AND (a.provider <> 'codex' OR a.role <> 'worker'))
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') < ?)
 			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND phase <> 'terminal') < 1))
@@ -207,6 +209,10 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		keys.AttemptDigest.Bytes(), keys.ResultProofDigest.bytes(), at.Int64(), at.Int64())
 	if err != nil {
 		return AdmissionResult{}, tx.Rollback(classifyAdmissionConflict(ctx, tx.connection, keys, err))
+	}
+	_, err = tx.connection.ExecContext(ctx, `UPDATE task_prerequisites AS prerequisite SET consumed_run_id = (SELECT source_run.id FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded' WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision) WHERE prerequisite.task_id = ? AND consumed_run_id IS NULL`, task.ID.Bytes())
+	if err != nil {
+		return AdmissionResult{}, tx.Rollback(err)
 	}
 	updated, updateErr := tx.connection.ExecContext(ctx, `UPDATE projects SET runs_used = runs_used + 1, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ? AND (run_budget_limit = 0 OR runs_used < run_budget_limit)`, at.Int64(), project.ID.Bytes(), project.Revision.Int64())
 	if err := requireOneRow(updated, updateErr); err != nil {

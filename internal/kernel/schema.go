@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 14
+	userVersion   = 15
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -110,6 +110,9 @@ var schemaStatements = []string{
 	`CREATE UNIQUE INDEX tasks_id_project_incarnation_unique ON tasks(id, project_id, incarnation_id)`,
 	`CREATE UNIQUE INDEX tasks_incarnation_unique ON tasks(incarnation_id)`,
 	`CREATE INDEX tasks_canonical_queue ON tasks(status, priority DESC, created_at_ms ASC, id ASC)`,
+	`CREATE TABLE task_prerequisites (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), upstream_task_id BLOB NOT NULL CHECK (length(upstream_task_id) = 16) REFERENCES tasks(id), upstream_work_revision INTEGER NOT NULL CHECK (upstream_work_revision >= 1), consumed_run_id BLOB CHECK (consumed_run_id IS NULL OR length(consumed_run_id) = 16) REFERENCES runs(id), PRIMARY KEY (task_id, upstream_task_id), CHECK (task_id <> upstream_task_id)) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX task_prerequisites_upstream ON task_prerequisites(upstream_task_id, upstream_work_revision)`,
+	`CREATE TABLE task_conflict_paths (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), path TEXT NOT NULL CHECK (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) <> '/' AND instr(path, char(0)) = 0), PRIMARY KEY (task_id, path)) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE changes (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
