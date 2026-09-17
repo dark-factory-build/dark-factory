@@ -202,6 +202,31 @@ func TestSettleRunReadsTheWorktreeHeadWhileTheClockAdvances(t *testing.T) {
 	}
 }
 
+func TestSuccessfulWorkerOutcomeRefusesDirtySourceUntilCorrection(t *testing.T) {
+	fixture := newRecoveryFixtureWithRole(t, 0x6e, kernel.RoleWorker)
+	ctx := context.Background()
+	_, path := fixture.settlementWorktree(t)
+	success, err := kernel.NewSuccessProposal("done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}
+	if err := fixture.daemon.validateSuccessSource(ctx, live, success); err != nil {
+		t.Fatalf("clean no-change success refused: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "uncommitted.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.daemon.validateSuccessSource(ctx, live, success); !errors.Is(err, errDirtyWorkerChange) || !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("dirty success refusal = %v", err)
+	}
+	settlementGit(t, change.TrustedGitExecutable, path, "add", "uncommitted.txt")
+	settlementGit(t, change.TrustedGitExecutable, path, "commit", "-q", "-m", "corrected")
+	if err := fixture.daemon.validateSuccessSource(ctx, live, success); err != nil {
+		t.Fatalf("corrected success refused: %v", err)
+	}
+}
+
 func TestSettleRunAbandonsUnpublishedWorkerChange(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x70, kernel.RoleWorker)
 	fixture.failBeforeRuntime(t)
