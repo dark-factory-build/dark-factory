@@ -71,6 +71,9 @@ const (
 	CallContentAttach
 	CallContentEvidenceList
 	CallContentAttachments
+	CallOutcomeWrite
+	CallOutcomeRead
+	CallOutcomeList
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -124,6 +127,9 @@ type Call struct {
 	contentAttach       ContentAttachInput
 	contentEvidenceList ContentEvidenceListInput
 	contentAttachments  ContentAttachmentsInput
+	outcomeWrite        OutcomeWriteInput
+	outcomeRead         OutcomeReadInput
+	outcomeList         OutcomeListInput
 	webClient           WebClientRevocationInput
 	webAfter            string
 	expectedRevision    uint64
@@ -148,7 +154,7 @@ func (call Call) AttemptDigest() (AttemptDigest, bool) {
 		return AttemptDigest{}, false
 	}
 	switch call.kind {
-	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments:
+	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -299,6 +305,15 @@ func (call Call) ContentEvidenceListInput() (ContentEvidenceListInput, bool) {
 }
 func (call Call) ContentAttachmentsInput() (ContentAttachmentsInput, bool) {
 	return call.contentAttachments, call.kind == CallContentAttachments
+}
+func (call Call) OutcomeWriteInput() (OutcomeWriteInput, bool) {
+	return call.outcomeWrite, call.kind == CallOutcomeWrite
+}
+func (call Call) OutcomeReadInput() (OutcomeReadInput, bool) {
+	return call.outcomeRead, call.kind == CallOutcomeRead
+}
+func (call Call) OutcomeListInput() (OutcomeListInput, bool) {
+	return call.outcomeList, call.kind == CallOutcomeList
 }
 
 type replyKind uint8
@@ -915,6 +930,21 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.contentAttachments); err != nil || !validText(call.contentAttachments.ProjectID, 0, 64) || !validText(call.contentAttachments.TaskID, 0, 64) || call.contentAttachments.TaskWorkRevision == 0 || call.contentAttachments.ProjectID == "" && call.contentAttachments.TaskID == "" {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallOutcomeWrite:
+		if err := decodeExact(request.Params, &call.outcomeWrite); err != nil || !validText(call.outcomeWrite.ID, 1, 64) || !validText(call.outcomeWrite.ProjectID, 1, 64) {
+			return Call{}, RemoteInvalidRequest
+		}
+		if _, err := call.outcomeWrite.Document.MarshalBounded(); err != nil {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallOutcomeRead:
+		if err := decodeExact(request.Params, &call.outcomeRead); err != nil || !validText(call.outcomeRead.ID, 1, 64) || !validText(call.outcomeRead.ProjectID, 1, 64) {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallOutcomeList:
+		if err := decodeExact(request.Params, &call.outcomeList); err != nil || !validText(call.outcomeList.ProjectID, 1, 64) || call.outcomeList.Limit > MaxContentPageItems {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallHumanReply:
 		if err := decodeExact(request.Params, &call.humanReply); err != nil || !validID(call.humanReply.OperationID) || !validID(call.humanReply.RequestID) || call.humanReply.ExpectedRevision == 0 || !validText(call.humanReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
@@ -1062,6 +1092,18 @@ func methodKind(method string) (CallKind, byte) {
 		return CallContentEvidenceList, attemptDomain
 	case "attempt_content_attachments":
 		return CallContentAttachments, attemptDomain
+	case "outcome_write":
+		return CallOutcomeWrite, operatorDomain
+	case "outcome_read":
+		return CallOutcomeRead, operatorDomain
+	case "outcome_list":
+		return CallOutcomeList, operatorDomain
+	case "attempt_outcome_write":
+		return CallOutcomeWrite, attemptDomain
+	case "attempt_outcome_read":
+		return CallOutcomeRead, attemptDomain
+	case "attempt_outcome_list":
+		return CallOutcomeList, attemptDomain
 	case "human_requests":
 		return CallHumanRequests, operatorDomain
 	case "human_reply":
@@ -1156,7 +1198,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebRevoke
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus
-	case CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments:
+	case CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
 		return reply == replyContent || reply == replyMutation
 	default:
 		return false
