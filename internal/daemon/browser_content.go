@@ -114,7 +114,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if item.ProjectID != project {
 			return result, browser.ErrUnauthorized
 		}
-		page, e := backend.store.ReadContentBody(ctx, id, rev.Int64(), int(input.Offset), int(input.Limit))
+		page, e := backend.store.ReadContentBody(ctx, id, int(rev.Int64()), int(input.Offset), int(input.Limit))
 		if e != nil {
 			return result, mapBrowserError(e)
 		}
