@@ -331,7 +331,10 @@ revision once, and `git worktree add` checks out that exact commit. A
 concurrent attempt in the same repository contends only for Git's own locks.
 
 A retained legacy worktree is converted only during a later quiescent
-population. A native local bare clone without hardlinks retains all objects,
+population: no provider or host Git/source writer may edit that same Change
+during conversion. The branch/index locks do not freeze every Git operation's
+metadata. Unrelated project refs can still change; migration never rewrites them.
+A native local bare clone without hardlinks retains all objects,
 including dangling operation-state objects; copied
 per-worktree administration preserves the index, split-index and operation
 state. A durable preparation precedes the atomic Gitfile replacement. Original
