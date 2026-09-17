@@ -1348,6 +1348,10 @@ func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, cont
 	if len(contexts) == 0 {
 		return task
 	}
+	limit := runner.MaxProviderTaskBytes
+	if kind == kernel.ProviderCodex {
+		limit = runner.MaxCodexTaskBytes
+	}
 	var builder strings.Builder
 	builder.Grow(len(task) + len(contexts)*128)
 	builder.Write(task)
@@ -1371,10 +1375,32 @@ func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, cont
 		builder.WriteString(" context_digest=")
 		builder.WriteString(hex.EncodeToString(continuation.ContextDigest[:]))
 		builder.WriteString(" resolution=")
-		builder.WriteString(continuation.ResolutionDetail)
+		resolution := continuation.ResolutionDetail
+		if builder.Len()+len(resolution)+1 > limit {
+			remaining := limit - builder.Len() - 1
+			if remaining < 0 {
+				remaining = 0
+			}
+			resolution = truncateUTF8(resolution, remaining)
+		}
+		builder.WriteString(resolution)
 		builder.WriteByte('\n')
+		if builder.Len() >= limit {
+			break
+		}
 	}
 	return []byte(builder.String())
+}
+
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func kernelAttemptResult(record *runner.AttemptResultRecord, runID kernel.RunID, attemptDigest kernel.AttemptDigest, runtimeIdentity kernel.ResourceIdentity) (kernel.AttemptResult, error) {

@@ -564,7 +564,7 @@ func (store *Store) ResolveHumanContinuationForBrowser(ctx context.Context, clie
 }
 
 func resolveHumanContinuationOnConnection(ctx context.Context, tx *writeTx, request HumanRequest, continuation Continuation, reply string, at UnixMillis) error {
-	updated, err := tx.connection.ExecContext(ctx, `UPDATE human_requests SET status='resolved', resolution_kind='reply', closed_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND status='open' AND revision=?`, at.Int64(), at.Int64(), request.ID.Bytes(), request.Revision.Int64())
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE human_requests SET status='resolved', delivery_id=?, delivery_started_at_ms=?, resolution_kind='reply', closed_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND status='open' AND revision=?`, continuation.ID.Bytes(), at.Int64(), at.Int64(), at.Int64(), request.ID.Bytes(), request.Revision.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return err
 	}

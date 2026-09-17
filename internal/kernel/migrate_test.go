@@ -17,7 +17,7 @@ import (
 )
 
 func TestLegacyHomeMigratesAndKeepsEveryRow(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion, v14UserVersion} {
 		for _, persistWAL := range []bool{false, true} {
 			t.Run(fmt.Sprintf("v%d/wal=%v", version, persistWAL), func(t *testing.T) {
 				testLegacyHomeMigratesAndKeepsEveryRow(t, version, persistWAL)
@@ -350,9 +350,11 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 	}
 	// Every version before v14 bound a Git-free tree by its manifest facts,
 	// which a prepared, available or retained row had to carry.
-	if err := rebuildTable(ctx, connection, legacy, "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
-		"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
-		t.Fatal(err)
+	if version < v14UserVersion {
+		if err := rebuildTable(ctx, connection, legacy, "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
+			"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if version < priorUserVersion {
 		if err := rebuildTable(ctx, connection, legacy, "browser_pairing_challenges", previousPairingChallengeColumns, "", "", ""); err != nil {
@@ -386,7 +388,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		}
 		downgrade = append([]string{"DROP TABLE accounts"}, downgrade...)
 	}
-	if version < v14UserVersion {
+	if version <= v14UserVersion {
 		downgrade = append([]string{"DROP INDEX continuations_admission_queue", "DROP INDEX continuations_one_waiting_per_condition", "DROP TABLE continuations"}, downgrade...)
 	}
 	for _, statement := range downgrade {
@@ -577,14 +579,15 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "13b447ce02d140896a5d11478ff46639dc573266baddcb12adbc8e482258c0e0"},
-		{"v13", v13SchemaStatements(), "4f42aef879d2c6d92fe359aafa6a75c8e3da0ff435d5b13c297084dfa67f0d71"},
-		{"v12", v12SchemaStatements(), "eee004e7c802185ec32a2a0524310b4b54e8c3f452f6466ae1afc7c8c3d52296"},
-		{"v11", v11SchemaStatements(), "1ebf46f2a7b7db33956058f487e47551abd959464dda9eb75e85e7536c2eba43"},
-		{"v10", v10SchemaStatements(), "0933e6e4bc9ae06065c7574dee18ddd346dcc704aa67a0e161b53f688dcfb823"},
-		{"v9", v9SchemaStatements(), "967aba7ddb89fc860b8cb4ec08e06aa6f6bf4ca9a43611e4d6125bd7dc2b8ed6"},
-		{"v8", v8SchemaStatements(), "04c6290c0f1f887007a52bc57d135c1c62078e900bec6b47c400fc5909ef87b9"},
-		{"v7", v7SchemaStatements(), "438d5593765900d93f57f8dcc27876b013b4d23f2c54ef31a41c4100017821bd"},
+		{"current", schemaStatements, "a8acb61b736fb55137deca2d6732d8728a5a068ac438cc90766092ee77e5441d"},
+		{"v14", v14SchemaStatements(), "bca926ea31711c01597f7586e914e2efe334718d38a7aa73832c8c417e694ecd"},
+		{"v13", v13SchemaStatements(), "c7b3eec30efa6f0d7873e00fafdf760060e8a16ce7a24c4db20d1f7f1a0534cc"},
+		{"v12", v12SchemaStatements(), "6c461aeecbd2c5f1097cb0c2e0f2130f03b99547c780eaf389571950732164d2"},
+		{"v11", v11SchemaStatements(), "2db4354a813266a4393fa4f80dc654cceaa5ab3e7c7890650241117a5a9e1ef0"},
+		{"v10", v10SchemaStatements(), "fa05d3b574c3fa2b4c7b2336397d47adbdf6cc34f42573d9e1e13de4253640f2"},
+		{"v9", v9SchemaStatements(), "d7f27dc3e80c5ea09cae00e66c2d1f31e87ed548b0ccdc45aff5adab8b1acf8f"},
+		{"v8", v8SchemaStatements(), "73bb25da84c457ac4172bffdeb3484cc393429b624ff9118435d8f2f6b38b8f4"},
+		{"v7", v7SchemaStatements(), "5fbc7d980b42d50617be8bfe04e5ed3e859363ca565bb27801a712932be3c848"},
 		{"v6", v6SchemaStatements(), "4063acf5233e3aaf29fe932259283622df543733b56a7e78a359bd73ce85da8c"},
 		{"v4", v4SchemaStatements(), "6eb8be2af2f3efc8ed7d40ecf9bd1ec316675e39ad11fb8b0827a228e9232cf1"},
 		{"v3", priorSchemaStatements(), "2d5319a0afce6206d963631465833bc5f25d0f2261537f4f33c92a8e38a36009"},
