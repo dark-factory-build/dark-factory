@@ -157,7 +157,11 @@ subcommand), so a Codex worker or orchestrator launch instead discovers an
 already-recorded session and resumes it with a leading `codex resume
 SESSION_ID` (all of it added before the same `-c` overrides the launch always
 carries; `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` accepts every one of
-them identically to bare `codex`, confirmed from its own `--help`). Codex's
+them identically to bare `codex`, confirmed from its own `--help`). Every
+launch also carries the supported `tui.resume_cwd="current"` override. This
+binds an explicit resume to the current daemon-authorized attempt directory,
+so a session recorded by an earlier runtime cannot stop at Codex's interactive
+working-directory chooser. Codex's
 own rollout files live under `CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`,
 bucketed by wall-clock date rather than launch directory; each one's first
 JSON line records `payload.cwd` and `payload.id` (the resumable session id;

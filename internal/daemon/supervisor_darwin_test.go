@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -259,6 +260,9 @@ func runSupervisorCodexFixture() error {
 	resumedFrom := ""
 	if len(os.Args) > 2 && os.Args[1] == "resume" {
 		resumedFrom = os.Args[2]
+		if !slices.Contains(os.Args, `tui.resume_cwd="current"`) {
+			return errors.New("resumed Codex launch did not select its current authorized cwd")
+		}
 	}
 	if codexHome, cwd := os.Getenv("CODEX_HOME"), func() string { path, _ := os.Getwd(); return path }(); codexHome != "" && cwd != "" {
 		day := filepath.Join(codexHome, "sessions", time.Now().UTC().Format("2006/01/02"))
