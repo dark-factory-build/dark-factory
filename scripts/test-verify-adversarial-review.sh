@@ -91,15 +91,35 @@ expect_fail 'allow whose rendered head is a different commit'
 record "$head" COMMENTED "$app" "Three findings. Dark-Factory-Review: note $head" >"$reviews"
 expect_fail 'note is not an allow'
 
-# A blocking verdict blocks even when an ALLOW also stands at the same head,
-# so a second opinion can never launder the first one away. Clearing it means
-# pushing a fix, which moves the head and orphans both.
+# A blocking verdict blocks even when a plain ALLOW also stands at the same
+# head, so an unrelated second opinion can never launder the first one away.
+# Clearing it means either pushing a fix, which moves the head and orphans
+# both, or an ALLOW that explicitly names and corrects this exact block
+# operation (below).
 {
     record "$head" COMMENTED "$app" "Dark-Factory-Review: allow $head"
     record "$head" COMMENTED "$app" "Reaps nothing on failure. Dark-Factory-Review: block $head"
 } >"$reviews"
 expect_fail 'block outranks a co-existing allow'
 assert_summary '**BLOCKED**'
+
+# A corrected metadata/body review may clear an erroneous same-head block only
+# by naming that block's exact App operation. A same-head ALLOW without the
+# correction binding remains blocked.
+block_operation=11111111-1111-4111-8111-111111111111
+correction_operation=22222222-2222-4222-8222-222222222222
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_pass 'an exact operation-bound review correction clears a same-head block'
+assert_summary '**ALLOWED**'
+
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head"
+} >"$reviews"
+expect_fail 'an unbound same-head allow cannot clear a block'
 
 # ...and clears only by pushing. A block belongs to the head it was recorded
 # against, so the fix that moves the head orphans it exactly as it orphans an
