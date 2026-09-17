@@ -28,7 +28,7 @@ func writeProviderConfig(t *testing.T, path, content string) {
 // is the only thing the resolver may derive a provider config path from.
 func accountDaemon(accountHome string) *Daemon {
 	daemon := &Daemon{now: time.Now}
-	daemon.rememberSupervisorAccount("", accountHome, change.TrustedGitExecutable)
+	daemon.RememberSupervisorAccount("", accountHome, change.TrustedGitExecutable)
 	return daemon
 }
 
@@ -151,7 +151,7 @@ func TestProviderDefaultsServeTheCachedReadWithinItsWindow(t *testing.T) {
 	writeProviderConfig(t, settings, `{"model":"first"}`)
 	now := time.Now()
 	daemon := &Daemon{now: func() time.Time { return now }}
-	daemon.rememberSupervisorAccount("", accountHome, change.TrustedGitExecutable)
+	daemon.RememberSupervisorAccount("", accountHome, change.TrustedGitExecutable)
 	if model, _, _ := daemon.providerAccountDefaults("claude_code", ""); model != "first" {
 		t.Fatalf("first read = %q", model)
 	}

@@ -120,7 +120,7 @@ func (fixture *recoveryFixture) settlementWorktree(t *testing.T) (kernel.Change,
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.daemon.rememberSupervisorAccount(fixture.changeParent, filepath.Join(root, "account"), git)
+	fixture.daemon.RememberSupervisorAccount(fixture.changeParent, filepath.Join(root, "account"), git)
 	return available, path
 }
 
@@ -149,6 +149,15 @@ func TestSettleRunReadsTheWorktreeHeadWhileTheClockAdvances(t *testing.T) {
 	settlementGit(t, change.TrustedGitExecutable, path, "commit", "-q", "-m", "made")
 	head := settlementGit(t, change.TrustedGitExecutable, path, "rev-parse", "HEAD")
 	fixture.failBeforeRuntime(t)
+	// Only a run that reached running had authority to move the branch
+	// (ARCHITECTURE.md); settlement refuses a moved head from a run that
+	// never ran. Record that this run did: the full resource-activation
+	// lifecycle that would set this durably is proven elsewhere, and this
+	// fixture drives settlement's own concurrency in isolation from it. The
+	// terminal session's own activation must agree, or the run's relationship
+	// read refuses it as corrupt before settlement is ever reached.
+	execSupervisorSQL(t, fixture.storePath, `UPDATE runs SET running_at_ms = 350 WHERE id = ?`, fixture.run.ID.Bytes())
+	execSupervisorSQL(t, fixture.storePath, `UPDATE terminal_sessions SET activated_at_ms = 350 WHERE run_id = ?`, fixture.run.ID.Bytes())
 	var clock atomic.Int64
 	clock.Store(500)
 	fixture.daemon.now = func() time.Time { return time.UnixMilli(clock.Load()) }
@@ -254,7 +263,7 @@ func TestSettleRunRetainsAGitFreeChangeWithoutAHead(t *testing.T) {
 	}
 	// As the v13 migration leaves a Change: base recorded, no head.
 	execSupervisorSQL(t, fixture.storePath, `UPDATE changes SET head_commit = NULL WHERE id = ?`, changeState.ID.Bytes())
-	fixture.daemon.rememberSupervisorAccount(fixture.changeParent, "", "/private/no-git-for-a-git-free-change")
+	fixture.daemon.RememberSupervisorAccount(fixture.changeParent, "", "/private/no-git-for-a-git-free-change")
 	fixture.failBeforeRuntime(t)
 	settled, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Code() != kernel.FailureSpawn {

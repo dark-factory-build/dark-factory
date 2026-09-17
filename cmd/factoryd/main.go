@@ -364,6 +364,10 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("daemon")
+	// A leftover finalizing worker run with an available Change needs the
+	// Git executable to settle its worktree; publish it before the sweep
+	// runs rather than waiting for the first admitted attempt to remember it.
+	owner.daemon.RememberSupervisorAccount(owner.supervisorSpec.ChangeParent, owner.supervisorSpec.AccountHome, owner.supervisorSpec.GitExecutable)
 	// The sweep runs to a quiet state before any listener opens so no client
 	// can act on unrecovered durable state. A run the sweep leaves unresolved
 	// is durable fail-closed residue, reported but never a boot refusal.

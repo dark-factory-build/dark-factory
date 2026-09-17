@@ -55,7 +55,7 @@ func TestRunPathsAnswersForALiveRunAndCachesTheWalk(t *testing.T) {
 	fixture.pair(t)
 	run := adapterRunningRoleRun(t, fixture.store, 0x70, kernel.RoleWorker)
 	changeParent := t.TempDir()
-	fixture.daemon.rememberSupervisorAccount(changeParent, "", change.TrustedGitExecutable)
+	fixture.daemon.RememberSupervisorAccount(changeParent, "", change.TrustedGitExecutable)
 	published, found, err := fixture.store.Change(ctx, *run.ChangeID)
 	if err != nil || !found {
 		t.Fatalf("published change: found=%v err=%v", found, err)
@@ -243,7 +243,7 @@ func TestRunPathsUsesOnlyCurrentOwnerAndIsolatesReplacementCache(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	run := adapterRunningRoleRun(t, fixture.store, 0x70, kernel.RoleWorker)
 	parent := t.TempDir()
-	fixture.daemon.rememberSupervisorAccount(parent, "", change.TrustedGitExecutable)
+	fixture.daemon.RememberSupervisorAccount(parent, "", change.TrustedGitExecutable)
 	root := filepath.Join(parent, run.ChangeID.String())
 	writeRunFile(t, root, "old/file.go", time.UnixMilli(run.RunningAt.Int64()+1))
 	check := func(want kernel.RunID, paths string) {
