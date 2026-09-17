@@ -32,7 +32,8 @@ process-sensitive tests through `./scripts/with-local-ci-lease.sh`.
 The complete local gate is the explicit full check above. It adds repository
 fixtures, process and lifecycle checks, and release/package fixtures. Fixed
 `./scripts/local-ci.sh --ui`, `--runtime`, and `--release` modes match those
-component boundaries. CI selects a mode from the complete merge-queue diff;
+component boundaries; the release mode also runs the routine source check.
+CI selects a mode from the complete merge-queue diff;
 uncertain or mixed changes use the full gate. The daemon is Darwin-only today,
 so the gate is macOS-only; Linux support is #120/#141-144. A focused `-race`
 check covers concurrency or ownership changes without imposing broad stress

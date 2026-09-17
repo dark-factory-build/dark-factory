@@ -236,12 +236,7 @@ if /bin/kill -0 "$signal_child_pid" 2>/dev/null; then
     fail "signal cleanup left child $signal_child_pid alive"
 fi
 [ -z "${go_gate_supervisor_pid-}" ] || fail "test supervisor PID was left stale"
-[ -x "$repository_root/scripts/go-ci.sh" ] || fail "official go-ci lost executable mode"
 [ -x "$repository_root/scripts/go-ci-owned.sh" ] || fail "owned go-ci body lost executable mode"
-grep -F '/usr/bin/dirname' "$repository_root/scripts/go-ci.sh" >/dev/null \
-    || fail "go-ci bootstrap uses ambient dirname"
-grep -F '. "$script_dir/local-ci-environment.sh"' "$repository_root/scripts/go-ci.sh" >/dev/null \
-    || fail "go-ci does not source the shared bootstrap"
 grep -F '/usr/bin/dirname' "$repository_root/scripts/local-ci.sh" >/dev/null \
     || fail "local-ci bootstrap uses ambient dirname"
 grep -F '. "$script_dir/local-ci-environment.sh"' "$repository_root/scripts/local-ci.sh" >/dev/null \
@@ -348,7 +343,7 @@ for local_child in \
     test-reinstall-service.sh test-deploy-site.sh test-cold-review.sh \
     test-github-step-summary.sh test-verify-adversarial-review.sh \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
-    test-local-ci-mode.sh test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
+    test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
     test-prepare-release-source.sh test-publish-release.sh test-package-release.sh \
     test-publication-parents.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
@@ -361,18 +356,19 @@ done
 
 run_local_fault() {
     local_mode=$1
+    local_gate_mode=${2---release}
     set +e
     local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
         DF_GATE_FAULT="$local_mode" \
         PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
-        /bin/sh ./scripts/local-ci.sh 2>&1)
+        /bin/sh ./scripts/local-ci.sh "$local_gate_mode" 2>&1)
     local_status=$?
     set -e
 }
 for local_fault in 'release:fixture release proof failure'; do
     local_mode=${local_fault%%:*}
     local_want=${local_fault#*:}
-    run_local_fault "$local_mode"
+    run_local_fault "$local_mode" --release
     [ "$local_status" -ne 0 ] || fail "failing $local_mode proof passed"
     printf '%s\n' "$local_output" | /usr/bin/grep -F "$local_want" >/dev/null \
         || fail "$local_mode failure was unclear: $local_output"
@@ -401,6 +397,20 @@ local_cache_root=$(sed -n '2p' "$local_fixture/cache-roots")
     || fail "local-ci let a PATH sibling replace the trusted Go tool"
 [ ! -s "$local_fixture/probe-env" ] \
     || fail "Node candidate probe saw inherited credentials"
+
+run_local_mode() {
+    selected_mode=$1
+    local_output=$(CDPATH= cd -- "$local_fixture" && DARK_FACTORY_LOCAL_CI_LEASE_HELD=1 \
+        PATH="$local_fixture/poison:/opt/homebrew/bin:/usr/bin:/bin" \
+        /bin/sh ./scripts/local-ci.sh "$selected_mode" 2>&1)
+    printf '%s\n' "$local_output" | /usr/bin/grep -F "local-ci: PASS (${selected_mode#--})" >/dev/null \
+        || fail "$selected_mode did not report its selected scope: $local_output"
+    if printf '%s\n' "$local_output" | /usr/bin/grep -F 'repository contract fixtures' >/dev/null; then
+        fail "$selected_mode unexpectedly ran the full repository fixtures"
+    fi
+}
+run_local_mode --runtime
+run_local_mode --release
 
 /bin/mkdir "$local_fixture/mismatch"
 /bin/cat >"$local_fixture/mismatch/node" <<'EOF'

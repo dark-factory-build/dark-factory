@@ -34,7 +34,7 @@ It includes repository and release fixtures, ordinary checks, and every
 process-sensitive Go and end-to-end check. Smaller fixed modes are available
 when their inputs are known: `./scripts/local-ci.sh --ui` runs the UI source
 and leased browser smoke checks, `--runtime` runs ordinary and process gates,
-and `--release` runs release and packaging fixtures. The selector in the
+and `--release` runs the source check plus release and packaging fixtures. The selector in the
 protected CI workflow chooses these modes from the complete merge-queue diff;
 uncertain or mixed paths use the full gate.
 
@@ -183,9 +183,10 @@ The local CI lease lives entirely in `dark-factory-local-ci` beneath the
 repository's canonical Git common directory. Workers receive that subtree
 through `DARK_FACTORY_LOCAL_CI_DIRECTORY`; use
 `scripts/with-local-ci-lease.sh <focused check>` to share the host gate. Full
-`local-ci.sh` holds the lease for its complete suite because repository and
-release fixtures can also use process state. The `--runtime` and `--ui` modes
-acquire it only around their process-sensitive checks.
+Full `local-ci.sh` and `--release` hold the lease for their complete suite
+because repository and release fixtures can also use process state. The
+`--runtime` and `--ui` modes acquire it only around their process-sensitive
+checks.
 If lease preparation is unavailable or refused, source work can still start with
 no lease grant and an explicit startup diagnostic; required CI remains blocked.
 
@@ -214,9 +215,8 @@ object and cannot create an independent gate. Never grant workers the enclosing
 To check an older exact host checkout after cutover without changing its source,
 run the current helper from that checkout:
 `/absolute/current/scripts/with-local-ci-lease.sh /bin/sh ./scripts/local-ci.sh`.
-The old entry preserves the held-lease marker and does not acquire a second gate.
-For its process gate, wrap `./scripts/go-ci-owned.sh` directly, not `go-ci.sh`
-(which always tries to acquire another lease).
+The process body is `./scripts/go-ci-owned.sh`; wrap it with the same helper for
+a focused process check.
 
 Native checks use the already-pinned `DARK_FACTORY_FACTORYCTL` binary for only
 same-user process birth and group identity because macOS's setuid `/bin/ps`

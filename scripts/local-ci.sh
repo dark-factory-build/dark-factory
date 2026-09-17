@@ -22,15 +22,16 @@ esac
 }
 . "$script_dir/local-ci-environment.sh"
 
-if [ "$local_ci_mode" = full ] && [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
-    exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh" --full
+if { [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; } \
+    && [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
+    exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh" "--$local_ci_mode"
 fi
 
 if [ "$local_ci_mode" = ui ]; then
     echo "local-ci: UI source and browser smoke gate"
     ./scripts/go-check.sh --ui
     "$script_dir/with-local-ci-lease.sh" ./scripts/go-browser-e2e.sh
-    echo "local-ci: PASS"
+    echo "local-ci: PASS (ui)"
     exit 0
 fi
 
@@ -55,7 +56,6 @@ if [ "$local_ci_mode" = full ]; then
     ./scripts/test-cloudflare-env.sh
     ./scripts/test-bootstrap-maintainer-v2.sh
     ./scripts/test-repository-settings.sh
-    ./scripts/test-local-ci-mode.sh
     /bin/sh ./scripts/test-go-gates.sh
 fi
 
@@ -74,8 +74,11 @@ fi
 
 if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; then
     echo "local-ci: release gate"
+    if [ "$local_ci_mode" = release ]; then
+        ./scripts/go-check.sh
+    fi
     ./scripts/test-prepare-release-source.sh
     ./scripts/test-publish-release.sh
     ./scripts/test-package-release.sh
 fi
-echo "local-ci: PASS"
+echo "local-ci: PASS ($local_ci_mode)"
