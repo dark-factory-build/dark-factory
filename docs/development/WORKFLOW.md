@@ -129,8 +129,10 @@ data/state remain local or temporary; `git clean -ffdx` still removes them.
 Actions restores only the reusable directories under `RUNNER_TEMP` using
 `actions/cache`, keyed by platform, actual Go version, Node version and dependency
 locks. Cache hits never skip checks. GitHub scopes saved caches by ref; a manual
-run on `main` can seed a cache available to subsequent merge-queue refs. Queue
-caches alone do not establish reuse across different queue refs.
+run on `main` with runner `macos-latest` seeds the matching hosted toolchain
+cache for subsequent merge-queue refs. The default manual runner remains
+`dark-factory-mac`; its Go patch version may differ. Queue caches alone do not
+establish reuse across different queue refs.
 
 Process-sensitive checks acquire one kernel-backed lease from the common Git
 directory, so linked worktrees cannot stack process-heavy Go runs. The routine

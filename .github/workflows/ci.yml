@@ -11,6 +11,12 @@ on:
   # persistent Mac. A conflict-free merge is not followed by a duplicate
   # full gate: the PR and merge-queue trees already supplied that evidence.
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Mac runner (hosted can seed the main-branch cache)
+        type: choice
+        default: dark-factory-mac
+        options: [dark-factory-mac, macos-latest]
 
 permissions:
   contents: read
@@ -153,7 +159,7 @@ jobs:
   checks:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
-    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || 'dark-factory-mac' }}
+    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
