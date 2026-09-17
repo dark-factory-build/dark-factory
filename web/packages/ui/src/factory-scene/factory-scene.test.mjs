@@ -713,6 +713,15 @@ test("pictured child bays use a side approach around shared work surfaces in eve
     assert.ok(route);
     clearOfContents(start, route, room);
     assertRouteGeometry(layout, start, route, `${sizeBucket} child bay`);
+    const returnRoute = routeBetween(layout, worker, { ...worker, area: "resting", roomId: undefined, x: start.x, y: start.y });
+    assert.ok(returnRoute);
+    clearOfContents(worker, returnRoute, room);
+    assertRouteGeometry(layout, worker, returnRoute, `${sizeBucket} child bay exit`);
+    const surface = room.contents.find((item) => item.workSurface);
+    const bench = { ...worker, bayId: undefined, x: surface.x + surface.width / 2, y: surface.y + surface.height + 8 };
+    const reassigned = routeBetween(layout, worker, bench);
+    assert.ok(reassigned);
+    clearOfContents(worker, reassigned, room);
   }
 });
 

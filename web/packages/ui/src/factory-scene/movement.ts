@@ -51,7 +51,7 @@ function leaveRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], from
   if (corridor === undefined) return undefined;
   const clear = laneY(corridor);
   return [
-    { x: room.door.x, y: from.y }, room.door,
+    ...roomApproach(room, from).slice().reverse(), room.door,
     { x: room.door.x, y: clear },
     { x: center, y: clear },
   ];
@@ -114,7 +114,8 @@ export function routeBetween(
   const source = from.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === from.roomId);
   const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
   if (from.area === "room" && source === undefined || to.area === "room" && destination === undefined) return undefined;
-  if (source !== undefined && source.id === destination?.id) return route([from, to]);
+  if (source !== undefined && source.id === destination?.id) return route([from,
+    ...roomApproach(source, from).slice().reverse(), source.door, ...roomApproach(source, to)]);
   const mainSpine = spine(layout);
   if (mainSpine === undefined) return undefined;
   const center = mainSpine.x + mainSpine.width / 2;
