@@ -344,6 +344,18 @@ func (attempt *liveAttempt) retainDiagnosticOutput(start, end uint64, payload []
 	attempt.diagnosticFloor = attempt.diagnosticHead - uint64(attempt.diagnosticLength)
 }
 
+func (attempt *liveAttempt) resetDiagnosticOutput(floor, head uint64) {
+	if attempt == nil || head < floor {
+		return
+	}
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	attempt.diagnosticOffset = 0
+	attempt.diagnosticLength = 0
+	attempt.diagnosticFloor = floor
+	attempt.diagnosticHead = head
+}
+
 func (attempt *liveAttempt) diagnosticSnapshot() (uint64, uint64, []byte) {
 	attempt.diagnosticMu.Lock()
 	defer attempt.diagnosticMu.Unlock()
