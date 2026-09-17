@@ -5,9 +5,12 @@ import (
 	"database/sql"
 )
 
-// TaskRecovery is the bounded operator read used by unattended controllers.
-// It is deliberately derived from the canonical task/run/Change rows; callers
-// never need to open the private SQLite database or reconstruct authority.
+// TaskRecovery is the operator read used by unattended controllers. It is
+// deliberately derived from the canonical task/run/Change rows; callers never
+// need to open the private SQLite database or reconstruct authority. The
+// reply is bounded to the latest run, MaxRecoveryResources artifacts, and a
+// truncated result; the run history behind it is validated in full, exactly
+// as the Task read does, however many retries the task has accumulated.
 type TaskRecovery struct {
 	Task                  Task
 	Incarnation           IncarnationID
@@ -33,7 +36,7 @@ func (store *Store) TaskRecovery(ctx context.Context, id TaskID, incarnation Inc
 	if task.IncarnationID != incarnation {
 		return TaskRecovery{}, false, nil
 	}
-	if err := validateTaskRunTopologyBounded(ctx, read.connection, task, MaxRecoveryRuns); err != nil {
+	if err := validateTaskRunTopology(ctx, read.connection, task); err != nil {
 		return TaskRecovery{}, false, err
 	}
 	var stale int

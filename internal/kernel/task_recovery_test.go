@@ -20,21 +20,81 @@ func TestTaskRecoveryRefusesResourceCountBeyondBound(t *testing.T) {
 	}
 }
 
-func TestTaskRecoveryRefusesTopologyBeyondBound(t *testing.T) {
-	store, terminal, retry := retryAdmittedWorker(t, 50, 60)
+// TestTaskRecoveryReadsHistoryBeyondSixtyFourRuns is the regression for the
+// retired 64-run recovery ceiling: a real manager task reached work revision
+// 65 and its operator recovery read failed while every other read still
+// worked. Recovery must keep working at any history depth, keep the exact
+// old/current run semantics, and still refuse a corrupted deep history.
+func TestTaskRecoveryReadsHistoryBeyondSixtyFourRuns(t *testing.T) {
+	const terminalRuns = 65
+	store, terminal, _ := terminalPreRunningWorker(t)
 	defer store.Close()
-	task, found, err := store.Task(context.Background(), terminal.TaskID)
+	failure, _ := NewFailureProposal(FailureInternal, "cleanup")
+	at := terminal.UpdatedAt.Int64()
+	for revision := 2; revision <= terminalRuns; revision++ {
+		at += 10
+		queueRetrySameAgent(t, store, terminal.TaskID, at)
+		admission, err := store.AdmitNext(context.Background(), historyKeys(t, revision), mustTime(t, at+1))
+		if err != nil || !admission.Admitted() {
+			t.Fatalf("revision %d admission = %+v, %v", revision, admission, err)
+		}
+		run := *admission.Run
+		runtime := resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		identity, _ := NewPathResourceIdentity(1000+int64(revision), 302)
+		if _, err := store.ActivateResource(context.Background(), run.ID, runtime.ID, runtime.Revision, identity, mustTime(t, at+2)); err != nil {
+			t.Fatal(err)
+		}
+		finalizing, err := store.FailRun(context.Background(), run.ID, run.Revision, failure, mustTime(t, at+3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime = resourceOfKind(t, resourcesForRunTest(t, store, run.ID), ResourceRuntimeRoot)
+		if _, err := store.ReleaseResource(context.Background(), run.ID, runtime.ID, runtime.Revision, runtime.Identity, mustTime(t, at+4)); err != nil {
+			t.Fatal(err)
+		}
+		settlement, _ := NewAbandonedChangeSettlement(*run.AdmittedChangeRevision)
+		terminal, err = store.FinalizeWorkerRun(context.Background(), run.ID, finalizing.Revision, settlement, mustTime(t, at+5))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if terminal.AdmittedTaskWorkRevision.Int64() != terminalRuns {
+		t.Fatalf("history depth = %d", terminal.AdmittedTaskWorkRevision.Int64())
+	}
+
+	// A queued retry beyond the old ceiling reads the predecessor as its run.
+	at += 10
+	queueRetrySameAgent(t, store, terminal.TaskID, at)
+	recovery, found, err := store.TaskRecovery(context.Background(), terminal.TaskID, terminal.TaskIncarnationID)
+	if err != nil || !found || recovery.Task.Status != TaskQueued || recovery.Task.WorkRevision.Int64() != terminalRuns+1 || recovery.Run == nil || recovery.Run.ID != terminal.ID || recovery.Run.AdmittedTaskWorkRevision.Int64() != terminalRuns {
+		t.Fatalf("queued retry recovery = %+v, found=%v, err=%v", recovery, found, err)
+	}
+
+	// The admitted retry becomes the current run at the same work revision.
+	admission, err := store.AdmitNext(context.Background(), historyKeys(t, terminalRuns+1), mustTime(t, at+1))
+	if err != nil || !admission.Admitted() {
+		t.Fatalf("current admission = %+v, %v", admission, err)
+	}
+	recovery, found, err = store.TaskRecovery(context.Background(), terminal.TaskID, terminal.TaskIncarnationID)
+	if err != nil || !found || recovery.Task.Status != TaskRunning || recovery.Run == nil || recovery.Run.ID != admission.Run.ID || recovery.Run.AdmittedTaskWorkRevision.Int64() != terminalRuns+1 || recovery.Task.WorkRevision != recovery.Run.AdmittedTaskWorkRevision {
+		t.Fatalf("current run recovery = %+v, found=%v, err=%v", recovery, found, err)
+	}
+
+	// Corruption past the old ceiling is still refused, not skipped.
+	corruptSQL(t, store, `DELETE FROM terminal_sessions WHERE run_id = ?`, terminal.ID.Bytes())
+	if _, found, err := store.TaskRecovery(context.Background(), terminal.TaskID, terminal.TaskIncarnationID); !errors.Is(err, ErrCorruptState) || found {
+		t.Fatalf("corrupted history recovery = found=%v, err=%v", found, err)
+	}
+}
+
+func queueRetrySameAgent(t *testing.T, store *Store, id TaskID, at int64) {
+	t.Helper()
+	task, found, err := store.Task(context.Background(), id)
 	if err != nil || !found {
 		t.Fatalf("task = %+v, found=%v, err=%v", task, found, err)
 	}
-
-	read, err := store.beginRead(context.Background())
-	if err != nil {
+	if _, err := store.SendBackTask(context.Background(), id, task.Revision, "again", mustTime(t, at)); err != nil {
 		t.Fatal(err)
-	}
-	defer read.Close()
-	if err := validateTaskRunTopologyBounded(context.Background(), read.connection, task, 1); !errors.Is(err, ErrRecoveryBounds) {
-		t.Fatalf("bounded topology error = %v (retry=%s)", err, retry.ID)
 	}
 }
 

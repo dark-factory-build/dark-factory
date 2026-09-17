@@ -12,7 +12,6 @@ const (
 	EventRetentionLimit  = 4096
 	SnapshotEntityLimit  = 4096
 	MaxFactoryCapacity   = 1024
-	MaxRecoveryRuns      = 64
 	MaxRecoveryResources = 16
 )
 
