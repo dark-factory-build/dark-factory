@@ -24,10 +24,12 @@ changed risk. Process-sensitive tests must use
 `./scripts/with-local-ci-lease.sh`; this keeps one heavy process run on the
 Mac without making source checks wait. Use `./scripts/local-ci.sh --ui`,
 `--runtime`, or `--release` when working across that component boundary.
-Run the explicit `./scripts/local-ci.sh` full gate for CI changes or when the
-scope is mixed or uncertain. Before review, record the exact head and checks
-run. An independent reviewer reproduces relevant risks, while the protected
-merge queue runs the selected gates against the complete combined tree.
+For CI changes, run the affected gate fixtures and source checks; use the
+explicit `./scripts/local-ci.sh` full gate when the risk needs broad local
+integration proof. Before review, record the exact head and checks run.
+An independent reviewer reproduces relevant risks. Do not repeat the full
+suite automatically for each edit, reviewer, or enqueue: the protected merge
+queue checks the actual combined tree, widening mixed or uncertain inputs.
 
 ## Writing code: the ponytail ladder
 

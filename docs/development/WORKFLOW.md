@@ -24,7 +24,7 @@ It runs Go formatting, vetting, ordinary short tests, the TypeScript build and
 tests, and `git diff --check`. It does not acquire the process lease. During
 implementation, run this check plus focused tests for the changed package.
 
-The full local gate is an explicit pre-merge or CI change check:
+The full local gate is available when broad local integration proof is needed:
 
 ```sh
 ./scripts/local-ci.sh
@@ -37,6 +37,10 @@ and leased browser smoke checks, `--runtime` runs ordinary and process gates,
 and `--release` runs the source check plus release and packaging fixtures. The selector in the
 protected CI workflow chooses these modes from the complete merge-queue diff;
 uncertain or mixed paths use the full gate.
+
+For CI edits, run the affected gate fixtures and source checks, adding a full
+local run where that resolves a concrete risk. Authors and reviewers do not
+repeat the entire suite merely because a PR is about to enter the queue.
 
 Additional checks follow changed risk. Process-sensitive checks share the
 repository lease:

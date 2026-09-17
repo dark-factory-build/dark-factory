@@ -30,7 +30,11 @@ fi
 if [ "$local_ci_mode" = ui ]; then
     echo "local-ci: UI source and browser smoke gate"
     ./scripts/go-check.sh --ui
-    "$script_dir/with-local-ci-lease.sh" ./scripts/go-browser-e2e.sh
+    if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then
+        ./scripts/go-browser-e2e.sh
+    else
+        "$script_dir/with-local-ci-lease.sh" ./scripts/go-browser-e2e.sh
+    fi
     echo "local-ci: PASS (ui)"
     exit 0
 fi

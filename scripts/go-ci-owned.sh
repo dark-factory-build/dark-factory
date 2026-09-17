@@ -35,7 +35,8 @@ go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/daemon
 
 echo "go-ci: process-sensitive Go tests"
 set --
-for package in $(go list ./...); do
+packages=$(go list ./...)
+for package in $packages; do
     case "$package" in
         github.com/dark-factory-build/dark-factory/cmd/cloudflare-admin|\
         github.com/dark-factory-build/dark-factory/internal/browserprotocol|\
