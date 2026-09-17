@@ -257,18 +257,20 @@ type liveAttempt struct {
 	controller *runner.AttemptController
 	// sourceOps counts explicit source requests in flight for this attempt,
 	// so shutdown refuses new ones and waits for admitted ones to finish.
-	sourceOpsMu        sync.Mutex
-	sourceOpsDone      chan struct{}
-	sourceCloseStarted chan struct{}
-	sourceOps          int
-	sourceClosing      bool
-	attemptDigest      kernel.AttemptDigest
-	diagnosticMu       sync.Mutex
-	diagnosticPayload  [kernel.MaxTerminalDiagnosticsBytes]byte
-	diagnosticOffset   int
-	diagnosticLength   int
-	diagnosticFloor    uint64
-	diagnosticHead     uint64
+	sourceOpsMu                 sync.Mutex
+	sourceOpsDone               chan struct{}
+	sourceCloseStarted          chan struct{}
+	sourceOps                   int
+	sourceClosing               bool
+	attemptDigest               kernel.AttemptDigest
+	diagnosticMu                sync.Mutex
+	diagnosticPayload           [kernel.MaxTerminalDiagnosticsBytes]byte
+	diagnosticOffset            int
+	diagnosticLength            int
+	diagnosticFloor             uint64
+	diagnosticHead              uint64
+	diagnosticReplayCorrelation uint64
+	diagnosticReplayHead        uint64
 
 	commands chan liveAttemptCommand
 	wake     chan struct{}

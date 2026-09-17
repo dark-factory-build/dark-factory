@@ -683,6 +683,19 @@ func (attempt *liveAttempt) handleRunnerEvent(event runner.AttemptEvent) (bool, 
 			return false, runner.ErrState
 		}
 		attempt.readySeen = true
+		correlation, err := attempt.nextCorrelation()
+		if err != nil {
+			return false, err
+		}
+		attempt.diagnosticReplayCorrelation = correlation
+		attempt.lastCorrelation = correlation
+		attempt.diagnosticReplayHead = event.Head
+		if err := attempt.controller.SendTerminalCommand(runner.TerminalCommand{Kind: runner.TerminalAttach, Correlation: correlation, Sequence: event.Floor}); err != nil {
+			return false, err
+		}
+		if err := attempt.addCredit(liveAttemptCredit); err != nil {
+			return false, err
+		}
 		return false, nil
 	case runner.AttemptTerminalFrame:
 		if event.Frame == nil {
@@ -717,7 +730,12 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 	case runner.TerminalAttached:
 		return attempt.routeAttached(frame)
 	case runner.TerminalOutput:
-		if frame.Correlation == 0 {
+		if attempt.diagnosticReplayCorrelation != 0 && frame.Correlation == attempt.diagnosticReplayCorrelation {
+			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
+			if frame.End >= attempt.diagnosticReplayHead {
+				attempt.diagnosticReplayCorrelation = 0
+			}
+		} else if frame.Correlation == 0 {
 			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
 			for subscriber := range attempt.subs {
 				attempt.routeLive(subscriber, frame)
@@ -729,6 +747,11 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 		}
 		return attempt.replenishCredit(uint64(len(frame.Payload)))
 	case runner.TerminalReset:
+		if attempt.diagnosticReplayCorrelation != 0 && frame.Correlation == attempt.diagnosticReplayCorrelation {
+			attempt.resetDiagnosticOutput(frame.Floor, frame.Head)
+			attempt.diagnosticReplayCorrelation = 0
+			return nil
+		}
 		if frame.Correlation == 0 {
 			attempt.resetDiagnosticOutput(frame.Floor, frame.Head)
 			for subscriber := range attempt.subs {
@@ -760,6 +783,18 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 }
 
 func (attempt *liveAttempt) routeAttached(frame runner.TerminalFrame) error {
+	if attempt.diagnosticReplayCorrelation != 0 && frame.Correlation == attempt.diagnosticReplayCorrelation {
+		if frame.Status == runner.TerminalResultRejected {
+			attempt.resetDiagnosticOutput(frame.Floor, frame.Head)
+			attempt.diagnosticReplayCorrelation = 0
+			return nil
+		}
+		attempt.diagnosticReplayHead = frame.Head
+		if frame.Sequence == frame.Head {
+			attempt.diagnosticReplayCorrelation = 0
+		}
+		return nil
+	}
 	subscriber := attempt.correlations[frame.Correlation]
 	if subscriber == nil {
 		if frame.Correlation <= attempt.lastCorrelation {
