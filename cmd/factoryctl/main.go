@@ -106,6 +106,9 @@ const (
   factoryctl service uninstall --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl --version
   factoryctl --build-identity
+  factoryctl outcome write --id ID --project ID [--revision N] --document JSON|--document-file PATH
+  factoryctl outcome read --project ID --id ID [--revision N]
+  factoryctl outcome list --project ID [--offset N] [--limit N]
 `
 )
 
@@ -171,6 +174,9 @@ const (
 	commandContentAttach
 	commandContentEvidenceList
 	commandContentAttachments
+	commandOutcomeWrite
+	commandOutcomeRead
+	commandOutcomeList
 )
 
 type attemptCommand struct {
@@ -232,6 +238,8 @@ type attemptCommand struct {
 	contentResult    string
 	location         string
 	judgment         string
+	document         string
+	documentFile     string
 	prerequisites    []api.TaskPrerequisiteInput
 	conflictPaths    []string
 }
@@ -311,6 +319,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
+	if command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList && len(args) > 0 && args[0] == "outcome" {
+		return runOperator(ctx, command, getenv, stdout, stderr)
+	}
 	if command.kind >= commandOverseerStatus && command.kind <= commandOverseerReplyHuman {
 		return runOverseer(ctx, command, getenv, stdout, stderr)
 	}
@@ -380,6 +391,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments {
 		return runContent(callContext, client, command, stdout, stderr)
+	}
+	if command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList {
+		return runOutcome(callContext, client, command, stdout, stderr)
 	}
 	var result api.MutationResult
 	switch command.kind {
@@ -523,7 +537,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 1 && args[0] == "service" {
 		return parseServiceCommand(args)
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "content" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -569,6 +583,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if args[1] == "content" {
 		return parseContent(args)
+	}
+	if args[1] == "outcome" {
+		return parseOutcome(args)
 	}
 	switch args[1] {
 	case "task":
@@ -787,7 +804,7 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 			}
 			command.contentRevision = n
 		case "--offset":
-			n, ok := parseRevision(value)
+			n, ok := parseOffset(value)
 			if !ok {
 				return attemptCommand{}, false, false
 			}
@@ -909,7 +926,7 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandContentAttachments:
-		if command.contentRevision == 0 || (command.project == "" || (start == 0 && command.id == "")) {
+		if command.contentRevision == 0 || (start == 0 && (command.project == "" || command.id == "")) {
 			return attemptCommand{}, false, false
 		}
 	}
@@ -1219,6 +1236,9 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 2 && args[0] == "content" {
 		return parseContent(args)
+	}
+	if len(args) >= 2 && args[0] == "outcome" {
+		return parseOutcome(args)
 	}
 	if len(args) == 1 && args[0] == "status" {
 		return attemptCommand{kind: commandStatus}, false, true
@@ -1721,6 +1741,13 @@ func parseRevision(value string) (uint64, bool) {
 	return parsed, err == nil && parsed > 0 && parsed <= uint64(^uint64(0)>>1)
 }
 
+func parseOffset(value string) (uint64, bool) {
+	if value == "0" {
+		return 0, true
+	}
+	return parseRevision(value)
+}
+
 func parseOverseerOffset(value string, allowZero bool) (uint64, bool) {
 	if value == "" || len(value) > 19 || value[0] == '0' && (len(value) > 1 || !allowZero) {
 		return 0, false
@@ -1828,6 +1855,9 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	defer cancel()
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments {
 		return runContent(callContext, client, command, stdout, stderr)
+	}
+	if command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList {
+		return runOutcome(callContext, client, command, stdout, stderr)
 	}
 	switch command.kind {
 	case commandStatus:

@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 16
+	userVersion   = 17
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -113,6 +113,19 @@ var schemaStatements = []string{
 	`CREATE TABLE task_prerequisites (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), upstream_task_id BLOB NOT NULL CHECK (length(upstream_task_id) = 16) REFERENCES tasks(id), upstream_work_revision INTEGER NOT NULL CHECK (upstream_work_revision >= 1), consumed_run_id BLOB CHECK (consumed_run_id IS NULL OR length(consumed_run_id) = 16) REFERENCES runs(id), PRIMARY KEY (task_id, upstream_task_id), CHECK (task_id <> upstream_task_id)) STRICT, WITHOUT ROWID`,
 	`CREATE INDEX task_prerequisites_upstream ON task_prerequisites(upstream_task_id, upstream_work_revision)`,
 	`CREATE TABLE task_conflict_paths (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), path TEXT NOT NULL CHECK (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) <> '/' AND instr(path, char(0)) = 0), PRIMARY KEY (task_id, path)) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE project_outcome_revisions (
+    id BLOB NOT NULL CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    document TEXT NOT NULL CHECK (length(CAST(document AS BLOB)) BETWEEN 1 AND 32768),
+    author TEXT NOT NULL CHECK (length(CAST(author AS BLOB)) BETWEEN 1 AND 256),
+    authority TEXT NOT NULL CHECK (length(CAST(authority AS BLOB)) BETWEEN 1 AND 64),
+    objective_hash BLOB NOT NULL CHECK (length(objective_hash) = 32),
+    objective_work_revision INTEGER NOT NULL CHECK (objective_work_revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (id, revision)
+) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX project_outcome_revisions_project ON project_outcome_revisions(project_id, id, revision DESC)`,
 	`CREATE TABLE project_content_revisions (
     id BLOB NOT NULL CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
