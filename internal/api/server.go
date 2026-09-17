@@ -61,6 +61,16 @@ const (
 	CallOverseerReplyHuman
 	CallHumanRequests
 	CallHumanReply
+	CallContentCreate
+	CallContentRevise
+	CallContentDeprecate
+	CallContentList
+	CallContentRead
+	CallContentBody
+	CallContentEvidence
+	CallContentAttach
+	CallContentEvidenceList
+	CallContentAttachments
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -78,44 +88,53 @@ func digestAttemptCredential(bearer credential) AttemptDigest {
 // Call is an immutable decoded request. Only the accessor matching Kind
 // returns true.
 type Call struct {
-	terminalObserve    TerminalObserveInput
-	peerIncludeTargets bool
-	kind               CallKind
-	digest             AttemptDigest
-	project            CreateProjectInput
-	projectLimits      ProjectLimitsInput
-	agent              CreateAgentInput
-	agentIdlePolicy    AgentIdlePolicyInput
-	task               EnqueueTaskInput
-	humanQuestion      HumanQuestionInput
-	peerQuestion       PeerQuestionInput
-	peerAnswer         PeerAnswerInput
-	peerStatusOffset   uint64
-	peerTargetOffset   uint64
-	peerExpectedHead   uint64
-	sendBack           SendBackInput
-	taskRecovery       TaskRecoveryInput
-	overseerTask       OverseerTaskCreateInput
-	overseerSnapshot   OverseerSnapshotInput
-	overseerTaskEdit   OverseerTaskUpdateInput
-	overseerAgent      OverseerAgentUpdateInput
-	overseerRun        OverseerRunStopInput
-	overseerReplace    OverseerRunReplaceInput
-	overseerMessage    OverseerWorkerMessageInput
-	overseerInterrupt  OverseerWorkerInterruptInput
-	overseerReply      OverseerHumanReplyInput
-	humanReply         OverseerHumanReplyInput
-	webClient          WebClientRevocationInput
-	webAfter           string
-	expectedRevision   uint64
-	enabled            bool
-	capacity           uint16
-	account            AccountLinkInput
-	selection          AgentAccountSelectInput
-	accountsOffset     uint32
-	modelSelection     AgentModelSelectInput
-	text               string
-	sourceTaskID       string
+	attempt             bool
+	terminalObserve     TerminalObserveInput
+	peerIncludeTargets  bool
+	kind                CallKind
+	digest              AttemptDigest
+	project             CreateProjectInput
+	projectLimits       ProjectLimitsInput
+	agent               CreateAgentInput
+	agentIdlePolicy     AgentIdlePolicyInput
+	task                EnqueueTaskInput
+	humanQuestion       HumanQuestionInput
+	peerQuestion        PeerQuestionInput
+	peerAnswer          PeerAnswerInput
+	peerStatusOffset    uint64
+	peerTargetOffset    uint64
+	peerExpectedHead    uint64
+	sendBack            SendBackInput
+	taskRecovery        TaskRecoveryInput
+	overseerTask        OverseerTaskCreateInput
+	overseerSnapshot    OverseerSnapshotInput
+	overseerTaskEdit    OverseerTaskUpdateInput
+	overseerAgent       OverseerAgentUpdateInput
+	overseerRun         OverseerRunStopInput
+	overseerReplace     OverseerRunReplaceInput
+	overseerMessage     OverseerWorkerMessageInput
+	overseerInterrupt   OverseerWorkerInterruptInput
+	overseerReply       OverseerHumanReplyInput
+	humanReply          OverseerHumanReplyInput
+	content             ContentInput
+	contentList         ContentListInput
+	contentRead         ContentReadInput
+	contentBody         ContentBodyInput
+	contentEvidence     ContentEvidenceInput
+	contentAttach       ContentAttachInput
+	contentEvidenceList ContentEvidenceListInput
+	contentAttachments  ContentAttachmentsInput
+	webClient           WebClientRevocationInput
+	webAfter            string
+	expectedRevision    uint64
+	enabled             bool
+	capacity            uint16
+	account             AccountLinkInput
+	selection           AgentAccountSelectInput
+	accountsOffset      uint32
+	modelSelection      AgentModelSelectInput
+	text                string
+	sourceTaskID        string
 }
 
 func (call Call) Kind() CallKind { return call.kind }
@@ -125,8 +144,11 @@ func (call Call) GoString() string {
 }
 
 func (call Call) AttemptDigest() (AttemptDigest, bool) {
+	if !call.attempt {
+		return AttemptDigest{}, false
+	}
 	switch call.kind {
-	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
+	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -254,6 +276,30 @@ func (call Call) WebClientRevocationInput() (WebClientRevocationInput, bool) {
 func (call Call) WebListAfter() (string, bool) {
 	return call.webAfter, call.kind == CallWebListClients
 }
+func (call Call) ContentInput() (ContentInput, bool) {
+	return call.content, call.kind == CallContentCreate || call.kind == CallContentRevise || call.kind == CallContentDeprecate
+}
+func (call Call) ContentListInput() (ContentListInput, bool) {
+	return call.contentList, call.kind == CallContentList
+}
+func (call Call) ContentReadInput() (ContentReadInput, bool) {
+	return call.contentRead, call.kind == CallContentRead
+}
+func (call Call) ContentBodyInput() (ContentBodyInput, bool) {
+	return call.contentBody, call.kind == CallContentBody
+}
+func (call Call) ContentEvidenceInput() (ContentEvidenceInput, bool) {
+	return call.contentEvidence, call.kind == CallContentEvidence
+}
+func (call Call) ContentAttachInput() (ContentAttachInput, bool) {
+	return call.contentAttach, call.kind == CallContentAttach
+}
+func (call Call) ContentEvidenceListInput() (ContentEvidenceListInput, bool) {
+	return call.contentEvidenceList, call.kind == CallContentEvidenceList
+}
+func (call Call) ContentAttachmentsInput() (ContentAttachmentsInput, bool) {
+	return call.contentAttachments, call.kind == CallContentAttachments
+}
 
 type replyKind uint8
 
@@ -267,6 +313,7 @@ const (
 	replyWebClients
 	replyWebRevoke
 	replyRemoteStatus
+	replyContent
 	replyOverseerSnapshot
 	replyPeerStatus
 	replyTerminalObservation
@@ -291,6 +338,7 @@ type Reply struct {
 	remote              RemoteStatus
 	overseer            OverseerSnapshot
 	peerStatus          PeerStatus
+	content             any
 	accounts            Accounts
 	taskRecovery        TaskRecovery
 	humanRequests       HumanRequestList
@@ -433,6 +481,7 @@ func NewErrorReply(code RemoteErrorCode) (Reply, error) {
 	}
 	return Reply{kind: replyError, code: code}, nil
 }
+func NewContentReply(value any) Reply { return Reply{kind: replyContent, content: value} }
 
 // Listener owns local API framing over one install-retained endpoint. It
 // creates no goroutines; the caller owns the accept loop.
@@ -662,6 +711,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 	}
 	call := Call{kind: kind}
 	if domain == attemptDomain {
+		call.attempt = true
 		call.digest = digestAttemptCredential(bearer)
 	}
 	switch kind {
@@ -829,6 +879,42 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.overseerReply); err != nil || !validID(call.overseerReply.OperationID) || !validID(call.overseerReply.RequestID) || call.overseerReply.ExpectedRevision == 0 || !validText(call.overseerReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallContentCreate, CallContentRevise:
+		if err := decodeExact(request.Params, &call.content); err != nil || !validText(call.content.ID, 1, 64) || !validText(call.content.ProjectID, 1, 64) || !validText(call.content.Kind, 1, 64) || !validText(call.content.Title, 1, 1024) || !validText(call.content.Description, 0, 4096) || !validText(call.content.Body, 0, 1<<20) || !validText(call.content.SourceReferences, 0, 32768) {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentDeprecate:
+		if err := decodeExact(request.Params, &call.content); err != nil || !validText(call.content.ID, 1, 64) || !validText(call.content.ProjectID, 1, 64) || call.content.ExpectedRevision == 0 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentList:
+		if err := decodeExact(request.Params, &call.contentList); err != nil || !validText(call.contentList.ProjectID, 1, 64) || call.contentList.Limit > MaxContentPageItems {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentRead:
+		if err := decodeExact(request.Params, &call.contentRead); err != nil || !validText(call.contentRead.ID, 1, 64) || call.contentRead.Revision == 0 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentBody:
+		if err := decodeExact(request.Params, &call.contentBody); err != nil || !validText(call.contentBody.ID, 1, 64) || call.contentBody.Revision == 0 || call.contentBody.Limit == 0 || call.contentBody.Limit > 64*1024 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentEvidence:
+		if err := decodeExact(request.Params, &call.contentEvidence); err != nil || !validText(call.contentEvidence.ID, 1, 64) || !validText(call.contentEvidence.ProjectID, 1, 64) || !validText(call.contentEvidence.ContentID, 1, 64) || call.contentEvidence.ContentRevision == 0 || !validText(call.contentEvidence.TestedSource, 1, 4096) || !validText(call.contentEvidence.Environment, 0, 4096) || !validText(call.contentEvidence.Result, 1, 32) || !validText(call.contentEvidence.Location, 0, 4096) || !validText(call.contentEvidence.Judgment, 0, 8192) || (call.contentEvidence.Result != "passed" && call.contentEvidence.Result != "failed" && call.contentEvidence.Result != "incomplete" && call.contentEvidence.Result != "not_run") {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentAttach:
+		if err := decodeExact(request.Params, &call.contentAttach); err != nil || !validText(call.contentAttach.TaskID, 1, 64) || !validText(call.contentAttach.ProjectID, 1, 64) || !validText(call.contentAttach.ContentID, 1, 64) || call.contentAttach.ContentRevision == 0 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentEvidenceList:
+		if err := decodeExact(request.Params, &call.contentEvidenceList); err != nil || !validText(call.contentEvidenceList.ProjectID, 0, 64) || !validText(call.contentEvidenceList.ContentID, 1, 64) || call.contentEvidenceList.ContentRevision == 0 || call.contentEvidenceList.Limit > MaxContentPageItems {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentAttachments:
+		if err := decodeExact(request.Params, &call.contentAttachments); err != nil || !validText(call.contentAttachments.ProjectID, 0, 64) || !validText(call.contentAttachments.TaskID, 0, 64) || call.contentAttachments.TaskWorkRevision == 0 || call.contentAttachments.ProjectID == "" && call.contentAttachments.TaskID == "" {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallHumanReply:
 		if err := decodeExact(request.Params, &call.humanReply); err != nil || !validID(call.humanReply.OperationID) || !validID(call.humanReply.RequestID) || call.humanReply.ExpectedRevision == 0 || !validText(call.humanReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
@@ -936,6 +1022,46 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOverseerInterruptWorker, attemptDomain
 	case "overseer_reply_human":
 		return CallOverseerReplyHuman, attemptDomain
+	case "content_create":
+		return CallContentCreate, operatorDomain
+	case "content_revise":
+		return CallContentRevise, operatorDomain
+	case "content_deprecate":
+		return CallContentDeprecate, operatorDomain
+	case "content_list":
+		return CallContentList, operatorDomain
+	case "content_read":
+		return CallContentRead, operatorDomain
+	case "content_body":
+		return CallContentBody, operatorDomain
+	case "content_evidence":
+		return CallContentEvidence, operatorDomain
+	case "content_attach":
+		return CallContentAttach, operatorDomain
+	case "content_evidence_list":
+		return CallContentEvidenceList, operatorDomain
+	case "content_attachments":
+		return CallContentAttachments, operatorDomain
+	case "attempt_content_create":
+		return CallContentCreate, attemptDomain
+	case "attempt_content_revise":
+		return CallContentRevise, attemptDomain
+	case "attempt_content_deprecate":
+		return CallContentDeprecate, attemptDomain
+	case "attempt_content_list":
+		return CallContentList, attemptDomain
+	case "attempt_content_read":
+		return CallContentRead, attemptDomain
+	case "attempt_content_body":
+		return CallContentBody, attemptDomain
+	case "attempt_content_evidence":
+		return CallContentEvidence, attemptDomain
+	case "attempt_content_attach":
+		return CallContentAttach, attemptDomain
+	case "attempt_content_evidence_list":
+		return CallContentEvidenceList, attemptDomain
+	case "attempt_content_attachments":
+		return CallContentAttachments, attemptDomain
 	case "human_requests":
 		return CallHumanRequests, operatorDomain
 	case "human_reply":
@@ -1030,6 +1156,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebRevoke
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus
+	case CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments:
+		return reply == replyContent || reply == replyMutation
 	default:
 		return false
 	}
@@ -1072,6 +1200,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.webRevoke)
 	case replyRemoteStatus:
 		data, err = json.Marshal(reply.remote)
+	case replyContent:
+		data, err = json.Marshal(reply.content)
 	case replyOverseerSnapshot:
 		data, err = json.Marshal(reply.overseer)
 	case replyTerminalObservation:
