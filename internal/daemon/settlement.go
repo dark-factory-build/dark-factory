@@ -84,6 +84,22 @@ func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID 
 		if err != nil {
 			return run, err
 		}
+		// The provider has already converged before settlement. Re-inspect after
+		// all earlier settlement work and immediately before FinalizeWorkerRun;
+		// this is the final source fence, so a real write in the last interval
+		// becomes a refusal rather than a durable success.
+		if run.Proposal.Kind() == kernel.OutcomeSucceeded {
+			if daemon.beforeWorkerFinalize != nil {
+				daemon.beforeWorkerFinalize()
+			}
+			inspectionCtx, cancel = context.WithTimeout(ctx, supervisorInspectionWindow)
+			inspectionCtx = context.WithValue(inspectionCtx, successSettlementContextKey{}, true)
+			settlement, err = settleRetained(inspectionCtx, changeParent, changeState)
+			cancel()
+			if err != nil {
+				return run, err
+			}
+		}
 		at, err := daemon.timestamp()
 		if err != nil {
 			return run, err

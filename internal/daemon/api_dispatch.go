@@ -48,6 +48,9 @@ type Daemon struct {
 	beforeSuccessProposal   func()
 	successSourceInspect    func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
 	beforeSuccessSettlement func()
+	// beforeWorkerFinalize is a package-test-only seam for the final source
+	// fence immediately before durable worker settlement.
+	beforeWorkerFinalize func()
 
 	browserMu          sync.Mutex
 	browserLifecycleMu sync.Mutex
