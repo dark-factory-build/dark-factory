@@ -340,6 +340,42 @@ type ContentAttachment struct {
 type ContentAttachments struct {
 	Items []ContentAttachment `json:"items"`
 }
+
+type Outcome struct {
+	ID                    string                 `json:"id"`
+	ProjectID             string                 `json:"project_id"`
+	Revision              uint64                 `json:"revision"`
+	Document              kernel.OutcomeDocument `json:"document"`
+	Kind                  string                 `json:"kind"`
+	Objective             string                 `json:"objective"`
+	Criteria              string                 `json:"criteria"`
+	State                 string                 `json:"state"`
+	Author                string                 `json:"author"`
+	Authority             string                 `json:"authority"`
+	ObjectiveWorkRevision uint64                 `json:"objective_work_revision"`
+	Stale                 bool                   `json:"stale"`
+	MissingReferences     []string               `json:"missing_references,omitempty"`
+}
+type OutcomeList struct {
+	Items      []Outcome `json:"items"`
+	NextOffset uint64    `json:"next_offset,omitempty"`
+}
+type OutcomeWriteInput struct {
+	ID               string                 `json:"id"`
+	ProjectID        string                 `json:"project_id"`
+	Document         kernel.OutcomeDocument `json:"document"`
+	ExpectedRevision uint64                 `json:"expected_revision,omitempty"`
+}
+type OutcomeReadInput struct {
+	ProjectID string `json:"project_id"`
+	ID        string `json:"id"`
+	Revision  uint64 `json:"revision,omitempty"`
+}
+type OutcomeListInput struct {
+	ProjectID string `json:"project_id"`
+	Offset    uint64 `json:"offset,omitempty"`
+	Limit     uint64 `json:"limit,omitempty"`
+}
 type ContentInput struct {
 	ID               string `json:"id"`
 	ProjectID        string `json:"project_id"`

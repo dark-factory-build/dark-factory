@@ -46,7 +46,7 @@ func TestAttemptMCPUsesExistingAuthAndExactTask(t *testing.T) {
 		t.Fatal("MCP changed authentication or task identity")
 	}
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 3 || !strings.Contains(lines[1], "attempt succeed") || !strings.Contains(lines[1], "attempt content create") || strings.Contains(lines[1], "factoryctl content create") || strings.Contains(lines[1], "project create") {
+	if len(lines) != 3 || !strings.Contains(lines[1], "attempt succeed") || !strings.Contains(lines[1], "attempt content create") || strings.Contains(lines[1], "factoryctl content create") || strings.Contains(lines[1], "body-file") || strings.Contains(lines[1], "project create") {
 		t.Fatalf("unexpected discovery: %s", output.String())
 	}
 	var response struct {
