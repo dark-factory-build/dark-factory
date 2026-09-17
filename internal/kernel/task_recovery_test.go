@@ -1,10 +1,160 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
+
+// The operator read separates the durable wake from any handling: a failed
+// worker task is pending until EnqueueOverseerWakeups has consumed its newest
+// event, scheduled from then on, and its disposition stays none until a
+// retry, cancel, Needs You from its own run or operator recovery is actually
+// recorded. No prose or timestamp associates anything with the task: an
+// orchestrator's question that quotes the task id is not its Needs You, and
+// events sharing one millisecond are ordered by sequence alone.
+func TestTaskRecoveryReportsOverseerNotificationSeparatelyFromDisposition(t *testing.T) {
+	ctx := context.Background()
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+	recovery, found, err := store.TaskRecovery(ctx, terminal.TaskID, terminal.TaskIncarnationID)
+	if err != nil || !found || recovery.Overseer != nil || recovery.OverseerNotification != OverseerNotificationNone || recovery.Disposition() != "none" || recovery.LastProgressAt != terminal.UpdatedAt {
+		t.Fatalf("recovery without an overseer = %+v, found=%v, err=%v", recovery, found, err)
+	}
+	overseerKeys, overseerRun := runningOverseerKeys(t, store, terminal.ProjectID, 35)
+	overseer, _, err := store.Agent(ctx, agentID(t, 245))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, budget, instruction := IdleStandingInstruction, uint32(1), uint32(4), "Supervise."
+	if _, err := store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, 43)); err != nil {
+		t.Fatal(err)
+	}
+	// The running overseer quotes the worker task id in its own question:
+	// that request belongs to the overseer's run, not to this task.
+	if _, err := store.CreateHumanQuestionForAttempt(ctx, overseerKeys.AttemptDigest, NewHumanQuestion{IdempotencyKey: humanKey(90), QuestionText: "Retry " + terminal.TaskID.String() + "?"}, mustTime(t, 44)); err != nil {
+		t.Fatal(err)
+	}
+	recovery, _, err = store.TaskRecovery(ctx, terminal.TaskID, terminal.TaskIncarnationID)
+	if err != nil || recovery.Overseer == nil || *recovery.Overseer != overseer.ID || recovery.OverseerNotification != OverseerNotificationPending || recovery.HumanRequest != nil || recovery.Disposition() != "none" || recovery.OverseerTask == nil || recovery.OverseerTask.Status != TaskRunning {
+		t.Fatalf("recovery before any wake = %+v, err=%v", recovery, err)
+	}
+	// Busy overseer: its running task blocks the wake, the event stays pending.
+	if wakes, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 2_000)); err != nil || len(wakes) != 0 {
+		t.Fatalf("wake during running overseer = %+v, %v", wakes, err)
+	}
+	failure, _ := NewFailureProposal(FailureInternal, "overseer ended")
+	if _, err := store.FailRun(ctx, overseerRun.ID, overseerRun.Revision, failure, mustTime(t, 2_001)); err != nil {
+		t.Fatal(err)
+	}
+	observeMissingProcessExits(t, store, overseerRun.ID, 2_002)
+	releaseAllRunResources(t, store, overseerRun.ID, 2_005)
+	closed := closeTerminalSessionAtCurrent(t, store, overseerRun.ID, 2_010)
+	if _, err := store.FinalizeRun(ctx, closed.ID, closed.Revision, mustTime(t, 2_011)); err != nil {
+		t.Fatal(err)
+	}
+	wakes, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 4_000))
+	if err != nil || len(wakes) != 1 {
+		t.Fatalf("wake = %+v, %v", wakes, err)
+	}
+	recovery, _, err = store.TaskRecovery(ctx, terminal.TaskID, terminal.TaskIncarnationID)
+	if err != nil || recovery.OverseerNotification != OverseerNotificationScheduled || recovery.OverseerTask == nil || recovery.OverseerTask.ID != wakes[0].ID || recovery.Disposition() != "none" {
+		t.Fatalf("recovery after wake = %+v, err=%v", recovery, err)
+	}
+	// The overseer's own wake task names no overseer: nothing wakes anyone
+	// about it, and the wire refuses an overseer with a "none" notification.
+	own, found, err := store.TaskRecovery(ctx, wakes[0].ID, wakes[0].IncarnationID)
+	if err != nil || !found || own.Overseer != nil || own.OverseerTask != nil || own.OverseerNotification != OverseerNotificationNone || own.Disposition() != "queued" {
+		t.Fatalf("recovery of the overseer's own task = %+v, found=%v, err=%v", own, found, err)
+	}
+	// Two events in one millisecond after the wake: the send-back and a
+	// priority edit. Owed again by sequence, and the send-back is the recorded
+	// disposition and newest progress.
+	sentBack, err := store.SendBackTask(ctx, terminal.TaskID, recovery.Task.Revision, "retry the same worker", mustTime(t, 4_001))
+	if err != nil {
+		t.Fatal(err)
+	}
+	priority := int64(1)
+	if _, err := store.UpdateTask(ctx, sentBack.ID, sentBack.Revision, TaskPatch{Priority: &priority}, mustTime(t, 4_001)); err != nil {
+		t.Fatal(err)
+	}
+	recovery, _, err = store.TaskRecovery(ctx, terminal.TaskID, terminal.TaskIncarnationID)
+	if err != nil || recovery.OverseerNotification != OverseerNotificationPending || recovery.Disposition() != "retry_queued" || recovery.LastProgressAt.Int64() != 4_001 {
+		t.Fatalf("recovery after same-millisecond events = %+v, err=%v", recovery, err)
+	}
+}
+
+// A question raised by the task's own run is its Needs You, and it stays
+// the disposition while unresolved.
+func TestTaskRecoveryReportsOwnRunHumanRequestAsNeedsYou(t *testing.T) {
+	ctx := context.Background()
+	store, running, keys := runningWorkerRun(t)
+	defer store.Close()
+	recovery, found, err := store.TaskRecovery(ctx, running.TaskID, running.TaskIncarnationID)
+	if err != nil || !found || recovery.HumanRequest != nil || recovery.Disposition() != "running" {
+		t.Fatalf("recovery while running = %+v, found=%v, err=%v", recovery, found, err)
+	}
+	request, err := store.CreateHumanQuestionForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{IdempotencyKey: humanKey(91), QuestionText: "Which base?"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, _, err = store.TaskRecovery(ctx, running.TaskID, running.TaskIncarnationID)
+	if err != nil || recovery.HumanRequest == nil || *recovery.HumanRequest != request.ID || recovery.Disposition() != "needs_you" || recovery.LastProgressAt.Int64() != 400 {
+		t.Fatalf("recovery with own question = %+v, err=%v", recovery, err)
+	}
+}
+
+// An outcome-less provider exit proves nothing about effects: the run's own
+// exit and the retained head it left are the evidence a retry decision needs,
+// and a worker that moved its Change head before exiting is not a refusal.
+func TestTaskRecoveryExposesProviderExitAndMovedHeadAsRetryEvidence(t *testing.T) {
+	ctx := context.Background()
+	store, running, _ := runningWorkerRun(t)
+	defer store.Close()
+	exit, err := NewProcessExitCode(1, 1, mustTime(t, 30))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err := store.ObserveProviderExit(ctx, running.ID, running.Revision, registeredProcessIdentity(t, store, running.ID, ResourceProviderProcess), exit, mustTime(t, 31))
+	if err != nil || finalizing.Phase != RunFinalizing || finalizing.Proposal == nil || finalizing.Proposal.Code() != FailureProviderExit {
+		t.Fatalf("provider exit = %+v, %v", finalizing, err)
+	}
+	finalizing = observeMissingProcessExits(t, store, running.ID, 32)
+	releaseAllRunResources(t, store, running.ID, 35)
+	finalizing = closeTerminalSessionAtCurrent(t, store, running.ID, 40)
+	change, found, err := store.Change(ctx, *running.ChangeID)
+	if err != nil || !found || change.HeadCommit == nil {
+		t.Fatalf("Change = %+v, found=%v, err=%v", change, found, err)
+	}
+	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
+	if _, err := store.FinalizeWorkerRun(ctx, running.ID, finalizing.Revision, settlement, mustTime(t, 41)); err != nil {
+		t.Fatal(err)
+	}
+	recovery, found, err := store.TaskRecovery(ctx, running.TaskID, running.TaskIncarnationID)
+	if err != nil || !found || recovery.Run == nil || recovery.Run.ProviderExit == nil || recovery.Change == nil || recovery.Change.HeadCommit == nil {
+		t.Fatalf("recovery = %+v, found=%v, err=%v", recovery, found, err)
+	}
+	code, ok := recovery.Run.ProviderExit.Code()
+	if !ok || code != 1 || recovery.Run.RunningAt == nil || recovery.Run.TerminalAt == nil || recovery.Run.TerminalAt.Int64()-recovery.Run.RunningAt.Int64() <= 0 {
+		t.Fatalf("run evidence = %+v", recovery.Run)
+	}
+	if !recovery.Change.HeadCommit.equal(moved) || recovery.Change.HeadCommit.equal(change.Selection.Commit()) {
+		t.Fatalf("head evidence = %x, base %x", recovery.Change.HeadCommit.Bytes(), change.Selection.Commit().Bytes())
+	}
+	if recovery.Disposition() != "none" || recovery.Task.Status != TaskFailed {
+		t.Fatalf("disposition = %q status %s", recovery.Disposition(), recovery.Task.Status)
+	}
+	// The overseer's own task view carries the same exit evidence.
+	overseerKeys, _ := runningOverseerKeys(t, store, running.ProjectID, 50)
+	taskID := running.TaskID
+	snapshot, err := store.OverseerSnapshotForAttempt(ctx, overseerKeys.AttemptDigest, OverseerSnapshotRequest{TaskID: &taskID})
+	if err != nil || len(snapshot.Tasks) != 1 || !strings.HasSuffix(snapshot.Tasks[0].Result, "; provider exit code 1; ran 11 ms after activation") || !strings.HasPrefix(snapshot.Tasks[0].Result, "provider exited before an attempt outcome") {
+		t.Fatalf("overseer view of the failed task = %+v, err=%v", snapshot.Tasks, err)
+	}
+}
 
 func TestTaskRecoveryRefusesResourceCountBeyondBound(t *testing.T) {
 	store, run, _ := admittedOrchestratorRun(t)
