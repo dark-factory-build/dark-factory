@@ -61,6 +61,7 @@ type HumanRequestDeliveryID struct{ identifier }
 type TaskInterventionID struct{ identifier }
 type PeerQuestionID struct{ identifier }
 type PeerDeliveryID struct{ identifier }
+type ContinuationID struct{ identifier }
 
 func ProjectIDFromBytes(value []byte) (ProjectID, error) {
 	id, err := identifierFromBytes(value)
@@ -128,6 +129,11 @@ func HumanRequestDeliveryIDFromBytes(value []byte) (HumanRequestDeliveryID, erro
 func TaskInterventionIDFromBytes(value []byte) (TaskInterventionID, error) {
 	id, err := identifierFromBytes(value)
 	return TaskInterventionID{id}, err
+}
+
+func ContinuationIDFromBytes(value []byte) (ContinuationID, error) {
+	id, err := identifierFromBytes(value)
+	return ContinuationID{id}, err
 }
 func PeerQuestionIDFromBytes(value []byte) (PeerQuestionID, error) {
 	id, err := identifierFromBytes(value)
@@ -378,6 +384,7 @@ const (
 	EntityHumanRequest
 	EntityAccount
 	EntityPeerQuestion
+	EntityContinuation
 )
 
 func parseEntityKind(value string) (EntityKind, error) {
@@ -400,6 +407,8 @@ func parseEntityKind(value string) (EntityKind, error) {
 		return EntityAccount, nil
 	case "peer_question":
 		return EntityPeerQuestion, nil
+	case "continuation":
+		return EntityContinuation, nil
 	default:
 		return 0, corruptControl("entity kind", value)
 	}
@@ -425,6 +434,8 @@ func (value EntityKind) String() string {
 		return "account"
 	case EntityPeerQuestion:
 		return "peer_question"
+	case EntityContinuation:
+		return "continuation"
 	default:
 		return ""
 	}

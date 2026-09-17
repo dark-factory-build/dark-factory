@@ -1229,11 +1229,21 @@ func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	request, err := daemon.store.CreateHumanQuestionForAttempt(ctx, kDigest, kernel.NewHumanQuestion{
+	authority, authErr := daemon.store.AuthenticateAttempt(ctx, kDigest)
+	if authErr != nil {
+		return newErrorReply(remoteErrorCode(authErr))
+	}
+	question := kernel.NewHumanQuestion{
 		IdempotencyKey: key,
 		QuestionText:   input.Question,
 		Options:        input.Options,
-	}, at)
+	}
+	var request kernel.HumanRequest
+	if authority.Role == kernel.RoleWorker && authority.Provider != kernel.ProviderShell {
+		request, err = daemon.store.CreateHumanQuestionAndYieldForAttempt(ctx, kDigest, question, at)
+	} else {
+		request, err = daemon.store.CreateHumanQuestionForAttempt(ctx, kDigest, question, at)
+	}
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1571,6 +1581,18 @@ func (daemon *Daemon) overseerReplyHuman(ctx context.Context, call api.Call) api
 	at, err := daemon.timestamp()
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
+	}
+	if handled, continuationErr := daemon.store.ResolveHumanContinuationForAttempt(ctx, digest, requestID, expected, input.Reply, at); continuationErr == nil && handled {
+		// Resolution queues fresh work; wake admission immediately while keeping
+		// the old attempt bearer permanently revoked.
+		daemon.notifyScheduler()
+		projection, _, readErr := daemon.store.HumanRequest(ctx, requestID)
+		if readErr != nil {
+			return newErrorReply(remoteErrorCode(readErr))
+		}
+		return daemon.overseerHumanReplyMutation(projection)
+	} else if continuationErr != nil && !errors.Is(continuationErr, kernel.ErrNotFound) && !errors.Is(continuationErr, kernel.ErrConflict) && !errors.Is(continuationErr, kernel.ErrRevisionConflict) {
+		return newErrorReply(remoteErrorCode(continuationErr))
 	}
 	delivery, err := daemon.store.BeginHumanReplyForAttempt(ctx, digest, requestID, expected, deliveryID, input.Reply, at)
 	if err != nil {

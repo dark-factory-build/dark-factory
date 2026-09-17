@@ -62,12 +62,12 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			LEFT JOIN delivered_successors AS d ON d.successor_task_id = t.id
 			WHERE t.status = 'queued'
 			  AND a.paused = 0 AND a.archived = 0
-			  AND a.tool_calls_used < a.tool_budget_limit
+			  AND (a.role = 'orchestrator' OR a.tool_calls_used < a.tool_budget_limit)
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
 			  AND NOT (t.body LIKE 'review handoff %' AND (a.provider <> 'codex' OR a.role <> 'worker'))
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') < ?)
-			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND phase <> 'terminal') < 1))
+			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') < 1))
 		), next_for_worker AS (
 			SELECT *, ROW_NUMBER() OVER (
 				PARTITION BY agent_id
@@ -106,11 +106,12 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM tasks AS t
 			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker')
-			WHERE t.status = 'queued' AND a.paused = 0 AND a.archived = 0 AND a.tool_calls_used < a.tool_budget_limit
+			WHERE t.status = 'queued' AND a.paused = 0 AND a.archived = 0
+			  AND (a.role = 'orchestrator' OR a.tool_calls_used < a.tool_budget_limit)
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') >= ?)
-			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND phase <> 'terminal') >= 1))
+		    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') >= 1))
 		)`, factory.Capacity).Scan(&capacityBlocked); err != nil {
 			return AdmissionResult{}, tx.Rollback(err)
 		}
@@ -254,6 +255,10 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		if err == nil {
 			err = ErrCorruptState
 		}
+		return AdmissionResult{}, tx.Rollback(err)
+	}
+	run.ContinuationContexts, err = resolvedContinuationContextsForTask(ctx, tx.connection, task)
+	if err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {

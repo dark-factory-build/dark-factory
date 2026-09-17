@@ -130,9 +130,20 @@ func (store *Store) CreateHumanQuestionForAttempt(ctx context.Context, digest At
 	return store.createHumanQuestionForAttempt(ctx, digest, input, at, MaxOpenHumanRequests)
 }
 
+// CreateHumanQuestionAndYieldForAttempt atomically records a provider question,
+// revokes the old bearer, and persists its continuation. A reply cannot commit
+// between the question and yield edges.
+func (store *Store) CreateHumanQuestionAndYieldForAttempt(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis) (HumanRequest, error) {
+	return store.createHumanQuestionForAttemptWithYield(ctx, digest, input, at, MaxOpenHumanRequests, true)
+}
+
 // createHumanQuestionForAttempt keeps the cap as an argument only for bounded
 // package tests; production always uses MaxOpenHumanRequests above.
 func (store *Store) createHumanQuestionForAttempt(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis, openLimit int64) (HumanRequest, error) {
+	return store.createHumanQuestionForAttemptWithYield(ctx, digest, input, at, openLimit, false)
+}
+
+func (store *Store) createHumanQuestionForAttemptWithYield(ctx context.Context, digest AttemptDigest, input NewHumanQuestion, at UnixMillis, openLimit int64, yield bool) (HumanRequest, error) {
 	if err := input.valid(); err != nil {
 		return HumanRequest{}, err
 	}
@@ -209,6 +220,13 @@ func (store *Store) createHumanQuestionForAttempt(ctx context.Context, digest At
 		}
 		return HumanRequest{}, tx.Rollback(err)
 	}
+	if yield {
+		var conditionID ContinuationConditionID
+		copy(conditionID[:], request.ID.Bytes())
+		if _, err := store.yieldContinuationOnConnection(ctx, tx, run, ConditionHumanRequest, conditionID, request.Revision, at); err != nil {
+			return HumanRequest{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return HumanRequest{}, err
 	}
@@ -268,7 +286,7 @@ func (store *Store) CancelHumanRequestRun(ctx context.Context, clientID BrowserC
 	if err != nil {
 		return Run{}, HumanRequest{}, tx.Rollback(err)
 	}
-	updatedRun, err := store.enterFinalizing(ctx, tx, run, expectedRun, proposal, at, &request.ID)
+	updatedRun, err := store.enterFinalizing(ctx, tx, run, expectedRun, proposal, at, &request.ID, nil)
 	if err != nil {
 		return Run{}, HumanRequest{}, err
 	}
@@ -699,7 +717,7 @@ func (store *Store) RecoverHumanDeliveries(ctx context.Context, at UnixMillis) (
 // transitionHumanRequestsForRun is called from the run transition transaction.
 // It never delivers or removes a request: it only makes the loss of its exact
 // running origin durable before the run transition becomes observable.
-func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, runID RunID, at UnixMillis, terminal bool, cancelRequest *HumanRequestID) ([]pendingInvalidation, error) {
+func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, runID RunID, at UnixMillis, terminal bool, cancelRequest *HumanRequestID, preserveCondition *ContinuationConditionID) ([]pendingInvalidation, error) {
 	rows, err := connection.QueryContext(ctx, `SELECT id, status, revision, updated_at_ms FROM human_requests WHERE run_id = ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY id`, runID.Bytes())
 	if err != nil {
 		return nil, err
@@ -740,6 +758,16 @@ func transitionHumanRequestsForRun(ctx context.Context, connection *sql.Conn, ru
 		target := item.status
 		resolution, closed := "", any(nil)
 		isCancel := cancelRequest != nil && item.id == *cancelRequest
+		if preserveCondition != nil && bytes.Equal(item.id.Bytes(), preserveCondition.Bytes()) {
+			continue
+		}
+		var continuationWaiting int
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM continuations WHERE condition_kind='human_request' AND condition_id=? AND state IN ('waiting','queued'))`, item.id.Bytes()).Scan(&continuationWaiting); err != nil {
+			return nil, err
+		}
+		if continuationWaiting != 0 {
+			continue
+		}
 		if isCancel {
 			if item.status != HumanRequestOpen || terminal {
 				return nil, ErrRevisionConflict

@@ -386,6 +386,9 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		}
 		downgrade = append([]string{"DROP TABLE accounts"}, downgrade...)
 	}
+	if version < v14UserVersion {
+		downgrade = append([]string{"DROP INDEX continuations_admission_queue", "DROP INDEX continuations_one_waiting_per_condition", "DROP TABLE continuations"}, downgrade...)
+	}
 	for _, statement := range downgrade {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			t.Fatalf("downgrade to v%d: %v", version, err)
@@ -574,14 +577,14 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "ffe2ae3739c95f9594a45e45473bf10c51b5a63f5a5ec19176a5225a201c3fde"},
-		{"v13", v13SchemaStatements(), "f38d4c5ac959eb2c3b23e3c0ace78faa1859201688cb12314c0c4fa721db56db"},
-		{"v12", v12SchemaStatements(), "78ff7808dc146c35383329f73c94559172e824e0b72484bc56db48291dbadefa"},
-		{"v11", v11SchemaStatements(), "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
-		{"v10", v10SchemaStatements(), "af5c61224274d2c62e8b78036e911239aa98d8b40154811cb9c4788ad224a603"},
-		{"v9", v9SchemaStatements(), "049dc8ff317e31a86157fd5366579954581a4468caaca63c5dd95ee2958ab4cb"},
-		{"v8", v8SchemaStatements(), "45606d5fa2b054c4ccee79c55f20b184f25ee0860ec5817099c0582174df676b"},
-		{"v7", v7SchemaStatements(), "c6793e1552a878dfff3fb4efc4179ba6343a26f122337580b6ac558e8a6bfedf"},
+		{"current", schemaStatements, "13b447ce02d140896a5d11478ff46639dc573266baddcb12adbc8e482258c0e0"},
+		{"v13", v13SchemaStatements(), "4f42aef879d2c6d92fe359aafa6a75c8e3da0ff435d5b13c297084dfa67f0d71"},
+		{"v12", v12SchemaStatements(), "eee004e7c802185ec32a2a0524310b4b54e8c3f452f6466ae1afc7c8c3d52296"},
+		{"v11", v11SchemaStatements(), "1ebf46f2a7b7db33956058f487e47551abd959464dda9eb75e85e7536c2eba43"},
+		{"v10", v10SchemaStatements(), "0933e6e4bc9ae06065c7574dee18ddd346dcc704aa67a0e161b53f688dcfb823"},
+		{"v9", v9SchemaStatements(), "967aba7ddb89fc860b8cb4ec08e06aa6f6bf4ca9a43611e4d6125bd7dc2b8ed6"},
+		{"v8", v8SchemaStatements(), "04c6290c0f1f887007a52bc57d135c1c62078e900bec6b47c400fc5909ef87b9"},
+		{"v7", v7SchemaStatements(), "438d5593765900d93f57f8dcc27876b013b4d23f2c54ef31a41c4100017821bd"},
 		{"v6", v6SchemaStatements(), "4063acf5233e3aaf29fe932259283622df543733b56a7e78a359bd73ce85da8c"},
 		{"v4", v4SchemaStatements(), "6eb8be2af2f3efc8ed7d40ecf9bd1ec316675e39ad11fb8b0827a228e9232cf1"},
 		{"v3", priorSchemaStatements(), "2d5319a0afce6206d963631465833bc5f25d0f2261537f4f33c92a8e38a36009"},

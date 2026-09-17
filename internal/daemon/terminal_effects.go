@@ -346,6 +346,14 @@ func (daemon *Daemon) humanReply(ctx context.Context, principal browser.Principa
 	if err != nil {
 		return 0, err
 	}
+	if handled, continuationErr := daemon.store.ResolveHumanContinuationForBrowser(ctx, clientID, requestID, expected, reply, at); continuationErr == nil && handled {
+		// The reply is the durable wake edge. The next attempt must be admitted
+		// without waiting for the scheduler's periodic reconciliation tick.
+		daemon.notifyScheduler()
+		return 0, nil
+	} else if continuationErr != nil && !errors.Is(continuationErr, kernel.ErrNotFound) && !errors.Is(continuationErr, kernel.ErrConflict) && !errors.Is(continuationErr, kernel.ErrRevisionConflict) {
+		return 0, continuationErr
+	}
 	delivery, err := daemon.store.BeginHumanReply(ctx, clientID, requestID, expected, deliveryID, reply, at)
 	if err != nil {
 		if terminalStoreOutcomeUnknown(err) {
