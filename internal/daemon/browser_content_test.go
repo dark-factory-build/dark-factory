@@ -7,15 +7,60 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/dark-factory-build/dark-factory/internal/api"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/coder/websocket"
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
+
+func browserContentProjectFixture(t *testing.T, f *adapterFixture, id kernel.ProjectID, name string) string {
+	t.Helper()
+	root, err := os.MkdirTemp("/private/tmp", "dark-factory-browser-content-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	for _, args := range [][]string{{"init", root}, {"-C", root, "config", "user.name", "Dark Factory Test"}, {"-C", root, "config", "user.email", "test@invalid"}} {
+		if output, runErr := exec.Command(change.TrustedGitExecutable, args...).CombinedOutput(); runErr != nil {
+			t.Fatalf("git %v: %v: %s", args, runErr, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("content source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"-C", root, "add", "README.md"}, {"-C", root, "commit", "-m", "initial"}} {
+		if output, runErr := exec.Command(change.TrustedGitExecutable, args...).CombinedOutput(); runErr != nil {
+			t.Fatalf("git %v: %v: %s", args, runErr, output)
+		}
+	}
+	if _, err := f.store.CreateProject(context.Background(), kernel.NewProject{ID: id, Name: name, Root: root}, adapterTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func seedBrowserContent(t *testing.T, f *adapterFixture, spec kernel.NewContent, at kernel.UnixMillis) kernel.ContentRevision {
+	t.Helper()
+	f.daemon.operationMu.Lock()
+	defer f.daemon.operationMu.Unlock()
+	pinned, err := f.daemon.writeContentSource(context.Background(), spec, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := f.store.CreateContent(context.Background(), pinned, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
 
 func TestBrowserProjectContentUsesExactProjectAndRevisionAuthority(t *testing.T) {
 	f := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail|kernel.BrowserCapabilityHumanActions)
@@ -26,13 +71,8 @@ func TestBrowserProjectContentUsesExactProjectAndRevisionAuthority(t *testing.T)
 	defer connection.Close(websocket.StatusNormalClosure, "")
 	projectID, _ := kernel.ProjectIDFromBytes(bytesOf(0x21))
 	contentID, _ := kernel.ContentIDFromBytes(bytesOf(0x22))
-	if _, err := f.store.CreateProject(context.Background(), kernel.NewProject{ID: projectID, Name: "library", Root: "/library"}, adapterTime(t, 10)); err != nil {
-		t.Fatal(err)
-	}
-	content, err := f.store.CreateContent(context.Background(), kernel.NewContent{ID: contentID, ProjectID: projectID, Kind: kernel.ContentProcedure, Title: "Procedure", Body: "abcdef", Author: "seed"}, adapterTime(t, 11))
-	if err != nil {
-		t.Fatal(err)
-	}
+	browserContentProjectFixture(t, f, projectID, "library")
+	content := seedBrowserContent(t, f, kernel.NewContent{ID: contentID, ProjectID: projectID, Kind: kernel.ContentProcedure, Title: "Procedure", Body: "abcdef", Author: "seed"}, adapterTime(t, 11))
 	input := func(project string, revision uint64) []byte {
 		b, _ := json.Marshal(map[string]any{"project_id": project, "id": contentID.String(), "revision": revision, "offset": 0, "limit": 4})
 		return b
@@ -49,9 +89,7 @@ func TestBrowserProjectContentUsesExactProjectAndRevisionAuthority(t *testing.T)
 		t.Fatalf("body result = %s, %v", result.Output, err)
 	}
 	otherID, _ := kernel.ProjectIDFromBytes(bytesOf(0x23))
-	if _, err := f.store.CreateProject(context.Background(), kernel.NewProject{ID: otherID, Name: "other", Root: "/other"}, adapterTime(t, 12)); err != nil {
-		t.Fatal(err)
-	}
+	browserContentProjectFixture(t, f, otherID, "other")
 	_, err = f.backend.ProjectContent(context.Background(), rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "body", Input: input(otherID.String(), 1)})
 	if !errors.Is(err, browser.ErrUnauthorized) {
 		t.Fatalf("cross-project body = %v", err)
@@ -81,18 +119,19 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 			project, _ := kernel.ProjectIDFromBytes(bytesOf(0x31))
 			other, _ := kernel.ProjectIDFromBytes(bytesOf(0x32))
 			for i, p := range []kernel.ProjectID{project, other} {
-				if _, err := f.store.CreateProject(ctx, kernel.NewProject{ID: p, Name: fmt.Sprint(i), Root: fmt.Sprintf("/library-%d", i)}, adapterTime(t, 10)); err != nil {
-					t.Fatal(err)
-				}
+				browserContentProjectFixture(t, f, p, fmt.Sprint(i))
 			}
 			content, _ := kernel.ContentIDFromBytes(bytesOf(0x33))
 			spec := kernel.NewContent{ID: content, ProjectID: project, Kind: kernel.ContentProcedure, Title: "guide", Body: "old", Author: "seed"}
-			first, err := f.store.CreateContent(ctx, spec, adapterTime(t, 11))
-			if err != nil {
-				t.Fatal(err)
-			}
+			first := seedBrowserContent(t, f, spec, adapterTime(t, 11))
 			spec.Body = "new"
-			if _, err = f.store.ReviseContent(ctx, first.Revision, spec, adapterTime(t, 12)); err != nil {
+			f.daemon.operationMu.Lock()
+			pinned, err := f.daemon.writeContentSource(ctx, spec, 2)
+			if err == nil {
+				_, err = f.store.ReviseContent(ctx, first.Revision, pinned, adapterTime(t, 12))
+			}
+			f.daemon.operationMu.Unlock()
+			if err != nil {
 				t.Fatal(err)
 			}
 			sequence := 0
@@ -134,9 +173,7 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 				t.Fatalf("cross-project body=%v", err)
 			}
 			hugeID, _ := kernel.ContentIDFromBytes(bytesOf(0x35))
-			if _, err := f.store.CreateContent(ctx, kernel.NewContent{ID: hugeID, ProjectID: project, Kind: kernel.ContentProcedure, Title: "large metadata", Author: "seed", SourceReferences: strings.Repeat("\x01", 32768)}, adapterTime(t, 13)); err != nil {
-				t.Fatal(err)
-			}
+			seedBrowserContent(t, f, kernel.NewContent{ID: hugeID, ProjectID: project, Kind: kernel.ContentProcedure, Title: "large metadata", Body: "large", Author: "seed", SourceReferences: strings.Repeat("\x01", 32768)}, adapterTime(t, 13))
 			frame = send("read", map[string]any{"project_id": project.String(), "id": hugeID.String(), "revision": 1})
 			if frame.Type != browserprotocol.TypeError || frame.Body.(browserprotocol.Error).Code != browserprotocol.ErrorTooLarge {
 				t.Fatalf("oversized response=%+v", frame)

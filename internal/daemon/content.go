@@ -150,6 +150,22 @@ func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.Cont
 	return change.ReadContentSource(ctx, git, project.Root, identity, change.ContentSource{Commit: id, Path: content.Path})
 }
 
+func (daemon *Daemon) contentBodySource(ctx context.Context, content kernel.ContentRevision) (kernel.ContentRevision, string, error) {
+	if content.Commit != "" {
+		body, err := daemon.readContentSource(ctx, content)
+		return content, body, err
+	}
+	_, body, err := daemon.store.LegacyContent(ctx, content.ID, content.Revision.Int64())
+	if err != nil {
+		return content, "", err
+	}
+	if migrated, exportErr := daemon.exportLegacyContent(ctx, content.ID, content.Revision.Int64()); exportErr == nil {
+		content = migrated
+		body, err = daemon.readContentSource(ctx, content)
+	}
+	return content, body, err
+}
+
 func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 	if call.Kind() == api.CallContentCreate || call.Kind() == api.CallContentRevise || call.Kind() == api.CallContentDeprecate || call.Kind() == api.CallContentBody {
 		daemon.operationMu.Lock()
@@ -337,19 +353,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
-		var sourceBody string
-		if content.Commit == "" {
-			_, sourceBody, err = daemon.store.LegacyContent(ctx, content.ID, content.Revision.Int64())
-			if err != nil {
-				return newErrorReply(remoteErrorCode(err))
-			}
-			if migrated, exportErr := daemon.exportLegacyContent(ctx, content.ID, content.Revision.Int64()); exportErr == nil {
-				content = migrated
-				sourceBody, err = daemon.readContentSource(ctx, content)
-			}
-		} else {
-			sourceBody, err = daemon.readContentSource(ctx, content)
-		}
+		content, sourceBody, err := daemon.contentBodySource(ctx, content)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
