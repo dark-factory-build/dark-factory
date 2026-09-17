@@ -46,7 +46,7 @@ Additional checks follow changed risk. Process-sensitive checks share the
 repository lease:
 
 ```sh
-./scripts/with-local-ci-lease.sh go test ./internal/daemon/
+./scripts/with-local-ci-lease.sh go test -count=1 ./internal/daemon/
 ```
 
 Concurrency, process ownership, finalization, or recovery changes benefit from

@@ -27,7 +27,7 @@ The routine source gate is:
 
 It runs `gofmt`, `go vet`, ordinary short Go tests, the TypeScript build and
 tests, and `git diff --check`. Add focused tests for the changed package; run
-process-sensitive tests through `./scripts/with-local-ci-lease.sh`.
+process-sensitive Go tests with `-count=1` through `./scripts/with-local-ci-lease.sh`.
 
 The complete local gate is the explicit full check above. It adds repository
 fixtures, process and lifecycle checks, and release/package fixtures. Fixed

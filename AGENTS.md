@@ -20,7 +20,7 @@ details live in [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md),
 ## Agent check loop
 
 During implementation, run `./scripts/go-check.sh` and focused tests for the
-changed risk. Process-sensitive tests must use
+changed risk. Process-sensitive Go tests use `-count=1` and must run through
 `./scripts/with-local-ci-lease.sh`; this keeps one heavy process run on the
 Mac without making source checks wait. Use `./scripts/local-ci.sh --ui`,
 `--runtime`, or `--release` when working across that component boundary.
