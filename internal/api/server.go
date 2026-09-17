@@ -61,6 +61,14 @@ const (
 	CallOverseerReplyHuman
 	CallHumanRequests
 	CallHumanReply
+	CallContentCreate
+	CallContentRevise
+	CallContentDeprecate
+	CallContentList
+	CallContentRead
+	CallContentBody
+	CallContentEvidence
+	CallContentAttach
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -78,6 +86,7 @@ func digestAttemptCredential(bearer credential) AttemptDigest {
 // Call is an immutable decoded request. Only the accessor matching Kind
 // returns true.
 type Call struct {
+	attempt            bool
 	terminalObserve    TerminalObserveInput
 	peerIncludeTargets bool
 	kind               CallKind
@@ -105,6 +114,12 @@ type Call struct {
 	overseerInterrupt  OverseerWorkerInterruptInput
 	overseerReply      OverseerHumanReplyInput
 	humanReply         OverseerHumanReplyInput
+	content            ContentInput
+	contentList        ContentListInput
+	contentRead        ContentReadInput
+	contentBody        ContentBodyInput
+	contentEvidence    ContentEvidenceInput
+	contentAttach      ContentAttachInput
 	webClient          WebClientRevocationInput
 	webAfter           string
 	expectedRevision   uint64
@@ -129,7 +144,7 @@ func (call Call) AttemptDigest() (AttemptDigest, bool) {
 		return AttemptDigest{}, false
 	}
 	switch call.kind {
-	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman:
+	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -288,6 +303,7 @@ const (
 	replyWebClients
 	replyWebRevoke
 	replyRemoteStatus
+	replyContent
 	replyOverseerSnapshot
 	replyPeerStatus
 	replyTerminalObservation
@@ -312,6 +328,7 @@ type Reply struct {
 	remote              RemoteStatus
 	overseer            OverseerSnapshot
 	peerStatus          PeerStatus
+	content             any
 	accounts            Accounts
 	taskRecovery        TaskRecovery
 	humanRequests       HumanRequestList
@@ -852,6 +869,34 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.overseerReply); err != nil || !validID(call.overseerReply.OperationID) || !validID(call.overseerReply.RequestID) || call.overseerReply.ExpectedRevision == 0 || !validText(call.overseerReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallContentCreate, CallContentRevise:
+		if err := decodeExact(request.Params, &call.content); err != nil || !validText(call.content.ID, 1, 64) || !validText(call.content.ProjectID, 1, 64) || !validText(call.content.Kind, 1, 64) || !validText(call.content.Title, 1, 1024) || !validText(call.content.Description, 0, 4096) || !validText(call.content.Body, 0, 1<<20) || !validText(call.content.Author, 1, 256) || !validText(call.content.SourceReferences, 0, 32768) || (call.content.Kind != "procedure" && call.content.Kind != "acceptance_scenario") {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentDeprecate:
+		if err := decodeExact(request.Params, &call.content); err != nil || !validText(call.content.ID, 1, 64) || !validText(call.content.ProjectID, 1, 64) || !validText(call.content.Author, 1, 256) || call.content.ExpectedRevision == 0 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentList:
+		if err := decodeExact(request.Params, &call.contentList); err != nil || !validText(call.contentList.ProjectID, 1, 64) || call.contentList.Limit > 64 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentRead:
+		if err := decodeExact(request.Params, &call.contentRead); err != nil || !validText(call.contentRead.ID, 1, 64) || call.contentRead.Revision == 0 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentBody:
+		if err := decodeExact(request.Params, &call.contentBody); err != nil || !validText(call.contentBody.ID, 1, 64) || call.contentBody.Revision == 0 || call.contentBody.Limit == 0 || call.contentBody.Limit > 64*1024 {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentEvidence:
+		if err := decodeExact(request.Params, &call.contentEvidence); err != nil || !validText(call.contentEvidence.ID, 1, 64) || !validText(call.contentEvidence.ProjectID, 1, 64) || !validText(call.contentEvidence.ContentID, 1, 64) || call.contentEvidence.ContentRevision == 0 || !validText(call.contentEvidence.TestedSource, 1, 4096) || !validText(call.contentEvidence.Environment, 0, 4096) || !validText(call.contentEvidence.Result, 1, 32) || !validText(call.contentEvidence.Location, 0, 4096) || !validText(call.contentEvidence.Evaluator, 1, 256) || !validText(call.contentEvidence.Judgment, 0, 8192) || (call.contentEvidence.Result != "passed" && call.contentEvidence.Result != "failed" && call.contentEvidence.Result != "incomplete" && call.contentEvidence.Result != "not_run") {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallContentAttach:
+		if err := decodeExact(request.Params, &call.contentAttach); err != nil || !validText(call.contentAttach.TaskID, 1, 64) || !validText(call.contentAttach.ProjectID, 1, 64) || !validText(call.contentAttach.ContentID, 1, 64) || call.contentAttach.ContentRevision == 0 {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallHumanReply:
 		if err := decodeExact(request.Params, &call.humanReply); err != nil || !validID(call.humanReply.OperationID) || !validID(call.humanReply.RequestID) || call.humanReply.ExpectedRevision == 0 || !validText(call.humanReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
@@ -959,6 +1004,38 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOverseerInterruptWorker, attemptDomain
 	case "overseer_reply_human":
 		return CallOverseerReplyHuman, attemptDomain
+	case "content_create":
+		return CallContentCreate, operatorDomain
+	case "content_revise":
+		return CallContentRevise, operatorDomain
+	case "content_deprecate":
+		return CallContentDeprecate, operatorDomain
+	case "content_list":
+		return CallContentList, operatorDomain
+	case "content_read":
+		return CallContentRead, operatorDomain
+	case "content_body":
+		return CallContentBody, operatorDomain
+	case "content_evidence":
+		return CallContentEvidence, operatorDomain
+	case "content_attach":
+		return CallContentAttach, operatorDomain
+	case "attempt_content_create":
+		return CallContentCreate, attemptDomain
+	case "attempt_content_revise":
+		return CallContentRevise, attemptDomain
+	case "attempt_content_deprecate":
+		return CallContentDeprecate, attemptDomain
+	case "attempt_content_list":
+		return CallContentList, attemptDomain
+	case "attempt_content_read":
+		return CallContentRead, attemptDomain
+	case "attempt_content_body":
+		return CallContentBody, attemptDomain
+	case "attempt_content_evidence":
+		return CallContentEvidence, attemptDomain
+	case "attempt_content_attach":
+		return CallContentAttach, attemptDomain
 	case "human_requests":
 		return CallHumanRequests, operatorDomain
 	case "human_reply":
@@ -1097,6 +1174,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.webRevoke)
 	case replyRemoteStatus:
 		data, err = json.Marshal(reply.remote)
+	case replyContent:
+		data, err = json.Marshal(reply.content)
 	case replyOverseerSnapshot:
 		data, err = json.Marshal(reply.overseer)
 	case replyTerminalObservation:

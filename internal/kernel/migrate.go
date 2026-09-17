@@ -410,19 +410,6 @@ func v13SchemaStatements() []string {
 	return statements
 }
 
-// v11 is the pre-procedure schema. The current schema adds only the bounded
-// project content and task-reference tables.
-func v11SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
-	for i := len(statements) - 1; i >= 0; i-- {
-		_, name := schemaObjectIdentity(statements[i])
-		if name == "project_content_revisions" || name == "project_content_revisions_project_kind" || name == "project_content_evidence" || name == "task_content_references" {
-			statements = append(statements[:i], statements[i+1:]...)
-		}
-	}
-	return statements
-}
-
 // priorSchemaStatements is the exact v3 schema: v4 with the frozen agents
 // definition substituted. Every other statement is read live from
 // schemaStatements, so editing any of them silently changes what this claims
@@ -864,22 +851,6 @@ func migrateV13Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	return validateSchemaVersion(ctx, connection, v11UserVersion, v11SchemaStatements())
-}
-
-func migrateV11Transaction(ctx context.Context, connection *sql.Conn) error {
-	if err := validateSchemaVersion(ctx, connection, v11UserVersion, v11SchemaStatements()); err != nil {
-		return err
-	}
-	target := expectedSchemaOf(schemaStatements)
-	for _, name := range []string{"project_content_revisions", "project_content_revisions_project_kind", "project_content_evidence", "task_content_references"} {
-		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
-			return fmt.Errorf("create %s: %w", name, err)
-		}
-	}
-	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
-		return err
-	}
-	return validateExactSchema(ctx, connection)
 }
 
 // rebuildTable replaces one table with its target definition, preserving every

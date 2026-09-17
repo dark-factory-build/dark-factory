@@ -150,6 +150,14 @@ const (
 	commandOverseerReplyHuman
 	commandHumanList
 	commandHumanReply
+	commandContentCreate
+	commandContentRevise
+	commandContentDeprecate
+	commandContentList
+	commandContentRead
+	commandContentBody
+	commandContentEvidence
+	commandContentAttach
 )
 
 type attemptCommand struct {
@@ -164,42 +172,54 @@ type attemptCommand struct {
 	after            string
 	expectedRevision uint64
 
-	label           string
-	plistDir        string
-	relayOrigin     string
-	browserAddress  string
-	name            string
-	root            string
-	project         string
-	agent           string
-	role            string
-	provider        string
-	model           string
-	reasoningEffort string
-	account         string
-	title           string
-	body            string
-	bodySet         bool
-	toolBudget      uint64
-	capacity        uint16
-	maxBytes        uint32
-	maxRunSeconds   uint32
-	priority        int64
-	prioritySet     bool
-	offset          uint64
-	head            uint64
-	textOffset      uint64
-	includeTargets  bool
-	enabled         bool
-	operationID     string
-	taskRevision    uint64
-	runRevision     uint64
-	run             string
-	paused          bool
-	archived        bool
-	archiveSet      bool
-	cancel          bool
-	retry           bool
+	label            string
+	plistDir         string
+	relayOrigin      string
+	browserAddress   string
+	name             string
+	root             string
+	project          string
+	agent            string
+	role             string
+	provider         string
+	model            string
+	reasoningEffort  string
+	account          string
+	title            string
+	body             string
+	bodySet          bool
+	bodyFile         string
+	contentKind      string
+	contentID        string
+	contentRevision  uint64
+	description      string
+	sourceReferences string
+	testedSource     string
+	environment      string
+	contentResult    string
+	location         string
+	evaluator        string
+	judgment         string
+	toolBudget       uint64
+	capacity         uint16
+	maxBytes         uint32
+	maxRunSeconds    uint32
+	priority         int64
+	prioritySet      bool
+	offset           uint64
+	head             uint64
+	textOffset       uint64
+	includeTargets   bool
+	enabled          bool
+	operationID      string
+	taskRevision     uint64
+	runRevision      uint64
+	run              string
+	paused           bool
+	archived         bool
+	archiveSet       bool
+	cancel           bool
+	retry            bool
 }
 
 func main() {

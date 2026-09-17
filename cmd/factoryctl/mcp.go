@@ -88,6 +88,10 @@ func allowedAttemptMCPCommand(kind commandKind) bool {
 		commandOverseerReplaceWorker, commandOverseerMessageWorker,
 		commandOverseerInterruptWorker, commandOverseerReplyHuman:
 		return true
+	case commandContentCreate, commandContentRevise, commandContentDeprecate,
+		commandContentList, commandContentRead, commandContentBody,
+		commandContentEvidence, commandContentAttach:
+		return true
 	}
 	return false
 }
