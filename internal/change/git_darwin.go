@@ -1648,6 +1648,22 @@ func validatePrivateWorktreeRegistration(registration, path, admin string, expec
 	for _, name := range entries {
 		switch name {
 		case "HEAD", "commondir", "gitdir", "index", "logs":
+		case "ORIG_HEAD":
+			_, data, err := readGitAdminFile(regFD, name, maxGitSelectionOutput)
+			if err != nil || strings.TrimSpace(string(data)) != expectedBase.Hex() {
+				return &ValidationError{Reason: "private Change registration retains another original head"}
+			}
+		case "refs":
+			refsFD, _, err := openGitAdminDirectory(regFD, name)
+			if err != nil {
+				return err
+			}
+			refs := os.NewFile(uintptr(refsFD), "")
+			names, readErr := refs.Readdirnames(-1)
+			closeErr := refs.Close()
+			if readErr != nil || closeErr != nil || len(names) != 0 {
+				return &ValidationError{Reason: "private Change registration retains worktree refs"}
+			}
 		default:
 			return &ValidationError{Reason: "private Change registration contains unknown state"}
 		}
