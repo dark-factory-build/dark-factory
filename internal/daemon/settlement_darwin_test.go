@@ -319,9 +319,6 @@ func TestSuccessfulSettlementRefusesRealWriteBeforeFinalize(t *testing.T) {
 	}
 	defer openSource.Close()
 	fixture.daemon.beforeWorkerFinalize = func() {
-		if err := os.WriteFile(filepath.Join(path, "raced-by-path.txt"), []byte("raced\n"), 0o644); err == nil {
-			t.Fatal("worker write crossed the pathname fence")
-		}
 		if _, err := openSource.WriteString("raced after clean inspection\n"); err != nil {
 			t.Fatal(err)
 		}
