@@ -1260,10 +1260,27 @@ func startTakeoverEndpoint(dir *os.File, runID string) (*HandoverTransport, func
 	}
 	replacements := make(chan *os.File, 1)
 	done := make(chan struct{})
-	go serveTakeover(listener.(*net.UnixListener), int(dir.Fd()), runID, token, replacements, done)
+	stopped := make(chan struct{})
+	go func() {
+		serveTakeover(listener.(*net.UnixListener), int(dir.Fd()), runID, token, replacements, done)
+		close(stopped)
+	}()
 	cleanup := func() {
 		close(done)
 		_ = listener.Close()
+		<-stopped
+		for {
+			select {
+			case file := <-replacements:
+				if file != nil {
+					_ = writeTakeoverResponse(file, false, "runner-exiting")
+					_ = file.Close()
+				}
+			default:
+				goto drained
+			}
+		}
+	drained:
 		_ = unix.Unlinkat(int(dir.Fd()), TakeoverSocketName, 0)
 		_ = unix.Unlinkat(int(dir.Fd()), TakeoverGrantName, 0)
 	}
