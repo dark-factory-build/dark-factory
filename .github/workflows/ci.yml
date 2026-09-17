@@ -139,9 +139,8 @@ jobs:
       # detect and repair each kind of leftover state, then `git checkout
       # --force --detach` lands on the target commit and `git clean -ffdx`
       # removes anything else a prior job left in the working tree. That
-      # clean never touches the Go build cache: the gate provisions its own
-      # GOCACHE and GOMODCACHE under an isolated stage root (see
-      # docs/development/WORKFLOW.md, "The self-hosted runner").
+      # reusable compiler and package caches live under RUNNER_TEMP, outside
+      # this checkout. Generated outputs and fixture state are still cleaned.
       #
       # $GITHUB_SHA is the selected commit for `merge_group` and
       # `workflow_dispatch`; GitHub serves `git fetch` by arbitrary commit SHA.
@@ -190,6 +189,22 @@ jobs:
           "$node_bin/node" "$node_bin/corepack" --version
           printf '%s\n' "$node_bin" >> "$GITHUB_PATH"
           printf 'DF_CI_NODE=%s/node\nDF_CI_COREPACK=%s/corepack\n' "$node_bin" "$node_bin" >> "$GITHUB_ENV"
+
+      - name: Name reusable caches
+        id: cache-toolchain
+        run: |
+          printf 'DF_CI_CACHE_ROOT=%s/dark-factory-ci-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'go=%s\n' "$(/opt/homebrew/bin/go env GOVERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore reusable compiler and package caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/dark-factory-ci-cache/go-build
+            ${{ runner.temp }}/dark-factory-ci-cache/go-mod
+            ${{ runner.temp }}/dark-factory-ci-cache/corepack
+            ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
+          key: ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}
 
       - name: Run the macOS source gate
         run: ./scripts/local-ci.sh

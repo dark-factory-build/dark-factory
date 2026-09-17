@@ -125,7 +125,9 @@ test('a host key that does not hash to the node id is refused', async () => {
 
 test('a host token issued outside the sixty second skew is refused', async () => {
 	const node = createNode();
-	for (const issued of [nowSeconds() - 61, nowSeconds() + 61]) {
+	// Exact 60/61-second edges use the fixed clock in tokens.vectors.test.mjs.
+	// A future token one second outside the window can enter it during I/O.
+	for (const issued of [nowSeconds() - 120, nowSeconds() + 120]) {
 		const refused = await openHost(worker.origin, node.id, mintHostToken(node, { issued }));
 		assert.equal(refused.status, 403, `issued ${issued}`);
 	}

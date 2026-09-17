@@ -100,6 +100,20 @@ reports operator-checkout candidates to its host instead of crossing that bounda
 
 ## Shared local-CI lease
 
+Reusable Go build/module caches, Corepack downloads and the pnpm store live
+outside checkouts at `$HOME/Library/Caches/dark-factory/local-ci/trusted`.
+`DF_CI_CACHE_ROOT` selects another absolute directory and survives the clean
+test environment. Share it only between trusted worktrees; use a separate root
+for untrusted code. Factory runtime homes remain separate trust contexts under
+their existing filesystem grants. Test homes, generated outputs and XDG
+data/state remain local or temporary; `git clean -ffdx` still removes them.
+
+Actions restores only the reusable directories under `RUNNER_TEMP` using
+`actions/cache`, keyed by platform, actual Go version, Node version and dependency
+locks. Cache hits never skip checks. GitHub scopes saved caches by ref; a manual
+run on `main` can seed a cache available to subsequent merge-queue refs. Queue
+caches alone do not establish reuse across different queue refs.
+
 `scripts/local-ci.sh` acquires one kernel-backed lease from the common Git
 directory, so linked worktrees cannot stack process-heavy Go runs. Set
 `DARK_FACTORY_LOCAL_CI_WAIT=0` to fail instead of waiting.
