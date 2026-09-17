@@ -1106,6 +1106,76 @@ func TestTokenAndSocketPathsFailClosed(t *testing.T) {
 	})
 }
 
+func TestAttemptClientFollowsRotatedSessionTokenAcrossReadAndWrites(t *testing.T) {
+	first := testCredential('A')
+	second := testCredential('B')
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, first)
+	listener, socket := testListener(t, directory)
+	defer listener.Close()
+	t.Setenv(attemptTokenFileEnv, token)
+	client, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		responses := []string{
+			successResponse(`{"task":"exact"}`),
+			successResponse(`{"head":1,"revision":1}`),
+			successResponse(`{"head":2,"revision":2}`),
+		}
+		want := []credential{first, second, second}
+		for index := range responses {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			frame, readErr := readTestFrame(connection)
+			if readErr == nil && (len(frame) < wireRequestPrelude || frame[0] != wireAttemptDomain || !bytes.Equal(frame[1:wireRequestPrelude], want[index][:])) {
+				readErr = fmt.Errorf("attempt frame %d carried the wrong credential", index)
+			}
+			if readErr == nil {
+				readErr = writeTestResponse(connection, wireAttemptDomain, responses[index])
+			}
+			if readErr == nil && index > 0 {
+				readErr = writeTestPayload(connection, make([]byte, outcomeReceiptBytes), nil)
+				if readErr == nil {
+					readErr = connection.(*net.UnixConn).CloseWrite()
+				}
+				if readErr == nil {
+					_, readErr = readTestFrame(connection)
+				}
+			}
+			_ = connection.Close()
+			if readErr != nil {
+				done <- readErr
+				return
+			}
+		}
+		done <- nil
+	}()
+	if _, err := client.Task(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(directory, "replacement")
+	writeTestToken(t, replacement, second)
+	if err := os.Rename(replacement, token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Succeed(context.Background(), "first write"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Block(context.Background(), "second write"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testListener(t testing.TB, directory string) (*net.UnixListener, string) {
 	t.Helper()
 	socket := filepath.Join(directory, "api.sock")

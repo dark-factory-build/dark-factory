@@ -75,6 +75,26 @@ func requestFor(t *testing.T, kind kernel.Provider, installation Installation, r
 	return roleRequestFor(t, kind, installation, runtime, model, effort, kernel.RoleWorker)
 }
 
+func TestCodexAttemptMCPUsesPersistentSessionTokenLocator(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	locator := filepath.Join(runtime.accountHome, ".dark-factory-attempt-tokens", "agent.token")
+	runtime, err := runtime.WithSessionTokenPath(locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(requestFor(t, kernel.ProviderCodex, installation, runtime, "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(launch.Environment(), "DARK_FACTORY_ATTEMPT_TOKEN_FILE="+locator) {
+		t.Fatalf("launch environment did not use persistent session token: %q", launch.Environment())
+	}
+	permissions := strings.Join(launch.Argv(), " ")
+	if !strings.Contains(permissions, tomlBasicString(locator)+`="read"`) {
+		t.Fatalf("Codex permissions did not grant the session token locator: %q", permissions)
+	}
+}
+
 // testAgentID and testIncarnationID stand in for the durable agent and task
 // incarnation identifiers a real supervisor call site always supplies.
 const (
