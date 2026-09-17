@@ -2912,8 +2912,9 @@ impl CreatePullRequest {
             if kind != expected_kind || issue_number != self.issue_number {
                 return Err(OperationError::InvalidInput);
             }
-            body = body[..body.len() - line.len()]
-                .trim_end_matches(|character: char| character == '\n' || character == '\r');
+            body = body[..body.len() - line.len()].trim_end_matches(|character: char| {
+                character == '\n' || character == '\r' || character == ' ' || character == '\t'
+            });
         }
         if body.is_empty() {
             Ok(format!("{}\n\n{}", footer, self.marker()?))
@@ -9461,6 +9462,26 @@ mod tests {
         assert_eq!(
             conflicting_footer.marked_body().err(),
             Some(OperationError::InvalidInput)
+        );
+        let mut whitespace_separated_conflict = create.clone();
+        whitespace_separated_conflict
+            .body
+            .push_str("\n\nRefs #391\n \t\nCloses #390\n");
+        assert_eq!(
+            whitespace_separated_conflict.marked_body().err(),
+            Some(OperationError::InvalidInput)
+        );
+        let mut whitespace_separated_duplicates = create.clone();
+        whitespace_separated_duplicates
+            .body
+            .push_str("\n\nCloses #390\n \t\nCloses #390\n");
+        assert_eq!(
+            whitespace_separated_duplicates
+                .marked_body()
+                .unwrap()
+                .matches("Closes #390")
+                .count(),
+            1
         );
         let mut inline_reference = create.clone();
         inline_reference.body.push_str("\nRelated context: Refs #391");
