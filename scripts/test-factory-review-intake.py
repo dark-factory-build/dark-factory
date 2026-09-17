@@ -314,6 +314,22 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertIn('Do not retry blindly', task.call_args.args[1]['body'])
             Path(self.config['journal'] + '.reviews.json').unlink()
 
+    def test_refused_enqueue_state_survives_apps_planned_observation_on_replay(self):
+        # The App persists a released refusal claim as journal state
+        # "planned", not "missing" (control-plane journal.rs release_claim on
+        # refusal). A later intake pass observing that "planned" state must
+        # keep the concrete refusal already recorded, not degrade it to the
+        # generic "unresolved" guidance.
+        text = 'refused: The request was refused: the pull request was already queued before this operation claimed it.'
+        bridge_call, writes = self.enqueue_bridge(['missing', 'planned'], {'content': [{'type': 'text', 'text': text}], 'isError': True})
+        _first, _second, task, receipt = self.run_allow(bridge_call, task_state=[None, None])
+        self.assertEqual((1, 'refused', text), (len(writes), receipt['enqueue_state'], receipt['enqueue_refusal']))
+        self.assertEqual(2, task.call_count)
+        body = task.call_args.args[1]['body']
+        self.assertIn(text, body)
+        self.assertIn('Do not retry blindly', body)
+        self.assertNotIn('Its outcome is unresolved', body)
+
     def test_enqueue_receipt_for_another_head_is_refused(self):
         operation = dict(self.operation, enqueue_operation='11111111-1111-4111-8111-111111111111', enqueue_base='main')
         value = {'operation_id': operation['enqueue_operation'], 'state': 'completed', 'kind': 'enqueue_pull_request',
@@ -328,13 +344,18 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual((operation['enqueue_operation'], 'queued', []), (receipt['enqueue_operation'], receipt['enqueue_state'], writes))
 
     def test_uppercase_persisted_enqueue_operation_id_still_matches_digest(self):
-        # The App canonicalizes operation_id to lowercase before hashing
-        # (control-plane/src/github_app.rs canonical_operation_id); an
-        # operator-recorded id persisted uppercase must still be recognized
-        # as the same completed request, not falsely reported unresolved.
+        # The App canonicalizes operation_id to lowercase before journal
+        # lookup and echoes that canonical (lowercase) id back in its reply
+        # (control-plane/src/mcp.rs observe_operation, github_app.rs
+        # canonical_operation_id): the fake bridge below must do the same, or
+        # this test would pass even if observe_operation demanded a byte-exact
+        # match against the uppercase id we sent. An operator-recorded id
+        # persisted uppercase must still be recognized as the same completed
+        # request, not falsely reported unresolved.
         operation = dict(self.operation, enqueue_operation='ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB', enqueue_base='main')
-        app_digest = review.enqueue_request_digest(self.config, dict(operation, enqueue_operation=operation['enqueue_operation'].lower()))
-        value = {'operation_id': operation['enqueue_operation'], 'state': 'completed', 'kind': 'enqueue_pull_request',
+        canonical_id = operation['enqueue_operation'].lower()
+        app_digest = review.enqueue_request_digest(self.config, dict(operation, enqueue_operation=canonical_id))
+        value = {'operation_id': canonical_id, 'state': 'completed', 'kind': 'enqueue_pull_request',
                  'request_digest': app_digest, 'result': {'pull_number': 9, 'head_sha': SHA}}
         with patch.object(review, 'bridge_call', return_value={'structuredContent': value, 'isError': False}):
             self.assertEqual('queued', review.observe_enqueue(self.config, operation))

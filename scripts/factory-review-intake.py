@@ -124,7 +124,11 @@ def bridge_call(name, arguments):
 def observe_operation(operation_id):
     result = bridge_call("observe_operation", {"operation_id": operation_id})
     value = result.get("structuredContent")
-    if result.get("isError") or not isinstance(value, dict) or value.get("operation_id") != operation_id:
+    returned_id = value.get("operation_id") if isinstance(value, dict) else None
+    # The App canonicalizes operation_id to lowercase before journal lookup and
+    # returns that canonical form, so a persisted id that is not already
+    # lowercase must still compare equal here.
+    if result.get("isError") or not isinstance(returned_id, str) or returned_id.lower() != operation_id.lower():
         raise ReviewError("operation observation invalid")
     state = value.get("state")
     if state not in {"completed", "missing", "planned", "executing", "indeterminate"}:
@@ -196,7 +200,10 @@ def enqueue_allowed(config, operation, journal_path, receipts):
             raise ReviewError("enqueue result does not match the exact head")
         else:
             state = "queued"
-    elif state == "missing" and operation.get("enqueue_state") == "refused":
+    elif state in {"missing", "planned"} and operation.get("enqueue_state") == "refused":
+        # The App itself persists a released refusal claim as journal state
+        # "planned", not "missing"; either must keep the concrete refusal
+        # already recorded rather than degrade to generic "unresolved".
         state = "refused"
     elif state != "queued":
         state = "unresolved"
