@@ -137,6 +137,10 @@ func TestOutcomeObjectiveEditMustReopenAcceptance(t *testing.T) {
 	if _, err := store.WriteOutcome(context.Background(), NewOutcome{ID: id, ProjectID: project.ID, Document: changed}, 1, mustTime(t, 4)); err != nil {
 		t.Fatalf("reopen objective edit = %v", err)
 	}
+	historical, err := store.Outcome(context.Background(), project.ID, id, 1)
+	if err != nil || !historical.Stale {
+		t.Fatalf("source historical acceptance stale=%v err=%v", historical.Stale, err)
+	}
 }
 
 func TestBrowserOutcomeWriterUsesLiveHumanAuthority(t *testing.T) {
@@ -268,6 +272,14 @@ func TestComparisonPinsScenarioEvidenceWithoutStartingWork(t *testing.T) {
 	if tasksAfter != tasksBefore || runsAfter != runsBefore {
 		t.Fatalf("comparison started work: tasks %d -> %d, runs %d -> %d", tasksBefore, tasksAfter, runsBefore, runsAfter)
 	}
+	mismatched := candidate
+	mismatched.Environment = "other"
+	bad := doc
+	bad.Baseline = &mismatched
+	bad.Candidates = []ComparisonCandidate{mismatched}
+	if _, err := store.WriteOutcome(ctx, NewOutcome{ID: outcomeID(t, 131), ProjectID: run.ProjectID, Document: bad}, 0, mustTime(t, 43)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("mismatched scenario environment = %v", err)
+	}
 }
 
 func TestOutcomeAnchorBecomesStaleAndProjectIdentityIsStable(t *testing.T) {
@@ -286,8 +298,17 @@ func TestOutcomeAnchorBecomesStaleAndProjectIdentityIsStable(t *testing.T) {
 	if _, err := store.WriteOutcome(context.Background(), NewOutcome{ID: id, ProjectID: project.ID, Document: doc}, 0, mustTime(t, 3)); err != nil {
 		t.Fatal(err)
 	}
+	revised := doc
+	revised.Criteria = "revised criteria"
+	if _, err := store.WriteOutcome(context.Background(), NewOutcome{ID: id, ProjectID: project.ID, Document: revised}, 1, mustTime(t, 4)); err != nil {
+		t.Fatal(err)
+	}
+	historical, err := store.Outcome(context.Background(), project.ID, id, 1)
+	if err != nil || !historical.Stale {
+		t.Fatalf("task historical criteria stale=%v err=%v", historical.Stale, err)
+	}
 	body := "same revision field changes are stale too"
-	if _, err := store.UpdateTask(context.Background(), task.ID, task.Revision, TaskPatch{Body: &body}, mustTime(t, 4)); err != nil {
+	if _, err := store.UpdateTask(context.Background(), task.ID, task.Revision, TaskPatch{Body: &body}, mustTime(t, 5)); err != nil {
 		t.Fatal(err)
 	}
 	read, err := store.Outcome(context.Background(), project.ID, id, 0)
