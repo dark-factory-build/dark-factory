@@ -593,6 +593,13 @@ pub(crate) struct PublishCommit {
     /// same branch means the second one's expectation no longer holds and it
     /// fails closed instead of clobbering the first.
     pub(crate) expected_head_sha: String,
+    /// A second parent, when the worker integrated it: the published commit
+    /// is then the merge the worker made and `changes` are applied to this
+    /// commit's tree. Copying an integrated tree onto the branch as a
+    /// single-parent commit reproduced every file but lost the ancestry, so
+    /// GitHub re-merged the same hunks against main and reported a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_parent_sha: Option<String>,
     pub(crate) message: String,
     pub(crate) changes: Vec<FileChange>,
 }
@@ -3047,6 +3054,12 @@ impl PublishCommit {
         canonical_operation_id(&mut self.operation_id)?;
         valid_ref(&self.branch)?;
         valid_sha(&self.expected_head_sha)?;
+        if let Some(parent) = self.merge_parent_sha.as_deref() {
+            valid_sha(parent)?;
+            if parent == self.expected_head_sha {
+                return Err(OperationError::InvalidInput);
+            }
+        }
         // Keep caller text to one headline and reserve the body for the
         // operation trailer so the full message is byte-exact and trivial to
         // reconcile.
@@ -3097,6 +3110,21 @@ impl PublishCommit {
     #[cfg(target_arch = "wasm32")]
     fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
         operation(kind, &self.operation_id, self)
+    }
+
+    /// The branch head first, so the branch's own history stays first-parent.
+    fn parents(&self) -> Vec<&str> {
+        let mut parents = vec![self.expected_head_sha.as_str()];
+        parents.extend(self.merge_parent_sha.as_deref());
+        parents
+    }
+
+    /// The tree `changes` are applied to: the integrated commit when there is
+    /// one, so the caller supplies the worker's diff from it, not a copy of it.
+    fn tree_base(&self) -> &str {
+        self.merge_parent_sha
+            .as_deref()
+            .unwrap_or(&self.expected_head_sha)
     }
 
     fn trailer(&self) -> Result<String, OperationError> {
@@ -4383,7 +4411,7 @@ impl Authority {
         token: &RepositoryToken,
         request: &PublishCommit,
     ) -> Result<bool, OperationError> {
-        match self.read_ref_optional(token, &request.branch).await? {
+        let branch_exists = match self.read_ref_optional(token, &request.branch).await? {
             Some(reference) => (reference.object.sha == request.expected_head_sha)
                 .then_some(true)
                 .ok_or(OperationError::Conflict),
@@ -4395,17 +4423,16 @@ impl Authority {
             None => {
                 // The parent must still be a real commit, so a typo cannot
                 // create a branch from nothing.
-                let _: GitCommit = github_json(
-                    &format!(
-                        "https://api.github.com/repos/{}/{}/git/commits/{}",
-                        token.repository.owner, token.repository.name, request.expected_head_sha
-                    ),
-                    token.as_str(),
-                )
-                .await?;
+                self.read_commit(token, &request.expected_head_sha).await?;
                 Ok(false)
             }
+        }?;
+        // A mistyped merge parent would otherwise burn the operation id on a
+        // 422 from the commit write; every other input is checked first.
+        if let Some(parent) = request.merge_parent_sha.as_deref() {
+            self.read_commit(token, parent).await?;
         }
+        Ok(branch_exists)
     }
 
     async fn push_commit(
@@ -4425,7 +4452,7 @@ impl Authority {
             Some(&CommitRequest {
                 message: request.marked_message()?,
                 tree: &tree,
-                parents: [&request.expected_head_sha],
+                parents: request.parents(),
             }),
         )
         .await?;
@@ -4482,14 +4509,7 @@ impl Authority {
         token: &RepositoryToken,
         request: &PublishCommit,
     ) -> Result<String, OperationError> {
-        let base: GitCommit = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/commits/{}",
-                token.repository.owner, token.repository.name, request.expected_head_sha
-            ),
-            token.as_str(),
-        )
-        .await?;
+        let base = self.read_commit(token, request.tree_base()).await?;
         valid_sha(&base.tree.sha)?;
         let base_tree: GitTree = github_json(
             &format!(
@@ -4560,21 +4580,18 @@ impl Authority {
         if reference.object.sha == request.expected_head_sha {
             return Ok(None);
         }
-        let head: GitCommit = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/commits/{}",
-                token.repository.owner, token.repository.name, reference.object.sha
-            ),
-            token.as_str(),
-        )
-        .await?;
+        let head = self.read_commit(token, &reference.object.sha).await?;
         // The trailer alone is not proof. It travels with the message through a
         // rebase or a cherry-pick, and `validate` is the only thing stopping a
         // caller writing another operation's trailer into its own commit, so
-        // the tip must also still be a direct child of the stated head. That is
-        // what makes the reported `parent_sha` true rather than assumed.
+        // the tip must also still be a direct child of the stated parents. That
+        // is what makes the reported `parent_sha` true rather than assumed.
         if head.message != request.marked_message()?
-            || !matches!(head.parents.as_slice(), [parent] if parent.sha == request.expected_head_sha)
+            || !head
+                .parents
+                .iter()
+                .map(|parent| parent.sha.as_str())
+                .eq(request.parents())
             || valid_sha(&head.tree.sha).is_err()
         {
             // The branch moved for some other reason; this operation did not
@@ -6120,7 +6137,7 @@ struct GitTreeEntry {
 struct CommitRequest<'a> {
     message: String,
     tree: &'a str,
-    parents: [&'a str; 1],
+    parents: Vec<&'a str>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -8837,6 +8854,7 @@ mod tests {
             operation_id: "11111111-2222-3333-4444-555555555555".into(),
             branch: "agent/work".into(),
             expected_head_sha: "a".repeat(40),
+            merge_parent_sha: None,
             message: "Do the thing".into(),
             changes,
         };
@@ -8987,6 +9005,21 @@ mod tests {
         different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
         assert_ne!(trailer, different_tree.trailer().unwrap());
         assert!(forged("Two\nlines").validate().is_err());
+        // A worker that integrated main publishes the merge it made: the
+        // branch head stays first parent, the integrated commit is second, and
+        // the changes are its diff from that commit rather than a copy of it.
+        let mut merge = base(vec![file("README.md")]);
+        assert_eq!(merge.parents(), vec!["a".repeat(40)]);
+        assert_eq!(merge.tree_base(), "a".repeat(40));
+        merge.merge_parent_sha = Some("b".repeat(40));
+        assert!(merge.validate().is_ok());
+        assert_eq!(merge.parents(), vec!["a".repeat(40), "b".repeat(40)]);
+        assert_eq!(merge.tree_base(), "b".repeat(40));
+        assert_ne!(trailer, merge.trailer().unwrap());
+        for refused in ["a".repeat(40), "B".repeat(40), "b".repeat(39)] {
+            merge.merge_parent_sha = Some(refused);
+            assert_eq!(merge.validate().err(), Some(OperationError::InvalidInput));
+        }
     }
 
     #[test]
