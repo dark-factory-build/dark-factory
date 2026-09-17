@@ -14,6 +14,13 @@ send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
 admission limits. A configured `max_run_seconds: 0` disables the run deadline;
 intake honors that operator choice and does not require a finite duration.
+
+Workers should use `./scripts/go-check.sh` plus focused tests while implementing
+and record the exact head and checks before review. Process-sensitive checks use
+`./scripts/with-local-ci-lease.sh`; reviewers reproduce relevant risks instead
+of rerunning the full suite by default. The protected merge queue selects the
+appropriate fixed gates from its complete combined-tree diff and remains the
+authoritative pre-merge full check.
 The overseer lane is not an extra worker slot. Do not infer
 capacity from the number of visible terminals or raise limits to clear a queue.
 

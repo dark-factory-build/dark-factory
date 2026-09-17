@@ -14,15 +14,29 @@ cd .worktrees/<slug>
 Prefer deleting obsolete behavior and duplicated machinery over compatibility
 code, feature flags, or speculative abstractions.
 
-The routine baseline is:
+The routine source check is:
+
+```sh
+./scripts/go-check.sh
+```
+
+It runs Go formatting, vetting, ordinary short tests, the TypeScript build and
+tests, and `git diff --check`. It does not acquire the process lease. During
+implementation, run this check plus focused tests for the changed package.
+
+The full local gate is an explicit pre-merge or CI change check:
 
 ```sh
 ./scripts/local-ci.sh
 ```
 
-It covers repository/release fixtures, Go formatting and vetting, risk-scoped
-short Go suites, the TypeScript client proof, browser/daemon end-to-end checks,
-and `git diff --check`. It is macOS-only while the daemon is Darwin-only.
+It includes repository and release fixtures, ordinary checks, and every
+process-sensitive Go and end-to-end check. Smaller fixed modes are available
+when their inputs are known: `./scripts/local-ci.sh --ui` runs the UI source
+and leased browser smoke checks, `--runtime` runs ordinary and process gates,
+and `--release` runs release and packaging fixtures. The selector in the
+protected CI workflow chooses these modes from the complete merge-queue diff;
+uncertain or mixed paths use the full gate.
 
 Additional checks follow changed risk. Process-sensitive checks share the
 repository lease:
@@ -114,9 +128,10 @@ locks. Cache hits never skip checks. GitHub scopes saved caches by ref; a manual
 run on `main` can seed a cache available to subsequent merge-queue refs. Queue
 caches alone do not establish reuse across different queue refs.
 
-`scripts/local-ci.sh` acquires one kernel-backed lease from the common Git
-directory, so linked worktrees cannot stack process-heavy Go runs. Set
-`DARK_FACTORY_LOCAL_CI_WAIT=0` to fail instead of waiting.
+Process-sensitive checks acquire one kernel-backed lease from the common Git
+directory, so linked worktrees cannot stack process-heavy Go runs. The routine
+`go-check.sh` remains outside that lease. Set `DARK_FACTORY_LOCAL_CI_WAIT=0`
+to fail instead of waiting.
 
 The full lease stress suites are focused checks for changes to the lease
 helpers, their entry/owner semantics, or the macOS process primitives they
@@ -167,8 +182,10 @@ when install or service ownership changes; it is not a routine extra gate.
 The local CI lease lives entirely in `dark-factory-local-ci` beneath the
 repository's canonical Git common directory. Workers receive that subtree
 through `DARK_FACTORY_LOCAL_CI_DIRECTORY`; use
-`scripts/with-local-ci-lease.sh <focused check>` to share the host gate, and
-run full `local-ci.sh` from the Change worktree, which is a Git checkout.
+`scripts/with-local-ci-lease.sh <focused check>` to share the host gate. Full
+`local-ci.sh` holds the lease for its complete suite because repository and
+release fixtures can also use process state. The `--runtime` and `--ui` modes
+acquire it only around their process-sensitive checks.
 If lease preparation is unavailable or refused, source work can still start with
 no lease grant and an explicit startup diagnostic; required CI remains blocked.
 

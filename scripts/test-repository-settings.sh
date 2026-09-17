@@ -85,12 +85,14 @@ assert_job_field required needs "[eligibility, scope, checks, control-plane, rel
 require_job scope 'BASE_SHA: ${{ github.event.merge_group.base_sha }}'
 require_job scope 'git diff --check "$BASE_SHA" "$GITHUB_SHA"'
 require_job scope 'git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$BASE_SHA" "$GITHUB_SHA"'
+require_job scope "macos_mode=full"
 expected_scope_keys=$(printf '%s\n' name id env run)
 [ "$(step_keys scope 'Select fixed gates from the combined tree')" = "$expected_scope_keys" ] || {
     echo "combined-tree scope has unexpected step controls" >&2
     exit 1
 }
 require_job checks './scripts/local-ci.sh'
+require_job checks './scripts/local-ci.sh --ui'
 require_job relay './relay/scripts/local-ci.sh'
 diagnostic_events="github.event_name == 'pull_request' || github.event_name == 'merge_group'"
 [ "$(step_field required 'Confirm the live merge rules' if)" = "$diagnostic_events" ] || {
@@ -219,26 +221,45 @@ scope_case() {
     want_macos=$1
     want_control=$2
     want_relay=$3
-    shift 3
+    want_mode=$4
+    shift 4
     run_scope merge_group aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa false "$@"
     [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
-        "control_plane=$want_control macos=$want_macos relay=$want_relay " ]
+        "control_plane=$want_control macos=$want_macos macos_mode=$want_mode relay=$want_relay " ]
 }
-scope_case false false false docs/install.md README.md
-scope_case false true false control-plane
-scope_case false true false control-plane/src/lib.rs
-scope_case false true false .github/workflows/deploy-control-plane.yml
-scope_case true false false internal/kernel/store.go
-scope_case true true false control-plane/src/lib.rs internal/kernel/store.go
-scope_case true true true .github/workflows/ci.yml
-scope_case true true false .gitignore
-scope_case true true false scripts/bootstrap-maintainer-v2.sh
-scope_case false false true relay/src/index.ts
-scope_case false false true relay
-scope_case true false false unclassified-boundary
+scope_case false false false none docs/install.md README.md
+scope_case false true false none control-plane
+scope_case false true false none control-plane/src/lib.rs
+scope_case false true false none .github/workflows/deploy-control-plane.yml
+scope_case true false false ui web/packages/ui/src/console-view.tsx
+scope_case true false false ui web/packages/ui/src/factory-console.tsx
+scope_case true false false ui web/packages/ui/test/console-view.test.mjs
+scope_case true false false full web/packages/ui/src/factory-app-controller.ts
+scope_case true false false full web/packages/client/src/state.ts
+scope_case true false false full web/fixtures/state.mjs
+scope_case true false false full protocol/browser/fixtures/agent_control.json
+scope_case true false false full internal/buildinfo/buildinfo.go
+scope_case true false false full internal/install/install_darwin.go
+scope_case true false false full cmd/factoryctl/main.go
+scope_case true false false full web/package.json
+scope_case true false false release VERSION
+scope_case true false false release scripts/package-release.sh
+scope_case true false false runtime internal/kernel/store.go
+scope_case true true false runtime control-plane/src/lib.rs internal/kernel/store.go
+scope_case true true true full .github/workflows/ci.yml
+scope_case true true false full .gitignore
+scope_case true true false full scripts/bootstrap-maintainer-v2.sh
+scope_case false false true none relay/src/index.ts
+scope_case false false true none relay
+scope_case true false false full unclassified-boundary
+scope_case true false false full web/packages/ui/src/console-view.tsx internal/kernel/store.go
+# A rename/deletion is represented by the old and new paths because the
+# selector deliberately disables rename detection; either side must force the
+# same conservative mode.
+scope_case true false false full web/packages/ui/src/console-view.ts web/packages/ui/src/console-view.tsx
 run_scope workflow_dispatch '' false
 [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
-    'control_plane=true macos=true relay=true ' ]
+    'control_plane=true macos=true macos_mode=full relay=true ' ]
 if run_scope merge_group bad false >/dev/null 2>&1; then
     echo "invalid scope commit passed" >&2
     exit 1

@@ -9,35 +9,35 @@ process_entry="$repository_root/scripts/go-ci.sh"
 service_gate="$repository_root/scripts/go-service-e2e.sh"
 fail() { echo "local-ci shape test failed: $*" >&2; exit 1; }
 
+grep -Fq '1:--ui) go_check_mode=ui' "$ordinary_gate" \
+    || fail "Go gate has no narrow UI mode"
+grep -Fq 'usage: scripts/go-check.sh [--ui]' "$ordinary_gate" \
+    || fail "Go gate usage does not document UI mode"
+grep -Fq 'local_ci_mode=ui' "$local_gate" || fail "local-CI has no UI mode"
+grep -Fq './scripts/go-check.sh --ui' "$local_gate" || fail "UI mode lacks source checks"
+grep -Fq 'with-local-ci-lease.sh" ./scripts/go-browser-e2e.sh' "$local_gate" \
+    || fail "UI mode lacks the leased browser smoke"
+
 set +e
 usage_output=$(/bin/sh "$local_gate" obsolete-mode 2>&1)
 usage_status=$?
 set -e
 [ "$usage_status" -eq 2 ] || fail "local-ci accepted an argument"
-[ "$usage_output" = "usage: scripts/local-ci.sh" ] || fail "local-ci usage error changed"
+[ "$usage_output" = "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui]" ] || fail "local-ci usage error changed"
 
-ordinary_line=$(grep -n -F 'echo "local-ci: ordinary source gate"' "$local_gate" | cut -d: -f1)
-process_line=$(grep -n -F 'echo "local-ci: process-sensitive gate"' "$local_gate" | cut -d: -f1)
-release_line=$(grep -n -F 'echo "local-ci: release gate"' "$local_gate" | cut -d: -f1)
-[ -n "$ordinary_line" ] && [ "$ordinary_line" -lt "$process_line" ] \
-    && [ "$process_line" -lt "$release_line" ] \
-    || fail "ordinary, process, and release gates are not ordered"
-
-for invocation in './scripts/go-check.sh' '/bin/sh "$script_dir/go-ci-owned.sh"'; do
-    [ "$(grep -Fc "$invocation" "$local_gate")" -eq 1 ] || fail "gate invocation is not unique: $invocation"
-done
+grep -Fq './scripts/go-check.sh' "$local_gate" || fail "ordinary source gate is missing"
+grep -Fq 'exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh" --full' "$local_gate" \
+    || fail "full gate lost its shared lease"
+grep -Fq 'with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh"' "$local_gate" \
+    || fail "process gate lost the repository lease"
+grep -Fq './scripts/test-prepare-release-source.sh' "$local_gate" \
+    || fail "release mode lacks release fixtures"
 if grep -Fq 'go-service-e2e.sh' "$local_gate"; then
     fail "focused service lifecycle proof returned to the routine gate"
 fi
-grep -Fq 'exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"' "$local_gate" \
-    || fail "local-CI entry lost the repository lease"
 if grep -Eq 'test-local-ci-lease(-mutations)?\.sh' "$local_gate"; then
     fail "focused lease stress returned to the routine gate"
 fi
-[ "$(grep -Fc '/bin/sh ./scripts/test-go-gates.sh' "$local_gate")" -eq 1 ] \
-    || fail "fault fixtures are not invoked through their non-executable shell boundary"
-[ ! -x "$repository_root/scripts/test-go-gates.sh" ] \
-    || fail "fault fixture unnecessarily requires an executable mode"
 
 grep -Fq 'go vet ./...' "$ordinary_gate" || fail "ordinary vet is missing"
 grep -Fq 'go test -short -timeout=20m' "$ordinary_gate" || fail "ordinary tests are missing"

@@ -2,6 +2,15 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
+[ "$#" -le 1 ] || { echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui]" >&2; exit 2; }
+case "${1-}" in
+    '') local_ci_mode=full ;;
+    --full) local_ci_mode=full ;;
+    --runtime) local_ci_mode=runtime ;;
+    --release) local_ci_mode=release ;;
+    --ui) local_ci_mode=ui ;;
+    *) echo "usage: scripts/local-ci.sh [--full|--runtime|--release|--ui]" >&2; exit 2 ;;
+esac
 # Refuse outside Git before creating cache state; inherited Git locators must
 # not turn another repository into the target of this preflight.
 /usr/bin/env -i PATH=/usr/bin:/bin HOME=/dev/null TMPDIR=/tmp \
@@ -12,43 +21,61 @@ script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
     exit 1
 }
 . "$script_dir/local-ci-environment.sh"
-[ "$#" -eq 0 ] || { echo "usage: scripts/local-ci.sh" >&2; exit 2; }
-if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
-    exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh"
+
+if [ "$local_ci_mode" = full ] && [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" != 1 ]; then
+    exec "$script_dir/with-local-ci-lease.sh" "$script_dir/local-ci.sh" --full
 fi
 
-echo "local-ci: repository contract fixtures"
-./scripts/check-toolchain-pins.sh
-./scripts/test-local-ci-environment.sh
-./scripts/test-new-worktree.sh
-./scripts/test-reinstall-service.sh
-./scripts/test-deploy-site.sh
-node ./scripts/test-verification-profile.mjs
-./scripts/test-cold-review.sh
-./scripts/test-publication-parents.sh
-python3 ./scripts/test-factory-browser.py
-python3 ./scripts/test-factory-intake.py
-python3 ./scripts/test-factory-release.py
-python3 ./scripts/test-factory-autonomy.py
-python3 ./scripts/test-factory-delivery.py
-python3 ./scripts/test-factory-review-intake.py
-./scripts/test-github-step-summary.sh
-./scripts/test-verify-adversarial-review.sh
-./scripts/test-cloudflare-env.sh
-./scripts/test-bootstrap-maintainer-v2.sh
-./scripts/test-repository-settings.sh
-./scripts/test-local-ci-mode.sh
-/bin/sh ./scripts/test-go-gates.sh
+if [ "$local_ci_mode" = ui ]; then
+    echo "local-ci: UI source and browser smoke gate"
+    ./scripts/go-check.sh --ui
+    "$script_dir/with-local-ci-lease.sh" ./scripts/go-browser-e2e.sh
+    echo "local-ci: PASS"
+    exit 0
+fi
 
-echo "local-ci: ordinary source gate"
-./scripts/go-check.sh
+if [ "$local_ci_mode" = full ]; then
+    echo "local-ci: repository contract fixtures"
+    ./scripts/check-toolchain-pins.sh
+    ./scripts/test-local-ci-environment.sh
+    ./scripts/test-new-worktree.sh
+    ./scripts/test-reinstall-service.sh
+    ./scripts/test-deploy-site.sh
+    node ./scripts/test-verification-profile.mjs
+    ./scripts/test-cold-review.sh
+    ./scripts/test-publication-parents.sh
+    python3 ./scripts/test-factory-browser.py
+    python3 ./scripts/test-factory-intake.py
+    python3 ./scripts/test-factory-release.py
+    python3 ./scripts/test-factory-autonomy.py
+    python3 ./scripts/test-factory-delivery.py
+    python3 ./scripts/test-factory-review-intake.py
+    ./scripts/test-github-step-summary.sh
+    ./scripts/test-verify-adversarial-review.sh
+    ./scripts/test-cloudflare-env.sh
+    ./scripts/test-bootstrap-maintainer-v2.sh
+    ./scripts/test-repository-settings.sh
+    ./scripts/test-local-ci-mode.sh
+    /bin/sh ./scripts/test-go-gates.sh
+fi
 
-echo "local-ci: process-sensitive gate"
-./scripts/test-go-e2e-tools.sh
-/bin/sh "$script_dir/go-ci-owned.sh"
+if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = runtime ]; then
+    echo "local-ci: ordinary source gate"
+    ./scripts/go-check.sh
 
-echo "local-ci: release gate"
-./scripts/test-prepare-release-source.sh
-./scripts/test-publish-release.sh
-./scripts/test-package-release.sh
+    echo "local-ci: process-sensitive gate"
+    ./scripts/test-go-e2e-tools.sh
+    if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then
+        /bin/sh "$script_dir/go-ci-owned.sh"
+    else
+        "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh"
+    fi
+fi
+
+if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = release ]; then
+    echo "local-ci: release gate"
+    ./scripts/test-prepare-release-source.sh
+    ./scripts/test-publish-release.sh
+    ./scripts/test-package-release.sh
+fi
 echo "local-ci: PASS"
