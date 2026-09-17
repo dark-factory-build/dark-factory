@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -257,11 +258,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 	}
 	var changeID kernel.ChangeID
-	var finalName, stagingName string
+	var finalName string
 	if worker {
 		changeID = *run.ChangeID
 		finalName = changeID.String()
-		stagingName = "." + finalName + ".stage"
 	}
 	task, found, err := daemon.store.Task(ctx, run.TaskID)
 	if err != nil || !found {
@@ -314,11 +314,18 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
-	// CI is an optional execution capability. An unavailable or unsafe lease
-	// must not block otherwise valid source work; no directory is granted.
+	// The repository's Git directory holds every Change worktree's refs and
+	// commits; a run that cannot resolve it has no source to work in. CI is an
+	// optional execution capability on top: an unavailable or unsafe lease
+	// must not block otherwise valid source work; no lease directory is
+	// granted.
+	gitCommonDir, err := resolveGitCommonDir(ctx, spec.GitExecutable, project.Root)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
+	}
 	var localCILeaseDir string
 	if worker {
-		localCILeaseDir, _ = prepareLocalCILeaseDirectory(ctx, spec.GitExecutable, project.Root)
+		localCILeaseDir, _ = prepareLocalCILeaseDirectory(gitCommonDir)
 	}
 	// From CreateRuntime until the runtime resource is durably active, a
 	// failure cannot be finalized live: the exact-edge grammar requires either
@@ -355,8 +362,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	config := changeworker.Config{
 		Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
-		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity, GitCommonDir: gitCommonDir,
+		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
@@ -525,7 +532,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	var workerResult changeworker.Result
 	var selection kernel.ChangeSelection
-	var stage kernel.FileIdentity
 	if worker {
 		if workerResult, err = changeworker.DecodeResult(preparationEvent.Payload); err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
@@ -533,18 +539,17 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if selection, err = kernelSelectionCheckpoint(workerResult, repositoryIdentity); err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
 		}
-		if stage, err = kernelStageIdentity(workerResult.Tree); err != nil {
-			return daemon.failRun(run, kernel.FailureSource, err)
-		}
 		at, err = daemon.timestamp()
 		if err != nil {
 			return daemon.failRun(run, kernel.FailureInternal, err)
 		}
 		if retained == nil {
-			changeState, err = daemon.store.RecordChangePrepared(ctx, changeID, changeState.Revision, selection, stage, at)
+			changeState, err = daemon.store.RecordChangePrepared(ctx, changeID, changeState.Revision, selection, at)
 			if err != nil {
 				return daemon.failRun(run, kernel.FailureSource, err)
 			}
+		} else if !kernelSelectionEqual(*changeState.Selection, selection) {
+			return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 		}
 	} else if len(preparationEvent.Payload) != 0 {
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
@@ -557,24 +562,33 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
-		facts, err := change.InspectPublished(ctx, spec.ChangeParent, finalName, workerResult.Tree, workerResult.Format, workerResult.Base)
-		if err != nil || !resultMatchesFacts(workerResult, facts) {
+		// The daemon reads the worktree itself: it must be a linked worktree of
+		// the project repository on the Change's branch, at the base for a fresh
+		// or adopted Change and at the settled head for a reopened one.
+		facts, err := change.InspectWorktree(ctx, spec.GitExecutable, project.Root, repositoryIdentity, filepath.Join(spec.ChangeParent, finalName))
+		if err != nil || facts.Branch() != change.BranchName(finalName) {
 			return daemon.failRun(run, kernel.FailureSource, errors.Join(err, errInvalidContract))
 		}
-		availability, err := kernelAvailability(facts)
+		head, err := kernelCommit(facts.Head())
 		if err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
 		}
-		if retained == nil {
+		switch {
+		case retained == nil:
 			at, err = daemon.timestamp()
 			if err != nil {
 				return daemon.failRun(run, kernel.FailureInternal, err)
 			}
-			changeState, err = daemon.store.MarkChangeAvailable(ctx, changeID, changeState.Revision, availability, at)
+			changeState, err = daemon.store.MarkChangeAvailable(ctx, changeID, changeState.Revision, head, at)
 			if err != nil {
 				return daemon.failRun(run, kernel.FailureSource, err)
 			}
-		} else if !retainedWorkerCheckpointsMatch(changeState, selection, stage, availability) {
+		case changeState.HeadCommit == nil:
+			changeState, err = daemon.store.RecordChangeWorktree(ctx, changeID, changeState.Revision, head)
+			if err != nil {
+				return daemon.failRun(run, kernel.FailureSource, err)
+			}
+		case !kernelCommitEqual(*changeState.HeadCommit, head):
 			return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 		}
 	}
@@ -604,8 +618,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			live.pathsSince = *run.RunningAt
 		}
 	}
-	live.sourceSnapshots = make(map[kernel.RetainedChangeHandoff]string)
-	live.sourceRoot = filepath.Join(gotRuntimePath, "retained-source")
 	live.attemptDigest = digest
 	live.beforeProviderStateCheck = spec.beforeProviderStateCheck
 	if err := daemon.registerLiveAttempt(live); err != nil {
@@ -793,19 +805,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		}
 		return current, errors.Join(settleErr, ctx.Err())
 	}
-	var settlement kernel.ChangeSettlement
-	settledFacts, settleErr := change.InspectPublished(daemon.cleanupCtx, spec.ChangeParent, finalName, workerResult.Tree, workerResult.Format, workerResult.Base)
-	if refused, refusal := publicationRefused(settleErr); refused {
-		// The tree the worker left cannot be published as it is. That is the
-		// run's outcome, recorded now, not a reason to leave it finalizing.
-		settlement, settleErr = refusedSettlement(spec.ChangeParent, changeState, run.ID, refusal)
-	} else if settleErr == nil {
-		var settledAvailability kernel.ChangeAvailability
-		settledAvailability, settleErr = kernelAvailability(settledFacts)
-		if settleErr == nil {
-			settlement, settleErr = kernel.NewRetainedChangeSettlement(changeState.Revision, settledAvailability)
-		}
-	}
+	settlement, settleErr := daemon.retainedSettlement(daemon.cleanupCtx, spec.ChangeParent, changeState)
 	if settleErr != nil {
 		return current, errors.Join(settleErr, ctx.Err())
 	}
@@ -886,9 +886,12 @@ func releaseCheckpoint(controller *runner.AttemptController, stage runner.Attemp
 	return event, nil
 }
 
-func resultMatchesFacts(result changeworker.Result, facts change.TreeFacts) bool {
-	return result.Tree.Equal(facts.Identity()) && result.Commitment.Equal(facts.Commitment()) &&
-		result.EntryCount == facts.EntryCount() && result.BlobBytes == facts.BlobBytes()
+func kernelSelectionEqual(left, right kernel.ChangeSelection) bool {
+	return left.ObjectFormat() == right.ObjectFormat() && kernelCommitEqual(left.Commit(), right.Commit()) && left.RepositoryIdentity() == right.RepositoryIdentity()
+}
+
+func kernelCommitEqual(left, right kernel.CommitID) bool {
+	return left.Format() == right.Format() && bytes.Equal(left.Bytes(), right.Bytes())
 }
 
 func (daemon *Daemon) activateResource(ctx context.Context, runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Resource, error) {

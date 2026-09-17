@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -54,7 +55,7 @@ func TestRunPathsAnswersForALiveRunAndCachesTheWalk(t *testing.T) {
 	fixture.pair(t)
 	run := adapterRunningRoleRun(t, fixture.store, 0x70, kernel.RoleWorker)
 	changeParent := t.TempDir()
-	fixture.daemon.rememberSupervisorAccount(changeParent, "")
+	fixture.daemon.rememberSupervisorAccount(changeParent, "", change.TrustedGitExecutable)
 	published, found, err := fixture.store.Change(ctx, *run.ChangeID)
 	if err != nil || !found {
 		t.Fatalf("published change: found=%v err=%v", found, err)
@@ -219,31 +220,19 @@ func adapterPublishChange(t *testing.T, store *kernel.Store, run kernel.Run) ker
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, err := kernel.TreeDigestFromBytes(bytes.Repeat([]byte{0x82}, kernel.DigestBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
 	repository, err := kernel.NewFileIdentity(7, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	selection, err := kernel.NewChangeSelection(format, commit, digest, 1, 64, repository)
+	selection, err := kernel.NewChangeSelection(format, commit, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tree, err := kernel.NewFileIdentity(9, 10)
+	prepared, err := store.RecordChangePrepared(ctx, state.ID, state.Revision, selection, adapterTime(t, max(int64(322), run.UpdatedAt.Int64())))
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := store.RecordChangePrepared(ctx, state.ID, state.Revision, selection, tree, adapterTime(t, max(int64(322), run.UpdatedAt.Int64())))
-	if err != nil {
-		t.Fatal(err)
-	}
-	availability, err := kernel.NewChangeAvailability(digest, 1, 64, tree)
-	if err != nil {
-		t.Fatal(err)
-	}
-	available, err := store.MarkChangeAvailable(ctx, state.ID, prepared.Revision, availability, adapterTime(t, max(int64(324), run.UpdatedAt.Int64())))
+	available, err := store.MarkChangeAvailable(ctx, state.ID, prepared.Revision, commit, adapterTime(t, max(int64(324), run.UpdatedAt.Int64())))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +243,7 @@ func TestRunPathsUsesOnlyCurrentOwnerAndIsolatesReplacementCache(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	run := adapterRunningRoleRun(t, fixture.store, 0x70, kernel.RoleWorker)
 	parent := t.TempDir()
-	fixture.daemon.rememberSupervisorAccount(parent, "")
+	fixture.daemon.rememberSupervisorAccount(parent, "", change.TrustedGitExecutable)
 	root := filepath.Join(parent, run.ChangeID.String())
 	writeRunFile(t, root, "old/file.go", time.UnixMilli(run.RunningAt.Int64()+1))
 	check := func(want kernel.RunID, paths string) {

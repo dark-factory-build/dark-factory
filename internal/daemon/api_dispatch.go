@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,10 +74,11 @@ type Daemon struct {
 	// the account every run launches under, published the same way and for the
 	// same reason. runPathsMu guards only the map of bounded directory walks,
 	// never a walk itself.
-	changeParent atomic.Pointer[string]
-	accountHome  atomic.Pointer[string]
-	runPathsMu   sync.Mutex
-	runPaths     map[kernel.RunID]runPathsResult
+	changeParent  atomic.Pointer[string]
+	accountHome   atomic.Pointer[string]
+	gitExecutable atomic.Pointer[string]
+	runPathsMu    sync.Mutex
+	runPaths      map[kernel.RunID]runPathsResult
 
 	attemptMu sync.Mutex
 	attempts  map[kernel.RunID]*liveAttempt
@@ -471,12 +471,6 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	// Only the Codex launch currently enforces a read-only local-command
-	// boundary for this private snapshot. Claude and shell must not receive a
-	// mutable path described as an immutable source handoff.
-	if authority.Provider != kernel.ProviderCodex {
-		return newErrorReply(api.RemoteUnavailable)
-	}
 	taskIDText, ok := call.AttemptSourceTaskID()
 	if !ok {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -502,15 +496,11 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if !found {
 		return newErrorReply(api.RemoteNotFound)
 	}
-	path, err := daemon.materializeAttemptSource(ctx, live, handoff)
+	projected, err := daemon.attemptSourceHandoff(ctx, handoff)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	projected, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: path})
-	if err != nil || len(projected) != 1 {
-		return newErrorReply(api.RemoteUnavailable)
-	}
-	reply, err := api.NewAttemptSourceReply(projected[0])
+	reply, err := api.NewAttemptSourceReply(projected)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -1299,17 +1289,11 @@ func (daemon *Daemon) overseerSnapshot(ctx context.Context, call api.Call) api.R
 	}
 	daemon.attemptMu.Lock()
 	live := daemon.attempts[authority.RunID]
-	var snapshots map[kernel.RetainedChangeHandoff]string
-	if live != nil {
-		live.sourceMu.Lock()
-		snapshots = maps.Clone(live.sourceSnapshots)
-		live.sourceMu.Unlock()
-	}
 	daemon.attemptMu.Unlock()
 	if live == nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}
-	projected, err := projectOverseerSnapshot(snapshot, snapshots)
+	projected, err := projectOverseerSnapshot(snapshot)
 	if err != nil {
 		return newErrorReply(api.RemoteUnavailable)
 	}

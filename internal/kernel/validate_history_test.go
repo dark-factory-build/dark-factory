@@ -75,7 +75,6 @@ func retainedHistoryStore(t *testing.T, tasks, runs int) *Store {
 		t.Fatal(err)
 	}
 	selection := testChangeSelection(t)
-	stage, _ := NewFileIdentity(3, 4)
 	at := int64(100)
 	next := 0
 	for index := range tasks {
@@ -105,12 +104,11 @@ func retainedHistoryStore(t *testing.T, tasks, runs int) *Store {
 				if err != nil || !found {
 					t.Fatalf("change = %+v, %v", change, err)
 				}
-				prepared, err := store.RecordChangePrepared(ctx, change.ID, change.Revision, selection, stage, mustTime(t, at+1))
+				prepared, err := store.RecordChangePrepared(ctx, change.ID, change.Revision, selection, mustTime(t, at+1))
 				if err != nil {
 					t.Fatal(err)
 				}
-				availability, _ := NewChangeAvailability(selection.commitment, 1, 1, stage)
-				if _, err := store.MarkChangeAvailable(ctx, change.ID, prepared.Revision, availability, mustTime(t, at+2)); err != nil {
+				if _, err := store.MarkChangeAvailable(ctx, change.ID, prepared.Revision, selection.commit, mustTime(t, at+2)); err != nil {
 					t.Fatal(err)
 				}
 			}

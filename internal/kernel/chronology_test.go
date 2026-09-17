@@ -679,8 +679,7 @@ func TestSourceFailuresThatAreNotRefusalsRetryAsBefore(t *testing.T) {
 		if err != nil || !found || change.Phase != ChangeAvailable {
 			t.Fatalf("available Change = %+v, found=%v, %v", change, found, err)
 		}
-		availability := mustChangeAvailability(t, change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
-		retained, _ := NewRetainedChangeSettlement(change.Revision, availability)
+		retained, _ := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
 		terminal, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, retained, mustTime(t, 80))
 		if err != nil {
 			t.Fatal(err)
@@ -710,8 +709,7 @@ func TestRefusedPublicationOnARetainedRetryAbandonsAndRetriesFresh(t *testing.T)
 	if err != nil || !found || change.Phase != ChangeAvailable {
 		t.Fatalf("available Change = %+v, found=%v, %v", change, found, err)
 	}
-	availability := mustChangeAvailability(t, change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
-	retained, _ := NewRetainedChangeSettlement(change.Revision, availability)
+	retained, _ := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
 	first, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, retained, mustTime(t, 80))
 	if err != nil {
 		t.Fatal(err)
@@ -1167,14 +1165,12 @@ func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 		t.Fatal(err)
 	}
 	selection := testChangeSelection(t)
-	stage, _ := NewFileIdentity(70, 80)
-	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, stage, mustTime(t, 12))
+	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, mustTime(t, 12))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	availability := mustChangeAvailability(t, selection.commitment, selection.entries, selection.bytes, stage)
-	if _, err := store.MarkChangeAvailable(context.Background(), *run.ChangeID, prepared.Revision, availability, mustTime(t, 13)); err != nil {
+	if _, err := store.MarkChangeAvailable(context.Background(), *run.ChangeID, prepared.Revision, selection.commit, mustTime(t, 13)); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
@@ -1189,7 +1185,7 @@ func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 		store.Close()
 		t.Fatal(err)
 	}
-	settlement, _ := NewRetainedChangeSettlement(mustRevision(t, 3), availability)
+	settlement, _ := NewRetainedChangeSettlement(mustRevision(t, 3), &selection.commit)
 	terminal, err := store.FinalizeWorkerRun(context.Background(), run.ID, finalizing.Revision, settlement, mustTime(t, 33))
 	if err != nil {
 		store.Close()

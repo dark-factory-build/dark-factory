@@ -19,7 +19,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -171,7 +170,7 @@ func runSupervisorCodexFixture() error {
 		}
 		if overseer {
 			before, err := client.OverseerTaskSnapshot(ctx, expected[0])
-			if err != nil || len(before.Handoffs) != 0 {
+			if err != nil || len(before.Handoffs) != 1 || before.Handoffs[0].TaskID != expected[0] || before.Handoffs[0].SourcePath != "" || before.Handoffs[0].GitDirectory != "" || before.Handoffs[0].HeadCommit == "" {
 				return fmt.Errorf("status before explicit request = %+v, %v", before.Handoffs, err)
 			}
 		}
@@ -182,13 +181,19 @@ func runSupervisorCodexFixture() error {
 		if handoff.TaskID != expected[0] || handoff.ChangeID != expected[1] || handoff.BaseCommit != expected[2] || strconv.FormatUint(handoff.TaskWorkRevision, 10) != expected[3] || strconv.FormatUint(handoff.ChangeRevision, 10) != expected[4] {
 			return fmt.Errorf("source receipt = %+v for expected identity %q", handoff, target)
 		}
+		if handoff.Branch != "factory/"+handoff.ChangeID[:12] || handoff.HeadCommit == "" || filepath.Base(handoff.GitDirectory) != ".git" || filepath.Base(handoff.SourcePath) != handoff.ChangeID {
+			return fmt.Errorf("source receipt lacks Git identities: %+v", handoff)
+		}
+		if _, err := os.Stat(filepath.Join(handoff.GitDirectory, "worktrees", handoff.ChangeID)); err != nil {
+			return fmt.Errorf("source receipt Git directory does not register the worktree: %w", err)
+		}
 		if overseer {
 			snapshot, err := client.OverseerTaskSnapshot(ctx, expected[0])
 			if err != nil {
 				return err
 			}
-			if len(snapshot.Handoffs) != 1 || snapshot.Handoffs[0].TaskID != handoff.TaskID || snapshot.Handoffs[0].SourcePath != handoff.SourcePath {
-				return fmt.Errorf("status lost explicitly requested handoff = %+v", snapshot.Handoffs)
+			if len(snapshot.Handoffs) != 1 || snapshot.Handoffs[0].TaskID != handoff.TaskID || snapshot.Handoffs[0].HeadCommit != handoff.HeadCommit {
+				return fmt.Errorf("status handoff identity = %+v", snapshot.Handoffs)
 			}
 		} else if _, err := client.OverseerTaskSnapshot(ctx, expected[0]); err == nil {
 			return errors.New("reviewer gained overseer source discovery")
@@ -219,6 +224,9 @@ func runSupervisorCodexFixture() error {
 		}
 		if body, err := os.ReadFile(filepath.Join(path, "payload.txt")); err != nil || string(body) != "exact source\n" {
 			return fmt.Errorf("earlier source was lost after another request: %q, %v", body, err)
+		}
+		if _, err := os.Lstat(filepath.Join(path, ".git")); err != nil {
+			return fmt.Errorf("source is not a worktree: %w", err)
 		}
 	}
 	for _, value := range append(append([]string(nil), os.Args[1:]...), os.Environ()...) {
@@ -520,23 +528,22 @@ func TestSupervisorWorkerFilesSettleUnderThePrivateServiceUmask(t *testing.T) {
 	fixture.assertReleased(t, run)
 }
 
-// A tree the inspection refuses for good (an empty directory, which no git
-// tree can hold) ends the run as a visible source failure naming the reason
-// and where the tree was moved, abandons the Change, fails the task, and
-// leaves the task's own retry free to prepare a fresh tree.
-func TestSupervisorRefusedPublicationFailsTheRunVisibly(t *testing.T) {
-	// The first run leaves an empty directory; the retry, which finds the
+// A worktree the worker destroyed cannot be retained and cannot come back:
+// the run ends as a visible source failure naming it, the Change is
+// abandoned, the task fails, and the task's own retry makes a fresh
+// worktree on the same branch.
+func TestSupervisorMissingWorktreeFailsTheRunVisibly(t *testing.T) {
+	// The first run deletes its own worktree; the retry, which finds the
 	// witness of the first, does not.
-	program := "set -eu\n[ -s __WITNESS__ ] || mkdir left-empty\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
+	program := "set -eu\n[ -s __WITNESS__ ] || { cd \"$HOME\" && rm -rf \"$OLDPWD\"; }\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
 	fixture := newSupervisorFixture(t, program)
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
-	aside := fixture.changeName(t, run) + ".refused-" + run.ID.String()[:8]
 	if run.Terminal == nil || run.Terminal.Code() != kernel.FailureSource || !strings.Contains(run.Terminal.Detail(), "published tree refused") ||
-		!strings.Contains(run.Terminal.Detail(), "empty or unselected prepared directory") || !strings.Contains(run.Terminal.Detail(), "changes/"+aside) {
+		!strings.Contains(run.Terminal.Detail(), "worktree is gone") || !strings.Contains(run.Terminal.Detail(), "changes/"+fixture.changeName(t, run)) {
 		t.Fatalf("refused run = %+v", run.Terminal)
 	}
 	task, found, err := fixture.store.Task(context.Background(), run.TaskID)
@@ -546,12 +553,6 @@ func TestSupervisorRefusedPublicationFailsTheRunVisibly(t *testing.T) {
 	changeState, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found || changeState.Phase != kernel.ChangeAbandoned || changeState.SettledRunID == nil || *changeState.SettledRunID != run.ID {
 		t.Fatalf("change after refusal = %+v, found=%v, %v", changeState, found, err)
-	}
-	if _, err := os.Stat(filepath.Join(fixture.changeParent, aside, "left-empty")); err != nil {
-		t.Fatalf("refused tree was not moved aside for a person to read: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(fixture.changeParent, fixture.changeName(t, run))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the Change's own name is still taken: %v", err)
 	}
 	fixture.assertReleased(t, run)
 	queueSupervisorRetry(t, fixture, run)
@@ -563,25 +564,13 @@ func TestSupervisorRefusedPublicationFailsTheRunVisibly(t *testing.T) {
 		t.Fatalf("retry run = %+v", retry)
 	}
 	fixture.assertTerminal(t, retry, kernel.OutcomeSucceeded)
-	if retained, found, err := fixture.store.Change(context.Background(), *run.ChangeID); err != nil || !found || retained.Phase != kernel.ChangeRetained {
+	retained, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
+	if err != nil || !found || retained.Phase != kernel.ChangeRetained || retained.HeadCommit == nil {
 		t.Fatalf("change after the retry = %+v, found=%v, %v", retained, found, err)
 	}
-}
-
-// A worker that runs git init in its tree leaves a path no Change may hold;
-// the run ends with that reason rather than finalizing for good.
-func TestSupervisorRefusedPublicationForAGitDirectory(t *testing.T) {
-	program := "set -eu\nmkdir .git\nprintf 'ref: refs/heads/main\\n' > .git/HEAD\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
-	fixture := newSupervisorFixture(t, program)
-	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-	if err != nil {
-		t.Fatalf("RunNext: %v", err)
+	if body, err := os.ReadFile(filepath.Join(fixture.changeParent, fixture.changeName(t, run), "payload.txt")); err != nil || string(body) != "exact source\n" {
+		t.Fatalf("fresh worktree payload = %q, %v", body, err)
 	}
-	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
-	if run.Terminal == nil || run.Terminal.Code() != kernel.FailureSource || !strings.Contains(run.Terminal.Detail(), ".git path components are forbidden") {
-		t.Fatalf("refused run = %+v", run.Terminal)
-	}
-	fixture.assertReleased(t, run)
 }
 
 func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
@@ -738,8 +727,13 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 	fixture.assertReleased(t, reviewer)
 }
 
-func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) {
-	fixture := newSupervisorFixture(t, providerExitWithoutOutcomeProgram(t))
+// A retry reopens the same worktree: the worker's commit on the Change
+// branch and its uncommitted edits are exactly as it left them, the
+// settled head is what the daemon recorded, and no fresh selection or
+// upstream refresh happens.
+func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
+	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf committed > committed.txt; git add committed.txt; git commit -q -m committed; printf edited > edited.txt; fi\nprintf x >> __WITNESS__\nexit 0\n"
+	fixture := newSupervisorFixture(t, program)
 	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("first RunNext: %v", err)
@@ -751,36 +745,35 @@ func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) 
 		t.Fatal(err)
 	}
 	firstChange, found, err := fixture.store.Change(context.Background(), *first.ChangeID)
-	if err != nil || !found || firstChange.Selection == nil {
+	if err != nil || !found || firstChange.Selection == nil || firstChange.HeadCommit == nil {
 		t.Fatalf("first retained Change = %+v, found=%v, err=%v", firstChange, found, err)
 	}
-	repositoryIdentity := firstChange.Selection.RepositoryIdentity()
-	queueSupervisorRetry(t, fixture, first)
-	// A retained retry must not resolve a selector or invoke Git again.
-	fixture.spec.GitExecutable = "/private/retained-retry-must-not-run-git"
-	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
-	if err := os.Rename(filepath.Join(fixture.root, "repository", ".git"), filepath.Join(fixture.root, "repository", ".git.retained")); err != nil {
-		t.Fatal(err)
+	head := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD"))
+	if fmt.Sprintf("%x", firstChange.HeadCommit.Bytes()) != head || head == fixture.base {
+		t.Fatalf("settled head = %x, worktree head = %s, base = %s", firstChange.HeadCommit.Bytes(), head, fixture.base)
 	}
+	if fmt.Sprintf("%x", firstChange.Selection.Commit().Bytes()) != fixture.base {
+		t.Fatalf("settled base moved: %x", firstChange.Selection.Commit().Bytes())
+	}
+	queueSupervisorRetry(t, fixture, first)
+	// A retained retry must not resolve a selector again.
+	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("retained RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, second, kernel.OutcomeFailed)
 	after, err := os.Lstat(changePath)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("retained worktree identity changed: %v", err)
 	}
-	beforeStat, beforeOK := before.Sys().(*syscall.Stat_t)
-	afterStat, afterOK := after.Sys().(*syscall.Stat_t)
-	if !beforeOK || !afterOK || beforeStat.Dev != afterStat.Dev || beforeStat.Ino != afterStat.Ino {
-		t.Fatalf("retained tree identity changed: before=%+v after=%+v", beforeStat, afterStat)
+	for name, want := range map[string]string{"payload.txt": "exact source\n", "committed.txt": "committed", "edited.txt": "edited"} {
+		if body, err := os.ReadFile(filepath.Join(changePath, name)); err != nil || string(body) != want {
+			t.Fatalf("retained %s = %q, %v", name, body, err)
+		}
 	}
-	if body, err := os.ReadFile(filepath.Join(changePath, "payload.txt")); err != nil || string(body) != "exact source\n" {
-		t.Fatalf("retained payload = %q, %v", body, err)
-	}
-	if _, err := os.Lstat(filepath.Join(fixture.changeParent, "."+fixture.changeName(t, first)+".stage")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("retained retry created staging tree: %v", err)
+	if got := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")); got != head {
+		t.Fatalf("retry moved the branch to %s", got)
 	}
 	if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "xx" {
 		t.Fatalf("retained provider witness = %q, %v", witness, err)
@@ -789,8 +782,8 @@ func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) 
 		t.Fatalf("retained retry changed canonical Change: first=%+v second=%+v", first.ChangeID, second.ChangeID)
 	}
 	secondChange, found, err := fixture.store.Change(context.Background(), *second.ChangeID)
-	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != repositoryIdentity {
-		t.Fatalf("retained retry changed repository identity: Change=%+v found=%v err=%v", secondChange, found, err)
+	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != firstChange.Selection.RepositoryIdentity() || secondChange.HeadCommit == nil || fmt.Sprintf("%x", secondChange.HeadCommit.Bytes()) != head {
+		t.Fatalf("retained retry changed identities: Change=%+v found=%v err=%v", secondChange, found, err)
 	}
 }
 

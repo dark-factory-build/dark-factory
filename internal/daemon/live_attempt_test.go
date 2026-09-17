@@ -397,16 +397,3 @@ func TestTerminalAttachmentFinishIsIdempotentAndPayloadBounded(t *testing.T) {
 		t.Fatal("oversized terminal payload was queued")
 	}
 }
-
-func TestLiveAttemptSourceGateCancellation(t *testing.T) {
-	attempt := newLiveAttempt(nil, kernel.RunID{}, kernel.TerminalSessionID{}, nil)
-	if !attempt.acquireSourceGate(context.Background()) {
-		t.Fatal("first gate")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if attempt.acquireSourceGate(ctx) {
-		t.Fatal("cancelled queued request acquired gate")
-	}
-	<-attempt.sourceGate
-}

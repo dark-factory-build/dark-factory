@@ -124,15 +124,15 @@ func (daemon *Daemon) rememberedRunPaths(runID kernel.RunID, now time.Time) ([]s
 // layout and never derives either; these are the same values every run in the
 // process is published under, so the stores are lock-free publications that
 // RunNext never waits on.
-func (daemon *Daemon) rememberSupervisorAccount(parent, accountHome string) {
+func (daemon *Daemon) rememberSupervisorAccount(parent, accountHome, gitExecutable string) {
 	daemon.changeParent.Store(&parent)
 	daemon.accountHome.Store(&accountHome)
+	daemon.gitExecutable.Store(&gitExecutable)
 }
 
 // changedDirectories returns the deepest directory of every file modified
-// after the given moment, deduplicated and sorted. A published change
-// directory is a plain materialized tree with no repository metadata, so the
-// modification time is the only evidence of the worker's edits. Every stop --
+// after the given moment, deduplicated and sorted. It is a hint about where
+// the worker is, read without running Git in its worktree. Every stop --
 // a missing tree, an unreadable entry, an exhausted budget -- answers with
 // what was found rather than an error, so there is nothing to report.
 func changedDirectories(ctx context.Context, root string, since time.Time) []string {

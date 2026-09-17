@@ -94,14 +94,15 @@ lost responses. Only the daemon API writes factory state.
 Failed work is not recreated on every poll. Missing evidence and ambiguous
 outcomes remain visible. Stop intake to stop importing work; disable dispatch
 to stop future admissions. Existing runs require Stop or their duration limit.
-Intake never fast-forwards the project root. Every delegated worker uses a
-private clean worktree and fetches the current base before making changes.
-Fresh worker Changes fetch the configured project upstream through the runtime's
-owned Git process before selecting one exact commit. They do not wait for an
-idle factory or move the registered checkout. Failed fetches fail source
-preparation visibly, without using a stale tracking ref. Retained Changes are
-not refreshed or rebased; a correction continues its exact retained source,
-and integrating it with current main is a separate reviewed operation. Explicit
+Intake never fast-forwards the project root. Every delegated worker works in
+its own linked worktree of the project on its Change branch, made at the
+current base. Fresh worker Changes fetch the configured project upstream
+through the runtime's owned Git process before selecting one exact commit.
+They do not wait for an idle factory or move the registered checkout. Failed
+fetches fail source preparation visibly, without using a stale tracking ref.
+Retained Changes are not refreshed or rebased; a correction continues on its
+exact branch, and integrating it with current main is a separate reviewed
+operation. Explicit
 local revision policies remain local. See README for `--base-revision`.
 If a source supervisor reaches its duration limit while a human decision is
 unanswered, intake records `needs_operator_recovery`.
