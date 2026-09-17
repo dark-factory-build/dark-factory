@@ -502,6 +502,9 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeProjectContentResult(frame.ID, result)
+		if errors.Is(err, browserprotocol.ErrOversized) {
+			err = ErrTooLarge
+		}
 	case browserprotocol.TaskEnqueue:
 		if current.server.taskBackend == nil {
 			err = ErrUnauthorized

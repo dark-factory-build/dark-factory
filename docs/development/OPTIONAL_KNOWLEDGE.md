@@ -69,3 +69,23 @@ parallel work uses ordinary capacity controls.
 `kind: mission` supports a manually maintained objective. A bounded milestone
 may name `milestone_of`; accepting it does not complete the parent mission.
 There is no campaign scheduler or autonomous optimization loop.
+
+## Browser use
+
+The existing console sidebar has a collapsed **Project library & outcomes**
+panel. Opening it or leaving it unused causes no fetch. Browse metadata, select
+an exact revision, then explicitly read body or evidence pages. Authoring saves
+new revisions; superseded definitions and existing attachments remain unchanged.
+Attach a selected revision to queued work or open an ordinary agent instruction
+draft for review and explicit submission. An outcome links existing work; saving
+or accepting it does not enqueue, replay or publish anything.
+
+Private-detail permission is required for reads; private-detail plus human-actions
+permission is required for authoring. Every resource operation validates the
+selected project. The protocol uses existing pairing, revocation gates and
+request correlation; there is no new credential or capability bit. Metadata
+pages contain one record and body pages at most 8 KiB. Responses exceeding the
+browser frame or exact JSON integer limit return `too_large` without closing
+the session; use CLI/API for such records. Stored revisions remain unrestricted
+by that browser transport limit. The browser never automatically retries writes
+or replays task instructions after reconnecting.

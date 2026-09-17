@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/dark-factory-build/dark-factory/internal/api"
+	"strings"
 	"testing"
 
 	"github.com/coder/websocket"
@@ -126,10 +127,23 @@ func TestBrowserLibraryRealWireAndCapabilityBoundaries(t *testing.T) {
 			if err := json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &body); err != nil || body.Body != "old" {
 				t.Fatalf("pinned body = %+v %v", body, err)
 			}
-			frame = send("body", map[string]any{"project_id": other.String(), "id": content.String(), "revision": 1, "limit": 8192})
-			if frame.Type != browserprotocol.TypeError {
-				t.Fatal("cross-project body admitted")
+			mismatch, _ := json.Marshal(map[string]any{"project_id": other.String(), "id": content.String(), "revision": 1, "limit": 8192})
+			if _, err := f.backend.ProjectContent(ctx, rawBrowserClient(f.client.ID), browserprotocol.ProjectContent{Operation: "body", Input: mismatch}); !errors.Is(err, browser.ErrUnauthorized) {
+				t.Fatalf("cross-project body=%v", err)
 			}
+			hugeID, _ := kernel.ContentIDFromBytes(bytesOf(0x35))
+			if _, err := f.store.CreateContent(ctx, kernel.NewContent{ID: hugeID, ProjectID: project, Kind: kernel.ContentProcedure, Title: "large metadata", Author: "seed", SourceReferences: strings.Repeat("\x01", 32768)}, adapterTime(t, 13)); err != nil {
+				t.Fatal(err)
+			}
+			frame = send("read", map[string]any{"project_id": project.String(), "id": hugeID.String(), "revision": 1})
+			if frame.Type != browserprotocol.TypeError || frame.Body.(browserprotocol.Error).Code != browserprotocol.ErrorTooLarge {
+				t.Fatalf("oversized response=%+v", frame)
+			}
+			frame = send("read", map[string]any{"project_id": project.String(), "id": content.String(), "revision": 1})
+			if frame.Type != browserprotocol.TypeProjectContentResult {
+				t.Fatalf("connection lost after too_large: %+v", frame)
+			}
+
 			newID, _ := kernel.ContentIDFromBytes(bytesOf(0x34))
 			frame = send("create", map[string]any{"project_id": project.String(), "id": newID.String(), "kind": "procedure", "title": "browser draft", "body": "human contribution"})
 			if !caps.Has(kernel.BrowserCapabilityHumanActions) {

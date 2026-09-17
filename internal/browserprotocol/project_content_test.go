@@ -35,3 +35,23 @@ func TestProjectContentContractIsFiniteAndBounded(t *testing.T) {
 		t.Fatalf("oversized input = %v", err)
 	}
 }
+
+func TestProjectContentIntegerBoundaryMatchesBrowser(t *testing.T) {
+	for _, raw := range []string{`{"revision":9007199254740991}`, `{"document":{"anchor_work_revision":9007199254740991}}`} {
+		wire, err := EncodeProjectContentResult("limit", ProjectContentResult{Operation: "read", Output: []byte(raw)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = DecodeServerControl(wire); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, raw := range []string{`{"revision":9007199254740992}`, `{"document":{"anchor_work_revision":9223372036854775807}}`} {
+		if _, err := EncodeProjectContentResult("limit", ProjectContentResult{Operation: "read", Output: []byte(raw)}); !errors.Is(err, ErrOversized) {
+			t.Fatalf("unsafe result=%v", err)
+		}
+		if _, err := EncodeProjectContent("limit", ProjectContent{Operation: "read", Input: []byte(raw)}); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("unsafe request=%v", err)
+		}
+	}
+}

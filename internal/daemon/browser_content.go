@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/dark-factory-build/dark-factory/internal/api"
-	"math"
 	"strings"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
@@ -61,7 +60,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	}
 	result := browserprotocol.ProjectContentResult{Operation: request.Operation}
 	var output any
-	if input.Revision > math.MaxInt64 || input.ExpectedRevision > math.MaxInt64 || input.ContentRevision > math.MaxInt64 || input.TaskWorkRevision > math.MaxInt64 || input.Offset > math.MaxInt64 || input.Limit > math.MaxInt64 {
+	if input.Revision > (1<<53)-1 || input.ExpectedRevision > (1<<53)-1 || input.ContentRevision > (1<<53)-1 || input.TaskWorkRevision > (1<<53)-1 || input.Offset > (1<<53)-1 || input.Limit > (1<<53)-1 {
 		return result, browser.ErrInvalidRequest
 	}
 	contentRevision := input.ContentRevision

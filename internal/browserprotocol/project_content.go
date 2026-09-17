@@ -25,27 +25,40 @@ func EncodeProjectContentResult(id string, value ProjectContentResult) ([]byte, 
 }
 
 func validProjectContent(kind MessageType, body any) error {
-	bad := func() error { return ErrMalformed }
+	var operation string
+	var raw json.RawMessage
 	if kind == TypeProjectContent {
-		v, ok := indirect(body).(ProjectContent)
-		if !ok || !validProjectOperation(v.Operation) {
-			return bad()
+		value, ok := indirect(body).(ProjectContent)
+		if !ok {
+			return ErrMalformed
 		}
-		trimmed := bytes.TrimSpace(v.Input)
-		if len(v.Input) > MaxControlBytes-1024 {
-			return ErrOversized
+		operation, raw = value.Operation, value.Input
+	} else {
+		value, ok := indirect(body).(ProjectContentResult)
+		if !ok {
+			return ErrMalformed
 		}
-		if len(v.Input) == 0 || string(trimmed) == "null" || !json.Valid(v.Input) || len(trimmed) == 0 || trimmed[0] != '{' {
-			return bad()
-		}
-		return nil
+		operation, raw = value.Operation, value.Output
 	}
-	v, ok := indirect(body).(ProjectContentResult)
-	if len(v.Output) > MaxControlBytes-1024 {
+	if !validProjectOperation(operation) {
+		return ErrMalformed
+	}
+	if len(raw) > MaxControlBytes-1024 {
 		return ErrOversized
 	}
-	if !ok || !validProjectOperation(v.Operation) || len(v.Output) == 0 || string(bytes.TrimSpace(v.Output)) == "null" || !json.Valid(v.Output) || len(bytes.TrimSpace(v.Output)) == 0 || bytes.TrimSpace(v.Output)[0] != '{' {
-		return bad()
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(raw) {
+		return ErrMalformed
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	// Use the same integer, depth and collection bounds as the complete wire
+	// decoder. Unrepresentable stored metadata is an explicit bounded error.
+	if err := scanJSONValue(decoder, 2, MaxArrayItems); err != nil {
+		if kind == TypeProjectContentResult {
+			return ErrOversized
+		}
+		return ErrMalformed
 	}
 	return nil
 }

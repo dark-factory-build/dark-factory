@@ -2159,7 +2159,7 @@ test("optional library stays unused until requested and correlates bounded repli
   await assert.rejects(session.projectContent("body", { revision: Number.MAX_SAFE_INTEGER + 1 }), ProtocolError);
   const failed = session.projectContent("read", { project_id: input.project_id, id: "02".repeat(16), revision: 1 });
   const request = lastFrame(socket, "PROJECT_CONTENT");
-  socket.reply(encodeServerError(request.id, "unsupported"));
+  socket.reply(encodeServerError({ code: "unsupported", retryable: false }, request.id));
   await assert.rejects(failed, (error) => error.code === "unsupported");
   assert.equal(session.status, "ready");
   session.close();
@@ -2176,4 +2176,10 @@ test("optional library requires private detail and writes additionally require h
   const { session } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.private_human_request_detail);
   await assert.rejects(session.projectContent("outcome_write", {}), (error) => error.code === "unauthorized");
   session.close();
+});
+
+test("library numeric bounds match the Go wire contract", () => {
+  const frame = (output) => JSON.stringify({ type: "PROJECT_CONTENT_RESULT", id: "limit", body: { operation: "read", output } });
+  for (const output of [{ revision: Number.MAX_SAFE_INTEGER }, { document: { anchor_work_revision: Number.MAX_SAFE_INTEGER } }]) assert.deepEqual(decodeServerControl(frame(output)).body.output, output);
+  for (const output of [{ revision: Number.MAX_SAFE_INTEGER + 1 }, { document: { anchor_work_revision: Number.MAX_SAFE_INTEGER + 1 } }]) assert.throws(() => decodeServerControl(frame(output)), ProtocolError);
 });
