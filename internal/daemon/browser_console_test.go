@@ -219,6 +219,9 @@ func TestBrowserEffectVerdictSurvivesItsDeadlineCause(t *testing.T) {
 	if mapped := mapBrowserError(context.DeadlineExceeded); !retryable(mapped) {
 		t.Fatalf("bare deadline = %v", mapped)
 	}
+	if mapped := mapBrowserError(kernel.ErrStoreClosed); !retryable(mapped) {
+		t.Fatalf("closed store = %v", mapped)
+	}
 }
 
 // The tree bounds nothing. A node the wire cannot carry is dropped with its

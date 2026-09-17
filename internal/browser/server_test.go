@@ -1115,6 +1115,7 @@ func TestClosedStateWatchPreservesReconnectClassification(t *testing.T) {
 	}{
 		{name: "clean"},
 		{name: "daemon reload", cause: context.Canceled},
+		{name: "deadline", cause: context.DeadlineExceeded, code: browserprotocol.ErrorInternal},
 		{name: "busy", cause: ErrRateLimited, code: browserprotocol.ErrorRateLimited, retryable: true},
 		{name: "revoked", cause: ErrUnauthorized, code: browserprotocol.ErrorUnauthorized},
 		{name: "fault", cause: errors.New("store failed"), code: browserprotocol.ErrorInternal},
