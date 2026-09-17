@@ -11,6 +11,8 @@ export type HumanRequestFlowSelection<Scope> = Readonly<{
   reply: string;
   notice?: string;
   token: number;
+  /** The private authority belongs to this exact browser session. */
+  session?: HumanSession;
 }>;
 
 export type HumanRequestFlowOptions<Scope> = Readonly<{
@@ -51,7 +53,7 @@ export class HumanRequestFlow<Scope> {
     const selected = this.#selection;
     if (selected === undefined) return;
     const latest = this.#options.currentRequest(selected.scope, selected.request.id);
-    if (latest === undefined || latest.revision !== selected.request.revision) this.clear(true);
+    if (latest === undefined || latest.revision !== selected.request.revision || selected.session !== this.#options.session(selected.scope)) this.clear(true);
     else this.#put({ ...selected, request: latest });
   }
 
@@ -77,11 +79,12 @@ export class HumanRequestFlow<Scope> {
     if (selected.reply.length === 0) { this.#fail(new SessionError("invalid_request")); return Promise.resolve(); }
     const session = this.#options.session(selected.scope);
     if (session === undefined) { this.#end(selected, this.#options.unavailableNotice); return Promise.resolve(); }
+    if (selected.session !== session) { this.#fence(selected); return Promise.resolve(); }
     const authority = selected.detail;
     this.#put({ ...selected, phase: "replying", notice: undefined });
     return session.replyHumanRequest(authority, selected.reply).then(
-      () => this.#afterAction(selected),
-      (error) => this.#afterAction(selected, this.#options.actionFailureNotice?.(error)),
+      () => this.#afterAction(selected, session),
+      (error) => this.#afterAction(selected, session, this.#options.actionFailureNotice?.(error)),
     );
   }
 
@@ -91,33 +94,34 @@ export class HumanRequestFlow<Scope> {
     if (selected?.phase !== "ready" || authority === undefined || authority === null || !this.#options.active(selected.scope)) return Promise.resolve();
     const session = this.#options.session(selected.scope);
     if (session === undefined) { this.#end(selected, this.#options.unavailableNotice); return Promise.resolve(); }
+    if (selected.session !== session) { this.#fence(selected); return Promise.resolve(); }
     this.#put({ ...selected, phase: "cancelling", notice: undefined });
     return session.cancelHumanRequest(authority).then(
-      () => this.#afterAction(selected),
-      (error) => this.#afterAction(selected, this.#options.actionFailureNotice?.(error)),
+      () => this.#afterAction(selected, session),
+      (error) => this.#afterAction(selected, session, this.#options.actionFailureNotice?.(error)),
     );
   }
 
   #load(next: HumanRequestFlowSelection<Scope>, notice?: string): Promise<void> {
-    this.#put({ ...next, notice });
     const session = this.#options.session(next.scope);
+    this.#put({ ...next, notice, session });
     if (session === undefined) { this.#end(next, notice ?? this.#options.unavailableNotice, this.#options.unavailableError); return Promise.resolve(); }
     return session.getHumanRequestDetail({ requestId: next.request.id, expectedRevision: next.request.revision }).then(
       (detail) => {
-        if (!this.#owns(next) || !this.#options.active(next.scope)) return;
+        if (!this.#owns(next, session) || !this.#options.active(next.scope)) { this.#fence(next); return; }
         const latest = this.#options.currentRequest(next.scope, next.request.id);
         if (latest === undefined || latest.revision !== next.request.revision) return this.#end(next, notice ?? this.#options.absentNotice);
-        this.#put({ ...next, request: latest, detail, phase: "ready", reply: "", notice });
+        this.#put({ ...next, request: latest, detail, phase: "ready", reply: "", notice, session });
       },
       (error) => {
-        if (!this.#owns(next)) return;
+        if (!this.#owns(next, session)) { this.#fence(next); return; }
         this.#end(next, notice ?? this.#options.absentNotice, error);
       },
     );
   }
 
-  #afterAction(after: HumanRequestFlowSelection<Scope>, notice?: string): Promise<void> {
-    if (!this.#owns(after)) return Promise.resolve();
+  #afterAction(after: HumanRequestFlowSelection<Scope>, session: HumanSession, notice?: string): Promise<void> {
+    if (!this.#owns(after, session)) { this.#fence(after); return Promise.resolve(); }
     if (this.#options.afterAction === "clear") { this.clear(true); return Promise.resolve(); }
     const request = this.#options.currentRequest(after.scope, after.request.id);
     if (request === undefined) { this.#end(after, notice ?? this.#options.absentNotice); return Promise.resolve(); }
@@ -125,7 +129,7 @@ export class HumanRequestFlow<Scope> {
   }
 
   #end(after: HumanRequestFlowSelection<Scope>, notice?: string, error?: unknown): void {
-    if (!this.#owns(after)) return;
+    if (this.#selection?.token !== after.token) return;
     if (this.#options.afterAction === "clear") {
       this.#selection = undefined;
       ++this.#token;
@@ -137,7 +141,12 @@ export class HumanRequestFlow<Scope> {
   }
 
   #fail(error: SessionError | ProtocolError): void { this.#options.onError?.(error); this.#options.onChange(); }
-  #owns(selection: HumanRequestFlowSelection<Scope>): boolean { return this.#selection?.token === selection.token; }
+  #owns(selection: HumanRequestFlowSelection<Scope>, session: HumanSession | undefined): boolean {
+    return this.#selection?.token === selection.token && session !== undefined && this.#options.session(selection.scope) === session;
+  }
+  #fence(selection: HumanRequestFlowSelection<Scope>): void {
+    if (this.#selection?.token === selection.token) this.clear(true);
+  }
   #put(selection: HumanRequestFlowSelection<Scope>): void { this.#selection = selection; this.#options.onChange(); }
 }
 

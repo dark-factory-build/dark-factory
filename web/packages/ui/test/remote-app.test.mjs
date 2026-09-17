@@ -513,6 +513,58 @@ test("a drop while a reply is in flight keeps the unknown notice", async () => {
   });
 });
 
+test("a replaced session cannot publish an old pending question", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const old = fakeSession({ detail: () => pending });
+  const replacement = fakeSession({ detail: () => detailFor(northRequest) });
+  const sessions = new Map([[NORTH, old]]);
+  const manager = fakeManager([northFactory()], sessions);
+  await withApp(props(manager), async (renderer) => {
+    await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
+    sessions.set(NORTH, replacement);
+    await act(async () => { manager.onChange(); });
+    release(detailFor(northRequest));
+    await settle();
+    assert.equal(findNode(renderer.toJSON(), "dfRemote__detail"), undefined);
+    assert.equal(replacement.calls.detail.length, 0, "an old read never crosses into the replacement session");
+  });
+});
+
+test("a replaced session cannot refresh an old reply or cancellation", async () => {
+  for (const action of ["reply", "cancel"]) {
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    const old = fakeSession({
+      detail: () => detailFor(northRequest),
+      ...(action === "reply" ? { reply: () => pending } : { cancel: () => pending }),
+    });
+    const replacement = fakeSession({ detail: () => detailFor(northRequest) });
+    const sessions = new Map([[NORTH, old]]);
+    const manager = fakeManager([northFactory()], sessions);
+    await withApp(props(manager), async (renderer) => {
+      await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
+      if (action === "reply") {
+        const field = renderer.root.findByProps({ className: "dfRemote__replyText" });
+        await act(async () => { field.props.onChange({ currentTarget: { value: "go ahead" } }); });
+        await act(async () => { button(renderer, "dfRemote__replyAction").props.onClick(); });
+      } else {
+        await act(async () => { button(renderer, "dfRemote__cancelOpen").props.onClick(); });
+        const field = renderer.root.findByProps({ className: "dfRemote__cancelText" });
+        await act(async () => { field.props.onChange({ currentTarget: { value: "CANCEL RUN" } }); });
+        await act(async () => { button(renderer, "dfRemote__cancelAction").props.onClick(); });
+      }
+      sessions.set(NORTH, replacement);
+      await act(async () => { manager.onChange(); });
+      release({ request_id: northRequest.id });
+      await settle();
+      assert.equal(findNode(renderer.toJSON(), "dfRemote__detail"), undefined, `${action} result is fenced`);
+      assert.equal(replacement.calls.detail.length, 0, `${action} does not refresh through a replacement session`);
+      assert.equal(action === "reply" ? replacement.calls.reply.length : replacement.calls.cancel.length, 0, `${action} is never replayed`);
+    });
+  }
+});
+
 test("ANSWER opens one question at a time", async () => {
   let release;
   const held = new Promise((resolve) => { release = resolve; });
