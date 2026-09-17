@@ -190,8 +190,10 @@ func taskByID(ctx context.Context, connection *sql.Conn, id TaskID) (Task, bool,
 	if id.zero() {
 		return Task{}, false, fmt.Errorf("%w: zero task identifier", ErrInvalidValue)
 	}
-	return scanTask(connection.QueryRowContext(ctx, `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE id = ?`, id.Bytes()))
+	return scanTask(connection.QueryRowContext(ctx, `SELECT `+taskSelectColumns+` FROM tasks WHERE id = ?`, id.Bytes()))
 }
+
+const taskSelectColumns = `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms`
 
 func scanTask(scanner rowScanner) (Task, bool, error) {
 	var rawID, rawProjectID, rawAgentID, rawIncarnationID []byte
