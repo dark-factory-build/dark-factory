@@ -255,6 +255,38 @@ func TestParseOverseerTaskAddAcceptsAnyEligibleWorker(t *testing.T) {
 	}
 }
 
+func TestOverseerTaskRetryCLIUsesAtomicAPIRequest(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	taskID, agentID := strings.Repeat("3", 32), strings.Repeat("4", 32)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		if call.Kind() != api.CallOverseerUpdateTask {
+			t.Errorf("call kind = %v", call.Kind())
+		}
+		input, ok := call.OverseerTaskUpdateInput()
+		if !ok || input.TaskID != taskID || input.ExpectedRevision != 7 || !input.Retry || input.AssignedAgentID == nil || *input.AssignedAgentID != agentID {
+			t.Errorf("retry input = %+v, ok=%v", input, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 18, Revision: 8})
+		if err != nil {
+			t.Errorf("new reply: %v", err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"overseer", "task", "update", "--task", taskID, "--revision", "7", "--agent", agentID, "--retry"}, func(name string) string {
+		if name == "DARK_FACTORY_SOCKET" {
+			return fixture.socket
+		}
+		return ""
+	}, &stdout, &stderr)
+	result := awaitServer(t, done)
+	if exit != 0 || result.err != nil || stderr.Len() != 0 {
+		t.Fatalf("retry CLI = exit %d, server %v, stderr %q", exit, result.err, stderr.String())
+	}
+}
+
 func TestParseOverseerStatusPaging(t *testing.T) {
 	id := "0123456789abcdef0123456789abcdef"
 	command, help, ok := parse([]string{"overseer", "status", "--task", id, "--offset", "4", "--text-offset", "4096", "--head", "7"})
