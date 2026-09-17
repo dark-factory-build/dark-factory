@@ -4,6 +4,7 @@ set -eu
 repository_root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 boundary=$repository_root/scripts/local-ci-environment.sh
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-local-ci-environment.XXXXXX")
+temporary_root=$(CDPATH= cd -- "$temporary" && pwd -P)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
 fail() {
@@ -36,7 +37,7 @@ child_environment=$temporary/child.env
     export CODEX_HOME=/intentional/provider-home
     export OPENAI_API_KEY=preserved-fake-provider-credential
     export DARK_FACTORY_UPDATE_URL=https://fixture.invalid/manifest.json
-    export HOME=/intentional/home
+    export HOME="$temporary/host-home"
     export npm_config_userconfig=/intentional/npmrc
     export npm_config_globalconfig=/intentional/global-npmrc
     export NETRC=/intentional/netrc
@@ -66,7 +67,7 @@ done
 
 for forbidden in \
     'CARGO_TARGET_DIR=' 'RUSTUP_TOOLCHAIN=' 'CODEX_HOME=' \
-    'OPENAI_API_KEY=' 'DARK_FACTORY_UPDATE_URL=' 'HOME=/intentional/home' \
+    'OPENAI_API_KEY=' 'DARK_FACTORY_UPDATE_URL=' \
     'npm_config_userconfig=/intentional/npmrc' 'COREPACK_HOME=/intentional/corepack' \
     'npm_config_globalconfig=/intentional/global-npmrc' 'NETRC=/intentional/netrc' \
     'GOPROXY=https://fixture.invalid/proxy'; do
@@ -79,23 +80,27 @@ grep -F -x 'GOFLAGS=-modcacherw' "$child_environment" >/dev/null \
     || fail "Go module cache directories would prevent worktree cleanup"
 grep -F -x 'HOME=/var/empty' "$child_environment" >/dev/null \
     || fail "safe isolated HOME was not installed"
-grep -F -x "DF_CI_CACHE_ROOT=$repository_root/.tools/local-ci" "$child_environment" >/dev/null \
-    || fail "worktree-local cache root was not installed"
-grep -F -x "GOCACHE=$repository_root/.tools/local-ci/go-build" "$child_environment" >/dev/null \
+grep -F -x "DF_CI_CACHE_ROOT=$temporary_root/host-home/Library/Caches/dark-factory/local-ci/trusted" "$child_environment" >/dev/null \
+    || fail "external cache root was not installed"
+grep -F -x "GOCACHE=$temporary_root/host-home/Library/Caches/dark-factory/local-ci/trusted/go-build" "$child_environment" >/dev/null \
     || fail "safe isolated Go build cache was not installed"
-grep -F -x "GOMODCACHE=$repository_root/.tools/local-ci/go-mod" "$child_environment" >/dev/null \
+grep -F -x "GOMODCACHE=$temporary_root/host-home/Library/Caches/dark-factory/local-ci/trusted/go-mod" "$child_environment" >/dev/null \
     || fail "safe isolated Go module cache was not installed"
 grep -F -x 'NPM_CONFIG_USERCONFIG=/var/empty/.npmrc' "$child_environment" >/dev/null \
     || fail "safe npm config was not installed"
 grep -F -x 'NPM_CONFIG_GLOBALCONFIG=/var/empty/.npmrc-global' "$child_environment" >/dev/null \
     || fail "safe global npm config was not installed"
+grep -F -x "NPM_CONFIG_CACHE=$temporary_root/host-home/Library/Caches/dark-factory/local-ci/trusted/npm" "$child_environment" >/dev/null \
+    || fail "reusable npm cache was not installed"
+grep -F -x "NPM_CONFIG_STORE_DIR=$temporary_root/host-home/Library/Caches/dark-factory/local-ci/trusted/pnpm-store" "$child_environment" >/dev/null \
+    || fail "reusable pnpm store was not installed"
 grep -F -x 'NETRC=/dev/null' "$child_environment" >/dev/null \
     || fail "safe netrc boundary was not installed"
 grep -F -x 'XDG_CONFIG_HOME=/var/empty' "$child_environment" >/dev/null \
     || fail "host config was not isolated"
-grep -F -x "XDG_DATA_HOME=$repository_root/.tools/local-ci/data" "$child_environment" >/dev/null \
+grep -F -x "XDG_DATA_HOME=$repository_root/.tools/local-ci-state/data" "$child_environment" >/dev/null \
     || fail "safe XDG data directory was not installed"
-grep -F -x "XDG_STATE_HOME=$repository_root/.tools/local-ci/state" "$child_environment" >/dev/null \
+grep -F -x "XDG_STATE_HOME=$repository_root/.tools/local-ci-state/state" "$child_environment" >/dev/null \
     || fail "safe XDG state directory was not installed"
 
 fixture=$temporary/fixture
@@ -111,56 +116,62 @@ printf '%s\n' "$DF_CI_CACHE_ROOT"
 EOF
 /bin/chmod 755 "$fixture/scripts/entry.sh"
 
-cache_root_one=$(CDPATH='' cd -- "$fixture" && /bin/sh ./scripts/entry.sh)
+cache_root_one=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh)
 cache_root_two=$cache_root_one
 fixture_root=$(CDPATH='' cd -- "$fixture" && pwd -P)
-[ "$cache_root_one" = "$fixture_root/.tools/local-ci" ] || fail "direct cache root changed"
+[ "$cache_root_one" = "$temporary_root/fixture-home/Library/Caches/dark-factory/local-ci/trusted" ] || fail "direct cache root changed"
 [ "$cache_root_two" = "$cache_root_one" ] || fail "nested cache root changed"
 
 /bin/rm -rf "$fixture/.tools"
-/bin/ln -s "$fixture/.tools-target" "$fixture/.tools"
+/bin/mkdir -p "$fixture/.tools"
+/bin/ln -s "$fixture/.tools-target" "$fixture/.tools/local-ci-state"
 set +e
-symlink_output=$(CDPATH='' cd -- "$fixture" && /bin/sh ./scripts/entry.sh 2>&1)
-symlink_status=$?
+state_output=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" /bin/sh ./scripts/entry.sh 2>&1)
+state_status=$?
 set -e
-[ "$symlink_status" -ne 0 ] || fail "symlink .tools path was accepted"
-printf '%s\n' "$symlink_output" | grep -F 'refusing unsafe .tools path' >/dev/null \
-    || fail "symlink .tools refusal was unclear: $symlink_output"
-/bin/rm "$fixture/.tools"
-/bin/mkdir "$fixture/.tools"
-/bin/ln -s "$fixture/.tools-target" "$fixture/.tools/local-ci"
-set +e
-symlink_output=$(CDPATH='' cd -- "$fixture" && /bin/sh ./scripts/entry.sh 2>&1)
-symlink_status=$?
-set -e
-[ "$symlink_status" -ne 0 ] || fail "symlink cache path was accepted"
-printf '%s\n' "$symlink_output" | grep -F 'refusing unsafe .tools/local-ci path' >/dev/null \
-    || fail "symlink cache refusal was unclear: $symlink_output"
-
+[ "$state_status" -ne 0 ] || fail "symlink private state root was accepted"
+printf '%s\n' "$state_output" | grep -F 'refusing unsafe .tools/local-ci-state path' >/dev/null \
+    || fail "symlink private state refusal was unclear: $state_output"
 /bin/rm -rf "$fixture/.tools"
-/bin/mkdir -p "$fixture/.tools/local-ci"
-/bin/ln -s "$fixture/.tools-target" "$fixture/.tools/local-ci/go-build"
+
+/bin/mkdir -p "$temporary/explicit-cache"
+explicit_root="$temporary_root/explicit-cache/root"
+/bin/mkdir "$temporary/explicit-cache/root"
+explicit_output=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" DF_CI_CACHE_ROOT="$explicit_root" /bin/sh ./scripts/entry.sh)
+[ "$explicit_output" = "$explicit_root" ] || fail "explicit cache root was discarded"
+/bin/rm -rf "$temporary/explicit-cache/root"
+/bin/ln -s "$fixture/.tools-target" "$temporary/explicit-cache/root"
 set +e
-symlink_output=$(CDPATH='' cd -- "$fixture" && /bin/sh ./scripts/entry.sh 2>&1)
+symlink_output=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" DF_CI_CACHE_ROOT="$temporary/explicit-cache/root" /bin/sh ./scripts/entry.sh 2>&1)
+symlink_status=$?
+set -e
+[ "$symlink_status" -ne 0 ] || fail "symlink cache root was accepted"
+printf '%s\n' "$symlink_output" | grep -F 'refusing unsafe cache root path' >/dev/null \
+    || fail "symlink cache root refusal was unclear: $symlink_output"
+/bin/rm "$temporary/explicit-cache/root"
+/bin/mkdir "$temporary/explicit-cache/root"
+/bin/ln -s "$fixture/.tools-target" "$temporary/explicit-cache/root/go-build"
+set +e
+symlink_output=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" DF_CI_CACHE_ROOT="$temporary/explicit-cache/root" /bin/sh ./scripts/entry.sh 2>&1)
 symlink_status=$?
 set -e
 [ "$symlink_status" -ne 0 ] || fail "symlink cache child was accepted"
-printf '%s\n' "$symlink_output" | grep -F 'refusing unsafe .tools/local-ci/go-build path' >/dev/null \
+printf '%s\n' "$symlink_output" | grep -F 'refusing unsafe cache/go-build path' >/dev/null \
     || fail "symlink cache child refusal was unclear: $symlink_output"
-[ "$(/usr/bin/find "$fixture/.tools/local-ci" -mindepth 1 -maxdepth 1 | /usr/bin/wc -l | /usr/bin/tr -d ' ')" -eq 1 ] \
+[ "$(/usr/bin/find "$temporary/explicit-cache/root" -mindepth 1 -maxdepth 1 | /usr/bin/wc -l | /usr/bin/tr -d ' ')" -eq 1 ] \
     || fail "symlink cache child caused partial cache writes"
 
-/bin/rm -rf "$fixture/.tools"
-/bin/mkdir -p "$fixture/.tools/local-ci"
-: >"$fixture/.tools/local-ci/go-mod"
+/bin/rm -rf "$temporary/explicit-cache/root"
+/bin/mkdir "$temporary/explicit-cache/root"
+: >"$temporary/explicit-cache/root/go-mod"
 set +e
-file_output=$(CDPATH='' cd -- "$fixture" && /bin/sh ./scripts/entry.sh 2>&1)
+file_output=$(CDPATH='' cd -- "$fixture" && HOME="$temporary/fixture-home" DF_CI_CACHE_ROOT="$temporary/explicit-cache/root" /bin/sh ./scripts/entry.sh 2>&1)
 file_status=$?
 set -e
 [ "$file_status" -ne 0 ] || fail "regular-file cache child was accepted"
-printf '%s\n' "$file_output" | grep -F 'refusing unsafe .tools/local-ci/go-mod path' >/dev/null \
+printf '%s\n' "$file_output" | grep -F 'refusing unsafe cache/go-mod path' >/dev/null \
     || fail "regular-file cache child refusal was unclear: $file_output"
-[ "$(/usr/bin/find "$fixture/.tools/local-ci" -mindepth 1 -maxdepth 1 | /usr/bin/wc -l | /usr/bin/tr -d ' ')" -eq 1 ] \
+[ "$(/usr/bin/find "$temporary/explicit-cache/root" -mindepth 1 -maxdepth 1 | /usr/bin/wc -l | /usr/bin/tr -d ' ')" -eq 1 ] \
     || fail "regular-file cache child caused partial cache writes"
 
 sh -n "$boundary" "$repository_root/scripts/local-ci.sh"
