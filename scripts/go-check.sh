@@ -49,7 +49,7 @@ if [ "$go_check_mode" = source ]; then
     go vet ./...
 
     # These packages contain ordinary source and data-contract tests. Packages
-    # that create sockets, PTYs, subprocesses, or services run in go-ci instead.
+    # that create sockets, PTYs, subprocesses, or services run in the process gate.
     echo "go-check: ordinary Go tests"
     go test -short -timeout=20m \
         ./cmd/cloudflare-admin \
