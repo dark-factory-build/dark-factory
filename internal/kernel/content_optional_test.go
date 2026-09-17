@@ -3,8 +3,10 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ncruces/go-sqlite3"
@@ -27,7 +29,7 @@ func seedUnusedContent(t testing.TB, store *Store, project ProjectID, count int)
 		if _, err := store.CreateContent(ctx, NewContent{
 			ID: optionalContentID(t, byte(index+40)), ProjectID: project,
 			Kind: ContentKind("procedure"), Title: "unused procedure",
-			Description: "metadata only", Body: "never loaded by admission",
+			Description: "metadata only", ObjectFormat: "sha1", Commit: strings.Repeat(fmt.Sprintf("%02x", byte(index+40)), 20), Path: ".dark-factory/content/unused.md", RepositoryDevice: 1, RepositoryInode: 2,
 			Author: "operator", SourceReferences: "issue746",
 		}, mustTimeTB(t, int64(index+10))); err != nil {
 			t.Fatal(err)

@@ -164,12 +164,12 @@ func TestV16OutcomeMigrationPreservesLibrary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	first, err := store.ReadContentBody(ctx, contentID(t, 212), 1, 0, 4096)
-	if err != nil || first.Body != "original definition" {
+	first, firstBody, err := store.LegacyContent(ctx, contentID(t, 212), 1)
+	if err != nil || firstBody != "original definition" {
 		t.Fatalf("original revision: %+v %v", first, err)
 	}
-	second, err := store.ReadContentBody(ctx, contentID(t, 212), 2, 0, 4096)
-	if err != nil || second.Body != "corrected definition" {
+	second, secondBody, err := store.LegacyContent(ctx, contentID(t, 212), 2)
+	if err != nil || secondBody != "corrected definition" {
 		t.Fatalf("corrected revision: %+v %v", second, err)
 	}
 	evidence, err := store.ListContentEvidence(ctx, projectID(t, 1), contentID(t, 212), mustRevision(t, 1), 0, 4)
@@ -326,13 +326,10 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		}
 	}
 	if version >= v16UserVersion {
-		content, err := store.CreateContent(ctx, NewContent{ID: contentID(t, 212), ProjectID: project, Kind: ContentAcceptanceScenario, Title: "retained scenario", Body: "original definition", Author: "operator:local"}, mustTime(t, 9))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.ReviseContent(ctx, content.Revision, NewContent{ID: content.ID, ProjectID: project, Kind: content.Kind, Title: content.Title, Body: "corrected definition", Author: content.Author}, mustTime(t, 10)); err != nil {
-			t.Fatal(err)
-		}
+		id := contentID(t, 212)
+		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, '', 'original definition', 'operator:local', '', 0, 9)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
+		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 2, ?, '', 'corrected definition', 'operator:local', '', 0, 10)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
+		content := ContentRevision{ID: id, ProjectID: project, Revision: mustRevision(t, 1)}
 		evidence, err := ContentEvidenceIDFromBytes(bytes.Repeat([]byte{213}, IDBytes))
 		if err != nil {
 			t.Fatal(err)
@@ -453,6 +450,12 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 	}
 	if version <= v7UserVersion {
 		if err := rebuildTable(ctx, connection, legacy, "projects", "id, name, root, verification_policy, revision, created_at_ms, updated_at_ms", "projects_root_unique", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if version >= v16UserVersion && version < userVersion {
+		columns := "id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms"
+		if err := rebuildTable(ctx, connection, legacy, "project_content_revisions", columns, "project_content_revisions_project_kind", "", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -663,7 +666,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "8e566e2483f36de3f9b9d13722bbab6fb58293787b77f201ab16d98c7084ff54"},
+		{"current", schemaStatements, "a3af3c17a532d6b7b324507554a00080ec1c26d61831e3c51f1f1a6ac5279457"},
+		{"v17", v17SchemaStatements(), "8e566e2483f36de3f9b9d13722bbab6fb58293787b77f201ab16d98c7084ff54"},
 		{"v16", v16SchemaStatements(), "2547d01bcfd2878245cb3e6d27c0116cb6ebb9a032bf4816834b2138892d8705"},
 		{"v15", v15SchemaStatements(), "4657aab650b20fbf6ff2dac4e57d334d954321da14b5e14224aab200247cb4dc"},
 		{"v13", v13SchemaStatements(), "f38d4c5ac959eb2c3b23e3c0ace78faa1859201688cb12314c0c4fa721db56db"},

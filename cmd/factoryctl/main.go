@@ -85,8 +85,8 @@ const (
   factoryctl web status
   factoryctl web list-clients [--after CLIENT_ID]
   factoryctl web revoke CLIENT_ID --revision REVISION
-  factoryctl content create [--id ID] --project ID --kind KIND --title TEXT  [--description TEXT] [--body TEXT|--body-file PATH] [--source-references TEXT]
-  factoryctl content revise --project ID --id ID --revision REVISION --kind KIND --title TEXT  [--description TEXT] [--body TEXT|--body-file PATH]
+	factoryctl content create [--id ID] --project ID --kind KIND --title TEXT [--description TEXT] [--body TEXT|--body-file PATH|--commit OID --path PATH] [--source-references TEXT]
+	factoryctl content revise --project ID --id ID --revision REVISION --kind KIND --title TEXT [--description TEXT] [--body TEXT|--body-file PATH|--commit OID --path PATH]
   factoryctl content deprecate --project ID --id ID --revision REVISION
   factoryctl content list --project ID [--kind KIND] [--offset N] [--limit N]
   factoryctl content read --id ID --revision REVISION
@@ -233,6 +233,8 @@ type attemptCommand struct {
 	contentRevision  uint64
 	description      string
 	sourceReferences string
+	sourceCommit     string
+	sourcePath       string
 	testedSource     string
 	environment      string
 	contentResult    string
@@ -452,7 +454,7 @@ func contentBody(command attemptCommand) (string, error) {
 }
 
 func contentInput(command attemptCommand, body string) api.ContentInput {
-	return api.ContentInput{ID: command.contentID, ProjectID: command.project, Kind: command.contentKind, Title: command.title, Description: command.description, Body: body, SourceReferences: command.sourceReferences, ExpectedRevision: command.contentRevision}
+	return api.ContentInput{ID: command.contentID, ProjectID: command.project, Kind: command.contentKind, Title: command.title, Description: command.description, Body: body, SourceReferences: command.sourceReferences, Commit: command.sourceCommit, Path: command.sourcePath, ExpectedRevision: command.contentRevision}
 }
 
 type contentClient interface {
@@ -853,6 +855,18 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 			} else {
 				return attemptCommand{}, false, false
 			}
+		case "--commit":
+			if len(value) >= 40 && len(value) <= 64 {
+				command.sourceCommit = value
+			} else {
+				return attemptCommand{}, false, false
+			}
+		case "--path":
+			if validOperatorText(value, 1, 4096) {
+				command.sourcePath = value
+			} else {
+				return attemptCommand{}, false, false
+			}
 		case "--tested-source":
 			if validOperatorText(value, 1, 4096) {
 				command.testedSource = value
@@ -889,6 +903,9 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 		}
 	}
 	if command.bodySet && command.bodyFile != "" {
+		return attemptCommand{}, false, false
+	}
+	if (command.sourceCommit == "") != (command.sourcePath == "") || command.sourceCommit != "" && (command.bodySet || command.bodyFile != "") {
 		return attemptCommand{}, false, false
 	}
 	switch command.kind {

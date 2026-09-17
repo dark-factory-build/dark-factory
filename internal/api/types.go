@@ -299,6 +299,9 @@ type Content struct {
 	Body             string `json:"body,omitempty"`
 	Author           string `json:"author"`
 	SourceReferences string `json:"source_references"`
+	ObjectFormat     string `json:"object_format,omitempty"`
+	Commit           string `json:"commit,omitempty"`
+	Path             string `json:"path,omitempty"`
 	Revision         uint64 `json:"revision"`
 	Deprecated       bool   `json:"deprecated"`
 	LatestRevision   uint64 `json:"latest_revision"`
@@ -386,6 +389,8 @@ type ContentInput struct {
 	Description      string `json:"description"`
 	Body             string `json:"body"`
 	SourceReferences string `json:"source_references"`
+	Commit           string `json:"commit,omitempty"`
+	Path             string `json:"path,omitempty"`
 	ExpectedRevision uint64 `json:"expected_revision,omitempty"`
 }
 type ContentListInput struct {

@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/dark-factory-build/dark-factory/internal/api"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -57,6 +58,13 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	defer release()
 	if !read && !client.CapabilityMask.Has(kernel.BrowserCapabilityHumanActions) {
 		return browserprotocol.ProjectContentResult{}, browser.ErrUnauthorized
+	}
+	if request.Operation == "create" || request.Operation == "revise" || request.Operation == "deprecate" || request.Operation == "body" {
+		if backend.owner == nil {
+			return browserprotocol.ProjectContentResult{}, browser.ErrUnauthorized
+		}
+		backend.owner.operationMu.Lock()
+		defer backend.owner.operationMu.Unlock()
 	}
 	result := browserprotocol.ProjectContentResult{Operation: request.Operation}
 	var output any
@@ -114,19 +122,35 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if item.ProjectID != project {
 			return result, browser.ErrUnauthorized
 		}
-		page, e := backend.store.ReadContentBody(ctx, id, int(rev.Int64()), int(input.Offset), int(input.Limit))
+		item, sourceBody, e := backend.owner.contentBodySource(ctx, item)
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		page, e := pageContentBody(item, sourceBody, int(input.Offset), int(input.Limit))
 		if e != nil {
 			return result, mapBrowserError(e)
 		}
 		output = api.ContentBody{ID: page.ID.String(), Revision: uint64(page.Revision.Int64()), Offset: uint64(page.Offset), Body: page.Body, NextOffset: uint64(page.NextOffset), Complete: page.Complete}
 	case "create", "revise":
 		id, e := browserContentIDValue(input.ID)
-		if e != nil {
+		if e != nil || !validBrowserContentWrite(input) {
 			return result, browser.ErrStale
 		}
-		spec := kernel.NewContent{ID: id, ProjectID: project, Kind: kernel.ContentKind(input.Kind), Title: input.Title, Description: input.Description, Body: input.Body, Author: fmt.Sprintf("browser:%s", client.ID.String()), SourceReferences: input.SourceReferences}
+		spec := kernel.NewContent{ID: id, ProjectID: project, Kind: kernel.ContentKind(input.Kind), Title: input.Title, Description: input.Description, Body: input.Body, Author: fmt.Sprintf("browser:%s", client.ID.String()), SourceReferences: input.SourceReferences, Commit: input.Commit, Path: input.Path}
 		var item kernel.ContentRevision
 		if request.Operation == "create" {
+			if existing, existingErr := backend.store.Content(ctx, id, 1); existingErr == nil {
+				if existing.ProjectID != project || existing.LatestRevision.Int64() != 1 {
+					return result, browser.ErrStale
+				}
+				spec.RepositoryDevice, spec.RepositoryInode = existing.RepositoryDevice, existing.RepositoryInode
+			} else if existingErr != kernel.ErrNotFound {
+				return result, mapBrowserError(existingErr)
+			}
+			spec, e = backend.owner.writeContentSource(ctx, spec, 1)
+			if e != nil {
+				return result, mapBrowserError(e)
+			}
 			item, e = backend.store.CreateContent(ctx, spec, at)
 		} else {
 			rev, re := browserContentRevision(input.ExpectedRevision)
@@ -139,6 +163,13 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 			}
 			if current.ProjectID != project {
 				return result, browser.ErrUnauthorized
+			}
+			if latest := current.LatestRevision.Int64(); latest != int64(input.ExpectedRevision) && latest != int64(input.ExpectedRevision)+1 {
+				return result, browser.ErrStale
+			}
+			spec, e = backend.owner.writeContentSource(ctx, spec, input.ExpectedRevision+1)
+			if e != nil {
+				return result, mapBrowserError(e)
 			}
 			item, e = backend.store.ReviseContent(ctx, rev, spec, at)
 		}
@@ -158,6 +189,12 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		if current.ProjectID != project {
 			return result, browser.ErrUnauthorized
+		}
+		if latest := current.LatestRevision.Int64(); latest != int64(input.ExpectedRevision) && latest != int64(input.ExpectedRevision)+1 {
+			return result, browser.ErrStale
+		}
+		if current.Commit == "" {
+			_, _ = backend.owner.exportLegacyContent(ctx, id, int64(input.ExpectedRevision))
 		}
 		item, e := backend.store.DeprecateContent(ctx, id, project, rev, fmt.Sprintf("browser:%s", client.ID.String()), at)
 		if e != nil {
@@ -300,6 +337,10 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		return browserprotocol.ProjectContentResult{}, browser.ErrTooLarge
 	}
 	return result, err
+}
+
+func validBrowserContentWrite(input browserContentInput) bool {
+	return len(input.Kind) >= 1 && len(input.Kind) <= 64 && len(input.Title) >= 1 && len(input.Title) <= 1024 && len(input.Description) <= 4096 && len(input.Body) <= 1<<20 && len(input.SourceReferences) <= 32768 && utf8.ValidString(input.Kind) && utf8.ValidString(input.Title) && utf8.ValidString(input.Description) && utf8.ValidString(input.Body) && utf8.ValidString(input.SourceReferences) && (input.Commit == "") == (input.Path == "") && (input.Commit == "" || input.Body == "" && len(input.Commit) >= 40 && len(input.Commit) <= 64 && len(input.Path) >= 1 && len(input.Path) <= 4096 && utf8.ValidString(input.Path))
 }
 
 var _ browser.ContentBackend = (*browserBackend)(nil)

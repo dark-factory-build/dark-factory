@@ -3,13 +3,14 @@ package kernel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
 
 func contentSpec(t *testing.T, project ProjectID, seed byte, body string) NewContent {
 	t.Helper()
-	return NewContent{ID: contentID(t, seed), ProjectID: project, Kind: ContentKind("custom_kind"), Title: "procedure", Description: "description", Body: body, Author: "operator", SourceReferences: "source"}
+	return NewContent{ID: contentID(t, seed), ProjectID: project, Kind: ContentKind("custom_kind"), Title: "procedure", Description: "description", Author: "operator", SourceReferences: "source", ObjectFormat: "sha1", Commit: strings.Repeat(fmt.Sprintf("%02x", seed), 20), Path: ".dark-factory/content/item.md", RepositoryDevice: 1, RepositoryInode: 2}
 }
 
 func contentID(t *testing.T, seed byte) ContentID {
@@ -63,36 +64,46 @@ func TestContentRevisionReplayAndHistoryRemainCASBound(t *testing.T) {
 	}
 }
 
-func TestContentBodyPagingRejectsTinyUTF8PagesAndCompletes(t *testing.T) {
+func TestContentExportRetiresLegacyBodyAndReplays(t *testing.T) {
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()
 	ctx := context.Background()
-	body := strings.Repeat("🙂x", 3000)
-	content, err := store.CreateContent(ctx, contentSpec(t, run.ProjectID, 41, body), mustTime(t, 40))
+	created, err := store.CreateContent(ctx, contentSpec(t, run.ProjectID, 39, "legacy"), mustTime(t, 39))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ReadContentBody(ctx, content.ID, int(content.Revision.Int64()), 0, 1); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("tiny UTF-8 page = %v", err)
+	corruptSQL(t, store, `UPDATE project_content_revisions SET body = 'legacy', object_format = NULL, commit_oid = NULL, path = NULL WHERE id = ? AND revision = 1`, created.ID.Bytes())
+	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", 1, 2); err != nil {
+		t.Fatal(err)
 	}
-	var got strings.Builder
-	offset := 0
-	for {
-		page, err := store.ReadContentBody(ctx, content.ID, int(content.Revision.Int64()), offset, 4097)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got.WriteString(page.Body)
-		if page.Complete {
-			break
-		}
-		if page.NextOffset <= offset {
-			t.Fatalf("paging did not advance: %+v", page)
-		}
-		offset = page.NextOffset
+	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", 1, 2); err != nil {
+		t.Fatalf("export replay: %v", err)
 	}
-	if got.String() != body {
-		t.Fatalf("paged body length/content mismatch: got %d want %d", got.Len(), len(body))
+	got, err := store.Content(ctx, created.ID, 1)
+	if err != nil || got.Commit != strings.Repeat("a", 40) {
+		t.Fatalf("exported content = %+v, %v", got, err)
+	}
+	if _, _, err := store.LegacyContent(ctx, created.ID, 1); !errors.Is(err, ErrConflict) {
+		t.Fatalf("exported revision remained a legacy body: %v", err)
+	}
+}
+
+func TestLegacyContentDeprecationPreservesBodyUntilExport(t *testing.T) {
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	created, err := store.CreateContent(ctx, contentSpec(t, run.ProjectID, 38, "legacy"), mustTime(t, 38))
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE project_content_revisions SET body = 'legacy', object_format = NULL, commit_oid = NULL, path = NULL, repository_dev = NULL, repository_inode = NULL WHERE id = ? AND revision = 1`, created.ID.Bytes())
+	deprecated, err := store.DeprecateContent(ctx, created.ID, run.ProjectID, created.Revision, "operator", mustTime(t, 39))
+	if err != nil || !deprecated.Deprecated {
+		t.Fatalf("legacy deprecation = %+v, %v", deprecated, err)
+	}
+	_, body, err := store.LegacyContent(ctx, created.ID, deprecated.Revision.Int64())
+	if err != nil || body != "legacy" {
+		t.Fatalf("deprecated legacy body = %q, %v", body, err)
 	}
 }
 
@@ -217,24 +228,6 @@ func TestContentDeprecationReplayUsesExpectedRevisionAfterLaterRevision(t *testi
 	replay, err := store.DeprecateContentForAttempt(ctx, run.CredentialDigest, created.ID, created.Revision, mustTime(t, 43))
 	if err != nil || replay.Revision != deprecated.Revision || !replay.Deprecated {
 		t.Fatalf("deprecation replay = %+v, %v", replay, err)
-	}
-}
-
-func TestContentBodyRejectsCorruptUTF8AndOversizePage(t *testing.T) {
-	store, run, _ := runningWorkerRun(t)
-	defer store.Close()
-	ctx := context.Background()
-	spec := contentSpec(t, run.ProjectID, 52, "valid")
-	created, err := store.CreateContent(ctx, spec, mustTime(t, 40))
-	if err != nil {
-		t.Fatal(err)
-	}
-	corruptSQL(t, store, `UPDATE project_content_revisions SET body = CAST(X'FF' AS TEXT) WHERE id = ? AND revision = ?`, created.ID.Bytes(), created.Revision.Int64())
-	if _, err := store.ReadContentBody(ctx, created.ID, int(created.Revision.Int64()), 0, 1); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("invalid UTF-8 body = %v", err)
-	}
-	if _, err := store.ReadContentBody(ctx, created.ID, int(created.Revision.Int64()), 0, contentBodyPageSize+1); !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("oversize body page = %v", err)
 	}
 }
 

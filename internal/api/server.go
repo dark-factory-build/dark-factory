@@ -895,7 +895,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallContentCreate, CallContentRevise:
-		if err := decodeExact(request.Params, &call.content); err != nil || !validText(call.content.ID, 1, 64) || !validText(call.content.ProjectID, 1, 64) || !validText(call.content.Kind, 1, 64) || !validText(call.content.Title, 1, 1024) || !validText(call.content.Description, 0, 4096) || !validText(call.content.Body, 0, 1<<20) || !validText(call.content.SourceReferences, 0, 32768) {
+		if err := decodeExact(request.Params, &call.content); err != nil || !validText(call.content.ID, 1, 64) || !validText(call.content.ProjectID, 1, 64) || !validText(call.content.Kind, 1, 64) || !validText(call.content.Title, 1, 1024) || !validText(call.content.Description, 0, 4096) || !validText(call.content.Body, 0, 1<<20) || !validText(call.content.SourceReferences, 0, 32768) || (call.content.Commit == "") != (call.content.Path == "") || call.content.Commit != "" && (call.content.Body != "" || !validText(call.content.Commit, 40, 64) || !validText(call.content.Path, 1, 4096)) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallContentDeprecate:
