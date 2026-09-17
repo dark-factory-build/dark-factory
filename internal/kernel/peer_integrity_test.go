@@ -100,7 +100,7 @@ func TestV6MigrationPreservesSendBackAndSupervision(t *testing.T) {
 	if err := rebuildTable(ctx, connection, target, "tasks", testTaskColumnsV5, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{"DROP TABLE peer_questions", "PRAGMA user_version = 6", "COMMIT"} {
+	for _, statement := range []string{"DROP TABLE peer_questions", "DROP TABLE terminal_diagnostics", "PRAGMA user_version = 6", "COMMIT"} {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
