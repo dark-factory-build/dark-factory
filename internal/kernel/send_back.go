@@ -196,6 +196,9 @@ func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDige
 	if task.Status != TaskBlocked && task.Status != TaskFailed {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
+	if at.Int64() < task.UpdatedAt.Int64() {
+		return Task{}, tx.Rollback(ErrRevisionConflict)
+	}
 	original, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
