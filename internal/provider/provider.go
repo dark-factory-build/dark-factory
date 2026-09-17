@@ -659,7 +659,8 @@ func Build(request Request) (Launch, error) {
 			argv = append(argv, "resume", id)
 		}
 		argv = append(argv, "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
-		argv = append(argv, "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+		attemptServer := codexAttemptServerName(request.runtime)
+		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
 			args := make([]string, len(browserArgs))
 			for i, arg := range browserArgs {
@@ -686,7 +687,7 @@ func Build(request Request) (Launch, error) {
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(bridge)+`,enabled=true,required=true,default_tools_approval_mode="approve"}`)
 			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
-		prompt := codexBootstrapPrompt
+		prompt := codexBootstrapPromptFor(request.runtime)
 		if request.role == kernel.RoleOrchestrator {
 			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Continue actionable supervision and delivery in this session; when none remains, report a durable checkpoint and exit without idle polling. Events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
@@ -748,6 +749,15 @@ func codexPermissions(request Request) (string, error) {
 
 func codexPermissionName(runtime RuntimePaths) string {
 	return fmt.Sprintf("dark-factory-%x", sha256.Sum256([]byte(runtime.home)))
+}
+
+func codexAttemptServerName(runtime RuntimePaths) string {
+	digest := sha256.Sum256([]byte(runtime.home))
+	return fmt.Sprintf("factory_attempt_%x", digest[:8])
+}
+
+func codexBootstrapPromptFor(runtime RuntimePaths) string {
+	return strings.Replace(codexBootstrapPrompt, "factory_attempt.factory", codexAttemptServerName(runtime)+".factory", 1)
 }
 
 func codexUntrustedProjectConfig(path string) string {

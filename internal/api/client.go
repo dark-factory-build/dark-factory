@@ -45,10 +45,6 @@ type client struct {
 	token      tokenRecord
 	socket     socketRecord
 	domain     byte
-	// followToken is used only by the attempt MCP bridge. Its token locator
-	// can be an atomically retargeted per-session locator when a native provider
-	// resumes; operator clients remain pinned to their construction token.
-	followToken bool
 }
 
 type OperatorClient struct{ client client }
@@ -79,7 +75,6 @@ func NewAttemptClientFromEnvironment(socketPath string) (*AttemptClient, error) 
 	if err != nil {
 		return nil, err
 	}
-	base.followToken = true
 	return &AttemptClient{client: base}, nil
 }
 
@@ -546,7 +541,7 @@ type responseEnvelope struct {
 
 func (client client) call(ctx context.Context, method string, params, output any) error {
 	current, err := loadToken(client.tokenPath)
-	if err != nil || (!client.followToken && !current.same(client.token)) {
+	if err != nil || !current.same(client.token) {
 		return ErrInvalidClient
 	}
 	encoded, err := json.Marshal(requestEnvelope{Method: method, Params: params})
@@ -582,7 +577,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 
 	payload := make([]byte, requestPrelude+len(encoded))
 	payload[0] = client.domain
-	copy(payload[1:requestPrelude], current.bearer[:])
+	copy(payload[1:requestPrelude], client.token.bearer[:])
 	copy(payload[requestPrelude:], encoded)
 	if err := writeFrame(connection, payload); err != nil {
 		return classifyTransport(ctx)
@@ -672,7 +667,7 @@ func (client client) revalidate(before socketRecord) error {
 		return ErrInvalidClient
 	}
 	latest, err := loadToken(client.tokenPath)
-	if err != nil || (!client.followToken && !latest.same(client.token)) {
+	if err != nil || !latest.same(client.token) {
 		return ErrInvalidClient
 	}
 	return nil
