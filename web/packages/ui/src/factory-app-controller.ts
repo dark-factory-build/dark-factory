@@ -971,7 +971,7 @@ export class FactoryAppController {
   #receiveStatus(generation: number, status: SessionStatus): void {
     if (!this.#current(generation)) return;
     this.#status = status;
-    this.#statusReason = status === "closed" ? this.#error?.code ?? "closed" : undefined;
+    this.#statusReason = status === "closed" ? this.#closedReason() : undefined;
     if (status !== "ready") {
       this.#discardTaskEditConfirmation();
       this.#clearSelection();
@@ -1058,8 +1058,14 @@ export class FactoryAppController {
   #receiveError(generation: number, error: SessionError | ProtocolError): void {
     if (!this.#current(generation)) return;
     this.#error = error;
-    if (this.#status === "closed") this.#statusReason = error.code;
+    if (this.#status === "closed") this.#statusReason = this.#closedReason();
     this.#publish();
+  }
+
+  /** A retryable close is transport-shaped for hosts: the client is already reconnecting on it. */
+  #closedReason(): SessionErrorCode {
+    const error = this.#error;
+    return error instanceof SessionError && error.retryable ? "connection" : error?.code ?? "closed";
   }
 
   #current(generation: number): boolean {
