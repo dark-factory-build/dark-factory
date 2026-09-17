@@ -265,13 +265,32 @@ The branch is `factory/<first 12 hex of change_id>`. The task's
   diff against that head, not the base. A branch that does not exist here
   means the earlier publication never happened: treat it as the first.
 
-Set `from` to `base_commit` or `branch_head` accordingly. The published
+Set `from` to `base_commit` or `branch_head` accordingly, and set
+`branch_exists=1` when the publication branch exists or `0` when it does not.
+The published
 `branch_head` is an App-authored commit that is not in the local repository;
-diff the worker's head against the same *content* by fetching it into your
-clone first when `from` is a `branch_head`:
-`git -C repo fetch -q origin "$from"` and then
+fetch it and the worker's head into your clone,
+`git -C repo fetch -q origin main "$from"` and then
 `git -C repo fetch -q "$git_directory" "$head_commit"`, and run the commands
 below against `repo/.git` instead of `$git_directory`.
+
+A worker that integrated a merged prerequisite has main in its head's
+ancestry. Copying that head's files onto `from` reproduces the tree but not
+the ancestry, so GitHub merges main's own hunks against main again and
+reports a conflict that no source correction can clear. Let the script decide
+what the publication's parents are:
+
+```sh
+set -- $(repo/scripts/publication-parents.sh repo/.git "$from" "$head_commit" "$(git -C repo rev-parse origin/main)" "$branch_exists")
+from=$1 diff_from=$2 merge_parent=$3
+```
+
+`diff_from` replaces `from` in every diff below. When the branch does not
+exist yet, `from` becomes the integrated main commit itself, the valid current
+base. When it exists, `merge_parent` names the integrated commit and the first
+`publish_commit` of this publication carries it as `merge_parent_sha`: the
+published commit is then the merge the worker made, with the branch head first
+and its changes applied to the integrated tree. `-` means nothing to carry.
 
 The diff is between two commits in the repository's Git directory; nothing
 is checked out and no index is touched. The worker's own `.gitignore` decides
@@ -280,8 +299,8 @@ generated dependencies, build output, caches, and temporary metadata must be
 absent from the head.
 
 ```sh
-git --git-dir="$git_directory" diff --no-renames --name-status "$from" "$head_commit" > changed.txt   # A / M / D per path, never R
-git --git-dir="$git_directory" diff --no-renames --numstat "$from" "$head_commit"                     # for the delta paragraph
+git --git-dir="$git_directory" diff --no-renames --name-status "$diff_from" "$head_commit" > changed.txt   # A / M / D per path, never R
+git --git-dir="$git_directory" diff --no-renames --numstat "$diff_from" "$head_commit"                     # for the delta paragraph
 git --git-dir="$git_directory" ls-tree -r "$head_commit"                                               # mode and blob per path
 ```
 
@@ -331,10 +350,11 @@ Then, with `branch = factory/<first 12 hex of change_id>`:
 1. `observe_ref` for `main` and keep the answer as `main_head`. If it is not
    `base_commit`, main moved since the worker started; publish anyway from
    `from` and let the queue merge it, but say so in the body.
-2. `publish_commit` with `branch`, `expected_head_sha = from`, `message` =
-   the task title and nothing else (the App takes exactly one line: no blank
-   line, no trailers, no session link; a second line is refused as
-   `invalid_input`), and the first (or only) 50 entries. The operation id is
+2. `publish_commit` with `branch`, `expected_head_sha = from`,
+   `merge_parent_sha = merge_parent` on this first commit unless it is `-`,
+   `message` = the task title and nothing else (the App takes exactly one
+   line: no blank line, no trailers, no session link; a second line is refused
+   as `invalid_input`), and the first (or only) 50 entries. The operation id is
    `opid "$change_id" publish-1` for a first publication and
    `opid "$change_id" publish-<HEAD8 of from>-1` for a follow-up. It returns
    the new head commit; a second commit uses the next number and that head,
@@ -353,8 +373,8 @@ only the follow-up commit's delta. Fetch the new head and calculate that base
 and numstat directly:
 
 ```sh
-git -C repo fetch -q origin "$HEAD_SHA"
-review_base=$(git -C repo merge-base "$base_commit" "$HEAD_SHA")
+git -C repo fetch -q origin main "$HEAD_SHA"
+review_base=$(git -C repo merge-base origin/main "$HEAD_SHA")
 git -C repo diff --numstat "$review_base" "$HEAD_SHA"
 ```
 
