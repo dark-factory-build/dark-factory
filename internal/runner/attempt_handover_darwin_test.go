@@ -134,6 +134,29 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 	if transport.Current != finalRunner {
 		t.Fatal("final result authority did not follow the replacement connection")
 	}
+	// Finalization must notify the adopted daemon. The original daemon socket
+	// was fenced during adoption, so using it here would publish a durable
+	// spool without delivering the result that settles the live run.
+	cfg := attemptConfig{AttemptID: "attempt-handover-settlement", ResultName: AttemptResultSpoolName, ResultProof: testResultProofHex()}
+	if err := finishAttemptWithExit(child, f.dir, cfg, reads, transport.Current, true, nil); err != nil {
+		t.Fatalf("finish adopted attempt: %v", err)
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		result, err := finalOwner.Next(time.Until(deadline))
+		if err != nil {
+			t.Fatalf("adopted result notification err=%v", err)
+		}
+		if result.Kind == AttemptResultReady {
+			if result.Result == nil {
+				t.Fatal("adopted result notification had no notice")
+			}
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("adopted result notification=%+v", result)
+		}
+	}
 	output, _, err := owner.ring.Read(owner.ring.Floor())
 	if err != nil || string(output) != "before-handover\r\nafter-handover\r\n" {
 		t.Fatalf("ordered PTY output=%q err=%v", output, err)

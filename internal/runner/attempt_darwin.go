@@ -1192,6 +1192,9 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 	// capability nothing answers, and the runtime is removable from the
 	// instant the result exists.
 	closeTakeover()
+	if transport != nil && transport.Current != nil {
+		daemon = transport.Current
+	}
 	return finishAttemptWithExit(child, dir, cfg, &reads, daemon, daemonOpen, err)
 }
 
