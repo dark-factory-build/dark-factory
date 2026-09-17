@@ -91,9 +91,11 @@ expect_fail 'allow whose rendered head is a different commit'
 record "$head" COMMENTED "$app" "Three findings. Dark-Factory-Review: note $head" >"$reviews"
 expect_fail 'note is not an allow'
 
-# A blocking verdict blocks even when an ALLOW also stands at the same head,
-# so a second opinion can never launder the first one away. Clearing it means
-# pushing a fix, which moves the head and orphans both.
+# A blocking verdict blocks even when a plain ALLOW also stands at the same
+# head, so an unrelated second opinion can never launder the first one away.
+# Clearing it means either pushing a fix, which moves the head and orphans
+# both, or an ALLOW that explicitly names and corrects this exact block
+# operation (below).
 {
     record "$head" COMMENTED "$app" "Dark-Factory-Review: allow $head"
     record "$head" COMMENTED "$app" "Reaps nothing on failure. Dark-Factory-Review: block $head"

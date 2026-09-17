@@ -4746,10 +4746,8 @@ impl Authority {
             if !review.is_block_for_head(&request.head_sha) {
                 continue;
             }
-            let Some((block_operation_id, block_digest)) = review
-                .body
-                .as_deref()
-                .and_then(review_operation_marker)
+            let Some((block_operation_id, block_digest)) =
+                review.body.as_deref().and_then(review_operation_marker)
             else {
                 return Ok(true);
             };
@@ -4760,12 +4758,12 @@ impl Authority {
             };
             if block_operation.request_digest != block_digest
                 || !block_operation.matches_review(
-                review,
-                token.repository.full_name.as_str(),
-                request.pull_number,
-                &request.head_sha,
-                "block",
-            )
+                    review,
+                    token.repository.full_name.as_str(),
+                    request.pull_number,
+                    &request.head_sha,
+                    "block",
+                )
             {
                 return Ok(true);
             }
@@ -6565,7 +6563,7 @@ impl TryFrom<PullRequest> for PullRequestResult {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Deserialize)]
+#[derive(Deserialize)]
 struct PullRequestReview {
     id: i64,
     html_url: String,
@@ -6584,14 +6582,16 @@ impl PullRequestReview {
             && self.state == REVIEW_STATE
     }
 
-    fn blocks_head(&self, head_sha: &str, _reviews: &[PullRequestReview]) -> bool {
-        // Clearing a block requires the async merge path to authenticate the
-        // correcting review through the durable operation journal. This pure
-        // predicate is deliberately conservative and is also safe for callers
-        // that do not have journal access.
-        self.is_block_for_head(head_sha)
-    }
-
+    // GitHub cannot delete a submitted review, and dismissal preserves its
+    // body. This App exposes no review-update operation, so its rendered
+    // BLOCK line remains the durable decision even if the review state is
+    // later changed to DISMISSED.
+    //
+    // Clearing a block requires the async merge path
+    // (`Authority::review_blocks_head`) to authenticate a correcting review
+    // through the durable operation journal. This pure predicate is
+    // deliberately conservative and never clears a block by itself, which
+    // also makes it safe for callers that do not have journal access.
     fn is_block_for_head(&self, head_sha: &str) -> bool {
         self.commit_id == head_sha
             && (self.state == "CHANGES_REQUESTED"
@@ -6631,7 +6631,7 @@ impl PullRequestReview {
         if operation.request_digest != digest {
             return Ok(false);
         }
-        operation.matches_review(self, repository, pull_number, head_sha, "allow")
+        Ok(operation.matches_review(self, repository, pull_number, head_sha, "allow"))
     }
 
     fn matches_allow_result(
@@ -6670,10 +6670,12 @@ fn review_operation_marker(body: &str) -> Option<(&str, &str)> {
         let rest = line.trim().strip_prefix(OPERATION_MARKER_PREFIX)?;
         let (id, digest) = rest.strip_suffix(" -->")?.split_once(':')?;
         (id.len() == 36
-            && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
             && digest.len() == 64
             && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .then_some((id, digest))
+        .then_some((id, digest))
     })
 }
 
@@ -9916,7 +9918,12 @@ mod tests {
 
         // A metadata-only correction may clear an erroneous block at the same
         // head, but only when the fresh independent review names that exact
-        // prior App operation. A plain ALLOW remains insufficient.
+        // prior App operation. A plain ALLOW remains insufficient. Actually
+        // clearing the block is journal-authenticated on the wasm32-only
+        // merge path (`Authority::review_blocks_head`), which native `cargo
+        // test` cannot reach; what is provable here is the wire format that
+        // path and `verify-adversarial-review.sh` both read, and that the
+        // pure predicate never clears a block by itself.
         let correction = SubmitPullRequestReview {
             repository: block.repository.clone(),
             operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
@@ -9927,24 +9934,20 @@ mod tests {
             corrects_review_operation_id: Some(block.operation_id.clone()),
         };
         assert!(correction.clone().validate().is_ok());
+        assert!(correction.marked_body().unwrap().contains(&format!(
+            "{REVIEW_CORRECTION_PREFIX} {}",
+            block.operation_id
+        )));
         let blocking_review = PullRequestReview {
             id: 6,
-            html_url: "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-6".into(),
+            html_url:
+                "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-6"
+                    .into(),
             body: Some(block.marked_body().unwrap()),
             commit_id: block.head_sha.clone(),
             state: REVIEW_STATE.into(),
         };
-        let corrected_review = PullRequestReview {
-            id: 7,
-            html_url: "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-7".into(),
-            body: Some(correction.marked_body().unwrap()),
-            commit_id: correction.head_sha.clone(),
-            state: REVIEW_STATE.into(),
-        };
-        assert!(blocking_review.blocks_head(&block.head_sha, std::slice::from_ref(&blocking_review)));
-        // A review-shaped correction from GitHub is not enough by itself:
-        // only the merge path, with journal provenance, may clear this block.
-        assert!(blocking_review.blocks_head(&block.head_sha, &[blocking_review, corrected_review]));
+        assert!(blocking_review.is_block_for_head(&block.head_sha));
         assert!(
             PullRequestReview {
                 id: 5,
@@ -9975,12 +9978,14 @@ mod tests {
                 "caller body must not be able to write a verdict: {forged}"
             );
         }
-        assert!(SubmitPullRequestReview {
-            body: format!("Dark-Factory-Review-Correction: {}", block.operation_id),
-            ..allow.clone()
-        }
-        .validate()
-        .is_err());
+        assert!(
+            SubmitPullRequestReview {
+                body: format!("Dark-Factory-Review-Correction: {}", block.operation_id),
+                ..allow.clone()
+            }
+            .validate()
+            .is_err()
+        );
 
         // An ALLOW is reconciled from the `COMMENTED` state it was posted as.
         let recovered = PullRequestReview {
@@ -10276,8 +10281,8 @@ mod tests {
             commit_id: head.clone(),
             state: "COMMENTED".into(),
         };
-        assert!(app_block.blocks_head(&head, std::slice::from_ref(&app_block)));
-        assert!(!app_block.blocks_head(&"b".repeat(40), std::slice::from_ref(&app_block)));
+        assert!(app_block.is_block_for_head(&head));
+        assert!(!app_block.is_block_for_head(&"b".repeat(40)));
         assert!(
             PullRequestReview {
                 id: 3,
@@ -10286,7 +10291,7 @@ mod tests {
                 commit_id: head.clone(),
                 state: "DISMISSED".into(),
             }
-            .blocks_head(&head, std::slice::from_ref(&app_block))
+            .is_block_for_head(&head)
         );
     }
 
