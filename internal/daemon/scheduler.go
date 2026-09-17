@@ -285,6 +285,14 @@ func (daemon *Daemon) validateScheduledCompletion(changeParent string, unsettled
 		}
 		current = settled
 	}
+	if current.Phase == kernel.RunRunning {
+		// A clean protocol-2 shutdown handover leaves the run running and
+		// owned by its reparented runner under a fresh grant; the next
+		// daemon adopts it. RunNext never returns a running run otherwise —
+		// every other exit finalizes — so this is never a stray running
+		// completion masquerading as a handover.
+		return nil
+	}
 	if current.Phase != kernel.RunTerminal {
 		return kernel.NewOutcomeUnknownError(fmt.Errorf("%w: scheduled run remained %s", kernel.ErrConflict, current.Phase.String()))
 	}

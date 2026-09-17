@@ -1053,7 +1053,15 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	root := t.TempDir()
+	return newFixtureAt(t, t.TempDir())
+}
+
+// newFixtureAt builds the same fixture as newFixture but rooted at an
+// existing directory. A test that binds a Unix-domain socket under the root
+// needs a short one to stay under macOS's 104-byte sun_path bound, which
+// t.TempDir()'s long, test-name-derived path can exceed.
+func newFixtureAt(t *testing.T, root string) *fixture {
+	t.Helper()
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}

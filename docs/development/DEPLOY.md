@@ -23,10 +23,15 @@ up the selected home’s `factory.sqlite3` to
 `factoryctl service uninstall` and `service install` with the new binaries,
 waits (bounded) for the previous daemon to leave and for the new one to accept
 on its socket, and prints service, web and remote status. It refuses to run
-unless dispatch is off and the store holds no non-terminal run, checked once
-before the build and again right before the uninstall. In one coordinated
-maintenance window, run `factoryctl dispatch off`, wait for work to drain, and
-keep dispatch off until the reinstall exits and the new service is healthy;
+unless dispatch is off and every non-terminal run is one the new daemon can
+adopt, checked once before the build and again right before the uninstall. A
+run is adoptable when it is `running` and its runner still publishes
+`runtimes/<run id>/takeover.sock`: the new daemon takes that runner's control
+capability over at boot and the provider never stops. Every other non-terminal
+run — a run still being admitted or finalizing, or an older runner with no
+endpoint — still has to drain. In one coordinated maintenance window, run
+`factoryctl dispatch off`, wait for the work that cannot be adopted to drain,
+and keep dispatch off until the reinstall exits and the new service is healthy;
 then run `factoryctl dispatch on`. Binaries land in
 `.worktrees/bin-<sha>`. If it stops after the uninstall because the previous
 daemon still accepts connections or retains `home.lock`, the service is
@@ -40,7 +45,9 @@ address. It refuses a missing label or a receipt changed during preparation.
 
 The deployment hook calls `reinstall-service.sh --prepare` while work continues.
 Only preparation holds the shared local-CI lease. After it releases the lease,
-the hook pauses dispatch and drains work, then calls `--install-prepared`.
+the hook pauses dispatch and drains the work that cannot be adopted — its drain
+loop uses the same running-plus-endpoint predicate — then calls
+`--install-prepared`.
 That phase validates the clean exact source and all three binaries’ VCS and
 release identities without compiling or waiting for the compiler lease.
 Preparation does not back up, migrate a browser profile, or alter the service.

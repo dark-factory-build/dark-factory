@@ -52,7 +52,7 @@ printf '\n' >"$fake_home/.dark-factory/home.lock"
 mkdir -p "$fake_home/.dark-factory.service"
 printf '{"label":"com.dark-factory.fixture","plist_path":"/private/tmp/fixture-plists/com.dark-factory.fixture.plist","relay_origin":"wss://relay.example"}\n' >"$fake_home/.dark-factory.service/receipt"
 printf '0\n' >"$temporary/dispatch-enabled"
-printf '0\n' >"$temporary/active-runs"
+: >"$temporary/active-runs"
 : >"$temporary/pids"
 
 # go build writes a stub that records the build tree's HEAD, its supplied VCS
@@ -75,7 +75,7 @@ case "$1" in
             "${DARK_FACTORY_TEST_VCS_REVISION-$(git rev-parse HEAD)}" "${DARK_FACTORY_TEST_VCS_MODIFIED-false}" \
             "${GOTOOLCHAIN-unset}" "${GOENV-unset}" "${GOAUTH-unset}" >"$out"
         chmod 755 "$out"
-        [ -z "${DARK_FACTORY_TEST_ADMIT_DURING_BUILD-}" ] || printf '1\n' >"$DARK_FACTORY_TEST_ACTIVE_RUNS"
+        [ -z "${DARK_FACTORY_TEST_ADMIT_DURING_BUILD-}" ] || printf 'admitted:%s\n' "$DARK_FACTORY_TEST_RUN" >"$DARK_FACTORY_TEST_ACTIVE_RUNS"
         [ -z "${DARK_FACTORY_TEST_ENABLE_DISPATCH_DURING_BUILD-}" ] || printf '1\n' >"$DARK_FACTORY_TEST_DISPATCH_ENABLED"
         ;;
     env) case "$2" in GOOS) echo darwin ;; GOARCH) echo arm64 ;; esac ;;
@@ -89,7 +89,7 @@ cat >"$fake_bin/sqlite3" <<'FAKE'
 set -eu
 case "$2" in
     "SELECT dispatch_enabled FROM factory WHERE singleton = 1") cat "$DARK_FACTORY_TEST_DISPATCH_ENABLED" ;;
-    "SELECT count(*) FROM runs WHERE phase <> 'terminal'") cat "$DARK_FACTORY_TEST_ACTIVE_RUNS" ;;
+    "SELECT phase || ':' || lower(hex(id)) FROM runs WHERE phase <> 'terminal'") cat "$DARK_FACTORY_TEST_ACTIVE_RUNS" ;;
     ".backup "*)
         cp "$1" "${2#.backup }"
         # The modes while the store is being copied, before any later chmod.
@@ -171,6 +171,9 @@ printf '#!/bin/sh\n' >"$fake_bin/sleep"
 chmod 755 "$fake_bin"/*
 export PATH="$fake_bin:$PATH" HOME="$fake_home"
 export DARK_FACTORY_TEST_ACTIVE_RUNS="$temporary/active-runs"
+# One fixture run id, the 32 lowercase hex characters a runtime directory is
+# named after.
+export DARK_FACTORY_TEST_RUN=0123456789abcdef0123456789abcdef
 export DARK_FACTORY_TEST_DISPATCH_ENABLED="$temporary/dispatch-enabled"
 export DARK_FACTORY_TEST_BACKUP_MODES="$temporary/backup-modes"
 export DARK_FACTORY_TEST_FACTORYCTL_LOG="$temporary/factoryctl.log"
@@ -194,6 +197,16 @@ not_installed() {
 no_service_change() {
     [ ! -e "$DARK_FACTORY_TEST_FACTORYCTL_LOG" ] || fail "$1: factoryctl invoked"
 }
+# A real takeover.sock in the given runtime directory. It is bound under a
+# short path and moved into place: sockaddr_un's 104-byte sun_path cannot
+# reach this fixture's own temporary tree.
+fake_takeover_socket() {
+    mkdir -p "$1"
+    stage=$(mktemp -d /private/tmp/df-sock.XXXXXX)
+    perl -MIO::Socket::UNIX -e 'IO::Socket::UNIX->new(Local => shift, Listen => 1) or die' "$stage/s"
+    mv "$stage/s" "$1/takeover.sock"
+    rmdir "$stage"
+}
 
 "$script" >/dev/null 2>"$temporary/stderr" && fail "no argument accepted"
 grep -q '^usage:' "$temporary/stderr" || fail "no argument: usage not printed"
@@ -209,12 +222,29 @@ grep -q 'dispatch is enabled' "$temporary/stderr" || fail "dispatch enabled: wro
 untouched "dispatch enabled"
 printf '0\n' >"$temporary/dispatch-enabled"
 
-printf '1\n' >"$temporary/active-runs"
+printf 'running:%s\n' "$DARK_FACTORY_TEST_RUN" >"$temporary/active-runs"
 "$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "active run accepted"
 grep -q 'non-terminal run' "$temporary/stderr" || fail "active run: wrong refusal"
 [ ! -e "$test_repository/.worktrees" ] || fail "active run created a worktree"
 untouched "active run"
-printf '0\n' >"$temporary/active-runs"
+
+# The same running run, still publishing its runner's takeover endpoint, is
+# adopted by the next daemon: it does not have to drain.
+adoptable_runtime="$fake_home/.dark-factory/runtimes/$DARK_FACTORY_TEST_RUN"
+fake_takeover_socket "$adoptable_runtime"
+"$script" "$sha" >/dev/null 2>"$temporary/stderr" \
+    || fail "adoptable running run refused: $(cat "$temporary/stderr")"
+grep -q "adoptable: run $DARK_FACTORY_TEST_RUN" "$temporary/stderr" || fail "adoptable run: not reported"
+rm -rf "$fake_home/.dark-factory/runtimes" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" "$fake_home/.dark-factory-backups"
+
+# A finalizing run behind the same endpoint still blocks: only a running one
+# is adoptable.
+printf 'finalizing:%s\n' "$DARK_FACTORY_TEST_RUN" >"$temporary/active-runs"
+fake_takeover_socket "$adoptable_runtime"
+"$script" "$sha" >/dev/null 2>"$temporary/stderr" && fail "finalizing run with an endpoint accepted"
+grep -q 'non-terminal run' "$temporary/stderr" || fail "finalizing run: wrong refusal"
+rm -rf "$fake_home/.dark-factory/runtimes"
+: >"$temporary/active-runs"
 
 DARK_FACTORY_TEST_ENABLE_DISPATCH_DURING_BUILD=1 "$script" "$sha" >/dev/null 2>"$temporary/stderr" \
     && fail "dispatch enabled during build accepted"
@@ -226,7 +256,7 @@ DARK_FACTORY_TEST_ADMIT_DURING_BUILD=1 "$script" "$sha" >/dev/null 2>"$temporary
     && fail "run admitted during the build accepted"
 grep -q 'non-terminal run' "$temporary/stderr" || fail "run admitted during the build: wrong refusal"
 [ ! -e "$DARK_FACTORY_TEST_FACTORYCTL_LOG" ] || fail "run admitted during the build: service uninstalled"
-printf '0\n' >"$temporary/active-runs"
+: >"$temporary/active-runs"
 rm -rf "$fake_home/.dark-factory-backups"
 
 # A legacy browser session must leave the strict runtime home before the
@@ -365,7 +395,7 @@ rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
 # Preparation can run alongside active work, without migrating profiles,
 # backing up stores, or changing the service.
 printf '1\n' >"$temporary/dispatch-enabled"
-printf '1\n' >"$temporary/active-runs"
+printf 'running:%s\n' "$DARK_FACTORY_TEST_RUN" >"$temporary/active-runs"
 mkdir -p "$fake_home/.dark-factory/verification-browser"
 before_backups=$(backups)
 "$script" --prepare "$sha" >/dev/null 2>"$temporary/stderr" \
@@ -375,7 +405,7 @@ before_backups=$(backups)
 no_service_change "preparation"
 rmdir "$fake_home/.dark-factory/verification-browser"
 printf '0\n' >"$temporary/dispatch-enabled"
-printf '0\n' >"$temporary/active-runs"
+: >"$temporary/active-runs"
 
 # The drained phase uses the prepared artifacts without compiler work, and
 # preserves the configured service rather than targeting the default factory.
