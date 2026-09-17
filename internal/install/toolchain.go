@@ -27,17 +27,26 @@ func SupportedToolchain(accountHome string) (toolPath, readRoots string) {
 	nodeBin := filepath.Join(nodeRoot, "bin")
 	cargoBin := filepath.Join(accountHome, ".cargo", "bin")
 	rustupHome := filepath.Join(accountHome, ".rustup")
+	homebrewGoLibexec := filepath.Join("/opt/homebrew/Cellar/go", supportedGoVersion, "libexec")
+	intelGoLibexec := filepath.Join("/usr/local/Cellar/go", supportedGoVersion, "libexec")
 	var paths, roots []string
 	for _, path := range []string{nodeBin, cargoBin} {
 		if canonicalDirectory(path) {
 			paths = append(paths, path)
 		}
 	}
-	for _, path := range []string{nodeRoot, cargoBin, rustupHome,
-		filepath.Join("/opt/homebrew/Cellar/go", supportedGoVersion, "libexec"),
-		filepath.Join("/usr/local/Cellar/go", supportedGoVersion, "libexec")} {
+	for _, path := range []string{nodeRoot, cargoBin, rustupHome, homebrewGoLibexec, intelGoLibexec} {
 		if canonicalDirectory(path) {
 			roots = append(roots, path)
+		}
+	}
+	// The default tool path's /opt/homebrew/bin and /usr/local/bin entries
+	// are Homebrew opt-symlinks; the sandbox's read grant covers only the
+	// resolved libexec target, so the Go binary is reachable only from its
+	// canonical libexec/bin, not through the unpermitted symlink chain.
+	for _, libexec := range []string{homebrewGoLibexec, intelGoLibexec} {
+		if goBin := filepath.Join(libexec, "bin"); canonicalDirectory(goBin) {
+			paths = append(paths, goBin)
 		}
 	}
 	return strings.Join(paths, string(filepath.ListSeparator)), strings.Join(roots, string(filepath.ListSeparator))

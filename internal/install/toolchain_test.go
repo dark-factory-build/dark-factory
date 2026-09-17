@@ -37,14 +37,20 @@ func TestSupportedToolchainNamesOnlyPinnedPrivateInstallations(t *testing.T) {
 		}
 	}
 	path, roots := SupportedToolchain(root)
-	if path != strings.Join([]string{filepath.Join(nodeRoot, "bin"), filepath.Join(root, ".cargo", "bin")}, string(filepath.ListSeparator)) {
-		t.Fatalf("tool path=%q", path)
-	}
+	wantPath := []string{filepath.Join(nodeRoot, "bin"), filepath.Join(root, ".cargo", "bin")}
 	wantRoots := []string{nodeRoot, filepath.Join(root, ".cargo", "bin"), filepath.Join(root, ".rustup")}
-	for _, path := range []string{filepath.Join("/opt/homebrew/Cellar/go", supportedGoVersion, "libexec"), filepath.Join("/usr/local/Cellar/go", supportedGoVersion, "libexec")} {
-		if canonicalDirectory(path) {
-			wantRoots = append(wantRoots, path)
+	for _, libexec := range []string{filepath.Join("/opt/homebrew/Cellar/go", supportedGoVersion, "libexec"), filepath.Join("/usr/local/Cellar/go", supportedGoVersion, "libexec")} {
+		if canonicalDirectory(libexec) {
+			wantRoots = append(wantRoots, libexec)
 		}
+	}
+	for _, libexec := range []string{filepath.Join("/opt/homebrew/Cellar/go", supportedGoVersion, "libexec"), filepath.Join("/usr/local/Cellar/go", supportedGoVersion, "libexec")} {
+		if goBin := filepath.Join(libexec, "bin"); canonicalDirectory(goBin) {
+			wantPath = append(wantPath, goBin)
+		}
+	}
+	if path != strings.Join(wantPath, string(filepath.ListSeparator)) {
+		t.Fatalf("tool path=%q", path)
 	}
 	if roots != strings.Join(wantRoots, string(filepath.ListSeparator)) {
 		t.Fatalf("read roots=%q", roots)
