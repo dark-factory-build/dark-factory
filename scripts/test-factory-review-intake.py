@@ -46,6 +46,10 @@ class ReviewIntakeTest(unittest.TestCase):
         receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())
         self.assertEqual("allow", receipt['pulls']['9:' + SHA]["review_state"])
 
+    def test_crlf_terminal_footer_links_managed_pr(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        self.assertEqual(7, review.linked_issue("Summary\r\nRefs #7\r\n", journal, 'o/r'))
+
     def test_unlinked_pr_is_not_woken(self):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'untrusted Refs #8'}]), \
              patch.object(review, 'ready') as ready:
