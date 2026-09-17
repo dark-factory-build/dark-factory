@@ -90,6 +90,48 @@ class ReleaseFixtures(unittest.TestCase):
             self.assertEqual(result["state"], "verified")
             command.assert_not_called()
 
+    def test_reconcile_records_verified_receipt_without_deploy_hook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            release.atomic_json(journal, {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}})
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([{"pr": 633, "merge_sha": SHA, "issue": 602, "reference": "refs"}], "range")), \
+                 mock.patch.object(release, "run") as command:
+                result = release.reconcile(cfg, 633, SHA)
+            self.assertEqual(result["state"], "verified")
+            self.assertEqual(release.load(journal)["live_tip"]["sha"], SHA)
+            command.assert_not_called()
+
+    def test_reconcile_rejects_wrong_observed_sha_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            before = {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}}
+            release.atomic_json(journal, before)
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "does not match"):
+                    release.reconcile(cfg, 633, OLD)
+            self.assertEqual(release.load(journal), before)
+            command.assert_not_called()
+
+    def test_reconcile_refuses_uncertain_receipt_without_hook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "632": {"pr": 632, "sha": OLD, "state": "running",
+                         "config_fingerprint": release.config_fingerprint(cfg)}}})
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "unresolved running"):
+                    release.reconcile(cfg, 633, SHA)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+
     def test_running_release_with_unknown_probe_becomes_blocked(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "release.json"
