@@ -166,16 +166,23 @@ func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) 
 // tickingBody is a provider task that publishes its own PID, prints one
 // numbered line a second, and then declares its outcome through the local API
 // — which by then belongs to a different daemon process than the one that
-// started it.
+// started it. Between ticks a background spinner keeps the terminal busy the
+// way a TUI redraw does: a line every 10ms never leaves the 100ms gap the
+// runner's idle tick needs, so the handover has to work under continuous
+// output. It is one process: a shell loop forking sleep per line pauses far
+// longer than that under the provider sandbox.
 func (fixture *blackBoxFixture) tickingBody(ticks int) string {
 	return fmt.Sprintf(`set -eu
 printf '%%s\n' "$$" > '%s'
+/usr/bin/perl -e '$|=1; while (1) { print "spin\n"; select(undef, undef, undef, 0.01) }' &
+spinner=$!
 i=1
 while [ "$i" -le %d ]; do
 	printf 'tick %%d\n' "$i"
 	i=$((i + 1))
 	sleep 1
 done
+kill "$spinner"
 "$DARK_FACTORY_FACTORYCTL" attempt succeed --result 'handover survived'
 `, fixture.providerPIDPath(), ticks)
 }
