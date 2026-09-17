@@ -149,28 +149,36 @@ func (backend *browserBackend) removeSubscription(watch *browserStateWatch) {
 
 func (backend *browserBackend) startObserverLocked() {
 	if backend.observerCancel != nil {
-		select {
-		case <-backend.observerDone:
-			backend.observerCancel, backend.observerDone = nil, nil
-		default:
-			return
-		}
+		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	backend.observerCancel, backend.observerDone, backend.observerWake = cancel, make(chan struct{}), make(chan struct{}, 1)
-	go backend.observe(ctx, backend.observerDone)
+	go backend.observe(ctx, backend.observerDone, backend.observerWake)
 }
 
-func (backend *browserBackend) observe(ctx context.Context, done chan struct{}) {
+func (backend *browserBackend) observe(ctx context.Context, done chan struct{}, wake <-chan struct{}) {
 	defer close(done)
-	ticker := time.NewTicker(browserStatePollInterval)
-	defer ticker.Stop()
 	for {
+		backend.subMu.Lock()
+		hasSubscribers := len(backend.subs) != 0
+		backend.subMu.Unlock()
+		if !hasSubscribers {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+			}
+			continue
+		}
+		ticker := time.NewTicker(browserStatePollInterval)
 		select {
 		case <-ctx.Done():
+			ticker.Stop()
 			return
 		case <-ticker.C:
-		case <-backend.observerWake:
+			ticker.Stop()
+		case <-wake:
+			ticker.Stop()
 		}
 		state, err := backend.store.Factory(ctx)
 		if err != nil {
@@ -178,7 +186,7 @@ func (backend *browserBackend) observe(ctx context.Context, done chan struct{}) 
 			for _, watch := range watches {
 				backend.finishWatch(watch, mapBrowserError(err))
 			}
-			return
+			continue
 		}
 		watches := backend.snapshotSubscriptions()
 		for _, watch := range watches {
@@ -201,7 +209,7 @@ func (backend *browserBackend) observe(ctx context.Context, done chan struct{}) 
 		empty := len(backend.subs) == 0
 		backend.subMu.Unlock()
 		if empty {
-			return
+			continue
 		}
 	}
 }
@@ -260,8 +268,6 @@ func (backend *browserBackend) close() error {
 	if backend.observerCancel != nil {
 		backend.observerCancel()
 		<-backend.observerDone
-		backend.observerCancel = nil
-		backend.observerDone = nil
 	}
 	for _, watch := range watches {
 		backend.finishWatch(watch, nil)
