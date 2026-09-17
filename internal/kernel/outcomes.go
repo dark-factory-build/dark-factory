@@ -563,7 +563,7 @@ func validateCandidateReference(ctx context.Context, connection *sql.Conn, proje
 		}
 	}
 	if candidate.ScenarioEvidenceID != "" {
-		if err := validateScenarioEvidenceReference(ctx, connection, project, candidate.ScenarioEvidenceID); err != nil {
+		if err := validateScenarioEvidenceReference(ctx, connection, project, candidate.ScenarioEvidenceID, candidate.Source, candidate.Environment); err != nil {
 			return err
 		}
 	}
@@ -617,10 +617,10 @@ func validateEvidenceReference(ctx context.Context, connection *sql.Conn, projec
 	}
 	return nil
 }
-func validateScenarioEvidenceReference(ctx context.Context, connection *sql.Conn, project ProjectID, value string) error {
+func validateScenarioEvidenceReference(ctx context.Context, connection *sql.Conn, project ProjectID, value, source, environment string) error {
 	var evidenceProject []byte
-	var kind string
-	err := connection.QueryRowContext(ctx, `SELECT e.project_id, c.kind FROM project_content_evidence e JOIN project_content_revisions c ON c.id = e.content_id AND c.revision = e.content_revision WHERE e.id = ?`, mustOutcomeID(value)).Scan(&evidenceProject, &kind)
+	var kind, testedSource, testedEnvironment string
+	err := connection.QueryRowContext(ctx, `SELECT e.project_id, c.kind, e.tested_source, e.environment FROM project_content_evidence e JOIN project_content_revisions c ON c.id = e.content_id AND c.revision = e.content_revision WHERE e.id = ?`, mustOutcomeID(value)).Scan(&evidenceProject, &kind, &testedSource, &testedEnvironment)
 	if err == sql.ErrNoRows {
 		return ErrNotFound
 	}
@@ -632,6 +632,9 @@ func validateScenarioEvidenceReference(ctx context.Context, connection *sql.Conn
 	}
 	if ContentKind(kind) != ContentAcceptanceScenario {
 		return fmt.Errorf("%w: comparison scenario evidence is not an acceptance scenario", ErrConflict)
+	}
+	if testedSource != source || testedEnvironment != environment {
+		return fmt.Errorf("%w: comparison candidate source or environment differs from scenario evidence", ErrConflict)
 	}
 	return nil
 }
@@ -712,7 +715,31 @@ func outcomeOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, id
 	result := OutcomeRevision{ID: id, ProjectID: pid, Revision: rr, Document: doc, Kind: doc.Kind, Objective: doc.Objective, Criteria: doc.Criteria, State: doc.State, Author: author, Authority: authority, ObjectiveWorkRevision: wr, CreatedAt: at}
 	copy(result.ObjectiveHash[:], hash)
 	result.Stale, result.MissingReferences = outcomeReadFlags(ctx, c, project, doc, hash, work)
+	latest, latestRevision, latestErr := latestOutcomeDocument(ctx, c, project, id)
+	if latestErr != nil {
+		return OutcomeRevision{}, latestErr
+	}
+	if latestRevision > rev && outcomeObjectiveChanged(doc, latest) {
+		result.Stale = true
+	}
 	return result, nil
+}
+
+func latestOutcomeDocument(ctx context.Context, connection *sql.Conn, project ProjectID, id OutcomeID) (OutcomeDocument, int64, error) {
+	var raw string
+	var revision int64
+	err := connection.QueryRowContext(ctx, `SELECT document, revision FROM project_outcome_revisions WHERE project_id = ? AND id = ? ORDER BY revision DESC LIMIT 1`, project.Bytes(), id.Bytes()).Scan(&raw, &revision)
+	if err == sql.ErrNoRows {
+		return OutcomeDocument{}, 0, ErrNotFound
+	}
+	if err != nil {
+		return OutcomeDocument{}, 0, err
+	}
+	document, err := DecodeOutcomeDocument(raw)
+	if err != nil {
+		return OutcomeDocument{}, 0, err
+	}
+	return document, revision, nil
 }
 
 // Reads retain history even when a linked row later changes or is removed.
