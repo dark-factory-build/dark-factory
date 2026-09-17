@@ -153,8 +153,11 @@ def enqueue_request_digest(config, operation):
     # order) JSON of the exact EnqueuePullRequest fields, sha256-hexed. The
     # App's analogous observe_pull_request_merge guard compares this same way
     # (control-plane/src/github_app.rs:2752-2769) before trusting a completed
-    # enqueue observation.
-    expected = {"repository": config["repository"].lower(), "operation_id": operation["enqueue_operation"],
+    # enqueue observation. EnqueuePullRequest::validate canonicalizes
+    # operation_id to lowercase before that digest is computed
+    # (control-plane/src/github_app.rs:3069-3073, canonical_operation_id at
+    # :3351-3365), so an uppercase persisted id must be lowercased here too.
+    expected = {"repository": config["repository"].lower(), "operation_id": operation["enqueue_operation"].lower(),
                 "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"]}
     return hashlib.sha256(json.dumps(expected, separators=(",", ":")).encode()).hexdigest()
 

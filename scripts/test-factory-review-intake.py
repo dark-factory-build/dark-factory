@@ -327,6 +327,18 @@ class ReviewIntakeTest(unittest.TestCase):
         _first, _second, _task, receipt = self.run_allow(bridge_call)
         self.assertEqual((operation['enqueue_operation'], 'queued', []), (receipt['enqueue_operation'], receipt['enqueue_state'], writes))
 
+    def test_uppercase_persisted_enqueue_operation_id_still_matches_digest(self):
+        # The App canonicalizes operation_id to lowercase before hashing
+        # (control-plane/src/github_app.rs canonical_operation_id); an
+        # operator-recorded id persisted uppercase must still be recognized
+        # as the same completed request, not falsely reported unresolved.
+        operation = dict(self.operation, enqueue_operation='ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEFAB', enqueue_base='main')
+        app_digest = review.enqueue_request_digest(self.config, dict(operation, enqueue_operation=operation['enqueue_operation'].lower()))
+        value = {'operation_id': operation['enqueue_operation'], 'state': 'completed', 'kind': 'enqueue_pull_request',
+                 'request_digest': app_digest, 'result': {'pull_number': 9, 'head_sha': SHA}}
+        with patch.object(review, 'bridge_call', return_value={'structuredContent': value, 'isError': False}):
+            self.assertEqual('queued', review.observe_enqueue(self.config, operation))
+
     def test_enqueue_receipt_for_another_request_digest_is_refused(self):
         # Same PR, same head, and a well-formed completed observation, but the
         # journaled request was for a different base (release instead of the
