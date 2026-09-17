@@ -299,7 +299,7 @@ pub(crate) struct SubmitPullRequestReview {
     pub(crate) head_sha: String,
     pub(crate) event: ReviewEvent,
     pub(crate) body: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) corrects_review_operation_id: Option<String>,
 }
 
@@ -10044,6 +10044,69 @@ mod tests {
                 ..recovered
             }
             .matches(&allow)
+        );
+    }
+
+    /// `corrects_review_operation_id` was added after this operation shipped.
+    /// A retry of a pre-change request still arrives with the field absent,
+    /// deserializes to `None` via `#[serde(default)]`, and must hash to
+    /// exactly the digest it always did -- `skip_serializing_if` is what
+    /// keeps `None` out of the JSON the digest is taken over. Without it, a
+    /// legacy retry would compute a different digest than its own prior
+    /// attempt and hit the journal's `Conflict` path instead of reconciling.
+    #[test]
+    fn corrects_review_operation_id_does_not_change_the_legacy_digest() {
+        #[derive(Serialize)]
+        struct LegacyShape {
+            repository: String,
+            operation_id: String,
+            pull_number: i64,
+            head_sha: String,
+            event: ReviewEvent,
+            body: String,
+        }
+
+        let request = SubmitPullRequestReview {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "5c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 331,
+            head_sha: "d".repeat(40),
+            event: ReviewEvent::Allow,
+            body: "Legacy retry, no correction field.".into(),
+            corrects_review_operation_id: None,
+        };
+        let legacy = LegacyShape {
+            repository: request.repository.clone(),
+            operation_id: request.operation_id.clone(),
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+            event: request.event,
+            body: request.body.clone(),
+        };
+        assert_eq!(
+            request_digest(&request).unwrap(),
+            request_digest(&legacy).unwrap(),
+            "a field-absent replay must reproduce the pre-change digest exactly"
+        );
+
+        // The field is not silently invisible to the digest once it is
+        // actually used: a correction is a different request from the replay
+        // above, and from a request naming a different prior operation.
+        let corrected = SubmitPullRequestReview {
+            corrects_review_operation_id: Some("6c8a5c44-7f1f-11f0-952e-acde48001122".into()),
+            ..request.clone()
+        };
+        assert_ne!(
+            request_digest(&request).unwrap(),
+            request_digest(&corrected).unwrap()
+        );
+        let corrected_other = SubmitPullRequestReview {
+            corrects_review_operation_id: Some("7c8a5c44-7f1f-11f0-952e-acde48001122".into()),
+            ..request
+        };
+        assert_ne!(
+            request_digest(&corrected).unwrap(),
+            request_digest(&corrected_other).unwrap()
         );
     }
 
