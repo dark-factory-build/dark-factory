@@ -96,6 +96,20 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual(1, verify.call_count)
         self.assertEqual('b' * 40, verify.call_args.args[2]['base'])
 
+    def test_legacy_version_two_receipt_without_review_provider_is_still_accepted(self):
+        # Pre-review_provider receipts fingerprinted config without that
+        # field (review.legacy_config_fingerprint). Upgrading this script
+        # must not invalidate every journal already on disk.
+        legacy_fingerprint = review.legacy_config_fingerprint(self.config)
+        self.assertNotEqual(legacy_fingerprint, review.config_fingerprint(self.config))
+        receipt = {'version': 2, 'config_fingerprint': legacy_fingerprint, 'pulls': {'9:' + SHA: self.operation}}
+        Path(self.config['journal'] + '.reviews.json').write_text(json.dumps(receipt))
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
+             patch.object(review, 'ready', side_effect=AssertionError('must reuse the pre-change receipt')), patch.object(review, 'verify_existing') as verify, \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            self.assertEqual([], review.run_once(self.config))
+        self.assertEqual(1, verify.call_count)
+
     def test_receipt_rejects_mirror_config_change(self):
         Path(self.config['journal'] + '.reviews.json').write_text(json.dumps({'version': 2, 'config_fingerprint': review.config_fingerprint(self.config), 'pulls': {}}))
         changed = dict(self.config, review_mirror_root='/other')

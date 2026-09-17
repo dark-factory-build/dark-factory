@@ -179,6 +179,15 @@ def config_fingerprint(config):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def legacy_config_fingerprint(config):
+    # Pre-review_provider version-2 receipts were fingerprinted without that
+    # field. Recognize their existing digest so upgrading this script does
+    # not invalidate every journal already on disk; a receipt only earns the
+    # new, provider-bound digest the next time it is written.
+    value = {key: config.get(key) for key in ("repository", "project_id", "overseer_agent_id", "review_mirror_root")}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def run_once(config):
     config = intake.validate_config(config)
     path = mirror(config)
@@ -202,7 +211,8 @@ def run_locked(config, path, journal, journal_path):
             receipts = json.loads(journal_path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ReviewError("review receipt is unreadable") from exc
-        if receipts.get("version") != 2 or not isinstance(receipts.get("pulls"), dict) or receipts.get("config_fingerprint") != config_fingerprint(config):
+        if receipts.get("version") != 2 or not isinstance(receipts.get("pulls"), dict) \
+                or receipts.get("config_fingerprint") not in (config_fingerprint(config), legacy_config_fingerprint(config)):
             raise ReviewError("review receipt is invalid")
     else:
         receipts = {"version": 2, "config_fingerprint": config_fingerprint(config), "pulls": {}}
