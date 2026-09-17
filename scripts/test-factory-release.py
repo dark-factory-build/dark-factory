@@ -99,11 +99,53 @@ class ReleaseFixtures(unittest.TestCase):
                  mock.patch.object(release, "review_gate"), \
                  mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
                  mock.patch.object(release, "range_sources", return_value=([{"pr": 633, "merge_sha": SHA, "issue": 602, "reference": "refs"}], "range")), \
-                 mock.patch.object(release, "run") as command:
+                 mock.patch.object(release, "run", return_value=json.dumps({"status": "ahead", "merge_base_commit": {"sha": SHA}})) as command:
                 result = release.reconcile(cfg, 633, SHA)
             self.assertEqual(result["state"], "verified")
             self.assertEqual(release.load(journal)["live_tip"]["sha"], SHA)
             self.assertEqual(result["reconciliation"], {"mode": "operator_observed", "observed_sha": SHA})
+            command.assert_called_once()
+
+    def test_reconcile_accepts_reviewed_ancestor_when_default_advanced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            release.atomic_json(journal, {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}})
+            current = (dict(snapshot()[0], mergeCommitSha=SHA), SECOND, snapshot()[2], snapshot()[3])
+            with mock.patch.object(release, "gh_snapshot", return_value=current), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([], "range")), \
+                 mock.patch.object(release, "run", return_value=json.dumps({"status": "ahead", "merge_base_commit": {"sha": SHA}})):
+                result = release.reconcile(cfg, 633, SHA)
+            self.assertEqual(result["state"], "verified")
+
+    def test_reconcile_rejects_diverged_target_without_writing_or_hook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            before = {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}}
+            release.atomic_json(journal, before)
+            current = (dict(snapshot()[0], mergeCommitSha=SHA), SECOND, snapshot()[2], snapshot()[3])
+            with mock.patch.object(release, "gh_snapshot", return_value=current), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "run", return_value=json.dumps({"status": "diverged"})) as command:
+                with self.assertRaisesRegex(release.ReleaseError, "not an ancestor"):
+                    release.reconcile(cfg, 633, SHA)
+            self.assertEqual(release.load(journal), before)
+            command.assert_called_once()
+
+    def test_normal_deployment_still_rejects_stale_merged_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            before = {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}}
+            release.atomic_json(journal, before)
+            current = (dict(snapshot()[0], mergeCommitSha=SHA), SECOND, snapshot()[2], snapshot()[3])
+            with mock.patch.object(release, "gh_snapshot", return_value=current), mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "not at the merged SHA"):
+                    release.once(cfg, 633)
+            self.assertEqual(release.load(journal), before)
             command.assert_not_called()
 
     def test_reconcile_rejects_unhealthy_or_wrong_live_probe_without_writing(self):
@@ -116,11 +158,11 @@ class ReleaseFixtures(unittest.TestCase):
                 with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
                      mock.patch.object(release, "review_gate"), \
                      mock.patch.object(release, "probe", return_value=observed), \
-                     mock.patch.object(release, "run") as command:
+                     mock.patch.object(release, "run", return_value=json.dumps({"status": "ahead", "merge_base_commit": {"sha": SHA}})) as command:
                     with self.assertRaisesRegex(release.ReleaseError, "healthy SHA"):
                         release.reconcile(cfg, 633, SHA)
                 self.assertEqual(release.load(journal), before)
-                command.assert_not_called()
+                command.assert_called_once()
 
     def test_reconcile_rejects_fingerprint_mismatch_without_writing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -146,11 +188,11 @@ class ReleaseFixtures(unittest.TestCase):
                  mock.patch.object(release, "review_gate"), \
                  mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
                  mock.patch.object(release, "range_sources", side_effect=release.ReleaseError("range incomplete")), \
-                 mock.patch.object(release, "run") as command:
+                 mock.patch.object(release, "run", return_value=json.dumps({"status": "ahead", "merge_base_commit": {"sha": SHA}})) as command:
                 with self.assertRaisesRegex(release.ReleaseError, "range incomplete"):
                     release.reconcile(cfg, 633, SHA)
             self.assertEqual(release.load(journal), before)
-            command.assert_not_called()
+            command.assert_called_once()
 
     def test_reconcile_rejects_wrong_observed_sha_without_writing(self):
         with tempfile.TemporaryDirectory() as directory:
