@@ -249,6 +249,215 @@ class ReleaseFixtures(unittest.TestCase):
                     release.once(cfg, 633)
             self.assertEqual(release.load(journal)["releases"]["633"]["state"], "blocked")
 
+    def test_unresolved_old_release_blocks_newer_latest_without_hook_or_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            entry = {"pr": 633, "sha": SHA, "state": "blocked",
+                     "config_fingerprint": release.config_fingerprint(cfg)}
+            release.atomic_json(journal, {"version": 1, "releases": {"633": entry},
+                                          "unresolved_deployment": {
+                                              "pr": 633, "sha": SHA,
+                                              "config_fingerprint": release.config_fingerprint(cfg),
+                                              "error": "deployment outcome is ambiguous",
+                                          }})
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "earlier deployment is unresolved"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+
+    def test_legacy_running_receipt_blocks_newer_release_before_github_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "running",
+                         "config_fingerprint": release.config_fingerprint(cfg)}
+            }})
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "earlier deployment is unresolved"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(release.load(journal)["unresolved_deployment"]["pr"], 633)
+
+    def test_legacy_running_receipt_with_different_config_blocks_newer_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            old_cfg = dict(cfg, deploy_argv=["/bin/false"])
+            original = {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "running",
+                         "config_fingerprint": release.config_fingerprint(old_cfg)}
+            }}
+            release.atomic_json(journal, original)
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "different repository or hook configuration"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(release.load(journal), original)
+
+    def test_legacy_blocked_receipt_blocks_newer_release_before_github_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            fingerprint = release.config_fingerprint(cfg)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "blocked",
+                         "config_fingerprint": fingerprint}
+            }})
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "earlier deployment is unresolved"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(release.load(journal)["unresolved_deployment"]["pr"], 633)
+
+    def test_legacy_opaque_blocked_receipt_from_old_config_blocks_newer_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            old_cfg = dict(cfg, deploy_argv=["/bin/false"])
+            entry = {"pr": 633, "sha": SHA, "state": "blocked",
+                     "config_fingerprint": release.config_fingerprint(old_cfg),
+                     "error": "deployment outcome is ambiguous"}
+            release.atomic_json(journal, {"version": 1, "releases": {"633": entry}})
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "earlier deployment is unresolved"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(release.load(journal)["unresolved_deployment"]["pr"], 633)
+
+    def test_reconcile_settles_exact_healthy_deployment_without_hook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            fingerprint = release.config_fingerprint(dict(cfg, deploy_argv=["/bin/false"]))
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "blocked",
+                         "config_fingerprint": fingerprint}},
+                "live_tip": {"sha": OLD, "healthy": True},
+                "unresolved_deployment": {"pr": 633, "sha": SHA,
+                                            "config_fingerprint": fingerprint,
+                                            "error": "ambiguous"}})
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([{"pr": 633, "merge_sha": SHA,
+                                                                                "issue": 602, "reference": "refs"}], "range")), \
+                 mock.patch.object(release, "run", return_value=json.dumps({"status": "ahead", "merge_base_commit": {"sha": SHA}})) as command:
+                result = release.reconcile(cfg, 633, SHA)
+            self.assertEqual(result["state"], "verified")
+            self.assertNotIn("unresolved_deployment", release.load(journal))
+            self.assertEqual(command.call_count, 1)
+            self.assertEqual(command.call_args.args[0][:2], ["gh", "api"])
+
+    def test_legacy_predeploy_blocked_receipt_can_be_recovered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            fingerprint = release.config_fingerprint(cfg)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "blocked",
+                         "config_fingerprint": fingerprint,
+                         "error": "live probe unavailable or malformed before deployment"}
+            }})
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "run") as command:
+                result = release.once(cfg, 633, retry=True)
+            self.assertEqual(result["state"], "verified")
+            command.assert_not_called()
+            self.assertNotIn("unresolved_deployment", release.load(journal))
+
+    def test_hook_crash_leaves_barrier_before_any_hook_effect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            def hook_crash(argv, *args, **kwargs):
+                if argv[:2] == ["gh", "api"]:
+                    return json.dumps({"object": {"sha": SHA}})
+                raise KeyboardInterrupt
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": OLD, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([{"pr": 633, "merge_sha": SHA, "issue": 602, "reference": "refs"}], "range")), \
+                 mock.patch.object(release, "run", side_effect=hook_crash):
+                with self.assertRaises(KeyboardInterrupt):
+                    release.once(cfg, 633)
+            receipt = release.load(journal)["releases"]["633"]
+            self.assertEqual(receipt["state"], "running")
+            self.assertEqual(release.load(journal)["unresolved_deployment"]["sha"], SHA)
+
+    def test_explicit_recovery_clears_barrier_and_allows_subsequent_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            fingerprint = release.config_fingerprint(cfg)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "blocked", "config_fingerprint": fingerprint}},
+                "live_tip": {"sha": OLD, "healthy": True},
+                "unresolved_deployment": {"pr": 633, "sha": SHA, "config_fingerprint": fingerprint,
+                                            "error": "ambiguous"}})
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "run") as command:
+                release.once(cfg, 633, retry=True)
+            command.assert_not_called()
+            self.assertNotIn("unresolved_deployment", release.load(journal))
+
+            newer = snapshot()
+            newer = (dict(newer[0], mergeCommitSha=SECOND), SECOND, newer[2], newer[3])
+            with mock.patch.object(release, "gh_snapshot", return_value=newer), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([{"pr": 634, "merge_sha": SECOND, "issue": 602, "reference": "refs"}], "range")), \
+                 mock.patch.object(release, "verify", return_value={"sha": SECOND, "healthy": True}), \
+                 mock.patch.object(release, "run", side_effect=lambda argv, *a, **kw: json.dumps({"object": {"sha": SECOND}}) if argv[:2] == ["gh", "api"] else ""):
+                result = release.once(cfg, 634)
+            self.assertEqual(result["state"], "verified")
+
+    def test_failed_explicit_recovery_never_replans_or_deploys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            fingerprint = release.config_fingerprint(cfg)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "blocked", "config_fingerprint": fingerprint}},
+                "unresolved_deployment": {"pr": 633, "sha": SHA, "config_fingerprint": fingerprint,
+                                            "error": "ambiguous"}})
+            with mock.patch.object(release, "probe", side_effect=release.ReleaseError("probe unavailable")), \
+                 mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "ambiguous"):
+                    release.once(cfg, 633, retry=True)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+
+    def test_ambiguous_running_release_is_not_replayed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "running",
+                         "config_fingerprint": release.config_fingerprint(cfg)}}})
+            with mock.patch.object(release, "probe", return_value={"sha": OLD, "healthy": True}), \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "ambiguous"):
+                    release.once(cfg, 633, retry=True)
+            command.assert_not_called()
+            self.assertIn("unresolved_deployment", release.load(journal))
+
     def test_unavailable_predeploy_probe_never_deploys(self):
         with tempfile.TemporaryDirectory() as directory:
             cfg = config(Path(directory) / "release.json")
