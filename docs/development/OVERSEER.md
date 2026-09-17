@@ -14,6 +14,13 @@ send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
 admission limits. A configured `max_run_seconds: 0` disables the run deadline;
 intake honors that operator choice and does not require a finite duration.
+
+Workers should use `./scripts/go-check.sh` plus focused tests while implementing
+and record the exact head and checks before review. Process-sensitive checks use
+`./scripts/with-local-ci-lease.sh`; reviewers reproduce relevant risks instead
+of rerunning the full suite by default. The protected merge queue selects the
+appropriate fixed gates from its complete combined-tree diff and remains the
+authoritative pre-merge full check.
 The overseer lane is not an extra worker slot. Do not infer
 capacity from the number of visible terminals or raise limits to clear a queue.
 
@@ -438,7 +445,8 @@ human request, not a retry.
 - Production-line delta: added minus deleted outside tests, docs and fixtures,
   from the numstat, with the largest files named.
 - How it was verified: what the worker's result text says it ran, and that
-  the merge queue runs `scripts/local-ci.sh`. Claim nothing you did not see.
+  the merge queue runs the selected `scripts/local-ci.sh` mode on the combined
+  tree. Claim nothing you did not see.
 - Never an email, an org name, an account id, or a `/Users/<name>` path.
 - End with the repository's generated-with line and nothing after it. You
   have no session link; never invent one.

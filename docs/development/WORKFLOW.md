@@ -14,21 +14,39 @@ cd .worktrees/<slug>
 Prefer deleting obsolete behavior and duplicated machinery over compatibility
 code, feature flags, or speculative abstractions.
 
-The routine baseline is:
+The routine source check is:
+
+```sh
+./scripts/go-check.sh
+```
+
+It runs Go formatting, vetting, ordinary short tests, the TypeScript build and
+tests, and `git diff --check`. It does not acquire the process lease. During
+implementation, run this check plus focused tests for the changed package.
+
+The full local gate is available when broad local integration proof is needed:
 
 ```sh
 ./scripts/local-ci.sh
 ```
 
-It covers repository/release fixtures, Go formatting and vetting, risk-scoped
-short Go suites, the TypeScript client proof, browser/daemon end-to-end checks,
-and `git diff --check`. It is macOS-only while the daemon is Darwin-only.
+It includes repository and release fixtures, ordinary checks, and every
+process-sensitive Go and end-to-end check. Smaller fixed modes are available
+when their inputs are known: `./scripts/local-ci.sh --ui` runs the UI source
+and leased browser smoke checks, `--runtime` runs ordinary and process gates,
+and `--release` runs the source check plus release and packaging fixtures. The selector in the
+protected CI workflow chooses these modes from the complete merge-queue diff;
+uncertain or mixed paths use the full gate.
+
+For CI edits, run the affected gate fixtures and source checks, adding a full
+local run where that resolves a concrete risk. Authors and reviewers do not
+repeat the entire suite merely because a PR is about to enter the queue.
 
 Additional checks follow changed risk. Process-sensitive checks share the
 repository lease:
 
 ```sh
-./scripts/with-local-ci-lease.sh go test ./internal/daemon/
+./scripts/with-local-ci-lease.sh go test -count=1 ./internal/daemon/
 ```
 
 Concurrency, process ownership, finalization, or recovery changes benefit from
@@ -130,12 +148,15 @@ data/state remain local or temporary; `git clean -ffdx` still removes them.
 Actions restores only the reusable directories under `RUNNER_TEMP` using
 `actions/cache`, keyed by platform, actual Go version, Node version and dependency
 locks. Cache hits never skip checks. GitHub scopes saved caches by ref; a manual
-run on `main` can seed a cache available to subsequent merge-queue refs. Queue
-caches alone do not establish reuse across different queue refs.
+run on `main` with runner `macos-latest` seeds the matching hosted toolchain
+cache for subsequent merge-queue refs. The default manual runner remains
+`dark-factory-mac`; its Go patch version may differ. Queue caches alone do not
+establish reuse across different queue refs.
 
-`scripts/local-ci.sh` acquires one kernel-backed lease from the common Git
-directory, so linked worktrees cannot stack process-heavy Go runs. Set
-`DARK_FACTORY_LOCAL_CI_WAIT=0` to fail instead of waiting.
+Process-sensitive checks acquire one kernel-backed lease from the common Git
+directory, so linked worktrees cannot stack process-heavy Go runs. The routine
+`go-check.sh` remains outside that lease. Set `DARK_FACTORY_LOCAL_CI_WAIT=0`
+to fail instead of waiting.
 
 The full lease stress suites are focused checks for changes to the lease
 helpers, their entry/owner semantics, or the macOS process primitives they
@@ -186,8 +207,11 @@ when install or service ownership changes; it is not a routine extra gate.
 The local CI lease lives entirely in `dark-factory-local-ci` beneath the
 repository's canonical Git common directory. Workers receive that subtree
 through `DARK_FACTORY_LOCAL_CI_DIRECTORY`; use
-`scripts/with-local-ci-lease.sh <focused check>` to share the host gate, and
-run full `local-ci.sh` from the Change worktree, which is a Git checkout.
+`scripts/with-local-ci-lease.sh <focused check>` to share the host gate.
+Full `local-ci.sh` and `--release` hold the lease for their complete suite
+because repository and release fixtures can also use process state. The
+`--runtime` and `--ui` modes acquire it only around their process-sensitive
+checks.
 If lease preparation is unavailable or refused, source work can still start with
 no lease grant and an explicit startup diagnostic; required CI remains blocked.
 
@@ -216,9 +240,8 @@ object and cannot create an independent gate. Never grant workers the enclosing
 To check an older exact host checkout after cutover without changing its source,
 run the current helper from that checkout:
 `/absolute/current/scripts/with-local-ci-lease.sh /bin/sh ./scripts/local-ci.sh`.
-The old entry preserves the held-lease marker and does not acquire a second gate.
-For its process gate, wrap `./scripts/go-ci-owned.sh` directly, not `go-ci.sh`
-(which always tries to acquire another lease).
+The process body is `./scripts/go-ci-owned.sh`; wrap it with the same helper for
+a focused process check.
 
 Native checks use the already-pinned `DARK_FACTORY_FACTORYCTL` binary for only
 same-user process birth and group identity because macOS's setuid `/bin/ps`
