@@ -1059,6 +1059,9 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
+	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
+		return newErrorReply(remoteErrorCode(err)), nil
+	}
 	at, err := daemon.timestamp()
 	if err != nil {
 		return newErrorReply(api.RemoteInternal), nil

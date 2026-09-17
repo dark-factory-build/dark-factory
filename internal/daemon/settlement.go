@@ -12,6 +12,8 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
+var errDirtyWorkerChange = errors.New("uncommitted implementation in Change worktree; commit it or clean it up before reporting success")
+
 // settleRun commits the terminal outcome of a finalizing run through the
 // reviewed finalize edges. A change without a worktree settles abandoned; a
 // change with one settles retained at the branch head its worktree is at.
