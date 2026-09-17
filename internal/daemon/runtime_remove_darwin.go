@@ -210,7 +210,7 @@ func isRemovableRuntimeFile(name string) bool {
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
 		runner.TerminalScratchName,
-		runner.TakeoverGrantName, runner.TakeoverSocketName,
+		runner.TakeoverGrantName, runner.TakeoverScratchName, runner.TakeoverSocketName,
 		runner.RuntimeLifetimeLeaseName:
 		return true
 	default:

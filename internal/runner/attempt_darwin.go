@@ -1201,9 +1201,12 @@ const (
 	// capability to a replacement daemon. A live runner unlinks both before
 	// it publishes its result; a killed one leaves them as ordinary runtime
 	// residue, so the daemon's recovery and removal know them by name.
-	TakeoverGrantName   = "takeover.json"
-	TakeoverSocketName  = "takeover.sock"
-	takeoverScratchName = ".runner-takeover.tmp"
+	TakeoverGrantName  = "takeover.json"
+	TakeoverSocketName = "takeover.sock"
+	// TakeoverScratchName is the grant's rename scratch. It normally exists
+	// for the length of one write, but a runner killed mid-rotation leaves it
+	// behind, so the daemon's runtime census and removal know it by name too.
+	TakeoverScratchName = ".runner-takeover.tmp"
 	takeoverTokenBytes  = 32
 	maxTakeoverBody     = 16 << 10
 	takeoverReadTimeout = 5 * time.Second
@@ -1280,24 +1283,26 @@ func writeTakeoverGrant(dirFD int, runID, token string) error {
 	if err != nil {
 		return err
 	}
-	fd, err := unix.Openat(dirFD, takeoverScratchName, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	fd, err := unix.Openat(dirFD, TakeoverScratchName, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return err
 	}
 	writeErr := writeAll(fd, body)
 	closeErr := unix.Close(fd)
-	if err := errors.Join(writeErr, closeErr); err != nil {
-		return err
+	if err := errors.Join(writeErr, closeErr); err == nil {
+		err = unix.Renameat(dirFD, TakeoverScratchName, dirFD, TakeoverGrantName)
+		if err == nil {
+			return nil
+		}
 	}
-	return unix.Renameat(dirFD, takeoverScratchName, dirFD, TakeoverGrantName)
+	// The scratch exists from here on. Leaving it behind would make the
+	// runtime's own census refuse an unknown child and strand the directory.
+	_ = unix.Unlinkat(dirFD, TakeoverScratchName, 0)
+	return err
 }
 
 // serveTakeover is the sole accept loop for one attempt's takeover.sock; it
 // runs until the listener closes.
-//
-// ponytail: a replacement arriving while the old daemon is still attached
-// just waits buffered until that stream quiesces or is lost; nothing here
-// fences it closed sooner. Add that if a live (non-quiesced) race matters.
 func serveTakeover(listener *net.UnixListener, dirFD int, runID, token string, replacements chan<- *os.File, done <-chan struct{}) {
 	for {
 		conn, err := listener.Accept()
@@ -1310,8 +1315,10 @@ func serveTakeover(listener *net.UnixListener, dirFD int, runID, token string, r
 
 // handleTakeoverConn validates one takeover request against the current
 // bearer and, on an exact match, rotates the on-disk grant before handing the
-// still-open connection to the released-provider loop. It always returns the
-// token the next connection must present.
+// still-open connection to the released-provider loop. It never answers an
+// accepted request: only that loop may, once it has fenced the owner this
+// replacement displaces. It always returns the token the next connection
+// must present.
 func handleTakeoverConn(conn net.Conn, dirFD int, runID, token string, replacements chan<- *os.File, done <-chan struct{}) string {
 	defer conn.Close()
 	if err := conn.SetReadDeadline(time.Now().Add(takeoverReadTimeout)); err != nil {
@@ -1335,9 +1342,6 @@ func handleTakeoverConn(conn net.Conn, dirFD int, runID, token string, replaceme
 	if err := writeTakeoverGrant(dirFD, runID, next); err != nil {
 		_ = writeTakeoverResponse(conn, false, "internal")
 		return token
-	}
-	if err := writeTakeoverResponse(conn, true, ""); err != nil {
-		return next
 	}
 	unixConn, ok := conn.(*net.UnixConn)
 	if !ok {
@@ -1363,11 +1367,11 @@ func handleTakeoverConn(conn net.Conn, dirFD int, runID, token string, replaceme
 // readTakeoverLine reads one newline-terminated line one byte at a time. The
 // daemon keeps its write half open for the control frames it sends after the
 // handshake, so neither side may read past the line it owns.
-func readTakeoverLine(conn net.Conn, limit int) ([]byte, error) {
+func readTakeoverLine(r io.Reader, limit int) ([]byte, error) {
 	var line []byte
 	single := make([]byte, 1)
 	for len(line) < limit {
-		if _, err := io.ReadFull(conn, single); err != nil {
+		if _, err := io.ReadFull(r, single); err != nil {
 			return nil, err
 		}
 		if single[0] == '\n' {
@@ -1385,12 +1389,16 @@ type takeoverResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-func writeTakeoverResponse(conn net.Conn, accepted bool, errMsg string) error {
+// writeTakeoverResponse writes the endpoint's one newline-terminated reply.
+// A refusal is written by the accept loop on the connection it is about to
+// close; the acceptance is written by the owner loop, on the descriptor it
+// has just taken over, after the previous owner is fenced.
+func writeTakeoverResponse(w io.Writer, accepted bool, errMsg string) error {
 	body, err := json.Marshal(takeoverResponse{Accepted: accepted, Error: errMsg})
 	if err != nil {
 		return err
 	}
-	_, err = conn.Write(append(body, '\n'))
+	_, err = w.Write(append(body, '\n'))
 	return err
 }
 

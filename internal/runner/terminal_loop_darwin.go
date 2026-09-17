@@ -307,12 +307,18 @@ func (o *terminalOwner) serve() (bool, error) {
 		}
 		switch ev.source {
 		case sourceTick:
+			if o.handover != nil {
+				// A buffered replacement is taken while attached too: the
+				// endpoint has already consumed its grant, so the old owner
+				// is over either way and must be fenced now, not whenever it
+				// happens to quiesce or die.
+				if err := o.adoptReplacement(); err != nil {
+					return o.daemonOpen, err
+				}
+			}
 			if o.detached {
 				if time.Since(o.detachedAt) >= handoverGrace() {
 					return o.daemonOpen, o.stop()
-				}
-				if err := o.attachIfReady(); err != nil {
-					return o.daemonOpen, err
 				}
 				continue
 			}
@@ -392,7 +398,7 @@ func (o *terminalOwner) nextEvent() (terminalReady, error) {
 		// While a startup CR is owed the wait is bounded, so the quiet prompt
 		// is noticed without any event arriving.
 		var timeout *unix.Timespec
-		if !o.enterBy.IsZero() || o.detached {
+		if !o.enterBy.IsZero() || o.handover != nil {
 			tick := unix.NsecToTimespec(int64(startupEnterTick))
 			timeout = &tick
 		}
@@ -505,50 +511,81 @@ func (o *terminalOwner) quiesce() error {
 		return err
 	}
 	_ = o.writeDaemonFrame(attemptFrame{Version: 2, Kind: string(AttemptHandoverQuiesced), Floor: o.ring.Floor(), Head: o.ring.Head()})
-	if o.daemon != nil {
-		_ = o.daemon.Close()
-	}
-	o.daemon, o.daemonOpen, o.detached = nil, false, true
-	o.detachedAt = time.Now()
-	o.handover.Current = nil
-	o.inputActive, o.credit, o.observerAttached = false, 0, false
-	o.replay = nil
+	o.fenceDaemon()
 	return nil
 }
 
-// attachIfReady is called only from the runner owner loop. The takeover
-// endpoint has already authenticated the grant and fenced the old owner.
-func (o *terminalOwner) attachIfReady() error {
-	if o == nil || !o.detached {
+// fenceDaemon ends the current owner capability on this loop. Its stream is
+// closed and every piece of per-owner state is dropped, so no command it sent
+// can still run, no pending CR is owed to its successor, and no correlation,
+// credit, observer or replay is inherited. The caller retires the read filter
+// first, and nothing but this loop ever calls it.
+func (o *terminalOwner) fenceDaemon() {
+	if o.daemon != nil {
+		_ = o.daemon.Close()
+		o.daemon = nil
+	}
+	o.daemonOpen, o.detached, o.detachedAt = false, true, time.Now()
+	o.enterAfter, o.enterBy = time.Time{}, time.Time{}
+	o.humanReplyCorrelation, o.humanReplyCount = 0, 0
+	o.inputActive, o.credit, o.observerAttached = false, 0, false
+	o.replay = nil
+	if o.handover != nil {
+		o.handover.Current = nil
+	}
+}
+
+// adoptReplacement takes one already-authenticated replacement from the
+// takeover endpoint. Fencing the old owner and answering the new one are one
+// step on this loop, in that order, so a replacement is never told it owns the
+// run while the stream it replaces can still issue a command: the endpoint
+// consumed the grant but never answered it. A replacement that cannot be
+// committed or registered is closed unanswered, which its client reads as a
+// refusal and falls back to leaving the run to its live holder.
+func (o *terminalOwner) adoptReplacement() error {
+	if o == nil || o.handover == nil {
 		return ErrState
 	}
+	var file *os.File
 	select {
-	case file, ok := <-o.handover.Replacements:
-		if !ok || file == nil {
+	case candidate, ok := <-o.handover.Replacements:
+		if !ok || candidate == nil {
 			return nil
 		}
-		if _, err := commitControl(file); err != nil {
-			file.Close()
-			return nil
-		}
-		o.reads.daemonFD = int(file.Fd())
-		if err := o.reads.registerDaemon(); err != nil {
-			file.Close()
-			return nil
-		}
-		o.daemon = file
-		o.daemonOpen = true
-		o.handover.Current = file
-		o.daemonDecoder, _ = newAttemptFrameDecoder(maxFrameBytes)
-		if err := o.writeDaemonFrame(attemptFrame{Version: 2, Kind: "handover-attached", Floor: o.ring.Floor(), Head: o.ring.Head()}); err != nil {
-			return nil // poisonDaemon closed this candidate; a fresh grant can retry
-		}
-		o.detached = false
-		o.detachedAt = time.Time{}
-		return nil
+		file = candidate
 	default:
 		return nil
 	}
+	if !o.detached {
+		if err := retireReadableFilter(o.reads.removeDaemon); err != nil {
+			_ = file.Close()
+			return err
+		}
+		_ = o.writeDaemonFrame(attemptFrame{Version: 2, Kind: string(AttemptHandoverQuiesced), Floor: o.ring.Floor(), Head: o.ring.Head()})
+		o.fenceDaemon()
+	}
+	if _, err := commitControl(file); err != nil {
+		_ = file.Close()
+		return nil
+	}
+	o.reads.daemonFD = int(file.Fd())
+	if err := o.reads.registerDaemon(); err != nil {
+		_ = file.Close()
+		return nil
+	}
+	o.daemon = file
+	o.daemonOpen = true
+	o.handover.Current = file
+	o.daemonDecoder, _ = newAttemptFrameDecoder(maxFrameBytes)
+	if err := writeTakeoverResponse(file, true, ""); err != nil {
+		return o.poisonDaemon(nil) // a fresh grant can retry
+	}
+	if err := o.writeDaemonFrame(attemptFrame{Version: 2, Kind: "handover-attached", Floor: o.ring.Floor(), Head: o.ring.Head()}); err != nil {
+		return nil // poisonDaemon closed this candidate; a fresh grant can retry
+	}
+	o.detached = false
+	o.detachedAt = time.Time{}
+	return nil
 }
 
 // stop is the typed owner transition used by daemon cancellation/finalizing.
@@ -952,13 +989,7 @@ func (o *terminalOwner) daemonLost() error {
 	if o.handover != nil && cleanupErr == nil {
 		// A deferred submit may already have written text. No new owner may
 		// blindly send its CR or reuse its correlation after an EOF.
-		o.enterAfter, o.enterBy = time.Time{}, time.Time{}
-		o.humanReplyCorrelation, o.humanReplyCount = 0, 0
-		o.credit, o.observerAttached = 0, false
-		o.replay = nil
-		o.detached = true
-		o.detachedAt = time.Now()
-		o.handover.Current = nil
+		o.fenceDaemon()
 		return nil
 	}
 	if o.child != nil && o.child.state == stateActivated {

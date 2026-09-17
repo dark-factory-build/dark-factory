@@ -79,6 +79,7 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 		t.Fatal(err)
 	}
 	replacements <- newRunner // endpoint delivers this only after grant/fence proof
+	readTakeoverAccept(t, newDaemon)
 	newOwner, err := AdoptHandoverControl(newDaemon)
 	if err != nil {
 		t.Fatal(err)
@@ -101,6 +102,7 @@ func TestTerminalOwnerKeepsSameProviderAndPTYAcrossControlReattach(t *testing.T)
 		t.Fatal(err)
 	}
 	replacements <- finalRunner
+	readTakeoverAccept(t, finalDaemon)
 	finalOwner, err := AdoptHandoverControl(finalDaemon)
 	if err != nil {
 		t.Fatal(err)
@@ -167,16 +169,17 @@ type handoverFixture struct {
 	identity  Identity
 	owner     *terminalOwner
 	transport *HandoverTransport
+	old       *AttemptController
 	done      chan error
 	continued string
 	after     string
 }
 
-// startQuiescedHandoverFixture launches a long-running PTY provider behind a
-// real takeover.sock/takeover.json endpoint and quiesces the original control
-// connection, leaving the runner in exactly the detached state a replacement
-// daemon finds after the old daemon has sent handover-quiesce (or died).
-func startQuiescedHandoverFixture(t *testing.T, attemptID string) *handoverFixture {
+// startHandoverFixture launches a long-running PTY provider behind a real
+// takeover.sock/takeover.json endpoint with its original control connection
+// still attached: the state a replacement daemon finds when the daemon it
+// displaces has not quiesced or died.
+func startHandoverFixture(t *testing.T, attemptID string) *handoverFixture {
 	t.Helper()
 	f := newFixtureAt(t, shortRuntimeRoot(t))
 	ready := filepath.Join(f.root, "provider.ready")
@@ -225,14 +228,38 @@ func startQuiescedHandoverFixture(t *testing.T, attemptID string) *handoverFixtu
 	go func() { _, err := owner.serve(); done <- err }()
 	old := &AttemptController{file: oldDaemon, state: controllerProviderReleased, terminalReady: true}
 	t.Cleanup(func() { _ = old.Close() })
-	if err := old.SendHandoverQuiesce(); err != nil {
+	return &handoverFixture{f: f, identity: identity, owner: owner, transport: transport, old: old, done: done, continued: continued, after: after}
+}
+
+// startQuiescedHandoverFixture is the same fixture after the original daemon
+// has sent handover-quiesce and been fenced: the detached state a replacement
+// finds when the daemon it displaces left cleanly (or died).
+func startQuiescedHandoverFixture(t *testing.T, attemptID string) *handoverFixture {
+	t.Helper()
+	hf := startHandoverFixture(t, attemptID)
+	if err := hf.old.SendHandoverQuiesce(); err != nil {
 		t.Fatal(err)
 	}
-	quiesced, err := old.Next(4 * time.Second)
+	quiesced, err := hf.old.Next(4 * time.Second)
 	if err != nil || quiesced.Kind != AttemptHandoverQuiesced || quiesced.Floor > quiesced.Head {
 		t.Fatalf("quiesced=%+v err=%v", quiesced, err)
 	}
-	return &handoverFixture{f: f, identity: identity, owner: owner, transport: transport, done: done, continued: continued, after: after}
+	return hf
+}
+
+// readTakeoverAccept consumes the one accepted reply the owner loop writes on
+// a replacement connection, after fencing the owner it displaces and before
+// its first frame.
+func readTakeoverAccept(t *testing.T, file *os.File) {
+	t.Helper()
+	line, err := readTakeoverLine(file, maxTakeoverBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response takeoverResponse
+	if err := json.Unmarshal(line, &response); err != nil || !response.Accepted {
+		t.Fatalf("replacement reply %q = %+v: %v", line, response, err)
+	}
 }
 
 func readTakeoverToken(t *testing.T, root string) string {
@@ -377,5 +404,57 @@ func TestTakeoverDetachedGraceTerminatesProvider(t *testing.T) {
 	}
 	if hf.transport.Current != nil {
 		t.Fatal("handover transport still references a control stream after grace termination")
+	}
+}
+
+// TestTakeoverFencesAttachedOwnerBeforeAccepting is the double-owner window:
+// the endpoint consumes the grant while the previous daemon is still
+// attached, so the run must be fenced before the replacement is ever told it
+// owns it. The accepted reply is written by the owner loop itself, after that
+// fence, which makes reading the reply proof the old stream is already over —
+// and a command the old daemon writes afterwards can never be executed.
+func TestTakeoverFencesAttachedOwnerBeforeAccepting(t *testing.T) {
+	withShortHandoverGrace(t, 2*time.Second)
+	const attemptID = "attempt-takeover-attached"
+	hf := startHandoverFixture(t, attemptID)
+	token := readTakeoverToken(t, hf.f.root)
+
+	conn, response := dialTakeover(t, hf.f.root, attemptID, token)
+	if !response.Accepted {
+		t.Fatalf("takeover of an attached owner rejected: %+v", response)
+	}
+	// The reply was written after the fence, so the old owner's end of the
+	// story is already on its socket and needs no waiting.
+	fenced, err := hf.old.Next(time.Second)
+	if err != nil {
+		t.Fatalf("old owner was still attached when the replacement was accepted: %v", err)
+	}
+	if fenced.Kind != AttemptHandoverQuiesced {
+		t.Fatalf("old owner fence = %+v, want handover-quiesced", fenced)
+	}
+	var attached attemptFrame
+	if err := readFrame(conn, &attached, maxConfigBytes); err != nil || attached.Kind != "handover-attached" || attached.Floor > attached.Head {
+		t.Fatalf("attached frame=%+v err=%v", attached, err)
+	}
+
+	// A terminate on the old stream after the reply is not a command any
+	// more: the runner closed that capability, and the provider it named
+	// keeps running through the rest of its script.
+	_ = hf.old.Terminate()
+	if got, err := readIdentity(hf.identity.PID); err != nil || got != hf.identity {
+		t.Fatalf("fenced owner still terminated the provider: identity=%+v err=%v", got, err)
+	}
+	if err := os.WriteFile(hf.continued, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFile(t, hf.after)
+	if got, err := readIdentity(hf.identity.PID); err != nil || got != hf.identity {
+		t.Fatalf("provider changed under the replacement: identity=%+v err=%v", got, err)
+	}
+	_ = conn.Close()
+	awaitHandoverConverge(t, hf.done)
+	output, _, err := hf.owner.ring.Read(hf.owner.ring.Floor())
+	if err != nil || string(output) != "before-handover\r\nafter-handover\r\n" {
+		t.Fatalf("ordered PTY output=%q err=%v", output, err)
 	}
 }

@@ -395,9 +395,11 @@ func validRecoveredRuntimeFile(name string, stat unix.Stat_t, device uint64) boo
 		return false
 	}
 	switch name {
-	case runner.TakeoverGrantName:
+	case runner.TakeoverGrantName, runner.TakeoverScratchName:
 		// The grant is one small fixed JSON object; a torn rotation may be
-		// shorter, and only its content ever authorizes anything.
+		// shorter, and only its content ever authorizes anything. Its rename
+		// scratch is the same shape, left behind by a runner killed between
+		// the write and the rename.
 		return stat.Size >= 0 && stat.Size <= 1024
 	case attemptTokenName:
 		return stat.Size == 32
