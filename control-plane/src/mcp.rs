@@ -559,7 +559,7 @@ fn tools() -> Value {
     }, {
         "name": "submit_pull_request_review",
         "title": "Submit an exact-head pull request review",
-        "description": "Record an adversarial-review verdict against one pull request head commit. ALLOW satisfies the required `review` check; REQUEST_CHANGES blocks it, and a block at a head is cleared only by pushing a fix, never by a second ALLOW at that same head; COMMENT decides nothing. All three are this App's own words and none is a GitHub review state: the App authors the pull requests it reviews and GitHub refuses a self-review either way, so every verdict is submitted as a GitHub COMMENT and the verdict itself rides in a line the App writes. That is the line the `review` check reads, which is why `body` carries the reviewer's findings and must not contain one. Replays require the same operation UUID and request.",
+        "description": "Record an adversarial-review verdict against one pull request head commit. ALLOW satisfies the required `review` check; REQUEST_CHANGES blocks it, and a block at a head remains until a new head or an independent exact-head ALLOW explicitly corrects that prior App review operation; COMMENT decides nothing. All three are this App's own words and none is a GitHub review state: the App authors the pull requests it reviews and GitHub refuses a self-review either way, so every verdict is submitted as a GitHub COMMENT and the verdict itself rides in a line the App writes. That is the line the `review` check reads, which is why `body` carries the reviewer's findings and must not contain one. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -568,7 +568,8 @@ fn tools() -> Value {
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "event": {"type": "string", "enum": ["ALLOW", "COMMENT", "REQUEST_CHANGES"]},
-                "body": {"type": "string", "minLength": 1, "maxLength": 16000}
+                "body": {"type": "string", "minLength": 1, "maxLength": 16000},
+                "corrects_review_operation_id": {"type": ["string", "null"], "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"}
             },
             "required": ["repository", "operation_id", "pull_number", "head_sha", "event", "body"],
             "additionalProperties": false

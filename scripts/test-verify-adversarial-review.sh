@@ -101,6 +101,24 @@ expect_fail 'note is not an allow'
 expect_fail 'block outranks a co-existing allow'
 assert_summary '**BLOCKED**'
 
+# A corrected metadata/body review may clear an erroneous same-head block only
+# by naming that block's exact App operation. A same-head ALLOW without the
+# correction binding remains blocked.
+block_operation=11111111-1111-4111-8111-111111111111
+correction_operation=22222222-2222-4222-8222-222222222222
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_pass 'an exact operation-bound review correction clears a same-head block'
+assert_summary '**ALLOWED**'
+
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head"
+} >"$reviews"
+expect_fail 'an unbound same-head allow cannot clear a block'
+
 # ...and clears only by pushing. A block belongs to the head it was recorded
 # against, so the fix that moves the head orphans it exactly as it orphans an
 # ALLOW. Without this, "cleared by pushing the fix" is a claim rather than a

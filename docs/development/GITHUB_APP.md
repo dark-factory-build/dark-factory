@@ -151,7 +151,9 @@ The live maintainer broker exposes only these repository-scoped operations:
 - create one PR for that exact branch and base;
 - replace one open PR body and return its observed head;
 - close one PR only while it still names the caller's exact head;
-- submit one bounded exact-head review verdict through the Pull Request Review
+- submit one bounded exact-head review verdict through the Pull Request Review;
+  an independent ALLOW may explicitly correct a prior App review operation at
+  the same head when the correction is bound to that exact operation
   API;
 - observe Check Runs, bounded workflow/job/step state, a bounded failed-job log
   tail, and eventual merge state for one exact PR head;

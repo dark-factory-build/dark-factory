@@ -9,7 +9,9 @@ use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(target_arch = "wasm32")]
-use crate::journal::{DeliveryJournal, Operation, OperationRecord, OperationTransition};
+use crate::journal::{
+    DeliveryJournal, Operation, OperationObservation, OperationRecord, OperationTransition,
+};
 use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
@@ -297,6 +299,8 @@ pub(crate) struct SubmitPullRequestReview {
     pub(crate) head_sha: String,
     pub(crate) event: ReviewEvent,
     pub(crate) body: String,
+    #[serde(default)]
+    pub(crate) corrects_review_operation_id: Option<String>,
 }
 
 /// What the reviewer concluded, which is not the same thing as which GitHub
@@ -341,6 +345,7 @@ pub(crate) enum ReviewEvent {
 /// GitHub state, which is why the required `review` check reads that line.
 const REVIEW_EVENT: &str = "COMMENT";
 const REVIEW_STATE: &str = "COMMENTED";
+const REVIEW_CORRECTION_PREFIX: &str = "Dark-Factory-Review-Correction:";
 
 impl ReviewEvent {
     /// The verdict word the required `review` check reads.
@@ -2960,7 +2965,15 @@ impl SubmitPullRequestReview {
         valid_sha(&self.head_sha)?;
         valid_text(&self.body, 1, 16_000, true)?;
         free_of_operation_marker(&self.body)?;
-        free_of_review_verdict(&self.body)
+        free_of_review_verdict(&self.body)?;
+        free_of_review_correction(&self.body)?;
+        if let Some(operation_id) = &mut self.corrects_review_operation_id {
+            canonical_operation_id(operation_id)?;
+            if !matches!(self.event, ReviewEvent::Allow) || *operation_id == self.operation_id {
+                return Err(OperationError::InvalidInput);
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -2984,11 +2997,17 @@ impl SubmitPullRequestReview {
     /// from the App's request, so that field is the binding, and the two
     /// cannot disagree because both are rendered from `head_sha` here.
     fn marked_body(&self) -> Result<String, OperationError> {
+        let correction = self
+            .corrects_review_operation_id
+            .as_deref()
+            .map(|id| format!("\n{REVIEW_CORRECTION_PREFIX} {id}"))
+            .unwrap_or_default();
         Ok(format!(
-            "{}\n\n{REVIEW_VERDICT_PREFIX} {} {}\n{}",
+            "{}\n\n{REVIEW_VERDICT_PREFIX} {} {}{}\n{}",
             self.body,
             self.event.verdict(),
             self.head_sha,
+            correction,
             self.marker()?
         ))
     }
@@ -3395,6 +3414,12 @@ const REVIEW_VERDICT_PREFIX: &str = "Dark-Factory-Review:";
 
 fn free_of_review_verdict(value: &str) -> Result<(), OperationError> {
     (!value.contains(REVIEW_VERDICT_PREFIX))
+        .then_some(())
+        .ok_or(OperationError::InvalidInput)
+}
+
+fn free_of_review_correction(value: &str) -> Result<(), OperationError> {
+    (!value.contains(REVIEW_CORRECTION_PREFIX))
         .then_some(())
         .ok_or(OperationError::InvalidInput)
 }
@@ -4683,9 +4708,9 @@ impl Authority {
                 &request.head_sha,
                 &request.review_operation_id,
             )
-        }) || reviews
-            .iter()
-            .any(|review| review.blocks_head(&request.head_sha))
+        }) || self
+            .review_blocks_head(journal, token, request, &reviews)
+            .await?
         {
             return Err(OperationError::Refused(RefusalReason::MergeReview));
         }
@@ -4708,6 +4733,63 @@ impl Authority {
             }
         }
         Ok(())
+    }
+
+    async fn review_blocks_head(
+        &self,
+        journal: &DeliveryJournal,
+        token: &RepositoryToken,
+        request: &MergePullRequestAtHead,
+        reviews: &[PullRequestReview],
+    ) -> Result<bool, OperationError> {
+        for review in reviews {
+            if !review.is_block_for_head(&request.head_sha) {
+                continue;
+            }
+            let Some((block_operation_id, block_digest)) = review
+                .body
+                .as_deref()
+                .and_then(review_operation_marker)
+            else {
+                return Ok(true);
+            };
+            let Some(block_operation) =
+                completed_review_operation(journal, block_operation_id).await?
+            else {
+                return Ok(true);
+            };
+            if block_operation.request_digest != block_digest
+                || !block_operation.matches_review(
+                review,
+                token.repository.full_name.as_str(),
+                request.pull_number,
+                &request.head_sha,
+                "block",
+            )
+            {
+                return Ok(true);
+            }
+            let mut corrected = false;
+            for candidate in reviews {
+                if candidate
+                    .corrects_block_operation(
+                        journal,
+                        block_operation_id,
+                        token.repository.full_name.as_str(),
+                        request.pull_number,
+                        &request.head_sha,
+                    )
+                    .await?
+                {
+                    corrected = true;
+                    break;
+                }
+            }
+            if !corrected {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn verify_no_merge_queue(
@@ -6483,7 +6565,7 @@ impl TryFrom<PullRequest> for PullRequestResult {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct PullRequestReview {
     id: i64,
     html_url: String,
@@ -6502,19 +6584,54 @@ impl PullRequestReview {
             && self.state == REVIEW_STATE
     }
 
-    fn blocks_head(&self, head_sha: &str) -> bool {
-        if self.commit_id != head_sha {
-            return false;
-        }
-        // GitHub cannot delete a submitted review, and dismissal preserves its
-        // body. This App exposes no review-update operation, so its rendered
-        // BLOCK line remains the durable decision even if the review state is
-        // later changed to DISMISSED.
-        self.state == "CHANGES_REQUESTED"
-            || self.body.as_deref().is_some_and(|body| {
-                body.lines()
-                    .any(|line| line.trim() == format!("{REVIEW_VERDICT_PREFIX} block {head_sha}"))
+    fn blocks_head(&self, head_sha: &str, _reviews: &[PullRequestReview]) -> bool {
+        // Clearing a block requires the async merge path to authenticate the
+        // correcting review through the durable operation journal. This pure
+        // predicate is deliberately conservative and is also safe for callers
+        // that do not have journal access.
+        self.is_block_for_head(head_sha)
+    }
+
+    fn is_block_for_head(&self, head_sha: &str) -> bool {
+        self.commit_id == head_sha
+            && (self.state == "CHANGES_REQUESTED"
+                || self.body.as_deref().is_some_and(|body| {
+                    body.lines().any(|line| {
+                        line.trim() == format!("{REVIEW_VERDICT_PREFIX} block {head_sha}")
+                    })
+                }))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn corrects_block_operation(
+        &self,
+        journal: &DeliveryJournal,
+        block_operation_id: &str,
+        repository: &str,
+        pull_number: i64,
+        head_sha: &str,
+    ) -> Result<bool, OperationError> {
+        let Some(body) = self.body.as_deref() else {
+            return Ok(false);
+        };
+        if self.commit_id != head_sha
+            || self.state != REVIEW_STATE
+            || !body.lines().any(|line| {
+                line.trim() == format!("{REVIEW_CORRECTION_PREFIX} {block_operation_id}")
             })
+        {
+            return Ok(false);
+        }
+        let Some((operation_id, digest)) = review_operation_marker(body) else {
+            return Ok(false);
+        };
+        let Some(operation) = completed_review_operation(journal, operation_id).await? else {
+            return Ok(false);
+        };
+        if operation.request_digest != digest {
+            return Ok(false);
+        }
+        operation.matches_review(self, repository, pull_number, head_sha, "allow")
     }
 
     fn matches_allow_result(
@@ -6544,6 +6661,74 @@ impl PullRequestReview {
                     .url
                     .strip_prefix(&expected_url)
                     .is_some_and(|suffix| suffix.starts_with('#')))
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn review_operation_marker(body: &str) -> Option<(&str, &str)> {
+    body.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix(OPERATION_MARKER_PREFIX)?;
+        let (id, digest) = rest.strip_suffix(" -->")?.split_once(':')?;
+        (id.len() == 36
+            && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+            && digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some((id, digest))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn completed_review_operation(
+    journal: &DeliveryJournal,
+    operation_id: &str,
+) -> Result<Option<OperationObservation>, OperationError> {
+    let Some(observation) = journal
+        .observe_operation(operation_id)
+        .await
+        .map_err(|_| OperationError::Unavailable)?
+    else {
+        return Ok(None);
+    };
+    if observation.kind != "submit_pull_request_review" || observation.state != "completed" {
+        return Ok(None);
+    }
+    Ok(Some(observation))
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OperationObservation {
+    fn matches_review(
+        &self,
+        review: &PullRequestReview,
+        repository: &str,
+        pull_number: i64,
+        head_sha: &str,
+        verdict: &str,
+    ) -> bool {
+        let Ok(result) = self
+            .result_json
+            .as_deref()
+            .ok_or(())
+            .and_then(|json| serde_json::from_str::<ReviewResult>(json).map_err(|_| ()))
+        else {
+            return false;
+        };
+        let expected_url = format!("https://github.com/{repository}/pull/{pull_number}");
+        result.review_id == review.id
+            && result.url == review.html_url
+            && result.head_sha == head_sha
+            && result.state == REVIEW_STATE
+            && result.verdict == verdict
+            && (result.url == expected_url
+                || result
+                    .url
+                    .strip_prefix(&expected_url)
+                    .is_some_and(|suffix| suffix.starts_with('#')))
+            && review.body.as_deref().is_some_and(|body| {
+                body.lines().any(|line| {
+                    line.trim() == format!("{REVIEW_VERDICT_PREFIX} {verdict} {head_sha}")
+                })
+            })
     }
 }
 
@@ -9604,6 +9789,7 @@ mod tests {
             head_sha: "a".repeat(40),
             event: ReviewEvent::RequestChanges,
             body: "Exact finding.".into(),
+            corrects_review_operation_id: None,
         };
         // `uuidgen` on macOS emits this, and refusing it cost two callers a
         // blind retry before it was canonicalized instead.
@@ -9727,6 +9913,38 @@ mod tests {
         let blocked = posted_block.into_result(&block).unwrap();
         assert_eq!(blocked.state, "COMMENTED");
         assert_eq!(blocked.verdict, "block");
+
+        // A metadata-only correction may clear an erroneous block at the same
+        // head, but only when the fresh independent review names that exact
+        // prior App operation. A plain ALLOW remains insufficient.
+        let correction = SubmitPullRequestReview {
+            repository: block.repository.clone(),
+            operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: block.pull_number,
+            head_sha: block.head_sha.clone(),
+            event: ReviewEvent::Allow,
+            body: "The prior finding was based on corrected metadata.".into(),
+            corrects_review_operation_id: Some(block.operation_id.clone()),
+        };
+        assert!(correction.clone().validate().is_ok());
+        let blocking_review = PullRequestReview {
+            id: 6,
+            html_url: "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-6".into(),
+            body: Some(block.marked_body().unwrap()),
+            commit_id: block.head_sha.clone(),
+            state: REVIEW_STATE.into(),
+        };
+        let corrected_review = PullRequestReview {
+            id: 7,
+            html_url: "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-7".into(),
+            body: Some(correction.marked_body().unwrap()),
+            commit_id: correction.head_sha.clone(),
+            state: REVIEW_STATE.into(),
+        };
+        assert!(blocking_review.blocks_head(&block.head_sha, std::slice::from_ref(&blocking_review)));
+        // A review-shaped correction from GitHub is not enough by itself:
+        // only the merge path, with journal provenance, may clear this block.
+        assert!(blocking_review.blocks_head(&block.head_sha, &[blocking_review, corrected_review]));
         assert!(
             PullRequestReview {
                 id: 5,
@@ -9757,6 +9975,12 @@ mod tests {
                 "caller body must not be able to write a verdict: {forged}"
             );
         }
+        assert!(SubmitPullRequestReview {
+            body: format!("Dark-Factory-Review-Correction: {}", block.operation_id),
+            ..allow.clone()
+        }
+        .validate()
+        .is_err());
 
         // An ALLOW is reconciled from the `COMMENTED` state it was posted as.
         let recovered = PullRequestReview {
@@ -10052,8 +10276,8 @@ mod tests {
             commit_id: head.clone(),
             state: "COMMENTED".into(),
         };
-        assert!(app_block.blocks_head(&head));
-        assert!(!app_block.blocks_head(&"b".repeat(40)));
+        assert!(app_block.blocks_head(&head, std::slice::from_ref(&app_block)));
+        assert!(!app_block.blocks_head(&"b".repeat(40), std::slice::from_ref(&app_block)));
         assert!(
             PullRequestReview {
                 id: 3,
@@ -10062,7 +10286,7 @@ mod tests {
                 commit_id: head.clone(),
                 state: "DISMISSED".into(),
             }
-            .blocks_head(&head)
+            .blocks_head(&head, std::slice::from_ref(&app_block))
         );
     }
 
