@@ -200,17 +200,13 @@ function composeRoom(node: SceneNode, room: SceneRect, arrangement: SceneRoomLay
   // the 8px-clear side approach used for both the bench and direct-child bays.
   const contentLeft = room.x + 20;
   const contentWidth = room.width - 40;
-  // Root halls can show four direct bays; compact parents deliberately show
-  // fewer. Six remains the hard scene-wide pictured-bay bound.
-  const bayLimit = arrangement === "bench" ? 0 : arrangement === "parent" ? (room.width >= 192 ? 2 : 1) : room.width >= 216 ? 4 : room.width >= 192 ? 3 : 1;
+  // Full-width stations keep each worker beside its own pictured child bay.
+  const bayLimit = arrangement === "bench" ? 0 : arrangement === "parent" ? 1 : room.width >= 216 ? 3 : room.width >= 192 ? 2 : 1;
   const bays = children.slice(0, Math.min(6, bayLimit));
-  const columns = arrangement === "parent" ? 1 : bays.length > 3 ? 2 : bays.length;
-  const bayWidth = columns === 0 ? 0 : (contentWidth - Math.max(0, columns - 1) * 8) / columns;
-  const bayHeight = arrangement === "parent" ? 34 : 38;
+  const bayHeight = 24;
   bays.forEach((child, index) => {
-    const column = index % columns, row = Math.floor(index / columns);
     contents.push({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id,
-      x: contentLeft + column * (bayWidth + 8), y: room.y + 48 + row * (bayHeight + 8), width: bayWidth, height: bayHeight,
+      x: contentLeft, y: room.y + 40 + index * (bayHeight + 4), width: contentWidth, height: bayHeight,
     });
   });
   if (primary === undefined) return contents;
@@ -222,7 +218,7 @@ function composeRoom(node: SceneNode, room: SceneRect, arrangement: SceneRoomLay
   // Tests retain a supporting place even beside a much larger source installation.
   const secondary = kinds.filter((kind) => kind !== primary).sort((a, b) => Number(b === "tests") - Number(a === "tests") || compareText(a, b));
   const slots = arrangement === "bench" ? 2 : bays.length >= 3 ? 1 : 2;
-  const bayBottom = bays.length === 0 ? room.y + 38 : room.y + 48 + Math.ceil(bays.length / columns) * (bayHeight + 8) - 8;
+  const bayBottom = contents.filter((item) => item.kind === "component").reduce((bottom, item) => Math.max(bottom, item.y + item.height), room.y + 32);
   const supportY = bayBottom + 8;
   const primaryTop = contents.find((item) => item.workSurface)!.y;
   const supportCount = supportY + 24 <= primaryTop - 8 ? Math.min(slots, Math.floor(contentWidth / 56)) : 0;

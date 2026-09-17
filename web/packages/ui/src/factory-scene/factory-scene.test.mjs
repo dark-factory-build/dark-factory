@@ -858,7 +858,7 @@ test("named direct-child bays are bounded and only exact observations occupy the
   const bays = room.contents.filter((item) => item.kind === "component");
   assert.equal(room.arrangement, "hall");
   assert.ok(bays.length > 0 && bays.length <= 6);
-  assert.deepEqual(bays.map((item) => item.targetId), ["child-0", "child-1", "child-2", "child-3"]);
+  assert.deepEqual(bays.map((item) => item.targetId), ["child-0", "child-1", "child-2"]);
   const exact = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [{ ...workers[0], nodeId: node.id, observedBayId: "child-1" }])[0];
   const representative = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [{ ...workers[0], nodeId: node.id, observedBayId: "not-pictured" }])[0];
   assert.equal(exact.bayId, "child-1");
@@ -873,15 +873,18 @@ test("named direct-child bays are bounded and only exact observations occupy the
   assert.deepEqual(occupied.map(({ id, area, bayId }) => [id, area, bayId]), [
     ["a", "room", "child-0"], ["b", "room", "child-1"], ["c", "overflow", undefined], ["d", "room", undefined],
   ]);
+  assert.notDeepEqual([occupied[0].x, occupied[0].y], [occupied[1].x, occupied[1].y], "distinct child bays have distinct standing points");
   assert.equal(layoutScene({ digest: "parent", nodes: [{ ...node, id: "parent", parentId: "root" }] }).rooms[0].arrangement, "parent");
   assert.equal(layoutScene({ digest: "leaf", nodes: [{ ...node, id: "leaf", parentId: "root", components: [] }] }).rooms[0].arrangement, "bench");
   const hall = layoutScene({ digest: "hall", nodes: [{ ...node, sizeBucket: "large" }] }).rooms[0];
   const parent = layoutScene({ digest: "parent-bays", nodes: [{ ...node, id: "parent-bays", parentId: "root", sizeBucket: "large" }] }).rooms[0];
   const leaf = layoutScene({ digest: "leaf-bays", nodes: [{ ...node, id: "leaf-bays", parentId: "root", components: [], sizeBucket: "large" }] }).rooms[0];
-  assert.deepEqual(hall.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - hall.y]), [[88, 48], [88, 48], [88, 94], [88, 94]]);
-  assert.deepEqual(parent.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - parent.y]), [[184, 48], [184, 90]]);
+  assert.deepEqual(hall.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - hall.y]), [[184, 40], [184, 68], [184, 96]]);
+  for (let index = 0; index < hall.contents.length; index++) for (const other of hall.contents.slice(index + 1))
+    assert.equal(overlaps(hall.contents[index], other), false, "pictured stations cannot overlap equipment");
+  assert.deepEqual(parent.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - parent.y]), [[184, 40]]);
   assert.equal(leaf.contents.some((item) => item.kind === "component"), false);
-  assert.equal(hall.omittedBayCount, 4);
-  assert.ok(hall.contents.filter((item) => item.kind !== "component" && !item.workSurface).length <= 1, "four bays retain one secondary installation");
+  assert.equal(hall.omittedBayCount, 5);
+  assert.ok(hall.contents.filter((item) => item.kind !== "component" && !item.workSurface).length <= 1, "three bays retain one secondary installation");
   assert.ok(leaf.contents.filter((item) => item.kind !== "component" && !item.workSurface).length <= 2, "leaf never grows a third support");
 });
