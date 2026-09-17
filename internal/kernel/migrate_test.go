@@ -374,6 +374,9 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		}
 	}
 	downgrade := []string{fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	if version < userVersion {
+		downgrade = append([]string{"DROP TABLE task_conflict_paths", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites"}, downgrade...)
+	}
 	if version < v7UserVersion {
 		downgrade = append([]string{"DROP TABLE peer_questions"}, downgrade...)
 	}
@@ -574,7 +577,7 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "ffe2ae3739c95f9594a45e45473bf10c51b5a63f5a5ec19176a5225a201c3fde"},
+		{"current", schemaStatements, "4657aab650b20fbf6ff2dac4e57d334d954321da14b5e14224aab200247cb4dc"},
 		{"v13", v13SchemaStatements(), "f38d4c5ac959eb2c3b23e3c0ace78faa1859201688cb12314c0c4fa721db56db"},
 		{"v12", v12SchemaStatements(), "78ff7808dc146c35383329f73c94559172e824e0b72484bc56db48291dbadefa"},
 		{"v11", v11SchemaStatements(), "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
