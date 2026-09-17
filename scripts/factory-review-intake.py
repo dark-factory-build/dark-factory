@@ -64,15 +64,21 @@ def mirror(config):
     return path
 
 
-def app_receipt(body, kinds, number):
+def app_receipt(body, kinds, number, repository, object_path):
     """True when the body's App marker is a completed receipt that created or rewrote object `number`."""
     marker = publication.APP_MARKER_TRAILER.search(body)
     if marker is None:
         return False
     value = observe_operation(marker.group(1))
     result = value.get("result")
-    return value["state"] == "completed" and value.get("kind") in kinds and value.get("request_digest") == marker.group(2) \
-        and isinstance(result, dict) and result.get("number") == number
+    if value["state"] != "completed" or value.get("kind") not in kinds or value.get("request_digest") != marker.group(2):
+        return False
+    if not isinstance(result, dict) or result.get("number") != number or not isinstance(result.get("url"), str):
+        return False
+    parsed = urlparse(result["url"])
+    expected = "/" + repository + "/" + object_path + "/" + str(number)
+    return parsed.scheme == "https" and parsed.netloc == "github.com" and not parsed.params \
+        and not parsed.query and not parsed.fragment and parsed.path.casefold() == expected.casefold()
 
 
 def linked_issue(config, pr, journal, existing=None):
@@ -98,9 +104,9 @@ def linked_issue(config, pr, journal, existing=None):
     # intake label), so prove the App wrote both objects: the PR's own marker
     # is a completed publication receipt for this PR number, and the footer
     # issue's marker is the completed create_issue receipt for that number.
-    if not app_receipt(body, {"create_pull_request", "update_pull_request_body"}, pr["number"]):
+    if not app_receipt(body, {"create_pull_request", "update_pull_request_body"}, pr["number"], config["repository"], "pull"):
         raise Unproven("footer #" + str(issue) + " is not an intake-managed source and PR #" + str(pr["number"]) + " has no completed App publication receipt")
-    if not app_receipt(intake.exact_issue(config, issue)["body"], {"create_issue"}, issue):
+    if not app_receipt(intake.exact_issue(config, issue)["body"], {"create_issue"}, issue, config["repository"], "issues"):
         raise Unproven("footer #" + str(issue) + " is neither an intake-managed source nor an App-created tracking issue (no completed create_issue receipt)")
     return issue
 

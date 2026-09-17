@@ -409,8 +409,8 @@ class ReviewIntakeTest(unittest.TestCase):
         # publication for it. Provenance is the two completed receipts.
         body = 'Change\n\nRefs #20' + self.MARK % (self.PR_OP, 'a' * 64)
         issue_body = 'Track it' + self.MARK % (self.ISSUE_OP, 'b' * 64)
-        receipts = {self.PR_OP: {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64, 'result': {'number': 9, 'head_sha': SHA}},
-                    self.ISSUE_OP: {'state': 'completed', 'kind': 'create_issue', 'request_digest': 'b' * 64, 'result': {'number': 20}}}
+        receipts = {self.PR_OP: {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64, 'result': {'number': 9, 'head_sha': SHA, 'url': 'https://github.com/o/r/pull/9'}},
+                    self.ISSUE_OP: {'state': 'completed', 'kind': 'create_issue', 'request_digest': 'b' * 64, 'result': {'number': 20, 'url': 'https://github.com/o/r/issues/20'}}}
         bridge_call, writes, observed = self.app_bridge(receipts, ['missing', 'completed'])
         self.observe.side_effect = ['missing', 'allow', 'allow']
         operation = dict(self.operation, source_marker='FACTORY_SOURCE o/r#20')
@@ -434,8 +434,8 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual(('allow', 'queued'), (receipt['review_state'], receipt['enqueue_state']))
 
     def test_unproven_footers_are_refused_with_reason_and_never_reviewed(self):
-        pr_receipt = {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64, 'result': {'number': 9, 'head_sha': SHA}}
-        issue_receipt = {'state': 'completed', 'kind': 'create_issue', 'request_digest': 'b' * 64, 'result': {'number': 20}}
+        pr_receipt = {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64, 'result': {'number': 9, 'head_sha': SHA, 'url': 'https://github.com/o/r/pull/9'}}
+        issue_receipt = {'state': 'completed', 'kind': 'create_issue', 'request_digest': 'b' * 64, 'result': {'number': 20, 'url': 'https://github.com/o/r/issues/20'}}
         marked = 'Refs #20' + self.MARK % (self.PR_OP, 'a' * 64)
         tracked = 'Track it' + self.MARK % (self.ISSUE_OP, 'b' * 64)
         cases = [
@@ -460,6 +460,25 @@ class ReviewIntakeTest(unittest.TestCase):
             ready.assert_not_called()
             launch.assert_not_called()
             self.assertFalse(Path(self.config['journal'] + '.reviews.json').exists() and '9:' + SHA in json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls'])
+
+    def test_foreign_or_ambiguous_app_urls_are_refused(self):
+        body = 'Refs #20' + self.MARK % (self.PR_OP, 'a' * 64)
+        issue_body = 'Track it' + self.MARK % (self.ISSUE_OP, 'b' * 64)
+        base_pr = {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64,
+                   'result': {'number': 9, 'head_sha': SHA, 'url': 'https://github.com/o/r/pull/9'}}
+        base_issue = {'state': 'completed', 'kind': 'create_issue', 'request_digest': 'b' * 64,
+                      'result': {'number': 20, 'url': 'https://github.com/o/r/issues/20'}}
+        for url in ('https://github.com/other/repo/pull/9', 'http://github.com/o/r/pull/9',
+                    'https://github.com/o/r/pull/9?x=1', 'https://user@github.com/o/r/pull/9'):
+            receipts = {self.PR_OP: dict(base_pr, result=dict(base_pr['result'], url=url)), self.ISSUE_OP: base_issue}
+            bridge_call, _writes, _observed = self.app_bridge(receipts, [])
+            with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': body}]), \
+                 patch.object(review, 'bridge_call', side_effect=bridge_call), \
+                 patch.object(review.intake, 'exact_issue', return_value={'number': 20, 'body': issue_body}), patch.object(review, 'ready') as ready:
+                messages = review.run_once(self.config)
+            self.assertEqual(1, len(messages), url)
+            self.assertIn('no completed App publication receipt', messages[0])
+            ready.assert_not_called()
 
 
 if __name__ == '__main__':
