@@ -292,12 +292,18 @@ func closeValidatedBrowserRows(rows *sql.Rows) error {
 }
 
 func validateResourceIdentityCollisions(ctx context.Context, connection *sql.Conn) error {
+	// A resource carries either a path identity or a process identity, so
+	// one join per identity kind finds the same pairs as one OR-joined query
+	// while letting SQLite index the inner side instead of scanning it per row.
 	rows, err := connection.QueryContext(ctx, `SELECT left_resource.run_id, left_resource.kind, right_resource.run_id, right_resource.kind
 		FROM resources AS left_resource
-		JOIN resources AS right_resource ON left_resource.id < right_resource.id AND (
-			(left_resource.path_dev IS NOT NULL AND left_resource.path_dev = right_resource.path_dev AND left_resource.path_inode = right_resource.path_inode) OR
-			(left_resource.pid IS NOT NULL AND left_resource.pid = right_resource.pid AND left_resource.pgid = right_resource.pgid AND left_resource.birth_digest = right_resource.birth_digest)
-		)`)
+		JOIN resources AS right_resource ON left_resource.id < right_resource.id
+			AND left_resource.path_dev IS NOT NULL AND left_resource.path_dev = right_resource.path_dev AND left_resource.path_inode = right_resource.path_inode
+		UNION ALL
+		SELECT left_resource.run_id, left_resource.kind, right_resource.run_id, right_resource.kind
+		FROM resources AS left_resource
+		JOIN resources AS right_resource ON left_resource.id < right_resource.id
+			AND left_resource.pid IS NOT NULL AND left_resource.pid = right_resource.pid AND left_resource.pgid = right_resource.pgid AND left_resource.birth_digest = right_resource.birth_digest`)
 	if err != nil {
 		return err
 	}
@@ -344,8 +350,10 @@ func validateRunRelationships(ctx context.Context, connection *sql.Conn) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	// validateTasks has already walked every task's run history once; walking
+	// it again per run made this pass quadratic in each task's retry depth.
 	for _, run := range runs {
-		if _, err := loadRunRelationships(ctx, connection, run); err != nil {
+		if _, err := loadRunRelationshipsWithTopology(ctx, connection, run, false); err != nil {
 			return err
 		}
 	}
@@ -559,6 +567,12 @@ func workerChangeProvenanceForRun(ctx context.Context, connection *sql.Conn, run
 }
 
 func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (runRelationships, error) {
+	return loadRunRelationshipsWithTopology(ctx, connection, run, true)
+}
+
+// loadRunRelationshipsWithTopology skips the task's run-history walk only when
+// the caller has already validated it in the same transaction.
+func loadRunRelationshipsWithTopology(ctx context.Context, connection *sql.Conn, run Run, validateTopology bool) (runRelationships, error) {
 	task, found, err := taskByID(ctx, connection, run.TaskID)
 	if err != nil || !found {
 		if err == nil {
@@ -569,8 +583,10 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if task.ProjectID != run.ProjectID || task.IncarnationID != run.TaskIncarnationID {
 		return runRelationships{}, fmt.Errorf("%w: task does not match run", ErrCorruptState)
 	}
-	if err := validateTaskRunTopology(ctx, connection, task); err != nil {
-		return runRelationships{}, err
+	if validateTopology {
+		if err := validateTaskRunTopology(ctx, connection, task); err != nil {
+			return runRelationships{}, err
+		}
 	}
 	if run.Phase != RunTerminal {
 		if !taskMatchesRun(task, run) {
