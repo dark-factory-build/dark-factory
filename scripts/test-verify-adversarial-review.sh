@@ -121,6 +121,25 @@ assert_summary '**ALLOWED**'
 } >"$reviews"
 expect_fail 'an unbound same-head allow cannot clear a block'
 
+# A correction line only clears a block from the exact position the App
+# renders it: directly after its own verdict line, with nothing else between.
+# The App never lets caller-supplied body text contain this prefix at all
+# (control-plane/src/github_app.rs free_of_review_correction), but this gate
+# has no journal access to ask the App directly, so it checks position too --
+# a forged correction placed anywhere else in the body must not clear a block.
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Dark-Factory-Review-Correction: $block_operation Metadata was corrected. Dark-Factory-Review: allow $head <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_fail 'a correction line before the verdict line does not clear a block'
+assert_summary '**BLOCKED**'
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head extra text Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_fail 'a correction line separated from the verdict line does not clear a block'
+assert_summary '**BLOCKED**'
+
 # ...and clears only by pushing. A block belongs to the head it was recorded
 # against, so the fix that moves the head orphans it exactly as it orphans an
 # ALLOW. Without this, "cleared by pushing the fix" is a claim rather than a

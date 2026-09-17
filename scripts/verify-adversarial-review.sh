@@ -186,10 +186,19 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
 
     if [ "$verdict" = allow ]; then
-        # A same-head correction must name the exact App operation that made
-        # the block. The App renders this line from a dedicated request field;
-        # arbitrary reviewer text cannot create a correction marker.
-        sed -n 's/.*Dark-Factory-Review-Correction:[[:space:]]*\([0-9a-f-][0-9a-f-]*\).*/\1/p' <<EOF >>"$corrections"
+        # A same-head correction must be the exact text the App renders
+        # directly after its own verdict line -- marked_body puts the
+        # verdict line, then (only when the request named one) the
+        # correction line, then the operation marker, each separated by one
+        # newline; the projection this gate reads flattens every newline in
+        # the body to one space (.github/workflows/ci.yml's
+        # `gsub("[\n\r\t]"; " ")`), so the App-rendered sequence arrives
+        # here as one contiguous, single-space-joined run. Requiring that
+        # exact run -- not merely a correction line present anywhere in the
+        # body -- is the same App-rendered-text trust `verdict` above
+        # already rests on, checked positionally too because this gate has
+        # no journal access to ask the App directly.
+        sed -n "s/.*Dark-Factory-Review: allow $head_sha Dark-Factory-Review-Correction: \([0-9a-f-][0-9a-f-]*\) <!-- dark-factory-operation:.*/\1/p" <<EOF >>"$corrections"
 $field_body
 EOF
     fi
