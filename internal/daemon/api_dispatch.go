@@ -13,6 +13,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
@@ -39,6 +40,13 @@ type Daemon struct {
 	// scheduledRun is a package-test-only seam for the scheduler's terminal
 	// completion reread. Production reads from the concrete Store.
 	scheduledRun func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	// successSource* are package-test-only seams for failure-injection coverage;
+	// production source validation always reads the concrete Store.
+	successSourceRun      func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	successSourceChange   func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
+	successSourceProject  func(context.Context, kernel.ProjectID) (kernel.Project, bool, error)
+	beforeSuccessProposal func()
+	successSourceInspect  func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
 
 	browserMu          sync.Mutex
 	browserLifecycleMu sync.Mutex
@@ -1064,6 +1072,20 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		return newErrorReply(api.RemoteInternal), nil
 	}
 	daemon.operationMu.Lock()
+	// Source validation and the durable proposal share one linearization gate.
+	// The second validation is a checked snapshot fence: a source mutation
+	// observed between the first inspection and proposal is refused.
+	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
+		daemon.operationMu.Unlock()
+		return newErrorReply(remoteErrorCode(err)), nil
+	}
+	if daemon.beforeSuccessProposal != nil {
+		daemon.beforeSuccessProposal()
+	}
+	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
+		daemon.operationMu.Unlock()
+		return newErrorReply(remoteErrorCode(err)), nil
+	}
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
 	// running/finalizing boundary; notification carries no authority.

@@ -12,6 +12,10 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
+var errDirtyWorkerChange = errors.New("uncommitted implementation in Change worktree; commit it or clean it up before reporting success")
+
+type successSettlementContextKey struct{}
+
 // settleRun commits the terminal outcome of a finalizing run through the
 // reviewed finalize edges. A change without a worktree settles abandoned; a
 // change with one settles retained at the branch head its worktree is at.
@@ -74,6 +78,7 @@ func (daemon *Daemon) settleRun(ctx context.Context, changeParent string, runID 
 			settleRetained = daemon.retainedSettlement
 		}
 		inspectionCtx, cancel := context.WithTimeout(ctx, supervisorInspectionWindow)
+		inspectionCtx = context.WithValue(inspectionCtx, successSettlementContextKey{}, run.Proposal.Kind() == kernel.OutcomeSucceeded)
 		settlement, err := settleRetained(inspectionCtx, changeParent, changeState)
 		cancel()
 		if err != nil {
@@ -128,6 +133,11 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 	facts, err := change.InspectWorktree(ctx, *git, project.Root, repository, path)
 	if err != nil {
 		return kernel.ChangeSettlement{}, errors.Join(fmt.Errorf("%w: Change worktree did not verify", kernel.ErrConflict), err)
+	}
+	if success, _ := ctx.Value(successSettlementContextKey{}).(bool); success {
+		if facts.Dirty() {
+			return kernel.NewRefusedChangeSettlement(changeState.Revision, fmt.Sprintf("%s: commit it or clean it up before reporting success", errDirtyWorkerChange))
+		}
 	}
 	head, err := kernelCommit(facts.Head())
 	if err != nil {
