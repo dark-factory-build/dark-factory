@@ -147,7 +147,7 @@ jobs:
             printf 'relay=%s\n' "$relay"
           } >>"$GITHUB_OUTPUT"
 
-  # Darwin runtime changes use the existing full gate. Presentation-only web
+  # Darwin runtime changes use the source and process gates. Presentation-only web
   # changes use the source and browser smoke gates; documentation and
   # control-plane-only changes never allocate a hosted Mac.
   checks:

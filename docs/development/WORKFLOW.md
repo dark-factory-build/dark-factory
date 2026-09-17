@@ -186,7 +186,7 @@ when install or service ownership changes; it is not a routine extra gate.
 The local CI lease lives entirely in `dark-factory-local-ci` beneath the
 repository's canonical Git common directory. Workers receive that subtree
 through `DARK_FACTORY_LOCAL_CI_DIRECTORY`; use
-`scripts/with-local-ci-lease.sh <focused check>` to share the host gate. Full
+`scripts/with-local-ci-lease.sh <focused check>` to share the host gate.
 Full `local-ci.sh` and `--release` hold the lease for their complete suite
 because repository and release fixtures can also use process state. The
 `--runtime` and `--ui` modes acquire it only around their process-sensitive
