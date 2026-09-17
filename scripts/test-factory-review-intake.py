@@ -237,9 +237,11 @@ class ReviewIntakeTest(unittest.TestCase):
         def bridge_call(name, arguments):
             if name == 'observe_operation':
                 state = states.pop(0)
-                value = {'operation_id': arguments['operation_id'], 'state': state, 'kind': None, 'result': None}
+                value = {'operation_id': arguments['operation_id'], 'state': state, 'kind': None, 'result': None, 'request_digest': None}
                 if state == 'completed':
-                    value.update(kind='enqueue_pull_request', result={'pull_number': 9, 'head_sha': SHA, 'entry_id': 'e', 'state_when_recorded': 'QUEUED'})
+                    digest = review.enqueue_request_digest(self.config, {'enqueue_operation': arguments['operation_id'], 'pr': 9, 'head': SHA, 'enqueue_base': 'main'})
+                    value.update(kind='enqueue_pull_request', request_digest=digest,
+                                 result={'pull_number': 9, 'head_sha': SHA, 'entry_id': 'e', 'state_when_recorded': 'QUEUED'})
                 return {'structuredContent': value, 'isError': False}
             self.assertEqual('enqueue_pull_request', name)
             # Durable before the write: the id and attempt marker are already on disk.
@@ -313,17 +315,30 @@ class ReviewIntakeTest(unittest.TestCase):
             Path(self.config['journal'] + '.reviews.json').unlink()
 
     def test_enqueue_receipt_for_another_head_is_refused(self):
-        operation = dict(self.operation, enqueue_operation='11111111-1111-4111-8111-111111111111')
+        operation = dict(self.operation, enqueue_operation='11111111-1111-4111-8111-111111111111', enqueue_base='main')
         value = {'operation_id': operation['enqueue_operation'], 'state': 'completed', 'kind': 'enqueue_pull_request',
-                 'result': {'pull_number': 9, 'head_sha': 'c' * 40}}
+                 'request_digest': review.enqueue_request_digest(self.config, operation), 'result': {'pull_number': 9, 'head_sha': 'c' * 40}}
         with patch.object(review, 'bridge_call', return_value={'structuredContent': value, 'isError': False}):
             with self.assertRaisesRegex(review.ReviewError, 'exact head'):
-                review.observe_enqueue(operation)
+                review.observe_enqueue(self.config, operation)
         # An operator-recorded enqueue id is preserved, never replaced by a derived one.
         bridge_call, writes = self.enqueue_bridge(['completed', 'completed'])
         self.operation['enqueue_operation'] = operation['enqueue_operation']
         _first, _second, _task, receipt = self.run_allow(bridge_call)
         self.assertEqual((operation['enqueue_operation'], 'queued', []), (receipt['enqueue_operation'], receipt['enqueue_state'], writes))
+
+    def test_enqueue_receipt_for_another_request_digest_is_refused(self):
+        # Same PR, same head, and a well-formed completed observation, but the
+        # journaled request was for a different base (release instead of the
+        # persisted expected main). Matching kind/pull_number/head_sha alone
+        # must not be trusted: the digest binds the whole request.
+        operation = dict(self.operation, enqueue_operation='11111111-1111-4111-8111-111111111111', enqueue_base='main')
+        wrong_digest = review.enqueue_request_digest(self.config, dict(operation, enqueue_base='release'))
+        value = {'operation_id': operation['enqueue_operation'], 'state': 'completed', 'kind': 'enqueue_pull_request',
+                 'request_digest': wrong_digest, 'result': {'pull_number': 9, 'head_sha': SHA}}
+        with patch.object(review, 'bridge_call', return_value={'structuredContent': value, 'isError': False}):
+            with self.assertRaisesRegex(review.ReviewError, 'exact head'):
+                review.observe_enqueue(self.config, operation)
 
 
 

@@ -148,12 +148,24 @@ def observe_review(config, operation):
     return result["verdict"]
 
 
-def observe_enqueue(operation):
+def enqueue_request_digest(config, operation):
+    # Matches the App's own request_digest: the canonical (unsorted, struct-
+    # order) JSON of the exact EnqueuePullRequest fields, sha256-hexed. The
+    # App's analogous observe_pull_request_merge guard compares this same way
+    # (control-plane/src/github_app.rs:2752-2769) before trusting a completed
+    # enqueue observation.
+    expected = {"repository": config["repository"].lower(), "operation_id": operation["enqueue_operation"],
+                "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"]}
+    return hashlib.sha256(json.dumps(expected, separators=(",", ":")).encode()).hexdigest()
+
+
+def observe_enqueue(config, operation):
     value = observe_operation(operation["enqueue_operation"])
     if value["state"] != "completed":
         return value["state"]
     result = value.get("result")
-    if value.get("kind") != "enqueue_pull_request" or not isinstance(result, dict) or result.get("head_sha") != operation["head"] or result.get("pull_number") != operation["pr"]:
+    if value.get("kind") != "enqueue_pull_request" or value.get("request_digest") != enqueue_request_digest(config, operation) \
+            or not isinstance(result, dict) or result.get("head_sha") != operation["head"] or result.get("pull_number") != operation["pr"]:
         raise ReviewError("enqueue receipt does not match the exact head")
     return "queued"
 
@@ -164,7 +176,7 @@ def enqueue_allowed(config, operation, journal_path, receipts):
     operation.setdefault("enqueue_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-enqueue:" + config["repository"] + ":" + str(operation["pr"]) + ":" + operation["head"])))
     operation.setdefault("enqueue_base", config.get("base", "main"))
     intake.atomic_json(journal_path, receipts)
-    state = observe_enqueue(operation)
+    state = observe_enqueue(config, operation)
     if state == "missing" and not operation.get("enqueue_attempted"):
         operation["enqueue_attempted"] = True
         intake.atomic_json(journal_path, receipts)
