@@ -41,7 +41,10 @@ func validProjectContent(kind MessageType, body any) error {
 		return nil
 	}
 	v, ok := indirect(body).(ProjectContentResult)
-	if !ok || !validProjectOperation(v.Operation) || len(v.Output) == 0 || len(v.Output) > MaxControlBytes-1024 || string(bytes.TrimSpace(v.Output)) == "null" || !json.Valid(v.Output) || len(bytes.TrimSpace(v.Output)) == 0 || bytes.TrimSpace(v.Output)[0] != '{' {
+	if len(v.Output) > MaxControlBytes-1024 {
+		return ErrOversized
+	}
+	if !ok || !validProjectOperation(v.Operation) || len(v.Output) == 0 || string(bytes.TrimSpace(v.Output)) == "null" || !json.Valid(v.Output) || len(bytes.TrimSpace(v.Output)) == 0 || bytes.TrimSpace(v.Output)[0] != '{' {
 		return bad()
 	}
 	return nil
@@ -49,7 +52,7 @@ func validProjectContent(kind MessageType, body any) error {
 
 func validProjectOperation(operation string) bool {
 	switch operation {
-	case "list", "read", "body", "create", "revise", "deprecate", "evidence", "evidence_list", "attach", "attachments":
+	case "list", "read", "body", "create", "revise", "deprecate", "evidence", "evidence_list", "attach", "attachments", "outcome_list", "outcome_read", "outcome_write":
 		return true
 	default:
 		return false

@@ -18,18 +18,19 @@ import (
 // membership is still checked so a selected project never returns another's data.
 type browserContentInput struct {
 	api.ContentInput
-	ContentID        string `json:"content_id"`
-	TaskID           string `json:"task_id"`
-	Revision         uint64 `json:"revision"`
-	ContentRevision  uint64 `json:"content_revision"`
-	TaskWorkRevision uint64 `json:"task_work_revision"`
-	Offset           uint64 `json:"offset"`
-	Limit            uint64 `json:"limit"`
-	TestedSource     string `json:"tested_source"`
-	Environment      string `json:"environment"`
-	Result           string `json:"result"`
-	Location         string `json:"location"`
-	Judgment         string `json:"judgment"`
+	Document         kernel.OutcomeDocument `json:"document"`
+	ContentID        string                 `json:"content_id"`
+	TaskID           string                 `json:"task_id"`
+	Revision         uint64                 `json:"revision"`
+	ContentRevision  uint64                 `json:"content_revision"`
+	TaskWorkRevision uint64                 `json:"task_work_revision"`
+	Offset           uint64                 `json:"offset"`
+	Limit            uint64                 `json:"limit"`
+	TestedSource     string                 `json:"tested_source"`
+	Environment      string                 `json:"environment"`
+	Result           string                 `json:"result"`
+	Location         string                 `json:"location"`
+	Judgment         string                 `json:"judgment"`
 }
 
 func browserContentProject(s string) (kernel.ProjectID, error) {
@@ -49,7 +50,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments"
+	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -68,7 +69,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil {
 		return result, err
 	}
-	if request.Operation == "list" || request.Operation == "evidence_list" {
+	if request.Operation == "list" || request.Operation == "evidence_list" || request.Operation == "outcome_list" {
 		if input.Limit == 0 {
 			input.Limit = 1
 		}
@@ -260,6 +261,34 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		output = out
 
+	case "outcome_list":
+		page, e := backend.store.ListOutcomes(ctx, project, int(input.Offset), int(input.Limit))
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		out := api.OutcomeList{Items: []api.Outcome{}, NextOffset: uint64(page.NextOffset)}
+		for _, item := range page.Items {
+			out.Items = append(out.Items, outcomeDTO(item))
+		}
+		output = out
+	case "outcome_read", "outcome_write":
+		id, e := outcomeID(input.ID)
+		if e != nil {
+			return result, browser.ErrInvalidRequest
+		}
+		var item kernel.OutcomeRevision
+		if request.Operation == "outcome_read" {
+			item, e = backend.store.Outcome(ctx, project, id, int64(input.Revision))
+		} else {
+			item, e = backend.store.WriteOutcomeForBrowser(ctx, client.ID, kernel.NewOutcome{ID: id, ProjectID: project, Document: input.Document}, int64(input.ExpectedRevision), at)
+		}
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		out := outcomeDTO(item)
+		// The full document already includes these potentially large strings.
+		out.Objective, out.Criteria = "", ""
+		output = out
 	default:
 		return result, browser.ErrInvalidRequest
 	}
@@ -268,7 +297,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		return result, err
 	}
 	result.Output = body
-	if _, err = browserprotocol.EncodeProjectContentResult(strings.Repeat("x", 128), result); err == browserprotocol.ErrOversized {
+	if _, err = browserprotocol.EncodeProjectContentResult(strings.Repeat("x", 64), result); err == browserprotocol.ErrOversized {
 		return browserprotocol.ProjectContentResult{}, browser.ErrTooLarge
 	}
 	return result, err
