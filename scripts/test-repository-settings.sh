@@ -250,7 +250,10 @@ scope_case true true false runtime control-plane/src/lib.rs internal/kernel/stor
 scope_case true true true full .github/workflows/ci.yml
 scope_case true true false full .gitignore
 scope_case true true false full scripts/bootstrap-maintainer-v2.sh
-scope_case false false true none relay/src/index.ts
+scope_case true false true full relay/src/index.ts
+scope_case true false true full relay/src/tokens.ts
+scope_case true false true full relay/src/envelope.ts
+scope_case false false true none relay/tests/tokens.vectors.test.mjs
 scope_case false false true none relay
 scope_case true false false full unclassified-boundary
 scope_case true false false full web/packages/ui/src/console-view.tsx internal/kernel/store.go

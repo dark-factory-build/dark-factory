@@ -110,7 +110,7 @@ jobs:
               .github/workflows/deploy-control-plane.yml)
                 control_plane=true
                 ;;
-              relay/fixtures/*)
+              relay/fixtures/*|relay/src/*)
                 macos=true; select_macos_mode full; relay=true
                 ;;
               relay|relay/*)
