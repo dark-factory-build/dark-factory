@@ -170,6 +170,11 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     project: { id: `p-${index % 2}`, name: `Project ${index % 2}` },
   })) });
   assert.equal(corridorReachability(multi), true, "multi-project rooms remain reachable from the spine");
+  const independent = layoutScene({ digest: "independent", nodes: [
+    { id: "left", parentId: "", path: ".", label: "Left", kind: "repository", sizeBucket: "large", project: { id: "left-project", name: "Left" } },
+    { id: "right", parentId: "", path: ".", label: "Right", kind: "repository", sizeBucket: "large", project: { id: "right-project", name: "Right" } },
+  ] });
+  assert.equal(independent.width, PADDING + 32 + 240 + PADDING, "independent one-room projects share one visual column");
 
   const buckets = ["empty", "tiny", "small", "medium", "large"];
   const sized = layoutScene({ digest: "sizes", nodes: buckets.map((sizeBucket) => ({ id: sizeBucket, path: sizeBucket, label: sizeBucket, kind: "directory", sizeBucket })) });
@@ -205,7 +210,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     workers: [], omittedLocations: 1,
   }));
   const compactWidth = Number(compact.match(/viewBox="0 0 (\d+)/)[1]);
-  assert.ok(Number(compact.match(/max-width:(\d+)px/)[1]) <= compactWidth * 2, "a one-room scope caps sprite magnification");
+  assert.ok(Number(compact.match(/max-width:([\d.]+)px/)[1]) <= compactWidth * 2, "a one-room scope caps sprite magnification");
   assert.match(compact, /current locations not shown in this view/);
   assert.equal(compact.includes("omitted by the room cap"), false);
   assert.match(first, /&lt;Shared &amp; Library/);
@@ -652,6 +657,8 @@ test("stationary tasks expose affected areas and link the existing queue and que
   assert.doesNotMatch(markup, /<script>/);
   const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
   assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
+  const propsOff = render({ tasks, appearance: { scenery: "off", dependencyLinks: "off", labels: "names", taskProps: false, animation: "off", ambientLife: "off" } });
+  assert.doesNotMatch(propsOff, /data-floor-queue=|data-work-footprint=|data-workbench-task-id=/);
 });
 
 
@@ -787,7 +794,8 @@ test("inventory inspection discloses actual omitted categories and plans", async
   assert.match(text, /scanned files in other categories/);
   assert.match(text, /subcomponents without pictured plans/);
   assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 1 && p.props.children[1].includes("subcomponents")));
-  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 2 && p.props.children[1].includes("scanned files")));
+  const shown = layoutScene({ digest: "inventory", nodes: [node] }).rooms[0].contents.filter((item) => item.kind !== "component").reduce((sum, item) => sum + item.count, 0);
+  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 6 - shown && p.props.children[1].includes("scanned files")));
   assert.match(text, /5 direct filenames omitted/);
   await act(async () => renderer.unmount());
 });

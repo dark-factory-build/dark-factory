@@ -122,7 +122,7 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
 /** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
   state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true, floorAppearance, onFloorAppearanceChange,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true, floorAppearance,
 }: {
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
@@ -135,14 +135,8 @@ export function FactoryFloor({
   onSelectTask?: (taskId: string) => void;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
-  /** Renderer consumption is the following sequential integration stage. */
   floorAppearance: FloorAppearance;
-  onFloorAppearanceChange: (appearance: FloorAppearance) => void;
 }) {
-  // The renderer intentionally does not consume these until its sequential
-  // appearance integration; keeping the boundary stable preserves its state.
-  void floorAppearance;
-  void onFloorAppearanceChange;
   const [{ scopeId, page }, setView] = useState<{ scopeId?: string; page: number }>({ page: 0 });
   const setScopeId = (scopeId: string | undefined) => setView({ scopeId, page: 0 });
   // Snapshot decoding replaces the projects Map even when only live work changed.
@@ -174,6 +168,7 @@ export function FactoryFloor({
     </p>}
     <div className="dfFactoryFloor__scene">
     <FactoryScene
+      appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       topology={scene.topology}

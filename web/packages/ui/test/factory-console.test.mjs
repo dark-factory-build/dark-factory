@@ -81,12 +81,12 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
 
 test("floor appearance is local, field-validated, and available before a connection", () => {
   assert.deepEqual(readFloorAppearance('{"scenery":"off","dependencyLinks":"bad","labels":"names-and-counts","taskProps":false,"animation":"off"}'), {
-    scenery: "off", dependencyLinks: "selected-room", labels: "names-and-counts", taskProps: false, animation: "off",
+    scenery: "off", dependencyLinks: "selected-room", labels: "names-and-counts", taskProps: false, animation: "off", ambientLife: "quiet",
   });
   assert.deepEqual(readFloorAppearance('{"scenery":"subtle"}'), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "subtle" });
   assert.deepEqual(readFloorAppearance("not json"), DEFAULT_FLOOR_APPEARANCE);
   const markup = render({ status: "closed", settingsOpen: true });
-  for (const text of ["Scenery", "Dependency links", "Labels", "Task props", "Animation", "Reset floor appearance", "Saved in this browser. Does not change how the factory runs."]) assert.match(markup, new RegExp(text));
+  for (const text of ["Scenery", "Dependency links", "Labels", "Task props", "Animation", "Ambient life", "Reset floor appearance", "Saved in this browser. Does not change how the factory runs."]) assert.match(markup, new RegExp(text));
   assert.match(markup, /<option value="selected-room" selected="">Selected room<\/option>/);
 });
 
@@ -106,7 +106,7 @@ test("floor appearance waits for storage, changes while disconnected, and resets
     let tree;
     act(() => { tree = create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); });
     assert.deepEqual(writes, [], "loading never writes defaults");
-    const selects = tree.root.findAllByType("select").slice(-5);
+    const selects = tree.root.findAllByType("select").slice(-6);
     assert.equal(selects[0].props.value, "subtle");
     assert.equal(selects[1].props.value, "overview");
     assert.equal(selects[2].props.value, "names");

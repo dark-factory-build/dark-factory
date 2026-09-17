@@ -4,6 +4,7 @@ export type FloorAppearance = Readonly<{
   labels: "names" | "names-and-counts";
   taskProps: boolean;
   animation: "follow-device" | "off";
+  ambientLife: "off" | "quiet" | "lively";
 }>;
 
 const STORAGE_KEY = "dark-factory.floor-appearance";
@@ -14,6 +15,7 @@ export const DEFAULT_FLOOR_APPEARANCE: FloorAppearance = {
   labels: "names",
   taskProps: true,
   animation: "follow-device",
+  ambientLife: "quiet",
 };
 
 function oneOf<T extends string>(value: unknown, values: readonly T[], fallback: T): T {
@@ -33,6 +35,7 @@ export function readFloorAppearance(value: string | null): FloorAppearance {
     labels: oneOf(parsed.labels, ["names", "names-and-counts"], DEFAULT_FLOOR_APPEARANCE.labels),
     taskProps: typeof parsed.taskProps === "boolean" ? parsed.taskProps : DEFAULT_FLOOR_APPEARANCE.taskProps,
     animation: oneOf(parsed.animation, ["follow-device", "off"], DEFAULT_FLOOR_APPEARANCE.animation),
+    ambientLife: oneOf(parsed.ambientLife, ["off", "quiet", "lively"], DEFAULT_FLOOR_APPEARANCE.ambientLife),
   };
 }
 

@@ -607,6 +607,7 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
     <label>Labels<select value={appearance.labels} onChange={(event) => onChange({ ...appearance, labels: event.currentTarget.value as FloorAppearance["labels"] })}><option value="names">Names</option><option value="names-and-counts">Names and counts</option></select></label>
     <label>Task props<select value={appearance.taskProps ? "on" : "off"} onChange={(event) => onChange({ ...appearance, taskProps: event.currentTarget.value === "on" })}><option value="on">On</option><option value="off">Off</option></select></label>
     <label>Animation<select value={appearance.animation} onChange={(event) => onChange({ ...appearance, animation: event.currentTarget.value as FloorAppearance["animation"] })}><option value="follow-device">Follow device</option><option value="off">Off</option></select></label>
+    <label>Ambient life<select value={appearance.ambientLife} onChange={(event) => onChange({ ...appearance, ambientLife: event.currentTarget.value as FloorAppearance["ambientLife"] })}><option value="off">Off</option><option value="quiet">Quiet</option><option value="lively">Lively</option></select></label>
     <button type="button" onClick={onReset}>Reset floor appearance</button>
   </section>;
 }
