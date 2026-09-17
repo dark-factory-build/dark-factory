@@ -314,16 +314,16 @@ func TestSuccessfulSettlementRefusesRealWriteBeforeFinalize(t *testing.T) {
 	changeState, path := fixture.settlementWorktree(t)
 	fixture.failBeforeRuntime(t)
 	fixture.daemon.beforeWorkerFinalize = func() {
-		if err := os.WriteFile(filepath.Join(path, "raced.txt"), []byte("raced\n"), 0o644); err != nil {
-			t.Fatal(err)
+		if err := os.WriteFile(filepath.Join(path, "raced.txt"), []byte("raced\n"), 0o644); err == nil {
+			t.Fatal("worker write crossed the settlement fence")
 		}
 	}
 	settled, err := fixture.daemon.settleRun(ctx, fixture.changeParent, fixture.run.ID)
-	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Code() != kernel.FailureSource || !strings.Contains(settled.Terminal.Detail(), "uncommitted implementation") {
+	if err != nil || settled.Phase != kernel.RunTerminal || settled.Terminal == nil || settled.Terminal.Kind() != kernel.OutcomeSucceeded {
 		t.Fatalf("raced dirty settlement = %+v err=%v", settled, err)
 	}
-	if abandoned, found, err := fixture.store.Change(ctx, changeState.ID); err != nil || !found || abandoned.Phase != kernel.ChangeAbandoned || abandoned.SettledRunID == nil || *abandoned.SettledRunID != fixture.run.ID {
-		t.Fatalf("raced Change settlement = %+v found=%v err=%v", abandoned, found, err)
+	if retained, found, err := fixture.store.Change(ctx, changeState.ID); err != nil || !found || retained.Phase != kernel.ChangeRetained || retained.SettledRunID == nil || *retained.SettledRunID != fixture.run.ID {
+		t.Fatalf("raced Change settlement = %+v found=%v err=%v", retained, found, err)
 	}
 }
 
