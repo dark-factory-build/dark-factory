@@ -64,8 +64,6 @@ jobs:
     steps:
       - name: Select fixed gates from the combined tree
         id: select
-        env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           emit_all() {
@@ -78,17 +76,19 @@ jobs:
             emit_all
             exit 0
           fi
-          for sha in "$BASE_SHA" "$GITHUB_SHA"; do
-            case "$sha" in
-              *[!0-9a-f]*|'') echo "invalid merge-group commit" >&2; exit 1 ;;
-            esac
-            [ "${#sha}" -eq 40 ] || { echo "invalid merge-group commit" >&2; exit 1; }
-          done
+          case "$GITHUB_SHA" in
+            *[!0-9a-f]*|'') echo "invalid merge-group commit" >&2; exit 1 ;;
+          esac
+          [ "${#GITHUB_SHA}" -eq 40 ] || { echo "invalid merge-group commit" >&2; exit 1; }
           git init
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$GITHUB_SHA"
-          git diff --check "$BASE_SHA" "$GITHUB_SHA"
-          git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$BASE_SHA" "$GITHUB_SHA" \
+          # The event's base_sha can be the preceding synthetic queue entry.
+          # Full ancestry against main includes every still-pending entry;
+          # blob filtering avoids downloading unrelated historical contents.
+          git fetch --no-tags --filter=blob:none origin refs/heads/main:refs/remotes/origin/main "$GITHUB_SHA"
+          merge_base=$(git merge-base refs/remotes/origin/main "$GITHUB_SHA")
+          git diff --check "$merge_base" "$GITHUB_SHA"
+          git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$merge_base" "$GITHUB_SHA" \
             >"$RUNNER_TEMP/changed-paths"
 
           macos=false
