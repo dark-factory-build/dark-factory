@@ -1866,40 +1866,6 @@ func TestRemoveRecordedRuntimeBoundsDepthAndReestablishesDurableAbsence(t *testi
 	})
 }
 
-// TestRemoveRecordedRuntimeRemovesTakeoverEndpointResidue: a runner killed
-// while it held its takeover endpoint leaves its socket and its one-shot
-// grant behind, and one killed between that grant's write and its rename
-// leaves the rename scratch too. None of them is durable authority, and
-// refusing any of them as an unknown child strands the runtime for good.
-func TestRemoveRecordedRuntimeRemovesTakeoverEndpointResidue(t *testing.T) {
-	// Short root: the residue includes a real bound socket.
-	parent, runtime, path, identity := removableRuntimeFixtureAt(t, filepath.Join(runtimeTempDir(t), "private"))
-	defer parent.Close()
-	socket := filepath.Join(path, runner.TakeoverSocketName)
-	listener, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	if err := os.Chmod(socket, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{runner.TakeoverGrantName, runner.TakeoverScratchName} {
-		if err := os.WriteFile(filepath.Join(path, name), []byte(`{"run_id":"x","token":"y"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := runtime.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if done, err := RemoveRecordedRuntime(context.Background(), parent, runtimeTestName, identity); err != nil || !done {
-		t.Fatalf("takeover residue removal = %v, %v", done, err)
-	}
-	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("runtime persists after removal: %v", err)
-	}
-}
-
 func removableRuntimeFixture(t testing.TB) (*RuntimeParent, *Runtime, string, runner.FileIdentity) {
 	t.Helper()
 	parentPath := filepath.Join(runtimeTempDir(t), "private")

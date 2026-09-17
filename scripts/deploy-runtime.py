@@ -14,18 +14,8 @@ import time
 
 def state(home):
     with sqlite3.connect((home / 'factory.sqlite3').as_uri() + '?mode=ro', uri=True) as connection:
-        # Controls and non-terminal runs are read from the same SQLite snapshot.
-        connection.execute('BEGIN')
-        enabled, revision = connection.execute('SELECT dispatch_enabled, revision FROM factory WHERE singleton=1').fetchone()
-        runs = connection.execute("SELECT phase, lower(hex(id)) FROM runs WHERE phase <> 'terminal'").fetchall()
-    # A run still running behind its runner's takeover endpoint is adopted by
-    # the next daemon and survives the restart, so it does not have to drain;
-    # every other non-terminal run still does.
-    return enabled, revision, sum(1 for phase, run in runs if not adoptable(home, phase, run))
-
-
-def adoptable(home, phase, run):
-    return phase == 'running' and (home / 'runtimes' / run / 'takeover.sock').is_socket()
+        # Controls and active runs are read from the same SQLite snapshot.
+        return connection.execute("SELECT dispatch_enabled, revision, (SELECT count(*) FROM runs WHERE phase <> 'terminal') FROM factory WHERE singleton=1").fetchone()
 
 
 def failure_receipt(sha, reachable):

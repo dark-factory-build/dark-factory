@@ -26,11 +26,8 @@ type OverseerSnapshot struct {
 // reviewer must match before reading a daemon-retained worker tree. It is
 // deliberately an identity, not a caller-supplied pathname.
 type RetainedChangeHandoff struct {
-	ChangeID   ChangeID
-	BaseCommit string
-	// HeadCommit is the settled tip of the Change's branch, or empty while the
-	// Change is still a Git-free tree that no worktree has adopted.
-	HeadCommit       string
+	ChangeID         ChangeID
+	BaseCommit       string
 	TaskID           TaskID
 	TaskWorkRevision Revision
 	ChangeRevision   Revision
@@ -329,11 +326,7 @@ func retainedChangeHandoff(ctx context.Context, connection *sql.Conn, projectID 
 	if run.AdmittedTaskWorkRevision != task.WorkRevision {
 		return RetainedChangeHandoff{}, false, nil
 	}
-	handoff := RetainedChangeHandoff{ChangeID: change.ID, BaseCommit: hex.EncodeToString(change.Selection.Commit().Bytes()), TaskID: task.ID, TaskWorkRevision: task.WorkRevision, ChangeRevision: change.Revision}
-	if change.HeadCommit != nil {
-		handoff.HeadCommit = hex.EncodeToString(change.HeadCommit.Bytes())
-	}
-	return handoff, true, nil
+	return RetainedChangeHandoff{ChangeID: change.ID, BaseCommit: hex.EncodeToString(change.Selection.Commit().Bytes()), TaskID: task.ID, TaskWorkRevision: task.WorkRevision, ChangeRevision: change.Revision}, true, nil
 }
 
 // RetainedChangeHandoffForTask returns the current handoff identity for one

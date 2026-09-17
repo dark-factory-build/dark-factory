@@ -10,7 +10,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
-	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -28,7 +27,7 @@ func writeProviderConfig(t *testing.T, path, content string) {
 // is the only thing the resolver may derive a provider config path from.
 func accountDaemon(accountHome string) *Daemon {
 	daemon := &Daemon{now: time.Now}
-	daemon.RememberSupervisorAccount("", accountHome, change.TrustedGitExecutable)
+	daemon.rememberSupervisorAccount("", accountHome)
 	return daemon
 }
 
@@ -151,7 +150,7 @@ func TestProviderDefaultsServeTheCachedReadWithinItsWindow(t *testing.T) {
 	writeProviderConfig(t, settings, `{"model":"first"}`)
 	now := time.Now()
 	daemon := &Daemon{now: func() time.Time { return now }}
-	daemon.RememberSupervisorAccount("", accountHome, change.TrustedGitExecutable)
+	daemon.rememberSupervisorAccount("", accountHome)
 	if model, _, _ := daemon.providerAccountDefaults("claude_code", ""); model != "first" {
 		t.Fatalf("first read = %q", model)
 	}

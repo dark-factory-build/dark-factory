@@ -404,13 +404,16 @@ func activatePeerWorker(t *testing.T, store *Store, task Task, seed byte) Run {
 	}
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, format.oidLength()))
+	digest := changeTreeDigest(t, 3)
 	repository, _ := NewFileIdentity(80, 81)
-	selection, _ := NewChangeSelection(format, commit, repository)
-	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, mustTime(t, 34))
+	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
+	stage, _ := NewFileIdentity(82, 83)
+	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, stage, mustTime(t, 34))
 	if err != nil {
 		t.Fatalf("prepare peer change: %v", err)
 	}
-	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, selection.commit, mustTime(t, 35)); err != nil {
+	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
+	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, availability, mustTime(t, 35)); err != nil {
 		t.Fatalf("make peer change available: %v", err)
 	}
 	activated := activatePeerResources(t, store, *admission.Run, 36)

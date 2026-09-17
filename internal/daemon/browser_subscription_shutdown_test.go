@@ -100,51 +100,6 @@ func TestBrowserRuntimeCloseJoinsDisconnectedActiveStateSubscription(t *testing.
 	}
 }
 
-func TestConnectedStateWatchMapsStoreCloseToRetryableLifecycleError(t *testing.T) {
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	paired := fixture.pair(t)
-	_ = paired.CloseNow()
-	connection := fixture.authenticate(t)
-	state, err := fixture.store.Factory(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	subscribe, err := browserprotocol.EncodeStateWatch("store-close-watch", browserprotocol.StateWatch{AfterHead: decimalSequence(state.Head)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapterWrite(t, connection, subscribe)
-	barrier, err := browserprotocol.EncodeStateGet("store-close-barrier", browserprotocol.StateGet{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapterWrite(t, connection, barrier)
-	if frame := adapterRead(t, connection); frame.Type != browserprotocol.TypeStateSnapshot || frame.ID != "store-close-barrier" {
-		t.Fatalf("connected watch was not installed: %+v", frame)
-	}
-
-	// This is a real authenticated WebSocket and the production daemon adapter;
-	// closing its isolated fixture Store reproduces the lifecycle failure that
-	// previously escaped mapBrowserError as a finite internal frame.
-	if err := fixture.store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	frame := adapterRead(t, connection)
-	verdict, ok := frame.Body.(browserprotocol.Error)
-	if !ok || frame.Type != browserprotocol.TypeError || frame.ID != "store-close-watch" || verdict.Code != browserprotocol.ErrorRateLimited || !bool(verdict.Retryable) {
-		t.Fatalf("closed-store watch = %+v, want retryable rate_limited", frame)
-	}
-	// The fixture Store is deliberately closed to exercise the connected path;
-	// detach the runtime from its daemon so fixture cleanup does not attempt
-	// challenge invalidation through the closed Store.
-	fixture.runtime.daemon = nil
-	fixture.daemon.browserMu.Lock()
-	delete(fixture.daemon.browsers, fixture.runtime)
-	fixture.daemon.browserMu.Unlock()
-	_ = fixture.server.Close()
-	_ = fixture.backend.close()
-}
-
 func newBrowserStateSubscriptionLoopTest() (*browserStateWatch, *browserBackend) {
 	ctx, cancel := context.WithCancel(context.Background())
 	backend := &browserBackend{subs: make(map[*browserStateWatch]struct{})}

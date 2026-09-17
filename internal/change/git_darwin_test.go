@@ -28,13 +28,8 @@ type localGitFixture struct {
 	identity   RepositoryIdentity
 	format     ObjectFormat
 	base       ObjectID
-	files      []fixtureFile
-}
-
-type fixtureFile struct {
-	path []byte
-	mode string
-	data []byte
+	manifest   Manifest
+	blobs      map[string][]byte
 }
 
 func TestSelectGitRealSHA1AndSHA256WithoutBlobReads(t *testing.T) {
@@ -45,10 +40,61 @@ func TestSelectGitRealSHA1AndSHA256WithoutBlobReads(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !selected.RepositoryIdentity().Equal(fixture.identity) || selected.ObjectFormat() != fixture.format || !selected.Base().equal(fixture.base) {
+			if !selected.RepositoryIdentity().Equal(fixture.identity) || selected.ObjectFormat() != fixture.format ||
+				!selected.Base().equal(fixture.base) || !selected.Commitment().Equal(fixture.manifest.Commitment()) ||
+				selected.EntryCount() != fixture.manifest.EntryCount() || selected.BlobBytes() != fixture.manifest.BlobBytes() ||
+				!manifestsEqual(selected.Manifest(), fixture.manifest) {
 				t.Fatalf("selection differs: %+v", selected)
 			}
 		})
+	}
+}
+
+func TestSelectionSurvivesRefAndWorktreeMovementAndMaterializesExactOldCommit(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("new commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "add", "README.md")
+	runFixtureGit(t, fixture.git, fixture.repository, "commit", "-m", "move HEAD")
+	newCommit := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, fixture.repository, "rev-parse", "HEAD"))
+	runFixtureGit(t, fixture.git, fixture.repository, "update-ref", "refs/heads/moving", fixture.base.Hex())
+	selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "moving", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "update-ref", "refs/heads/moving", newCommit)
+	if err := os.WriteFile(filepath.Join(fixture.repository, "README.md"), []byte("uncommitted worktree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changeParent := secureTempDir(t)
+	prepared := mustPrepare(t, changeParent, "published", "declared-stage")
+	blobs, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := prepared.PopulateAndPublish(context.Background(), selected.Manifest(), blobs.Read)
+	if err != nil {
+		_ = blobs.Abort()
+		t.Fatal(err)
+	}
+	if err := blobs.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !published.Facts().Commitment().Equal(selected.Commitment()) {
+		t.Fatalf("published commitment=%s selected=%s", published.Facts().Commitment().Hex(), selected.Commitment().Hex())
+	}
+	assertExactTree(t, published.Path(), changeFixture{manifest: fixture.manifest, blobs: fixture.blobs})
+	readme, err := os.ReadFile(filepath.Join(published.Path(), "README.md"))
+	if err != nil || string(readme) != "old commit\n" {
+		t.Fatalf("published moving state: %q %v", readme, err)
+	}
+	if _, err := os.Lstat(filepath.Join(published.Path(), ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published Change contains Git authority: %v", err)
 	}
 }
 
@@ -103,7 +149,7 @@ func TestSelectGitRepositoryShapesAndReplacement(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(fixture.repository, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AddWorktree(context.Background(), selected, filepath.Join(secureTempDir(t), "published"), BranchName("0123456789abcdef0123456789abcdef")); err == nil {
+	if _, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected); err == nil {
 		t.Fatal("replacement repository served an old selection")
 	}
 }
@@ -442,9 +488,35 @@ func TestGitSelectionToleratesUnrelatedObjectStoreChurn(t *testing.T) {
 	if !mutated {
 		t.Fatal("fixture did not mutate the object store between Git phases")
 	}
-	if !selected.Base().equal(fixture.base) {
-		t.Fatal("unrelated object-store churn changed the selected base")
+	if !selected.Commitment().Equal(fixture.manifest.Commitment()) {
+		t.Fatal("unrelated object-store churn changed the selected commitment")
 	}
+}
+
+func TestGitSelectionMaterializesAfterReachableRepack(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "gc", "--prune=now")
+	prepared := mustPrepare(t, secureTempDir(t), "published", "declared-stage")
+	blobs, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := prepared.PopulateAndPublish(context.Background(), selected.Manifest(), blobs.Read)
+	if err != nil {
+		_ = blobs.Abort()
+		t.Fatal(err)
+	}
+	if err := blobs.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertExactTree(t, published.Path(), changeFixture{manifest: fixture.manifest, blobs: fixture.blobs})
 }
 
 func assertRepositoryRejectedBeforeGit(t testing.TB, repository string, identity RepositoryIdentity) {
@@ -463,12 +535,14 @@ func TestGitAuthorityIsRecheckedAtProcessBoundaries(t *testing.T) {
 	repository := fakeRepository(t)
 	format := mustFormat(t, "sha1")
 	base := mustID(t, format, bytes.Repeat([]byte{0x31}, format.OIDLength()))
+	entry := mustEntry(t, format, []byte("file"), "100644", []byte("secret"))
 	script := fmt.Sprintf(`#!/bin/sh
 case "$*" in
   *" config "*) exit 1 ;;
   *" rev-parse "*) printf '%%s\nsha1\n%%s\n' %q %q ;;
+  *" ls-tree "*) printf '100644 blob %%s 6\tfile\0' %q ;;
 esac
-`, repository, base.Hex())
+`, repository, base.Hex(), entry.oid.Hex())
 	git := writeFakeGit(t, script)
 	original := repository + "-original"
 	mutated := false
@@ -491,6 +565,25 @@ esac
 		t.Fatal("repository replacement after metadata child exit was accepted")
 	}
 
+	repository = fakeRepository(t)
+	selection, _ := fakeSelection(t, repository, "", []byte("secret"))
+	git = writeFakeGit(t, "#!/bin/sh\nwhile IFS= read -r request; do exit 0; done\n")
+	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
+	original = git + "-original"
+	_, err = openGitBlobs(context.Background(), git, repository, selection, func(event gitProcessEvent) {
+		if event != gitProcessStarted {
+			return
+		}
+		if renameErr := os.Rename(git, original); renameErr != nil {
+			panic(renameErr)
+		}
+		if writeErr := os.WriteFile(git, []byte("#!/bin/sh\nexit 0\n"), 0o700); writeErr != nil {
+			panic(writeErr)
+		}
+	})
+	if err == nil {
+		t.Fatal("Git executable replacement after blob child start was accepted")
+	}
 }
 
 func TestGitExecutableIsContentFrozenAcrossEveryPhase(t *testing.T) {
@@ -672,7 +765,8 @@ func TestGitPublicFailuresNeverExposePrivateBoundaryData(t *testing.T) {
 	if err := os.Rename(repository, privateRepository); err != nil {
 		t.Fatal(err)
 	}
-	selection := Selection{repositoryRoot: privateRepository, gitExecutable: filepath.Join(filepath.Dir(privateRepository), sentinel+"-git")}
+	selection, _ := fakeSelection(t, privateRepository, "", []byte("secret"))
+	selection.gitExecutable = filepath.Join(filepath.Dir(privateRepository), sentinel+"-git")
 	selectionText := fmt.Sprintf("%v|%+v|%#v", selection, selection, selection)
 	selectionJSON, err := json.Marshal(selection)
 	if err != nil {
@@ -680,6 +774,45 @@ func TestGitPublicFailuresNeverExposePrivateBoundaryData(t *testing.T) {
 	}
 	if strings.Contains(selectionText, sentinel) || strings.Contains(string(selectionJSON), sentinel) {
 		t.Fatalf("public Selection formatting leaked private locators: %q %q", selectionText, selectionJSON)
+	}
+}
+
+func TestParseGitTreeRejectsUnsupportedMalformedAndUnboundedMetadata(t *testing.T) {
+	format := mustFormat(t, "sha1")
+	base := mustID(t, format, bytes.Repeat([]byte{1}, format.OIDLength()))
+	oid := strings.Repeat("a", format.OIDLength()*2)
+	invalid := map[string][]byte{
+		"symlink":      []byte(fmt.Sprintf("120000 blob %s 1\tlink\x00", oid)),
+		"gitlink":      []byte(fmt.Sprintf("160000 commit %s -\tsubmodule\x00", oid)),
+		"tree":         []byte(fmt.Sprintf("040000 tree %s -\tdirectory\x00", oid)),
+		"git path":     []byte(fmt.Sprintf("100644 blob %s 1\t.GIT/config\x00", oid)),
+		"invalid utf8": append([]byte(fmt.Sprintf("100644 blob %s 1\tbad", oid)), 0xff, 0),
+		"malformed":    []byte("not-a-record\x00"),
+		"truncated":    []byte(fmt.Sprintf("100644 blob %s 1\tpath", oid)),
+		"wrong oid":    []byte("100644 blob aa 1\tpath\x00"),
+		"size":         []byte(fmt.Sprintf("100644 blob %s %d\tpath\x00", oid, MaxBlobBytes+1)),
+	}
+	for name, output := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseGitTree(format, base, output); err == nil {
+				t.Fatal("unsafe tree metadata accepted")
+			}
+		})
+	}
+	duplicate := []byte(fmt.Sprintf("100644 blob %s 1\tpath\x00100644 blob %s 1\tpath\x00", oid, oid))
+	if _, err := parseGitTree(format, base, duplicate); err == nil {
+		t.Fatal("duplicate path accepted")
+	}
+	deep := strings.Repeat("d/", MaxDepth) + "f"
+	if _, err := parseGitTree(format, base, []byte(fmt.Sprintf("100644 blob %s 1\t%s\x00", oid, deep))); err == nil {
+		t.Fatal("over-depth path accepted")
+	}
+	total := make([]byte, 0)
+	for index := range 5 {
+		total = append(total, []byte(fmt.Sprintf("100644 blob %s %d\tf%d\x00", oid, MaxBlobBytes, index))...)
+	}
+	if _, err := parseGitTree(format, base, total); err == nil {
+		t.Fatal("over-total-size tree accepted")
 	}
 }
 
@@ -727,90 +860,15 @@ func newLocalGitFixture(t testing.TB, formatName string) localGitFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	entries := make([]Entry, len(files))
+	blobs := make(map[string][]byte, len(files))
+	for index, file := range files {
+		entries[index] = mustEntry(t, format, file.path, file.mode, file.data)
+		blobs[entries[index].oid.Hex()] = bytes.Clone(file.data)
+	}
 	return localGitFixture{
 		git: git, repository: repository, identity: mustRepositoryIdentity(t, repository),
-		format: format, base: base, files: files,
-	}
-}
-
-func mustFormat(t testing.TB, name string) ObjectFormat {
-	t.Helper()
-	format, err := NewObjectFormat(name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return format
-}
-
-func mustID(t testing.TB, format ObjectFormat, raw []byte) ObjectID {
-	t.Helper()
-	id, err := NewObjectID(format, raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return id
-}
-
-func secureTempDir(t testing.TB) string {
-	t.Helper()
-	path, err := os.MkdirTemp("/private/tmp", "dark-factory-change-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(path) })
-	if err := os.Chmod(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func descriptorCount(t testing.TB) int {
-	t.Helper()
-	entries, err := os.ReadDir("/dev/fd")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return len(entries)
-}
-
-// assertExactTree checks the fixture's files, and nothing else besides the
-// gitfile, are in the worktree with their exact bytes and modes.
-func assertExactTree(t testing.TB, root string, fixture localGitFixture) {
-	t.Helper()
-	want := make(map[string]fixtureFile, len(fixture.files))
-	for _, file := range fixture.files {
-		want[string(file.path)] = file
-	}
-	seen := 0
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		relative, _ := filepath.Rel(root, path)
-		if entry.IsDir() || relative == ".git" {
-			return nil
-		}
-		file, ok := want[relative]
-		if !ok {
-			return fmt.Errorf("unexpected entry %q", relative)
-		}
-		seen++
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		executable := info.Mode()&0o100 != 0
-		if !bytes.Equal(data, file.data) || executable != (file.mode == "100755") {
-			return fmt.Errorf("entry %q differs: %q executable=%v", relative, data, executable)
-		}
-		return nil
-	})
-	if err != nil || seen != len(want) {
-		t.Fatalf("worktree differs from fixture: %v (seen %d of %d)", err, seen, len(want))
+		format: format, base: base, manifest: mustManifest(t, format, base, entries), blobs: blobs,
 	}
 }
 
@@ -881,28 +939,51 @@ func TestGitBoundaryResourceCensus(t *testing.T) {
 	if after := descriptorCount(t); after != beforeFDs {
 		t.Fatalf("40 public SelectGit calls leaked descriptors without GC: before=%d after=%d", beforeFDs, after)
 	}
-	parent := secureTempDir(t)
-	for index := range 5 {
-		changeID := strings.Repeat(fmt.Sprintf("%x", index+1), 32)
-		if _, err := AddWorktree(context.Background(), selected, filepath.Join(parent, changeID), BranchName(changeID)); err != nil {
+	for range 20 {
+		blobs, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := InspectWorktree(context.Background(), fixture.git, fixture.repository, fixture.identity, filepath.Join(parent, changeID)); err != nil {
+		for _, entry := range selected.Manifest().Entries() {
+			if _, err := blobs.Read(context.Background(), entry.ObjectID()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := blobs.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	blockedGit := writeFakeGit(t, "#!/bin/sh\nexec /usr/bin/perl -e '$SIG{TERM}=sub{exit 0}; while(1){select(undef,undef,undef,1)}'\n")
+	malformedRepository := fakeRepository(t)
+	malformedSelection, malformedEntry := fakeSelection(t, malformedRepository, "", []byte("secret"))
+	malformedGit := writeFakeGit(t, "#!/bin/sh\nIFS= read -r request || exit 2\nprintf '%s blob 6\\nwrong!\\n' \"$request\"\n")
+	malformedSelection.gitExecutable, malformedSelection.gitIdentity = malformedGit, mustGitFileIdentity(t, malformedGit)
+	for range 10 {
+		blobs, err := openGitBlobs(context.Background(), malformedGit, malformedRepository, malformedSelection, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := blobs.Read(context.Background(), malformedEntry.oid); err == nil {
+			t.Fatal("malformed resource-census blob was accepted")
+		}
+	}
 	blockedRepository := fakeRepository(t)
+	blockedSelection, blockedEntry := fakeSelection(t, blockedRepository, "", []byte("secret"))
+	blockedGit := writeFakeGit(t, "#!/bin/sh\nIFS= read -r request || exit 2\nexec /usr/bin/perl -e '$SIG{TERM}=sub{exit 0}; while(1){select(undef,undef,undef,1)}'\n")
+	blockedSelection.gitExecutable, blockedSelection.gitIdentity = blockedGit, mustGitFileIdentity(t, blockedGit)
 	for range 5 {
+		blobs, err := openGitBlobs(context.Background(), blockedGit, blockedRepository, blockedSelection, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		_, err := selectGit(ctx, blockedGit, blockedRepository, "HEAD", mustRepositoryIdentity(t, blockedRepository), nil)
+		_, err = blobs.Read(ctx, blockedEntry.oid)
 		cancel()
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("blocked resource-census selection=%v", err)
+			t.Fatalf("blocked resource-census read=%v", err)
 		}
 	}
 	if after := descriptorCount(t); after != beforeFDs {
-		t.Fatalf("Git worktree and cancel paths leaked descriptors without GC: before=%d after=%d", beforeFDs, after)
+		t.Fatalf("Git blob success/error/cancel paths leaked descriptors without GC: before=%d after=%d", beforeFDs, after)
 	}
 	if after := runtime.NumGoroutine(); after > beforeGoroutines {
 		t.Fatalf("Git boundary goroutine leak: before=%d after=%d", beforeGoroutines, after)

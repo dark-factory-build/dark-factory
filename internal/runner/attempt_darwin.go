@@ -5,20 +5,16 @@ package runner
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -195,19 +191,6 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 		}
 		return AttemptEvent{}, err
 	}
-	if frame.Kind == string(AttemptHandoverQuiesced) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
-		floor, head := frame.Floor, frame.Head
-		if err := c.spend(); err != nil {
-			return AttemptEvent{}, err
-		}
-		return AttemptEvent{Kind: AttemptHandoverQuiesced, Floor: floor, Head: head}, nil
-	}
-	if frame.Kind == string(AttemptHandoverAttached) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
-		return AttemptEvent{Kind: AttemptHandoverAttached, Floor: frame.Floor, Head: frame.Head}, nil
-	}
-	if frame.Kind == string(AttemptHandoverRejected) && c.state == controllerProviderReleased && validHandoverCursorFrame(frame) {
-		return AttemptEvent{Kind: AttemptHandoverRejected, Floor: frame.Floor, Head: frame.Head}, nil
-	}
 	if frame.Version != 1 {
 		return AttemptEvent{}, ErrIdentity
 	}
@@ -366,30 +349,6 @@ func (c *AttemptController) SendTerminalCommand(command TerminalCommand) error {
 		return err
 	}
 	return c.writeFrame(terminalCommandFrame(command), maxFrameBytes)
-}
-
-// SendHandoverQuiesce asks a protocol-2 runner to finish all preceding control
-// commands and close this owner capability. The caller must consume the
-// HandoverQuiesced event before granting replacement control. Protocol-1
-// runners reject the frame and must be drained before switching.
-func (c *AttemptController) SendHandoverQuiesce() error {
-	if c == nil || c.file == nil || c.state != controllerProviderReleased || !c.terminalReady {
-		return ErrState
-	}
-	return c.writeFrame(attemptFrame{Version: 2, Kind: "handover-quiesce"}, maxFrameBytes)
-}
-
-// AdoptHandoverControl wraps a duplex stream already authenticated and fenced
-// by the protocol-2 takeover endpoint. This method does not authenticate the
-// stream; callers must never pass an unverified connection.
-func AdoptHandoverControl(file *os.File) (*AttemptController, error) {
-	if file == nil {
-		return nil, ErrState
-	}
-	if _, err := commitControl(file); err != nil {
-		return nil, err
-	}
-	return &AttemptController{file: file, state: controllerProviderReleased, terminalReady: true}, nil
 }
 
 func (c *AttemptController) Terminate() error {
@@ -1181,254 +1140,8 @@ func runAttempt(daemon, dir, lifetime *os.File, cfg attemptConfig, workerConfig 
 			return finishAttemptFailure(child, dir, cfg, &reads, err)
 		}
 	}
-	// A takeover endpoint is a resilience bonus, not a correctness
-	// requirement: an attempt whose runtime directory is too deep for
-	// macOS's 104-byte sun_path (or that hits any other setup failure) still
-	// runs, just without handover capability, exactly like a protocol-1
-	// runner that never gets sent a handover-quiesce.
-	transport, closeTakeover := startTakeoverEndpoint(dir, cfg.AttemptID)
-	daemonOpen, err := runReleasedProviderWithHandover(child, daemon, workerParent, &reads, stagePTY, retained, cfg.StartupInput, transport)
-	// The endpoint closes before the result is published: a daemon that
-	// adopted a runner already past its provider would own a control
-	// capability nothing answers, and the runtime is removable from the
-	// instant the result exists.
-	closeTakeover()
-	if transport != nil && transport.Current != nil {
-		daemon = transport.Current
-	}
+	daemonOpen, err := runReleasedProvider(child, daemon, workerParent, &reads, stagePTY, retained, cfg.StartupInput)
 	return finishAttemptWithExit(child, dir, cfg, &reads, daemon, daemonOpen, err)
-}
-
-const (
-	// TakeoverGrantName and TakeoverSocketName are the two runtime-root
-	// children a protocol-2 runner publishes while it can hand its control
-	// capability to a replacement daemon. A live runner unlinks both before
-	// it publishes its result; a killed one leaves them as ordinary runtime
-	// residue, so the daemon's recovery and removal know them by name.
-	TakeoverGrantName  = "takeover.json"
-	TakeoverSocketName = "takeover.sock"
-	// TakeoverScratchName is the grant's rename scratch. It normally exists
-	// for the length of one write, but a runner killed mid-rotation leaves it
-	// behind, so the daemon's runtime census and removal know it by name too.
-	TakeoverScratchName = ".runner-takeover.tmp"
-	takeoverTokenBytes  = 32
-	maxTakeoverBody     = 16 << 10
-	takeoverReadTimeout = 5 * time.Second
-)
-
-// takeoverGrant is the on-disk, one-shot bearer a replacement daemon presents
-// to prove possession of this run's runtime directory. It is not a durable
-// authority record: the daemon's own Store transaction remains that.
-type takeoverGrant struct {
-	RunID string `json:"run_id"`
-	Token string `json:"token"`
-}
-
-// startTakeoverEndpoint publishes the current bearer and accepts
-// authenticated replacements for as long as the returned transport is in use
-// by the released-provider loop; the caller runs the returned cleanup only
-// after that loop returns. A setup failure degrades to a nil transport and a
-// no-op cleanup (see the call site) rather than failing the attempt.
-func startTakeoverEndpoint(dir *os.File, runID string) (*HandoverTransport, func()) {
-	noop := func() {}
-	if dir == nil || validateAttemptName(runID, 256) != nil {
-		return nil, noop
-	}
-	token, err := newTakeoverToken()
-	if err != nil {
-		return nil, noop
-	}
-	if err := writeTakeoverGrant(int(dir.Fd()), runID, token); err != nil {
-		return nil, noop
-	}
-	dirPath, err := fdPath(dir)
-	if err != nil {
-		_ = unix.Unlinkat(int(dir.Fd()), TakeoverGrantName, 0)
-		return nil, noop
-	}
-	// macOS sun_path is 104 bytes; a short fixed basename leaves the runtime
-	// directory the only variable part of this path.
-	socketPath := filepath.Join(dirPath, TakeoverSocketName)
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		_ = unix.Unlinkat(int(dir.Fd()), TakeoverGrantName, 0)
-		return nil, noop
-	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
-		_ = listener.Close()
-		_ = unix.Unlinkat(int(dir.Fd()), TakeoverGrantName, 0)
-		return nil, noop
-	}
-	replacements := make(chan *os.File, 1)
-	done := make(chan struct{})
-	stopped := make(chan struct{})
-	go func() {
-		serveTakeover(listener.(*net.UnixListener), int(dir.Fd()), runID, token, replacements, done)
-		close(stopped)
-	}()
-	var stopOnce sync.Once
-	stopAdmission := func() {
-		stopOnce.Do(func() {
-			close(done)
-			_ = listener.Close()
-			<-stopped
-		})
-	}
-	cleanup := func() {
-		stopAdmission()
-		select {
-		case file := <-replacements:
-			if file != nil {
-				_ = writeTakeoverResponse(file, false, "runner-exiting")
-				_ = file.Close()
-			}
-		default:
-		}
-		_ = unix.Unlinkat(int(dir.Fd()), TakeoverSocketName, 0)
-		_ = unix.Unlinkat(int(dir.Fd()), TakeoverGrantName, 0)
-	}
-	return &HandoverTransport{Replacements: replacements, Stop: stopAdmission}, cleanup
-}
-
-func newTakeoverToken() (string, error) {
-	var raw [takeoverTokenBytes]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(raw[:]), nil
-}
-
-// writeTakeoverGrant replaces takeover.json atomically so a reader never
-// observes a partial write. It is used both for the initial grant and for
-// every one-shot rotation after a consumed token.
-func writeTakeoverGrant(dirFD int, runID, token string) error {
-	body, err := json.Marshal(takeoverGrant{RunID: runID, Token: token})
-	if err != nil {
-		return err
-	}
-	fd, err := unix.Openat(dirFD, TakeoverScratchName, unix.O_WRONLY|unix.O_CREAT|unix.O_TRUNC|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-	if err != nil {
-		return err
-	}
-	writeErr := writeAll(fd, body)
-	closeErr := unix.Close(fd)
-	if err := errors.Join(writeErr, closeErr); err == nil {
-		err = unix.Renameat(dirFD, TakeoverScratchName, dirFD, TakeoverGrantName)
-		if err == nil {
-			return nil
-		}
-	}
-	// The scratch exists from here on. Leaving it behind would make the
-	// runtime's own census refuse an unknown child and strand the directory.
-	_ = unix.Unlinkat(dirFD, TakeoverScratchName, 0)
-	return err
-}
-
-// serveTakeover is the sole accept loop for one attempt's takeover.sock; it
-// runs until the listener closes.
-func serveTakeover(listener *net.UnixListener, dirFD int, runID, token string, replacements chan<- *os.File, done <-chan struct{}) {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		token = handleTakeoverConn(conn, dirFD, runID, token, replacements, done)
-	}
-}
-
-// handleTakeoverConn validates one takeover request against the current
-// bearer and, on an exact match, rotates the on-disk grant before handing the
-// still-open connection to the released-provider loop. It never answers an
-// accepted request: only that loop may, once it has fenced the owner this
-// replacement displaces. It always returns the token the next connection
-// must present.
-func handleTakeoverConn(conn net.Conn, dirFD int, runID, token string, replacements chan<- *os.File, done <-chan struct{}) string {
-	defer conn.Close()
-	if err := conn.SetReadDeadline(time.Now().Add(takeoverReadTimeout)); err != nil {
-		return token
-	}
-	body, err := readTakeoverLine(conn, maxTakeoverBody)
-	if err != nil {
-		return token
-	}
-	var request takeoverGrant
-	if json.Unmarshal(body, &request) != nil || request.RunID != runID ||
-		subtle.ConstantTimeCompare([]byte(request.Token), []byte(token)) != 1 {
-		_ = writeTakeoverResponse(conn, false, "stale")
-		return token
-	}
-	next, err := newTakeoverToken()
-	if err != nil {
-		_ = writeTakeoverResponse(conn, false, "internal")
-		return token
-	}
-	if err := writeTakeoverGrant(dirFD, runID, next); err != nil {
-		_ = writeTakeoverResponse(conn, false, "internal")
-		return token
-	}
-	unixConn, ok := conn.(*net.UnixConn)
-	if !ok {
-		return next
-	}
-	file, err := unixConn.File()
-	if err != nil {
-		return next
-	}
-	fd := int(file.Fd())
-	_ = unix.SetNonblock(fd, true)
-	for _, opt := range []int{unix.SO_SNDBUF, unix.SO_RCVBUF} {
-		_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, opt, controlSocketBytes)
-	}
-	select {
-	case replacements <- file:
-		return next
-	default:
-	}
-	select {
-	case <-done:
-		_ = writeTakeoverResponse(file, false, "runner-exiting")
-		_ = file.Close()
-	case replacements <- file:
-	}
-	return next
-}
-
-// readTakeoverLine reads one newline-terminated line one byte at a time. The
-// daemon keeps its write half open for the control frames it sends after the
-// handshake, so neither side may read past the line it owns.
-func readTakeoverLine(r io.Reader, limit int) ([]byte, error) {
-	var line []byte
-	single := make([]byte, 1)
-	for len(line) < limit {
-		if _, err := io.ReadFull(r, single); err != nil {
-			return nil, err
-		}
-		if single[0] == '\n' {
-			return line, nil
-		}
-		line = append(line, single[0])
-	}
-	return nil, errors.New("runner: takeover request line too large")
-}
-
-// takeoverResponse is the endpoint's one JSON reply, written once per
-// connection before the accepted duplex is (or is not) handed onward.
-type takeoverResponse struct {
-	Accepted bool   `json:"accepted"`
-	Error    string `json:"error,omitempty"`
-}
-
-// writeTakeoverResponse writes the endpoint's one newline-terminated reply.
-// A refusal is written by the accept loop on the connection it is about to
-// close; the acceptance is written by the owner loop, on the descriptor it
-// has just taken over, after the previous owner is fenced.
-func writeTakeoverResponse(w io.Writer, accepted bool, errMsg string) error {
-	body, err := json.Marshal(takeoverResponse{Accepted: accepted, Error: errMsg})
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(append(body, '\n'))
-	return err
 }
 
 func newControlPair(parentName, childName string) (*os.File, *os.File, error) {

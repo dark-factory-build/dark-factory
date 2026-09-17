@@ -38,44 +38,8 @@ const (
 	v11UserVersion      = 11
 	v12UserVersion      = 12
 	v13UserVersion      = 13
-	// v13Changes is the changes table before managed Git worktrees. It bound a
-	// Git-free published tree by a manifest digest, its entry and byte counts
-	// and its root inode. v14 names the tree's own branch head instead and
-	// drops those columns; a v13 row keeps its base, repository and settled
-	// run and gets no head until its tree is adopted into a worktree.
-	v13Changes = `CREATE TABLE changes (
-    id BLOB PRIMARY KEY CHECK (length(id) = 16),
-    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
-    task_id BLOB NOT NULL CHECK (length(task_id) = 16),
-    task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
-	phase TEXT NOT NULL CHECK (phase IN ('reserved', 'prepared', 'available', 'retained', 'abandoned')),
-    object_format TEXT CHECK (object_format IS NULL OR object_format IN ('sha1', 'sha256')),
-	base_commit BLOB,
-	repository_dev INTEGER CHECK (repository_dev IS NULL OR repository_dev >= 0),
-	repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
-    prepared_at_ms INTEGER CHECK (prepared_at_ms IS NULL OR prepared_at_ms >= 0),
-    tree_digest BLOB CHECK (tree_digest IS NULL OR length(tree_digest) = 32),
-    entry_count INTEGER CHECK (entry_count IS NULL OR entry_count BETWEEN 0 AND 10000),
-    total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes BETWEEN 0 AND 1073741824),
-	tree_dev INTEGER CHECK (tree_dev IS NULL OR tree_dev >= 0),
-	tree_inode INTEGER CHECK (tree_inode IS NULL OR tree_inode > 0),
-    available_at_ms INTEGER CHECK (available_at_ms IS NULL OR available_at_ms >= 0),
-	settled_run_id BLOB CHECK (settled_run_id IS NULL OR length(settled_run_id) = 16),
-    revision INTEGER NOT NULL CHECK (revision >= 1),
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
-    FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
-	FOREIGN KEY (settled_run_id, id, project_id, task_id, task_incarnation_id) REFERENCES runs(id, change_id, project_id, task_id, task_incarnation_id),
-	CHECK ((object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL) OR (object_format = 'sha1' AND length(base_commit) = 20 AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL) OR (object_format = 'sha256' AND length(base_commit) = 32 AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL)),
-	CHECK (
-		(phase = 'reserved' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
-		(phase = 'prepared' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
-		(phase = 'available' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NULL) OR
-		(phase = 'retained' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NOT NULL) OR
-		(phase = 'abandoned' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NOT NULL)
-	)
-) STRICT, WITHOUT ROWID`
-	v8HumanRequests = `CREATE TABLE human_requests (
+	v14UserVersion      = 14
+	v8HumanRequests     = `CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
     idempotency_key BLOB NOT NULL CHECK (length(idempotency_key) = 16 AND idempotency_key <> zeroblob(16)),
@@ -390,7 +354,12 @@ func v11SchemaStatements() []string {
 // queued task carry no assigned agent (any eligible worker claims it at
 // admission) and requires an agent on every other status.
 func v12SchemaStatements() []string {
-	statements := v13SchemaStatements()
+	statements := make([]string, 0, len(schemaStatements)-1)
+	for _, statement := range schemaStatements {
+		if _, name := schemaObjectIdentity(statement); name != "terminal_diagnostics" {
+			statements = append(statements, statement)
+		}
+	}
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "tasks" {
 			statements[i] = v12Tasks
@@ -399,12 +368,12 @@ func v12SchemaStatements() []string {
 	return statements
 }
 
-// v13SchemaStatements is the exact schema before managed Git worktrees.
+// v13SchemaStatements is the exact schema before retained terminal diagnostics.
 func v13SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
-	for i, statement := range statements {
-		if _, name := schemaObjectIdentity(statement); name == "changes" {
-			statements[i] = v13Changes
+	statements := make([]string, 0, len(schemaStatements)-1)
+	for _, statement := range schemaStatements {
+		if _, name := schemaObjectIdentity(statement); name != "terminal_diagnostics" {
+			statements = append(statements, statement)
 		}
 	}
 	return statements
@@ -834,20 +803,16 @@ func migrateV12Transaction(ctx context.Context, connection *sql.Conn) error {
 	return validateSchemaVersion(ctx, connection, v13UserVersion, v13SchemaStatements())
 }
 
-// migrateV13Transaction replaces the Git-free tree facts of every Change with
-// the head column. Every row keeps its identity, phase, base, repository,
-// chronology, revision and settled run; no row gets a head, since none of
-// those trees is a worktree yet. Each is adopted, at its recorded base and
-// with its contents untouched, the next time it is reopened or read.
+// migrateV13Transaction adds the bounded retained terminal diagnostic table.
 func migrateV13Transaction(ctx context.Context, connection *sql.Conn) error {
 	if err := validateSchemaVersion(ctx, connection, v13UserVersion, v13SchemaStatements()); err != nil {
 		return err
 	}
-	columns := `id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit, repository_dev, repository_inode, prepared_at_ms, available_at_ms, settled_run_id, revision, created_at_ms, updated_at_ms`
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "changes", columns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "head_commit", "NULL"); err != nil {
-		return err
+	target := expectedSchemaOf(schemaStatements)
+	if _, err := connection.ExecContext(ctx, target["terminal_diagnostics"].sql); err != nil {
+		return fmt.Errorf("create terminal diagnostics: %w", err)
 	}
-	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v14UserVersion)); err != nil {
 		return err
 	}
 	return validateExactSchema(ctx, connection)

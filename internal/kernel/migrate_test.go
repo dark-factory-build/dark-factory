@@ -17,7 +17,7 @@ import (
 )
 
 func TestLegacyHomeMigratesAndKeepsEveryRow(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion} {
 		for _, persistWAL := range []bool{false, true} {
 			t.Run(fmt.Sprintf("v%d/wal=%v", version, persistWAL), func(t *testing.T) {
 				testLegacyHomeMigratesAndKeepsEveryRow(t, version, persistWAL)
@@ -348,12 +348,6 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 	if err := rebuildTable(ctx, connection, legacy, "tasks", taskColumnsFor, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	// Every version before v14 bound a Git-free tree by its manifest facts,
-	// which a prepared, available or retained row had to carry.
-	if err := rebuildTable(ctx, connection, legacy, "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
-		"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
-		t.Fatal(err)
-	}
 	if version < priorUserVersion {
 		if err := rebuildTable(ctx, connection, legacy, "browser_pairing_challenges", previousPairingChallengeColumns, "", "", ""); err != nil {
 			t.Fatal(err)
@@ -374,6 +368,9 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		}
 	}
 	downgrade := []string{fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	if version < userVersion {
+		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
+	}
 	if version < v7UserVersion {
 		downgrade = append([]string{"DROP TABLE peer_questions"}, downgrade...)
 	}
@@ -459,11 +456,6 @@ const testTaskColumns = `id, project_id, assigned_agent_id, incarnation_id, work
 
 const testTaskColumnsV5 = `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms`
 
-// testChangeColumns is the Change row every version has had, spelled here so
-// the fixture and its comparison cannot lose a column with the migration's
-// list. The v13 tree fact columns are added by the fixture and dropped by v14.
-const testChangeColumns = `id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit, repository_dev, repository_inode, prepared_at_ms, available_at_ms, settled_run_id, revision, created_at_ms, updated_at_ms`
-
 // testInvalidationColumns is the invalidation row every version has had,
 // spelled here so the fixture cannot lose a column with the migration's list.
 const testInvalidationColumns = `sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted`
@@ -508,9 +500,6 @@ func snapshotSchemaRows(t *testing.T, ctx context.Context, connection *sql.Conn,
 		}
 		if name == "human_requests" {
 			columns = "id, run_id, idempotency_key, kind, reason_code, question_text, status, delivery_id, delivery_started_at_ms, resolution_kind, closed_at_ms, revision, created_at_ms, updated_at_ms"
-		}
-		if name == "changes" {
-			columns = testChangeColumns
 		}
 		rows, err := connection.QueryContext(ctx, "SELECT "+columns+" FROM "+name+" ORDER BY 1")
 		if err != nil {
@@ -574,7 +563,7 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "ffe2ae3739c95f9594a45e45473bf10c51b5a63f5a5ec19176a5225a201c3fde"},
+		{"current", schemaStatements, "7849f6af0488ee10e084977e0e44455ca2858fe2b780c114953aace242315d94"},
 		{"v13", v13SchemaStatements(), "f38d4c5ac959eb2c3b23e3c0ace78faa1859201688cb12314c0c4fa721db56db"},
 		{"v12", v12SchemaStatements(), "78ff7808dc146c35383329f73c94559172e824e0b72484bc56db48291dbadefa"},
 		{"v11", v11SchemaStatements(), "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
@@ -599,7 +588,7 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 // that reaches inside the migration transaction: the two above are rejected by
 // the preflight, on its disposable copy, before any pool exists.
 func TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t, version)
 		})

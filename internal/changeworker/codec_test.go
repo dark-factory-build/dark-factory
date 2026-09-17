@@ -65,8 +65,7 @@ func TestRetainedConfigRoundTripPreservesExactPublicationAuthority(t *testing.T)
 // are empty, and a worker's may not be.
 func TestOrchestratorConfigCarriesNoChange(t *testing.T) {
 	config := configFixture(t)
-	config.Role, config.FinalName = kernel.RoleOrchestrator, ""
-	config.PreviousWorkingDirectory = "/private/previous-runtime-home/home"
+	config.Role, config.FinalName, config.StagingName = kernel.RoleOrchestrator, "", ""
 	encoded, err := EncodeConfig(config)
 	if err != nil {
 		t.Fatal(err)
@@ -82,9 +81,7 @@ func TestOrchestratorConfigCarriesNoChange(t *testing.T) {
 	withChange.Retained = &retained
 	worker := configFixture(t)
 	worker.FinalName = ""
-	workerWithHint := configFixture(t)
-	workerWithHint.PreviousWorkingDirectory = config.PreviousWorkingDirectory
-	for name, bad := range map[string]Config{"orchestrator with a name": named, "orchestrator with a retained tree": withChange, "worker without a name": worker, "worker with a previous-working-directory hint": workerWithHint} {
+	for name, bad := range map[string]Config{"orchestrator with a name": named, "orchestrator with a retained tree": withChange, "worker without a name": worker} {
 		if _, err := EncodeConfig(bad); !errors.Is(err, ErrInvalidContract) {
 			t.Fatalf("%s encoded: %v", name, err)
 		}
@@ -157,20 +154,12 @@ func TestResultRoundTripIsStrictBoundedAndPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Format != want.Format || got.Base.Hex() != want.Base.Hex() || got.Head == nil || got.Head.Hex() != want.Head.Hex() {
+	if got.Format != want.Format || got.Base.Hex() != want.Base.Hex() || !got.Commitment.Equal(want.Commitment) ||
+		got.EntryCount != want.EntryCount || got.BlobBytes != want.BlobBytes || !got.Tree.Equal(want.Tree) {
 		t.Fatal("round trip changed result")
 	}
-	// A Git-free Change has no head yet; the wire says so by omission.
-	legacy := Result{Format: want.Format, Base: want.Base}
-	encoded, err = EncodeResult(legacy)
-	if err != nil || strings.Contains(string(encoded), "head") {
-		t.Fatalf("headless result = %s, %v", encoded, err)
-	}
-	if got, err := DecodeResult(encoded); err != nil || got.Head != nil || got.Base.Hex() != want.Base.Hex() {
-		t.Fatalf("headless round trip = %+v, %v", got, err)
-	}
 	formatted := fmt.Sprintf("%v %+v %#v", want, want, want)
-	for _, private := range []string{want.Base.Hex(), want.Head.Hex()} {
+	for _, private := range []string{want.Base.Hex(), want.Commitment.Hex()} {
 		if strings.Contains(formatted, private) {
 			t.Fatalf("private result leaked: %q", formatted)
 		}
@@ -183,27 +172,20 @@ func TestResultRejectsOversizeUnknownTrailingMissingInvalidAndPartialJSON(t *tes
 		t.Fatal(err)
 	}
 	unknown := bytes.Replace(encoded, []byte{'{'}, []byte(`{"unknown":true,`), 1)
-	missingBase := bytes.Replace(encoded, []byte(`"base":"`+strings.Repeat("01", 20)+`",`), nil, 1)
-	if bytes.Equal(missingBase, encoded) {
-		t.Fatal("base fixture was not removed")
+	missingEntries := bytes.Replace(encoded, []byte(`,"entry_count":7`), nil, 1)
+	if bytes.Equal(missingEntries, encoded) {
+		t.Fatal("entry-count fixture was not removed")
 	}
 	invalidFormat := bytes.Replace(encoded, []byte(`"format":"sha1"`), []byte(`"format":"sha512"`), 1)
 	if bytes.Equal(invalidFormat, encoded) {
 		t.Fatal("format fixture was not replaced")
 	}
-	shortHead := bytes.Replace(encoded, []byte(`"head":"`+strings.Repeat("07", 20)+`"`), []byte(`"head":"`+strings.Repeat("07", 19)+`"`), 1)
-	if bytes.Equal(shortHead, encoded) {
-		t.Fatal("head fixture was not replaced")
-	}
-	upperHead := bytes.Replace(encoded, []byte(`"head":"`+strings.Repeat("07", 20)+`"`), []byte(`"head":"`+strings.Repeat("0A", 20)+`"`), 1)
 	for name, value := range map[string][]byte{
 		"oversize":         bytes.Repeat([]byte{' '}, ResultLimit+1),
 		"unknown field":    unknown,
 		"trailing data":    append(bytes.Clone(encoded), []byte(`{}`)...),
-		"missing required": missingBase,
+		"missing required": missingEntries,
 		"invalid format":   invalidFormat,
-		"short head":       shortHead,
-		"upper-case head":  upperHead,
 		"partial":          bytes.Clone(encoded[:len(encoded)-1]),
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -222,9 +204,9 @@ func TestConfigRejectsMalformedRetainedChangeJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	malformed := bytes.Replace(encoded, []byte(`"head":"`+strings.Repeat("07", 20)+`"`), []byte(`"head":"not-a-commit"`), 1)
+	malformed := bytes.Replace(encoded, []byte(`"tree":{"device":21,"inode":22}`), []byte(`"tree":{"device":21,"inode":0}`), 1)
 	if bytes.Equal(malformed, encoded) {
-		t.Fatal("retained head fixture was not replaced")
+		t.Fatal("retained tree fixture was not replaced")
 	}
 	if _, err := DecodeConfig(malformed); !errors.Is(err, ErrInvalidContract) {
 		t.Fatalf("malformed retained Change accepted: %v", err)
@@ -239,13 +221,6 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { v.Provider, v.Model = kernel.ProviderCodex, "model\x00suffix" },
 		func(v *Config) { v.ReasoningEffort = strings.Repeat("x", 33) },
 		func(v *Config) { v.RuntimeIdentity = runner.FileIdentity{} },
-		func(v *Config) { v.AgentID = "" },
-		func(v *Config) { v.TaskIncarnationID = "" },
-		func(v *Config) { v.AgentID = strings.Repeat("x", maximumSessionKeyPartBytes+1) },
-		func(v *Config) { v.PreviousWorkingDirectory = "/private/previous" }, // worker carrying an orchestrator-only hint
-		func(v *Config) { // and, for an otherwise-valid orchestrator, a malformed one
-			v.Role, v.FinalName, v.PreviousWorkingDirectory = kernel.RoleOrchestrator, "", "relative"
-		},
 		func(v *Config) { v.RepositoryRoot = "relative" },
 		func(v *Config) { v.FactoryctlExecutable = "" },
 		func(v *Config) { v.FactoryctlExecutable = "relative/factoryctl" },
@@ -259,9 +234,7 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 		func(v *Config) { v.ToolchainReadRoots = v.RepositoryRoot },
 		func(v *Config) { v.Provider, v.ReasoningEffort = kernel.ProviderCodex, "speculative" },
 		func(v *Config) { v.FinalName = ".GiT" },
-		func(v *Config) { v.GitCommonDir = "/private/other/.git" },
-		func(v *Config) { v.GitCommonDir = v.RepositoryRoot },
-		func(v *Config) { v.GitCommonDir = "" },
+		func(v *Config) { v.StagingName = v.FinalName },
 		func(v *Config) { v.AttemptSocket = "/" + strings.Repeat("s", install.MaxSocketPathBytes) },
 		func(v *Config) { v.ProviderTask = []byte{0xff} },
 		func(v *Config) { v.ProviderTask = []byte{'x', 0} },
@@ -292,7 +265,7 @@ func configFixture(t testing.TB) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, AgentID: "agent-fixture", TaskIncarnationID: "incarnation-fixture", RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", ToolchainReadRoots: "/opt/software/node:/opt/software/go", LocalCILeaseDir: "/private/repository/.git/dark-factory-local-ci", AccountHome: "/private/account", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, GitCommonDir: "/private/repository/.git", Revision: "main", ChangeParent: "/private/changes", FinalName: "change", AttemptSocket: "/private/api.sock", ProviderTask: []byte("printf exact")}
+	return Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", ToolchainReadRoots: "/opt/software/node:/opt/software/go", LocalCILeaseDir: "/private/repository/.git/dark-factory-local-ci", AccountHome: "/private/account", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, Revision: "main", ChangeParent: "/private/changes", FinalName: "change", StagingName: ".change.stage", AttemptSocket: "/private/api.sock", ProviderTask: []byte("printf exact")}
 }
 
 func resultFixture(t testing.TB) Result {
@@ -305,9 +278,21 @@ func resultFixture(t testing.TB) Result {
 	if err != nil {
 		t.Fatal(err)
 	}
-	head, err := change.NewObjectID(format, bytes.Repeat([]byte{7}, format.OIDLength()))
+	commitment, err := change.ParseCommitment(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Result{Format: format, Base: base, Head: &head}
+	return Result{
+		Format: format, Base: base, Commitment: commitment,
+		EntryCount: 7, BlobBytes: 99, Tree: mustStage(t, 21, 22),
+	}
+}
+
+func mustStage(t testing.TB, device, inode uint64) change.StageIdentity {
+	t.Helper()
+	result, err := change.NewStageIdentity(device, inode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }

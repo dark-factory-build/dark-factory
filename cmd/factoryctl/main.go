@@ -53,7 +53,7 @@ const (
   factoryctl attempt send-back --task ID --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
   factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
-  factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
+  factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel]
   factoryctl overseer task send-back --task ID --note TEXT
   factoryctl overseer agent pause|resume|archive|restore --agent ID --revision REVISION
   factoryctl overseer worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
@@ -199,7 +199,6 @@ type attemptCommand struct {
 	archived        bool
 	archiveSet      bool
 	cancel          bool
-	retry           bool
 }
 
 func main() {
@@ -1195,14 +1194,6 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			index++
 			continue
 		}
-		if name == "--retry" && command.kind == commandOverseerTaskUpdate {
-			if seen[name] {
-				return attemptCommand{}, false, false
-			}
-			seen[name], command.retry = true, true
-			index++
-			continue
-		}
 		if index+1 >= len(args) || seen[name] {
 			return attemptCommand{}, false, false
 		}
@@ -1305,7 +1296,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandOverseerTaskUpdate:
-		if command.id == "" || command.expectedRevision == 0 || command.retry && (command.agent == "" || command.title != "" || command.bodySet || command.prioritySet || command.cancel) || !command.retry && !command.cancel && command.agent == "" && command.title == "" && !command.bodySet && !command.prioritySet {
+		if command.id == "" || command.expectedRevision == 0 || !command.cancel && command.agent == "" && command.title == "" && !command.bodySet && !command.prioritySet {
 			return attemptCommand{}, false, false
 		}
 	case commandOverseerTaskSendBack:
@@ -1694,7 +1685,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
 	case commandOverseerTaskUpdate:
-		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry}
+		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel}
 		if command.title != "" {
 			input.Title = &command.title
 		}

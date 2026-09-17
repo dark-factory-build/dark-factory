@@ -68,24 +68,23 @@ acceptance criteria. A send-back replaces the previous feedback; use its note
 for the latest findings or pointers, not enduring requirements. See
 [the queued correction procedure](development/OVERSEER.md).
 
-`--role orchestrator` names an overseer. A worker's run makes a Change of
-the project, a linked Git worktree on the Change's branch, and works there;
-an orchestrator's run binds no Change and is given its private runtime home
-as its working directory. It requests a worker's settled Change explicitly
-with `factoryctl attempt source --task TASK_ID`. The daemon checks that target
-task in the authenticated attempt's same project, requires its current settled
-retained Change (including blocked, failed, or cancelled outcomes), verifies
-the worktree is still at the settled head, and returns the Change ID, base
-commit, `head_commit`, `branch`, target task ID, task work revision, current
-Change revision, the worktree as `source_path`, the repository's Git directory
-as `git_directory`, and whether the worktree holds uncommitted work. The
-branch head is the work: read it with `git --git-dir=$git_directory`. An
-accepted response without that receipt is unusable; never reconstruct a path
-or select a project-latest tree. A Codex orchestrator's local commands are
-granted the repository's Git directory read-only; they do not receive the
-daemon database, the Changes parent, or the daemon home. A later work
-revision or Change revision, or a branch that moved since settlement, is
-refused.
+`--role orchestrator` names an overseer. A worker's run materializes a Change
+of the project and works there; an orchestrator's run binds no Change and is
+given its private runtime home as its working directory. It requests a worker
+tree explicitly with `factoryctl attempt source --task TASK_ID`. The daemon
+checks that target task in the authenticated attempt's same project, requires
+its current settled retained Change (including blocked, failed, or cancelled
+outcomes), materializes one private read-only snapshot, and returns the Change ID, base commit, target task ID, task work
+revision, current Change revision and daemon-derived `source_path`. An accepted
+response without that receipt is unusable; never reconstruct a path or select a
+project-latest tree. A Codex launch receives read access only to the private
+per-run retained-source root, while the daemon creates only the requested exact
+child. It does not receive the daemon database, the Changes parent, or the
+daemon home. A later work revision or Change revision is refused against an
+older materialization and requires a fresh launch profile. The
+daemon drains admitted source materialization before shutting down and
+removing the run's private retained-source directory, so cleanup cannot race a
+source handoff.
 overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
 with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
 the fixed tool path, as its one MCP server; a Claude Code worker is launched
@@ -124,76 +123,7 @@ The launch arguments are defined in `internal/provider/provider.go` and guarded
 by the exact-argv checks in `internal/provider/provider_darwin_test.go`. The
 configuration and capability boundaries are described below.
 
-### Native session persistence
-
-A worker's Claude Code launch adds `--session-id UUID` or `--resume UUID`
-right after `--dangerously-skip-permissions`. The CLI keys a conversation's
-own transcript by the exact launch directory under its effective
-configuration directory (`<config-home>/projects/<escaped-cwd>/<uuid>.jsonl`):
-`HOME/.claude` by default, or a linked account's own directory when one is
-selected, exactly the directory the launch environment names
-`CLAUDE_CONFIG_DIR` (`claudeConfigHome` in `internal/provider/provider.go` is
-the one place this is computed, shared by the launch environment and by
-session discovery so they can never disagree); a worker's launch directory is
-its task incarnation's Change worktree, which a send-back retry reuses (see
-`internal/kernel/change.go`), so the same UUID keeps a correction in the same
-native conversation instead of a fresh one that only repeats the brief. The
-UUID is derived (UUID v5, RFC 4122) from provider, agent ID and
-task incarnation ID, so no extra state records which session belongs to which
-task, and `--resume` is chosen only when that exact transcript file already
-exists on disk; a first attempt, or a transcript past the shared rotation
-ceiling in `internal/provider/provider.go` (`nativeSessionRotateBytes`), gets
-a fresh `--session-id` instead. This does not apply to a Claude Code
-orchestrator launch: its working directory is a fresh runtime root on every
-run (see `internal/daemon/supervisor_darwin.go` and
-`internal/changeworker/worker_darwin.go`), so no chosen ID could ever be found
-again; giving the orchestrator role a stable per-agent working directory
-across runs is a separate, larger change, so a Claude orchestrator's launch
-argv is unaffected.
-
-Codex offers no way to choose or name a session's ID at creation (no
-`--session-id`/`--name` flag or config key on `codex`, `codex exec`, or any
-subcommand), so a Codex worker or orchestrator launch instead discovers an
-already-recorded session and resumes it with a leading `codex resume
-SESSION_ID` (all of it added before the same `-c` overrides the launch always
-carries; `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` accepts every one of
-them identically to bare `codex`, confirmed from its own `--help`). Every
-launch also carries the supported `tui.resume_cwd="current"` override. This
-binds an explicit resume to the current daemon-authorized attempt directory,
-so a session recorded by an earlier runtime cannot stop at Codex's interactive
-working-directory chooser. Codex's
-own rollout files live under `CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`,
-bucketed by wall-clock date rather than launch directory; each one's first
-JSON line records `payload.cwd` and `payload.id` (the resumable session id;
-for an ordinary, non-subagent Dark Factory launch this equals the filename's
-own trailing UUID and Codex's `session_id`, so a rollout's own filename is
-never trusted alone). `codexSessionSelection` walks day directories newest
-first, bounded to the newest 30 days (`maxCodexScanDays`), and within a day
-reads only each rollout's bounded first line looking for the newest one whose
-`cwd` matches; the newest match is resumed while under the same
-`nativeSessionRotateBytes` ceiling, otherwise the launch is a fresh one
-(unchanged argv), never falling back to an older, smaller match for the same
-cwd. A worker's launch cwd is its retained Change worktree (as for Claude),
-so a send-back retry finds its own rollout directly. An orchestrator's launch
-cwd is a fresh runtime root every run like Claude's, but `codex resume
-SESSION_ID` does not require the resuming launch's own cwd to match (cwd
-filtering is a convenience of the interactive picker and `--last`, which
-`resume --all` exists to disable; an explicit SESSION_ID resolves regardless
-of cwd), so Build instead searches by `previousWorkingDirectory`: the same
-agent's most recently terminal run's own working directory. That path is
-found from `kernel.Store.LatestTerminalRuntimeRoot`, a minimal read joining
-`runs` and `resources` for the newest terminal run's `runtime_root` resource
-path (retained in that row after release, so it stays readable long after the
-directory itself is reclaimed), joined with `changeworker.HomeName`
-(`.../home`, the exact directory Codex was launched in) and threaded through
-`changeworker.Config.PreviousWorkingDirectory` and
-`provider.Request.WithPreviousWorkingDirectory`. This is how an overseer's
-distinct standing tasks share one continuing Codex context despite each one's
-own fresh runtime root. A first-ever orchestrator run, or one whose prior
-Codex session cannot be found, launches unaffected, the same as a worker's
-first attempt.
-
-Codex receives the daemon-authorized Change worktree as an invocation-only
+Codex receives the daemon-authorized Change directory as an invocation-only
 project override with `trust_level="untrusted"`. This suppresses Codex's
 interactive directory-trust screen while explicitly refusing project-local
 configuration and hooks; the directory is never persisted in Codex config and
@@ -218,14 +148,6 @@ temp exceptions. An optional startup `--toolchain-read-roots` path list adds
 read-only access to exact installed software directories (for example one
 Node installation including its Corepack libraries, or one Go `libexec`).
 This is not inferred from PATH and does not pin every child executable.
-With the default Darwin tool path, factoryd derives the pinned Node
-`v22.20.0` bin directory, Cargo's bin directory, a pinned Homebrew Go's
-canonical `libexec/bin` directory, and the selected account's Rustup metadata
-when those canonical directories exist. The Homebrew `opt`/`Cellar` symlink
-chain is outside the sandbox's read grant, so the tool path uses the
-resolved `libexec/bin` directly rather than the usual `/opt/homebrew/bin`
-entry point. An explicit `--tool-path` or `--toolchain-read-roots` remains
-authoritative.
 The paths must be canonical existing directories owned by the daemon user,
 or the exact root-owned `/Library/Developer/CommandLineTools` installation,
 not writable by other users,
@@ -370,7 +292,8 @@ factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5
 
 Use the current agent revision from `factoryctl status`. The update refuses a stale revision or unsupported provider controls. An already admitted run keeps its model and effort. Omitting effort clears the explicit override for future runs.
 
-Every provider's local commands get the same Git identity for commits on the
-Change branch, `Dark Factory Worker <worker@darkfactory.build>`, with no
-credential helper, SSH command, prompt or `gh` configuration: a worker can
-commit, and only the Maintainer App publishes.
+Retained source snapshots currently require the Codex read-only local-command
+filesystem boundary. Claude and shell source requests return unavailable until
+their launch provides equivalent protection; this does not restrict peer
+communication or ordinary task execution. Do not substitute a mutable private
+copy or claim cross-provider source access is delivered.

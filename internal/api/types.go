@@ -511,52 +511,22 @@ type OverseerSnapshot struct {
 	Handoffs       []RetainedChangeHandoff `json:"retained_change_handoffs"`
 }
 
-// RetainedChangeHandoff identifies one settled worker Change by its Git
-// identities: the branch its worktree is on, the base it started from and
-// the head the daemon settled it at. Consumers must reject it when any
-// revision no longer matches their status snapshot. Overseer status carries
-// only the identities; attempt source adds where to read them.
+// RetainedChangeHandoff identifies one server-observed tree.  Consumers must
+// reject it when any revision no longer matches their status snapshot.
 type RetainedChangeHandoff struct {
-	ChangeID   string `json:"change_id"`
-	BaseCommit string `json:"base_commit"`
-	// HeadCommit is the settled tip of Branch, the exact head to review and
-	// publish. It is empty for a Change that is still a Git-free tree.
-	HeadCommit       string `json:"head_commit"`
-	Branch           string `json:"branch"`
+	ChangeID         string `json:"change_id"`
+	BaseCommit       string `json:"base_commit"`
 	TaskID           string `json:"task_id"`
 	TaskWorkRevision uint64 `json:"task_work_revision"`
 	ChangeRevision   uint64 `json:"change_revision"`
-	// SourcePath is the Change's worktree and GitDirectory the project
-	// repository's Git directory its commits live in; both are set only by
-	// an explicit attempt source request. Dirty reports uncommitted work in
-	// the worktree at that moment.
-	SourcePath   string `json:"source_path"`
-	GitDirectory string `json:"git_directory"`
-	Dirty        bool   `json:"dirty"`
+	// SourcePath is the one daemon-derived retained tree this status record
+	// describes. It is usable only when the launch profile granted that exact
+	// path; consumers must refresh status after any revision change.
+	SourcePath string `json:"source_path"`
 }
 
 func validRetainedChangeHandoff(handoff RetainedChangeHandoff) bool {
-	return validID(handoff.ChangeID) && validID(handoff.TaskID) && validCommitHex(handoff.BaseCommit) && (handoff.HeadCommit == "" || len(handoff.HeadCommit) == len(handoff.BaseCommit) && validCommitHex(handoff.HeadCommit)) &&
-		(handoff.Branch == "" || handoff.Branch == "factory/"+handoff.ChangeID[:12]) && handoff.TaskWorkRevision != 0 && handoff.ChangeRevision != 0 &&
-		(handoff.SourcePath == "" || validHandoffSourcePath(handoff.SourcePath, handoff.ChangeID)) && (handoff.GitDirectory == "" || validHandoffGitDirectory(handoff.GitDirectory))
-}
-
-// validSourceHandoff is the attempt source reply: every identity and every
-// location present.
-func validSourceHandoff(handoff RetainedChangeHandoff) bool {
-	return validRetainedChangeHandoff(handoff) && handoff.HeadCommit != "" && handoff.Branch != "" && handoff.SourcePath != "" && handoff.GitDirectory != ""
-}
-
-func validCommitHex(value string) bool {
-	if len(value) != 40 && len(value) != 64 {
-		return false
-	}
-	for _, character := range value {
-		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
-			return false
-		}
-	}
-	return true
+	return validID(handoff.ChangeID) && validID(handoff.TaskID) && (len(handoff.BaseCommit) == 40 || len(handoff.BaseCommit) == 64) && handoff.TaskWorkRevision != 0 && handoff.ChangeRevision != 0 && validHandoffSourcePath(handoff.SourcePath, handoff.ChangeID)
 }
 
 type OverseerIntervention struct {
@@ -648,7 +618,6 @@ type OverseerTaskUpdateInput struct {
 	Priority         *int64  `json:"priority,omitempty"`
 	AssignedAgentID  *string `json:"assigned_agent_id,omitempty"`
 	Cancel           bool    `json:"cancel,omitempty"`
-	Retry            bool    `json:"retry,omitempty"`
 }
 
 type OverseerAgentUpdateInput struct {

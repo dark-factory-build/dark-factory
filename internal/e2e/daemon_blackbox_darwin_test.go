@@ -247,10 +247,7 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 	factoryd := requiredExecutable(t, "DARK_FACTORY_E2E_FACTORYD")
 	factoryctl := requiredExecutable(t, "DARK_FACTORY_E2E_FACTORYCTL")
 	requiredExecutable(t, "DARK_FACTORY_E2E_RUNNER")
-	// Short prefix: a runner binds takeover.sock inside a runtime directory,
-	// and a run's 32-character name plus that basename has to stay inside the
-	// same sun_path budget as the local API socket.
-	root, err := os.MkdirTemp("/private/tmp", "df-e2e-")
+	root, err := os.MkdirTemp("/private/tmp", "dark-factory-daemon-e2e-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,13 +260,8 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 		t.Fatal(err)
 	}
 	fixture := &blackBoxFixture{root: root, home: filepath.Join(root, "factory"), repo: filepath.Join(root, "repo"), factoryd: factoryd, factoryctl: factoryctl}
-	for _, socket := range []string{
-		install.LocalAPISocketPath(fixture.home),
-		filepath.Join(install.RuntimesPath(fixture.home), strings.Repeat("0", 32), runner.TakeoverSocketName),
-	} {
-		if len(socket) > install.MaxSocketPathBytes {
-			t.Fatalf("socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
-		}
+	if socket := install.LocalAPISocketPath(fixture.home); len(socket) > install.MaxSocketPathBytes {
+		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
 	}
 	if err := os.Mkdir(fixture.repo, 0o700); err != nil {
 		t.Fatal(err)

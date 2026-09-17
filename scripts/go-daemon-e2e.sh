@@ -39,5 +39,5 @@ export DARK_FACTORY_E2E_FACTORYD="$e2e_root/factoryd"
 export DARK_FACTORY_E2E_FACTORYCTL="$e2e_root/factoryctl"
 export DARK_FACTORY_E2E_RUNNER="$e2e_root/factory-runner"
 
-"$go" test -v -timeout=10m -count=1 -p 1 -run 'TestBlackBoxDaemonLifecycle|TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider' ./internal/e2e
+"$go" test -timeout=5m -count=1 -p 1 -run TestBlackBoxDaemonLifecycle ./internal/e2e
 echo "go-daemon-e2e: PASS"

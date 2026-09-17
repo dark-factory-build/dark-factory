@@ -106,12 +106,12 @@ func TestOverseerSnapshotContinuationRequiresTaskForText(t *testing.T) {
 
 func TestOverseerSnapshotRequiresAnExactSourcePathForEachHandoff(t *testing.T) {
 	project := strings.Repeat("1", 32)
-	handoff := RetainedChangeHandoff{ChangeID: strings.Repeat("2", 32), BaseCommit: strings.Repeat("a", 40), TaskID: strings.Repeat("3", 32), TaskWorkRevision: 1, ChangeRevision: 1}
+	handoff := RetainedChangeHandoff{ChangeID: strings.Repeat("2", 32), BaseCommit: strings.Repeat("a", 40), TaskID: strings.Repeat("3", 32), TaskWorkRevision: 1, ChangeRevision: 1, SourcePath: "/private/runtime/retained-source/22222222222222222222222222222222"}
 	snapshot := OverseerSnapshot{ProjectID: project, Head: 1, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []OverseerIntervention{}, Handoffs: []RetainedChangeHandoff{handoff}}
 	if _, err := NewOverseerSnapshotReply(snapshot); err != nil {
-		t.Fatalf("identity-only handoff rejected: %v", err)
+		t.Fatalf("exact handoff rejected: %v", err)
 	}
-	for _, source := range []string{"relative", "/private/factory/changes/../other", "/private/factory/changes/44444444444444444444444444444444"} {
+	for _, source := range []string{"", "relative", "/private/factory/changes/../other", "/private/factory/changes/44444444444444444444444444444444"} {
 		invalid := snapshot
 		invalid.Handoffs = append([]RetainedChangeHandoff(nil), snapshot.Handoffs...)
 		invalid.Handoffs[0].SourcePath = source

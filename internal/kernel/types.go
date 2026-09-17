@@ -7,13 +7,15 @@ import (
 )
 
 const (
-	IDBytes              = 16
-	DigestBytes          = 32
-	EventRetentionLimit  = 4096
-	SnapshotEntityLimit  = 4096
-	MaxFactoryCapacity   = 1024
-	MaxRecoveryRuns      = 64
-	MaxRecoveryResources = 16
+	IDBytes                = 16
+	DigestBytes            = 32
+	EventRetentionLimit    = 4096
+	SnapshotEntityLimit    = 4096
+	MaxFactoryCapacity     = 1024
+	MaxChangeTreeEntries   = 10_000
+	MaxChangeTreeBlobBytes = 1 << 30
+	MaxRecoveryRuns        = 64
+	MaxRecoveryResources   = 16
 )
 
 type identifier struct {
@@ -176,6 +178,7 @@ func (d digest) Bytes() []byte {
 
 type AttemptDigest struct{ digest }
 type ResultProofDigest struct{ digest }
+type TreeDigest struct{ digest }
 type BirthDigest struct{ digest }
 
 func AttemptDigestFromBytes(value []byte) (AttemptDigest, error) {
@@ -188,6 +191,11 @@ func ResultProofDigestFromBytes(value []byte) (ResultProofDigest, error) {
 	return ResultProofDigest{d}, err
 }
 
+func TreeDigestFromBytes(value []byte) (TreeDigest, error) {
+	d, err := digestFromBytes(value)
+	return TreeDigest{d}, err
+}
+
 func BirthDigestFromBytes(value []byte) (BirthDigest, error) {
 	d, err := digestFromBytes(value)
 	return BirthDigest{d}, err
@@ -195,6 +203,7 @@ func BirthDigestFromBytes(value []byte) (BirthDigest, error) {
 
 func (d AttemptDigest) Bytes() []byte     { return d.digest.Bytes() }
 func (d ResultProofDigest) bytes() []byte { return d.digest.Bytes() }
+func (d TreeDigest) Bytes() []byte        { return d.digest.Bytes() }
 func (d BirthDigest) Bytes() []byte       { return d.digest.Bytes() }
 
 type BrowserChallengeDigest struct{ digest }

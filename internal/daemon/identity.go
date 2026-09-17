@@ -146,6 +146,9 @@ func attemptDigest(value api.AttemptDigest) (kernel.AttemptDigest, error) {
 }
 
 func kernelSelectionCheckpoint(result changeworker.Result, repository change.RepositoryIdentity) (kernel.ChangeSelection, error) {
+	if result.EntryCount > math.MaxUint32 {
+		return kernel.ChangeSelection{}, errInvalidContract
+	}
 	format, err := kernel.NewObjectFormat(result.Format.Name())
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
@@ -154,73 +157,75 @@ func kernelSelectionCheckpoint(result changeworker.Result, repository change.Rep
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
+	digest, err := kernel.TreeDigestFromBytes(result.Commitment.Bytes())
+	if err != nil {
+		return kernel.ChangeSelection{}, errInvalidContract
+	}
 	repositoryFile, err := changeFileIdentity(repository.Device(), repository.Inode())
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
-	selection, err := kernel.NewChangeSelection(format, commit, repositoryFile)
+	selection, err := kernel.NewChangeSelection(format, commit, digest, uint32(result.EntryCount), result.BlobBytes, repositoryFile)
 	if err != nil {
 		return kernel.ChangeSelection{}, errInvalidContract
 	}
 	return selection, nil
 }
 
-// retainedWorkerCheckpoint reverses the durable facts of an available
-// Change into the worker's reopen contract: its base and, unless the Change
-// is still a Git-free tree, the branch head the daemon last recorded.
 func retainedWorkerCheckpoint(value kernel.Change) (*changeworker.Result, change.RepositoryIdentity, error) {
-	if value.Phase != kernel.ChangeAvailable || value.Selection == nil {
+	if value.Phase != kernel.ChangeAvailable || value.Selection == nil || value.TreeIdentity == nil {
 		return nil, change.RepositoryIdentity{}, errInvalidContract
 	}
-	format, base, err := changeCommit(value.Selection.Commit())
+	format, base, tree, err := inspectPublishedArguments(*value.Selection, *value.TreeIdentity)
 	if err != nil {
 		return nil, change.RepositoryIdentity{}, err
 	}
-	result := &changeworker.Result{Format: format, Base: base}
-	if value.HeadCommit != nil {
-		_, head, err := changeCommit(*value.HeadCommit)
-		if err != nil {
-			return nil, change.RepositoryIdentity{}, err
-		}
-		result.Head = &head
-	}
-	repository, err := changeRepositoryIdentity(value.Selection.RepositoryIdentity())
+	commitment, err := change.ParseCommitment(value.Selection.Commitment().Bytes())
 	if err != nil {
-		return nil, change.RepositoryIdentity{}, err
+		return nil, change.RepositoryIdentity{}, errInvalidContract
 	}
-	return result, repository, nil
+	repositoryIdentity := value.Selection.RepositoryIdentity()
+	repository, err := change.NewRepositoryIdentity(uint64(repositoryIdentity.Device()), uint64(repositoryIdentity.Inode()))
+	if err != nil {
+		return nil, change.RepositoryIdentity{}, errInvalidContract
+	}
+	return &changeworker.Result{
+		Format: format, Base: base, Commitment: commitment,
+		EntryCount: uint64(value.Selection.EntryCount()), BlobBytes: value.Selection.TotalBytes(), Tree: tree,
+	}, repository, nil
 }
 
-func changeCommit(commit kernel.CommitID) (change.ObjectFormat, change.ObjectID, error) {
-	format, err := change.NewObjectFormat(commit.Format().String())
-	if err != nil {
-		return 0, change.ObjectID{}, errInvalidContract
+func retainedWorkerCheckpointsMatch(value kernel.Change, selection kernel.ChangeSelection, tree kernel.FileIdentity, availability kernel.ChangeAvailability) bool {
+	if value.Selection == nil || value.TreeIdentity == nil {
+		return false
 	}
-	id, err := change.NewObjectID(format, commit.Bytes())
-	if err != nil {
-		return 0, change.ObjectID{}, errInvalidContract
-	}
-	return format, id, nil
+	stored := *value.Selection
+	return stored.ObjectFormat() == selection.ObjectFormat() && bytes.Equal(stored.Commit().Bytes(), selection.Commit().Bytes()) && stored.Commitment() == selection.Commitment() &&
+		stored.EntryCount() == selection.EntryCount() && stored.TotalBytes() == selection.TotalBytes() && stored.RepositoryIdentity() == selection.RepositoryIdentity() &&
+		*value.TreeIdentity == tree && stored.Commitment() == availability.Commitment() && stored.EntryCount() == availability.EntryCount() && stored.TotalBytes() == availability.TotalBytes() && tree == availability.TreeIdentity()
 }
 
-func kernelCommit(id change.ObjectID) (kernel.CommitID, error) {
-	format, err := kernel.NewObjectFormat(id.Format().Name())
-	if err != nil {
-		return kernel.CommitID{}, errInvalidContract
-	}
-	commit, err := kernel.NewCommitID(format, id.Bytes())
-	if err != nil {
-		return kernel.CommitID{}, errInvalidContract
-	}
-	return commit, nil
+func kernelStageIdentity(identity change.StageIdentity) (kernel.FileIdentity, error) {
+	return changeFileIdentity(identity.Device(), identity.Inode())
 }
 
-func changeRepositoryIdentity(identity kernel.FileIdentity) (change.RepositoryIdentity, error) {
-	repository, err := change.NewRepositoryIdentity(uint64(identity.Device()), uint64(identity.Inode()))
-	if err != nil {
-		return change.RepositoryIdentity{}, errInvalidContract
+func kernelAvailability(facts change.TreeFacts) (kernel.ChangeAvailability, error) {
+	if facts.EntryCount() > math.MaxUint32 {
+		return kernel.ChangeAvailability{}, errInvalidContract
 	}
-	return repository, nil
+	digest, err := kernel.TreeDigestFromBytes(facts.Commitment().Bytes())
+	if err != nil {
+		return kernel.ChangeAvailability{}, errInvalidContract
+	}
+	source, err := changeFileIdentity(facts.Identity().Device(), facts.Identity().Inode())
+	if err != nil {
+		return kernel.ChangeAvailability{}, err
+	}
+	result, err := kernel.NewChangeAvailability(digest, uint32(facts.EntryCount()), facts.BlobBytes(), source)
+	if err != nil {
+		return kernel.ChangeAvailability{}, errInvalidContract
+	}
+	return result, nil
 }
 
 func changeFileIdentity(device, inode uint64) (kernel.FileIdentity, error) {
@@ -233,6 +238,27 @@ func changeFileIdentity(device, inode uint64) (kernel.FileIdentity, error) {
 		return kernel.FileIdentity{}, errInvalidContract
 	}
 	return result, nil
+}
+
+// inspectPublishedArguments reverses the durable facts needed by
+// change.InspectPublished without recovering any path from process memory.
+func inspectPublishedArguments(selection kernel.ChangeSelection, stage kernel.FileIdentity) (change.ObjectFormat, change.ObjectID, change.StageIdentity, error) {
+	format, err := change.NewObjectFormat(selection.ObjectFormat().String())
+	if err != nil {
+		return 0, change.ObjectID{}, change.StageIdentity{}, errInvalidContract
+	}
+	base, err := change.NewObjectID(format, selection.Commit().Bytes())
+	if err != nil {
+		return 0, change.ObjectID{}, change.StageIdentity{}, errInvalidContract
+	}
+	if stage.Device() < 0 || stage.Inode() <= 0 {
+		return 0, change.ObjectID{}, change.StageIdentity{}, errInvalidContract
+	}
+	identity, err := change.NewStageIdentity(uint64(stage.Device()), uint64(stage.Inode()))
+	if err != nil {
+		return 0, change.ObjectID{}, change.StageIdentity{}, errInvalidContract
+	}
+	return format, base, identity, nil
 }
 
 func (e contractError) Error() string    { return "daemon: invalid private contract" }

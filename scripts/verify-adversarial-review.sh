@@ -142,10 +142,8 @@ allowed=0
 blocked=0
 considered=0
 findings=$(mktemp "${TMPDIR:-/tmp}/df-review-findings.XXXXXX")
-blocked_records=$(mktemp "${TMPDIR:-/tmp}/df-review-blocks.XXXXXX")
-corrections=$(mktemp "${TMPDIR:-/tmp}/df-review-corrections.XXXXXX")
-trap 'rm -f "$findings" "$blocked_records" "$corrections"' EXIT
-trap 'rm -f "$findings" "$blocked_records" "$corrections"; exit 130' HUP INT TERM
+trap 'rm -f "$findings"' EXIT
+trap 'rm -f "$findings"; exit 130' HUP INT TERM
 
 # `|| [ -n "$line" ]` keeps the final record when the file has no trailing
 # newline. Without it `read` returns non-zero and the loop body never runs for
@@ -179,29 +177,8 @@ while IFS= read -r line || [ -n "$line" ]; do
 
     case $verdict in
         allow) allowed=$((allowed + 1)) ;;
-        block)
-            operation_id=$(printf '%s\n' "$field_body" | sed -n 's/.*dark-factory-operation:\([0-9a-f-][0-9a-f-]*\):.*/\1/p' | tail -1)
-            printf '%s\t%s\n' "$head_sha" "$operation_id" >>"$blocked_records"
-            ;;
+        block) blocked=$((blocked + 1)) ;;
     esac
-
-    if [ "$verdict" = allow ]; then
-        # A same-head correction must be the exact text the App renders
-        # directly after its own verdict line -- marked_body puts the
-        # verdict line, then (only when the request named one) the
-        # correction line, then the operation marker, each separated by one
-        # newline; the projection this gate reads flattens every newline in
-        # the body to one space (.github/workflows/ci.yml's
-        # `gsub("[\n\r\t]"; " ")`), so the App-rendered sequence arrives
-        # here as one contiguous, single-space-joined run. Requiring that
-        # exact run -- not merely a correction line present anywhere in the
-        # body -- is the same App-rendered-text trust `verdict` above
-        # already rests on, checked positionally too because this gate has
-        # no journal access to ask the App directly.
-        sed -n "s/.*Dark-Factory-Review: allow $head_sha Dark-Factory-Review-Correction: \([0-9a-f-][0-9a-f-]*\) <!-- dark-factory-operation:.*/\1/p" <<EOF >>"$corrections"
-$field_body
-EOF
-    fi
 
     {
         printf '<details><summary><code>%s</code> — <code>%s</code></summary>\n\n' \
@@ -209,17 +186,6 @@ EOF
         printf '<pre>%s</pre>\n\n</details>\n\n' "$(bounded_html "$field_body")"
     } >>"$findings"
 done <"$reviews"
-
-# A correction is effective only for an App-rendered block with the exact
-# operation identity it names. Blocks without that identity (including
-# GitHub-native CHANGES_REQUESTED) remain conservative and cannot be cleared
-# by a second opinion.
-while IFS="${tab}" read -r blocked_head blocked_operation; do
-    [ "$blocked_head" = "$head_sha" ] || continue
-    if [ -z "$blocked_operation" ] || ! grep -F -x -- "$blocked_operation" "$corrections" >/dev/null; then
-        blocked=$((blocked + 1))
-    fi
-done <"$blocked_records"
 
 summary '### Adversarial review'
 summary ''

@@ -54,9 +54,8 @@ no commit, push, pull-request, or repository-publication operation.
 - Optional [operator-owned GitHub intake and release scheduling](docs/development/UNATTENDED.md) runs on the host. There is no public HTTP intake or in-runtime updater.
 
 Each project has agents and durable tasks. An admitted attempt gets a fresh
-provider process and a daemon-owned Change: a linked Git worktree of the
-project on its own branch. The browser and CLI remain clients of the same
-local API; neither owns lifecycle or policy.
+provider process and a daemon-owned `.git`-free Change. The browser and CLI
+remain clients of the same local API; neither owns lifecycle or policy.
 
 Fresh Changes use `factoryd --base-revision HEAD` by default: a branch with a
 configured remote upstream is fetched before its exact commit is selected.

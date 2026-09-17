@@ -11,121 +11,72 @@ func TestChangePreparedAndAvailableAreExactReplayableCheckpoints(t *testing.T) {
 	store, change := ownedReservedChange(t)
 	defer store.Close()
 	selection := testChangeSelection(t)
-	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, selection, mustTime(t, 10))
-	if err != nil || prepared.Phase != ChangePrepared || prepared.Revision.Int64() != 2 || prepared.Selection == nil || prepared.HeadCommit != nil {
+	tree, _ := NewFileIdentity(9, 10)
+	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, selection, tree, mustTime(t, 10))
+	if err != nil || prepared.Phase != ChangePrepared || prepared.Revision.Int64() != 2 || prepared.Selection == nil || prepared.TreeIdentity == nil {
 		t.Fatalf("prepared = %+v, %v", prepared, err)
 	}
-	replay, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, selection, mustTime(t, 99))
+	replay, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, selection, tree, mustTime(t, 99))
 	if err != nil || replay.Revision != prepared.Revision || replay.UpdatedAt != prepared.UpdatedAt {
 		t.Fatalf("prepared replay = %+v, %v", replay, err)
 	}
 	wrong := selection
-	wrong.commit, _ = NewCommitID(selection.format, bytes.Repeat([]byte{0x44}, selection.format.oidLength()))
-	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, wrong, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
+	wrong.commitment = changeTreeDigest(t, 0x44)
+	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, wrong, tree, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("conflicting prepared replay = %v", err)
 	}
 	wrong = selection
 	wrong.repository, _ = NewFileIdentity(91, 92)
-	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, wrong, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, wrong, tree, mustTime(t, 11)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("conflicting repository replay = %v", err)
 	}
-	// The worktree is made at the selected base and nowhere else.
-	other, _ := NewCommitID(selection.format, bytes.Repeat([]byte{0x45}, selection.format.oidLength()))
-	if _, err := store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, other, mustTime(t, 12)); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("available at another head = %v", err)
-	}
-	available, err := store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, selection.commit, mustTime(t, 12))
-	if err != nil || available.Phase != ChangeAvailable || available.Revision.Int64() != 3 || available.AvailableAt == nil || available.HeadCommit == nil || !available.HeadCommit.equal(selection.commit) {
+	availableFacts := mustChangeAvailability(t, selection.commitment, selection.entries, selection.bytes, tree)
+	available, err := store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, availableFacts, mustTime(t, 12))
+	if err != nil || available.Phase != ChangeAvailable || available.Revision.Int64() != 3 || available.AvailableAt == nil {
 		t.Fatalf("available = %+v, %v", available, err)
 	}
-	replay, err = store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, selection.commit, mustTime(t, 100))
+	replay, err = store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, availableFacts, mustTime(t, 100))
 	if err != nil || replay.Revision != available.Revision || replay.UpdatedAt != available.UpdatedAt {
 		t.Fatalf("available replay = %+v, %v", replay, err)
 	}
-	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, selection, mustTime(t, 13)); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, selection, tree, mustTime(t, 13)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("intermediate replay after progress = %v", err)
 	}
 }
 
-func TestChangePreparedFactsSurviveRestart(t *testing.T) {
+func TestChangePreparedFactsSurviveRestartAndGuardAvailability(t *testing.T) {
 	store, change := ownedReservedChange(t)
 	path := storePath(t, store)
 	selection := testChangeSelection(t)
-	if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, selection, mustTime(t, 10)); err != nil {
+	tree, _ := NewFileIdentity(43, 44)
+	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, selection, tree, mustTime(t, 10))
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err := Open(context.Background(), path)
+	store, err = Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 	reopened, found, err := store.Change(context.Background(), change.ID)
-	if err != nil || !found || reopened.Selection == nil || !changeSelectionEqual(*reopened.Selection, selection) || reopened.HeadCommit != nil {
+	if err != nil || !found || reopened.Selection == nil || !changeSelectionEqual(*reopened.Selection, selection) || reopened.TreeIdentity == nil || *reopened.TreeIdentity != tree {
 		t.Fatalf("reopened = %+v, found=%v, err=%v", reopened, found, err)
 	}
-}
-
-// A Change from before managed worktrees has a base and no head. Adopting
-// its tree into a worktree at that base records the head without touching
-// the revision, the chronology or the settled run, so the provenance the
-// retry and settlement history proves is unchanged; a head that is not the
-// base, a second head, or a Change in any other phase is refused.
-func TestRecordChangeWorktreeFillsTheHeadOfAGitFreeChangeOnce(t *testing.T) {
-	blocked, _ := NewBlockedProposal("retry")
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
-	defer store.Close()
-	ctx := context.Background()
-	change, found, err := store.Change(ctx, *finalizing.ChangeID)
-	if err != nil || !found || change.HeadCommit == nil {
-		t.Fatalf("available Change = %+v, found=%v, err=%v", change, found, err)
-	}
-	base := change.Selection.commit
-	if _, err := store.RecordChangeWorktree(ctx, change.ID, change.Revision, base); err != nil {
-		t.Fatalf("recording the head a worktree Change has = %v", err)
-	}
-	other, _ := NewCommitID(base.format, bytes.Repeat([]byte{0x46}, base.format.oidLength()))
-	if _, err := store.RecordChangeWorktree(ctx, change.ID, change.Revision, other); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("another head on a worktree Change = %v", err)
-	}
-	// The same Change as the v13 migration leaves it: no head.
-	corruptSQL(t, store, `UPDATE changes SET head_commit = NULL WHERE id = ?`, change.ID.Bytes())
-	settlement, _ := NewRetainedChangeSettlement(change.Revision, nil)
-	terminal, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80))
-	if err != nil || terminal.Phase != RunTerminal {
-		t.Fatalf("Git-free settlement = %+v, %v", terminal, err)
-	}
-	retained, found, err := store.Change(ctx, change.ID)
-	if err != nil || !found || retained.Phase != ChangeRetained || retained.HeadCommit != nil {
-		t.Fatalf("retained Git-free Change = %+v, found=%v, err=%v", retained, found, err)
-	}
-	handoff, found, err := store.RetainedChangeHandoffForTask(ctx, retained.ProjectID, retained.TaskID)
-	if err != nil || !found || handoff.HeadCommit != "" {
-		t.Fatalf("Git-free handoff = %+v, found=%v, err=%v", handoff, found, err)
-	}
-	if _, err := store.RecordChangeWorktree(ctx, change.ID, retained.Revision, other); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("adoption at another head = %v", err)
-	}
-	if _, err := store.RecordChangeWorktree(ctx, change.ID, mustRevision(t, retained.Revision.Int64()+1), base); !errors.Is(err, ErrRevisionConflict) {
-		t.Fatalf("adoption at another revision = %v", err)
-	}
-	adopted, err := store.RecordChangeWorktree(ctx, change.ID, retained.Revision, base)
-	if err != nil || adopted.HeadCommit == nil || !adopted.HeadCommit.equal(base) || adopted.Revision != retained.Revision || adopted.UpdatedAt != retained.UpdatedAt || adopted.SettledRunID == nil || *adopted.SettledRunID != *retained.SettledRunID {
-		t.Fatalf("adopted Change = %+v, %v", adopted, err)
-	}
-	if again, err := store.RecordChangeWorktree(ctx, change.ID, retained.Revision, base); err != nil || again.Revision != adopted.Revision {
-		t.Fatalf("adoption replay = %+v, %v", again, err)
-	}
-	handoff, found, err = store.RetainedChangeHandoffForTask(ctx, retained.ProjectID, retained.TaskID)
-	if err != nil || !found || handoff.HeadCommit != handoff.BaseCommit || handoff.ChangeRevision != retained.Revision {
-		t.Fatalf("adopted handoff = %+v, found=%v, err=%v", handoff, found, err)
-	}
-	if _, retryKeys := queueRetryForTerminal(t, store, terminal, 81); retryKeys.RunID == (RunID{}) {
-		t.Fatal("retry keys")
-	} else if retry, err := store.AdmitNext(ctx, retryKeys, mustTime(t, 90)); err != nil || !retry.Admitted() {
-		t.Fatalf("retry admission after adoption = %+v, %v", retry, err)
+	for name, observation := range map[string]ChangeAvailability{
+		"commitment":  mustChangeAvailability(t, changeTreeDigest(t, 0x33), selection.entries, selection.bytes, tree),
+		"entry count": mustChangeAvailability(t, selection.commitment, selection.entries+1, selection.bytes, tree),
+		"total bytes": mustChangeAvailability(t, selection.commitment, selection.entries, selection.bytes+1, tree),
+	} {
+		before := captureWriteFootprint(t, store)
+		if _, err := store.MarkChangeAvailable(context.Background(), change.ID, prepared.Revision, observation, mustTime(t, 12)); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("mismatched %s = %v", name, err)
+		}
+		if after := captureWriteFootprint(t, store); after != before {
+			t.Fatalf("mismatched %s mutated authority: before=%+v after=%+v", name, before, after)
+		}
 	}
 }
 
@@ -147,12 +98,12 @@ func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 		}
 		columns[name] = true
 	}
-	for _, forbidden := range []string{"source_root", "staging_root", "selected_commit", "repository_root", "selected_at_ms", "stage_dev", "source_dev", "worktree_path", "branch", "tree_digest", "entry_count", "total_bytes", "tree_dev", "tree_inode"} {
+	for _, forbidden := range []string{"source_root", "staging_root", "selected_commit", "repository_root", "selected_at_ms", "stage_dev", "source_dev"} {
 		if columns[forbidden] {
 			t.Fatalf("obsolete Change column survived: %s", forbidden)
 		}
 	}
-	for _, required := range []string{"base_commit", "repository_dev", "repository_inode", "head_commit", "settled_run_id"} {
+	for _, required := range []string{"base_commit", "repository_dev", "repository_inode", "tree_dev", "tree_inode", "settled_run_id"} {
 		if !columns[required] {
 			t.Fatalf("missing Change column: %s", required)
 		}
@@ -190,15 +141,18 @@ func TestChangeSchemaIsPathFreeCanonicalAndCircularlyBound(t *testing.T) {
 
 func TestPartialPreparedFactsFailClosed(t *testing.T) {
 	for name, mutation := range map[string]string{
-		"missing base":                `UPDATE changes SET base_commit = NULL, object_format = NULL, repository_dev = NULL, repository_inode = NULL WHERE id = ?`,
+		"missing digest":              `UPDATE changes SET tree_digest = NULL WHERE id = ?`,
+		"short digest":                `UPDATE changes SET tree_digest = zeroblob(31) WHERE id = ?`,
+		"missing tree identity":       `UPDATE changes SET tree_inode = NULL WHERE id = ?`,
 		"missing repository identity": `UPDATE changes SET repository_inode = NULL WHERE id = ?`,
 		"invalid repository identity": `UPDATE changes SET repository_dev = -1 WHERE id = ?`,
-		"head before the worktree":    `UPDATE changes SET head_commit = base_commit WHERE id = ?`,
+		"negative entries":            `UPDATE changes SET entry_count = -1 WHERE id = ?`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			store, change := ownedReservedChange(t)
 			path := storePath(t, store)
-			if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, testChangeSelection(t), mustTime(t, 10)); err != nil {
+			tree, _ := NewFileIdentity(50, 51)
+			if _, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, testChangeSelection(t), tree, mustTime(t, 10)); err != nil {
 				t.Fatal(err)
 			}
 			corruptSQL(t, store, mutation, change.ID.Bytes())
@@ -220,7 +174,8 @@ func TestPartialPreparedFactsFailClosed(t *testing.T) {
 func TestRepositoryIdentitySchemaRequiresExactPairedStoreIntegers(t *testing.T) {
 	store, change := ownedReservedChange(t)
 	defer store.Close()
-	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, testChangeSelection(t), mustTime(t, 10))
+	tree, _ := NewFileIdentity(50, 51)
+	prepared, err := store.RecordChangePrepared(context.Background(), change.ID, change.Revision, testChangeSelection(t), tree, mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,10 +241,11 @@ func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
 	defer store.Close()
 	change, found, err := store.Change(context.Background(), *finalizing.ChangeID)
-	if err != nil || !found || change.Selection == nil || change.HeadCommit == nil || change.Phase != ChangeAvailable {
+	if err != nil || !found || change.Selection == nil || change.TreeIdentity == nil || change.Phase != ChangeAvailable {
 		t.Fatalf("available Change = %+v, found=%v, err=%v", change, found, err)
 	}
-	wrongRevision, _ := NewRetainedChangeSettlement(mustRevision(t, change.Revision.Int64()+1), change.HeadCommit)
+	availability := mustChangeAvailability(t, change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
+	wrongRevision, _ := NewRetainedChangeSettlement(mustRevision(t, change.Revision.Int64()+1), availability)
 	before := captureWriteFootprint(t, store)
 	if _, err := store.FinalizeWorkerRun(context.Background(), finalizing.ID, finalizing.Revision, wrongRevision, mustTime(t, 80)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("wrong Change revision settlement = %v", err)
@@ -297,7 +253,7 @@ func TestWorkerSettlementIsExactAndHistoricalFinalizationReplaySurvivesRetry(t *
 	if after := captureWriteFootprint(t, store); after != before {
 		t.Fatalf("wrong settlement mutated state: before=%+v after=%+v", before, after)
 	}
-	settlement, _ := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, availability)
 	terminal, err := store.FinalizeWorkerRun(context.Background(), finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80))
 	if err != nil || terminal.Phase != RunTerminal {
 		t.Fatalf("terminal settlement = %+v, %v", terminal, err)
@@ -328,6 +284,24 @@ func TestNonterminalWorkerCannotSettleChange(t *testing.T) {
 	if err := validateChanges(context.Background(), connection); !errors.Is(err, ErrCorruptState) {
 		t.Fatalf("nonterminal Change settlement validation = %v", err)
 	}
+}
+
+func changeTreeDigest(t testing.TB, seed byte) TreeDigest {
+	t.Helper()
+	digest, err := TreeDigestFromBytes(bytes.Repeat([]byte{seed}, DigestBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func mustChangeAvailability(t testing.TB, digest TreeDigest, entries uint32, totalBytes uint64, source FileIdentity) ChangeAvailability {
+	t.Helper()
+	availability, err := NewChangeAvailability(digest, entries, totalBytes, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return availability
 }
 
 func seedReservedChange(t *testing.T, store *Store) Change {

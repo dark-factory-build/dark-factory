@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -920,55 +919,6 @@ func TestDaemonOverseerTaskUpdateAuthorizesBeforeProviderPreflight(t *testing.T)
 		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
 			t.Fatalf("foreign update %#v = %v", input, err)
 		}
-	}
-}
-
-func TestDaemonOverseerTaskRetryRejectsOrchestratorTask(t *testing.T) {
-	fixture := newDispatchFixture(t)
-	ctx := context.Background()
-	caller := prepareActiveAttempt(t, fixture, 191)
-	target, found, err := fixture.store.Task(ctx, caller.run.TaskID)
-	if err != nil || !found {
-		t.Fatalf("orchestrator task = %+v, found=%v, err=%v", target, found, err)
-	}
-
-	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replacementID := testID(211)
-	done := fixture.serve(t)
-	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{
-		ID: replacementID, ProjectID: caller.run.ProjectID.String(), Name: "replacement", Role: "worker", Provider: "shell", ToolBudgetLimit: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	waitDispatch(t, done)
-
-	beforeHistory, err := fixture.store.TaskInterventions(ctx, target.ProjectID, target.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	done = fixture.serve(t)
-	_, err = caller.client.OverseerUpdateTask(ctx, api.OverseerTaskUpdateInput{
-		TaskID: target.ID.String(), ExpectedRevision: uint64(target.Revision.Int64()), AssignedAgentID: &replacementID, Retry: true,
-	})
-	waitDispatch(t, done)
-	var remote *api.RemoteError
-	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
-		t.Fatalf("orchestrator retry error = %v", err)
-	}
-	afterTask, found, err := fixture.store.Task(ctx, target.ID)
-	if err != nil || !found || !reflect.DeepEqual(afterTask, target) {
-		t.Fatalf("orchestrator retry changed task: before=%+v after=%+v found=%v err=%v", target, afterTask, found, err)
-	}
-	afterRun, found, err := fixture.store.Run(ctx, caller.run.ID)
-	if err != nil || !found || !reflect.DeepEqual(afterRun, caller.run) {
-		t.Fatalf("orchestrator retry changed caller run: before=%+v after=%+v found=%v err=%v", caller.run, afterRun, found, err)
-	}
-	afterHistory, err := fixture.store.TaskInterventions(ctx, target.ProjectID, target.ID)
-	if err != nil || len(afterHistory) != len(beforeHistory) {
-		t.Fatalf("orchestrator retry changed history: before=%d after=%d err=%v", len(beforeHistory), len(afterHistory), err)
 	}
 }
 

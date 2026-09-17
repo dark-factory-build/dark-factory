@@ -16,11 +16,11 @@ import (
 )
 
 func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
-	data := []byte("compile x.go\nAuthorization: Bearer private-value\nconfig /Users/operator/.codex/auth.json\nfinished\npartial secret=value")
+	data := []byte("compile x.go\nAuthorization: Bearer private-value\nconfig /Users/operator/.codex/auth.json\ninternal /var/folders/private/runtime\ntmp /tmp/factory-secret\nfinished\npartial secret=value")
 	for cursor := 0; cursor < len(data); cursor++ {
 		for size := 1; size <= len(data)-cursor; size++ {
 			got, omitted := redactTerminalWindow(data[cursor:cursor+size], uint64(cursor))
-			if bytes.Contains(got, []byte("private-value")) || bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte("secret=value")) || len(got)+int(omitted) != size {
+			if bytes.Contains(got, []byte("private-value")) || bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte("/var/")) || bytes.Contains(got, []byte("/tmp/")) || bytes.Contains(got, []byte("secret=value")) || len(got)+int(omitted) != size {
 				t.Fatalf("cursor=%d size=%d leaked or miscounted: %q omitted=%d", cursor, size, got, omitted)
 			}
 		}
