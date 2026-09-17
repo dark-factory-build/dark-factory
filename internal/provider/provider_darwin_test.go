@@ -822,7 +822,7 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("generated Codex environment rejected by runner: %v", err)
 	}
-	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "GOMODCACHE=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
+	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "GOMODCACHE=", "CARGO_HOME=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
 		found := false
 		for _, value := range launch.Environment() {
 			if strings.HasPrefix(value, prefix+runtime.home+"/") {
@@ -832,6 +832,9 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 		if !found {
 			t.Fatalf("cache %s not private", prefix)
 		}
+	}
+	if !slices.Contains(launch.Environment(), "RUSTUP_HOME="+runtime.accountHome+"/.rustup") {
+		t.Fatal("rustup metadata must remain in the selected account installation")
 	}
 	for _, root := range []string{runtime.accountHome, runtime.gitCeiling, runtime.home, runtime.temp} {
 		invalid := runtime

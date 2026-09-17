@@ -634,6 +634,8 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
 			"GOMODCACHE="+filepath.Join(runtime.home, "go", "pkg", "mod"),
+			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
+			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))

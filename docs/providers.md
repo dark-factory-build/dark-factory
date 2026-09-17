@@ -149,6 +149,10 @@ temp exceptions. An optional startup `--toolchain-read-roots` path list adds
 read-only access to exact installed software directories (for example one
 Node installation including its Corepack libraries, or one Go `libexec`).
 This is not inferred from PATH and does not pin every child executable.
+With the default Darwin tool path, factoryd derives the pinned Node
+`v22.20.0` bin directory, Cargo's bin directory, and the selected account's
+Rustup metadata when those canonical directories exist. An explicit
+`--tool-path` or `--toolchain-read-roots` remains authoritative.
 The paths must be canonical existing directories owned by the daemon user,
 or the exact root-owned `/Library/Developer/CommandLineTools` installation,
 not writable by other users,
