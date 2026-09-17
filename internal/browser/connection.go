@@ -486,6 +486,22 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeTaskDetail(frame.ID, result)
+	case browserprotocol.ProjectContent:
+		backend, ok := current.server.backend.(ContentBackend)
+		if !ok {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := backend.ProjectContent(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.Operation != body.Operation {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeProjectContentResult(frame.ID, result)
 	case browserprotocol.TaskEnqueue:
 		if current.server.taskBackend == nil {
 			err = ErrUnauthorized

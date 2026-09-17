@@ -3,6 +3,7 @@ import type { DiscoveredAccount, AccountItem, AgentItem, ProjectItem, SpriteAppe
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
+import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters } from "./console-view.js";
 import { SpriteEditor } from "./factory-scene/sprite-editor.js";
@@ -23,6 +24,8 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onToggleSettings?: () => void;
   selectedAgent?: FactoryAgentSelection;
   onSelectAgent?: (agent: AgentItem) => void;
+  onProjectContent?: ProjectContentCall;
+  onDraftLibraryTask?: (agent: AgentItem, instruction: string) => void;
   onSaveAgentConfig?: (config: AgentConfigEdit) => void;
   onSaveAgentAppearance?: (agentId: string, appearance: SpriteAppearance) => Promise<boolean>;
   appearanceAgentId?: string;
@@ -105,6 +108,8 @@ export function FactoryConsole({
   selectedHumanRequest,
   selectedAgent,
   onSelectAgent,
+  onProjectContent,
+  onDraftLibraryTask,
   onSaveAgentConfig,
   onSaveAgentAppearance,
   appearanceAgentId,
@@ -263,6 +268,7 @@ export function FactoryConsole({
                 onPanel={onAgentPanel}
               />}
             </div>
+            <ProjectLibrary state={state} call={ready ? onProjectContent : undefined} draft={ready ? onDraftLibraryTask : undefined} />
           </aside>
         </div>
       </main>

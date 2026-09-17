@@ -131,6 +131,10 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeTaskDetailGet(frame.ID, value)
 	case TaskDetail:
 		return EncodeTaskDetail(frame.ID, value)
+	case ProjectContent:
+		return EncodeProjectContent(frame.ID, value)
+	case ProjectContentResult:
+		return EncodeProjectContentResult(frame.ID, value)
 	case TaskEnqueue:
 		return EncodeTaskEnqueue(frame.ID, value)
 	case TaskEnqueueResult:

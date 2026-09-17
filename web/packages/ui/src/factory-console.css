@@ -1102,3 +1102,10 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfRoomDetails th, .dfRoomDetails td { padding: .25rem .5rem; text-align: right; border-bottom: 1px solid var(--df-border, #293c37); }
 .dfRoomDetails th:first-child { text-align: left; }
 .dfRoomDetails caption { text-align: left; margin-bottom: .5rem; }
+
+.dfProjectLibrary { border-top: 1px solid var(--df-border, #555); margin-top: 1rem; padding-top: 1rem; }
+.dfProjectLibrary fieldset { border: 0; padding: 0; min-width: 0; }
+.dfProjectLibrary label { display: grid; gap: .3rem; margin: .7rem 0; }
+.dfProjectLibrary textarea, .dfProjectLibrary input, .dfProjectLibrary select { max-width: 100%; box-sizing: border-box; }
+.dfProjectLibrary pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+.dfProjectLibrary button { margin: .2rem; }

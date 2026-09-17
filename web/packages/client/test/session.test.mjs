@@ -2146,3 +2146,34 @@ test("closed state watches reconnect only for transport loss or retryable errors
     client.close();
   }
 });
+
+test("optional library stays unused until requested and correlates bounded replies", async () => {
+  const { session, socket } = await openHumanSession();
+  assert.equal(socket.sent.some((wire) => decodeClientControl(wire).type === "PROJECT_CONTENT"), false);
+  const input = { project_id: "01".repeat(16), offset: 0, limit: 4 };
+  const pending = session.projectContent("list", input);
+  const frame = lastFrame(socket, "PROJECT_CONTENT");
+  assert.deepEqual(frame.body, { operation: "list", input });
+  socket.reply(encodeServerControl({ type: "PROJECT_CONTENT_RESULT", id: frame.id, body: { operation: "list", output: { items: [], next_offset: 0 } } }));
+  assert.deepEqual(await pending, { items: [], next_offset: 0 });
+  await assert.rejects(session.projectContent("body", { revision: Number.MAX_SAFE_INTEGER + 1 }), ProtocolError);
+  const failed = session.projectContent("read", { project_id: input.project_id, id: "02".repeat(16), revision: 1 });
+  const request = lastFrame(socket, "PROJECT_CONTENT");
+  socket.reply(encodeServerError(request.id, "unsupported"));
+  await assert.rejects(failed, (error) => error.code === "unsupported");
+  assert.equal(session.status, "ready");
+  session.close();
+});
+
+test("optional library requires private detail and writes additionally require human actions", async () => {
+  for (const capabilities of [CAPABILITIES.observe, CAPABILITIES.observe | CAPABILITIES.human_actions]) {
+    const { session, socket } = await openHumanSession(undefined, capabilities);
+    await assert.rejects(session.projectContent("list", { project_id: "01".repeat(16) }), (error) => error.code === "unauthorized");
+    await assert.rejects(session.projectContent("create", {}), (error) => error.code === "unauthorized");
+    assert.equal(socket.sent.some((wire) => decodeClientControl(wire).type === "PROJECT_CONTENT"), false);
+    session.close();
+  }
+  const { session } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.private_human_request_detail);
+  await assert.rejects(session.projectContent("outcome_write", {}), (error) => error.code === "unauthorized");
+  session.close();
+});
