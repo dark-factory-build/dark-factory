@@ -59,6 +59,12 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 	if err != nil {
 		return kernel.NewContent{}, err
 	}
+	if spec.RepositoryInode > 0 {
+		identity, err = change.NewRepositoryIdentity(uint64(spec.RepositoryDevice), uint64(spec.RepositoryInode))
+		if err != nil {
+			return kernel.NewContent{}, err
+		}
+	}
 	ref := fmt.Sprintf("refs/dark-factory/content/%s/%d", spec.ID, revision)
 	path := fmt.Sprintf(".dark-factory/content/%s.md", spec.ID)
 	var parent *change.ContentSource
@@ -74,6 +80,10 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 			}
 		}
 		if previous.Commit != "" {
+			identity, readErr = change.NewRepositoryIdentity(uint64(previous.RepositoryDevice), uint64(previous.RepositoryInode))
+			if readErr != nil {
+				return kernel.NewContent{}, readErr
+			}
 			id, idErr := change.NewObjectIDFromHex(previous.ObjectFormat, previous.Commit)
 			if idErr != nil {
 				return kernel.NewContent{}, idErr
@@ -141,7 +151,7 @@ func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.Cont
 }
 
 func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
-	if call.Kind() == api.CallContentCreate || call.Kind() == api.CallContentRevise || call.Kind() == api.CallContentDeprecate {
+	if call.Kind() == api.CallContentCreate || call.Kind() == api.CallContentRevise || call.Kind() == api.CallContentDeprecate || call.Kind() == api.CallContentBody {
 		daemon.operationMu.Lock()
 		defer daemon.operationMu.Unlock()
 	}
@@ -202,9 +212,10 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 				return newErrorReply(remoteErrorCode(specErr))
 			}
 			if existing, existingErr := daemon.contentForCaller(ctx, operator, kd, spec.ID, 1); existingErr == nil {
-				if existing.LatestRevision.Int64() != 1 {
+				if existing.ProjectID != spec.ProjectID || existing.LatestRevision.Int64() != 1 {
 					return newErrorReply(api.RemoteRevisionConflict)
 				}
+				spec.RepositoryDevice, spec.RepositoryInode = existing.RepositoryDevice, existing.RepositoryInode
 			} else if existingErr != kernel.ErrNotFound {
 				return newErrorReply(remoteErrorCode(existingErr))
 			}
@@ -230,6 +241,9 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 			if currentErr != nil {
 				return newErrorReply(remoteErrorCode(currentErr))
 			}
+			if current.ProjectID != spec.ProjectID {
+				return newErrorReply(api.RemoteRevisionConflict)
+			}
 			if latest := current.LatestRevision.Int64(); latest != int64(input.ExpectedRevision) && latest != int64(input.ExpectedRevision)+1 {
 				return newErrorReply(api.RemoteRevisionConflict)
 			}
@@ -250,6 +264,19 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 			r, e2 := revision(input.ExpectedRevision)
 			if e2 != nil {
 				return newErrorReply(api.RemoteInvalidRequest)
+			}
+			current, currentErr := daemon.contentForCaller(ctx, operator, kd, id, int64(input.ExpectedRevision))
+			if currentErr != nil {
+				return newErrorReply(remoteErrorCode(currentErr))
+			}
+			if current.ProjectID != pid || current.LatestRevision.Int64() != int64(input.ExpectedRevision) {
+				return newErrorReply(api.RemoteRevisionConflict)
+			}
+			if current.Commit == "" {
+				if _, exportErr := daemon.exportLegacyContent(ctx, id, int64(input.ExpectedRevision)); exportErr != nil {
+					// The Store's deprecation path preserves a legacy body revision;
+					// a later authenticated read retries its Git export.
+				}
 			}
 			if operator {
 				v, e = daemon.store.DeprecateContent(ctx, id, pid, r, operatorProvenance, at)

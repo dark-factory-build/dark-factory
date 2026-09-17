@@ -57,6 +57,9 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 	if created.Body != "" || created.Author != "operator:local" {
 		t.Fatalf("metadata create leaked body or caller provenance: %+v", created)
 	}
+	if created.Commit == "" || created.Path == "" || created.ObjectFormat == "" {
+		t.Fatalf("create omitted Git provenance: %+v", created)
+	}
 	done = fixture.serve(t)
 	read, err := client.ContentRead(ctx, api.ContentReadInput{ID: contentID, Revision: 1})
 	if err != nil {
@@ -157,6 +160,21 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 	if len(secondPage.Items) == 0 || secondPage.NextOffset != 0 {
 		t.Fatalf("second content page = %+v", secondPage)
 	}
+	moved := root + "-original"
+	if err := os.Rename(root, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("/bin/cp", "-R", moved+"/.", root).CombinedOutput(); err != nil {
+		t.Fatalf("copy replacement repository: %v: %s", err, output)
+	}
+	done = fixture.serve(t)
+	if _, err := client.ContentBody(ctx, api.ContentBodyInput{ID: contentID, Revision: 1, Limit: 64}); err == nil {
+		t.Fatal("replacement repository served an existing content pin")
+	}
+	waitDispatch(t, done)
 }
 
 func TestPageContentBodyContinuesFromGitSizedOffsets(t *testing.T) {

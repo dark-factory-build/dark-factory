@@ -88,6 +88,25 @@ func TestContentExportRetiresLegacyBodyAndReplays(t *testing.T) {
 	}
 }
 
+func TestLegacyContentDeprecationPreservesBodyUntilExport(t *testing.T) {
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	created, err := store.CreateContent(ctx, contentSpec(t, run.ProjectID, 38, "legacy"), mustTime(t, 38))
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptSQL(t, store, `UPDATE project_content_revisions SET body = 'legacy', object_format = NULL, commit_oid = NULL, path = NULL, repository_dev = NULL, repository_inode = NULL WHERE id = ? AND revision = 1`, created.ID.Bytes())
+	deprecated, err := store.DeprecateContent(ctx, created.ID, run.ProjectID, created.Revision, "operator", mustTime(t, 39))
+	if err != nil || !deprecated.Deprecated {
+		t.Fatalf("legacy deprecation = %+v, %v", deprecated, err)
+	}
+	_, body, err := store.LegacyContent(ctx, created.ID, deprecated.Revision.Int64())
+	if err != nil || body != "legacy" {
+		t.Fatalf("deprecated legacy body = %q, %v", body, err)
+	}
+}
+
 func TestAttemptContentUsesLiveProjectAndProvenance(t *testing.T) {
 	store, run, _ := runningWorkerRun(t)
 	defer store.Close()

@@ -13,6 +13,21 @@ Select only relevant revisions; a worker can explicitly read its task's attached
 references, then fetch the bodies it needs. Corrections append a revision rather
 than changing what earlier work used.
 
+Bodies are ordinary files at an exact project repository, commit and path.
+Browser and agent body writes create `.dark-factory/content/ID.md` in Git
+without changing the worktree, index or `HEAD`. To adopt an existing file, use
+`factoryctl content create` or `content revise` with `--commit OID --path PATH`
+instead of `--body`; metadata reads return the pinned object format, commit and
+path. A private create-only ref keeps the commit reachable after branch cleanup.
+The stored repository identity rejects a replacement at the same project path.
+
+SQLite retains authenticated actor, metadata, task attachments and evaluation;
+the Git commit author identifies only the generated Git object. Homes upgraded
+from the earlier SQLite-body format export each body on its first authenticated
+read and clear the blob only after the Git ref and SQL pin both succeed. If the
+project repository is temporarily unavailable, that authenticated read still
+serves the stored legacy body and retries export later.
+
 After running a chosen scenario, record an observation with the exact definition
 revision, tested source, environment, result, evaluator and existing report/run
 reference. Keep large reports in their existing location. Comparing observations

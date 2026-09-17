@@ -146,10 +146,10 @@ func WriteContentSource(ctx context.Context, gitExecutable, repositoryRoot strin
 	}
 	index := filepath.Join(authority.home, "index")
 	env := []string{"GIT_INDEX_FILE=" + index}
-	if _, err := authority.runWithEnvironment(ctx, maxGitSelectionOutput, env, "-C", repositoryRoot, "read-tree", baseID.Hex()); err != nil {
+	if _, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, env, "-C", repositoryRoot, "read-tree", baseID.Hex()); err != nil {
 		return ContentSource{}, err
 	}
-	if _, err := authority.runWithEnvironment(ctx, maxGitSelectionOutput, env, "-C", repositoryRoot, "update-index", "--add", "--cacheinfo", "100644,"+blob.Hex()+","+file); err != nil {
+	if _, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, env, "-C", repositoryRoot, "update-index", "--add", "--cacheinfo", "100644,"+blob.Hex()+","+file); err != nil {
 		return ContentSource{}, err
 	}
 	treeOutput, err := authority.succeedWithEnvironment(ctx, maxGitSelectionOutput, env, "-C", repositoryRoot, "write-tree")

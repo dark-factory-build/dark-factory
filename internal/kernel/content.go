@@ -214,6 +214,40 @@ func deprecateContentTx(ctx context.Context, tx *writeTx, id ContentID, project 
 	if err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
+	if current.ProjectID != project {
+		return ContentRevision{}, tx.Rollback(ErrConflict)
+	}
+	if current.Commit == "" {
+		var latest int64
+		if err := tx.connection.QueryRowContext(ctx, `SELECT MAX(revision) FROM project_content_revisions WHERE id = ?`, id.Bytes()).Scan(&latest); err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+		if latest != expected.Int64() {
+			if latest > expected.Int64() {
+				existing, readErr := contentByRevision(ctx, tx.connection, id, expected.Int64()+1)
+				if readErr == nil && existing.Deprecated && existing.Author == author {
+					if rollbackErr := tx.Rollback(nil); rollbackErr != nil {
+						return ContentRevision{}, rollbackErr
+					}
+					return existing, nil
+				}
+			}
+			return ContentRevision{}, tx.Rollback(ErrConflict)
+		}
+		next := latest + 1
+		_, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) SELECT id, project_id, kind, ?, title, description, body, ?, source_references, 1, ? FROM project_content_revisions WHERE id = ? AND revision = ? AND commit_oid IS NULL`, next, author, at.Int64(), id.Bytes(), expected.Int64())
+		if err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+		result, err := contentByRevision(ctx, tx.connection, id, next)
+		if err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ContentRevision{}, err
+		}
+		return result, nil
+	}
 	return reviseContentTx(ctx, tx, expected, NewContent{ID: id, ProjectID: project, Kind: current.Kind, Title: current.Title, Description: current.Description, Author: author, SourceReferences: current.SourceReferences, ObjectFormat: current.ObjectFormat, Commit: current.Commit, Path: current.Path, RepositoryDevice: current.RepositoryDevice, RepositoryInode: current.RepositoryInode}, true, at)
 }
 
