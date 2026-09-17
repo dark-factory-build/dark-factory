@@ -7,6 +7,9 @@ import {
   consumePairingChallenge,
   createBrowserClient,
   type BrowserClient,
+  type ProjectContentOperation,
+  type ProjectContentInput,
+  type ProjectContentOutput,
   type BrowserSession,
   type BrowserSessionOptions,
   type AgentItem,
@@ -150,7 +153,7 @@ type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTermin
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession };
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -332,6 +335,12 @@ export class FactoryAppController {
     this.#closeTerminal();
     this.watchRunPaths(false);
     this.#client?.close();
+  }
+
+  async projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
+    const session = this.#client?.session;
+    if (session?.projectContent === undefined) throw new SessionError("unsupported");
+    return session.projectContent(operation, input);
   }
 
   selectAgent(agent: AgentItem): void {

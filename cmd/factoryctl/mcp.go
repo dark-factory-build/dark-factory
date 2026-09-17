@@ -45,6 +45,7 @@ func runAttemptMCP(ctx context.Context, input io.Reader, output io.Writer, geten
 				}
 				if strings.HasPrefix(line, "factoryctl outcome ") {
 					line = strings.Replace(line, "factoryctl outcome ", "factoryctl attempt outcome ", 1)
+					line = strings.Replace(line, "--document JSON|--document-file PATH", "--document JSON", 1)
 				}
 				if strings.HasPrefix(line, "factoryctl attempt ") || strings.HasPrefix(line, "factoryctl overseer ") {
 					help = append(help, line)

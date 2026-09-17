@@ -46,7 +46,7 @@ func TestAttemptMCPUsesExistingAuthAndExactTask(t *testing.T) {
 		t.Fatal("MCP changed authentication or task identity")
 	}
 	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-	if len(lines) != 3 || !strings.Contains(lines[1], "attempt succeed") || !strings.Contains(lines[1], "attempt content create") || strings.Contains(lines[1], "factoryctl content create") || strings.Contains(lines[1], "body-file") || strings.Contains(lines[1], "project create") {
+	if len(lines) != 3 || !strings.Contains(lines[1], "attempt succeed") || !strings.Contains(lines[1], "attempt content create") || strings.Contains(lines[1], "factoryctl content create") || strings.Contains(lines[1], "body-file") || strings.Contains(lines[1], "document-file") || strings.Contains(lines[1], "project create") {
 		t.Fatalf("unexpected discovery: %s", output.String())
 	}
 	var response struct {
@@ -276,6 +276,38 @@ func TestTerminalObservationCLIAndMCPUseReadableSafeExactOutput(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+func TestAttemptMCPOutcomeListUsesAttemptAuthority(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	id := "0123456789abcdef0123456789abcdef"
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.OutcomeListInput()
+		if !ok || input.ProjectID != id || call.Kind() != api.CallOutcomeList {
+			t.Errorf("unexpected outcome call: %v", call)
+		}
+		return api.NewContentReply(api.OutcomeList{Items: []api.Outcome{}})
+	})
+	request := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"factory","arguments":{"argv":["attempt","outcome","list","--project","%s","--offset","0"]}}}`+"\n", id)
+	var output bytes.Buffer
+	if runAttemptMCP(context.Background(), strings.NewReader(request), &output, func(string) string { return fixture.socket }) != 0 {
+		t.Fatal("MCP outcome failed")
+	}
+	call := awaitServer(t, done)
+	digest, ok := call.call.AttemptDigest()
+	if call.err != nil || !ok || digest.Bytes() != sha256.Sum256(fixture.bearer[:]) || strings.Contains(output.String(), `"isError":true`) {
+		t.Fatalf("MCP authority/result: %v %s", call.err, output.String())
+	}
+	for _, file := range []string{"-", "/secret"} {
+		argv := []string{"attempt", "outcome", "write", "--project", id, "--id", id, "--document-file", file}
+		raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "factory", "arguments": map[string]any{"argv": argv}}})
+		output.Reset()
+		if runAttemptMCP(context.Background(), bytes.NewReader(raw), &output, func(string) string { t.Fatal("forbidden file reached environment"); return "" }) != 0 || !strings.Contains(output.String(), `"isError":true`) {
+			t.Fatal("MCP accepted host input")
 		}
 	}
 }
