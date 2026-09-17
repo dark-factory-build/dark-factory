@@ -332,7 +332,8 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 12, 13, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+				wantArgv = slices.Replace(wantArgv, 12, 13, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers."+codexAttemptServerName(request.runtime)+"={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+				wantArgv[len(wantArgv)-1] = codexBootstrapPromptFor(request.runtime)
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -398,6 +399,46 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+func TestCodexAttemptMCPNamesAreBoundToRuntimeHome(t *testing.T) {
+	installation, firstRuntime, _ := nativeFixture(t, kernel.ProviderCodex)
+	secondRuntime := runtimeFixture(t, firstRuntime.toolPath, firstRuntime.accountHome)
+	first, err := Build(requestFor(t, kernel.ProviderCodex, installation, firstRuntime, "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Build(requestFor(t, kernel.ProviderCodex, installation, secondRuntime, "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuredName := func(argv []string) string {
+		for _, arg := range argv {
+			if !strings.HasPrefix(arg, "mcp_servers.factory_attempt_") {
+				continue
+			}
+			name, _, _ := strings.Cut(strings.TrimPrefix(arg, "mcp_servers."), "=")
+			return name
+		}
+		t.Fatalf("Codex launch has no attempt MCP server: %q", argv)
+		return ""
+	}
+	firstName := configuredName(first.Argv())
+	secondName := configuredName(second.Argv())
+	if firstName == secondName {
+		t.Fatalf("distinct runtime homes configured the same MCP server %q", firstName)
+	}
+	for _, test := range []struct {
+		name string
+		argv []string
+	}{
+		{name: firstName, argv: first.Argv()},
+		{name: secondName, argv: second.Argv()},
+	} {
+		if !strings.Contains(strings.Join(test.argv, "\n"), test.name+".factory tool") {
+			t.Fatalf("bootstrap prompt does not name its configured server %q: %q", test.name, test.argv)
+		}
 	}
 }
 

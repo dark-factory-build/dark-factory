@@ -577,7 +577,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 
 	payload := make([]byte, requestPrelude+len(encoded))
 	payload[0] = client.domain
-	copy(payload[1:requestPrelude], current.bearer[:])
+	copy(payload[1:requestPrelude], client.token.bearer[:])
 	copy(payload[requestPrelude:], encoded)
 	if err := writeFrame(connection, payload); err != nil {
 		return classifyTransport(ctx)
