@@ -787,7 +787,7 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 			}
 			command.contentRevision = n
 		case "--offset":
-			n, ok := parseRevision(value)
+			n, ok := parseOffset(value)
 			if !ok {
 				return attemptCommand{}, false, false
 			}
@@ -909,7 +909,7 @@ func parseContent(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandContentAttachments:
-		if command.contentRevision == 0 || (command.project == "" || (start == 0 && command.id == "")) {
+		if command.contentRevision == 0 || (start == 0 && (command.project == "" || command.id == "")) {
 			return attemptCommand{}, false, false
 		}
 	}
@@ -1719,6 +1719,13 @@ func parseRevision(value string) (uint64, bool) {
 	}
 	parsed, err := strconv.ParseUint(value, 10, 64)
 	return parsed, err == nil && parsed > 0 && parsed <= uint64(^uint64(0)>>1)
+}
+
+func parseOffset(value string) (uint64, bool) {
+	if value == "0" {
+		return 0, true
+	}
+	return parseRevision(value)
 }
 
 func parseOverseerOffset(value string, allowZero bool) (uint64, bool) {
