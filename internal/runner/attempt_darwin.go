@@ -166,7 +166,7 @@ func (c *AttemptController) Configure(spec AttemptSpec) error {
 	return nil
 }
 
-func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
+func (c *AttemptController) Next(timeout time.Duration) (_ AttemptEvent, resultErr error) {
 	if c != nil {
 		c.operation.Lock()
 		defer c.operation.Unlock()
@@ -181,9 +181,15 @@ func (c *AttemptController) Next(timeout time.Duration) (AttemptEvent, error) {
 		return AttemptEvent{}, err
 	}
 	defer c.file.SetReadDeadline(time.Time{})
+	// Neither a partially read frame nor a consumed but invalid frame may be
+	// forgotten by transferring the stream to a replacement controller.
+	defer func() {
+		if resultErr != nil {
+			c.readFailed = true
+		}
+	}()
 	var frame attemptFrame
 	if err := readFrame(c.file, &frame, maxConfigBytes); err != nil {
-		c.readFailed = true // A partial read cannot be reconstructed by a replacement controller.
 		// These two errors, and only these two, mean the read stopped because
 		// the stream ended: readFrame gets them from io.ReadFull, and
 		// decodeFrameBody renames the decoder's identically-named answers so a

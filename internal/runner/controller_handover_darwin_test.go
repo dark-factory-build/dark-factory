@@ -180,3 +180,42 @@ func TestAttemptControllerHandoverRefusesBusyOrPartialRead(t *testing.T) {
 		t.Fatalf("partial transfer: %v", err)
 	}
 }
+
+func TestAttemptControllerHandoverRefusesInvalidConsumedFrame(t *testing.T) {
+	for name, frame := range map[string]attemptFrame{
+		"version":           {Version: 2, Kind: string(TerminalOutput)},
+		"terminal envelope": {Version: 1, Kind: string(TerminalOutput), Stage: StageProvider},
+		"unexpected state":  {Version: 1, Kind: "inner-ready"},
+		"result notice":     {Version: 1, Kind: string(AttemptResultReady)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, peer, err := NewAttemptController()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			defer peer.Close()
+			c.state = controllerProviderReleased
+			c.terminalReady = true
+			if err := writeControlFrame(peer, frame, maxFrameBytes); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Next(time.Second); err == nil {
+				t.Fatal("invalid frame accepted")
+			}
+			if _, _, err := c.DetachForHandover(); !errors.Is(err, ErrState) {
+				t.Fatalf("invalid frame transferred: %v", err)
+			}
+			// A subsequent valid frame must not erase the earlier protocol failure.
+			if err := writeControlFrame(peer, attemptFrame{Version: 1, Kind: "current-exec-check"}, maxFrameBytes); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Next(time.Second); err != nil {
+				t.Fatalf("valid frame: %v", err)
+			}
+			if _, _, err := c.DetachForHandover(); !errors.Is(err, ErrState) {
+				t.Fatalf("protocol failure forgotten: %v", err)
+			}
+		})
+	}
+}
