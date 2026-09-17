@@ -77,6 +77,9 @@ func prepareTaskRetry(ctx context.Context, store *kernel.Store, id kernel.TaskID
 	if task.Revision != expected {
 		return kernel.ErrRevisionConflict
 	}
+	if assigned == (kernel.AgentID{}) {
+		assigned = task.AssignedAgentID
+	}
 	agent, found, err := store.Agent(ctx, assigned)
 	if err != nil {
 		return err

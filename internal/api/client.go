@@ -987,7 +987,7 @@ func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
 	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel && !input.Retry {
 		return false
 	}
-	if input.Retry && (input.Title != nil || input.Body != nil || input.Priority != nil || input.AssignedAgentID == nil || input.Cancel) {
+	if input.Retry && (input.Title != nil || input.Body != nil || input.Priority != nil || input.Cancel) {
 		return false
 	}
 	if input.Title != nil && !validText(*input.Title, 1, 1024) || input.Body != nil && !validText(*input.Body, 0, 131072) {
