@@ -4,7 +4,9 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
@@ -113,4 +115,73 @@ func TestBrowserStateWatchCoalescesWhenSubscriberIsSlow(t *testing.T) {
 	if got := <-watch.updates; got.Head != 2 {
 		t.Fatalf("coalesced head = %d, want 2", got.Head)
 	}
+}
+
+func TestBrowserStateWatchSharedObserverSurvivesSlowAndReplacedSubscribers(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	fixture.pair(t)
+	ctx := context.Background()
+	initial, err := fixture.store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch := func() browser.StateSubscription {
+		t.Helper()
+		subscription, err := fixture.backend.WatchState(ctx, rawBrowserClient(fixture.client.ID), decimalSequence(initial.Head))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return subscription
+	}
+	read := func(subscription browser.StateSubscription, want browserprotocol.Decimal) {
+		t.Helper()
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case update, ok := <-subscription.Updates():
+				if !ok {
+					t.Fatalf("subscription closed: %v", subscription.Err())
+				}
+				if update.Head >= want {
+					return
+				}
+			case <-timer.C:
+				t.Fatal("shared observer did not deliver committed head")
+			}
+		}
+	}
+	slow, fast := watch(), watch()
+	var head browserprotocol.Decimal
+	for index := 0; index < 3; index++ {
+		id, err := kernel.ProjectIDFromBytes(adapterID(t, byte(70+index)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: id, Name: fmt.Sprintf("shared-%d", index), Root: fmt.Sprintf("/private/shared-%d", index)}, adapterTime(t, int64(400+index))); err != nil {
+			t.Fatal(err)
+		}
+		state, err := fixture.store.Factory(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		head = decimalSequence(state.Head)
+		read(fast, head)
+	}
+	read(slow, head)
+	for _, subscription := range []browser.StateSubscription{slow, fast} {
+		subscription.Cancel()
+		select {
+		case <-subscription.Done():
+		case <-time.After(3 * time.Second):
+			t.Fatal("cancel did not join")
+		}
+		if err := subscription.Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The same dormant observer must accept a subscriber after its last one left.
+	replacement := watch()
+	defer replacement.Cancel()
+	read(replacement, head)
 }

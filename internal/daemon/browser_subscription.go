@@ -170,16 +170,6 @@ func (backend *browserBackend) observe(ctx context.Context, done chan struct{}, 
 			}
 			continue
 		}
-		ticker := time.NewTicker(browserStatePollInterval)
-		select {
-		case <-ctx.Done():
-			ticker.Stop()
-			return
-		case <-ticker.C:
-			ticker.Stop()
-		case <-wake:
-			ticker.Stop()
-		}
 		state, err := backend.store.Factory(ctx)
 		if err != nil {
 			watches := backend.snapshotSubscriptions()
@@ -205,17 +195,23 @@ func (backend *browserBackend) observe(ctx context.Context, done chan struct{}, 
 				watch.send(browser.StateUpdate{Head: decimalSequence(state.Head)})
 			}
 		}
-		backend.subMu.Lock()
-		empty := len(backend.subs) == 0
-		backend.subMu.Unlock()
-		if empty {
-			continue
+		timer := time.NewTimer(browserStatePollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		case <-wake:
+			timer.Stop()
 		}
 	}
 }
 
 func (backend *browserBackend) finishWatch(watch *browserStateWatch, result error) {
 	watch.finishOnce.Do(func() {
+		if watch.ctx != nil && watch.ctx.Err() != nil {
+			result = nil
+		}
 		watch.cancel()
 		watch.errMu.Lock()
 		watch.err = result
