@@ -264,8 +264,7 @@ export function projectFloor(state: StateView | undefined, selected: ReturnType<
       : work?.roomIds.find((id) => visibleAncestor(id) === display);
     let observedBayId: string | undefined;
     if (selected.navigation.scopeId !== undefined && display !== undefined && displayedObservation !== undefined) {
-      let pictured = roomByID.get(displayedObservation);
-      while (pictured !== undefined && pictured.parentId !== display) pictured = pictured.parentId === undefined ? undefined : roomByID.get(pictured.parentId);
+      const pictured = roomByID.get(displayedObservation);
       if (pictured?.parentId === display) observedBayId = pictured.id;
     }
     if (live !== undefined) liveRooms.add(display ?? live);

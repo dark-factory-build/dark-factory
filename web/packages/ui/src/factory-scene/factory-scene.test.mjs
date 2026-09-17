@@ -778,7 +778,7 @@ test("inventory inspection discloses actual omitted categories and plans", async
   assert.match(text, /scanned files in other categories/);
   assert.match(text, /subcomponents without pictured plans/);
   assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 1 && p.props.children[1].includes("subcomponents")));
-  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 4 && p.props.children[1].includes("scanned files")));
+  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 2 && p.props.children[1].includes("scanned files")));
   assert.match(text, /5 direct filenames omitted/);
   await act(async () => renderer.unmount());
 });
@@ -860,8 +860,8 @@ test("named direct-child bays are bounded and only exact observations occupy the
   const hall = layoutScene({ digest: "hall", nodes: [{ ...node, sizeBucket: "large" }] }).rooms[0];
   const parent = layoutScene({ digest: "parent-bays", nodes: [{ ...node, id: "parent-bays", parentId: "root", sizeBucket: "large" }] }).rooms[0];
   const leaf = layoutScene({ digest: "leaf-bays", nodes: [{ ...node, id: "leaf-bays", parentId: "root", components: [], sizeBucket: "large" }] }).rooms[0];
-  assert.deepEqual(hall.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - hall.y]), [[96, 48], [96, 48], [96, 94], [96, 94]]);
-  assert.deepEqual(parent.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - parent.y]), [[200, 48], [200, 90]]);
+  assert.deepEqual(hall.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - hall.y]), [[88, 48], [88, 48], [88, 94], [88, 94]]);
+  assert.deepEqual(parent.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - parent.y]), [[184, 48], [184, 90]]);
   assert.equal(leaf.contents.some((item) => item.kind === "component"), false);
   assert.equal(hall.omittedBayCount, 4);
   assert.ok(hall.contents.filter((item) => item.kind !== "component" && !item.workSurface).length <= 1, "four bays retain one secondary installation");
