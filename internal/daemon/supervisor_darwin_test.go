@@ -27,6 +27,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -137,6 +138,16 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// codexFixtureSessionID stands in for the id the real Codex CLI would assign
+// itself at creation. provider.canonicalUUID requires an exact 36-character
+// lowercase 8-4-4-4-12 hex UUID, so this is one, with this exact fixture
+// invocation's own PID as its last group: deterministic per process, so a
+// test reading two separate fixture processes' own rollouts back from disk
+// can tell them apart without sharing a hardcoded id.
+func codexFixtureSessionID() string {
+	return fmt.Sprintf("00000000-0000-7000-8000-%012x", uint64(os.Getpid()))
+}
+
 func runSupervisorCodexFixture() error {
 	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
 	if err != nil {
@@ -237,6 +248,30 @@ func runSupervisorCodexFixture() error {
 	size, err := unix.IoctlGetWinsize(0, unix.TIOCGWINSZ)
 	if err != nil {
 		return err
+	}
+	// Stand in for the real CLI's own rollout write, so a later launch's
+	// discovery (provider.codexSessionSelection) can find this exact cwd the
+	// same way it would against the real tool.
+	// resumed_from is this fixture's own diagnostic field, not one
+	// codexSessionSelection reads: it records what this exact invocation's
+	// own argv named, so a test can independently confirm what a later
+	// launch actually discovered and resumed.
+	resumedFrom := ""
+	if len(os.Args) > 2 && os.Args[1] == "resume" {
+		resumedFrom = os.Args[2]
+	}
+	if codexHome, cwd := os.Getenv("CODEX_HOME"), func() string { path, _ := os.Getwd(); return path }(); codexHome != "" && cwd != "" {
+		day := filepath.Join(codexHome, "sessions", time.Now().UTC().Format("2006/01/02"))
+		if err := os.MkdirAll(day, 0o700); err == nil {
+			line, marshalErr := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": codexFixtureSessionID(), "cwd": cwd, "resumed_from": resumedFrom}})
+			if marshalErr == nil {
+				// A PID suffix keeps this run's filename distinct from any
+				// other rollout this fixture wrote in the same wall-clock
+				// second; codexSessionSelection only reads the JSON content.
+				name := fmt.Sprintf("rollout-%s-%d.jsonl", time.Now().UTC().Format("2006-01-02T15-04-05"), os.Getpid())
+				_ = os.WriteFile(filepath.Join(day, name), append(line, '\n'), 0o600)
+			}
+		}
 	}
 	_, err = client.Succeed(ctx, fmt.Sprintf("%s\nPTY=%dx%d", task.Task, size.Col, size.Row))
 	return err
@@ -475,6 +510,21 @@ func runSupervisorClaudeFixture() error {
 	if typed != task.Task {
 		return fmt.Errorf("typed task is %d bytes, the attempt's is %d", len(typed), len(task.Task))
 	}
+	// Stand in for the real CLI's own transcript write, so a later launch's
+	// on-disk check (provider.claudeSessionSelection) can observe this exact
+	// session the same way it would against the real tool. The escaping here
+	// mirrors provider.escapeClaudeProjectPath.
+	if home, cwd := os.Getenv("HOME"), func() string { path, _ := os.Getwd(); return path }(); home != "" && cwd != "" {
+		for i, arg := range os.Args {
+			if (arg == "--session-id" || arg == "--resume") && i+1 < len(os.Args) {
+				dir := filepath.Join(home, ".claude", "projects", strings.ReplaceAll(cwd, "/", "-"))
+				if err := os.MkdirAll(dir, 0o700); err == nil {
+					_ = os.WriteFile(filepath.Join(dir, os.Args[i+1]+".jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o600)
+				}
+				break
+			}
+		}
+	}
 	_, err = client.Succeed(ctx, "exact")
 	return err
 }
@@ -503,6 +553,52 @@ func TestSupervisorClaudeReceivesALongTaskThroughTheTerminal(t *testing.T) {
 		t.Fatalf("Claude receipt = %+v", run.Proposal)
 	}
 	fixture.assertReleased(t, run)
+}
+
+// A send-back retry re-queues the same task incarnation and reuses the same
+// retained Change directory (see TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree),
+// so a Claude Code worker's deterministic native session id is stable across
+// it: the retry resumes the first attempt's own conversation on disk instead
+// of starting an unrelated fresh one.
+func TestSupervisorClaudeWorkerReusesNativeSessionAcrossSendBack(t *testing.T) {
+	fixture := newSupervisorFixture(t, "unused shell task")
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "claude"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeSucceeded)
+	changePath := filepath.Join(fixture.changeParent, fixture.changeName(t, first))
+	projectDir := filepath.Join(fixture.spec.AccountHome, ".claude", "projects", strings.ReplaceAll(changePath, "/", "-"))
+	firstSessions, err := os.ReadDir(projectDir)
+	if err != nil || len(firstSessions) != 1 {
+		t.Fatalf("first native session files = %v, err=%v, want exactly one", firstSessions, err)
+	}
+
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("retry RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	if first.ChangeID == nil || second.ChangeID == nil || *first.ChangeID != *second.ChangeID {
+		t.Fatalf("send-back retry changed the retained Change: first=%v second=%v", first.ChangeID, second.ChangeID)
+	}
+	secondSessions, err := os.ReadDir(projectDir)
+	if err != nil || len(secondSessions) != 1 || secondSessions[0].Name() != firstSessions[0].Name() {
+		t.Fatalf("retry native session files = %v (want %q alone), err=%v", secondSessions, firstSessions[0].Name(), err)
+	}
+	fixture.assertReleased(t, first)
+	fixture.assertReleased(t, second)
 }
 
 // The provider inherits the daemon's umask. The service runs under 077, so
@@ -600,6 +696,101 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 		t.Fatalf("Codex task/PTY receipt = %q", run.Proposal.Result())
 	}
 	fixture.assertReleased(t, run)
+}
+
+// An orchestrator's own working directory is a fresh runtime root every run
+// (see internal/daemon/supervisor_darwin.go and
+// internal/changeworker/worker_darwin.go) and could never itself carry a
+// resumable Codex session. A second run of the same agent instead resumes
+// the first run's own session, discovered by that prior run's own working
+// directory (kernel.Store.LatestTerminalRuntimeRoot, joined with
+// changeworker.HomeName), so its standing tasks share one continuing context.
+func TestSupervisorCodexOrchestratorResumesFromPreviousRunsWorkingDirectory(t *testing.T) {
+	fixture := newSupervisorRoleFixture(t, "unused shell task", kernel.RoleOrchestrator)
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "codex"))
+	if err := os.WriteFile(filepath.Join(tools, "dark-factory-maintainer-mcp-bridge"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	sessionsRoot := filepath.Join(provider.ConfigHome(kernel.ProviderCodex, fixture.spec.AccountHome), "sessions")
+
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeSucceeded)
+	firstRollouts := codexRolloutSummaries(t, sessionsRoot)
+	if len(firstRollouts) != 1 || firstRollouts[0].ResumedFrom != "" || firstRollouts[0].ID == "" {
+		t.Fatalf("first run rollouts = %+v, want exactly one fresh rollout with an id", firstRollouts)
+	}
+	firstSessionID := firstRollouts[0].ID
+
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("second RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	secondRollouts := codexRolloutSummaries(t, sessionsRoot)
+	if len(secondRollouts) != 2 {
+		t.Fatalf("second run rollouts = %+v, want two", secondRollouts)
+	}
+	resumedSomething := false
+	for _, rollout := range secondRollouts {
+		if rollout.ResumedFrom == firstSessionID {
+			resumedSomething = true
+		}
+	}
+	if !resumedSomething {
+		t.Fatalf("second orchestrator run did not resume the first run's session %q: %+v", firstSessionID, secondRollouts)
+	}
+	fixture.assertReleased(t, first)
+	fixture.assertReleased(t, second)
+}
+
+// codexRolloutSummary is one fake rollout's own recorded id and its own
+// diagnostic resumed_from field (see runSupervisorCodexFixture): the exact
+// session id, if any, that invocation's own argv named to resume.
+type codexRolloutSummary struct {
+	ID          string
+	ResumedFrom string
+}
+
+func codexRolloutSummaries(t *testing.T, sessionsRoot string) []codexRolloutSummary {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(sessionsRoot, "*", "*", "*", "rollout-*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := make([]codexRolloutSummary, 0, len(matches))
+	for _, path := range matches {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line := raw
+		if index := bytes.IndexByte(raw, '\n'); index >= 0 {
+			line = raw[:index]
+		}
+		var meta struct {
+			Payload struct {
+				ID          string `json:"id"`
+				ResumedFrom string `json:"resumed_from"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(line, &meta); err != nil {
+			t.Fatal(err)
+		}
+		summaries = append(summaries, codexRolloutSummary{ID: meta.Payload.ID, ResumedFrom: meta.Payload.ResumedFrom})
+	}
+	return summaries
 }
 
 // One Codex overseer reads blocked and failed retained Changes in the same

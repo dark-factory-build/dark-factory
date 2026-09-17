@@ -18,13 +18,14 @@ import (
 )
 
 const (
-	AttemptTokenName     = "attempt.token"
-	HomeName             = "home"
-	TempName             = "tmp"
-	ResultLimit          = 32 << 10
-	ConfigLimit          = 256 << 10
-	maximumLocatorBytes  = 4096
-	maximumRevisionBytes = 4096
+	AttemptTokenName           = "attempt.token"
+	HomeName                   = "home"
+	TempName                   = "tmp"
+	ResultLimit                = 32 << 10
+	ConfigLimit                = 256 << 10
+	maximumLocatorBytes        = 4096
+	maximumRevisionBytes       = 4096
+	maximumSessionKeyPartBytes = 128
 )
 
 var ErrInvalidContract = errors.New("Change worker: invalid private contract")
@@ -35,17 +36,30 @@ type Config struct {
 	// prepared or reopened below; an orchestrator has none and works in its
 	// private runtime home, so its FinalName and Retained are
 	// empty.
-	Role                 kernel.AgentRole
-	Model                string
-	ReasoningEffort      string
-	RuntimePath          string
-	RuntimeIdentity      runner.FileIdentity
-	GitExecutable        string
-	FactoryctlExecutable string
-	ToolPath             string
-	ToolchainReadRoots   string
-	LocalCILeaseDir      string
-	AccountHome          string
+	Role            kernel.AgentRole
+	Model           string
+	ReasoningEffort string
+	// AgentID and TaskIncarnationID name the exact agent and task incarnation
+	// this attempt belongs to. The provider boundary uses them only to derive
+	// a deterministic native Claude Code worker session key (see
+	// provider.claudeSessionSelection); nothing here persists them further.
+	AgentID           string
+	TaskIncarnationID string
+	// PreviousWorkingDirectory is the same orchestrator agent's most recent
+	// terminal run's own working directory (empty for a worker, or an
+	// orchestrator with no prior terminal run). The provider boundary uses it
+	// only to find that run's own Codex session, since an orchestrator's
+	// current working directory is a fresh runtime root every run and could
+	// never itself be found again; see provider.codexSessionSelection.
+	PreviousWorkingDirectory string
+	RuntimePath              string
+	RuntimeIdentity          runner.FileIdentity
+	GitExecutable            string
+	FactoryctlExecutable     string
+	ToolPath                 string
+	ToolchainReadRoots       string
+	LocalCILeaseDir          string
+	AccountHome              string
 	// AccountConfigDir is the linked provider login this run launches with.
 	// Empty means the provider's own default configuration directory.
 	AccountConfigDir   string
@@ -95,28 +109,31 @@ type resultWire struct {
 }
 
 type configWire struct {
-	Provider             string       `json:"provider"`
-	Role                 string       `json:"role"`
-	Model                string       `json:"model"`
-	ReasoningEffort      string       `json:"reasoning_effort"`
-	RuntimePath          string       `json:"runtime_path"`
-	RuntimeIdentity      identityWire `json:"runtime_identity"`
-	GitExecutable        string       `json:"git_executable"`
-	FactoryctlExecutable string       `json:"factoryctl_executable"`
-	ToolPath             string       `json:"tool_path"`
-	ToolchainReadRoots   string       `json:"toolchain_read_roots,omitempty"`
-	LocalCILeaseDir      string       `json:"local_ci_lease_directory,omitempty"`
-	AccountHome          string       `json:"account_home"`
-	AccountConfigDir     string       `json:"account_config_dir"`
-	RepositoryRoot       string       `json:"repository_root"`
-	RepositoryIdentity   identityWire `json:"repository_identity"`
-	GitCommonDir         string       `json:"git_common_dir"`
-	Revision             string       `json:"revision"`
-	ChangeParent         string       `json:"change_parent"`
-	FinalName            string       `json:"final_name"`
-	AttemptSocket        string       `json:"attempt_socket"`
-	Retained             *resultWire  `json:"retained,omitempty"`
-	ProviderTask         []byte       `json:"provider_task"`
+	Provider                 string       `json:"provider"`
+	Role                     string       `json:"role"`
+	Model                    string       `json:"model"`
+	ReasoningEffort          string       `json:"reasoning_effort"`
+	AgentID                  string       `json:"agent_id"`
+	TaskIncarnationID        string       `json:"task_incarnation_id"`
+	PreviousWorkingDirectory string       `json:"previous_working_directory,omitempty"`
+	RuntimePath              string       `json:"runtime_path"`
+	RuntimeIdentity          identityWire `json:"runtime_identity"`
+	GitExecutable            string       `json:"git_executable"`
+	FactoryctlExecutable     string       `json:"factoryctl_executable"`
+	ToolPath                 string       `json:"tool_path"`
+	ToolchainReadRoots       string       `json:"toolchain_read_roots,omitempty"`
+	LocalCILeaseDir          string       `json:"local_ci_lease_directory,omitempty"`
+	AccountHome              string       `json:"account_home"`
+	AccountConfigDir         string       `json:"account_config_dir"`
+	RepositoryRoot           string       `json:"repository_root"`
+	RepositoryIdentity       identityWire `json:"repository_identity"`
+	GitCommonDir             string       `json:"git_common_dir"`
+	Revision                 string       `json:"revision"`
+	ChangeParent             string       `json:"change_parent"`
+	FinalName                string       `json:"final_name"`
+	AttemptSocket            string       `json:"attempt_socket"`
+	Retained                 *resultWire  `json:"retained,omitempty"`
+	ProviderTask             []byte       `json:"provider_task"`
 }
 
 func EncodeConfig(config Config) ([]byte, error) {
@@ -125,6 +142,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	}
 	wire := configWire{
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
+		AgentID: config.AgentID, TaskIncarnationID: config.TaskIncarnationID, PreviousWorkingDirectory: config.PreviousWorkingDirectory,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
 		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, GitCommonDir: config.GitCommonDir, Revision: config.Revision,
@@ -165,6 +183,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	}
 	config := Config{
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
+		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
 		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, Revision: wire.Revision,
@@ -193,9 +212,13 @@ func validateConfig(config Config) error {
 	if config.AccountConfigDir != "" && !validAbsolute(config.AccountConfigDir, maximumLocatorBytes) {
 		return invalidContract(nil)
 	}
+	if config.PreviousWorkingDirectory != "" && (config.Role != kernel.RoleOrchestrator || !validAbsolute(config.PreviousWorkingDirectory, maximumLocatorBytes)) {
+		return invalidContract(nil)
+	}
 	if len(config.AttemptSocket) > install.MaxSocketPathBytes || config.RuntimeIdentity.Device == 0 || config.RuntimeIdentity.Inode == 0 ||
 		kernel.ValidateProviderLaunchControls(config.Provider, config.Model, config.ReasoningEffort) != nil || provider.ValidateToolPath(config.ToolPath) != nil || !install.ToolchainReadRootsAllowed(config.ToolchainReadRoots, config.AccountHome, config.AccountConfigDir, config.RuntimePath, config.RepositoryRoot, config.ChangeParent) ||
-		!validText(config.Revision, maximumRevisionBytes) || config.Role.String() == "" {
+		!validText(config.Revision, maximumRevisionBytes) || config.Role.String() == "" ||
+		!validText(config.AgentID, maximumSessionKeyPartBytes) || !validText(config.TaskIncarnationID, maximumSessionKeyPartBytes) {
 		return invalidContract(nil)
 	}
 	if config.Role == kernel.RoleOrchestrator {

@@ -327,6 +327,19 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if worker {
 		localCILeaseDir, _ = prepareLocalCILeaseDirectory(gitCommonDir)
 	}
+	// An orchestrator's own working directory is a fresh runtime root every
+	// run, so it names its own agent's most recent terminal run's working
+	// directory instead, for the provider boundary to look for that run's own
+	// native session (see provider.codexSessionSelection). This is a resume
+	// hint, not admission authority: an unavailable or absent prior run must
+	// not block otherwise valid supervision, so any failure here just means
+	// no hint, the same as a first-ever run.
+	var previousWorkingDirectory string
+	if !worker {
+		if previousRuntimeRoot, found, err := daemon.store.LatestTerminalRuntimeRoot(ctx, run.AgentID); err == nil && found {
+			previousWorkingDirectory = filepath.Join(previousRuntimeRoot, changeworker.HomeName)
+		}
+	}
 	// From CreateRuntime until the runtime resource is durably active, a
 	// failure cannot be finalized live: the exact-edge grammar requires either
 	// trusted runtime absence (unprovable after an uncertain create) or an
@@ -361,6 +374,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	}
 	config := changeworker.Config{
 		Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
+		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity, GitCommonDir: gitCommonDir,
 		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName,

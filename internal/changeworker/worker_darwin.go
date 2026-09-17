@@ -122,10 +122,17 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	// Keep the one verified publication path as the authority for both Codex's
 	// project policy and the runner's process cwd below.
-	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths, publishedPath, config.Role)
+	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths, publishedPath, config.Role, config.AgentID, config.TaskIncarnationID)
 	if err != nil {
 		_ = cwd.Close()
 		return err
+	}
+	if config.PreviousWorkingDirectory != "" {
+		request, err = request.WithPreviousWorkingDirectory(config.PreviousWorkingDirectory)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
 	}
 	launch, err := provider.Build(request)
 	if err != nil {
