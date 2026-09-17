@@ -306,6 +306,28 @@ def record_live_tip(journal, value):
     journal["live_tip"] = {"sha": value["sha"], "healthy": value["healthy"], "observed_at": int(time.time())}
 
 
+def record_unresolved(journal, entry, error):
+    """Keep an attempted deployment as a global journal barrier.
+
+    The latest merged PR is not an authorization to replay an earlier hook.
+    This barrier is deliberately separate from the per-PR receipt so it can
+    protect the runtime while GitHub's default branch advances.
+    """
+    journal["unresolved_deployment"] = {
+        "pr": entry["pr"],
+        "sha": entry["sha"],
+        "config_fingerprint": entry["config_fingerprint"],
+        "error": error,
+        "updated_at": int(time.time()),
+    }
+
+
+def clear_unresolved(journal, entry):
+    unresolved = journal.get("unresolved_deployment")
+    if unresolved and unresolved.get("pr") == entry.get("pr") and unresolved.get("sha") == entry.get("sha"):
+        journal.pop("unresolved_deployment", None)
+
+
 def once(config, number, retry=False):
     journal_path = Path(config["journal"])
     lock_path = Path(str(journal_path) + ".lock")
@@ -320,6 +342,36 @@ def once(config, number, retry=False):
         entry = journal["releases"].get(str(number))
         if entry and entry.get("config_fingerprint") != fingerprint:
             raise ReleaseError("journal receipt belongs to a different repository or hook configuration")
+        unresolved = journal.get("unresolved_deployment")
+        if unresolved is not None:
+            unresolved_pr = unresolved.get("pr") if isinstance(unresolved, dict) else None
+            receipt = journal["releases"].get(str(unresolved_pr))
+            if (not isinstance(unresolved, dict) or unresolved.get("config_fingerprint") != fingerprint
+                    or not isinstance(unresolved_pr, int)
+                    or not SHA.fullmatch(str(unresolved.get("sha", "")))
+                    or not isinstance(receipt, dict)
+                    or receipt.get("pr") != unresolved_pr
+                    or receipt.get("sha") != unresolved.get("sha")
+                    or receipt.get("config_fingerprint") != fingerprint
+                    or receipt.get("state") not in {"blocked", "running"}):
+                raise ReleaseError("release journal has an invalid unresolved deployment barrier")
+            if unresolved_pr != number:
+                raise ReleaseError("an earlier deployment is unresolved; reconcile that pull request explicitly before releasing another")
+        if entry and entry.get("state") == "blocked" and retry and unresolved is not None:
+            # An explicit recovery first reconciles an effect that may have
+            # completed after the original process lost its result.
+            try:
+                value = probe(config, entry["sha"])
+                if (isinstance(value, dict) and value.get("healthy") is True
+                        and value.get("sha") == entry["sha"]):
+                    entry.update({"state": "verified", "verification": value, "verified_at": int(time.time())})
+                    record_live_tip(journal, value)
+                    clear_unresolved(journal, entry)
+                    atomic_json(journal_path, journal)
+                    return entry
+            except ReleaseError as exc:
+                raise ReleaseError("deployment outcome is ambiguous; reconcile the live runtime before retrying") from exc
+            raise ReleaseError("deployment outcome is ambiguous; reconcile the live runtime before retrying")
         if entry and entry.get("state") == "blocked" and not retry:
             raise ReleaseError("release is blocked; inspect the receipt and use --retry explicitly")
         if entry and entry.get("state") == "running":
@@ -329,11 +381,13 @@ def once(config, number, retry=False):
                     raise ReleaseError("deployment outcome is ambiguous; live probe reports another state")
                 entry.update({"state": "verified", "verification": value, "verified_at": int(time.time())})
                 record_live_tip(journal, value)
+                clear_unresolved(journal, entry)
                 atomic_json(journal_path, journal)
                 return entry
             except ReleaseError:
                 entry["state"] = "blocked"
                 entry["error"] = "deployment outcome is ambiguous; inspect before retrying"
+                record_unresolved(journal, entry, entry["error"])
                 atomic_json(journal_path, journal)
                 raise ReleaseError(entry["error"])
         pr, default, reviews, checks = gh_snapshot(config, number)
@@ -395,10 +449,12 @@ def once(config, number, retry=False):
         except ReleaseError as exc:
             entry["state"] = "blocked"
             entry["error"] = str(exc)
+            record_unresolved(journal, entry, entry["error"])
             atomic_json(journal_path, journal)
             raise
         entry.update({"state": "verified", "verification": value, "verified_at": int(time.time())})
         record_live_tip(journal, value)
+        clear_unresolved(journal, entry)
         atomic_json(journal_path, journal)
         return entry
 
