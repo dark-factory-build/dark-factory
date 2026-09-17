@@ -65,6 +65,9 @@ test("ambient scheduling stops for hidden, reduced-motion, disconnected and inel
     assert.equal(intervals.size, 0);
     act(() => { media.matches = false; listeners.get("media")(); });
     assert.equal(intervals.size, 1);
+    act(() => { scene.update(createElement(FactoryScene, { topology, workers: [worker], appearance: { ...DEFAULT_FLOOR_APPEARANCE, animation: "off" } })); });
+    assert.equal(intervals.size, 0);
+    assert.ok(scene.root.findByProps({ "data-worker-id": "idle" }).props["data-ambient-pose"], "animation off keeps a static inhabited pose");
     act(() => { scene.update(createElement(FactoryScene, { topology, workers: [worker], appearance: { ...DEFAULT_FLOOR_APPEARANCE, ambientLife: "off" } })); });
     assert.equal(intervals.size, 0);
     act(() => { scene.update(createElement(FactoryScene, { topology, workers: [worker], connected: false })); });

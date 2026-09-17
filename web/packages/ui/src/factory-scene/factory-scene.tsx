@@ -264,7 +264,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
     return () => { stop(); media?.removeEventListener("change", start); document.removeEventListener("visibilitychange", resume); };
   }, [appearance.ambientLife, appearance.animation, ambientEligible, connected]);
   const layout = useMemo(() => layoutScene(topology), [topology]);
-  const placements = useMemo(() => ambientPlacements(layout, placeWorkers(layout, workers), workers, appearance.animation === "off" ? "off" : appearance.ambientLife, ambientPhase), [layout, workers, appearance.animation, appearance.ambientLife, ambientPhase]);
+  const placements = useMemo(() => ambientPlacements(layout, placeWorkers(layout, workers), workers, appearance.ambientLife, ambientPhase), [layout, workers, appearance.ambientLife, ambientPhase]);
   const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
   const resting = placements.filter((placement) => placement.area === "resting");
   const staging = placements.filter((placement) => placement.area === "staging");
