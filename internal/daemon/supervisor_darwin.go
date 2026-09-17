@@ -722,6 +722,10 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		if err := live.join(); err != nil && resultOutcome.err == nil {
 			return err
 		}
+		// Normal success reaches runtime cleanup through this closure rather
+		// than supervisorAttemptOwner.close. Stop new retained-source reads and
+		// drain admitted materializations before dropping the live handle.
+		live.closeSourceOperations()
 		// A dead owner loop whose result was recovered from disk is already
 		// consumed evidence; its controller was closed by its own shutdown.
 		owner.live = nil
