@@ -153,6 +153,41 @@ class ReleaseFixtures(unittest.TestCase):
             command.assert_not_called()
             self.assertEqual(release.load(journal)["unresolved_deployment"]["pr"], 633)
 
+    def test_legacy_running_receipt_with_different_config_blocks_newer_release(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            old_cfg = dict(cfg, deploy_argv=["/bin/false"])
+            original = {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "running",
+                         "config_fingerprint": release.config_fingerprint(old_cfg)}
+            }}
+            release.atomic_json(journal, original)
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "different repository or hook configuration"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(release.load(journal), original)
+
+    def test_legacy_blocked_receipt_blocks_newer_release_before_github_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            fingerprint = release.config_fingerprint(cfg)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "blocked",
+                         "config_fingerprint": fingerprint}
+            }})
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "earlier deployment is unresolved"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(release.load(journal)["unresolved_deployment"]["pr"], 633)
+
     def test_hook_crash_leaves_barrier_before_any_hook_effect(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "release.json"

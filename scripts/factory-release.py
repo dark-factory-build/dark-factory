@@ -345,19 +345,39 @@ def once(config, number, retry=False):
         unresolved = journal.get("unresolved_deployment")
         # Older journals recorded ``running`` before invoking the hook but did
         # not have the separate barrier. Treat such a receipt as unresolved
-        # before making any GitHub calls for a newer release. Do not apply the
-        # same rule to historical blocked receipts: those are harmless once
-        # their live outcome has been verified and the explicit barrier was
-        # cleared.
+        # before making any GitHub calls for a newer release. Apply the same
+        # rule to historical blocked receipts. Before the
+        # separate barrier existed, a blocked receipt could have been written
+        # after the deploy hook (or during verification), so a newer merged PR
+        # must not turn it into an implicit retry. A receipt whose SHA is
+        # already recorded healthy is the journal's proof that recovery was
+        # completed and is safe to leave out of the barrier.
         if unresolved is None:
-            legacy_running = [receipt for receipt in journal["releases"].values()
-                              if isinstance(receipt, dict)
-                              and receipt.get("state") == "running"
-                              and receipt.get("config_fingerprint") == fingerprint]
-            if legacy_running:
-                if len(legacy_running) != 1:
-                    raise ReleaseError("release journal has multiple unresolved running deployments")
-                legacy = legacy_running[0]
+            # Do not filter running receipts by the current configuration.
+            # A running receipt from an older configuration is still an
+            # unresolved deployment and must remain a barrier; silently
+            # ignoring it would let a newer merged PR replay the hook.
+            all_running = [receipt for receipt in journal["releases"].values()
+                           if isinstance(receipt, dict) and receipt.get("state") == "running"]
+            for running in all_running:
+                if running.get("config_fingerprint") != fingerprint:
+                    raise ReleaseError("running deployment belongs to a different repository or hook configuration")
+            live_tip = journal.get("live_tip")
+            def recovered(receipt):
+                verification = receipt.get("verification")
+                return ((isinstance(verification, dict) and verification.get("sha") == receipt.get("sha")
+                         and verification.get("healthy") is True)
+                        or (isinstance(live_tip, dict) and live_tip.get("sha") == receipt.get("sha")
+                            and live_tip.get("healthy") is True))
+
+            legacy_blocked = [receipt for receipt in journal["releases"].values()
+                              if isinstance(receipt, dict) and receipt.get("state") == "blocked"
+                              and receipt.get("config_fingerprint") == fingerprint and not recovered(receipt)]
+            legacy_uncertain = all_running + legacy_blocked
+            if legacy_uncertain:
+                if len(legacy_uncertain) != 1:
+                    raise ReleaseError("release journal has multiple unresolved deployments")
+                legacy = legacy_uncertain[0]
                 if not isinstance(legacy.get("pr"), int) or not SHA.fullmatch(str(legacy.get("sha", ""))):
                     raise ReleaseError("release journal has an invalid unresolved deployment barrier")
                 record_unresolved(journal, legacy, "deployment outcome is ambiguous; reconcile the live runtime before releasing another")
