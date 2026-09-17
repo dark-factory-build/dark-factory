@@ -343,6 +343,26 @@ def once(config, number, retry=False):
         if entry and entry.get("config_fingerprint") != fingerprint:
             raise ReleaseError("journal receipt belongs to a different repository or hook configuration")
         unresolved = journal.get("unresolved_deployment")
+        # Older journals recorded ``running`` before invoking the hook but did
+        # not have the separate barrier. Treat such a receipt as unresolved
+        # before making any GitHub calls for a newer release. Do not apply the
+        # same rule to historical blocked receipts: those are harmless once
+        # their live outcome has been verified and the explicit barrier was
+        # cleared.
+        if unresolved is None:
+            legacy_running = [receipt for receipt in journal["releases"].values()
+                              if isinstance(receipt, dict)
+                              and receipt.get("state") == "running"
+                              and receipt.get("config_fingerprint") == fingerprint]
+            if legacy_running:
+                if len(legacy_running) != 1:
+                    raise ReleaseError("release journal has multiple unresolved running deployments")
+                legacy = legacy_running[0]
+                if not isinstance(legacy.get("pr"), int) or not SHA.fullmatch(str(legacy.get("sha", ""))):
+                    raise ReleaseError("release journal has an invalid unresolved deployment barrier")
+                record_unresolved(journal, legacy, "deployment outcome is ambiguous; reconcile the live runtime before releasing another")
+                atomic_json(journal_path, journal)
+                unresolved = journal["unresolved_deployment"]
         if unresolved is not None:
             unresolved_pr = unresolved.get("pr") if isinstance(unresolved, dict) else None
             receipt = journal["releases"].get(str(unresolved_pr))
@@ -442,6 +462,10 @@ def once(config, number, retry=False):
             atomic_json(journal_path, journal)
             raise ReleaseError(entry["error"])
         entry["state"] = "running"
+        # The barrier must be durable in the same journal before the hook is
+        # started. A process termination during the hook must not let a later
+        # ``--latest`` invocation replay it against the same runtime.
+        record_unresolved(journal, entry, "deployment outcome is ambiguous; inspect before retrying")
         atomic_json(journal_path, journal)
         try:
             run(config["deploy_argv"] + [sha], timeout=None)

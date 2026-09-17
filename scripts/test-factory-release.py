@@ -137,6 +137,41 @@ class ReleaseFixtures(unittest.TestCase):
             snapshot_call.assert_not_called()
             command.assert_not_called()
 
+    def test_legacy_running_receipt_blocks_newer_release_before_github_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            release.atomic_json(journal, {"version": 1, "releases": {
+                "633": {"pr": 633, "sha": SHA, "state": "running",
+                         "config_fingerprint": release.config_fingerprint(cfg)}
+            }})
+            with mock.patch.object(release, "gh_snapshot") as snapshot_call, \
+                 mock.patch.object(release, "run") as command:
+                with self.assertRaisesRegex(release.ReleaseError, "earlier deployment is unresolved"):
+                    release.once(cfg, 634)
+            snapshot_call.assert_not_called()
+            command.assert_not_called()
+            self.assertEqual(release.load(journal)["unresolved_deployment"]["pr"], 633)
+
+    def test_hook_crash_leaves_barrier_before_any_hook_effect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            def hook_crash(argv, *args, **kwargs):
+                if argv[:2] == ["gh", "api"]:
+                    return json.dumps({"object": {"sha": SHA}})
+                raise KeyboardInterrupt
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": OLD, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([{"pr": 633, "merge_sha": SHA, "issue": 602, "reference": "refs"}], "range")), \
+                 mock.patch.object(release, "run", side_effect=hook_crash):
+                with self.assertRaises(KeyboardInterrupt):
+                    release.once(cfg, 633)
+            receipt = release.load(journal)["releases"]["633"]
+            self.assertEqual(receipt["state"], "running")
+            self.assertEqual(release.load(journal)["unresolved_deployment"]["sha"], SHA)
+
     def test_explicit_recovery_clears_barrier_and_allows_subsequent_release(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "release.json"
