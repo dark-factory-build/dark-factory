@@ -70,10 +70,23 @@ refuse_dispatch_enabled() {
 }
 
 # Checked before the build and again right before the uninstall that would
-# kill work that was still draining while the build was running.
+# kill work that was still draining while the build was running. A run that is
+# still running behind its runner's takeover endpoint is adopted by the next
+# daemon and survives the restart, so it does not block; every other
+# non-terminal run — including an older runner with no endpoint — still does.
 refuse_active_runs() {
-    active=$(sqlite3 "$db" "SELECT count(*) FROM runs WHERE phase <> 'terminal'")
-    [ "$active" = 0 ] || { echo "refusing: $active non-terminal run(s) in $db" >&2; exit 1; }
+    blocking=0
+    for row in $(sqlite3 "$db" "SELECT phase || ':' || lower(hex(id)) FROM runs WHERE phase <> 'terminal'"); do
+        phase=${row%%:*}
+        run=${row#*:}
+        if [ "$phase" = running ] && [ -S "$runtime_home/runtimes/$run/takeover.sock" ]; then
+            echo "adoptable: run $run keeps running across the restart" >&2
+            continue
+        fi
+        echo "blocking: run $run is $phase and cannot be adopted" >&2
+        blocking=$((blocking + 1))
+    done
+    [ "$blocking" = 0 ] || { echo "refusing: $blocking non-adoptable non-terminal run(s) in $db" >&2; exit 1; }
 }
 
 # A connect, as the service e2e probes: nc -z cannot scan Unix sockets on macOS.

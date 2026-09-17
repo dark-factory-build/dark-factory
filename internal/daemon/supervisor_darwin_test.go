@@ -15,11 +15,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -28,6 +28,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/changeworker"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/provider"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"golang.org/x/sys/unix"
 )
@@ -138,6 +139,16 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// codexFixtureSessionID stands in for the id the real Codex CLI would assign
+// itself at creation. provider.canonicalUUID requires an exact 36-character
+// lowercase 8-4-4-4-12 hex UUID, so this is one, with this exact fixture
+// invocation's own PID as its last group: deterministic per process, so a
+// test reading two separate fixture processes' own rollouts back from disk
+// can tell them apart without sharing a hardcoded id.
+func codexFixtureSessionID() string {
+	return fmt.Sprintf("00000000-0000-7000-8000-%012x", uint64(os.Getpid()))
+}
+
 func runSupervisorCodexFixture() error {
 	client, err := api.NewAttemptClientFromEnvironment(os.Getenv("DARK_FACTORY_SOCKET"))
 	if err != nil {
@@ -171,7 +182,7 @@ func runSupervisorCodexFixture() error {
 		}
 		if overseer {
 			before, err := client.OverseerTaskSnapshot(ctx, expected[0])
-			if err != nil || len(before.Handoffs) != 0 {
+			if err != nil || len(before.Handoffs) != 1 || before.Handoffs[0].TaskID != expected[0] || before.Handoffs[0].SourcePath != "" || before.Handoffs[0].GitDirectory != "" || before.Handoffs[0].HeadCommit == "" {
 				return fmt.Errorf("status before explicit request = %+v, %v", before.Handoffs, err)
 			}
 		}
@@ -182,13 +193,19 @@ func runSupervisorCodexFixture() error {
 		if handoff.TaskID != expected[0] || handoff.ChangeID != expected[1] || handoff.BaseCommit != expected[2] || strconv.FormatUint(handoff.TaskWorkRevision, 10) != expected[3] || strconv.FormatUint(handoff.ChangeRevision, 10) != expected[4] {
 			return fmt.Errorf("source receipt = %+v for expected identity %q", handoff, target)
 		}
+		if handoff.Branch != "factory/"+handoff.ChangeID[:12] || handoff.HeadCommit == "" || filepath.Base(handoff.GitDirectory) != ".git" || filepath.Base(handoff.SourcePath) != handoff.ChangeID {
+			return fmt.Errorf("source receipt lacks Git identities: %+v", handoff)
+		}
+		if _, err := os.Stat(filepath.Join(handoff.GitDirectory, "worktrees", handoff.ChangeID)); err != nil {
+			return fmt.Errorf("source receipt Git directory does not register the worktree: %w", err)
+		}
 		if overseer {
 			snapshot, err := client.OverseerTaskSnapshot(ctx, expected[0])
 			if err != nil {
 				return err
 			}
-			if len(snapshot.Handoffs) != 1 || snapshot.Handoffs[0].TaskID != handoff.TaskID || snapshot.Handoffs[0].SourcePath != handoff.SourcePath {
-				return fmt.Errorf("status lost explicitly requested handoff = %+v", snapshot.Handoffs)
+			if len(snapshot.Handoffs) != 1 || snapshot.Handoffs[0].TaskID != handoff.TaskID || snapshot.Handoffs[0].HeadCommit != handoff.HeadCommit {
+				return fmt.Errorf("status handoff identity = %+v", snapshot.Handoffs)
 			}
 		} else if _, err := client.OverseerTaskSnapshot(ctx, expected[0]); err == nil {
 			return errors.New("reviewer gained overseer source discovery")
@@ -220,6 +237,9 @@ func runSupervisorCodexFixture() error {
 		if body, err := os.ReadFile(filepath.Join(path, "payload.txt")); err != nil || string(body) != "exact source\n" {
 			return fmt.Errorf("earlier source was lost after another request: %q, %v", body, err)
 		}
+		if _, err := os.Lstat(filepath.Join(path, ".git")); err != nil {
+			return fmt.Errorf("source is not a worktree: %w", err)
+		}
 	}
 	for _, value := range append(append([]string(nil), os.Args[1:]...), os.Environ()...) {
 		if strings.Contains(value, task.Task) {
@@ -229,6 +249,33 @@ func runSupervisorCodexFixture() error {
 	size, err := unix.IoctlGetWinsize(0, unix.TIOCGWINSZ)
 	if err != nil {
 		return err
+	}
+	// Stand in for the real CLI's own rollout write, so a later launch's
+	// discovery (provider.codexSessionSelection) can find this exact cwd the
+	// same way it would against the real tool.
+	// resumed_from is this fixture's own diagnostic field, not one
+	// codexSessionSelection reads: it records what this exact invocation's
+	// own argv named, so a test can independently confirm what a later
+	// launch actually discovered and resumed.
+	resumedFrom := ""
+	if len(os.Args) > 2 && os.Args[1] == "resume" {
+		resumedFrom = os.Args[2]
+		if !slices.Contains(os.Args, `tui.resume_cwd="current"`) {
+			return errors.New("resumed Codex launch did not select its current authorized cwd")
+		}
+	}
+	if codexHome, cwd := os.Getenv("CODEX_HOME"), func() string { path, _ := os.Getwd(); return path }(); codexHome != "" && cwd != "" {
+		day := filepath.Join(codexHome, "sessions", time.Now().UTC().Format("2006/01/02"))
+		if err := os.MkdirAll(day, 0o700); err == nil {
+			line, marshalErr := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": codexFixtureSessionID(), "cwd": cwd, "resumed_from": resumedFrom}})
+			if marshalErr == nil {
+				// A PID suffix keeps this run's filename distinct from any
+				// other rollout this fixture wrote in the same wall-clock
+				// second; codexSessionSelection only reads the JSON content.
+				name := fmt.Sprintf("rollout-%s-%d.jsonl", time.Now().UTC().Format("2006-01-02T15-04-05"), os.Getpid())
+				_ = os.WriteFile(filepath.Join(day, name), append(line, '\n'), 0o600)
+			}
+		}
 	}
 	_, err = client.Succeed(ctx, fmt.Sprintf("%s\nPTY=%dx%d", task.Task, size.Col, size.Row))
 	return err
@@ -467,6 +514,21 @@ func runSupervisorClaudeFixture() error {
 	if typed != task.Task {
 		return fmt.Errorf("typed task is %d bytes, the attempt's is %d", len(typed), len(task.Task))
 	}
+	// Stand in for the real CLI's own transcript write, so a later launch's
+	// on-disk check (provider.claudeSessionSelection) can observe this exact
+	// session the same way it would against the real tool. The escaping here
+	// mirrors provider.escapeClaudeProjectPath.
+	if home, cwd := os.Getenv("HOME"), func() string { path, _ := os.Getwd(); return path }(); home != "" && cwd != "" {
+		for i, arg := range os.Args {
+			if (arg == "--session-id" || arg == "--resume") && i+1 < len(os.Args) {
+				dir := filepath.Join(home, ".claude", "projects", strings.ReplaceAll(cwd, "/", "-"))
+				if err := os.MkdirAll(dir, 0o700); err == nil {
+					_ = os.WriteFile(filepath.Join(dir, os.Args[i+1]+".jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o600)
+				}
+				break
+			}
+		}
+	}
 	_, err = client.Succeed(ctx, "exact")
 	return err
 }
@@ -497,6 +559,52 @@ func TestSupervisorClaudeReceivesALongTaskThroughTheTerminal(t *testing.T) {
 	fixture.assertReleased(t, run)
 }
 
+// A send-back retry re-queues the same task incarnation and reuses the same
+// retained Change directory (see TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree),
+// so a Claude Code worker's deterministic native session id is stable across
+// it: the retry resumes the first attempt's own conversation on disk instead
+// of starting an unrelated fresh one.
+func TestSupervisorClaudeWorkerReusesNativeSessionAcrossSendBack(t *testing.T) {
+	fixture := newSupervisorFixture(t, "unused shell task")
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderClaudeCode, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "claude"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeSucceeded)
+	changePath := filepath.Join(fixture.changeParent, fixture.changeName(t, first))
+	projectDir := filepath.Join(fixture.spec.AccountHome, ".claude", "projects", strings.ReplaceAll(changePath, "/", "-"))
+	firstSessions, err := os.ReadDir(projectDir)
+	if err != nil || len(firstSessions) != 1 {
+		t.Fatalf("first native session files = %v, err=%v, want exactly one", firstSessions, err)
+	}
+
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("retry RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	if first.ChangeID == nil || second.ChangeID == nil || *first.ChangeID != *second.ChangeID {
+		t.Fatalf("send-back retry changed the retained Change: first=%v second=%v", first.ChangeID, second.ChangeID)
+	}
+	secondSessions, err := os.ReadDir(projectDir)
+	if err != nil || len(secondSessions) != 1 || secondSessions[0].Name() != firstSessions[0].Name() {
+		t.Fatalf("retry native session files = %v (want %q alone), err=%v", secondSessions, firstSessions[0].Name(), err)
+	}
+	fixture.assertReleased(t, first)
+	fixture.assertReleased(t, second)
+}
+
 // The provider inherits the daemon's umask. The service runs under 077, so
 // a file it makes is 0600 and a directory 0700; a run whose worker made any
 // file must still settle, with those modes kept, not repaired.
@@ -520,23 +628,22 @@ func TestSupervisorWorkerFilesSettleUnderThePrivateServiceUmask(t *testing.T) {
 	fixture.assertReleased(t, run)
 }
 
-// A tree the inspection refuses for good (an empty directory, which no git
-// tree can hold) ends the run as a visible source failure naming the reason
-// and where the tree was moved, abandons the Change, fails the task, and
-// leaves the task's own retry free to prepare a fresh tree.
-func TestSupervisorRefusedPublicationFailsTheRunVisibly(t *testing.T) {
-	// The first run leaves an empty directory; the retry, which finds the
+// A worktree the worker destroyed cannot be retained and cannot come back:
+// the run ends as a visible source failure naming it, the Change is
+// abandoned, the task fails, and the task's own retry makes a fresh
+// worktree on the same branch.
+func TestSupervisorMissingWorktreeFailsTheRunVisibly(t *testing.T) {
+	// The first run deletes its own worktree; the retry, which finds the
 	// witness of the first, does not.
-	program := "set -eu\n[ -s __WITNESS__ ] || mkdir left-empty\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
+	program := "set -eu\n[ -s __WITNESS__ ] || { cd \"$HOME\" && rm -rf \"$OLDPWD\"; }\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
 	fixture := newSupervisorFixture(t, program)
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
-	aside := fixture.changeName(t, run) + ".refused-" + run.ID.String()[:8]
 	if run.Terminal == nil || run.Terminal.Code() != kernel.FailureSource || !strings.Contains(run.Terminal.Detail(), "published tree refused") ||
-		!strings.Contains(run.Terminal.Detail(), "empty or unselected prepared directory") || !strings.Contains(run.Terminal.Detail(), "changes/"+aside) {
+		!strings.Contains(run.Terminal.Detail(), "worktree is gone") || !strings.Contains(run.Terminal.Detail(), "changes/"+fixture.changeName(t, run)) {
 		t.Fatalf("refused run = %+v", run.Terminal)
 	}
 	task, found, err := fixture.store.Task(context.Background(), run.TaskID)
@@ -546,12 +653,6 @@ func TestSupervisorRefusedPublicationFailsTheRunVisibly(t *testing.T) {
 	changeState, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
 	if err != nil || !found || changeState.Phase != kernel.ChangeAbandoned || changeState.SettledRunID == nil || *changeState.SettledRunID != run.ID {
 		t.Fatalf("change after refusal = %+v, found=%v, %v", changeState, found, err)
-	}
-	if _, err := os.Stat(filepath.Join(fixture.changeParent, aside, "left-empty")); err != nil {
-		t.Fatalf("refused tree was not moved aside for a person to read: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(fixture.changeParent, fixture.changeName(t, run))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the Change's own name is still taken: %v", err)
 	}
 	fixture.assertReleased(t, run)
 	queueSupervisorRetry(t, fixture, run)
@@ -563,25 +664,13 @@ func TestSupervisorRefusedPublicationFailsTheRunVisibly(t *testing.T) {
 		t.Fatalf("retry run = %+v", retry)
 	}
 	fixture.assertTerminal(t, retry, kernel.OutcomeSucceeded)
-	if retained, found, err := fixture.store.Change(context.Background(), *run.ChangeID); err != nil || !found || retained.Phase != kernel.ChangeRetained {
+	retained, found, err := fixture.store.Change(context.Background(), *run.ChangeID)
+	if err != nil || !found || retained.Phase != kernel.ChangeRetained || retained.HeadCommit == nil {
 		t.Fatalf("change after the retry = %+v, found=%v, %v", retained, found, err)
 	}
-}
-
-// A worker that runs git init in its tree leaves a path no Change may hold;
-// the run ends with that reason rather than finalizing for good.
-func TestSupervisorRefusedPublicationForAGitDirectory(t *testing.T) {
-	program := "set -eu\nmkdir .git\nprintf 'ref: refs/heads/main\\n' > .git/HEAD\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
-	fixture := newSupervisorFixture(t, program)
-	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-	if err != nil {
-		t.Fatalf("RunNext: %v", err)
+	if body, err := os.ReadFile(filepath.Join(fixture.changeParent, fixture.changeName(t, run), "payload.txt")); err != nil || string(body) != "exact source\n" {
+		t.Fatalf("fresh worktree payload = %q, %v", body, err)
 	}
-	fixture.assertTerminal(t, run, kernel.OutcomeFailed)
-	if run.Terminal == nil || run.Terminal.Code() != kernel.FailureSource || !strings.Contains(run.Terminal.Detail(), ".git path components are forbidden") {
-		t.Fatalf("refused run = %+v", run.Terminal)
-	}
-	fixture.assertReleased(t, run)
 }
 
 func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
@@ -611,6 +700,101 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 		t.Fatalf("Codex task/PTY receipt = %q", run.Proposal.Result())
 	}
 	fixture.assertReleased(t, run)
+}
+
+// An orchestrator's own working directory is a fresh runtime root every run
+// (see internal/daemon/supervisor_darwin.go and
+// internal/changeworker/worker_darwin.go) and could never itself carry a
+// resumable Codex session. A second run of the same agent instead resumes
+// the first run's own session, discovered by that prior run's own working
+// directory (kernel.Store.LatestTerminalRuntimeRoot, joined with
+// changeworker.HomeName), so its standing tasks share one continuing context.
+func TestSupervisorCodexOrchestratorResumesFromPreviousRunsWorkingDirectory(t *testing.T) {
+	fixture := newSupervisorRoleFixture(t, "unused shell task", kernel.RoleOrchestrator)
+	if err := replaceSupervisorAgentLaunchControls(fixture.storePath, fixture.agentID, kernel.ProviderCodex, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, supervisorTestExecutable(t), filepath.Join(tools, "codex"))
+	if err := os.WriteFile(filepath.Join(tools, "dark-factory-maintainer-mcp-bridge"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	sessionsRoot := filepath.Join(provider.ConfigHome(kernel.ProviderCodex, fixture.spec.AccountHome), "sessions")
+
+	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("first RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, first, kernel.OutcomeSucceeded)
+	firstRollouts := codexRolloutSummaries(t, sessionsRoot)
+	if len(firstRollouts) != 1 || firstRollouts[0].ResumedFrom != "" || firstRollouts[0].ID == "" {
+		t.Fatalf("first run rollouts = %+v, want exactly one fresh rollout with an id", firstRollouts)
+	}
+	firstSessionID := firstRollouts[0].ID
+
+	queueSupervisorRetry(t, fixture, first)
+	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("second RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, second, kernel.OutcomeSucceeded)
+	secondRollouts := codexRolloutSummaries(t, sessionsRoot)
+	if len(secondRollouts) != 2 {
+		t.Fatalf("second run rollouts = %+v, want two", secondRollouts)
+	}
+	resumedSomething := false
+	for _, rollout := range secondRollouts {
+		if rollout.ResumedFrom == firstSessionID {
+			resumedSomething = true
+		}
+	}
+	if !resumedSomething {
+		t.Fatalf("second orchestrator run did not resume the first run's session %q: %+v", firstSessionID, secondRollouts)
+	}
+	fixture.assertReleased(t, first)
+	fixture.assertReleased(t, second)
+}
+
+// codexRolloutSummary is one fake rollout's own recorded id and its own
+// diagnostic resumed_from field (see runSupervisorCodexFixture): the exact
+// session id, if any, that invocation's own argv named to resume.
+type codexRolloutSummary struct {
+	ID          string
+	ResumedFrom string
+}
+
+func codexRolloutSummaries(t *testing.T, sessionsRoot string) []codexRolloutSummary {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(sessionsRoot, "*", "*", "*", "rollout-*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := make([]codexRolloutSummary, 0, len(matches))
+	for _, path := range matches {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line := raw
+		if index := bytes.IndexByte(raw, '\n'); index >= 0 {
+			line = raw[:index]
+		}
+		var meta struct {
+			Payload struct {
+				ID          string `json:"id"`
+				ResumedFrom string `json:"resumed_from"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(line, &meta); err != nil {
+			t.Fatal(err)
+		}
+		summaries = append(summaries, codexRolloutSummary{ID: meta.Payload.ID, ResumedFrom: meta.Payload.ResumedFrom})
+	}
+	return summaries
 }
 
 // One Codex overseer reads blocked and failed retained Changes in the same
@@ -738,8 +922,13 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 	fixture.assertReleased(t, reviewer)
 }
 
-func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) {
-	fixture := newSupervisorFixture(t, providerExitWithoutOutcomeProgram(t))
+// A retry reopens the same worktree: the worker's commit on the Change
+// branch and its uncommitted edits are exactly as it left them, the
+// settled head is what the daemon recorded, and no fresh selection or
+// upstream refresh happens.
+func TestSupervisorRetainedRetryReopensTheSameWorktree(t *testing.T) {
+	program := "set -eu\nif [ ! -s __WITNESS__ ]; then printf committed > committed.txt; git add committed.txt; git commit -q -m committed; printf edited > edited.txt; fi\nprintf x >> __WITNESS__\nexit 0\n"
+	fixture := newSupervisorFixture(t, program)
 	first, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("first RunNext: %v", err)
@@ -751,36 +940,35 @@ func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) 
 		t.Fatal(err)
 	}
 	firstChange, found, err := fixture.store.Change(context.Background(), *first.ChangeID)
-	if err != nil || !found || firstChange.Selection == nil {
+	if err != nil || !found || firstChange.Selection == nil || firstChange.HeadCommit == nil {
 		t.Fatalf("first retained Change = %+v, found=%v, err=%v", firstChange, found, err)
 	}
-	repositoryIdentity := firstChange.Selection.RepositoryIdentity()
-	queueSupervisorRetry(t, fixture, first)
-	// A retained retry must not resolve a selector or invoke Git again.
-	fixture.spec.GitExecutable = "/private/retained-retry-must-not-run-git"
-	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
-	if err := os.Rename(filepath.Join(fixture.root, "repository", ".git"), filepath.Join(fixture.root, "repository", ".git.retained")); err != nil {
-		t.Fatal(err)
+	head := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD"))
+	if fmt.Sprintf("%x", firstChange.HeadCommit.Bytes()) != head || head == fixture.base {
+		t.Fatalf("settled head = %x, worktree head = %s, base = %s", firstChange.HeadCommit.Bytes(), head, fixture.base)
 	}
+	if fmt.Sprintf("%x", firstChange.Selection.Commit().Bytes()) != fixture.base {
+		t.Fatalf("settled base moved: %x", firstChange.Selection.Commit().Bytes())
+	}
+	queueSupervisorRetry(t, fixture, first)
+	// A retained retry must not resolve a selector again.
+	fixture.spec.BaseRevision = "refs/heads/retained-retry-must-not-resolve"
 	second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {
 		t.Fatalf("retained RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, second, kernel.OutcomeFailed)
 	after, err := os.Lstat(changePath)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("retained worktree identity changed: %v", err)
 	}
-	beforeStat, beforeOK := before.Sys().(*syscall.Stat_t)
-	afterStat, afterOK := after.Sys().(*syscall.Stat_t)
-	if !beforeOK || !afterOK || beforeStat.Dev != afterStat.Dev || beforeStat.Ino != afterStat.Ino {
-		t.Fatalf("retained tree identity changed: before=%+v after=%+v", beforeStat, afterStat)
+	for name, want := range map[string]string{"payload.txt": "exact source\n", "committed.txt": "committed", "edited.txt": "edited"} {
+		if body, err := os.ReadFile(filepath.Join(changePath, name)); err != nil || string(body) != want {
+			t.Fatalf("retained %s = %q, %v", name, body, err)
+		}
 	}
-	if body, err := os.ReadFile(filepath.Join(changePath, "payload.txt")); err != nil || string(body) != "exact source\n" {
-		t.Fatalf("retained payload = %q, %v", body, err)
-	}
-	if _, err := os.Lstat(filepath.Join(fixture.changeParent, "."+fixture.changeName(t, first)+".stage")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("retained retry created staging tree: %v", err)
+	if got := strings.TrimSpace(supervisorGitOutput(t, supervisorNativeGit(t), "-C", changePath, "rev-parse", "HEAD")); got != head {
+		t.Fatalf("retry moved the branch to %s", got)
 	}
 	if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "xx" {
 		t.Fatalf("retained provider witness = %q, %v", witness, err)
@@ -789,16 +977,15 @@ func TestSupervisorRetainedRetrySkipsGitAndPreservesPublishedTree(t *testing.T) 
 		t.Fatalf("retained retry changed canonical Change: first=%+v second=%+v", first.ChangeID, second.ChangeID)
 	}
 	secondChange, found, err := fixture.store.Change(context.Background(), *second.ChangeID)
-	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != repositoryIdentity {
-		t.Fatalf("retained retry changed repository identity: Change=%+v found=%v err=%v", secondChange, found, err)
+	if err != nil || !found || secondChange.Selection == nil || secondChange.Selection.RepositoryIdentity() != firstChange.Selection.RepositoryIdentity() || secondChange.HeadCommit == nil || fmt.Sprintf("%x", secondChange.HeadCommit.Bytes()) != head {
+		t.Fatalf("retained retry changed identities: Change=%+v found=%v err=%v", secondChange, found, err)
 	}
 }
 
 func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing.T) {
 	for _, test := range []struct {
-		name            string
-		terminalFailure bool
-		mutate          func(*testing.T, *supervisorFixture, kernel.Run)
+		name   string
+		mutate func(*testing.T, *supervisorFixture, kernel.Run)
 	}{
 		{
 			name: "repository identity",
@@ -813,8 +1000,14 @@ func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing
 			},
 		},
 		{
-			name:            "repository replacement at provider release",
-			terminalFailure: true,
+			// Under the worktree model, settling a retained Change reads the
+			// worktree through the repository, unlike the old published-tree
+			// copy: a repository fault is one retainedSettlement documents as
+			// transient ("may pass tomorrow and leaves the run finalizing"),
+			// not a terminal refusal. So this case now behaves like the other
+			// durable-authority mismatches above: RunNext surfaces the fault
+			// rather than reaching the provider or settling gracefully.
+			name: "repository replacement at provider release",
 			mutate: func(t *testing.T, fixture *supervisorFixture, _ kernel.Run) {
 				fixture.spec.beforeProviderRelease = func() {
 					repository := filepath.Join(fixture.root, "repository")
@@ -864,13 +1057,7 @@ func TestSupervisorRetainedRetryFailsClosedOnDurableAuthorityMismatch(t *testing
 			}
 			queueSupervisorRetry(t, fixture, first)
 			test.mutate(t, fixture, first)
-			second, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-			if test.terminalFailure {
-				if err != nil {
-					t.Fatalf("post-release retained verification = %v", err)
-				}
-				fixture.assertTerminal(t, second, kernel.OutcomeFailed)
-			} else if err == nil {
+			if _, err := fixture.daemon.RunNext(context.Background(), fixture.spec); err == nil {
 				t.Fatal("mismatched retained authority reached provider")
 			}
 			if witness, err := os.ReadFile(fixture.witness); err != nil || string(witness) != "x" {
@@ -2415,6 +2602,10 @@ func (fixture *supervisorFixture) assertRecoveredAfterClose(t *testing.T, run ke
 		t.Fatal(err)
 	}
 	defer recoveredDaemon.Close()
+	// Boot remembers the Git executable before the sweep runs, exactly as
+	// cmd/factoryd does; a leftover retained-Change settlement must not need
+	// a live attempt to have run first.
+	recoveredDaemon.RememberSupervisorAccount(fixture.spec.ChangeParent, fixture.spec.AccountHome, fixture.spec.GitExecutable)
 	if _, err := recoveredDaemon.RecoverAbandonedRuns(context.Background(), fixture.spec.RuntimeParent, fixture.spec.ChangeParent); err != nil {
 		t.Fatal(err)
 	}

@@ -331,7 +331,7 @@ func (client *AttemptClient) Source(ctx context.Context, taskID string) (Retaine
 	}{TaskID: taskID}, &result); err != nil {
 		return RetainedChangeHandoff{}, err
 	}
-	if !validRetainedChangeHandoff(result) {
+	if !validSourceHandoff(result) {
 		return RetainedChangeHandoff{}, ErrProtocol
 	}
 	return result, nil
@@ -577,7 +577,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 
 	payload := make([]byte, requestPrelude+len(encoded))
 	payload[0] = client.domain
-	copy(payload[1:requestPrelude], current.bearer[:])
+	copy(payload[1:requestPrelude], client.token.bearer[:])
 	copy(payload[requestPrelude:], encoded)
 	if err := writeFrame(connection, payload); err != nil {
 		return classifyTransport(ctx)
@@ -984,7 +984,10 @@ func validOverseerTaskCreateInput(input OverseerTaskCreateInput) bool {
 }
 
 func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
-	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel {
+	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel && !input.Retry {
+		return false
+	}
+	if input.Retry && (input.Title != nil || input.Body != nil || input.Priority != nil || input.AssignedAgentID == nil || input.Cancel) {
 		return false
 	}
 	if input.Title != nil && !validText(*input.Title, 1, 1024) || input.Body != nil && !validText(*input.Body, 0, 131072) {
@@ -1043,7 +1046,11 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 }
 
 func validHandoffSourcePath(value, changeID string) bool {
-	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID && filepath.Base(filepath.Dir(value)) == "retained-source"
+	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID
+}
+
+func validHandoffGitDirectory(value string) bool {
+	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == ".git"
 }
 
 func validOverseerSnapshotInput(input OverseerSnapshotInput) bool {

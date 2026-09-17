@@ -364,6 +364,10 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("daemon")
+	// A leftover finalizing worker run with an available Change needs the
+	// Git executable to settle its worktree; publish it before the sweep
+	// runs rather than waiting for the first admitted attempt to remember it.
+	owner.daemon.RememberSupervisorAccount(owner.supervisorSpec.ChangeParent, owner.supervisorSpec.AccountHome, owner.supervisorSpec.GitExecutable)
 	// The sweep runs to a quiet state before any listener opens so no client
 	// can act on unrecovered durable state. A run the sweep leaves unresolved
 	// is durable fail-closed residue, reported but never a boot refusal.
@@ -671,6 +675,15 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 	accountHome, err := install.AccountHome()
 	if err != nil {
 		return daemon.SupervisorSpec{}, err
+	}
+	if !configuration.toolPathExplicit {
+		supportedPath, supportedRoots := install.SupportedToolchain(accountHome)
+		if supportedPath != "" {
+			configuration.toolPath = supportedPath + string(filepath.ListSeparator) + configuration.toolPath
+		}
+		if configuration.toolchainReadRoots == "" {
+			configuration.toolchainReadRoots = supportedRoots
+		}
 	}
 	if err := install.CheckToolchainReadRoots(configuration.toolchainReadRoots, accountHome, configuration.home, install.ChangesPath(configuration.home)); err != nil {
 		return daemon.SupervisorSpec{}, fmt.Errorf("factoryd: invalid toolchain read roots: %w", err)

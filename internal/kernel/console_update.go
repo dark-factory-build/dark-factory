@@ -295,6 +295,25 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		}
 		task.AssignedAgentID = agent.ID
 	}
+	// Validate the resulting pair, including a body and assignment changed in
+	// the same revision-checked edit. This prevents a queued task from becoming
+	// a doomed review by changing only one side of the pair. Cancelling always
+	// resolves the queued state rather than keeping it eligible to run, so a
+	// legacy queued task that predates this validator (or that has no agent
+	// yet) remains cancellable; only an edit that would leave the ineligible
+	// pair queued is refused.
+	if !patch.Cancel && !task.AssignedAgentID.zero() {
+		assigned, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found {
+			return Task{}, tx.Rollback(ErrCorruptState)
+		}
+		if err := validateRetainedSourceReviewRoute(task.Body, assigned); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+	}
 	status, completed := task.Status.String(), any(nil)
 	if patch.Cancel {
 		status, completed = TaskCancelled.String(), at.Int64()

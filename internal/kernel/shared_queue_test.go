@@ -67,20 +67,17 @@ func settleWorkerRunForTest(t *testing.T, store *Store, run Run, keys AdmissionK
 	ctx := context.Background()
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
-	digest := changeTreeDigest(t, 2)
 	repository, _ := NewFileIdentity(61, 62)
-	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
-	stage, _ := NewFileIdentity(3, 4)
+	selection, _ := NewChangeSelection(format, commit, repository)
 	change, found, err := store.Change(ctx, *run.ChangeID)
 	if err != nil || !found {
 		t.Fatalf("change = %+v, found=%v, err=%v", change, found, err)
 	}
-	prepared, err := store.RecordChangePrepared(ctx, change.ID, change.Revision, selection, stage, mustTime(t, at))
+	prepared, err := store.RecordChangePrepared(ctx, change.ID, change.Revision, selection, mustTime(t, at))
 	if err != nil {
 		t.Fatalf("prepare change: %v", err)
 	}
-	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
-	if _, err := store.MarkChangeAvailable(ctx, change.ID, prepared.Revision, availability, mustTime(t, at+1)); err != nil {
+	if _, err := store.MarkChangeAvailable(ctx, change.ID, prepared.Revision, selection.commit, mustTime(t, at+1)); err != nil {
 		t.Fatalf("mark change available: %v", err)
 	}
 	_, activated := activateAllResources(t, store, run, keys, at+2)

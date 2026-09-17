@@ -86,6 +86,10 @@ func TestV6MigrationPreservesSendBackAndSupervision(t *testing.T) {
 	if err := rebuildTable(ctx, connection, expectedSchemaOf(v6SchemaStatements()), "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
 		t.Fatal(err)
 	}
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v6SchemaStatements()), "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
+		"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
+		t.Fatal(err)
+	}
 	target := expectedSchemaOf(v6SchemaStatements())
 	if err := rebuildTable(ctx, connection, target, "projects", "id, name, root, verification_policy, revision, created_at_ms, updated_at_ms", "projects_root_unique", "", ""); err != nil {
 		t.Fatal(err)
@@ -96,7 +100,7 @@ func TestV6MigrationPreservesSendBackAndSupervision(t *testing.T) {
 	if err := rebuildTable(ctx, connection, target, "tasks", testTaskColumnsV5, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{"DROP TABLE peer_questions", "DROP TABLE terminal_diagnostics", "PRAGMA user_version = 6", "COMMIT"} {
+	for _, statement := range []string{"DROP TABLE peer_questions", "PRAGMA user_version = 6", "COMMIT"} {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
