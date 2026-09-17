@@ -1083,7 +1083,7 @@ func (attempt *liveAttempt) finishSubscribers(err error) {
 }
 
 func toTerminalEvent(frame runner.TerminalFrame) TerminalEvent {
-	return TerminalEvent{Kind: terminalEventKind(frame.Kind), Accepted: frame.Status == runner.TerminalResultOK, Sequence: frame.Sequence, Start: frame.Start, End: frame.End, Floor: frame.Floor, Head: frame.Head, Payload: append([]byte(nil), frame.Payload...)}
+	return TerminalEvent{Kind: terminalEventKind(frame.Kind), Accepted: frame.Status == runner.TerminalResultOK, Sequence: frame.Sequence, Start: frame.Start, End: frame.End, Floor: frame.Floor, Head: frame.Head, Payload: append([]byte(nil), frame.Payload...), ContextStart: frame.ContextStart, Context: append([]byte(nil), frame.Context...)}
 }
 
 func terminalEventKind(kind runner.TerminalEventKind) TerminalEventKind {
