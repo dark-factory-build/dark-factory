@@ -718,6 +718,7 @@ func (attempt *liveAttempt) routeFrame(frame runner.TerminalFrame) error {
 		return attempt.routeAttached(frame)
 	case runner.TerminalOutput:
 		if frame.Correlation == 0 {
+			attempt.retainDiagnosticOutput(frame.Start, frame.End, frame.Payload)
 			for subscriber := range attempt.subs {
 				attempt.routeLive(subscriber, frame)
 			}

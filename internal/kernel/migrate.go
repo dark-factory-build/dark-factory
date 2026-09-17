@@ -38,6 +38,7 @@ const (
 	v11UserVersion      = 11
 	v12UserVersion      = 12
 	v13UserVersion      = 13
+	v14UserVersion      = 14
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -401,10 +402,20 @@ func v12SchemaStatements() []string {
 
 // v13SchemaStatements is the exact schema before managed Git worktrees.
 func v13SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v14SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "changes" {
 			statements[i] = v13Changes
+		}
+	}
+	return statements
+}
+
+func v14SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-1)
+	for _, statement := range schemaStatements {
+		if _, name := schemaObjectIdentity(statement); name != "terminal_diagnostics" {
+			statements = append(statements, statement)
 		}
 	}
 	return statements
@@ -510,6 +521,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v12SchemaStatements(), true
 	case v13UserVersion:
 		return v13SchemaStatements(), true
+	case v14UserVersion:
+		return v14SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -535,7 +548,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -564,6 +577,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[11:]
 	case v13UserVersion:
 		steps = all[12:]
+	case v14UserVersion:
+		steps = all[13:]
 	default:
 		return connection.Close()
 	}
@@ -844,8 +859,22 @@ func migrateV13Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	columns := `id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit, repository_dev, repository_inode, prepared_at_ms, available_at_ms, settled_run_id, revision, created_at_ms, updated_at_ms`
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "changes", columns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "head_commit", "NULL"); err != nil {
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v14SchemaStatements()), "changes", columns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "head_commit", "NULL"); err != nil {
 		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v14UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v14UserVersion, v14SchemaStatements())
+}
+
+func migrateV14Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v14UserVersion, v14SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	if _, err := connection.ExecContext(ctx, target["terminal_diagnostics"].sql); err != nil {
+		return fmt.Errorf("create terminal diagnostics: %w", err)
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err

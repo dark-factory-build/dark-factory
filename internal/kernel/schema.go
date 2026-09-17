@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 14
+	userVersion   = 15
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -394,6 +394,13 @@ var schemaStatements = []string{
     deleted INTEGER NOT NULL CHECK (deleted IN (0, 1))
 ) STRICT`,
 	`CREATE UNIQUE INDEX invalidations_entity_revision_unique ON invalidations(entity_kind, entity_id, revision)`,
+	`CREATE TABLE terminal_diagnostics (
+    run_id BLOB PRIMARY KEY CHECK (length(run_id) = 16) REFERENCES runs(id),
+    floor INTEGER NOT NULL CHECK (floor >= 0),
+    head INTEGER NOT NULL CHECK (head >= floor),
+    payload BLOB NOT NULL CHECK (length(payload) <= 1048576 AND length(payload) <= head - floor),
+    captured_at_ms INTEGER NOT NULL CHECK (captured_at_ms >= 0)
+) STRICT, WITHOUT ROWID`,
 }
 
 type schemaObject struct {

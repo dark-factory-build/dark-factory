@@ -37,6 +37,9 @@ func TestV8PendingQuestionSurvivesOptionsMigration(t *testing.T) {
 		"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := connection.ExecContext(ctx, "DROP TABLE terminal_diagnostics"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
 		t.Fatal(err)
 	}
