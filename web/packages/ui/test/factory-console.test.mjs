@@ -1031,20 +1031,19 @@ test("a queued edit refusal remains visible after its task leaves the queue", ()
   }
 });
 
-test("the settings modal carries the factory readout and a pairing mount point", () => {
+test("the settings modal keeps actionable settings compact", () => {
   const markup = render({ settingsOpen: true, onToggleSettings: () => {} });
   assert.match(markup, /<dialog class="dfConsoleDialog" aria-label="Settings">/);
-  assert.match(markup, /aria-label="BUILDING"/);
-  assert.match(markup, /<dt>DISPATCH<\/dt><dd>ENABLED<\/dd>/);
-  // Project values have one editable home, rather than duplicate narrow metrics.
+  assert.doesNotMatch(markup, /aria-label="BUILDING"/);
+  assert.doesNotMatch(markup, /<dt>DISPATCH<\/dt>/);
+  assert.doesNotMatch(markup, /aria-label="This factory"/);
+  assert.match(markup, /aria-label="Run limits"/);
   assert.doesNotMatch(markup, /<dt>(RUN ALLOWANCE|PER-RUN LIMIT)<\/dt>/);
   assert.equal((markup.match(/aria-label="Limits for North Workshop"/g) ?? []).length, 1);
   assert.equal((markup.match(/aria-label="Limits for South Workshop"/g) ?? []).length, 1);
   assert.match(markup, /5 RUNS USED · 7 FUTURE RUNS LEFT/);
   assert.match(markup, /3 RUNS USED · UNLIMITED/);
   assert.match(markup, /value="900"/);
-  assert.match(markup, /Revision 42/);
-  assert.match(markup, /127\.0\.0\.1:43123/);
   assert.match(markup, /aria-label="PAIRING"/);
   assert.match(markup, /Pairing unavailable/);
   // The peer PR drops its own component into the same slot.
@@ -1517,7 +1516,9 @@ test("settings asks the daemon for logins on open and links the one the operator
     assert.deepEqual(asked, ["asked"]);
     const section = renderer.root.findAllByProps({ "aria-label": "ACCOUNTS" })[0];
     assert.ok(section !== undefined);
-    const label = renderer.root.findAllByType("input").find((input) => input.props.id === `df-account-label-${login.home}`);
+    assert.equal(JSON.stringify(renderer.toJSON()).includes(login.home), false, "account paths stay out of the common flow");
+    assert.equal(JSON.stringify(renderer.toJSON()).includes(login.default_model), false, "model details stay out of account linking");
+    const label = renderer.root.findAllByType("input").find((input) => input.props.id === `df-account-label-${login.provider}-0`);
     await act(async () => { label.props.onChange({ currentTarget: { value: "dogfood" } }); });
     const link = renderer.root.findAllByType("button").find((button) => button.props.children === "LINK");
     await act(async () => { link.props.onClick(); });

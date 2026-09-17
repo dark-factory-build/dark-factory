@@ -427,7 +427,6 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               You can also paste that link above. The link works once and only on the device that
               opens it.
             </p>
-            <p className="dfRemote__prose">{ALERTS_NEED_INSTALL}</p>
           </section>
         ) : (
           <nav className="dfRemote__switcher" aria-label="Factories on this device">
