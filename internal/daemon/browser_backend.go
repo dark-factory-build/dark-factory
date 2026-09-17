@@ -1109,26 +1109,35 @@ func mapBrowserError(err error) error {
 	if err == nil {
 		return nil
 	}
-	// An owner-side effect that already reached a verdict keeps it, whichever
-	// case below its cause would otherwise match: terminal/uncertain outcomes
-	// (human-reply acknowledgement, lease renewal, ...) can be joined with a
-	// context or Store-lifecycle cause, but "the effect may already have
-	// landed" is never retryable busyness. remoteErrorCode fences
-	// OutcomeUnknownError ahead of its own context arm for the same reason.
-	if terminalEffectVerdict(err) {
-		return err
-	}
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// The caller gave up, or its budget expired before anything was
-		// attempted. That is retryable busyness, not a fault: the same
+		// An owner-side effect that already reached a verdict keeps it. Its
+		// cause often carries the deadline that produced it, but "the effect
+		// may already have landed" is never retryable busyness: retrying would
+		// attempt it a second time. remoteErrorCode fences OutcomeUnknownError
+		// ahead of its own context arm for the same reason.
+		if terminalEffectVerdict(err) {
+			return err
+		}
+		// Otherwise the caller gave up, or its budget expired before anything
+		// was attempted. That is retryable busyness, not a fault: the same
 		// request converges when it is made again with a budget it fits in.
 		return browser.ErrRateLimited
 	case errors.Is(err, kernel.ErrStoreClosed):
 		// A connected browser's state watch can observe the store closing
-		// during the bounded daemon handoff. This is lifecycle busyness, not a
-		// permanent internal fault; the next daemon generation owns the same
-		// durable client.
+		// during the bounded daemon handoff; that plain condition is lifecycle
+		// busyness, not a permanent internal fault, so it is retryable. But a
+		// human-reply acknowledgement or lease renewal that raced a closed
+		// Store joins this same kernel.ErrStoreClosed with its own
+		// terminal/uncertain effect marker (terminal_effects.go); that owner
+		// verdict must survive, exactly as the context arm above preserves
+		// its own. Unlike that arm's cause, a revision conflict or other
+		// case below is never joined with ErrStoreClosed, so this guard is
+		// scoped to this case alone and leaves every other case's ordering
+		// untouched (see TestReleaseAfterCancelIsStaleNotInternal).
+		if terminalEffectVerdict(err) {
+			return err
+		}
 		return browser.ErrRateLimited
 	case errors.Is(err, kernel.ErrUnauthorized):
 		return browser.ErrUnauthorized
