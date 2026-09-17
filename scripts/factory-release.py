@@ -350,6 +350,7 @@ def reconcile(config, number, expected):
         entry.update({"sha": expected, "state": "verified", "config_fingerprint": fingerprint,
                       "delivery_from_sha": previous or expected, "delivery_sources": sources,
                       "delivery_mode": delivery_mode, "verification": value,
+                      "reconciliation": {"mode": "operator_observed", "observed_sha": expected},
                       "verified_at": int(time.time()), "updated_at": int(time.time())})
         journal["releases"][str(number)] = entry
         record_live_tip(journal, value)

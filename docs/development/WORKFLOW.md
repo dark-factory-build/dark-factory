@@ -177,6 +177,14 @@ publishes two archives, `SHA256SUMS`, a Homebrew formula candidate, and
 The fixed recovery workflow can resume a failed release while remaining bound
 to its tag and exact default-branch workflow commit.
 
+If a runtime was installed through an independently verified operator path,
+reconcile its receipt without deploying with:
+`factory-release.py CONFIG --reconcile --pr N --observed-sha SHA`. This requires
+the exact merged PR, current independent review, a healthy live probe for that
+SHA, and a complete prior-to-target source range. It writes only the verified
+receipt under the release lock; it does not invoke the deployment hook or
+change dispatch. Unresolved or running receipts must be settled first.
+
 The current installer is deliberately fresh and small. `factoryctl service
 install` copies the exact sibling `factoryd`, `factory-runner`, and `factoryctl`
 binaries, writes its receipt and launchd plist, and loads that job. It does not
