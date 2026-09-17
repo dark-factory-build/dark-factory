@@ -86,6 +86,40 @@ func TestTaskRecoveryReportsOverseerNotificationSeparatelyFromDisposition(t *tes
 	}
 }
 
+func TestTaskRecoverySkipsPausedAndBudgetExhaustedOverseers(t *testing.T) {
+	ctx := context.Background()
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+
+	configure := func(id byte, name string) Agent {
+		overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, id), ProjectID: terminal.ProjectID, Name: name, Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, int64(id)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, after, budget, instruction := IdleStandingInstruction, uint32(1), uint32(4), "Supervise."
+		overseer, err = store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, int64(id)+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return overseer
+	}
+	paused := configure(30, "paused")
+	pausedValue := true
+	if _, err := store.UpdateAgent(ctx, paused.ID, paused.Revision, AgentPatch{Paused: &pausedValue}, mustTime(t, 32)); err != nil {
+		t.Fatal(err)
+	}
+	exhausted := configure(40, "exhausted")
+	if _, err := store.writer.Exec(`UPDATE agents SET tool_calls_used = tool_budget_limit WHERE id = ?`, exhausted.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	eligible := configure(50, "eligible")
+
+	recovery, found, err := store.TaskRecovery(ctx, terminal.TaskID, terminal.TaskIncarnationID)
+	if err != nil || !found || recovery.Overseer == nil || *recovery.Overseer != eligible.ID {
+		t.Fatalf("recovery selected %+v, found=%v, err=%v; want eligible overseer %v", recovery.Overseer, found, err, eligible.ID)
+	}
+}
+
 // A question raised by the task's own run is its Needs You, and it stays
 // the disposition while unresolved.
 func TestTaskRecoveryReportsOwnRunHumanRequestAsNeedsYou(t *testing.T) {

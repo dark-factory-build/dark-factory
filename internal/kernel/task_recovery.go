@@ -170,7 +170,7 @@ func overseerNotificationForTask(ctx context.Context, connection *sql.Conn, task
 	if orchestratorOwned != 0 {
 		return nil
 	}
-	err = connection.QueryRowContext(ctx, `SELECT id FROM agents WHERE project_id = ? AND role = 'orchestrator' AND idle_policy = 'standing_instruction' AND archived = 0 ORDER BY id LIMIT 1`, task.ProjectID.Bytes()).Scan(&raw)
+	err = connection.QueryRowContext(ctx, `SELECT id FROM agents WHERE project_id = ? AND role = 'orchestrator' AND idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0 AND tool_calls_used < tool_budget_limit ORDER BY id LIMIT 1`, task.ProjectID.Bytes()).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return nil
 	}
