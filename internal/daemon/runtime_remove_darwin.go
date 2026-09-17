@@ -15,7 +15,8 @@ import (
 
 const runtimeRemovalEffectLimit = 256
 const runtimeRemovalDepthLimit = 32
-const runtimeTopEntryLimit = 12 // home, tmp, terminal, lifetime, and eight removable fixed files.
+const runtimeRetainedSourceName = "retained-source"
+const runtimeTopEntryLimit = 13 // home, tmp, retained sources, lifetime, and eight removable fixed files.
 
 // RemoveRecordedRuntime removes only a positively identified, inactive
 // runtime using the fixed V1 grammar. false,nil is bounded progress or lock
@@ -113,6 +114,13 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 		if name == runner.TerminalSpoolName {
 			return false, invalidContract(nil)
 		}
+		if name == runtimeRetainedSourceName {
+			var stat unix.Stat_t
+			if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil || !validRuntimeOrdinaryDirectory(stat, rootIdentity.device, true) {
+				return false, invalidContract(err)
+			}
+			continue
+		}
 		if name != runtimeHomeName && name != runtimeTempName {
 			if !isRemovableRuntimeFile(name) {
 				return false, invalidContract(nil)
@@ -129,8 +137,13 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 			return false, nil
 		}
 	}
+	if done, err := removeRuntimeTree(ctx, fd, runtimeRetainedSourceName, rootIdentity.device, &budget, syncDirectory, true, 0); err != nil {
+		return false, invalidContract(err)
+	} else if !done {
+		return false, nil
+	}
 	for _, name := range entries {
-		if name == runtimeHomeName || name == runtimeTempName || name == runner.RuntimeLifetimeLeaseName {
+		if name == runtimeHomeName || name == runtimeTempName || name == runtimeRetainedSourceName || name == runner.RuntimeLifetimeLeaseName {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
@@ -142,7 +155,7 @@ func removeRecordedRuntimeWithHook(ctx context.Context, parent *RuntimeParent, b
 		var stat unix.Stat_t
 		if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
 			continue
-		} else if err != nil || !validRuntimeOrdinaryFile(stat, rootIdentity.device) {
+		} else if err != nil || !validRemovableRuntimeEntry(name, stat, rootIdentity.device) {
 			return false, invalidContract(err)
 		}
 		if err := unix.Unlinkat(fd, name, 0); err != nil {
@@ -197,6 +210,7 @@ func isRemovableRuntimeFile(name string) bool {
 		runner.OuterActivationMarkerName, runner.InnerActivationMarkerName,
 		runner.GateConfigScratchName, runner.GateStdinScratchName,
 		runner.TerminalScratchName,
+		runner.TakeoverGrantName, runner.TakeoverScratchName, runner.TakeoverSocketName,
 		runner.RuntimeLifetimeLeaseName:
 		return true
 	default:
@@ -222,8 +236,18 @@ func removeRuntimeTree(ctx context.Context, parentFD int, name string, device ui
 	} else if err != nil || !validRuntimeOrdinaryDirectory(named, device, exactLayout) {
 		return false, errInvalidContract
 	}
+	// A provider descendant may still be writing under home or tmp (a
+	// surviving `go build` with TMPDIR inside the runtime). A name that is
+	// gone when it is reached is the goal state, and a directory that
+	// refilled before its rmdir is re-listed on the next bounded pass;
+	// neither is an identity, ownership or lifetime question.
+	// ponytail: a descendant that never stops writing keeps the supervisor's
+	// removal loop busy for its lifetime; bound that loop like recovery's
+	// four-second pass if it ever matters.
 	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
-	if err != nil {
+	if errors.Is(err, unix.ENOENT) {
+		return true, nil
+	} else if err != nil {
 		return false, err
 	}
 	directory := os.NewFile(uintptr(fd), "runtime-tree-removal")
@@ -252,7 +276,9 @@ func removeRuntimeTree(ctx context.Context, parentFD int, name string, device ui
 			return false, err
 		}
 		var stat unix.Stat_t
-		if err := unix.Fstatat(fd, child, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err := unix.Fstatat(fd, child, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+			continue
+		} else if err != nil {
 			return false, err
 		}
 		switch stat.Mode & unix.S_IFMT {
@@ -275,7 +301,7 @@ func removeRuntimeTree(ctx context.Context, parentFD int, name string, device ui
 			if *budget == 0 {
 				return false, nil
 			}
-			if err := unix.Unlinkat(fd, child, 0); err != nil {
+			if err := unix.Unlinkat(fd, child, 0); err != nil && !errors.Is(err, unix.ENOENT) {
 				return false, err
 			}
 			*budget--
@@ -301,10 +327,16 @@ func removeRuntimeTree(ctx context.Context, parentFD int, name string, device ui
 		return false, nil
 	}
 	var current unix.Stat_t
-	if err := unix.Fstatat(parentFD, name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil || !sameFileObject(named, current) || !validRuntimeOrdinaryDirectory(current, device, exactLayout) {
+	if err := unix.Fstatat(parentFD, name, &current, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+		return true, nil
+	} else if err != nil || !sameFileObject(named, current) || !validRuntimeOrdinaryDirectory(current, device, exactLayout) {
 		return false, errInvalidContract
 	}
-	if err := unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR); err != nil {
+	if err := unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR); errors.Is(err, unix.ENOENT) {
+		return true, nil
+	} else if errors.Is(err, unix.ENOTEMPTY) {
+		return false, nil
+	} else if err != nil {
 		return false, err
 	}
 	*budget--
@@ -363,4 +395,19 @@ func validRuntimeOrdinaryName(stat unix.Stat_t, device uint64) bool {
 // at exactly 0600.
 func validRuntimeOrdinaryFile(stat unix.Stat_t, device uint64) bool {
 	return stat.Mode&unix.S_IFMT == unix.S_IFREG && uint64(stat.Dev) == device && stat.Uid == uint32(os.Geteuid()) && stat.Nlink == 1 && stat.Mode&0o7777 == 0o600
+}
+
+// validRemovableRuntimeEntry checks the one removable child that is not an
+// ordinary file: a killed runner's takeover socket.
+func validRemovableRuntimeEntry(name string, stat unix.Stat_t, device uint64) bool {
+	if name == runner.TakeoverSocketName {
+		return validRuntimeTakeoverSocket(stat, device)
+	}
+	return validRuntimeOrdinaryFile(stat, device)
+}
+
+// validRuntimeTakeoverSocket is the exact shape of the runner's own takeover
+// endpoint: a private socket the runner bound in its runtime root.
+func validRuntimeTakeoverSocket(stat unix.Stat_t, device uint64) bool {
+	return stat.Mode&unix.S_IFMT == unix.S_IFSOCK && uint64(stat.Dev) == device && stat.Uid == uint32(os.Geteuid()) && stat.Nlink == 1 && stat.Mode&0o7777 == 0o600
 }

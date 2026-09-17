@@ -236,16 +236,33 @@ type liveAttemptResult struct {
 	notice            *runner.AttemptResultNotice
 	err               error
 	observersRetained bool
+	// handedOver reports a clean protocol-2 shutdown handover: the runner
+	// still owns a live provider under a fresh takeover grant, the run stays
+	// durably running, and this daemon makes no further Store mutation for
+	// it. notice and err are unused when this is set.
+	handedOver bool
 }
 
 // liveAttempt is intentionally concrete. Except for the receipt fence named
 // below, mutable fields belong to its one owner goroutine after construction;
 // the registry mutex protects only the daemon's map membership.
 type liveAttempt struct {
-	daemon     *Daemon
-	runID      kernel.RunID
+	daemon *Daemon
+	runID  kernel.RunID
+	// Immutable observation facts from the inspected source, installed before registration.
+	agentID    kernel.AgentID
+	changeID   kernel.ChangeID
+	pathsSince kernel.UnixMillis
 	sessionID  kernel.TerminalSessionID
 	controller *runner.AttemptController
+	// sourceOps counts explicit source requests in flight for this attempt,
+	// so shutdown refuses new ones and waits for admitted ones to finish.
+	sourceOpsMu        sync.Mutex
+	sourceOpsDone      chan struct{}
+	sourceCloseStarted chan struct{}
+	sourceOps          int
+	sourceClosing      bool
+	attemptDigest      kernel.AttemptDigest
 
 	commands chan liveAttemptCommand
 	wake     chan struct{}
@@ -256,6 +273,14 @@ type liveAttempt struct {
 	// It spans durable finalization through the reporting client's validated
 	// response acknowledgement, without holding that global gate during I/O.
 	outcomeReceiptPending bool
+	// outcomeRefusal is written and consumed under daemon.operationMu. It is a
+	// typed refusal from this exact bearer, never a generic unauthorized hint.
+	outcomeRefusal error
+	// pendingOutcome retains the exact proposal whose live API call was refused
+	// until the authenticated runner result gives the supervisor one final,
+	// owner-bound chance to commit it. It is not terminal authority and is never
+	// recovered or replayed after this owner is gone.
+	pendingOutcome *kernel.Proposal
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
@@ -267,11 +292,15 @@ type liveAttempt struct {
 	terminationDelivered bool
 	resultReturned       bool
 	shutdownRequested    bool
-	resultNotice         *runner.AttemptResultNotice
-	creditOutstanding    uint64
-	finalErr             error
-	binding              terminalBinding
-	effectLimit          time.Duration
+	// handedOver is set once a released, terminal-ready controller has
+	// cleanly quiesced onto the runner's own takeover endpoint. See
+	// convergeForShutdown.
+	handedOver        bool
+	resultNotice      *runner.AttemptResultNotice
+	creditOutstanding uint64
+	finalErr          error
+	binding           terminalBinding
+	effectLimit       time.Duration
 	// These exact seams are fixed before the owner starts. Production uses the
 	// concrete Store renewal below; daemon tests replace it or pause one phase
 	// to prove ambiguous Store and operation-gate schedules causally.
@@ -287,6 +316,7 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), result: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
+		sourceOpsDone: make(chan struct{}), sourceCloseStarted: make(chan struct{}),
 		effectLimit: liveAttemptEffectLimit,
 	}
 	if daemon != nil && daemon.store != nil {
@@ -295,6 +325,46 @@ func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.Termina
 		}
 	}
 	return attempt
+}
+
+func (attempt *liveAttempt) beginSourceOperation() bool {
+	attempt.sourceOpsMu.Lock()
+	defer attempt.sourceOpsMu.Unlock()
+	if attempt.sourceClosing {
+		return false
+	}
+	if attempt.sourceOps == 0 {
+		// A completed request may be followed by another one. Each non-empty
+		// generation needs its own drain signal; a closed channel is never
+		// reopened or reused.
+		attempt.sourceOpsDone = make(chan struct{})
+	}
+	attempt.sourceOps++
+	return true
+}
+
+func (attempt *liveAttempt) endSourceOperation() {
+	attempt.sourceOpsMu.Lock()
+	defer attempt.sourceOpsMu.Unlock()
+	attempt.sourceOps--
+	if attempt.sourceOps == 0 && attempt.sourceOpsDone != nil {
+		close(attempt.sourceOpsDone)
+	}
+}
+
+func (attempt *liveAttempt) closeSourceOperations() {
+	attempt.sourceOpsMu.Lock()
+	attempt.sourceClosing = true
+	if attempt.sourceCloseStarted != nil {
+		close(attempt.sourceCloseStarted)
+		attempt.sourceCloseStarted = nil
+	}
+	done := attempt.sourceOpsDone
+	zero := attempt.sourceOps == 0
+	attempt.sourceOpsMu.Unlock()
+	if !zero {
+		<-done
+	}
 }
 
 func (daemon *Daemon) registerLiveAttempt(attempt *liveAttempt) error {
@@ -330,20 +400,39 @@ func (daemon *Daemon) unregisterLiveAttempt(runID kernel.RunID, attempt *liveAtt
 	daemon.attemptMu.Unlock()
 }
 
+// liveAttemptForDigest finds the owner for an exact attempt bearer without
+// asking SQLite to authenticate it. The caller has already validated the
+// digest shape; this lookup is only a best-effort wake route for a refused
+// outcome, and the owner still rereads durable state before acting.
+func (daemon *Daemon) liveAttemptForDigest(digest kernel.AttemptDigest) *liveAttempt {
+	if daemon == nil {
+		return nil
+	}
+	daemon.attemptMu.Lock()
+	defer daemon.attemptMu.Unlock()
+	for _, attempt := range daemon.attempts {
+		if attempt != nil && attempt.attemptDigest == digest {
+			return attempt
+		}
+	}
+	return nil
+}
+
 // closeLiveAttempts is the daemon shutdown seam. It first closes admission to
 // the in-memory owner registry, then synchronously asks each owner to converge
 // and joins it. The Store remains the authority for recovery after an
 // abnormal daemon death; this method only covers normal in-process shutdown.
 func (daemon *Daemon) closeLiveAttempts() error {
+	if daemon != nil && daemon.cleanupCancel != nil {
+		daemon.cleanupCancel()
+	}
 	if daemon == nil {
 		return nil
 	}
-	daemon.operationMu.Lock()
 	daemon.attemptMu.Lock()
 	if daemon.closing {
 		done := daemon.closeDone
 		daemon.attemptMu.Unlock()
-		daemon.operationMu.Unlock()
 		if done != nil {
 			<-done
 		}
@@ -361,7 +450,6 @@ func (daemon *Daemon) closeLiveAttempts() error {
 		supervisors = append(supervisors, registration)
 	}
 	daemon.attemptMu.Unlock()
-	daemon.operationMu.Unlock()
 	for _, registration := range supervisors {
 		registration.cancel()
 	}
@@ -399,6 +487,26 @@ func (attempt *liveAttempt) notify() {
 	case attempt.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (attempt *liveAttempt) notifyOutcomeRefusal(err error) {
+	if attempt == nil || err == nil || attempt.daemon == nil {
+		return
+	}
+	attempt.outcomeRefusal = err
+	attempt.notify()
+}
+
+func (attempt *liveAttempt) pendingOutcomeSnapshot() (kernel.Proposal, bool) {
+	if attempt == nil || attempt.daemon == nil {
+		return kernel.Proposal{}, false
+	}
+	attempt.daemon.operationMu.Lock()
+	defer attempt.daemon.operationMu.Unlock()
+	if attempt.pendingOutcome == nil {
+		return kernel.Proposal{}, false
+	}
+	return *attempt.pendingOutcome, true
 }
 
 func (attempt *liveAttempt) submit(ctx context.Context, command liveAttemptCommand) error {

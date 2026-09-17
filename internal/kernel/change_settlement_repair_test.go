@@ -1,7 +1,9 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"testing"
 )
@@ -136,13 +138,12 @@ func TestEveryUnsettledChangeRequiresCurrentOwner(t *testing.T) {
 				change := seedReservedChange(t, store)
 				if phase != ChangeReserved {
 					selection := testChangeSelection(t)
-					tree, _ := NewFileIdentity(70, 80)
 					availableAt := any(nil)
 					if phase == ChangeAvailable {
 						availableAt = int64(6)
 					}
-					corruptSQL(t, store, `UPDATE changes SET phase = ?, object_format = ?, base_commit = ?, repository_dev = ?, repository_inode = ?, tree_digest = ?, entry_count = ?, total_bytes = ?, tree_dev = ?, tree_inode = ?, prepared_at_ms = 5, available_at_ms = ?, revision = ?, updated_at_ms = 6 WHERE id = ?`,
-						phase.String(), selection.format.String(), selection.commit.Bytes(), selection.repository.device, selection.repository.inode, selection.commitment.Bytes(), int64(selection.entries), int64(selection.bytes), tree.device, tree.inode, availableAt, phaseRevision(phase), change.ID.Bytes())
+					corruptSQL(t, store, `UPDATE changes SET phase = ?, object_format = ?, base_commit = ?, repository_dev = ?, repository_inode = ?, prepared_at_ms = 5, available_at_ms = ?, revision = ?, updated_at_ms = 6 WHERE id = ?`,
+						phase.String(), selection.format.String(), selection.commit.Bytes(), selection.repository.device, selection.repository.inode, availableAt, phaseRevision(phase), change.ID.Bytes())
 				}
 				before := captureWriteFootprint(t, store)
 				var err error
@@ -175,6 +176,9 @@ func TestEveryUnsettledChangeRequiresCurrentOwner(t *testing.T) {
 	})
 }
 
+// A worker that never ran cannot have moved its branch, so a settlement
+// that names another head, or forgets the head a worktree Change has, is
+// refused before it touches anything.
 func TestPreRunningWorkerSettlementCannotBlessChangedContent(t *testing.T) {
 	for _, retained := range []bool{false, true} {
 		name := "fresh A+2"
@@ -182,25 +186,19 @@ func TestPreRunningWorkerSettlementCannotBlessChangedContent(t *testing.T) {
 			name = "retained A"
 		}
 		t.Run(name, func(t *testing.T) {
-			for _, field := range []string{"digest", "entry count", "total bytes", "tree identity"} {
+			for _, field := range []string{"moved head", "forgotten head"} {
 				t.Run(field, func(t *testing.T) {
 					store, finalizing, change := finalizingPreRunningAvailableWorker(t, retained)
 					defer store.Close()
 					if retained && change.Revision != *finalizing.AdmittedChangeRevision || !retained && change.Revision.Int64() != finalizing.AdmittedChangeRevision.Int64()+2 {
 						t.Fatalf("Change revision = %d, A = %d", change.Revision.Int64(), finalizing.AdmittedChangeRevision.Int64())
 					}
-					availability := availabilityForChange(t, change)
-					switch field {
-					case "digest":
-						availability.commitment = changeTreeDigest(t, 0xd1)
-					case "entry count":
-						availability.entries++
-					case "total bytes":
-						availability.bytes++
-					case "tree identity":
-						availability.tree, _ = NewFileIdentity(470, 480)
+					var head *CommitID
+					if field == "moved head" {
+						moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd1}, change.Selection.format.oidLength()))
+						head = &moved
 					}
-					settlement, _ := NewRetainedChangeSettlement(change.Revision, availability)
+					settlement, _ := NewRetainedChangeSettlement(change.Revision, head)
 					before := captureWriteFootprint(t, store)
 					if _, err := store.FinalizeWorkerRun(context.Background(), finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80)); !errors.Is(err, ErrConflict) {
 						t.Fatalf("FinalizeWorkerRun = %v", err)
@@ -234,7 +232,7 @@ func settleRunningRetainedRetry(t *testing.T, store *Store, run Run, keys Admiss
 	if err != nil || !found {
 		t.Fatalf("retained retry Change = %+v, found=%v, err=%v", change, found, err)
 	}
-	settlement, _ := NewRetainedChangeSettlement(change.Revision, availabilityForChange(t, change))
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, headForChange(t, change))
 	terminal, err := store.FinalizeWorkerRun(context.Background(), running.ID, finalizing.Revision, settlement, mustTime(t, at+15))
 	if err != nil {
 		t.Fatal(err)
@@ -249,26 +247,29 @@ func phaseRevision(phase ChangePhase) int64 {
 	return 3
 }
 
+// A worker that ran may have committed: its settlement records the branch
+// head it left, and a later read of the Change sees exactly that head.
 func TestRunningWorkerSettlementMayUpdateContentOnStableTree(t *testing.T) {
 	blocked, _ := NewBlockedProposal("retain edits")
 	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, blocked)
 	defer store.Close()
 	change, found, err := store.Change(context.Background(), *finalizing.ChangeID)
-	if err != nil || !found {
+	if err != nil || !found || change.HeadCommit == nil {
 		t.Fatalf("Change = %+v, found=%v, err=%v", change, found, err)
 	}
-	availability := availabilityForChange(t, change)
-	availability.commitment = changeTreeDigest(t, 0xd2)
-	availability.entries++
-	availability.bytes++
-	settlement, _ := NewRetainedChangeSettlement(change.Revision, availability)
+	moved, _ := NewCommitID(change.Selection.format, bytes.Repeat([]byte{0xd2}, change.Selection.format.oidLength()))
+	settlement, _ := NewRetainedChangeSettlement(change.Revision, &moved)
 	terminal, err := store.FinalizeWorkerRun(context.Background(), finalizing.ID, finalizing.Revision, settlement, mustTime(t, 80))
 	if err != nil || terminal.Phase != RunTerminal {
 		t.Fatalf("FinalizeWorkerRun = %+v, %v", terminal, err)
 	}
 	retained, found, err := store.Change(context.Background(), change.ID)
-	if err != nil || !found || retained.Phase != ChangeRetained || !changeAvailabilityMatches(retained, availability) {
+	if err != nil || !found || retained.Phase != ChangeRetained || retained.HeadCommit == nil || !retained.HeadCommit.equal(moved) {
 		t.Fatalf("retained Change = %+v, found=%v, err=%v", retained, found, err)
+	}
+	handoff, found, err := store.RetainedChangeHandoffForTask(context.Background(), retained.ProjectID, retained.TaskID)
+	if err != nil || !found || handoff.HeadCommit != hex.EncodeToString(moved.Bytes()) {
+		t.Fatalf("handoff = %+v, found=%v, err=%v", handoff, found, err)
 	}
 }
 
@@ -298,7 +299,7 @@ func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T)
 	if err != nil || !found {
 		t.Fatalf("second Change = %+v, found=%v, err=%v", secondChange, found, err)
 	}
-	secondSettlement, _ := NewRetainedChangeSettlement(secondChange.Revision, availabilityForChange(t, secondChange))
+	secondSettlement, _ := NewRetainedChangeSettlement(secondChange.Revision, headForChange(t, secondChange))
 	second, err := store.FinalizeWorkerRun(context.Background(), secondRunning.ID, secondFinalizing.Revision, secondSettlement, mustTime(t, 80))
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +314,7 @@ func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T)
 			t.Fatalf("Run(%s) found=%v, err=%v", run.ID, found, err)
 		}
 	}
-	firstChangeSettlement, _ := NewRetainedChangeSettlement(mustRevision(t, first.AdmittedChangeRevision.Int64()+2), availabilityForChange(t, secondChange))
+	firstChangeSettlement, _ := NewRetainedChangeSettlement(mustRevision(t, first.AdmittedChangeRevision.Int64()+2), headForChange(t, secondChange))
 	if replay, err := store.FinalizeWorkerRun(context.Background(), first.ID, mustRevision(t, first.Revision.Int64()-1), firstChangeSettlement, mustTime(t, 1)); err != nil || replay.Revision != first.Revision {
 		t.Fatalf("first replay = %+v, %v", replay, err)
 	}
@@ -325,13 +326,11 @@ func TestRetainedRetryHistoryLoadsAndHistoricalFinalizationReplays(t *testing.T)
 func materializeAdmittedWorkerChange(t *testing.T, store *Store, run Run, at int64) Change {
 	t.Helper()
 	selection := testChangeSelection(t)
-	tree, _ := NewFileIdentity(70, 80)
-	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, *run.AdmittedChangeRevision, selection, tree, mustTime(t, at))
+	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, *run.AdmittedChangeRevision, selection, mustTime(t, at))
 	if err != nil {
 		t.Fatal(err)
 	}
-	availability := mustChangeAvailability(t, selection.commitment, selection.entries, selection.bytes, tree)
-	available, err := store.MarkChangeAvailable(context.Background(), *run.ChangeID, prepared.Revision, availability, mustTime(t, at+1))
+	available, err := store.MarkChangeAvailable(context.Background(), *run.ChangeID, prepared.Revision, selection.commit, mustTime(t, at+1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,10 +379,10 @@ func finalizingPreRunningAvailableWorker(t *testing.T, retained bool) (*Store, R
 	return store, finalizing, change
 }
 
-func availabilityForChange(t *testing.T, change Change) ChangeAvailability {
+func headForChange(t *testing.T, change Change) *CommitID {
 	t.Helper()
-	if change.Selection == nil || change.TreeIdentity == nil {
-		t.Fatal("available Change has no content facts")
+	if change.Selection == nil || change.HeadCommit == nil {
+		t.Fatal("available Change has no branch head")
 	}
-	return mustChangeAvailability(t, change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
+	return change.HeadCommit
 }

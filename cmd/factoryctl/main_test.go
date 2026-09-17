@@ -33,6 +33,19 @@ func TestVersionRequiresNoHomeOrCredential(t *testing.T) {
 	}
 }
 
+func TestTerminalObserveCursorIsNotResponseBudget(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	args := []string{"attempt", "terminal", "observe", "--project", id, "--task", id, "--run", id, "--cursor", "10000000", "--max-bytes", "1024"}
+	command, help, ok := parse(args)
+	if !ok || help || command.kind != commandTerminalObserve || command.offset != 10000000 || command.maxBytes != 1024 {
+		t.Fatalf("valid large cursor rejected: %+v help=%v ok=%v", command, help, ok)
+	}
+	args[len(args)-1] = "65537"
+	if _, _, ok := parse(args); ok {
+		t.Fatal("oversized response accepted")
+	}
+}
+
 func TestBuildIdentityRequiresNoHomeOrCredential(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"--build-identity"}, func(string) string { return "private" }, &stdout, &stderr)
@@ -179,6 +192,7 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "attempt help", args: []string{"attempt", "-h"}, help: true},
 		{name: "verb help", args: []string{"attempt", "block", "--help"}, help: true},
 		{name: "task", args: []string{"attempt", "task"}, command: attemptCommand{kind: commandAttemptTask}},
+		{name: "source", args: []string{"attempt", "source", "--task", "0123456789abcdef0123456789abcdef"}, command: attemptCommand{kind: commandAttemptSource, id: "0123456789abcdef0123456789abcdef"}},
 		{name: "empty success", args: []string{"attempt", "succeed"}, command: attemptCommand{kind: commandSucceed}},
 		{name: "success", args: []string{"attempt", "succeed", "--result", "done"}, command: attemptCommand{kind: commandSucceed, text: "done"}},
 		{name: "block", args: []string{"attempt", "block", "--detail", "waiting"}, command: attemptCommand{kind: commandBlock, text: "waiting"}},
@@ -189,9 +203,10 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "human request", args: []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "what now?"}, command: attemptCommand{kind: commandRequestHuman, idempotencyKey: "0123456789abcdef0123456789abcdef", text: "what now?"}},
 		{name: "peer status", args: []string{"attempt", "peer", "status"}, command: attemptCommand{kind: commandPeerStatus}},
 		{name: "peer status history page", args: []string{"attempt", "peer", "status", "--offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, head: 8}},
-		{name: "peer status target page", args: []string{"attempt", "peer", "status", "--target-offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, textOffset: 4, head: 8}},
-		{name: "peer status both pages", args: []string{"attempt", "peer", "status", "--offset", "4", "--target-offset", "8", "--head", "9"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9}},
-		{name: "peer status both pages reversed", args: []string{"attempt", "peer", "status", "--target-offset", "8", "--head", "9", "--offset", "4"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9}},
+		{name: "peer status targets", args: []string{"attempt", "peer", "status", "--targets"}, command: attemptCommand{kind: commandPeerStatus, includeTargets: true}},
+		{name: "peer status target page", args: []string{"attempt", "peer", "status", "--targets", "--target-offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, textOffset: 4, head: 8, includeTargets: true}},
+		{name: "peer status both pages", args: []string{"attempt", "peer", "status", "--offset", "4", "--targets", "--target-offset", "8", "--head", "9"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9, includeTargets: true}},
+		{name: "peer status both pages reversed", args: []string{"attempt", "peer", "status", "--target-offset", "8", "--head", "9", "--targets", "--offset", "4"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9, includeTargets: true}},
 		{name: "peer ask", args: []string{"attempt", "peer", "ask", "--task", "0123456789abcdef0123456789abcdef", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--question", "need context"}, command: attemptCommand{kind: commandPeerAsk, id: "0123456789abcdef0123456789abcdef", idempotencyKey: "fedcba9876543210fedcba9876543210", text: "need context"}},
 		{name: "peer answer", args: []string{"attempt", "peer", "answer", "--question", "0123456789abcdef0123456789abcdef", "--revision", "7", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--answer", "context"}, command: attemptCommand{kind: commandPeerAnswer, id: "0123456789abcdef0123456789abcdef", expectedRevision: 7, idempotencyKey: "fedcba9876543210fedcba9876543210", text: "context"}},
 		{name: "send back", args: []string{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", "five findings"}, command: attemptCommand{kind: commandSendBack, id: "0123456789abcdef0123456789abcdef", text: "five findings"}},
@@ -229,21 +244,47 @@ func TestParseOverseerTaskUpdateKeepsPriority(t *testing.T) {
 	}
 }
 
-func TestParseContentCommands(t *testing.T) {
-	/*
-		id := "0123456789abcdef0123456789abcdef"
-		command, help, ok := parse([]string{"attempt", "content", "create", "--project", id, "--kind", "procedure", "--title", "safe", "--author", "operator", "--body-file", "-"})
-		if !ok || help || command.kind != commandContentCreate || command.project != id || command.bodyFile != "-" {
-			t.Fatalf("content create parse = %+v, help=%t, ok=%t", command, help, ok)
+func TestParseOverseerTaskAddAcceptsAnyEligibleWorker(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	command, help, ok := parse([]string{"overseer", "task", "add", "--agent", "any", "--title", "shared"})
+	if !ok || help || command.kind != commandOverseerTaskAdd || command.agent != "any" || anyWorkerAgent(command.agent) != "" {
+		t.Fatalf("any-worker overseer task add = %+v, help=%t, ok=%t", command, help, ok)
+	}
+	if _, _, ok := parse([]string{"overseer", "task", "update", "--task", id, "--revision", "7", "--agent", "any"}); ok {
+		t.Fatal("reassignment to `any` accepted; a queued task is reassigned to one worker")
+	}
+}
+
+func TestOverseerTaskRetryCLIUsesAtomicAPIRequest(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	taskID, agentID := strings.Repeat("3", 32), strings.Repeat("4", 32)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		if call.Kind() != api.CallOverseerUpdateTask {
+			t.Errorf("call kind = %v", call.Kind())
 		}
-		command, help, ok = parse([]string{"content", "deprecate", "--project", id, "--id", id, "--revision", "2", "--author", "operator"})
-		if !ok || help || command.kind != commandContentDeprecate || command.contentRevision != 2 {
-			t.Fatalf("content deprecate parse = %+v, help=%t, ok=%t", command, help, ok)
+		input, ok := call.OverseerTaskUpdateInput()
+		if !ok || input.TaskID != taskID || input.ExpectedRevision != 7 || !input.Retry || input.AssignedAgentID == nil || *input.AssignedAgentID != agentID {
+			t.Errorf("retry input = %+v, ok=%v", input, ok)
 		}
-		if _, _, ok = parse([]string{"attempt", "content", "create", "--project", id, "--kind", "procedure", "--title", "safe", "--author", "operator", "--body", "x", "--body-file", "-"); ok {
-			t.Fatal("accepted mutually exclusive body inputs")
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 18, Revision: 8})
+		if err != nil {
+			t.Errorf("new reply: %v", err)
 		}
-	*/
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"overseer", "task", "update", "--task", taskID, "--revision", "7", "--agent", agentID, "--retry"}, func(name string) string {
+		if name == "DARK_FACTORY_SOCKET" {
+			return fixture.socket
+		}
+		return ""
+	}, &stdout, &stderr)
+	result := awaitServer(t, done)
+	if exit != 0 || result.err != nil || stderr.Len() != 0 {
+		t.Fatalf("retry CLI = exit %d, server %v, stderr %q", exit, result.err, stderr.String())
+	}
 }
 
 func TestParseOverseerStatusPaging(t *testing.T) {
@@ -266,6 +307,7 @@ func TestParsePeerStatusRejectsDuplicateOrMalformedPageFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"attempt", "peer", "status", "--offset", "4"},
 		{"attempt", "peer", "status", "--target-offset", "4"},
+		{"attempt", "peer", "status", "--targets", "--targets"},
 		{"attempt", "peer", "status", "--offset", "4", "--offset", "8"},
 		{"attempt", "peer", "status", "--target-offset", "4", "--target-offset", "8"},
 		{"attempt", "peer", "status", "--head", "8", "--head", "9"},
@@ -591,24 +633,27 @@ func TestAcceptedOutputDoesNotClaimTerminalState(t *testing.T) {
 func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 	key := "0123456789abcdef0123456789abcdef"
 	question := "private-human-question-sentinel"
-	tests := []api.RemoteErrorCode{
-		api.RemoteInvalidRequest,
-		api.RemoteUnauthorized,
-		api.RemoteForbidden,
-		api.RemoteNotFound,
-		api.RemoteConflict,
-		api.RemoteRevisionConflict,
-		api.RemoteTooLarge,
-		api.RemoteUnavailable,
-		api.RemoteInternal,
+	tests := []struct {
+		code    api.RemoteErrorCode
+		message string
+	}{
+		{api.RemoteInvalidRequest, "local API rejected the request"},
+		{api.RemoteUnauthorized, "local API credential is unauthorized"},
+		{api.RemoteForbidden, "local API request is forbidden"},
+		{api.RemoteNotFound, "local API entity was not found"},
+		{api.RemoteConflict, "local API request conflicts with durable state"},
+		{api.RemoteRevisionConflict, "local API revision is stale"},
+		{api.RemoteTooLarge, "local API request exceeds a bound"},
+		{api.RemoteUnavailable, "local API is unavailable"},
+		{api.RemoteInternal, "local API failed internally"},
 	}
-	for _, code := range tests {
-		t.Run(string(code), func(t *testing.T) {
+	for _, test := range tests {
+		t.Run(string(test.code), func(t *testing.T) {
 			fixture := newAPIFixture(t)
 			defer fixture.close(t)
 			t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
 			done := serveOne(fixture.listener, func(api.Call) api.Reply {
-				reply, err := api.NewErrorReply(code)
+				reply, err := api.NewErrorReply(test.code)
 				if err != nil {
 					t.Errorf("new error reply: %v", err)
 				}
@@ -619,7 +664,7 @@ func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 			if result := awaitServer(t, done); result.err != nil {
 				t.Fatal(result.err)
 			}
-			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: human request was not accepted\n" {
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: human request: "+test.message+"\n" {
 				t.Fatalf("error output = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 			}
 			for _, private := range []string{fixture.socket, fixture.attemptPath, string(fixture.bearer[:]), key, question} {

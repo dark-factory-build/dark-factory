@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_PRIORITY, type AccountItem, type AgentItem, type ProjectItem, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_PRIORITY, type DiscoveredAccount, type AccountItem, type AgentItem, type ProjectItem, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
@@ -7,18 +7,6 @@ import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js"
 
 /** Only the controls the operator actually changed; the rest are left alone. */
 export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
-
-/** One discovered login and the account row it is linked to, if any. */
-export type DiscoveredAccount = Readonly<{
-  provider: "claude_code" | "codex";
-  home: string;
-  label: string;
-  email: string;
-  organization: string;
-  default_model: string;
-  default_reasoning_effort: string;
-  linked_id: string;
-}>;
 
 export type TaskEdit = Readonly<{ title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean }>;
 export type TaskBrief = Readonly<{ taskId: string; revision: bigint; head: bigint; instruction: string; feedback: string; outcome?: string; peerQuestions: readonly TaskPeerQuestion[]; nextPeerOffset?: bigint }>;
@@ -281,11 +269,18 @@ export function QueuePanel({
   const agents = state === undefined ? [] : [...state.agents.values()];
   const tasks = state === undefined ? [] : [...state.tasks.values()];
   const running = tasks.filter((task) => task.status === "running");
-  const queued = agents.flatMap((agent) => {
-    const assigned = tasks
-      .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
-    return assigned.length === 0 ? [] : [{ agent, tasks: assigned }];
-  });
+  const queued = [
+    ...agents.flatMap((agent) => {
+      const assigned = tasks
+        .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
+      return assigned.length === 0 ? [] : [{ projectId: agent.project_id, tasks: assigned }];
+    }),
+    // Shared work waits under its project until an eligible worker claims it.
+    ...(state === undefined ? [] : [...state.projects.values()]).flatMap((project) => {
+      const shared = tasks.filter((task) => task.assigned_agent_id === "" && task.project_id === project.id && task.status === "queued");
+      return shared.length === 0 ? [] : [{ projectId: project.id, tasks: shared }];
+    }),
+  ];
   return <section className="dfConsoleSidebar__panel" aria-label="Queue">
     {state === undefined ? <p className="dfFactoryConsole__empty">WAITING FOR SNAPSHOT</p>
       : <>
@@ -296,8 +291,8 @@ export function QueuePanel({
             <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"}</span>
           </div></li>)}</ul>
         </section>}
-        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">NO QUEUED TASKS</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ agent, tasks }) => {
-          const peers = agents.filter((peer) => peer.project_id === agent.project_id);
+        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">NO QUEUED TASKS</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ projectId, tasks }) => {
+          const peers = agents.filter((peer) => peer.project_id === projectId);
           return tasks.filter((task) => selectedTaskId === undefined || task.id === selectedTaskId).map((task) => <QueuedTask
               selected={selectedTaskId === task.id}
               onSelectTask={onSelectTask}
@@ -346,8 +341,6 @@ function AgentConfig({
   const [idlePolicy, setIdlePolicy] = useState(agent.idle_policy);
   const [idleAfterSeconds, setIdleAfterSeconds] = useState(String(agent.idle_after_seconds));
   const [idleInstruction, setIdleInstruction] = useState(agent.idle_instruction);
-  const [idleRunBudget, setIdleRunBudget] = useState(String(agent.idle_run_budget));
-  const [budgetTyped, setBudgetTyped] = useState(false);
   if (onSave === undefined) return null;
   if (agent.archived) return <div className="dfConsoleSidebar__config">
     <button type="button" disabled={pending || !ready} onClick={() => onSave({ archived: false })}>Restore paused</button>
@@ -355,17 +348,11 @@ function AgentConfig({
   // Sending a control the operator did not touch would make the daemon
   // revalidate it, so a stored pair it no longer accepts could not be paused.
   const idleAfter = Math.max(0, Math.floor(Number(idleAfterSeconds) || 0));
-  const idleBudget = Math.max(0, Math.floor(Number(idleRunBudget) || 0));
   const standing = idlePolicy === "standing_instruction";
   const supervising = agent.role === "orchestrator";
-  // A standing instruction is one rule, not three controls: the daemon
-  // refuses a wait, text or budget it cannot run, so the form sends the whole
-  // rule whenever any part of it moved, and will not submit one it can see
-  // is incomplete. The budget travels only when it was typed (even the same
-  // number) or the rule is new, since a budget the daemon receives starts the
-  // used count again; an edit to the wait or the text leaves the count alone.
-  const ruleMoved = idlePolicy !== agent.idle_policy || idleAfter !== agent.idle_after_seconds || idleInstruction !== agent.idle_instruction || idleBudget !== agent.idle_run_budget || budgetTyped;
-  const ruleIncomplete = standing && (idleAfter < 1 || idleInstruction.trim() === "" || idleBudget < 1);
+  // Submit the complete standing rule when its wait or instruction changes.
+  const ruleMoved = idlePolicy !== agent.idle_policy || idleAfter !== agent.idle_after_seconds || idleInstruction !== agent.idle_instruction;
+  const ruleIncomplete = standing && (idleAfter < 1 || idleInstruction.trim() === "");
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (ruleIncomplete) return;
@@ -374,7 +361,7 @@ function AgentConfig({
       ...(reasoningEffort === agent.reasoning_effort ? {} : { reasoningEffort }),
       ...(accountId === agent.account_id ? {} : { accountId }),
       ...(paused === agent.paused ? {} : { paused }),
-      ...(!ruleMoved ? {} : standing ? { idlePolicy, idleAfterSeconds: idleAfter, idleInstruction, ...(budgetTyped || idlePolicy !== agent.idle_policy ? { idleRunBudget: idleBudget } : {}) } : { idlePolicy }),
+      ...(!ruleMoved ? {} : standing ? { idlePolicy, idleAfterSeconds: idleAfter, idleInstruction } : { idlePolicy }),
     });
   };
   return (
@@ -412,11 +399,9 @@ function AgentConfig({
           <input id={`df-idle-after-${agent.id}`} inputMode="numeric" value={idleAfterSeconds} disabled={pending} onChange={(event) => setIdleAfterSeconds(event.currentTarget.value)} />
           <label htmlFor={`df-idle-instruction-${agent.id}`}>INSTRUCTION</label>
           <textarea id={`df-idle-instruction-${agent.id}`} rows={3} value={idleInstruction} disabled={pending} onChange={(event) => setIdleInstruction(event.currentTarget.value)} />
-          <label htmlFor={`df-idle-budget-${agent.id}`}>RUN BUDGET</label>
-          <input id={`df-idle-budget-${agent.id}`} inputMode="numeric" value={idleRunBudget} disabled={pending} onChange={(event) => { setBudgetTyped(true); setIdleRunBudget(event.currentTarget.value); }} />
-          <p className="dfConsoleSidebar__inherit">{agent.idle_runs_used} of {agent.idle_run_budget} idle runs used · type the budget again to start the count again</p>
+          <p className="dfConsoleSidebar__inherit">{agent.idle_runs_used} idle runs</p>
           {supervising ? <p className="dfConsoleSidebar__inherit">initial inspection, then worker events</p> : null}
-          {ruleIncomplete ? <p className="dfConsoleSidebar__inherit">a standing instruction needs at least a second, text and a budget of one run</p> : null}
+          {ruleIncomplete ? <p className="dfConsoleSidebar__inherit">a standing instruction needs at least a second and text</p> : null}
         </>
       ) : null}
       <button type="submit" disabled={pending || !ready || ruleIncomplete}>{pending ? "SAVING" : "SAVE"}</button>
@@ -481,7 +466,7 @@ function QueuedTask({
   return (
     <li>
       <details className="dfConsoleItem" onToggle={(event) => { if (event.currentTarget.open && brief === undefined && !loading) void load(); }}>
-        <summary className="dfConsoleItem__summary" onClick={() => onSelectTask?.(task.id)}><strong>{task.title}</strong><span className="dfConsoleItem__meta">{peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
+        <summary className="dfConsoleItem__summary" onClick={() => onSelectTask?.(task.id)}><strong>{task.title}</strong><span className="dfConsoleItem__meta">{task.assigned_agent_id === "" ? "ANY ELIGIBLE WORKER" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
         <div className="dfConsoleItem__detail">
         {open ? <>
           <label htmlFor={`df-title-${task.id}`}>TITLE</label>
@@ -508,7 +493,10 @@ function QueuedTask({
             disabled={disabled}
             onChange={(event) => { void onEditTask(task, { assignedAgentId: event.currentTarget.value }); }}
           >
-            {peers.filter((peer) => !peer.archived).map((peer) => <option key={peer.id} value={peer.id}>{peer.name}</option>)}
+            {[
+              ...(task.assigned_agent_id === "" ? [<option key="" value="" disabled>Any eligible worker</option>] : []),
+              ...peers.filter((peer) => !peer.archived && (task.assigned_agent_id !== "" || peer.role === "worker")).map((peer) => <option key={peer.id} value={peer.id}>{peer.name}</option>),
+            ]}
           </select>
           <button type="button" disabled={disabled} onClick={() => { void onEditTask(task, { cancel: true }); }}>CANCEL</button>
         </div>
@@ -707,6 +695,7 @@ function AccountsSection({
                 <p className="dfConsoleRow__title">{account.label} · {account.provider}</p>
                 <p>{identity === "" ? account.home : identity}</p>
                 {login?.default_model ? <p className="dfConsoleSidebar__inherit">CLI default: {login.default_model}</p> : null}
+                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again in this directory, then refresh.</p>}
                 <div className="dfConsoleSidebar__taskActions">
                   <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-linked-account-${account.id}`}>Label for {account.label}</label>
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />

@@ -307,6 +307,14 @@ test("authenticated task enqueue mints exact IDs and correlates the durable resu
     agent_revision: 7n,
   }));
   await followUp;
+
+  // "any" queues the instruction for any eligible worker in the pane agent's project.
+  const shared = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "Whoever is free: fix the flaky test", mode: "any" });
+  const sharedFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(sharedFrame.body.mode, "any");
+  assert.equal(sharedFrame.body.agent_id, agentId);
+  socket.reply(encodeTaskEnqueueResult(sharedFrame.id, { task_id: sharedFrame.body.task_id, revision: 3n, agent_revision: 7n }));
+  await shared;
   session.close();
 });
 
@@ -1915,6 +1923,9 @@ test("an agent's idle rule travels on AGENT_UPDATE and comes back on the snapsho
   // A snapshot from before idle rules describes an agent that waits.
   const legacy = decodeServerControl(JSON.stringify({ type: "STATE_SNAPSHOT", id: "s", body: { head: "1", factory: { dispatch_enabled: true, capacity: 1, active_runs: 0, revision: "1" }, projects: [], agents: [{ id: agentId, project_id: "0a".repeat(16), name: "old", role: "worker", provider: "shell", paused: false, revision: "1" }], tasks: [], human_requests: [] } }));
   assert.deepEqual([legacy.body.agents[0].idle_policy, legacy.body.agents[0].idle_after_seconds, legacy.body.agents[0].idle_instruction, legacy.body.agents[0].idle_run_budget, legacy.body.agents[0].idle_runs_used], ["wait", 0, "", 0, 0]);
+  const uncapped = { ...legacy.body.agents[0], idle_policy: "standing_instruction", idle_after_seconds: 1, idle_instruction: "Inspect work", idle_run_budget: 0, idle_runs_used: 1000001 };
+  const history = decodeServerControl(encodeServerControl({ ...legacy, body: { ...legacy.body, agents: [uncapped] } }));
+  assert.equal(history.body.agents[0].idle_runs_used, 1000001);
   session.close();
 });
 
@@ -1958,6 +1969,7 @@ test("account discovery and linking correlate by request id and gate on capabili
     default_model: "gpt-6-astra",
     default_reasoning_effort: "high",
     linked_id: "",
+    unavailable_reason: "",
   };
   const pending = session.discoverAccounts();
   const ask = decodeClientControl(socket.sent.at(-1));
@@ -1967,6 +1979,13 @@ test("account discovery and linking correlate by request id and gate on capabili
   const accounts = await pending;
   assert.deepEqual([...accounts], [discovered]);
   assert.equal(Object.isFrozen(accounts[0]), true);
+
+  // The required old shape above stays valid; this is the new daemon field.
+  const unavailable = { ...discovered, linked_id: "5b".repeat(16), unavailable_reason: "login is no longer discoverable" };
+  const pendingUnavailable = session.discoverAccounts();
+  const unavailableAsk = decodeClientControl(socket.sent.at(-1));
+  socket.reply(encodeServerControl({ type: "ACCOUNTS", id: unavailableAsk.id, body: { accounts: [unavailable] } }));
+  assert.deepEqual([...await pendingUnavailable], [unavailable]);
 
   const accountId = "5a".repeat(16);
   const linking = session.linkAccount({ provider: "codex", home: discovered.home, label: "dogfood" });
@@ -2085,4 +2104,45 @@ test("paired identities list newest first and revoke at an exact revision, never
   await assert.rejects(session.revokeBrowserClient({ clientId: session.clientId, expectedRevision: 1n }), (error) => error instanceof SessionError && error.code === "invalid_request");
   await assert.rejects(session.revokeBrowserClient({ clientId: other, expectedRevision: 0n }), (error) => error instanceof SessionError && error.code === "invalid_request");
   session.close();
+});
+
+test("closed state watches reconnect only for transport loss or retryable errors without replaying mutations", { timeout: 3_000 }, async () => {
+  for (const failure of [null, { code: "rate_limited", retryable: true }, { code: "unauthorized", retryable: false }, { code: "internal", retryable: false }]) {
+    const store = new MemoryKeys();
+    const sockets = [];
+    const timer = new VirtualTimer();
+    let ready;
+    let readiness = new Promise((resolve) => { ready = resolve; });
+    const client = new BrowserClient({
+      url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
+      onStatus: (status) => { if (status === "ready") ready(); },
+      socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; },
+    });
+    await client.connect();
+    await readiness;
+    readiness = new Promise((resolve) => { ready = resolve; });
+    const saved = store.value;
+    const mutation = client.session.updateTask({ taskId: "aa".repeat(16), expectedRevision: 1n, body: "one-shot instruction" });
+    const rejected = assert.rejects(mutation, (error) => error instanceof SessionError);
+    const watch = lastFrame(sockets[0], "STATE_WATCH");
+    if (failure === null) sockets[0].close();
+    else sockets[0].reply(encodeServerError(failure, watch.id));
+    await rejected;
+    await tick();
+    timer.advance(10);
+    const retry = failure === null || failure.retryable;
+    if (retry) await readiness;
+    assert.equal(sockets.length, retry ? 2 : 1);
+    assert.equal(client.status, retry ? "ready" : "closed");
+    assert.strictEqual(store.value, saved, "pairing must remain unchanged");
+    if (retry) {
+      const types = sockets[1].sent.map((wire) => decodeClientControl(wire).type);
+      assert.ok(types.includes("AUTH_PROVE"));
+      assert.ok(types.includes("STATE_GET"));
+      assert.ok(!types.includes("PAIR_PROVE"));
+      assert.ok(!types.includes("TASK_UPDATE"));
+      assert.ok(!types.some((type) => type.startsWith("TERMINAL_")));
+    }
+    client.close();
+  }
 });

@@ -35,9 +35,6 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validateChanges(ctx, connection); err != nil {
 		return FactoryState{}, fmt.Errorf("validate Changes: %w", err)
 	}
-	if err := validateRuns(ctx, connection); err != nil {
-		return FactoryState{}, fmt.Errorf("validate runs: %w", err)
-	}
 	if err := validateResources(ctx, connection); err != nil {
 		return FactoryState{}, fmt.Errorf("validate resources: %w", err)
 	}
@@ -295,12 +292,18 @@ func closeValidatedBrowserRows(rows *sql.Rows) error {
 }
 
 func validateResourceIdentityCollisions(ctx context.Context, connection *sql.Conn) error {
+	// A resource carries either a path identity or a process identity, so
+	// one join per identity kind finds the same pairs as one OR-joined query
+	// while letting SQLite index the inner side instead of scanning it per row.
 	rows, err := connection.QueryContext(ctx, `SELECT left_resource.run_id, left_resource.kind, right_resource.run_id, right_resource.kind
 		FROM resources AS left_resource
-		JOIN resources AS right_resource ON left_resource.id < right_resource.id AND (
-			(left_resource.path_dev IS NOT NULL AND left_resource.path_dev = right_resource.path_dev AND left_resource.path_inode = right_resource.path_inode) OR
-			(left_resource.pid IS NOT NULL AND left_resource.pid = right_resource.pid AND left_resource.pgid = right_resource.pgid AND left_resource.birth_digest = right_resource.birth_digest)
-		)`)
+		JOIN resources AS right_resource ON left_resource.id < right_resource.id
+			AND left_resource.path_dev IS NOT NULL AND left_resource.path_dev = right_resource.path_dev AND left_resource.path_inode = right_resource.path_inode
+		UNION ALL
+		SELECT left_resource.run_id, left_resource.kind, right_resource.run_id, right_resource.kind
+		FROM resources AS left_resource
+		JOIN resources AS right_resource ON left_resource.id < right_resource.id
+			AND left_resource.pid IS NOT NULL AND left_resource.pid = right_resource.pid AND left_resource.pgid = right_resource.pgid AND left_resource.birth_digest = right_resource.birth_digest`)
 	if err != nil {
 		return err
 	}
@@ -340,11 +343,17 @@ func validateRunRelationships(ctx context.Context, connection *sql.Conn) error {
 		}
 		runs = append(runs, run)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	// validateTasks has already walked every task's run history once; walking
+	// it again per run made this pass quadratic in each task's retry depth.
 	for _, run := range runs {
-		if _, err := loadRunRelationships(ctx, connection, run); err != nil {
+		if _, err := loadRunRelationshipsWithTopology(ctx, connection, run, false); err != nil {
 			return err
 		}
 	}
@@ -558,6 +567,12 @@ func workerChangeProvenanceForRun(ctx context.Context, connection *sql.Conn, run
 }
 
 func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (runRelationships, error) {
+	return loadRunRelationshipsWithTopology(ctx, connection, run, true)
+}
+
+// loadRunRelationshipsWithTopology skips the task's run-history walk only when
+// the caller has already validated it in the same transaction.
+func loadRunRelationshipsWithTopology(ctx context.Context, connection *sql.Conn, run Run, validateTopology bool) (runRelationships, error) {
 	task, found, err := taskByID(ctx, connection, run.TaskID)
 	if err != nil || !found {
 		if err == nil {
@@ -568,8 +583,10 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if task.ProjectID != run.ProjectID || task.IncarnationID != run.TaskIncarnationID {
 		return runRelationships{}, fmt.Errorf("%w: task does not match run", ErrCorruptState)
 	}
-	if err := validateTaskRunTopology(ctx, connection, task); err != nil {
-		return runRelationships{}, err
+	if validateTopology {
+		if err := validateTaskRunTopology(ctx, connection, task); err != nil {
+			return runRelationships{}, err
+		}
 	}
 	if run.Phase != RunTerminal {
 		if !taskMatchesRun(task, run) {
@@ -847,7 +864,21 @@ func taskMatchesRun(task Task, run Run) bool {
 }
 
 func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Task) error {
-	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id = ? AND task_incarnation_id = ? ORDER BY admitted_task_work_revision`, task.ID.Bytes(), task.IncarnationID.Bytes())
+	return validateTaskRunTopologyWithLimit(ctx, connection, task, 0)
+}
+
+func validateTaskRunTopologyBounded(ctx context.Context, connection *sql.Conn, task Task, limit int) error {
+	return validateTaskRunTopologyWithLimit(ctx, connection, task, limit)
+}
+
+func validateTaskRunTopologyWithLimit(ctx context.Context, connection *sql.Conn, task Task, limit int) error {
+	query := `SELECT ` + runColumns + ` FROM runs WHERE task_id = ? AND task_incarnation_id = ? ORDER BY admitted_task_work_revision`
+	args := []any{task.ID.Bytes(), task.IncarnationID.Bytes()}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit+1)
+	}
+	rows, err := connection.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -856,6 +887,10 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 	found := false
 	var invalid error
 	for rows.Next() {
+		if limit > 0 && expectedRevision > int64(limit) {
+			_ = rows.Close()
+			return fmt.Errorf("%w: task has more than %d runs", ErrRecoveryBounds, limit)
+		}
 		run, present, err := scanRun(rows)
 		if err != nil || !present || run.ProjectID != task.ProjectID || run.TaskID != task.ID || run.TaskIncarnationID != task.IncarnationID || run.AdmittedTaskWorkRevision.Int64() != expectedRevision {
 			if err != nil {
@@ -1147,20 +1182,6 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 		}
 	}
 	return nil
-}
-
-func validateRuns(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		if _, _, err := scanRun(rows); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
 }
 
 func validateResources(ctx context.Context, connection *sql.Conn) error {

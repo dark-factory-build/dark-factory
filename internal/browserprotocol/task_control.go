@@ -7,6 +7,9 @@ import (
 
 const MaxTaskInstructionBytes = 32768
 
+// TaskEnqueue submits an instruction from an agent's pane. Mode "now" starts
+// it on that agent, "queue" queues it for that agent, and "any" queues it for
+// any eligible worker in that agent's project.
 type TaskEnqueue struct {
 	TaskID                string  `json:"task_id"`
 	IncarnationID         string  `json:"incarnation_id"`
@@ -48,7 +51,7 @@ func validTaskControl(kind MessageType, body any) error {
 	positive := func(value Decimal) bool { return value > 0 }
 	switch value := body.(type) {
 	case TaskEnqueue:
-		if value.Mode != "" && value.Mode != "now" && value.Mode != "queue" || !id(value.TaskID) || !id(value.IncarnationID) || !id(value.AgentID) || !positive(value.ExpectedAgentRevision) || !utf8.ValidString(value.Instruction) || len(value.Instruction) == 0 || len([]byte(value.Instruction)) > MaxTaskInstructionBytes {
+		if value.Mode != "" && value.Mode != "now" && value.Mode != "queue" && value.Mode != "any" || !id(value.TaskID) || !id(value.IncarnationID) || !id(value.AgentID) || !positive(value.ExpectedAgentRevision) || !utf8.ValidString(value.Instruction) || len(value.Instruction) == 0 || len([]byte(value.Instruction)) > MaxTaskInstructionBytes {
 			return bad()
 		}
 	case TaskEnqueueResult:

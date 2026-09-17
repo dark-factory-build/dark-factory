@@ -165,12 +165,25 @@ func taskCreationReplay(ctx context.Context, connection *sql.Conn, spec NewTask)
 }
 
 func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewTask, at UnixMillis) (Task, error) {
-	agent, found, err := agentByID(ctx, connection, spec.AssignedAgentID)
-	if err != nil {
-		return Task{}, err
-	}
-	if !found || agent.ProjectID != spec.ProjectID || agent.Archived {
-		return Task{}, ErrConflict
+	if spec.AssignedAgentID.zero() {
+		// Any eligible worker: the project must exist; admission picks the agent.
+		if _, found, err := projectByID(ctx, connection, spec.ProjectID); err != nil || !found {
+			if err == nil {
+				err = ErrConflict
+			}
+			return Task{}, err
+		}
+	} else {
+		agent, found, err := agentByID(ctx, connection, spec.AssignedAgentID)
+		if err != nil {
+			return Task{}, err
+		}
+		if !found || agent.ProjectID != spec.ProjectID || agent.Archived {
+			return Task{}, ErrConflict
+		}
+		if err := validateRetainedSourceReviewRoute(spec.Body, agent); err != nil {
+			return Task{}, err
+		}
 	}
 	if _, err := connection.ExecContext(ctx, `INSERT INTO tasks(
         id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body,
@@ -178,7 +191,7 @@ func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewT
         status, priority, blocked_reason, result, completed_at_ms, revision,
 		created_at_ms, updated_at_ms
 	    ) VALUES(?, ?, ?, ?, 1, ?, ?, NULL, 'queued', ?, NULL, NULL, NULL, 1, ?, ?)`,
-		spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.AssignedAgentID.Bytes(), spec.IncarnationID.Bytes(), spec.Title, spec.Body, spec.Priority, at.Int64(), at.Int64()); err != nil {
+		spec.ID.Bytes(), spec.ProjectID.Bytes(), nullableAgentID(spec.AssignedAgentID), spec.IncarnationID.Bytes(), spec.Title, spec.Body, spec.Priority, at.Int64(), at.Int64()); err != nil {
 		return Task{}, err
 	}
 	if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityTask, id: spec.ID.Bytes(), revision: 1}}); err != nil {
@@ -198,8 +211,8 @@ func (store *Store) SetDispatch(ctx context.Context, expected Revision, enabled 
 	if expected.Int64() < 1 {
 		return FactoryState{}, fmt.Errorf("%w: invalid expected factory revision", ErrInvalidValue)
 	}
-	return store.setFactory(ctx, expected, at, func(state FactoryState) (bool, int64, int64) {
-		return state.DispatchEnabled != enabled, int64(boolInt(enabled)), int64(state.Capacity)
+	return store.setFactory(ctx, expected, at, func(state FactoryState) (int64, int64) {
+		return int64(boolInt(enabled)), int64(state.Capacity)
 	})
 }
 
@@ -207,12 +220,12 @@ func (store *Store) SetCapacity(ctx context.Context, expected Revision, capacity
 	if expected.Int64() < 1 || capacity < 1 || capacity > MaxFactoryCapacity {
 		return FactoryState{}, fmt.Errorf("%w: capacity %d outside 1..%d", ErrInvalidValue, capacity, MaxFactoryCapacity)
 	}
-	return store.setFactory(ctx, expected, at, func(state FactoryState) (bool, int64, int64) {
-		return state.Capacity != capacity, int64(boolInt(state.DispatchEnabled)), int64(capacity)
+	return store.setFactory(ctx, expected, at, func(state FactoryState) (int64, int64) {
+		return int64(boolInt(state.DispatchEnabled)), int64(capacity)
 	})
 }
 
-func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMillis, desired func(FactoryState) (bool, int64, int64)) (FactoryState, error) {
+func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMillis, desired func(FactoryState) (int64, int64)) (FactoryState, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return FactoryState{}, err
@@ -222,19 +235,9 @@ func (store *Store) setFactory(ctx context.Context, expected Revision, at UnixMi
 	if err != nil {
 		return FactoryState{}, tx.Rollback(err)
 	}
-	changed, dispatch, capacity := desired(state)
-	if state.Revision == expected && !changed {
-		if err := tx.Rollback(nil); err != nil {
-			return FactoryState{}, err
-		}
-		return state, nil
-	}
-	if state.Revision.Int64() == expected.Int64()+1 && !changed {
-		if err := tx.Rollback(nil); err != nil {
-			return FactoryState{}, err
-		}
-		return state, nil
-	}
+	// Even a same-value operator command records new intent and invalidates
+	// earlier control authority. A matching value never proves who wrote it.
+	dispatch, capacity := desired(state)
 	if state.Revision != expected {
 		return FactoryState{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -347,7 +350,7 @@ func validateNewAgent(spec NewAgent) error {
 }
 
 func validateNewTask(spec NewTask) error {
-	if spec.ID.zero() || spec.ProjectID.zero() || spec.AssignedAgentID.zero() || spec.IncarnationID.zero() || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Body) > 131072 || spec.Priority < -1_000_000 || spec.Priority > 1_000_000 {
+	if spec.ID.zero() || spec.ProjectID.zero() || spec.IncarnationID.zero() || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Body) > 131072 || spec.Priority < -1_000_000 || spec.Priority > 1_000_000 {
 		return fmt.Errorf("%w: invalid task", ErrInvalidValue)
 	}
 	return nil
@@ -390,6 +393,15 @@ func nullableString(value string) any {
 }
 
 func nullableID(id AccountID) any {
+	if id.zero() {
+		return nil
+	}
+	return id.Bytes()
+}
+
+// nullableAgentID writes tasks.assigned_agent_id: the zero identity is NULL,
+// a task any eligible worker in its project may claim.
+func nullableAgentID(id AgentID) any {
 	if id.zero() {
 		return nil
 	}

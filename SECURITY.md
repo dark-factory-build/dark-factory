@@ -177,14 +177,21 @@ selecting lower work.
 
 `factoryd` is the only product creator and administrator of Changes. Worker
 admission reserves one daemon-derived path for one task incarnation, and a
-registered wrapper materializes one exact committed tree before the provider
-can execute. The leased provider view is a plain writable directory with no
-Git administrative locator. Factoryd exposes no repository status, commit,
-push, pull-request, or publication operation.
+registered wrapper makes it a linked Git worktree of the project repository
+at one exact committed revision on the Change's own branch before the
+provider can execute. The provider's local commands are granted that worktree
+and the repository's Git directory (writable for a worker, read-only for an
+orchestrator) so they can commit, read and diff; they receive no Git
+credential helper, SSH command, prompt or `gh` configuration, so nothing in
+the provider can push or publish. A worktree isolates changes; it is not a
+security sandbox. Factoryd exposes no repository status, commit, push,
+pull-request, or publication operation of its own.
 
-Managed Change removal requires the exact typed ID, current revision, durable
-inode identity, and absence of a live lease; a replacement or ambiguous path
-remains visibly pending and is never touched.
+A retained Change is identified by its branch and the head the daemon read at
+settlement; a reopen or source request that finds the branch elsewhere is
+refused rather than described by a stale receipt. Factory worktrees are
+removed only by an operator after the merge and disuse proof in the
+development workflow; never by the daemon.
 
 ## Build and storage boundary
 

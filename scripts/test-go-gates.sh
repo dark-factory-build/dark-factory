@@ -348,12 +348,13 @@ for local_child in \
     test-github-step-summary.sh test-verify-adversarial-review.sh \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-local-ci-mode.sh test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
-    test-prepare-release-source.sh test-publish-release.sh test-package-release.sh; do
+    test-prepare-release-source.sh test-publish-release.sh test-package-release.sh \
+    test-publication-parents.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
 printf 'process.exit(0);\n' >"$local_fixture/scripts/test-verification-profile.mjs"
 
-for local_python in browser intake release autonomy delivery review-intake source-refresh; do
+for local_python in browser intake release autonomy delivery review-intake; do
     printf 'pass\n' >"$local_fixture/scripts/test-factory-$local_python.py"
 done
 

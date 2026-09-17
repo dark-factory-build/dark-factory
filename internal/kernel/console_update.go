@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
@@ -16,8 +17,7 @@ type AgentPatch struct {
 	Paused     *bool
 	Archived   *bool
 	Appearance *AgentAppearance
-	// The idle rule. A new budget starts the used count again; that is the
-	// one explicit operator action that resets it.
+	// The idle rule. Edits preserve the recorded wake count.
 	IdlePolicy       *IdlePolicy
 	IdleAfterSeconds *uint32
 	IdleInstruction  *string
@@ -116,6 +116,13 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 		agent.ReasoningEffort = *patch.ReasoningEffort
 	}
 	if patch.AccountID != nil {
+		var live int
+		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE agent_id = ? AND phase <> 'terminal')`, agent.ID.Bytes()).Scan(&live); err != nil {
+			return Agent{}, tx.Rollback(err)
+		}
+		if live != 0 {
+			return Agent{}, tx.Rollback(ErrConflict)
+		}
 		agent.AccountID = *patch.AccountID
 		if err := requireAccountForProvider(ctx, tx.connection, agent.Provider, agent.AccountID); err != nil {
 			return Agent{}, tx.Rollback(err)
@@ -137,7 +144,7 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 		agent.Idle.Instruction = *patch.IdleInstruction
 	}
 	if patch.IdleRunBudget != nil {
-		agent.Idle.RunBudget, agent.Idle.RunsUsed = *patch.IdleRunBudget, 0
+		agent.Idle.RunBudget = *patch.IdleRunBudget
 	}
 	if err := validateIdleRule(agent.Idle); err != nil {
 		return Agent{}, tx.Rollback(err)
@@ -208,7 +215,16 @@ func (store *Store) AuthorizeWorkerTaskForOverseer(ctx context.Context, digest A
 	if !found || task.ProjectID != overseer.ProjectID {
 		return ErrUnauthorized
 	}
-	agent, found, err := agentByID(ctx, read.connection, task.AssignedAgentID)
+	return requireWorkerTask(ctx, read.connection, task)
+}
+
+// requireWorkerTask authorizes an overseer edit: the task is a worker's, or
+// unclaimed shared work that only a worker can claim.
+func requireWorkerTask(ctx context.Context, connection *sql.Conn, task Task) error {
+	if task.AssignedAgentID.zero() {
+		return nil
+	}
+	agent, found, err := agentByID(ctx, connection, task.AssignedAgentID)
 	if err != nil {
 		return err
 	}
@@ -245,12 +261,8 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
 	if digest != nil {
-		agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
-		if err != nil {
+		if err := requireWorkerTask(ctx, tx.connection, task); err != nil {
 			return Task{}, tx.Rollback(err)
-		}
-		if !found || agent.Role != RoleWorker {
-			return Task{}, tx.Rollback(ErrUnauthorized)
 		}
 	}
 	if task.Status != TaskQueued {
@@ -283,6 +295,25 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		}
 		task.AssignedAgentID = agent.ID
 	}
+	// Validate the resulting pair, including a body and assignment changed in
+	// the same revision-checked edit. This prevents a queued task from becoming
+	// a doomed review by changing only one side of the pair. Cancelling always
+	// resolves the queued state rather than keeping it eligible to run, so a
+	// legacy queued task that predates this validator (or that has no agent
+	// yet) remains cancellable; only an edit that would leave the ineligible
+	// pair queued is refused.
+	if !patch.Cancel && !task.AssignedAgentID.zero() {
+		assigned, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found {
+			return Task{}, tx.Rollback(ErrCorruptState)
+		}
+		if err := validateRetainedSourceReviewRoute(task.Body, assigned); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+	}
 	status, completed := task.Status.String(), any(nil)
 	if patch.Cancel {
 		status, completed = TaskCancelled.String(), at.Int64()
@@ -295,7 +326,7 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		sentBack = *task.SentBackInstructionBytes
 	}
 	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET title = ?, body = ?, sent_back_instruction_bytes = ?, priority = ?, assigned_agent_id = ?, status = ?, completed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = 'queued' AND revision = ?`,
-		task.Title, task.Body, sentBack, task.Priority, task.AssignedAgentID.Bytes(), status, completed, at.Int64(), id.Bytes(), expected.Int64())
+		task.Title, task.Body, sentBack, task.Priority, nullableAgentID(task.AssignedAgentID), status, completed, at.Int64(), id.Bytes(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}

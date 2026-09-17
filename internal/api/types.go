@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	maxFrameBytes      = 1 << 20
-	maxSnapshotEntries = 4096
-	credentialBytes    = 32
+	maxFrameBytes          = 1 << 20
+	MaxRecoveryResultBytes = 65536
+	maxSnapshotEntries     = 4096
+	credentialBytes        = 32
 )
 
 var (
@@ -123,9 +124,88 @@ type MutationResult struct {
 	HumanReply   *OverseerHumanReplyResult   `json:"human_reply,omitempty"`
 }
 
+// DiscoveredAccount is a non-secret identity published by a provider login.
+// It deliberately carries neither credentials nor credential-derived tokens.
+type DiscoveredAccount struct {
+	Provider               string `json:"provider"`
+	Home                   string `json:"home"`
+	Label                  string `json:"label"`
+	Email                  string `json:"email,omitempty"`
+	Organization           string `json:"organization,omitempty"`
+	DefaultModel           string `json:"default_model,omitempty"`
+	DefaultReasoningEffort string `json:"default_reasoning_effort,omitempty"`
+	LinkedID               string `json:"linked_id,omitempty"`
+	UnavailableReason      string `json:"unavailable_reason,omitempty"`
+}
+
+type Accounts struct {
+	Accounts   []DiscoveredAccount `json:"accounts"`
+	NextOffset *uint32             `json:"next_offset,omitempty"`
+}
+type AccountLinkInput struct {
+	Provider string `json:"provider"`
+	Home     string `json:"home"`
+	Label    string `json:"label"`
+}
+type AgentAccountSelectInput struct {
+	AgentID          string `json:"agent_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	AccountID        string `json:"account_id"`
+}
+
+func validDiscoveredAccount(value DiscoveredAccount) bool {
+	provider, err := kernel.ParseProvider(value.Provider)
+	return err == nil && provider != kernel.ProviderShell && validText(value.Home, 1, 1024) && value.Home[0] == '/' && validText(value.Label, 1, 128) &&
+		validText(value.Email, 0, 128) && validText(value.Organization, 0, 128) && validText(value.DefaultModel, 0, 128) && validText(value.DefaultReasoningEffort, 0, 128) && validText(value.UnavailableReason, 0, 128) && (value.LinkedID == "" || validID(value.LinkedID))
+}
+func validAccounts(value Accounts) bool {
+	if value.Accounts == nil || len(value.Accounts) > 4096 || value.NextOffset != nil && *value.NextOffset == 0 {
+		return false
+	}
+	for _, account := range value.Accounts {
+		if !validDiscoveredAccount(account) {
+			return false
+		}
+	}
+	return true
+}
+func validAccountLinkInput(value AccountLinkInput) bool {
+	return validDiscoveredAccount(DiscoveredAccount{Provider: value.Provider, Home: value.Home, Label: value.Label})
+}
+func validAgentAccountSelectInput(value AgentAccountSelectInput) bool {
+	return validID(value.AgentID) && validID(value.AccountID) && value.ExpectedRevision != 0
+}
+
 type OverseerHumanReplyResult struct {
 	RequestID string `json:"request_id"`
 	State     string `json:"state"`
+}
+
+type HumanRequest struct {
+	ID       string   `json:"id"`
+	RunID    string   `json:"run_id"`
+	TaskID   string   `json:"task_id"`
+	AgentID  string   `json:"agent_id"`
+	Status   string   `json:"status"`
+	Revision uint64   `json:"revision"`
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
+}
+
+type HumanRequestList struct {
+	Requests []HumanRequest `json:"requests"`
+}
+
+func validHumanRequestList(value HumanRequestList) bool {
+	if value.Requests == nil || len(value.Requests) > 1024 {
+		return false
+	}
+	for _, request := range value.Requests {
+		if !validID(request.ID) || !validID(request.RunID) || !validID(request.TaskID) || !validID(request.AgentID) || request.Revision == 0 || !validText(request.Question, 1, 8192) || request.Status != "open" && request.Status != "delivering" && request.Status != "delivery_unknown" || request.Options == nil || kernel.ValidateHumanOptions(request.Options) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func validMutation(result MutationResult) bool {
@@ -147,7 +227,61 @@ type OverseerInterventionResult struct {
 // AttemptTask is the exact private task text visible only to the authenticated
 // live attempt that owns it.
 type AttemptTask struct {
-	Task string `json:"task"`
+	Task                   string `json:"task"`
+	TaskID                 string `json:"task_id,omitempty"`
+	IncarnationID          string `json:"incarnation_id,omitempty"`
+	WorkRevision           uint64 `json:"work_revision,omitempty"`
+	ChangeID               string `json:"change_id,omitempty"`
+	AdmittedChangeRevision uint64 `json:"admitted_change_revision,omitempty"`
+	ChangeRevision         uint64 `json:"change_revision,omitempty"`
+	BaseCommit             string `json:"base_commit,omitempty"`
+}
+
+// TerminalObserveInput identifies one exact attempt terminal. The API derives
+// authority from the bearer and requires all three durable identities to
+// match; cursor is a byte cursor in the runner's bounded replay ring.
+type TerminalObserveInput struct {
+	ProjectID string `json:"project_id"`
+	TaskID    string `json:"task_id"`
+	RunID     string `json:"run_id"`
+	Cursor    uint64 `json:"cursor"`
+	MaxBytes  uint32 `json:"max_bytes"`
+}
+
+type TerminalObservation struct {
+	ProjectID  string `json:"project_id"`
+	TaskID     string `json:"task_id"`
+	RunID      string `json:"run_id"`
+	Cursor     uint64 `json:"cursor"`
+	NextCursor uint64 `json:"next_cursor"`
+	Floor      uint64 `json:"floor"`
+	Head       uint64 `json:"head"`
+	Source     string `json:"source"`
+	Gap        bool   `json:"gap"`
+	Omitted    uint64 `json:"omitted"`
+	Payload    []byte `json:"payload"`
+}
+
+// MarshalDisplayJSON renders readable, terminal-safe text for CLI/MCP without
+// changing the byte payload or raw cursors on the local API wire.
+func (value TerminalObservation) MarshalDisplayJSON() ([]byte, error) {
+	type plain TerminalObservation
+	encoded, err := json.Marshal(struct {
+		plain
+		Payload string `json:"payload"`
+	}{plain(value), string(value.Payload)})
+	if err != nil {
+		return nil, err
+	}
+	return terminalSafeJSON(nil, encoded), nil
+}
+
+func validTerminalObservationInput(input TerminalObserveInput) bool {
+	return validID(input.ProjectID) && validID(input.TaskID) && validID(input.RunID) && input.MaxBytes > 0 && input.MaxBytes <= 65536
+}
+
+func validTerminalObservation(value TerminalObservation) bool {
+	return validID(value.ProjectID) && validID(value.TaskID) && validID(value.RunID) && value.NextCursor >= value.Cursor && value.Floor <= value.Head && value.NextCursor <= value.Head && (value.Source == "stored" || value.Source == "none") && len(value.Payload) <= 65536 && value.Omitted <= value.NextCursor-value.Cursor && uint64(len(value.Payload)) == value.NextCursor-value.Cursor-value.Omitted
 }
 
 // Project content is deliberately a small wire DTO. Bodies are never placed
@@ -244,12 +378,12 @@ func (task AttemptTask) MarshalJSON() ([]byte, error) {
 	if !validAttemptTask(task) {
 		return nil, ErrInvalidInput
 	}
-	quoted, err := json.Marshal(task.Task)
+	type plain AttemptTask
+	quoted, err := json.Marshal(plain(task))
 	if err != nil {
 		return nil, err
 	}
-	encoded := append([]byte(`{"task":`), terminalSafeJSON(nil, quoted)...)
-	return append(encoded, '}'), nil
+	return terminalSafeJSON(nil, quoted), nil
 }
 
 func terminalSafeJSON(dst, encoded []byte) []byte {
@@ -267,7 +401,21 @@ func terminalSafeJSON(dst, encoded []byte) []byte {
 }
 
 func validAttemptTask(task AttemptTask) bool {
-	return validText(task.Task, 0, 131072)
+	if !validText(task.Task, 0, 131072) {
+		return false
+	}
+	if task.TaskID == "" && task.IncarnationID == "" && task.WorkRevision == 0 && task.ChangeID == "" && task.AdmittedChangeRevision == 0 && task.ChangeRevision == 0 && task.BaseCommit == "" {
+		return true
+	}
+	if !validID(task.TaskID) || !validID(task.IncarnationID) || task.WorkRevision == 0 || !validID(task.ChangeID) || task.AdmittedChangeRevision == 0 || task.ChangeRevision == 0 || len(task.BaseCommit) != 40 && len(task.BaseCommit) != 64 {
+		return false
+	}
+	for _, ch := range task.BaseCommit {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 type FactorySummary struct {
@@ -292,6 +440,7 @@ type AgentSummary struct {
 	Name      string `json:"name"`
 	Role      string `json:"role"`
 	Provider  string `json:"provider"`
+	AccountID string `json:"account_id"`
 	Paused    bool   `json:"paused"`
 	Archived  bool   `json:"archived"`
 	Revision  uint64 `json:"revision"`
@@ -301,10 +450,121 @@ type TaskSummary struct {
 	ID              string `json:"id"`
 	ProjectID       string `json:"project_id"`
 	AssignedAgentID string `json:"assigned_agent_id"`
+	IncarnationID   string `json:"incarnation_id"`
+	WorkRevision    uint64 `json:"work_revision"`
 	Title           string `json:"title"`
 	Status          string `json:"status"`
 	Priority        int64  `json:"priority"`
 	Revision        uint64 `json:"revision"`
+}
+
+type TaskRecoveryInput struct {
+	TaskID        string `json:"task_id"`
+	IncarnationID string `json:"incarnation_id"`
+}
+
+type TaskRecovery struct {
+	Result                string   `json:"result"`
+	ResultTruncated       bool     `json:"result_truncated"`
+	BlockedReason         string   `json:"blocked_reason"`
+	RunWorkRevision       uint64   `json:"run_work_revision,omitempty"`
+	RunOutcome            string   `json:"run_outcome,omitempty"`
+	RunDetail             string   `json:"run_detail,omitempty"`
+	State                 string   `json:"state"`
+	TaskID                string   `json:"task_id"`
+	IncarnationID         string   `json:"incarnation_id"`
+	ProjectID             string   `json:"project_id"`
+	AssignedAgentID       string   `json:"assigned_agent_id"`
+	WorkRevision          uint64   `json:"work_revision"`
+	Revision              uint64   `json:"revision"`
+	Status                string   `json:"status"`
+	NeedsOperatorRecovery bool     `json:"needs_operator_recovery"`
+	ChangeID              string   `json:"change_id,omitempty"`
+	ChangeRevision        uint64   `json:"change_revision,omitempty"`
+	ChangePhase           string   `json:"change_phase,omitempty"`
+	SourceFormat          string   `json:"source_format,omitempty"`
+	SourceBaseCommit      string   `json:"source_base_commit,omitempty"`
+	SourceRepositoryDev   int64    `json:"source_repository_dev,omitempty"`
+	SourceRepositoryInode int64    `json:"source_repository_inode,omitempty"`
+	RunID                 string   `json:"run_id,omitempty"`
+	RunRevision           uint64   `json:"run_revision,omitempty"`
+	ArtifactPaths         []string `json:"artifact_paths"`
+}
+
+func validTaskRecovery(value TaskRecovery) bool {
+	if !utf8.ValidString(value.Result) || len(value.Result) > MaxRecoveryResultBytes || !utf8.ValidString(value.BlockedReason) || len(value.BlockedReason) > 4096 || !utf8.ValidString(value.RunDetail) || len(value.RunDetail) > 4096 {
+		return false
+	}
+	if (value.Result != "" || value.ResultTruncated) && value.Status != "succeeded" || value.BlockedReason != "" && value.Status != "blocked" {
+		return false
+	}
+	if value.ResultTruncated && len(value.Result) < MaxRecoveryResultBytes-3 {
+		return false
+	}
+	if value.RunID == "" && (value.RunWorkRevision != 0 || value.RunOutcome != "" || value.RunDetail != "") || value.RunID != "" && (value.RunWorkRevision == 0 || value.RunWorkRevision > value.WorkRevision) {
+		return false
+	}
+	switch value.RunOutcome {
+	case "":
+		if value.RunDetail != "" {
+			return false
+		}
+	case "succeeded":
+		if value.RunDetail != "" {
+			return false
+		}
+	case "blocked", "cancelled":
+		if value.RunDetail == "" {
+			return false
+		}
+	case "failed":
+	default:
+		return false
+	}
+
+	if value.State == "missing" {
+		return value.TaskID == "" && value.IncarnationID == "" && value.ProjectID == "" && value.AssignedAgentID == "" && value.WorkRevision == 0 && value.Revision == 0 && value.Status == "" && !value.NeedsOperatorRecovery && value.ChangeID == "" && value.ChangeRevision == 0 && value.ChangePhase == "" && value.SourceFormat == "" && value.SourceBaseCommit == "" && value.SourceRepositoryDev == 0 && value.SourceRepositoryInode == 0 && value.RunID == "" && value.RunRevision == 0 && value.ArtifactPaths != nil && len(value.ArtifactPaths) == 0
+	}
+	if value.State != "found" || !validID(value.TaskID) || !validID(value.IncarnationID) || !validID(value.ProjectID) || !validOptionalID(value.AssignedAgentID) || value.WorkRevision == 0 || value.Revision == 0 || !validTaskStatus(value.Status) || value.ArtifactPaths == nil || len(value.ArtifactPaths) > kernel.MaxRecoveryResources {
+		return false
+	}
+	if value.RunID == "" && value.RunRevision != 0 || value.RunID != "" && (!validID(value.RunID) || value.RunRevision == 0) {
+		return false
+	}
+	if value.ChangeID == "" {
+		if value.ChangeRevision != 0 || value.ChangePhase != "" || value.SourceFormat != "" {
+			return false
+		}
+	} else {
+		if !validID(value.ChangeID) || value.ChangeRevision == 0 {
+			return false
+		}
+		switch value.ChangePhase {
+		case "reserved", "prepared", "available", "retained", "abandoned":
+		default:
+			return false
+		}
+	}
+	if value.SourceFormat == "" {
+		if value.SourceBaseCommit != "" || value.SourceRepositoryDev != 0 || value.SourceRepositoryInode != 0 {
+			return false
+		}
+	} else {
+		if !(value.SourceFormat == "sha1" && len(value.SourceBaseCommit) == 40 || value.SourceFormat == "sha256" && len(value.SourceBaseCommit) == 64) || value.SourceRepositoryDev < 0 || value.SourceRepositoryInode <= 0 {
+			return false
+		}
+		for _, ch := range value.SourceBaseCommit {
+			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+				return false
+			}
+		}
+	}
+	for _, path := range value.ArtifactPaths {
+		if value.RunID == "" || !validCanonicalPath(path, 4096) {
+			return false
+		}
+	}
+	return true
 }
 
 // DashboardSnapshot deliberately contains only the bounded public Store
@@ -322,16 +582,65 @@ type DashboardSnapshot struct {
 // orchestrator. Its project identity is derived from the attempt credential;
 // callers cannot select a different project.
 type OverseerSnapshot struct {
-	ProjectID      string                 `json:"project_id"`
-	Head           uint64                 `json:"head"`
-	NextOffset     *uint64                `json:"next_offset"`
-	NextTextOffset *uint64                `json:"next_text_offset"`
-	Agents         []AgentSummary         `json:"agents"`
-	Tasks          []OverseerTask         `json:"tasks"`
-	Runs           []OverseerRun          `json:"runs"`
-	Questions      []OverseerQuestion     `json:"questions"`
-	PeerQuestions  []PeerQuestion         `json:"peer_questions"`
-	History        []OverseerIntervention `json:"history"`
+	ProjectID      string                  `json:"project_id"`
+	Head           uint64                  `json:"head"`
+	NextOffset     *uint64                 `json:"next_offset"`
+	NextTextOffset *uint64                 `json:"next_text_offset"`
+	Agents         []AgentSummary          `json:"agents"`
+	Tasks          []OverseerTask          `json:"tasks"`
+	Runs           []OverseerRun           `json:"runs"`
+	Questions      []OverseerQuestion      `json:"questions"`
+	PeerQuestions  []PeerQuestion          `json:"peer_questions"`
+	History        []OverseerIntervention  `json:"history"`
+	Handoffs       []RetainedChangeHandoff `json:"retained_change_handoffs"`
+}
+
+// RetainedChangeHandoff identifies one settled worker Change by its Git
+// identities: the branch its worktree is on, the base it started from and
+// the head the daemon settled it at. Consumers must reject it when any
+// revision no longer matches their status snapshot. Overseer status carries
+// only the identities; attempt source adds where to read them.
+type RetainedChangeHandoff struct {
+	ChangeID   string `json:"change_id"`
+	BaseCommit string `json:"base_commit"`
+	// HeadCommit is the settled tip of Branch, the exact head to review and
+	// publish. It is empty for a Change that is still a Git-free tree.
+	HeadCommit       string `json:"head_commit"`
+	Branch           string `json:"branch"`
+	TaskID           string `json:"task_id"`
+	TaskWorkRevision uint64 `json:"task_work_revision"`
+	ChangeRevision   uint64 `json:"change_revision"`
+	// SourcePath is the Change's worktree and GitDirectory the project
+	// repository's Git directory its commits live in; both are set only by
+	// an explicit attempt source request. Dirty reports uncommitted work in
+	// the worktree at that moment.
+	SourcePath   string `json:"source_path"`
+	GitDirectory string `json:"git_directory"`
+	Dirty        bool   `json:"dirty"`
+}
+
+func validRetainedChangeHandoff(handoff RetainedChangeHandoff) bool {
+	return validID(handoff.ChangeID) && validID(handoff.TaskID) && validCommitHex(handoff.BaseCommit) && (handoff.HeadCommit == "" || len(handoff.HeadCommit) == len(handoff.BaseCommit) && validCommitHex(handoff.HeadCommit)) &&
+		(handoff.Branch == "" || handoff.Branch == "factory/"+handoff.ChangeID[:12]) && handoff.TaskWorkRevision != 0 && handoff.ChangeRevision != 0 &&
+		(handoff.SourcePath == "" || validHandoffSourcePath(handoff.SourcePath, handoff.ChangeID)) && (handoff.GitDirectory == "" || validHandoffGitDirectory(handoff.GitDirectory))
+}
+
+// validSourceHandoff is the attempt source reply: every identity and every
+// location present.
+func validSourceHandoff(handoff RetainedChangeHandoff) bool {
+	return validRetainedChangeHandoff(handoff) && handoff.HeadCommit != "" && handoff.Branch != "" && handoff.SourcePath != "" && handoff.GitDirectory != ""
+}
+
+func validCommitHex(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type OverseerIntervention struct {
@@ -423,6 +732,7 @@ type OverseerTaskUpdateInput struct {
 	Priority         *int64  `json:"priority,omitempty"`
 	AssignedAgentID  *string `json:"assigned_agent_id,omitempty"`
 	Cancel           bool    `json:"cancel,omitempty"`
+	Retry            bool    `json:"retry,omitempty"`
 }
 
 type OverseerAgentUpdateInput struct {
@@ -430,6 +740,24 @@ type OverseerAgentUpdateInput struct {
 	ExpectedRevision uint64 `json:"expected_revision"`
 	Paused           *bool  `json:"paused,omitempty"`
 	Archived         *bool  `json:"archived,omitempty"`
+}
+
+// AgentIdlePolicyInput is the operator-only standing supervision edit. It
+// deliberately contains no provider, account, lifecycle, or appearance fields.
+type AgentIdlePolicyInput struct {
+	AgentID          string `json:"agent_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Policy           string `json:"policy"`
+	AfterSeconds     uint32 `json:"after_seconds"`
+	Instruction      string `json:"instruction"`
+	RunBudget        uint64 `json:"run_budget"`
+}
+
+func validAgentIdlePolicyInput(input AgentIdlePolicyInput) bool {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || input.RunBudget > uint64(kernel.MaxIdleRunBudget) || !validText(input.Instruction, 0, 32768) {
+		return false
+	}
+	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
 }
 
 type OverseerRunStopInput struct {
@@ -551,9 +879,10 @@ type PeerStatus struct {
 }
 
 type PeerStatusInput struct {
-	Offset       uint64 `json:"offset"`
-	TargetOffset uint64 `json:"target_offset"`
-	ExpectedHead uint64 `json:"expected_head"`
+	Offset         uint64 `json:"offset"`
+	TargetOffset   uint64 `json:"target_offset"`
+	ExpectedHead   uint64 `json:"expected_head"`
+	IncludeTargets bool   `json:"include_targets"`
 }
 
 // Peer status is printed in an authenticated provider terminal.
@@ -627,4 +956,15 @@ type SendBackInput struct {
 type WebClientRevocationInput struct {
 	ID               string `json:"id"`
 	ExpectedRevision uint64 `json:"expected_revision"`
+}
+
+type AgentModelSelectInput struct {
+	AgentID          string `json:"agent_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Model            string `json:"model"`
+	ReasoningEffort  string `json:"reasoning_effort"`
+}
+
+func validAgentModelSelectInput(value AgentModelSelectInput) bool {
+	return validID(value.AgentID) && value.ExpectedRevision != 0 && validText(value.Model, 1, 128) && validText(value.ReasoningEffort, 0, 128)
 }

@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"unicode/utf8"
 )
 
@@ -18,6 +19,21 @@ type OverseerSnapshot struct {
 	PeerQuestions  []PeerQuestion
 	History        []TaskIntervention
 	HistoryExcerpt bool
+	Handoffs       []RetainedChangeHandoff
+}
+
+// RetainedChangeHandoff is the complete identity an overseer or delegated
+// reviewer must match before reading a daemon-retained worker tree. It is
+// deliberately an identity, not a caller-supplied pathname.
+type RetainedChangeHandoff struct {
+	ChangeID   ChangeID
+	BaseCommit string
+	// HeadCommit is the settled tip of the Change's branch, or empty while the
+	// Change is still a Git-free tree that no worktree has adopted.
+	HeadCommit       string
+	TaskID           TaskID
+	TaskWorkRevision Revision
+	ChangeRevision   Revision
 }
 
 const OverseerSnapshotPageSize = 4
@@ -86,7 +102,7 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	if request.ExpectedHead.Int64() != 0 && request.ExpectedHead != state.Head {
 		return OverseerSnapshot{}, ErrRevisionConflict
 	}
-	result := OverseerSnapshot{ProjectID: authority.ProjectID, Head: state.Head, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRunSummary{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []TaskIntervention{}, HistoryExcerpt: request.TaskID == nil}
+	result := OverseerSnapshot{ProjectID: authority.ProjectID, Head: state.Head, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRunSummary{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []TaskIntervention{}, Handoffs: []RetainedChangeHandoff{}, HistoryExcerpt: request.TaskID == nil}
 	offset := int64(request.Offset)
 	nextOffset := uint64(offset + OverseerSnapshotPageSize)
 	hasMore := false
@@ -134,6 +150,19 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 			hasMore = true
 			break
 		}
+		// Failed/cancelled task rows have no result; their exact settled run
+		// retains the report needed to diagnose and route the next action.
+		if task.Status == TaskFailed || task.Status == TaskCancelled {
+			var detail sql.NullString
+			err := read.connection.QueryRowContext(ctx, `SELECT terminal_detail FROM runs
+				WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ? AND phase = 'terminal'
+				ORDER BY terminal_at_ms DESC, id DESC LIMIT 1`, task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64()).Scan(&detail)
+			if err != nil && err != sql.ErrNoRows {
+				tasks.Close()
+				return OverseerSnapshot{}, err
+			}
+			task.Result = detail.String
+		}
 		objective, objectiveTruncated, objectiveMore := overseerTaskText(task.Body, request.TaskID == nil, request.TextOffset)
 		resultText, resultTruncated, resultMore := overseerTaskText(task.Result, request.TaskID == nil, request.TextOffset)
 		if objectiveMore || resultMore {
@@ -151,6 +180,15 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	}
 	if request.TaskID != nil && len(result.Tasks) == 0 {
 		return OverseerSnapshot{}, ErrNotFound
+	}
+	for _, task := range result.Tasks {
+		handoff, found, err := retainedChangeHandoff(ctx, read.connection, authority.ProjectID, task.ID)
+		if err != nil {
+			return OverseerSnapshot{}, err
+		}
+		if found {
+			result.Handoffs = append(result.Handoffs, handoff)
+		}
 	}
 	historyQuery, historyArgs := `SELECT `+taskInterventionColumns+` FROM task_interventions WHERE project_id = ? ORDER BY created_at_ms DESC, operation_id DESC LIMIT ?`, []any{authority.ProjectID.Bytes(), MaxTaskInterventionHistory}
 	if request.TaskID != nil {
@@ -270,6 +308,46 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	return result, nil
 }
 
+func retainedChangeHandoff(ctx context.Context, connection *sql.Conn, projectID ProjectID, taskID TaskID) (RetainedChangeHandoff, bool, error) {
+	task, found, err := taskByID(ctx, connection, taskID)
+	if err != nil || !found || task.ProjectID != projectID {
+		return RetainedChangeHandoff{}, false, err
+	}
+	change, found, err := changeForTask(ctx, connection, task)
+	if err != nil || !found || change.Phase != ChangeRetained || change.Selection == nil || change.SettledRunID == nil {
+		return RetainedChangeHandoff{}, false, err
+	}
+	run, found, err := runByID(ctx, connection, *change.SettledRunID)
+	if err != nil {
+		return RetainedChangeHandoff{}, false, err
+	}
+	if !found || run.ProjectID != projectID || run.Role != RoleWorker || run.Phase != RunTerminal || run.Terminal == nil || run.TaskID != task.ID {
+		return RetainedChangeHandoff{}, false, ErrCorruptState
+	}
+	// Every current settled tree is inspectable evidence, regardless of outcome.
+	// A send-back invalidates this identity; it never authorizes execution.
+	if run.AdmittedTaskWorkRevision != task.WorkRevision {
+		return RetainedChangeHandoff{}, false, nil
+	}
+	handoff := RetainedChangeHandoff{ChangeID: change.ID, BaseCommit: hex.EncodeToString(change.Selection.Commit().Bytes()), TaskID: task.ID, TaskWorkRevision: task.WorkRevision, ChangeRevision: change.Revision}
+	if change.HeadCommit != nil {
+		handoff.HeadCommit = hex.EncodeToString(change.HeadCommit.Bytes())
+	}
+	return handoff, true, nil
+}
+
+// RetainedChangeHandoffForTask returns the current handoff identity for one
+// project task. The daemon copies it into an immutable attempt-local snapshot;
+// a send-back makes the identity stale for subsequent source requests.
+func (store *Store) RetainedChangeHandoffForTask(ctx context.Context, projectID ProjectID, taskID TaskID) (RetainedChangeHandoff, bool, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return RetainedChangeHandoff{}, false, err
+	}
+	defer read.Close()
+	return retainedChangeHandoff(ctx, read.connection, projectID, taskID)
+}
+
 func overseerTaskText(value string, overview bool, offset uint64) (string, bool, bool) {
 	if overview {
 		value, truncated := overseerExcerpt(value, 1024)
@@ -342,15 +420,17 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 	if spec.ProjectID != run.ProjectID {
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
-	agent, found, err := agentByID(ctx, tx.connection, spec.AssignedAgentID)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
-	}
-	if !found || agent.ProjectID != run.ProjectID || agent.Role != RoleWorker {
-		return Task{}, tx.Rollback(ErrUnauthorized)
-	}
-	if agent.Archived {
-		return Task{}, tx.Rollback(ErrConflict)
+	if !spec.AssignedAgentID.zero() {
+		agent, found, err := agentByID(ctx, tx.connection, spec.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || agent.ProjectID != run.ProjectID || agent.Role != RoleWorker {
+			return Task{}, tx.Rollback(ErrUnauthorized)
+		}
+		if agent.Archived {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
 	}
 	existing, replay, err := taskCreationReplay(ctx, tx.connection, spec)
 	if err != nil {

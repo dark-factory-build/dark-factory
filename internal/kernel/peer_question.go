@@ -100,7 +100,7 @@ func (store *Store) CreatePeerQuestionForAttempt(ctx context.Context, digest Att
 		}
 		return PeerQuestion{}, tx.Rollback(err)
 	}
-	if run.Role != RoleWorker || run.Phase != RunRunning || run.CredentialRevokedAt != nil || at.Int64() < run.UpdatedAt.Int64() {
+	if (run.Role != RoleWorker && run.Role != RoleOrchestrator) || run.Phase != RunRunning || run.CredentialRevokedAt != nil || at.Int64() < run.UpdatedAt.Int64() {
 		return PeerQuestion{}, tx.Rollback(ErrUnauthorized)
 	}
 	existing, found, err := peerQuestionByKey(ctx, tx.connection, run.TaskID, input.IdempotencyKey)
@@ -123,14 +123,24 @@ func (store *Store) CreatePeerQuestionForAttempt(ctx context.Context, digest Att
 		}
 		return PeerQuestion{}, tx.Rollback(err)
 	}
-	agent, found, err := agentByID(ctx, tx.connection, target.AssignedAgentID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
+	// An unclaimed shared task is worker work with no agent yet; a claimed
+	// task's agent must be a real worker or overseer.
+	if !target.AssignedAgentID.zero() {
+		agent, found, err := agentByID(ctx, tx.connection, target.AssignedAgentID)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return PeerQuestion{}, tx.Rollback(err)
 		}
-		return PeerQuestion{}, tx.Rollback(err)
+		if agent.Role != RoleWorker && agent.Role != RoleOrchestrator {
+			return PeerQuestion{}, tx.Rollback(ErrUnauthorized)
+		}
 	}
-	if target.ProjectID != run.ProjectID || target.ID == run.TaskID || agent.Role != RoleWorker || agent.Provider != ProviderCodex || (target.Status != TaskQueued && target.Status != TaskRunning) {
+	// Collaboration is a project-local, task-linked durable record. Provider
+	// selection only decides whether a best-effort terminal notice is possible;
+	// it must not decide who can read the durable inbox.
+	if target.ProjectID != run.ProjectID || target.ID == run.TaskID || (target.Status != TaskQueued && target.Status != TaskRunning) {
 		return PeerQuestion{}, tx.Rollback(ErrUnauthorized)
 	}
 	var raw [IDBytes]byte
@@ -181,7 +191,7 @@ func (store *Store) AnswerPeerQuestionForAttempt(ctx context.Context, digest Att
 		}
 		return PeerQuestion{}, tx.Rollback(err)
 	}
-	if run.Role != RoleWorker || run.Phase != RunRunning || run.CredentialRevokedAt != nil || at.Int64() < run.UpdatedAt.Int64() {
+	if (run.Role != RoleWorker && run.Role != RoleOrchestrator) || run.Phase != RunRunning || run.CredentialRevokedAt != nil || at.Int64() < run.UpdatedAt.Int64() {
 		return PeerQuestion{}, tx.Rollback(ErrUnauthorized)
 	}
 	question, found, err := peerQuestionByID(ctx, tx.connection, input.QuestionID)
@@ -282,8 +292,8 @@ func peerQuestionsForTask(ctx context.Context, connection *sql.Conn, taskID Task
 	return result, nil, nil
 }
 
-// PeerTargetsForAttempt exposes only current same-project worker tasks so a
-// worker can choose an asynchronous collaborator without learning task text.
+// PeerTargetsForAttempt exposes only current same-project collaboration tasks
+// so an attempt can choose a collaborator without learning task text.
 func (store *Store) PeerTargetsForAttempt(ctx context.Context, digest AttemptDigest, offset uint64, expectedHead EventSequence) ([]PeerTarget, *uint64, error) {
 	if offset > uint64(^uint64(0)>>1)-4 || expectedHead.Int64() < 0 || expectedHead.Int64() == 0 && offset != 0 {
 		return nil, nil, ErrInvalidValue
@@ -300,7 +310,7 @@ func (store *Store) PeerTargetsForAttempt(ctx context.Context, digest AttemptDig
 		}
 		return nil, nil, err
 	}
-	if run.Role != RoleWorker || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
+	if (run.Role != RoleWorker && run.Role != RoleOrchestrator) || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return nil, nil, ErrUnauthorized
 	}
 	state, err := factoryState(ctx, read.connection)
@@ -312,7 +322,7 @@ func (store *Store) PeerTargetsForAttempt(ctx context.Context, digest AttemptDig
 	}
 	rows, err := read.connection.QueryContext(ctx, `SELECT t.id, t.assigned_agent_id, a.name, t.title, t.status, t.revision
 		FROM tasks AS t JOIN agents AS a ON a.id=t.assigned_agent_id AND a.project_id=t.project_id
-		WHERE t.project_id=? AND t.id<>? AND a.role='worker' AND a.provider='codex' AND t.status IN ('queued','running')
+		WHERE t.project_id=? AND t.id<>? AND a.role IN ('worker','orchestrator') AND t.status IN ('queued','running')
 		ORDER BY t.priority DESC,t.created_at_ms,t.id LIMIT 5 OFFSET ?`, run.ProjectID.Bytes(), run.TaskID.Bytes(), int64(offset))
 	if err != nil {
 		return nil, nil, err
@@ -370,7 +380,7 @@ func (store *Store) ReservePeerDelivery(ctx context.Context, questionID PeerQues
 		}
 		return PeerDelivery{}, false, tx.Rollback(err)
 	}
-	if run.Role != RoleWorker || run.Provider != ProviderCodex || run.Phase != RunRunning || run.CredentialRevokedAt != nil || run.ProjectID != question.ProjectID || at.Int64() < run.UpdatedAt.Int64() {
+	if (run.Role != RoleWorker && run.Role != RoleOrchestrator) || run.Phase != RunRunning || run.CredentialRevokedAt != nil || run.ProjectID != question.ProjectID || at.Int64() < run.UpdatedAt.Int64() {
 		return PeerDelivery{}, false, tx.Rollback(ErrRevisionConflict)
 	}
 	wantTask := question.TargetTaskID

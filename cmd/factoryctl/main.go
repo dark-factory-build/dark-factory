@@ -20,14 +20,16 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const (
-	attemptRequestTimeout = 5 * time.Second
-	serviceRequestTimeout = 30 * time.Second
-	exitUsage             = 64
-	exitFailure           = 1
-	maxHomeArgumentBytes  = 4096
+	attemptRequestTimeout        = 5 * time.Second
+	retainedSourceRequestTimeout = 10 * time.Minute
+	serviceRequestTimeout        = 30 * time.Second
+	exitUsage                    = 64
+	exitFailure                  = 1
+	maxHomeArgumentBytes         = 4096
 
 	// pairListenAddress is factoryd's fixed loopback listener and pairPageURL
 	// the first-party pair page it serves there. A successful install opens
@@ -39,26 +41,19 @@ const (
 
 	usage = `usage:
   factoryctl attempt task
-  factoryctl content create --project ID --kind procedure|acceptance_scenario --title TEXT --author TEXT [--description TEXT] [--body TEXT|--body-file PATH] [--source-references TEXT]
-  factoryctl attempt content create --project ID --kind procedure|acceptance_scenario --title TEXT --author TEXT [--description TEXT] [--body TEXT|--body-file PATH] [--source-references TEXT]
-  factoryctl [attempt] content revise --project ID --id ID --revision N --kind procedure|acceptance_scenario --title TEXT --author TEXT [--description TEXT] [--body TEXT|--body-file PATH] [--source-references TEXT]
-  factoryctl [attempt] content deprecate --project ID --id ID --revision N --author TEXT
-  factoryctl [attempt] content list --project ID [--kind procedure|acceptance_scenario] [--offset N] [--limit N]
-  factoryctl [attempt] content read --id ID --revision N
-  factoryctl [attempt] content body --id ID --revision N --offset N --limit N
-  factoryctl [attempt] content evidence --project ID --id ID --revision N --tested-source TEXT --environment TEXT --result passed|failed|incomplete|not_run --location TEXT --evaluator TEXT --judgment TEXT
-  factoryctl [attempt] content attach --project ID --task ID --id ID --revision N
+  factoryctl attempt source --task ID
   factoryctl attempt succeed [--result TEXT]
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT [--option TEXT ...]
-  factoryctl attempt peer status [--offset N] [--target-offset N] [--head HEAD]
+  factoryctl attempt peer status [--targets [--target-offset N]] [--offset N] [--head HEAD]
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
+  factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl attempt send-back --task ID --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
-  factoryctl overseer task add --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
-  factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel]
+  factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+  factoryctl overseer task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
   factoryctl overseer task send-back --task ID --note TEXT
   factoryctl overseer agent pause|resume|archive|restore --agent ID --revision REVISION
   factoryctl overseer worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
@@ -66,12 +61,24 @@ const (
   factoryctl overseer worker message --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --message TEXT
   factoryctl overseer worker interrupt --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
   factoryctl overseer human reply --operation-id ID --request ID --revision REVISION --reply TEXT
+  factoryctl human list
+  factoryctl human reply --operation-id ID --request ID --revision REVISION --reply TEXT
   factoryctl project create --name TEXT --root ABSOLUTE
   factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
-  factoryctl task add --project ID --agent ID --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+  factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
+  factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N]
+
+  factoryctl account discover
+  factoryctl account list
+  factoryctl account link --provider claude_code|codex --home ABSOLUTE --label TEXT
+  factoryctl agent select-account --agent ID --revision REVISION --account ID
+  factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
+  factoryctl task add --project ID --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+    --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
+  factoryctl task recovery --task ID --incarnation ID
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
@@ -103,14 +110,8 @@ const (
 	commandPeerAnswer
 	commandSendBack
 	commandAttemptTask
-	commandContentCreate
-	commandContentRevise
-	commandContentDeprecate
-	commandContentList
-	commandContentRead
-	commandContentBody
-	commandContentEvidence
-	commandContentAttach
+	commandTerminalObserve
+	commandAttemptSource
 	commandWebStatus
 	commandWebListClients
 	commandWebRevoke
@@ -125,8 +126,15 @@ const (
 	commandProjectCreate
 	commandProjectLimits
 	commandAgentCreate
+	commandAgentIdlePolicy
+	commandAccountsDiscover
+	commandAccountsList
+	commandAccountLink
+	commandAgentSelectAccount
+	commandAgentSelectModel
 	commandTaskAdd
 	commandTaskSendBack
+	commandTaskRecovery
 	commandDispatch
 	commandCapacity
 	commandStatus
@@ -140,6 +148,8 @@ const (
 	commandOverseerMessageWorker
 	commandOverseerInterruptWorker
 	commandOverseerReplyHuman
+	commandHumanList
+	commandHumanReply
 )
 
 type attemptCommand struct {
@@ -154,51 +164,42 @@ type attemptCommand struct {
 	after            string
 	expectedRevision uint64
 
-	label            string
-	plistDir         string
-	relayOrigin      string
-	browserAddress   string
-	name             string
-	root             string
-	project          string
-	agent            string
-	role             string
-	provider         string
-	model            string
-	reasoningEffort  string
-	account          string
-	title            string
-	body             string
-	bodySet          bool
-	bodyFile         string
-	contentKind      string
-	contentID        string
-	contentRevision  uint64
-	description      string
-	sourceReferences string
-	testedSource     string
-	environment      string
-	contentResult    string
-	location         string
-	evaluator        string
-	judgment         string
-	toolBudget       uint64
-	capacity         uint16
-	maxRunSeconds    uint32
-	priority         int64
-	prioritySet      bool
-	offset           uint64
-	head             uint64
-	textOffset       uint64
-	enabled          bool
-	operationID      string
-	taskRevision     uint64
-	runRevision      uint64
-	run              string
-	paused           bool
-	archived         bool
-	archiveSet       bool
-	cancel           bool
+	label           string
+	plistDir        string
+	relayOrigin     string
+	browserAddress  string
+	name            string
+	root            string
+	project         string
+	agent           string
+	role            string
+	provider        string
+	model           string
+	reasoningEffort string
+	account         string
+	title           string
+	body            string
+	bodySet         bool
+	toolBudget      uint64
+	capacity        uint16
+	maxBytes        uint32
+	maxRunSeconds   uint32
+	priority        int64
+	prioritySet     bool
+	offset          uint64
+	head            uint64
+	textOffset      uint64
+	includeTargets  bool
+	enabled         bool
+	operationID     string
+	taskRevision    uint64
+	runRevision     uint64
+	run             string
+	paused          bool
+	archived        bool
+	archiveSet      bool
+	cancel          bool
+	retry           bool
 }
 
 func main() {
@@ -221,6 +222,24 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 type serviceInspector func(context.Context, string) (install.ServiceStatus, error)
 
 func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
+	if len(args) > 0 && args[0] == "--local-ci-process-identity" {
+		if len(args) != 2 {
+			return exitUsage
+		}
+		pid, err := strconv.Atoi(args[1])
+		if err != nil || pid <= 1 {
+			return exitUsage
+		}
+		identity, err := runner.ReadOwnedProcessIdentity(pid)
+		if err != nil {
+			return exitFailure
+		}
+		_, err = fmt.Fprintf(stdout, "%d:%06d %d\n", identity.Birth.Seconds, identity.Birth.Microseconds, identity.PGID)
+		if err != nil {
+			return exitFailure
+		}
+		return 0
+	}
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintf(stdout, "factoryctl %s\n", buildinfo.Current().Version())
 		return 0
@@ -252,7 +271,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus {
+	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttach && len(args) > 0 && args[0] == "content" {
@@ -274,6 +293,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	}
 
 	timeout := attemptRequestTimeout
+	if command.kind == commandAttemptSource {
+		timeout = retainedSourceRequestTimeout
+	}
 	if command.kind == commandPeerAsk || command.kind == commandPeerAnswer {
 		timeout = serviceRequestTimeout
 	}
@@ -287,8 +309,35 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		}
 		return writeJSON(stdout, result)
 	}
+	if command.kind == commandAttemptSource {
+		result, sourceErr := client.Source(callContext, command.id)
+		if sourceErr != nil {
+			writeFailure(stderr, command.kind, sourceErr)
+			return exitFailure
+		}
+		return writeJSON(stdout, result)
+	}
+	if command.kind == commandTerminalObserve {
+		result, observeErr := client.TerminalObserve(callContext, api.TerminalObserveInput{ProjectID: command.project, TaskID: command.id, RunID: command.run, Cursor: command.offset, MaxBytes: command.maxBytes})
+		if observeErr != nil {
+			writeFailure(stderr, command.kind, observeErr)
+			return exitFailure
+		}
+		encoded, err := result.MarshalDisplayJSON()
+		if err != nil {
+			writeFailure(stderr, command.kind, err)
+			return exitFailure
+		}
+		return writeJSON(stdout, json.RawMessage(encoded))
+	}
 	if command.kind == commandPeerStatus {
-		result, statusErr := client.PeerStatusPage(callContext, command.offset, command.textOffset, command.head)
+		var result api.PeerStatus
+		var statusErr error
+		if command.includeTargets {
+			result, statusErr = client.PeerStatusPage(callContext, command.offset, command.textOffset, command.head)
+		} else {
+			result, statusErr = client.PeerInboxPage(callContext, command.offset, command.head)
+		}
 		if statusErr != nil {
 			writeFailure(stderr, command.kind, statusErr)
 			return exitFailure
@@ -458,7 +507,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 1 && args[0] == "service" {
 		return parseServiceCommand(args)
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "project" || args[0] == "agent" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "content") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -466,6 +515,16 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, true, true
 		}
 		return parseOverseer(args)
+	}
+	if len(args) >= 1 && args[0] == "human" {
+		if len(args) == 2 && args[1] == "list" {
+			return attemptCommand{kind: commandHumanList}, false, true
+		}
+		if len(args) == 10 && args[1] == "reply" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) && args[4] == "--request" && validHumanRequestKey(args[5]) && args[6] == "--revision" && validRevision(args[7]) && args[8] == "--reply" && validQuestion(args[9]) {
+			revision, _ := strconv.ParseUint(args[7], 10, 64)
+			return attemptCommand{kind: commandHumanReply, operationID: args[3], id: args[5], expectedRevision: revision, text: args[9]}, false, true
+		}
+		return attemptCommand{}, false, false
 	}
 	if len(args) >= 1 && args[0] == "remote" {
 		return parseRemote(args)
@@ -478,7 +537,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) == 3 && helpFlag(args[2]) {
 		switch args[1] {
-		case "task", "succeed", "block", "fail", "request-human", "send-back", "peer":
+		case "task", "source", "succeed", "block", "fail", "request-human", "send-back", "peer":
 			return attemptCommand{}, true, true
 		case "status", "list-clients", "revoke":
 			if args[0] == "web" {
@@ -499,6 +558,10 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	case "task":
 		if len(args) == 2 {
 			return attemptCommand{kind: commandAttemptTask}, false, true
+		}
+	case "source":
+		if len(args) == 4 && args[2] == "--task" && validHumanRequestKey(args[3]) {
+			return attemptCommand{kind: commandAttemptSource, id: args[3]}, false, true
 		}
 	case "succeed":
 		if len(args) == 2 {
@@ -536,7 +599,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) >= 3 && args[2] == "status" {
 			command := attemptCommand{kind: commandPeerStatus}
 			seen := map[string]bool{}
-			for index := 3; index < len(args); index += 2 {
+			for index := 3; index < len(args); {
+				if args[index] == "--targets" && !seen[args[index]] {
+					seen[args[index]] = true
+					command.includeTargets = true
+					index++
+					continue
+				}
 				if index+1 >= len(args) || seen[args[index]] {
 					return attemptCommand{}, false, false
 				}
@@ -555,8 +624,9 @@ func parse(args []string) (attemptCommand, bool, bool) {
 				default:
 					return attemptCommand{}, false, false
 				}
+				index += 2
 			}
-			if command.head == 0 && (command.offset != 0 || command.textOffset != 0) {
+			if command.head == 0 && (command.offset != 0 || command.textOffset != 0) || !command.includeTargets && command.textOffset != 0 {
 				return attemptCommand{}, false, false
 			}
 			return command, false, true
@@ -567,6 +637,48 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		if len(args) == 11 && args[2] == "answer" && args[3] == "--question" && validHumanRequestKey(args[4]) && args[5] == "--revision" && validRevision(args[6]) && args[7] == "--idempotency-key" && validHumanRequestKey(args[8]) && args[9] == "--answer" && validPeerText(args[10]) {
 			revision, _ := strconv.ParseUint(args[6], 10, 64)
 			return attemptCommand{kind: commandPeerAnswer, id: args[4], expectedRevision: revision, idempotencyKey: args[8], text: args[10]}, false, true
+		}
+	case "terminal":
+		if len(args) >= 3 && args[2] == "observe" && (len(args)-3)%2 == 0 {
+			command := attemptCommand{kind: commandTerminalObserve, maxBytes: 8192}
+			seen := map[string]bool{}
+			for i := 3; i < len(args); i += 2 {
+				name, value := args[i], args[i+1]
+				if seen[name] {
+					return attemptCommand{}, false, false
+				}
+				seen[name] = true
+				switch name {
+				case "--project", "--task", "--run":
+					if !validHumanRequestKey(value) {
+						return attemptCommand{}, false, false
+					}
+					if name == "--project" {
+						command.project = value
+					} else if name == "--task" {
+						command.id = value
+					} else {
+						command.run = value
+					}
+				case "--cursor", "--max-bytes":
+					parsed, err := strconv.ParseUint(value, 10, 64)
+					if err != nil || name == "--max-bytes" && parsed > 65536 {
+						return attemptCommand{}, false, false
+					}
+					if name == "--cursor" {
+						command.offset = parsed
+					} else if parsed > 0 {
+						command.maxBytes = uint32(parsed)
+					} else {
+						return attemptCommand{}, false, false
+					}
+				default:
+					return attemptCommand{}, false, false
+				}
+			}
+			if command.project != "" && command.id != "" && command.run != "" {
+				return command, false, true
+			}
 		}
 	case "send-back":
 		if len(args) == 6 && args[2] == "--task" && validHumanRequestKey(args[3]) && args[4] == "--note" && validQuestion(args[5]) {
@@ -1089,7 +1201,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 3 && helpFlag(args[2]) {
 		switch args[0] + " " + args[1] {
-		case "project create", "project limits", "agent create", "task add", "task send-back":
+		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-account", "agent select-model", "account link", "task add", "task send-back", "task recovery":
 			return attemptCommand{}, true, true
 		}
 	}
@@ -1115,6 +1227,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 		return attemptCommand{}, false, false
 	}
+	if len(args) == 2 && args[0] == "account" && args[1] == "discover" {
+		return attemptCommand{kind: commandAccountsDiscover}, false, true
+	}
+	if len(args) == 2 && args[0] == "account" && args[1] == "list" {
+		return attemptCommand{kind: commandAccountsList}, false, true
+	}
 	if len(args) < 2 {
 		return attemptCommand{}, false, false
 	}
@@ -1126,10 +1244,20 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandProjectLimits
 	case "agent create":
 		command.kind = commandAgentCreate
+	case "agent idle-policy":
+		command.kind = commandAgentIdlePolicy
+	case "agent select-account":
+		command.kind = commandAgentSelectAccount
+	case "agent select-model":
+		command.kind = commandAgentSelectModel
+	case "account link":
+		command.kind = commandAccountLink
 	case "task add":
 		command.kind = commandTaskAdd
 	case "task send-back":
 		command.kind = commandTaskSendBack
+	case "task recovery":
+		command.kind = commandTaskRecovery
 	default:
 		return attemptCommand{}, false, false
 	}
@@ -1150,7 +1278,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.root = value
 		case name == "--project" && (command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd) && validHumanRequestKey(value):
 			command.project = value
-		case name == "--revision" && command.kind == commandProjectLimits:
+		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy):
 			revision, ok := parseRevision(value)
 			if !ok {
 				return attemptCommand{}, false, false
@@ -1168,8 +1296,26 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.maxRunSeconds = uint32(seconds)
-		case name == "--agent" && command.kind == commandTaskAdd && validHumanRequestKey(value):
+		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
 			command.agent = value
+		case name == "--revision" && (command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel):
+			revision, ok := parseRevision(value)
+			if !ok {
+				return attemptCommand{}, false, false
+			}
+			command.expectedRevision = revision
+		case name == "--account" && command.kind == commandAgentSelectAccount && validHumanRequestKey(value):
+			command.account = value
+		case name == "--model" && command.kind == commandAgentSelectModel && validOperatorText(value, 1, 128):
+			command.model = value
+		case name == "--reasoning-effort" && command.kind == commandAgentSelectModel:
+			command.reasoningEffort = value
+		case name == "--provider" && command.kind == commandAccountLink && (value == "claude_code" || value == "codex"):
+			command.provider = value
+		case name == "--home" && command.kind == commandAccountLink && validHomeArg(value) && validOperatorText(value, 1, 1024):
+			command.root = value
+		case name == "--label" && command.kind == commandAccountLink && validOperatorText(value, 1, 128):
+			command.label = value
 		case name == "--role" && command.kind == commandAgentCreate && (value == "worker" || value == "orchestrator"):
 			command.role = value
 		case name == "--provider" && command.kind == commandAgentCreate:
@@ -1186,6 +1332,22 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.toolBudget = budget
+		case name == "--policy" && command.kind == commandAgentIdlePolicy && (value == "wait" || value == "standing_instruction"):
+			command.provider = value
+		case name == "--after-seconds" && command.kind == commandAgentIdlePolicy:
+			seconds, err := strconv.ParseUint(value, 10, 32)
+			if err != nil || value != strconv.FormatUint(seconds, 10) || seconds > uint64(kernel.MaxIdleAfterSeconds) {
+				return attemptCommand{}, false, false
+			}
+			command.maxRunSeconds = uint32(seconds)
+		case name == "--instruction" && command.kind == commandAgentIdlePolicy && validOperatorText(value, 1, 32768):
+			command.text = value
+		case name == "--run-budget" && command.kind == commandAgentIdlePolicy:
+			budget, err := strconv.ParseUint(value, 10, 32)
+			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(kernel.MaxIdleRunBudget) {
+				return attemptCommand{}, false, false
+			}
+			command.toolBudget = budget
 		case name == "--title" && command.kind == commandTaskAdd && validOperatorText(value, 1, 1024):
 			command.title = value
 		case name == "--body" && command.kind == commandTaskAdd && validOperatorText(value, 0, 131072):
@@ -1196,6 +1358,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.run = value
 		case name == "--task" && command.kind == commandTaskSendBack && validHumanRequestKey(value):
 			command.id = value
+		case name == "--task" && command.kind == commandTaskRecovery && validHumanRequestKey(value):
+			command.id = value
+		case name == "--incarnation" && command.kind == commandTaskRecovery && validHumanRequestKey(value):
+			command.run = value
 		case name == "--note" && command.kind == commandTaskSendBack && validQuestion(value):
 			command.text = value
 		case name == "--priority" && command.kind == commandTaskAdd:
@@ -1223,6 +1389,22 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		if command.project == "" || command.name == "" || command.toolBudget == 0 || err != nil || kernel.ValidateProviderLaunchControls(provider, command.model, command.reasoningEffort) != nil {
 			return attemptCommand{}, false, false
 		}
+	case commandAgentIdlePolicy:
+		if command.agent == "" || command.expectedRevision == 0 || (command.provider != "wait" && command.provider != "standing_instruction") || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
+			return attemptCommand{}, false, false
+		}
+	case commandAgentSelectAccount:
+		if command.agent == "" || command.account == "" || command.expectedRevision == 0 {
+			return attemptCommand{}, false, false
+		}
+	case commandAgentSelectModel:
+		if command.agent == "" || command.model == "" || command.expectedRevision == 0 || !validReasoningEffort(command.reasoningEffort) {
+			return attemptCommand{}, false, false
+		}
+	case commandAccountLink:
+		if command.provider == "" || command.root == "" || command.label == "" {
+			return attemptCommand{}, false, false
+		}
 	case commandTaskAdd:
 		if command.project == "" || command.agent == "" || command.title == "" || (command.id == "") != (command.run == "") {
 			return attemptCommand{}, false, false
@@ -1231,8 +1413,21 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		if command.id == "" || command.text == "" {
 			return attemptCommand{}, false, false
 		}
+	case commandTaskRecovery:
+		if command.id == "" || command.run == "" {
+			return attemptCommand{}, false, false
+		}
 	}
 	return command, false, true
+}
+
+// anyWorkerAgent maps the CLI's `--agent any` to the wire's empty assigned
+// agent: the task is queued for any eligible worker in its project.
+func anyWorkerAgent(agent string) string {
+	if agent == "any" {
+		return ""
+	}
+	return agent
 }
 
 func parseOverseer(args []string) (attemptCommand, bool, bool) {
@@ -1321,6 +1516,14 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			index++
 			continue
 		}
+		if name == "--retry" && command.kind == commandOverseerTaskUpdate {
+			if seen[name] {
+				return attemptCommand{}, false, false
+			}
+			seen[name], command.retry = true, true
+			index++
+			continue
+		}
 		if index+1 >= len(args) || seen[name] {
 			return attemptCommand{}, false, false
 		}
@@ -1329,7 +1532,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 		index += 2
 		switch name {
 		case "--agent":
-			if !validHumanRequestKey(value) {
+			if !validHumanRequestKey(value) && !(command.kind == commandOverseerTaskAdd && value == "any") {
 				return attemptCommand{}, false, false
 			}
 			command.agent = value
@@ -1423,7 +1626,7 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandOverseerTaskUpdate:
-		if command.id == "" || command.expectedRevision == 0 || !command.cancel && command.agent == "" && command.title == "" && !command.bodySet && !command.prioritySet {
+		if command.id == "" || command.expectedRevision == 0 || command.retry && (command.agent == "" || command.title != "" || command.bodySet || command.prioritySet || command.cancel) || !command.retry && !command.cancel && command.agent == "" && command.title == "" && !command.bodySet && !command.prioritySet {
 			return attemptCommand{}, false, false
 		}
 	case commandOverseerTaskSendBack:
@@ -1521,6 +1724,10 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 	subject, input := "outcome request", "attempt input"
 	if kind == commandAttemptTask {
 		subject = "task request"
+	} else if kind == commandAttemptSource {
+		subject, input = "source request", "source request input"
+	} else if kind == commandTerminalObserve {
+		subject, input = "terminal observation", "terminal observation input"
 	} else if kind == commandRequestHuman {
 		subject, input = "human request", "human request input"
 	} else if kind == commandPeerStatus || kind == commandPeerAsk || kind == commandPeerAnswer {
@@ -1540,7 +1747,7 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 	case errors.Is(err, context.DeadlineExceeded):
 		message = "factoryctl: " + subject + " timed out\n"
 	case errors.As(err, &remote):
-		message = "factoryctl: " + subject + " was not accepted\n"
+		message = "factoryctl: " + subject + ": " + remote.Error() + "\n"
 	}
 	_, _ = io.WriteString(stderr, message)
 }
@@ -1584,6 +1791,79 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "status", callErr)
 		}
 		return writeJSON(stdout, snapshot)
+	case commandHumanList:
+		result, callErr := client.HumanRequests(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "human requests", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandHumanReply:
+		result, callErr := client.HumanReply(callContext, api.OverseerHumanReplyInput{OperationID: command.operationID, RequestID: command.id, ExpectedRevision: command.expectedRevision, Reply: command.text})
+		if callErr != nil {
+			return writeWebFailure(stderr, "human reply", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandAccountsDiscover:
+		accounts, callErr := client.DiscoverAccounts(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "account discover", callErr)
+		}
+		return writeJSON(stdout, accounts)
+	case commandAccountsList:
+		accounts, callErr := client.DiscoverAccounts(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "account list", callErr)
+		}
+		snapshot, callErr := client.Snapshot(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "account list", callErr)
+		}
+		type item struct {
+			api.DiscoveredAccount
+			State      string   `json:"state"`
+			Reason     string   `json:"reason"`
+			SelectedBy []string `json:"selected_by,omitempty"`
+		}
+		result := make([]item, 0, len(accounts.Accounts))
+		for _, account := range accounts.Accounts {
+			entry := item{DiscoveredAccount: account, State: "available", Reason: "not linked"}
+			if account.UnavailableReason != "" {
+				entry.State, entry.Reason = "unavailable", account.UnavailableReason
+			}
+			if account.LinkedID != "" {
+				if account.UnavailableReason == "" {
+					entry.State, entry.Reason = "linked", "linked but no idle worker selects it"
+				}
+				for _, agent := range snapshot.Agents {
+					if agent.AccountID == account.LinkedID {
+						entry.SelectedBy = append(entry.SelectedBy, agent.ID)
+					}
+				}
+				if account.UnavailableReason == "" && len(entry.SelectedBy) != 0 {
+					entry.State, entry.Reason = "selected", "selected by existing worker"
+				}
+			}
+			result = append(result, entry)
+		}
+		return writeJSON(stdout, result)
+	case commandAccountLink:
+		result, callErr := client.LinkAccount(callContext, api.AccountLinkInput{Provider: command.provider, Home: command.root, Label: command.label})
+		if callErr != nil {
+			return writeWebFailure(stderr, "account link", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandAgentSelectAccount:
+		result, callErr := client.SelectAgentAccount(callContext, api.AgentAccountSelectInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, AccountID: command.account})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent select-account", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandAgentSelectModel:
+		result, callErr := client.SelectAgentModel(callContext, api.AgentModelSelectInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Model: command.model, ReasoningEffort: command.reasoningEffort})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent select-model", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandProjectCreate:
 		id, err := newOperatorID()
 		if err != nil {
@@ -1622,6 +1902,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Head     uint64 `json:"head"`
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
+	case commandAgentIdlePolicy:
+		result, callErr := client.SetAgentIdlePolicy(callContext, api.AgentIdlePolicyInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Policy: command.provider, AfterSeconds: command.maxRunSeconds, Instruction: command.text, RunBudget: command.toolBudget})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent idle-policy", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandTaskAdd:
 		id, incarnation := command.id, command.run
 		if id == "" {
@@ -1635,7 +1921,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "task add", err)
 			}
 		}
-		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, AssignedAgentID: command.agent, IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task add", callErr)
 		}
@@ -1655,6 +1941,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Head     uint64 `json:"head"`
 			Revision uint64 `json:"revision"`
 		}{ID: command.id, Head: result.Head, Revision: result.Revision})
+	case commandTaskRecovery:
+		recovery, callErr := client.TaskRecovery(callContext, api.TaskRecoveryInput{TaskID: command.id, IncarnationID: command.run})
+		if callErr != nil {
+			return writeWebFailure(stderr, "task recovery", callErr)
+		}
+		return writeJSON(stdout, recovery)
 	case commandDispatch:
 		revision := command.expectedRevision
 		if revision == 0 {
@@ -1724,9 +2016,9 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "overseer task add", idErr)
 			}
 		}
-		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: command.agent, IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
 	case commandOverseerTaskUpdate:
-		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel}
+		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry}
 		if command.title != "" {
 			input.Title = &command.title
 		}
@@ -1857,12 +2149,17 @@ func writeWebFailure(stderr io.Writer, subject string, err error) int {
 	case errors.Is(err, context.DeadlineExceeded):
 		message = "factoryctl: " + subject + " timed out\n"
 	case errors.As(err, &remote):
-		if remote.Code() == api.RemoteCleanupUnresolved {
-			message = "factoryctl: web revoke committed but browser cleanup remains unresolved\n"
-		} else {
-			message = "factoryctl: " + subject + " was not accepted\n"
-		}
+		message = "factoryctl: " + subject + ": " + remote.Error() + "\n"
 	}
 	_, _ = io.WriteString(stderr, message)
 	return exitFailure
+}
+
+func validReasoningEffort(value string) bool {
+	switch value {
+	case "", "low", "medium", "high", "xhigh", "max", "ultra":
+		return true
+	default:
+		return false
+	}
 }

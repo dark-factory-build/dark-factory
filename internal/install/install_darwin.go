@@ -19,6 +19,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Darwin O_SEARCH (sys/fcntl.h) is not yet exported by x/sys/unix.
+const ancestorOpenFlag = 0x40000000 | unix.O_DIRECTORY
+
 const (
 	formatName         = "format"
 	databaseName       = "factory.sqlite3"
@@ -382,7 +385,11 @@ func openParent(path string) (*homeParent, error) {
 	if len(path) > maxHomeBytes || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, fmt.Errorf("%w: parent path is not canonical", ErrInvalidHome)
 	}
-	rootFD, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	rootFlag := ancestorOpenFlag
+	if path == "/" {
+		rootFlag = unix.O_RDONLY
+	}
+	rootFD, err := unix.Open("/", rootFlag|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open filesystem root: %w", err)
 	}
@@ -405,12 +412,17 @@ func openParent(path string) (*homeParent, error) {
 		_ = p.close()
 		return nil, fmt.Errorf("%w: home path is too deep", ErrInvalidHome)
 	}
-	for _, name := range parts {
+	for index, name := range parts {
 		if name == "" || name == "." || name == ".." || len(name) > maxNameSize {
 			_ = p.close()
 			return nil, fmt.Errorf("%w: invalid parent component", ErrInvalidHome)
 		}
-		fd, openErr := unix.Openat(int(p.file.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		// Only the final directory needs data access; ancestors are identity pins.
+		flag := ancestorOpenFlag
+		if index == len(parts)-1 {
+			flag = unix.O_RDONLY
+		}
+		fd, openErr := unix.Openat(int(p.file.Fd()), name, flag|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if openErr != nil {
 			_ = p.close()
 			return nil, fmt.Errorf("open home parent component: %w", openErr)
