@@ -61,8 +61,6 @@ export const CONTROL_MANIFEST = [
   { type: "HUMAN_REQUEST_REPLY_RESULT", direction: "server", id: "required", fixture: "human_request_reply_result.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN", direction: "client", id: "required", fixture: "human_request_cancel_run.json" },
   { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", direction: "server", id: "required", fixture: "human_request_cancel_run_result.json" },
-  { type: "PROJECT_CONTENT", direction: "client", id: "required", fixture: "project_content.json" },
-  { type: "PROJECT_CONTENT_RESULT", direction: "server", id: "required", fixture: "project_content_result.json" },
   { type: "TASK_ENQUEUE", direction: "client", id: "required", fixture: "task_enqueue.json" },
   { type: "TASK_ENQUEUE_RESULT", direction: "server", id: "required", fixture: "task_enqueue_result.json" },
   { type: "TERMINAL_TARGET_GET", direction: "client", id: "required", fixture: "terminal_target_get.json" },
@@ -115,6 +113,8 @@ export const CONTROL_MANIFEST = [
   { type: "TASK_DETAIL", direction: "server", id: "required", fixture: "task_detail.json" },
   { type: "TASK_LIST_GET", direction: "client", id: "required", fixture: "task_list_get.json" },
   { type: "TASK_LIST", direction: "server", id: "required", fixture: "task_list.json" },
+  { type: "PROJECT_CONTENT", direction: "client", id: "required", fixture: "project_content.json" },
+  { type: "PROJECT_CONTENT_RESULT", direction: "server", id: "required", fixture: "project_content_result.json" },
 ] as const;
 export const CONTROL_TYPES = CONTROL_MANIFEST.map((entry) => entry.type);
 export type ControlType = (typeof CONTROL_TYPES)[number];

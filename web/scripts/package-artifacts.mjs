@@ -43,7 +43,7 @@ const packages = {
 const inventory = {
   client: [
     "control.d.ts", "control.js", "errors.d.ts", "errors.js", "index.d.ts", "index.js",
-    "manifest.d.ts", "manifest.js", "remote/index.d.ts", "remote/index.js",
+    "manifest.d.ts", "manifest.js", "project-content.d.ts", "project-content.js", "remote/index.d.ts", "remote/index.js",
     "remote/invitation.d.ts", "remote/invitation.js", "remote/manager.d.ts", "remote/manager.js",
     "remote/relay-socket.d.ts", "remote/relay-socket.js", "remote/store.d.ts", "remote/store.js",
     "remote/tokens.d.ts", "remote/tokens.js", "session.d.ts", "session.js", "state.d.ts", "state.js",
@@ -62,7 +62,7 @@ const inventory = {
     "factory-scene/scene.d.ts", "factory-scene/scene.js",
     "factory-scene/sprite-editor.d.ts", "factory-scene/sprite-editor.js",
     "factory-scene/sprites/sprites.generated.d.ts", "factory-scene/sprites/sprites.generated.js",
-    "index.d.ts", "index.js",
+    "index.d.ts", "index.js", "project-library.d.ts", "project-library.js", "project-outcomes.d.ts", "project-outcomes.js",
     "remote-invite.d.ts", "remote-invite.js",
     "remote/remote-app.d.ts", "remote/remote-app.js", "remote/remote-view.d.ts", "remote/remote-view.js",
     "terminal-controller.d.ts", "terminal-controller.js", "xterm-terminal.d.ts", "xterm-terminal.js",
