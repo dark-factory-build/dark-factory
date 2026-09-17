@@ -607,7 +607,7 @@ func TestSupervisorClaudeWorkerReusesNativeSessionAcrossSendBack(t *testing.T) {
 func TestSupervisorWorkerFilesSettleUnderThePrivateServiceUmask(t *testing.T) {
 	previous := unix.Umask(0o077)
 	t.Cleanup(func() { unix.Umask(previous) })
-	program := "set -eu\nprintf made > made.txt\nmkdir made\nprintf inner > made/inner.txt\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
+	program := "set -eu\nprintf made > made.txt\nmkdir made\nprintf inner > made/inner.txt\ngit add made.txt made/inner.txt\ngit commit -q -m worker-files\nprintf x >> __WITNESS__\n" + quoteShell(supervisorTestExecutable(t)) + " --supervisor-attempt-succeed typed-success\n"
 	fixture := newSupervisorFixture(t, program)
 	run, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 	if err != nil {

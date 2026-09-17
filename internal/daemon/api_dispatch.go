@@ -1067,6 +1067,10 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest), nil
 	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal), nil
+	}
 	daemon.operationMu.Lock()
 	// Source validation and the durable proposal share one linearization gate.
 	// The second validation is a checked snapshot fence: a source mutation
@@ -1081,11 +1085,6 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
 		daemon.operationMu.Unlock()
 		return newErrorReply(remoteErrorCode(err)), nil
-	}
-	at, err := daemon.timestamp()
-	if err != nil {
-		daemon.operationMu.Unlock()
-		return newErrorReply(api.RemoteInternal), nil
 	}
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
