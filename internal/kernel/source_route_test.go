@@ -1,7 +1,9 @@
 package kernel
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -36,5 +38,52 @@ func TestRetainedSourceReviewRouteLeavesOrdinaryTasksProviderAgnostic(t *testing
 		if err := validateRetainedSourceReviewRoute("ordinary worker task", Agent{Role: RoleWorker, Provider: provider}); err != nil {
 			t.Fatalf("ordinary %s task rejected: %v", provider, err)
 		}
+	}
+}
+
+// TestRetainedSourceReviewRouteBlocksNonCodexTaskCreation exercises the
+// production guard through the real durable entry point (Store.EnqueueTask
+// -> insertTaskOnConnection), not the private validator directly. Deleting
+// or bypassing the validateRetainedSourceReviewRoute call at
+// internal/kernel/store.go's insertTaskOnConnection would make this test
+// fail: a review-handoff task would be accepted for a non-Codex worker.
+func TestRetainedSourceReviewRouteBlocksNonCodexTaskCreation(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "project", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 2), ProjectID: project.ID, Name: "claude-worker", Role: RoleWorker,
+		Provider: ProviderClaudeCode, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
+	}, mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 3), ProjectID: project.ID, Name: "codex-worker", Role: RoleWorker,
+		Provider: ProviderCodex, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
+	}, mustTime(t, 12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "review handoff " + strings.Repeat("a", 32)
+	if _, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 4), ProjectID: project.ID, AssignedAgentID: claude.ID, IncarnationID: incarnationID(t, 4),
+		Title: "task", Body: body, Priority: 0,
+	}, mustTime(t, 13)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("review handoff task assigned to non-codex worker: err=%v, want ErrConflict", err)
+	}
+	task, err := store.EnqueueTask(ctx, NewTask{
+		ID: taskID(t, 5), ProjectID: project.ID, AssignedAgentID: codex.ID, IncarnationID: incarnationID(t, 5),
+		Title: "task", Body: body, Priority: 0,
+	}, mustTime(t, 14))
+	if err != nil {
+		t.Fatalf("review handoff task assigned to codex worker rejected: %v", err)
+	}
+	if task.Status != TaskQueued {
+		t.Fatalf("unexpected task: %+v", task)
 	}
 }
