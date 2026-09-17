@@ -87,3 +87,77 @@ func TestRetainedSourceReviewRouteBlocksNonCodexTaskCreation(t *testing.T) {
 		t.Fatalf("unexpected task: %+v", task)
 	}
 }
+
+// TestRetainedSourceReviewRouteResolvesLegacyQueuedTasks proves the route
+// guard in updateTask (internal/kernel/console_update.go) does not strand a
+// queued review-handoff task that predates the capability-aware validator: a
+// row like that, once admission also excludes it, must still be cancellable
+// and reassignable to a Codex worker through the normal Store update paths,
+// not stuck forever because the guard now runs on every queued edit.
+func TestRetainedSourceReviewRouteResolvesLegacyQueuedTasks(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "project", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 2), ProjectID: project.ID, Name: "claude-worker", Role: RoleWorker,
+		Provider: ProviderClaudeCode, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
+	}, mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 3), ProjectID: project.ID, Name: "codex-worker", Role: RoleWorker,
+		Provider: ProviderCodex, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
+	}, mustTime(t, 12))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "review handoff " + strings.Repeat("a", 32)
+	// Bypass insertTaskOnConnection's route guard entirely, simulating a row a
+	// pre-upgrade daemon persisted before validateRetainedSourceReviewRoute
+	// existed: queued, non-Codex, with a review-handoff body.
+	insertLegacyReviewHandoff := func(seed byte) TaskID {
+		t.Helper()
+		id, incarnation := taskID(t, seed), incarnationID(t, seed)
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO tasks(
+			id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body,
+			sent_back_instruction_bytes,
+			status, priority, blocked_reason, result, completed_at_ms, revision,
+			created_at_ms, updated_at_ms
+		    ) VALUES(?, ?, ?, ?, 1, ?, ?, NULL, 'queued', 0, NULL, NULL, NULL, 1, ?, ?)`,
+			id.Bytes(), project.ID.Bytes(), claude.ID.Bytes(), incarnation.Bytes(), "legacy review", body, int64(20), int64(20)); err != nil {
+			t.Fatalf("insert legacy review handoff: %v", err)
+		}
+		return id
+	}
+
+	cancelID := insertLegacyReviewHandoff(4)
+	task, found, err := store.Task(ctx, cancelID)
+	if err != nil || !found || task.AssignedAgentID != claude.ID || task.Status != TaskQueued {
+		t.Fatalf("legacy task before cancel: found=%v err=%v task=%+v", found, err, task)
+	}
+	cancelled, err := store.UpdateTask(ctx, task.ID, task.Revision, TaskPatch{Cancel: true}, mustTime(t, 30))
+	if err != nil {
+		t.Fatalf("cancel legacy review handoff task: %v", err)
+	}
+	if cancelled.Status != TaskCancelled {
+		t.Fatalf("legacy task not cancelled: %+v", cancelled)
+	}
+
+	reassignID := insertLegacyReviewHandoff(6)
+	task, found, err = store.Task(ctx, reassignID)
+	if err != nil || !found {
+		t.Fatalf("read legacy task: found=%v err=%v", found, err)
+	}
+	reassigned, err := store.UpdateTask(ctx, task.ID, task.Revision, TaskPatch{AssignedAgentID: &codex.ID}, mustTime(t, 31))
+	if err != nil {
+		t.Fatalf("reassign legacy review handoff task to codex worker: %v", err)
+	}
+	if reassigned.AssignedAgentID != codex.ID || reassigned.Status != TaskQueued {
+		t.Fatalf("legacy task not reassigned to codex: %+v", reassigned)
+	}
+}
