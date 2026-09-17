@@ -93,35 +93,12 @@ func runProvider(ctx context.Context) (resultErr error) {
 
 	temp := filepath.Join(config.RuntimePath, TempName)
 	token := filepath.Join(config.RuntimePath, AttemptTokenName)
-	sessionToken := ""
-	if config.Provider == kernel.ProviderCodex {
-		// Codex may retain its MCP child while resuming a native session. Keep
-		// the locator in persistent provider state, scoped to this agent, and
-		// retarget it to this run's private token before Build. The child then
-		// follows the current attempt even after the old runtime is removed.
-		sessionToken = filepath.Join(config.AccountHome, ".dark-factory-attempt-tokens", config.AgentID+".token")
-		if err := os.MkdirAll(filepath.Dir(sessionToken), 0o700); err != nil {
-			_ = cwd.Close()
-			return err
-		}
-		if err := retargetSessionToken(sessionToken, token); err != nil {
-			_ = cwd.Close()
-			return err
-		}
-	}
 	runtimePaths, err := provider.NewRuntimePaths(
 		home, temp, config.AttemptSocket, token, factoryctl.Path(), filepath.Dir(publishedPath), config.ToolPath, config.AccountHome, config.AccountConfigDir, config.ToolchainReadRoots,
 	)
 	if err != nil {
 		_ = cwd.Close()
 		return err
-	}
-	if sessionToken != "" {
-		runtimePaths, err = runtimePaths.WithSessionTokenPath(sessionToken)
-		if err != nil {
-			_ = cwd.Close()
-			return err
-		}
 	}
 	if config.Role == kernel.RoleWorker && config.LocalCILeaseDir == "" {
 		fmt.Fprintln(os.Stderr, "factory: shared local CI lease unavailable; continue source work, but required CI needs host preparation before it can run")
@@ -227,28 +204,6 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	taskOpen = false
 	return control.ExecProvider(spec, cwd, task)
-}
-
-func retargetSessionToken(locator, target string) error {
-	if !filepath.IsAbs(locator) || !filepath.IsAbs(target) || filepath.Dir(locator) == locator {
-		return ErrWorker
-	}
-	body, err := os.ReadFile(target)
-	if err != nil || len(body) != 32 {
-		return ErrWorker
-	}
-	temporary := locator + fmt.Sprintf(".tmp-%d", os.Getpid())
-	if err := os.Remove(temporary); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.WriteFile(temporary, body, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary, locator); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	return nil
 }
 
 // openChangeDirectory makes or reopens the run's Change worktree and returns
