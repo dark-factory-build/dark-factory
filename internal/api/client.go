@@ -331,7 +331,7 @@ func (client *AttemptClient) Source(ctx context.Context, taskID string) (Retaine
 	}{TaskID: taskID}, &result); err != nil {
 		return RetainedChangeHandoff{}, err
 	}
-	if !validRetainedChangeHandoff(result) {
+	if !validSourceHandoff(result) {
 		return RetainedChangeHandoff{}, ErrProtocol
 	}
 	return result, nil
@@ -1043,7 +1043,11 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 }
 
 func validHandoffSourcePath(value, changeID string) bool {
-	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID && filepath.Base(filepath.Dir(value)) == "retained-source"
+	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID
+}
+
+func validHandoffGitDirectory(value string) bool {
+	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == ".git"
 }
 
 func validOverseerSnapshotInput(input OverseerSnapshotInput) bool {

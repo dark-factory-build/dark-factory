@@ -280,32 +280,46 @@ Provider output is opaque and never lifecycle authority.
 
 `factoryd` is the only product creator and administrator of Changes. Admission
 reserves one daemon-derived path for one task incarnation. A registered wrapper
-materializes one exact committed tree before the provider can execute. The
-provider sees a plain writable directory with no Git administrative locator.
-An orchestrator run binds no Change: it works in its private runtime home, and
-publication of a worker's retained Change is the Maintainer App's, reached
-through the one MCP server an orchestrator's Claude session is given.
-Factoryd exposes no repository status, commit, push, pull-request, or
-publication operation.
+makes that path an ordinary linked Git worktree of the project repository,
+checked out at one exact selected commit on the Change's own branch,
+`factory/<first 12 hex of the Change ID>`, before the provider can execute.
+The provider works in that worktree: it edits, tests and commits there with
+the factory's fixed Git identity, and its local commands are granted the
+repository's Git directory for that (written by a worker, read by an
+orchestrator) and nothing else of the repository. The provider environment
+carries no Git credential helper, SSH command or prompt; a worktree isolates
+changes, it is not a security sandbox. An orchestrator run binds no Change: it
+works in its private runtime home, and publication of a worker's retained
+Change is the Maintainer App's, reached through the one MCP server an
+orchestrator's session is given, from the Change's branch and head. Factoryd
+exposes no repository status, commit, push, pull-request, or publication
+operation of its own.
 
-Managed Change removal requires the exact typed ID, current revision, durable
-inode identity, and no live lease; replacement or ambiguity remains visibly
-pending and is never touched. Retries reuse a retained Change only after the
-preceding run is terminal.
+The durable record of a Change is its base commit, the repository identity
+and, once the worktree exists, its branch head: the base when the worktree is
+made, the branch tip the daemon reads at settlement afterwards. That head is
+the exact head an overseer or reviewer is handed and the mutation fence a
+retry and a source request check before reopening or reading the worktree.
+Retries reuse a retained Change only after the preceding run is terminal, and
+reopen the same worktree with the worker's commits and uncommitted edits as
+it left them. A worktree the worker destroyed cannot be retained: that run
+fails visibly, the Change is abandoned, and the task's retry makes a fresh
+worktree on the same branch.
 
 Fresh selection pins the exact repository root, Git administration directory,
 bounded local config, object-directory root, and trusted Git executable around
-each metadata process. It does not enumerate unrelated historical objects.
-Fresh selection refreshes a configured remote upstream without moving the
-checkout; a fetch failure cannot reuse cached source. Local revision policies
-and retained Changes do not fetch. Trusted Git resolves the revision once,
-the tree query names that exact commit,
-and the manifest binds every path, mode, size, and blob object ID. Materializing
-each selected blob requires the expected object ID, type, and size and
-independently hashes its bytes before the `.git`-free tree is published.
-Concurrent garbage collection, repacking, or unrelated object creation may
-therefore preserve the exact selection or make its read fail; it cannot select
-a different moving revision.
+each metadata process. Fresh selection refreshes a configured remote upstream
+without moving the checkout; a fetch failure cannot reuse cached source. Local
+revision policies and retained Changes do not fetch. Trusted Git resolves the
+revision once, and `git worktree add` checks out that exact commit. A
+concurrent attempt in the same repository contends only for Git's own locks.
+
+Changes made before managed worktrees are Git-free copies of their base with
+the worker's edits in them. They stay readable, reviewable and resumable: the
+first reopen or source request after the upgrade adopts such a tree into a
+worktree at its recorded base, with every file untouched, so the edits become
+the branch's uncommitted work and the head is recorded as a fact of the same
+Change revision. No Change is reset and no history is rewritten.
 
 ## Verification and storage
 

@@ -141,49 +141,21 @@ func (value ChangePhase) String() string {
 type ChangeSelection struct {
 	format     ObjectFormat
 	commit     CommitID
-	commitment TreeDigest
-	entries    uint32
-	bytes      uint64
 	repository FileIdentity
 }
 
-func NewChangeSelection(format ObjectFormat, commit CommitID, commitment TreeDigest, entries uint32, totalBytes uint64, repository FileIdentity) (ChangeSelection, error) {
-	if format.oidLength() == 0 || commit.format != format || entries > MaxChangeTreeEntries || totalBytes > MaxChangeTreeBlobBytes || !repository.valid() {
+func NewChangeSelection(format ObjectFormat, commit CommitID, repository FileIdentity) (ChangeSelection, error) {
+	if format.oidLength() == 0 || commit.format != format || !repository.valid() {
 		return ChangeSelection{}, fmt.Errorf("%w: invalid Change selection", ErrInvalidValue)
 	}
-	return ChangeSelection{format: format, commit: commit, commitment: commitment, entries: entries, bytes: totalBytes, repository: repository}, nil
+	return ChangeSelection{format: format, commit: commit, repository: repository}, nil
 }
 
 func (selection ChangeSelection) ObjectFormat() ObjectFormat       { return selection.format }
 func (selection ChangeSelection) Commit() CommitID                 { return selection.commit }
-func (selection ChangeSelection) Commitment() TreeDigest           { return selection.commitment }
-func (selection ChangeSelection) EntryCount() uint32               { return selection.entries }
-func (selection ChangeSelection) TotalBytes() uint64               { return selection.bytes }
 func (selection ChangeSelection) RepositoryIdentity() FileIdentity { return selection.repository }
 func (selection ChangeSelection) valid() bool {
-	return selection.format.oidLength() != 0 && selection.commit.format == selection.format && len(selection.commit.Bytes()) == selection.format.oidLength() && selection.entries <= MaxChangeTreeEntries && selection.bytes <= MaxChangeTreeBlobBytes && selection.repository.valid()
-}
-
-type ChangeAvailability struct {
-	commitment TreeDigest
-	entries    uint32
-	bytes      uint64
-	tree       FileIdentity
-}
-
-func NewChangeAvailability(commitment TreeDigest, entries uint32, totalBytes uint64, tree FileIdentity) (ChangeAvailability, error) {
-	if entries > MaxChangeTreeEntries || totalBytes > MaxChangeTreeBlobBytes || !tree.valid() {
-		return ChangeAvailability{}, fmt.Errorf("%w: invalid Change availability", ErrInvalidValue)
-	}
-	return ChangeAvailability{commitment: commitment, entries: entries, bytes: totalBytes, tree: tree}, nil
-}
-
-func (value ChangeAvailability) Commitment() TreeDigest     { return value.commitment }
-func (value ChangeAvailability) EntryCount() uint32         { return value.entries }
-func (value ChangeAvailability) TotalBytes() uint64         { return value.bytes }
-func (value ChangeAvailability) TreeIdentity() FileIdentity { return value.tree }
-func (value ChangeAvailability) valid() bool {
-	return value.entries <= MaxChangeTreeEntries && value.bytes <= MaxChangeTreeBlobBytes && value.tree.valid()
+	return selection.format.oidLength() != 0 && selection.commit.format == selection.format && len(selection.commit.Bytes()) == selection.format.oidLength() && selection.repository.valid()
 }
 
 type Change struct {
@@ -193,30 +165,37 @@ type Change struct {
 	TaskIncarnationID IncarnationID
 	Phase             ChangePhase
 	Selection         *ChangeSelection
-	TreeIdentity      *FileIdentity
-	SettledRunID      *RunID
-	Revision          Revision
-	CreatedAt         UnixMillis
-	UpdatedAt         UnixMillis
-	PreparedAt        *UnixMillis
-	AvailableAt       *UnixMillis
+	// HeadCommit is the tip of the Change's own branch as the daemon last
+	// observed it: the base when the worktree was made, the settled head
+	// afterwards. Nil on a Change that is still a Git-free tree from before
+	// managed worktrees, until it is adopted at a settled boundary.
+	HeadCommit   *CommitID
+	SettledRunID *RunID
+	Revision     Revision
+	CreatedAt    UnixMillis
+	UpdatedAt    UnixMillis
+	PreparedAt   *UnixMillis
+	AvailableAt  *UnixMillis
 }
 
 type ChangeSettlement struct {
-	phase        ChangePhase
-	expected     Revision
-	availability *ChangeAvailability
+	phase    ChangePhase
+	expected Revision
+	head     *CommitID
 	// refusal, when set, is the daemon's refusal of a published tree: the
 	// Change is abandoned from available and the run's outcome becomes this
 	// failure, whatever the worker proposed.
 	refusal *Proposal
 }
 
-func NewRetainedChangeSettlement(expected Revision, availability ChangeAvailability) (ChangeSettlement, error) {
-	if expected.Int64() < 1 || !availability.valid() {
+// NewRetainedChangeSettlement retains an available Change with the branch
+// head the daemon observed at settlement. A nil head settles a Change that
+// is still a Git-free tree, whose head nothing can observe.
+func NewRetainedChangeSettlement(expected Revision, head *CommitID) (ChangeSettlement, error) {
+	if expected.Int64() < 1 || head != nil && (head.format.oidLength() == 0 || len(head.Bytes()) != head.format.oidLength()) {
 		return ChangeSettlement{}, fmt.Errorf("%w: invalid retained Change settlement", ErrInvalidValue)
 	}
-	return ChangeSettlement{phase: ChangeRetained, expected: expected, availability: &availability}, nil
+	return ChangeSettlement{phase: ChangeRetained, expected: expected, head: head}, nil
 }
 
 func NewAbandonedChangeSettlement(expected Revision) (ChangeSettlement, error) {
@@ -266,7 +245,7 @@ func (settlement ChangeSettlement) valid() bool {
 	if settlement.refusal != nil && (settlement.phase != ChangeAbandoned || !refusedProposal(*settlement.refusal)) {
 		return false
 	}
-	return settlement.expected.Int64() >= 1 && (settlement.phase == ChangeRetained && settlement.availability != nil && settlement.availability.valid() || settlement.phase == ChangeAbandoned && settlement.availability == nil)
+	return settlement.expected.Int64() >= 1 && (settlement.phase == ChangeRetained || settlement.phase == ChangeAbandoned && settlement.head == nil)
 }
 
 type RunPhase uint8

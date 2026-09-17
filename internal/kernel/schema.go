@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 13
+	userVersion   = 14
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -120,12 +120,8 @@ var schemaStatements = []string{
 	base_commit BLOB,
 	repository_dev INTEGER CHECK (repository_dev IS NULL OR repository_dev >= 0),
 	repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
+	head_commit BLOB CHECK (head_commit IS NULL OR length(head_commit) = length(base_commit)),
     prepared_at_ms INTEGER CHECK (prepared_at_ms IS NULL OR prepared_at_ms >= 0),
-    tree_digest BLOB CHECK (tree_digest IS NULL OR length(tree_digest) = 32),
-    entry_count INTEGER CHECK (entry_count IS NULL OR entry_count BETWEEN 0 AND 10000),
-    total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes BETWEEN 0 AND 1073741824),
-	tree_dev INTEGER CHECK (tree_dev IS NULL OR tree_dev >= 0),
-	tree_inode INTEGER CHECK (tree_inode IS NULL OR tree_inode > 0),
     available_at_ms INTEGER CHECK (available_at_ms IS NULL OR available_at_ms >= 0),
 	settled_run_id BLOB CHECK (settled_run_id IS NULL OR length(settled_run_id) = 16),
     revision INTEGER NOT NULL CHECK (revision >= 1),
@@ -135,11 +131,11 @@ var schemaStatements = []string{
 	FOREIGN KEY (settled_run_id, id, project_id, task_id, task_incarnation_id) REFERENCES runs(id, change_id, project_id, task_id, task_incarnation_id),
 	CHECK ((object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL) OR (object_format = 'sha1' AND length(base_commit) = 20 AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL) OR (object_format = 'sha256' AND length(base_commit) = 32 AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL)),
 	CHECK (
-		(phase = 'reserved' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
-		(phase = 'prepared' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
-		(phase = 'available' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NULL) OR
-		(phase = 'retained' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NOT NULL) OR
-		(phase = 'abandoned' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NOT NULL)
+		(phase = 'reserved' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND head_commit IS NULL AND prepared_at_ms IS NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
+		(phase = 'prepared' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND head_commit IS NULL AND prepared_at_ms IS NOT NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
+		(phase = 'available' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NULL) OR
+		(phase = 'retained' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NOT NULL) OR
+		(phase = 'abandoned' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND head_commit IS NULL AND prepared_at_ms IS NULL AND available_at_ms IS NULL AND settled_run_id IS NOT NULL)
 	)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX changes_id_project_task_incarnation_unique ON changes(id, project_id, task_id, task_incarnation_id)`,

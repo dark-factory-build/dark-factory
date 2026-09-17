@@ -33,7 +33,7 @@ type Config struct {
 	Provider kernel.Provider
 	// Role decides whether the run works in a Change. A worker's Change is
 	// prepared or reopened below; an orchestrator has none and works in its
-	// private runtime home, so its FinalName, StagingName and Retained are
+	// private runtime home, so its FinalName and Retained are
 	// empty.
 	Role                 kernel.AgentRole
 	Model                string
@@ -51,12 +51,16 @@ type Config struct {
 	AccountConfigDir   string
 	RepositoryRoot     string
 	RepositoryIdentity change.RepositoryIdentity
-	Revision           string
-	ChangeParent       string
-	FinalName          string
-	StagingName        string
-	AttemptSocket      string
-	Retained           *Result
+	// GitCommonDir is the project repository's Git directory, which the
+	// worktree's commits and refs live in and a provider's local commands
+	// are granted: written by a worker, read by an orchestrator.
+	GitCommonDir  string
+	Revision      string
+	ChangeParent  string
+	FinalName     string
+	AttemptSocket string
+	// Retained is the Change to reopen instead of making a fresh worktree.
+	Retained *Result
 	// ProviderTask selects and verifies the provider's closed delivery path.
 	// Shell seals it on fd 11 and Claude receives a terminal-safe prompt. It is
 	// empty for Codex, whose task remains in the daemon behind the attempt API.
@@ -66,21 +70,14 @@ type Config struct {
 func (Config) String() string   { return "Change worker config (private)" }
 func (Config) GoString() string { return "changeworker.Config{private}" }
 
-// Result binds selected content to one prepared or retained tree. Repository
+// Result is the selected base of one Change and, for a retained Change,
+// the branch head the daemon last recorded. Head is absent while a retained
+// Change is still a Git-free tree from before managed worktrees. Repository
 // identity is absent because the daemon owns and independently verifies it.
 type Result struct {
-	Format     change.ObjectFormat
-	Base       change.ObjectID
-	Commitment change.Commitment
-	EntryCount uint64
-	BlobBytes  uint64
-	Tree       change.StageIdentity
-}
-
-// RetainedSource is one narrowly scoped retained-tree read grant.
-type RetainedSource struct {
-	ID     string
-	Result Result
+	Format change.ObjectFormat
+	Base   change.ObjectID
+	Head   *change.ObjectID
 }
 
 func (Result) String() string   { return "Change worker result (private)" }
@@ -92,12 +89,9 @@ type identityWire struct {
 }
 
 type resultWire struct {
-	Format     string       `json:"format"`
-	Base       string       `json:"base"`
-	Commitment string       `json:"commitment"`
-	EntryCount *uint64      `json:"entry_count"`
-	BlobBytes  *uint64      `json:"blob_bytes"`
-	Tree       identityWire `json:"tree"`
+	Format string `json:"format"`
+	Base   string `json:"base"`
+	Head   string `json:"head,omitempty"`
 }
 
 type configWire struct {
@@ -116,10 +110,10 @@ type configWire struct {
 	AccountConfigDir     string       `json:"account_config_dir"`
 	RepositoryRoot       string       `json:"repository_root"`
 	RepositoryIdentity   identityWire `json:"repository_identity"`
+	GitCommonDir         string       `json:"git_common_dir"`
 	Revision             string       `json:"revision"`
 	ChangeParent         string       `json:"change_parent"`
 	FinalName            string       `json:"final_name"`
-	StagingName          string       `json:"staging_name"`
 	AttemptSocket        string       `json:"attempt_socket"`
 	Retained             *resultWire  `json:"retained,omitempty"`
 	ProviderTask         []byte       `json:"provider_task"`
@@ -133,8 +127,8 @@ func EncodeConfig(config Config) ([]byte, error) {
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
 		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
-		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, Revision: config.Revision,
-		ChangeParent: config.ChangeParent, FinalName: config.FinalName, StagingName: config.StagingName,
+		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, GitCommonDir: config.GitCommonDir, Revision: config.Revision,
+		ChangeParent: config.ChangeParent, FinalName: config.FinalName,
 		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask),
 	}
 	if config.Retained != nil {
@@ -173,8 +167,8 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
 		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
-		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, Revision: wire.Revision,
-		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName, StagingName: wire.StagingName,
+		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, Revision: wire.Revision,
+		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName,
 		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
 	}
 	if err := validateConfig(config); err != nil {
@@ -184,11 +178,14 @@ func DecodeConfig(encoded []byte) (Config, error) {
 }
 
 func validateConfig(config Config) error {
-	paths := []string{config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.AccountHome, config.RepositoryRoot, config.ChangeParent, config.AttemptSocket}
+	paths := []string{config.RuntimePath, config.GitExecutable, config.FactoryctlExecutable, config.AccountHome, config.RepositoryRoot, config.ChangeParent, config.AttemptSocket, config.GitCommonDir}
 	for _, path := range paths {
 		if !validAbsolute(path, maximumLocatorBytes) {
 			return invalidContract(nil)
 		}
+	}
+	if filepath.Base(config.GitCommonDir) != ".git" || filepath.Dir(config.GitCommonDir) != config.RepositoryRoot {
+		return invalidContract(nil)
 	}
 	if config.LocalCILeaseDir != "" && (!validAbsolute(config.LocalCILeaseDir, maximumLocatorBytes) || filepath.Base(config.LocalCILeaseDir) != "dark-factory-local-ci") {
 		return ErrInvalidContract
@@ -202,10 +199,10 @@ func validateConfig(config Config) error {
 		return invalidContract(nil)
 	}
 	if config.Role == kernel.RoleOrchestrator {
-		if config.FinalName != "" || config.StagingName != "" || config.Retained != nil {
+		if config.FinalName != "" || config.Retained != nil {
 			return invalidContract(nil)
 		}
-	} else if !validChangeName(config.FinalName) || !validChangeName(config.StagingName) || config.FinalName == config.StagingName {
+	} else if !validChangeName(config.FinalName) {
 		return invalidContract(nil)
 	}
 	if _, _, err := prepareProviderTask(config.Provider, config.ProviderTask); err != nil {
@@ -267,60 +264,53 @@ func DecodeResult(encoded []byte) (Result, error) {
 
 func validateResult(result Result) error {
 	if result.Format.OIDLength() == 0 || result.Base.Format() != result.Format || len(result.Base.Bytes()) != result.Format.OIDLength() ||
-		len(result.Commitment.Bytes()) != 32 || result.EntryCount > change.MaxEntryCount || result.BlobBytes > change.MaxTotalBlobBytes {
+		result.Head != nil && (result.Head.Format() != result.Format || len(result.Head.Bytes()) != result.Format.OIDLength()) {
 		return invalidContract(nil)
-	}
-	if _, err := change.NewStageIdentity(result.Tree.Device(), result.Tree.Inode()); err != nil {
-		return invalidContract(err)
 	}
 	return nil
 }
 
 func resultToWire(result Result) resultWire {
-	entries, blobs := result.EntryCount, result.BlobBytes
-	return resultWire{
-		Format: result.Format.Name(), Base: result.Base.Hex(), Commitment: result.Commitment.Hex(),
-		EntryCount: &entries, BlobBytes: &blobs,
-		Tree: identityWire{Device: result.Tree.Device(), Inode: result.Tree.Inode()},
+	wire := resultWire{Format: result.Format.Name(), Base: result.Base.Hex()}
+	if result.Head != nil {
+		wire.Head = result.Head.Hex()
 	}
+	return wire
 }
 
 func resultFromWire(wire resultWire) (Result, error) {
-	if wire.EntryCount == nil || wire.BlobBytes == nil {
-		return Result{}, invalidContract(nil)
-	}
 	format, err := change.NewObjectFormat(wire.Format)
 	if err != nil {
 		return Result{}, invalidContract(err)
 	}
-	baseBytes, err := hex.DecodeString(wire.Base)
+	base, err := decodeObjectID(format, wire.Base)
 	if err != nil {
-		return Result{}, invalidContract(err)
+		return Result{}, err
 	}
-	base, err := change.NewObjectID(format, baseBytes)
-	if err != nil {
-		return Result{}, invalidContract(err)
-	}
-	commitmentBytes, err := hex.DecodeString(wire.Commitment)
-	if err != nil {
-		return Result{}, invalidContract(err)
-	}
-	commitment, err := change.ParseCommitment(commitmentBytes)
-	if err != nil {
-		return Result{}, invalidContract(err)
-	}
-	tree, err := change.NewStageIdentity(wire.Tree.Device, wire.Tree.Inode)
-	if err != nil {
-		return Result{}, invalidContract(err)
-	}
-	result := Result{
-		Format: format, Base: base, Commitment: commitment,
-		EntryCount: *wire.EntryCount, BlobBytes: *wire.BlobBytes, Tree: tree,
+	result := Result{Format: format, Base: base}
+	if wire.Head != "" {
+		head, err := decodeObjectID(format, wire.Head)
+		if err != nil {
+			return Result{}, err
+		}
+		result.Head = &head
 	}
 	if err := validateResult(result); err != nil {
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func decodeObjectID(format change.ObjectFormat, encoded string) (change.ObjectID, error) {
+	raw, err := hex.DecodeString(encoded)
+	if err != nil || strings.ToLower(encoded) != encoded {
+		return change.ObjectID{}, invalidContract(err)
+	}
+	id, err := change.NewObjectID(format, raw)
+	if err != nil {
+		return change.ObjectID{}, invalidContract(err)
+	}
+	return id, nil
 }
 
 func encodeJSON(value any, maximum int) ([]byte, error) {

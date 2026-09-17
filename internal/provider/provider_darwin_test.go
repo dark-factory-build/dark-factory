@@ -173,6 +173,7 @@ func TestBuildShellReturnsExactImmutableLaunchAndTask(t *testing.T) {
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
 		"LANG=C", "LC_ALL=C", "TERM=xterm-256color", "SHELL=/bin/sh",
+		"GIT_AUTHOR_NAME=" + GitIdentityName, "GIT_AUTHOR_EMAIL=" + GitIdentityEmail, "GIT_COMMITTER_NAME=" + GitIdentityName, "GIT_COMMITTER_EMAIL=" + GitIdentityEmail,
 		"GIT_CEILING_DIRECTORIES=" + runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
@@ -988,8 +989,34 @@ printf '#include <stdio.h>\nint main(void) { puts("sdk-ok"); return 0; }\n' > sd
 			t.Logf("installed SDK compile: %s", out)
 		}
 	}
+	// A worker's profile writes the repository's Git directory, where its
+	// Change branch lives; the repository's working tree stays unreachable.
+	request.runtime, err = request.runtime.WithGitCommonDirectory(gitDirectory, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeScript := `set -eu
+ printf ref > "$1/refs/factory-branch"
+ printf object > "$1/objects/new"
+ if (printf forbidden > "$2/tracked.go") 2>/dev/null; then exit 34; fi
+ `
+	if out, err := run("/bin/sh", "-c", worktreeScript, "proof", gitDirectory, root); err != nil {
+		t.Fatalf("worker Git directory grant: %v\n%s", err, out)
+	}
+	request.runtime, err = request.runtime.WithGitCommonDirectory(gitDirectory, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerScript := `set -eu
+ /bin/cat "$1/refs/factory-branch" >/dev/null
+ if (printf forbidden > "$1/refs/another") 2>/dev/null; then exit 35; fi
+ `
+	if out, err := run("/bin/sh", "-c", readerScript, "proof", gitDirectory); err != nil {
+		t.Fatalf("orchestrator Git directory grant: %v\n%s", err, out)
+	}
+	request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable = "", false
 	if fixture := os.Getenv("DARK_FACTORY_TEST_FIXTURE_BINARY"); fixture != "" {
-		request.runtime.sourceReadPaths = append(request.runtime.sourceReadPaths, fixture)
+		request.runtime.toolchainReadRoots = strings.TrimPrefix(request.runtime.toolchainReadRoots+string(filepath.ListSeparator)+filepath.Dir(fixture), string(filepath.ListSeparator))
 		out, err := run("/usr/bin/env", "DARK_FACTORY_TEST_ANCESTOR_SANDBOX=generated", fixture,
 			"-test.run=^TestDispatchFixtureTraversesUnreadableAncestors$", "-test.count=1")
 		if err != nil {
@@ -1027,37 +1054,48 @@ func TestCodexLocalCILeaseGrantExcludesGitMetadata(t *testing.T) {
 	}
 }
 
-func TestCodexLaunchGeneratesPermissionsForOnlyTheExplicitRetainedSource(t *testing.T) {
+// The one shared thing a Change worktree needs is the repository's Git
+// directory: a worker writes it, an orchestrator reads it, and nothing
+// else of the repository or the Changes parent is granted.
+func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
-	source := "/private/factory/changes/0123456789abcdef0123456789abcdef"
-	runtime, err := runtime.WithReadOnlySources([]string{source})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := requestFor(t, kernel.ProviderCodex, installation, runtime, "", "")
-	launch, err := Build(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy := ""
-	for _, argument := range launch.Argv() {
-		if strings.HasPrefix(argument, "permissions."+codexPermissionName(runtime)+"=") {
-			policy = argument
-			break
+	gitDirectory := "/private/project/.git"
+	for _, writable := range []bool{true, false} {
+		granted, err := runtime.WithGitCommonDirectory(gitDirectory, writable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := requestFor(t, kernel.ProviderCodex, installation, granted, "", "")
+		launch, err := Build(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy := ""
+		for _, argument := range launch.Argv() {
+			if strings.HasPrefix(argument, "permissions."+codexPermissionName(granted)+"=") {
+				policy = argument
+				break
+			}
+		}
+		access := "read"
+		if writable {
+			access = "write"
+		}
+		if !strings.Contains(policy, tomlBasicString(gitDirectory)+`="`+access+`"`) {
+			t.Fatalf("launch omitted the Git directory grant: %q", policy)
+		}
+		if strings.Contains(policy, tomlBasicString("/private/project")+`="`) || strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="`) {
+			t.Fatalf("Git directory grant widened: %q", policy)
+		}
+		for _, environment := range []string{"GIT_AUTHOR_NAME=" + GitIdentityName, "GIT_COMMITTER_EMAIL=" + GitIdentityEmail, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ASKPASS=/usr/bin/false"} {
+			if !slices.Contains(launch.Environment(), environment) {
+				t.Fatalf("launch environment lacks %q", environment)
+			}
 		}
 	}
-	if !strings.Contains(policy, tomlBasicString(source)+`="read"`) {
-		t.Fatalf("launch omitted scoped source permission: %q", policy)
-	}
-	if strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="read"`) {
-		t.Fatal("source grant widened to the Changes parent")
-	}
-	if strings.Contains(policy, tomlBasicString("/private/factory/changes/ffffffffffffffffffffffffffffffff")+`="read"`) {
-		t.Fatal("source grant included an unrelated retained Change")
-	}
-	for _, bad := range [][]string{{"relative"}, {source, source}, {runtime.home}} {
-		if _, err := runtime.WithReadOnlySources(bad); !errors.Is(err, ErrInvalid) {
-			t.Fatalf("sources %q = %v, want ErrInvalid", bad, err)
+	for _, bad := range []string{"relative", "/private/project", "/private/project/.git/", runtime.home} {
+		if _, err := runtime.WithGitCommonDirectory(bad, true); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Git directory %q = %v, want ErrInvalid", bad, err)
 		}
 	}
 }

@@ -24,7 +24,10 @@ const (
 	// maintainerBridge is the Maintainer App's MCP bridge. An orchestrator
 	// launch names it to Claude, which is how an overseer publishes: the
 	// daemon itself exposes no repository or publication operation.
-	maintainerBridge     = "dark-factory-maintainer-mcp-bridge"
+	maintainerBridge = "dark-factory-maintainer-mcp-bridge"
+	// GitIdentityName and GitIdentityEmail author a worker's local commits.
+	GitIdentityName      = "Dark Factory Worker"
+	GitIdentityEmail     = "worker@darkfactory.build"
 	codexTool            = "codex"
 	maxPathBytes         = 4096
 	claudeConfigDir      = ".claude"
@@ -170,16 +173,33 @@ type RuntimePaths struct {
 	// launch used before accounts existed.
 	accountConfig      string
 	toolchainReadRoots string
-	sourceReadPaths    []string
+	// gitCommonDir is the project repository's Git directory, where the
+	// Change worktree's index, refs and objects live. A worker's local
+	// commands write it; an orchestrator's read it for review and
+	// publication. It is metadata access, not a credential: the provider
+	// environment still has no Git credential helper, SSH or prompt.
+	gitCommonDir         string
+	gitCommonDirWritable bool
 }
 
-// WithLocalCILeaseDirectory carries only daemon-resolved lease storage, never
-// the enclosing Git directory, into a Git-free worker.
+// WithLocalCILeaseDirectory carries daemon-resolved lease storage below the
+// Git directory into a worker.
 func (runtime RuntimePaths) WithLocalCILeaseDirectory(path string) (RuntimePaths, error) {
 	if path != "" && (!validAbsolute(path, maxPathBytes) || filepath.Base(path) != "dark-factory-local-ci") {
 		return RuntimePaths{}, ErrInvalid
 	}
 	runtime.localCILeaseDir = path
+	return runtime, nil
+}
+
+// WithGitCommonDirectory grants the project repository's Git directory to
+// local commands: writable for a worker committing on its Change branch,
+// read-only for an orchestrator reading a settled Change's commits.
+func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool) (RuntimePaths, error) {
+	if !validAbsolute(path, maxPathBytes) || filepath.Base(path) != ".git" || path == runtime.home || path == runtime.temp {
+		return RuntimePaths{}, ErrInvalid
+	}
+	runtime.gitCommonDir, runtime.gitCommonDirWritable = path, writable
 	return runtime, nil
 }
 
@@ -192,23 +212,6 @@ func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath
 	if !runtime.valid() {
 		return RuntimePaths{}, ErrInvalid
 	}
-	return runtime, nil
-}
-
-// WithReadOnlySources adds exact daemon-selected retained trees to a Codex
-// launch profile. These are paths already derived from validated Change IDs.
-func (runtime RuntimePaths) WithReadOnlySources(paths []string) (RuntimePaths, error) {
-	seen := map[string]struct{}{}
-	for _, path := range paths {
-		if !validAbsolute(path, maxPathBytes) || path == runtime.home || path == runtime.temp {
-			return RuntimePaths{}, ErrInvalid
-		}
-		if _, duplicate := seen[path]; duplicate {
-			return RuntimePaths{}, ErrInvalid
-		}
-		seen[path] = struct{}{}
-	}
-	runtime.sourceReadPaths = append([]string(nil), paths...)
 	return runtime, nil
 }
 
@@ -370,7 +373,7 @@ func Build(request Request) (Launch, error) {
 		}
 		prompt := codexBootstrapPrompt
 		if request.role == kernel.RoleOrchestrator {
-			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For retained source, request attempt source --task TASK_ID and verify its exact task/work/Change receipt before reading source_path; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Continue actionable supervision and delivery in this session; when none remains, report a durable checkpoint and exit without idle polling. Events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
+			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Continue actionable supervision and delivery in this session; when none remains, report a durable checkpoint and exit without idle polling. Events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
 		argv = append(argv, prompt)
 		return Launch{
@@ -409,8 +412,12 @@ func codexPermissions(request Request) (string, error) {
 		// process group. Grant only the interpreter, not a standard-library tree.
 		entries = append(entries, tomlBasicString("/usr/bin/ruby")+`="read"`)
 	}
-	for _, path := range request.runtime.sourceReadPaths {
-		entries = append(entries, tomlBasicString(path)+`="read"`)
+	if request.runtime.gitCommonDir != "" {
+		access := "read"
+		if request.runtime.gitCommonDirWritable {
+			access = "write"
+		}
+		entries = append(entries, tomlBasicString(request.runtime.gitCommonDir)+`="`+access+`"`)
 	}
 	// Codex merges profile tables. Use the existing private runtime identity
 	// rather than a shared name that could inherit an account profile.
@@ -643,11 +650,18 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 	if runtime.localCILeaseDir != "" {
 		environment = append(environment, "DARK_FACTORY_LOCAL_CI_DIRECTORY="+runtime.localCILeaseDir)
 	}
+	// Commits on the Change branch carry the factory's own identity; the
+	// operator's Git configuration is not read, so without these git commit
+	// would refuse. The published commit is authored by the Maintainer App.
 	return append(environment,
 		"LANG=C",
 		"LC_ALL=C",
 		"TERM=xterm-256color",
 		"SHELL=/bin/sh",
+		"GIT_AUTHOR_NAME="+GitIdentityName,
+		"GIT_AUTHOR_EMAIL="+GitIdentityEmail,
+		"GIT_COMMITTER_NAME="+GitIdentityName,
+		"GIT_COMMITTER_EMAIL="+GitIdentityEmail,
 		"GIT_CEILING_DIRECTORIES="+runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1",

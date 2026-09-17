@@ -355,7 +355,7 @@ func NewAttemptTaskReply(task AttemptTask) (Reply, error) {
 }
 
 func NewAttemptSourceReply(source RetainedChangeHandoff) (Reply, error) {
-	if !validRetainedChangeHandoff(source) {
+	if !validSourceHandoff(source) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyAttemptSource, attemptSource: source}, nil
