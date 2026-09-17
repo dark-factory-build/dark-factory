@@ -54,7 +54,7 @@ func validProjectContent(kind MessageType, body any) error {
 	decoder.UseNumber()
 	// Use the same integer, depth and collection bounds as the complete wire
 	// decoder. Unrepresentable stored metadata is an explicit bounded error.
-	if err := scanJSONValue(decoder, 2, MaxArrayItems); err != nil {
+	if err := scanJSONValue(decoder, 2, MaxJSONArray); err != nil {
 		if kind == TypeProjectContentResult {
 			return ErrOversized
 		}

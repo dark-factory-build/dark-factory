@@ -16,9 +16,9 @@ export function projectContentOperation(value: unknown): ProjectContentOperation
 export function projectContentObject(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new ProtocolError("malformed");
   const visit = (item: unknown, depth: number): void => {
-    if (depth > 16 || typeof item === "number" && (!Number.isSafeInteger(item) || item < 0)) throw new ProtocolError("malformed");
-    if (Array.isArray(item)) { if (item.length > 64) throw new ProtocolError("malformed"); item.forEach((child) => visit(child, depth + 1)); }
-    else if (item !== null && typeof item === "object") Object.values(item).forEach((child) => visit(child, depth + 1));
+    if (depth > 14 || typeof item === "number" && (!Number.isSafeInteger(item) || item < 0)) throw new ProtocolError("malformed");
+    if (Array.isArray(item)) { if (item.length > 32) throw new ProtocolError("malformed"); item.forEach((child) => visit(child, depth + 1)); }
+    else if (item !== null && typeof item === "object") { if (Object.keys(item).length > 32) throw new ProtocolError("malformed"); Object.values(item).forEach((child) => visit(child, depth + 1)); }
     else if (typeof item !== "string" && typeof item !== "boolean" && typeof item !== "number" && item !== null) throw new ProtocolError("malformed");
   };
   visit(value, 0);
