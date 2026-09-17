@@ -405,8 +405,8 @@ func codexPermissions(request Request) (string, error) {
 	}
 	if request.runtime.localCILeaseDir != "" {
 		entries = append(entries, tomlBasicString(request.runtime.localCILeaseDir)+`="write"`)
-		// The existing lease wrapper uses system Perl for its owned process group.
-		entries = append(entries, tomlBasicString("/System/Library/Perl")+`="read"`)
+		// The existing lease wrapper uses the native system Ruby for its owned process group.
+		entries = append(entries, tomlBasicString("/usr/bin/ruby")+`="read"`)
 	}
 	for _, path := range request.runtime.sourceReadPaths {
 		entries = append(entries, tomlBasicString(path)+`="read"`)
