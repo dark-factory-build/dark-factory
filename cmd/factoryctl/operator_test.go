@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -18,13 +19,22 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		name string
 		args []string
 	}{
+		{name: "select model", args: []string{"agent", "select-model", "--agent", id, "--revision", "7", "--model", "gpt-5.6-luna"}},
 		{name: "project create", args: []string{"project", "create", "--name", "North Workshop", "--root", "/private/tmp/repo"}},
 		{name: "project limits", args: []string{"project", "limits", "--project", id, "--revision", "7", "--run-budget", "20", "--max-run-seconds", "900"}},
 		{name: "agent create shell default role", args: []string{"agent", "create", "--project", id, "--name", "Builder One", "--provider", "shell", "--tool-budget", "100"}},
 		{name: "agent create codex controls", args: []string{"agent", "create", "--project", id, "--name", "Foreman", "--provider", "codex", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium", "--tool-budget", "100", "--role", "orchestrator"}},
+		{name: "agent idle policy", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes"}},
+		{name: "agent idle wait", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait"}},
+		{name: "account discover", args: []string{"account", "discover"}},
+		{name: "account list", args: []string{"account", "list"}},
+		{name: "account link", args: []string{"account", "link", "--provider", "codex", "--home", "/Users/operator/.codex-dogfood", "--label", "dogfood"}},
+		{name: "agent select account", args: []string{"agent", "select-account", "--agent", id, "--revision", "7", "--account", strings.Repeat("cd", 16)}},
+		{name: "agent select model", args: []string{"agent", "select-model", "--agent", id, "--revision", "7", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium"}},
 		{name: "task add minimal", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "Tighten the queue ordering"}},
 		{name: "task add full", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--body", "b", "--priority", "-5"}},
 		{name: "task add supplied identities", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--task-id", id, "--incarnation-id", strings.Repeat("cd", 16)}},
+		{name: "task add any eligible worker", args: []string{"task", "add", "--project", id, "--agent", "any", "--title", "t"}},
 		{name: "status", args: []string{"status"}},
 		{name: "task send back", args: []string{"task", "send-back", "--task", id, "--note", "five findings"}},
 		{name: "dispatch on", args: []string{"dispatch", "on"}},
@@ -42,6 +52,13 @@ func TestParseExactOperatorCommands(t *testing.T) {
 	}
 	if command, _, _ := parse(valid[1].args); command.role != "worker" {
 		t.Fatalf("default role = %q", command.role)
+	}
+	// `--agent any` is the CLI spelling of the wire's empty assigned agent.
+	if command, _, _ := parse([]string{"task", "add", "--project", id, "--agent", "any", "--title", "t"}); command.agent != "any" || anyWorkerAgent(command.agent) != "" || anyWorkerAgent(id) != id {
+		t.Fatalf("any-worker task add = %+v", command)
+	}
+	if _, _, ok := parse([]string{"agent", "select-model", "--agent", "any", "--revision", "7", "--model", "m"}); ok {
+		t.Fatal("`any` accepted where one agent is required")
 	}
 	invalid := [][]string{
 		{"project", "create", "--name", "n"},
@@ -64,6 +81,16 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "x"},
 		{"agent", "create", "--project", "short", "--name", "n", "--provider", "shell", "--tool-budget", "1"},
 		{"agent", "create", "--project", id, "--name", "n", "--provider", "shell", "--tool-budget", "1", "--role", "manager"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--after-seconds", "60", "--instruction", "x", "--run-budget", "1"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "0", "--instruction", "x", "--run-budget", "1"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait", "--run-budget", "1"},
+		{"account", "link", "--provider", "shell", "--home", "/Users/operator/.shell", "--label", "shell"},
+		{"account", "link", "--provider", "codex", "--home", "relative", "--label", "codex"},
+		{"agent", "select-account", "--agent", id, "--revision", "0", "--account", id},
+		{"agent", "select-model", "--agent", id, "--revision", "0", "--model", "gpt-5.6-luna"},
+		{"agent", "select-model", "--agent", id, "--revision", "1", "--model", ""},
+		{"agent", "select-model", "--agent", id, "--revision", "1", "--model", "gpt-5.6-luna", "--reasoning-effort", "extreme"},
 		{"task", "add", "--project", id, "--title", "t"},
 		{"task", "add", "--project", id, "--agent", id},
 		{"task", "add", "--project", id, "--agent", id, "--title", ""},
@@ -173,6 +200,31 @@ func TestAgentCreateCarriesProviderControls(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), received.ID) || !strings.Contains(stdout.String(), `"head":8`) || !strings.Contains(stdout.String(), `"revision":1`) {
 		t.Fatalf("printed %q", stdout.String())
+	}
+}
+
+func TestAgentIdlePolicyUsesTheOperatorAPI(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	agentID := strings.Repeat("22", 16)
+	var received api.AgentIdlePolicyInput
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		var ok bool
+		received, ok = call.AgentIdlePolicyInput()
+		if !ok || call.Kind() != api.CallAgentIdlePolicy {
+			t.Errorf("call = %v, input=%+v, ok=%v", call.Kind(), received, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 8, Revision: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"agent", "idle-policy", "--agent", agentID, "--revision", "2", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes"}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || received != (api.AgentIdlePolicyInput{AgentID: agentID, ExpectedRevision: 2, Policy: "standing_instruction", AfterSeconds: 60, Instruction: "review retained changes"}) || !strings.Contains(stdout.String(), `"revision":3`) {
+		t.Fatalf("idle policy = exit %d input=%+v stdout=%q stderr=%q", exit, received, stdout.String(), stderr.String())
 	}
 }
 
@@ -299,26 +351,40 @@ func TestDispatchReadsExactFactoryRevisionThenSets(t *testing.T) {
 }
 
 func TestDispatchExplicitRevisionDoesNotRefreshOrOverrideTheGuard(t *testing.T) {
-	fixture := newAPIFixture(t)
-	defer fixture.close(t)
-	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
-		revision, enabled, ok := call.Dispatch()
-		if !ok || call.Kind() != api.CallSetDispatch || revision != 19 || !enabled {
-			t.Errorf("guarded dispatch = kind=%v revision=%d enabled=%v ok=%v", call.Kind(), revision, enabled, ok)
-		}
-		reply, err := api.NewErrorReply(api.RemoteConflict)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return reply
-	})
-	var stdout, stderr bytes.Buffer
-	exit := run(context.Background(), []string{"dispatch", "on", "--revision", "19"}, webEnvironment(fixture), &stdout, &stderr)
-	if result := awaitServer(t, done); result.err != nil {
-		t.Fatal(result.err)
-	}
-	if exit == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not accepted") {
-		t.Fatalf("guarded stale dispatch = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	for _, test := range []struct {
+		code    api.RemoteErrorCode
+		message string
+	}{
+		{api.RemoteConflict, "local API request conflicts with durable state"},
+		{api.RemoteRevisionConflict, "local API revision is stale"},
+		{api.RemoteInternal, "local API failed internally"},
+		{api.RemoteUnauthorized, "local API credential is unauthorized"},
+		{api.RemoteForbidden, "local API request is forbidden"},
+		{api.RemoteUnavailable, "local API is unavailable"},
+	} {
+		t.Run(string(test.code), func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+				revision, enabled, ok := call.Dispatch()
+				if !ok || call.Kind() != api.CallSetDispatch || revision != 19 || !enabled {
+					t.Errorf("guarded dispatch = kind=%v revision=%d enabled=%v ok=%v", call.Kind(), revision, enabled, ok)
+				}
+				reply, err := api.NewErrorReply(test.code)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return reply
+			})
+			var stdout, stderr bytes.Buffer
+			exit := run(context.Background(), []string{"dispatch", "on", "--revision", "19"}, webEnvironment(fixture), &stdout, &stderr)
+			if result := awaitServer(t, done); result.err != nil {
+				t.Fatal(result.err)
+			}
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: dispatch: "+test.message+"\n" {
+				t.Fatalf("guarded stale dispatch = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 
@@ -359,7 +425,153 @@ func TestOperatorRemoteRejectionIsReportedWithoutFabricatedSuccess(t *testing.T)
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"agent", "create", "--project", strings.Repeat("11", 16), "--name", "Builder", "--provider", "shell", "--tool-budget", "10"}, webEnvironment(fixture), &stdout, &stderr)
 	awaitServer(t, done)
-	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "agent create was not accepted") {
+	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "agent create: local API request conflicts with durable state") {
 		t.Fatalf("rejection = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestAgentSelectModelCarriesRevisionCheckedControls(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	agentID := strings.Repeat("22", 16)
+	var received api.AgentModelSelectInput
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		var ok bool
+		received, ok = call.AgentModelSelectInput()
+		if !ok || call.Kind() != api.CallAgentSelectModel {
+			t.Errorf("call = %v, input = %+v, ok = %v", call.Kind(), received, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 10, Revision: 8})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"agent", "select-model", "--agent", agentID, "--revision", "7", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium"}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || received != (api.AgentModelSelectInput{AgentID: agentID, ExpectedRevision: 7, Model: "gpt-5.6-luna", ReasoningEffort: "medium"}) {
+		t.Fatalf("select model = exit %d stderr %q received %+v", exit, stderr.String(), received)
+	}
+}
+
+func TestAccountDiscoverCLICollectsPagesAndRejectsRepeatedCursor(t *testing.T) {
+	for _, repeated := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "repeated cursor"}[repeated], func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			served := make(chan struct{})
+			go func() {
+				defer close(served)
+				for page := 0; page < 2; page++ {
+					done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+						offset, ok := call.AccountsOffset()
+						if !ok || offset != uint32(page*4096) {
+							t.Errorf("page %d offset=%d valid=%t", page, offset, ok)
+						}
+						count := 4096
+						if page == 1 {
+							count = 1
+						}
+						accounts := api.Accounts{Accounts: make([]api.DiscoveredAccount, count)}
+						for index := range accounts.Accounts {
+							accounts.Accounts[index] = api.DiscoveredAccount{Provider: "codex", Home: "/private/account", Label: "linked", LinkedID: strings.Repeat("ab", 16), UnavailableReason: "login is no longer discoverable"}
+						}
+						if page == 0 || repeated {
+							next := uint32(4096)
+							accounts.NextOffset = &next
+						}
+						reply, err := api.NewAccountsReply(accounts)
+						if err != nil {
+							t.Errorf("page reply: %v", err)
+						}
+						return reply
+					})
+					if result := <-done; result.err != nil {
+						t.Errorf("page server: %v", result.err)
+					}
+				}
+			}()
+			var stdout, stderr bytes.Buffer
+			exit := run(context.Background(), []string{"account", "discover"}, webEnvironment(fixture), &stdout, &stderr)
+			<-served
+			if repeated {
+				if exit == 0 {
+					t.Fatal("repeated cursor accepted")
+				}
+				return
+			}
+			var result api.Accounts
+			if exit != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil || len(result.Accounts) != 4097 || result.NextOffset != nil || result.Accounts[4096].UnavailableReason == "" {
+				t.Fatalf("CLI discovery exit=%d count=%d stderr=%q", exit, len(result.Accounts), stderr.String())
+			}
+		})
+	}
+}
+
+func TestTaskRecoveryUsesOperatorClient(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	taskID, incarnationID := strings.Repeat("11", 16), strings.Repeat("22", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.TaskRecoveryInput()
+		if !ok || input.TaskID != taskID || input.IncarnationID != incarnationID {
+			t.Errorf("unexpected recovery call: %+v", call)
+		}
+		reply, err := api.NewTaskRecoveryReply(api.TaskRecovery{State: "found", TaskID: taskID, IncarnationID: incarnationID, ProjectID: taskID, AssignedAgentID: taskID, WorkRevision: 1, Revision: 1, Status: "blocked", BlockedReason: "tool unavailable", ArtifactPaths: []string{}})
+		if err != nil {
+			t.Error(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"task", "recovery", "--task", taskID, "--incarnation", incarnationID}, webEnvironment(fixture), &stdout, &stderr)
+	if exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("task recovery = exit %d stderr %q", exit, stderr.String())
+	}
+	awaitServer(t, done)
+	var result api.TaskRecovery
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.BlockedReason != "tool unavailable" {
+		t.Fatalf("recovery response %q: %v", stdout.String(), err)
+	}
+}
+
+func TestHumanCommandsUseOperatorClient(t *testing.T) {
+	id := strings.Repeat("11", 16)
+	operation := strings.Repeat("22", 16)
+	for _, reply := range []bool{false, true} {
+		t.Run(fmt.Sprint(reply), func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			args := []string{"human", "list"}
+			if reply {
+				args = []string{"human", "reply", "--operation-id", operation, "--request", id, "--revision", "3", "--reply", "Proceed"}
+			}
+			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+				if !reply {
+					if call.Kind() != api.CallHumanRequests {
+						t.Errorf("wrong list call %v", call.Kind())
+					}
+					return api.NewHumanRequestListReply(api.HumanRequestList{Requests: []api.HumanRequest{}})
+				}
+				input, ok := call.HumanReplyInput()
+				if !ok || input.RequestID != id || input.OperationID != operation || input.ExpectedRevision != 3 || input.Reply != "Proceed" {
+					t.Errorf("wrong reply input %+v", input)
+				}
+				result, err := api.NewMutationReply(api.MutationResult{Head: 7, Revision: 4})
+				if err != nil {
+					t.Error(err)
+				}
+				return result
+			})
+			var stdout, stderr bytes.Buffer
+			if exit := run(context.Background(), args, webEnvironment(fixture), &stdout, &stderr); exit != 0 || stderr.Len() != 0 {
+				t.Fatalf("command failed: exit=%d stderr=%q", exit, stderr.String())
+			}
+			awaitServer(t, done)
+			if !json.Valid(stdout.Bytes()) {
+				t.Fatalf("invalid output %q", stdout.String())
+			}
+		})
 	}
 }

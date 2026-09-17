@@ -27,7 +27,13 @@ no commit, push, pull-request, or repository-publication operation.
   task; Stop ends it; Start new preserves its history and queues a replacement.
   Completed output stays visible. Add to queue accepts later work while busy.
   Queues are grouped by agent and follow its admission order; numeric priority can be raised or
-  lowered explicitly. Recent Work stays collapsed without reading private details. Opening it loads
+  lowered explicitly. A task targets one worker or any eligible worker in its
+  project: ANY WORKER in an agent's pane, or `factoryctl task add --agent any`,
+  queues it under the project's Any eligible worker group until the first free
+  worker claims it at admission. Workers take their own assigned work first,
+  then shared work. The claim writes that worker into the task, which stays
+  with it through send-back corrections unless the queue row reassigns it to
+  another worker. Recent Work stays collapsed without reading private details. Opening it loads
   authorized details for the newest ten completed or blocked tasks, showing
   instruction and outcome excerpts; Show more loads the next ten. Expand a row
   for the full outcome, reported PR links, instruction, and review feedback,
@@ -48,8 +54,24 @@ no commit, push, pull-request, or repository-publication operation.
 - Optional [operator-owned GitHub intake and release scheduling](docs/development/UNATTENDED.md) runs on the host. There is no public HTTP intake or in-runtime updater.
 
 Each project has agents and durable tasks. An admitted attempt gets a fresh
-provider process and a daemon-owned `.git`-free Change. The browser and CLI
-remain clients of the same local API; neither owns lifecycle or policy.
+provider process and a daemon-owned Change: a linked Git worktree of the
+project on its own branch. The browser and CLI remain clients of the same
+local API; neither owns lifecycle or policy.
+
+Fresh Changes use `factoryd --base-revision HEAD` by default: a branch with a
+configured remote upstream is fetched before its exact commit is selected.
+The registered checkout is not moved. Use `--base-revision
+refs/remotes/upstream/main` to select another remote branch. Explicit local
+refs or commit IDs, detached HEAD, and branches without an upstream stay local.
+A failed configured fetch fails source preparation; cached source is not a
+fallback. Retained Changes preserve their original source and edits until an
+explicit integration. Runtime build identity and Change source identity remain
+separate. Fetching adds only the pinned objects, without updating tracking refs
+or `FETCH_HEAD`, so parallel starts and custom upstream mappings cannot overwrite
+operator branches. Git runs noninteractively with a private HOME and
+global/system Git configuration disabled. Private remotes need
+working authentication through their repository-local transport configuration;
+missing credentials fail preparation rather than borrowing a worker account.
 
 ## Installation
 

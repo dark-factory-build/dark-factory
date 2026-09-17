@@ -60,8 +60,27 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 	events := make(chan schedulerEvent, (kernel.MaxFactoryCapacity+1)*2)
 	owners := make(map[uint64]*scheduledOwner, kernel.MaxFactoryCapacity+1)
 	var nextID, probeID uint64
+	stopping := false
+	var resultErr error
+	// Dispatch is an advisory scheduling gate; admission still validates the
+	// complete durable graph atomically when dispatch resumes.
+	dispatchEnabled := func() bool {
+		factory, err := daemon.store.Factory(ownedCtx)
+		if err != nil {
+			if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(err, cancellation) {
+				resultErr = errors.Join(resultErr, err)
+			}
+			stopping = true
+			cancel()
+			return false
+		}
+		return factory.DispatchEnabled
+	}
 
 	startProbe := func() {
+		if !dispatchEnabled() {
+			return
+		}
 		nextID++
 		id := nextID
 		probeID = id
@@ -88,8 +107,6 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 		pollEvents = poll.C
 		defer poll.Stop()
 	}
-	stopping := false
-	var resultErr error
 	ctxDone := ctx.Done()
 	if err := ownedCtx.Err(); err == nil {
 		startProbe()
@@ -112,17 +129,18 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 		case <-pollEvents:
 			if !stopping && resultErr == nil {
 				// Worker idle rules and event-driven overseer wakeups are enqueued
-				// on the tick ahead of the probe that admits them. A round that
+				// on enabled ticks ahead of the probe that admits them. Pausing
+				// defers automatic tasks without consuming their causal events. A round that
 				// fails is retried next tick; the admission probe stays exact.
 				if err := daemon.enforceRunLimits(ownedCtx); err != nil {
 					// Cancellation can interrupt the read before the Done arm runs.
 					// Preserve unrelated failures even when shutdown races with them.
-					if cancellation := ownedCtx.Err(); cancellation == nil || (!errors.Is(err, cancellation) && !errors.Is(err, sqlite3.INTERRUPT)) {
+					if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(err, cancellation) {
 						resultErr = err
 					}
 					stopping = true
 					cancel()
-				} else if at, err := daemon.timestamp(); err == nil {
+				} else if at, err := daemon.timestamp(); err == nil && dispatchEnabled() {
 					_, _ = daemon.store.EnqueueIdleInstructions(ownedCtx, at)
 					_, _ = daemon.store.EnqueueOverseerWakeups(ownedCtx, at)
 				}
@@ -165,7 +183,9 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 					probeID = 0
 				}
 				if !owner.observed {
-					if !(stopping && errors.Is(event.err, context.Canceled)) {
+					// Completion can beat the cancellation select arm. The context,
+					// not which event was selected first, determines cancellation.
+					if cancellation := ownedCtx.Err(); cancellation == nil || !schedulerOnlyCancellation(event.err, cancellation) {
 						resultErr = errors.Join(resultErr, event.err, fmt.Errorf("%w: attempt ended before admission was observed", kernel.ErrCorruptState))
 					}
 				} else if owner.admitted {
@@ -191,6 +211,33 @@ func (daemon *Daemon) RunScheduler(ctx context.Context, spec SupervisorSpec) err
 		}
 	}
 	return resultErr
+}
+
+// A joined reconciliation failure must survive even when another leaf is the
+// shutdown cancellation. Outcome-unknown also requires recovery, not silence.
+func schedulerOnlyCancellation(err, cancellation error) bool {
+	var unknown *kernel.OutcomeUnknownError
+	if err == nil || cancellation == nil || errors.As(err, &unknown) {
+		return false
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		causes := wrapped.Unwrap()
+		if len(causes) == 0 {
+			return false
+		}
+		for _, cause := range causes {
+			if !schedulerOnlyCancellation(cause, cancellation) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		if cause := wrapped.Unwrap(); cause != nil {
+			return schedulerOnlyCancellation(cause, cancellation)
+		}
+	}
+	return err == cancellation || errors.Is(err, sqlite3.INTERRUPT)
 }
 
 func duplicateAdmissionObservation(count int) error {
@@ -226,7 +273,7 @@ func (daemon *Daemon) validateScheduledCompletion(changeParent string, unsettled
 		return kernel.NewOutcomeUnknownError(err)
 	}
 	if current.Phase == kernel.RunFinalizing && current.Proposal != nil {
-		settled, settleErr := daemon.settleRun(changeParent, current.ID)
+		settled, settleErr := daemon.settleRun(daemon.cleanupCtx, changeParent, current.ID)
 		if settleErr != nil {
 			if errors.Is(settleErr, kernel.ErrConflict) {
 				if unsettled != nil {
@@ -237,6 +284,14 @@ func (daemon *Daemon) validateScheduledCompletion(changeParent string, unsettled
 			return kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: scheduled completion was not settled: %w", settleErr))
 		}
 		current = settled
+	}
+	if current.Phase == kernel.RunRunning {
+		// A clean protocol-2 shutdown handover leaves the run running and
+		// owned by its reparented runner under a fresh grant; the next
+		// daemon adopts it. RunNext never returns a running run otherwise —
+		// every other exit finalizes — so this is never a stray running
+		// completion masquerading as a handover.
+		return nil
 	}
 	if current.Phase != kernel.RunTerminal {
 		return kernel.NewOutcomeUnknownError(fmt.Errorf("%w: scheduled run remained %s", kernel.ErrConflict, current.Phase.String()))

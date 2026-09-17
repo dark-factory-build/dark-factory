@@ -9,7 +9,9 @@ use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(target_arch = "wasm32")]
-use crate::journal::{DeliveryJournal, Operation, OperationRecord, OperationTransition};
+use crate::journal::{
+    DeliveryJournal, Operation, OperationObservation, OperationRecord, OperationTransition,
+};
 use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
@@ -297,6 +299,8 @@ pub(crate) struct SubmitPullRequestReview {
     pub(crate) head_sha: String,
     pub(crate) event: ReviewEvent,
     pub(crate) body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) corrects_review_operation_id: Option<String>,
 }
 
 /// What the reviewer concluded, which is not the same thing as which GitHub
@@ -341,6 +345,7 @@ pub(crate) enum ReviewEvent {
 /// GitHub state, which is why the required `review` check reads that line.
 const REVIEW_EVENT: &str = "COMMENT";
 const REVIEW_STATE: &str = "COMMENTED";
+const REVIEW_CORRECTION_PREFIX: &str = "Dark-Factory-Review-Correction:";
 
 impl ReviewEvent {
     /// The verdict word the required `review` check reads.
@@ -588,6 +593,13 @@ pub(crate) struct PublishCommit {
     /// same branch means the second one's expectation no longer holds and it
     /// fails closed instead of clobbering the first.
     pub(crate) expected_head_sha: String,
+    /// A second parent, when the worker integrated it: the published commit
+    /// is then the merge the worker made and `changes` are applied to this
+    /// commit's tree. Copying an integrated tree onto the branch as a
+    /// single-parent commit reproduced every file but lost the ancestry, so
+    /// GitHub re-merged the same hunks against main and reported a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_parent_sha: Option<String>,
     pub(crate) message: String,
     pub(crate) changes: Vec<FileChange>,
 }
@@ -1647,7 +1659,10 @@ impl AppAuthority {
         // `verify_publish_precondition` already reports a moved head as a
         // conflict. Rewriting every other failure into one too told the caller
         // to refetch a head that had not moved.
-        let branch_exists = self.0.verify_publish_precondition(&token, &request).await?;
+        let branch_exists = self
+            .0
+            .verify_publish_precondition(&token, &request, &repository.default_branch)
+            .await?;
         match journal
             .mark_operation(&operation, OperationTransition::Executing)
             .await
@@ -2896,17 +2911,46 @@ impl CreatePullRequest {
     }
 
     fn marked_body(&self) -> Result<String, OperationError> {
-        let closes = if self.close_on_merge {
+        let footer = if self.close_on_merge {
             format!("Closes #{}", self.issue_number)
         } else {
             format!("Refs #{}", self.issue_number)
         };
-        if self.body.is_empty() {
-            Ok(format!("{}\n\n{}", closes, self.marker()?))
+        let mut body = self.body.trim_end_matches(|character: char| {
+            character == '\n' || character == '\r' || character == ' ' || character == '\t'
+        });
+        while let Some(line) = body.rsplit('\n').next() {
+            let Some((kind, issue_number)) = pull_request_footer(line) else {
+                break;
+            };
+            let expected_kind = if self.close_on_merge {
+                "Closes"
+            } else {
+                "Refs"
+            };
+            if kind != expected_kind || issue_number != self.issue_number {
+                return Err(OperationError::InvalidInput);
+            }
+            body = body[..body.len() - line.len()].trim_end_matches(|character: char| {
+                character == '\n' || character == '\r' || character == ' ' || character == '\t'
+            });
+        }
+        if body.is_empty() {
+            Ok(format!("{}\n\n{}", footer, self.marker()?))
         } else {
-            Ok(format!("{}\n\n{}\n\n{}", self.body, closes, self.marker()?))
+            Ok(format!("{}\n\n{}\n\n{}", body, footer, self.marker()?))
         }
     }
+}
+
+fn pull_request_footer(line: &str) -> Option<(&str, i64)> {
+    let line = line.trim();
+    let (kind, issue) = line.split_once(" #")?;
+    if kind != "Refs" && kind != "Closes" {
+        return None;
+    }
+    let issue_number = issue.parse::<i64>().ok()?;
+    (issue_number > 0).then_some((kind, issue_number))
 }
 
 impl UpdatePullRequestBody {
@@ -2960,7 +3004,15 @@ impl SubmitPullRequestReview {
         valid_sha(&self.head_sha)?;
         valid_text(&self.body, 1, 16_000, true)?;
         free_of_operation_marker(&self.body)?;
-        free_of_review_verdict(&self.body)
+        free_of_review_verdict(&self.body)?;
+        free_of_review_correction(&self.body)?;
+        if let Some(operation_id) = &mut self.corrects_review_operation_id {
+            canonical_operation_id(operation_id)?;
+            if !matches!(self.event, ReviewEvent::Allow) || *operation_id == self.operation_id {
+                return Err(OperationError::InvalidInput);
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -2984,11 +3036,17 @@ impl SubmitPullRequestReview {
     /// from the App's request, so that field is the binding, and the two
     /// cannot disagree because both are rendered from `head_sha` here.
     fn marked_body(&self) -> Result<String, OperationError> {
+        let correction = self
+            .corrects_review_operation_id
+            .as_deref()
+            .map(|id| format!("\n{REVIEW_CORRECTION_PREFIX} {id}"))
+            .unwrap_or_default();
         Ok(format!(
-            "{}\n\n{REVIEW_VERDICT_PREFIX} {} {}\n{}",
+            "{}\n\n{REVIEW_VERDICT_PREFIX} {} {}{}\n{}",
             self.body,
             self.event.verdict(),
             self.head_sha,
+            correction,
             self.marker()?
         ))
     }
@@ -2999,6 +3057,12 @@ impl PublishCommit {
         canonical_operation_id(&mut self.operation_id)?;
         valid_ref(&self.branch)?;
         valid_sha(&self.expected_head_sha)?;
+        if let Some(parent) = self.merge_parent_sha.as_deref() {
+            valid_sha(parent)?;
+            if parent == self.expected_head_sha {
+                return Err(OperationError::InvalidInput);
+            }
+        }
         // Keep caller text to one headline and reserve the body for the
         // operation trailer so the full message is byte-exact and trivial to
         // reconcile.
@@ -3049,6 +3113,21 @@ impl PublishCommit {
     #[cfg(target_arch = "wasm32")]
     fn operation(&self, kind: &str) -> Result<Operation, OperationError> {
         operation(kind, &self.operation_id, self)
+    }
+
+    /// The branch head first, so the branch's own history stays first-parent.
+    fn parents(&self) -> Vec<&str> {
+        let mut parents = vec![self.expected_head_sha.as_str()];
+        parents.extend(self.merge_parent_sha.as_deref());
+        parents
+    }
+
+    /// The tree `changes` are applied to: the integrated commit when there is
+    /// one, so the caller supplies the worker's diff from it, not a copy of it.
+    fn tree_base(&self) -> &str {
+        self.merge_parent_sha
+            .as_deref()
+            .unwrap_or(&self.expected_head_sha)
     }
 
     fn trailer(&self) -> Result<String, OperationError> {
@@ -3395,6 +3474,12 @@ const REVIEW_VERDICT_PREFIX: &str = "Dark-Factory-Review:";
 
 fn free_of_review_verdict(value: &str) -> Result<(), OperationError> {
     (!value.contains(REVIEW_VERDICT_PREFIX))
+        .then_some(())
+        .ok_or(OperationError::InvalidInput)
+}
+
+fn free_of_review_correction(value: &str) -> Result<(), OperationError> {
+    (!value.contains(REVIEW_CORRECTION_PREFIX))
         .then_some(())
         .ok_or(OperationError::InvalidInput)
 }
@@ -4328,8 +4413,9 @@ impl Authority {
         &self,
         token: &RepositoryToken,
         request: &PublishCommit,
+        default_branch: &str,
     ) -> Result<bool, OperationError> {
-        match self.read_ref_optional(token, &request.branch).await? {
+        let branch_exists = match self.read_ref_optional(token, &request.branch).await? {
             Some(reference) => (reference.object.sha == request.expected_head_sha)
                 .then_some(true)
                 .ok_or(OperationError::Conflict),
@@ -4341,17 +4427,42 @@ impl Authority {
             None => {
                 // The parent must still be a real commit, so a typo cannot
                 // create a branch from nothing.
-                let _: GitCommit = github_json(
-                    &format!(
-                        "https://api.github.com/repos/{}/{}/git/commits/{}",
-                        token.repository.owner, token.repository.name, request.expected_head_sha
-                    ),
-                    token.as_str(),
-                )
-                .await?;
+                self.read_commit(token, &request.expected_head_sha).await?;
                 Ok(false)
             }
+        }?;
+        // A mistyped merge parent would otherwise burn the operation id on a
+        // 422 from the commit write; every other input is checked first.
+        if let Some(parent) = request.merge_parent_sha.as_deref() {
+            self.read_commit(token, parent).await?;
+            let default_head = self.read_ref(token, default_branch).await?;
+            if default_head.object.kind != "commit" {
+                return Err(OperationError::Conflict);
+            }
+            self.verify_ancestor(token, parent, &default_head.object.sha)
+                .await?;
         }
+        Ok(branch_exists)
+    }
+
+    async fn verify_ancestor(
+        &self,
+        token: &RepositoryToken,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<(), OperationError> {
+        let comparison: GitComparison = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/compare/{ancestor}...{descendant}",
+                token.repository.owner, token.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        comparison
+            .proves_ancestor()
+            .then_some(())
+            .ok_or(OperationError::Conflict)
     }
 
     async fn push_commit(
@@ -4371,7 +4482,7 @@ impl Authority {
             Some(&CommitRequest {
                 message: request.marked_message()?,
                 tree: &tree,
-                parents: [&request.expected_head_sha],
+                parents: request.parents(),
             }),
         )
         .await?;
@@ -4428,14 +4539,7 @@ impl Authority {
         token: &RepositoryToken,
         request: &PublishCommit,
     ) -> Result<String, OperationError> {
-        let base: GitCommit = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/commits/{}",
-                token.repository.owner, token.repository.name, request.expected_head_sha
-            ),
-            token.as_str(),
-        )
-        .await?;
+        let base = self.read_commit(token, request.tree_base()).await?;
         valid_sha(&base.tree.sha)?;
         let base_tree: GitTree = github_json(
             &format!(
@@ -4506,21 +4610,18 @@ impl Authority {
         if reference.object.sha == request.expected_head_sha {
             return Ok(None);
         }
-        let head: GitCommit = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/commits/{}",
-                token.repository.owner, token.repository.name, reference.object.sha
-            ),
-            token.as_str(),
-        )
-        .await?;
+        let head = self.read_commit(token, &reference.object.sha).await?;
         // The trailer alone is not proof. It travels with the message through a
         // rebase or a cherry-pick, and `validate` is the only thing stopping a
         // caller writing another operation's trailer into its own commit, so
-        // the tip must also still be a direct child of the stated head. That is
-        // what makes the reported `parent_sha` true rather than assumed.
+        // the tip must also still be a direct child of the stated parents. That
+        // is what makes the reported `parent_sha` true rather than assumed.
         if head.message != request.marked_message()?
-            || !matches!(head.parents.as_slice(), [parent] if parent.sha == request.expected_head_sha)
+            || !head
+                .parents
+                .iter()
+                .map(|parent| parent.sha.as_str())
+                .eq(request.parents())
             || valid_sha(&head.tree.sha).is_err()
         {
             // The branch moved for some other reason; this operation did not
@@ -4683,9 +4784,9 @@ impl Authority {
                 &request.head_sha,
                 &request.review_operation_id,
             )
-        }) || reviews
-            .iter()
-            .any(|review| review.blocks_head(&request.head_sha))
+        }) || self
+            .review_blocks_head(journal, token, request, &reviews)
+            .await?
         {
             return Err(OperationError::Refused(RefusalReason::MergeReview));
         }
@@ -4708,6 +4809,61 @@ impl Authority {
             }
         }
         Ok(())
+    }
+
+    async fn review_blocks_head(
+        &self,
+        journal: &DeliveryJournal,
+        token: &RepositoryToken,
+        request: &MergePullRequestAtHead,
+        reviews: &[PullRequestReview],
+    ) -> Result<bool, OperationError> {
+        for review in reviews {
+            if !review.is_block_for_head(&request.head_sha) {
+                continue;
+            }
+            let Some((block_operation_id, block_digest)) =
+                review.body.as_deref().and_then(review_operation_marker)
+            else {
+                return Ok(true);
+            };
+            let Some(block_operation) =
+                completed_review_operation(journal, block_operation_id).await?
+            else {
+                return Ok(true);
+            };
+            if block_operation.request_digest != block_digest
+                || !block_operation.matches_review(
+                    review,
+                    token.repository.full_name.as_str(),
+                    request.pull_number,
+                    &request.head_sha,
+                    "block",
+                )
+            {
+                return Ok(true);
+            }
+            let mut corrected = false;
+            for candidate in reviews {
+                if candidate
+                    .corrects_block_operation(
+                        journal,
+                        block_operation_id,
+                        token.repository.full_name.as_str(),
+                        request.pull_number,
+                        &request.head_sha,
+                    )
+                    .await?
+                {
+                    corrected = true;
+                    break;
+                }
+            }
+            if !corrected {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn verify_no_merge_queue(
@@ -6011,7 +6167,7 @@ struct GitTreeEntry {
 struct CommitRequest<'a> {
     message: String,
     tree: &'a str,
-    parents: [&'a str; 1],
+    parents: Vec<&'a str>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -6041,6 +6197,22 @@ struct GitCommit {
     message: String,
     tree: GitObjectId,
     parents: Vec<GitParent>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct GitComparison {
+    status: String,
+    ahead_by: i64,
+    behind_by: i64,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl GitComparison {
+    fn proves_ancestor(&self) -> bool {
+        (self.status == "ahead" && self.ahead_by >= 1 && self.behind_by == 0)
+            || (self.status == "identical" && self.ahead_by == 0 && self.behind_by == 0)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -6502,19 +6674,56 @@ impl PullRequestReview {
             && self.state == REVIEW_STATE
     }
 
-    fn blocks_head(&self, head_sha: &str) -> bool {
-        if self.commit_id != head_sha {
-            return false;
-        }
-        // GitHub cannot delete a submitted review, and dismissal preserves its
-        // body. This App exposes no review-update operation, so its rendered
-        // BLOCK line remains the durable decision even if the review state is
-        // later changed to DISMISSED.
-        self.state == "CHANGES_REQUESTED"
-            || self.body.as_deref().is_some_and(|body| {
-                body.lines()
-                    .any(|line| line.trim() == format!("{REVIEW_VERDICT_PREFIX} block {head_sha}"))
+    // GitHub cannot delete a submitted review, and dismissal preserves its
+    // body. This App exposes no review-update operation, so its rendered
+    // BLOCK line remains the durable decision even if the review state is
+    // later changed to DISMISSED.
+    //
+    // Clearing a block requires the async merge path
+    // (`Authority::review_blocks_head`) to authenticate a correcting review
+    // through the durable operation journal. This pure predicate is
+    // deliberately conservative and never clears a block by itself, which
+    // also makes it safe for callers that do not have journal access.
+    fn is_block_for_head(&self, head_sha: &str) -> bool {
+        self.commit_id == head_sha
+            && (self.state == "CHANGES_REQUESTED"
+                || self.body.as_deref().is_some_and(|body| {
+                    body.lines().any(|line| {
+                        line.trim() == format!("{REVIEW_VERDICT_PREFIX} block {head_sha}")
+                    })
+                }))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn corrects_block_operation(
+        &self,
+        journal: &DeliveryJournal,
+        block_operation_id: &str,
+        repository: &str,
+        pull_number: i64,
+        head_sha: &str,
+    ) -> Result<bool, OperationError> {
+        let Some(body) = self.body.as_deref() else {
+            return Ok(false);
+        };
+        if self.commit_id != head_sha
+            || self.state != REVIEW_STATE
+            || !body.lines().any(|line| {
+                line.trim() == format!("{REVIEW_CORRECTION_PREFIX} {block_operation_id}")
             })
+        {
+            return Ok(false);
+        }
+        let Some((operation_id, digest)) = review_operation_marker(body) else {
+            return Ok(false);
+        };
+        let Some(operation) = completed_review_operation(journal, operation_id).await? else {
+            return Ok(false);
+        };
+        if operation.request_digest != digest {
+            return Ok(false);
+        }
+        Ok(operation.matches_review(self, repository, pull_number, head_sha, "allow"))
     }
 
     fn matches_allow_result(
@@ -6544,6 +6753,76 @@ impl PullRequestReview {
                     .url
                     .strip_prefix(&expected_url)
                     .is_some_and(|suffix| suffix.starts_with('#')))
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn review_operation_marker(body: &str) -> Option<(&str, &str)> {
+    body.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix(OPERATION_MARKER_PREFIX)?;
+        let (id, digest) = rest.strip_suffix(" -->")?.split_once(':')?;
+        (id.len() == 36
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+            && digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some((id, digest))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn completed_review_operation(
+    journal: &DeliveryJournal,
+    operation_id: &str,
+) -> Result<Option<OperationObservation>, OperationError> {
+    let Some(observation) = journal
+        .observe_operation(operation_id)
+        .await
+        .map_err(|_| OperationError::Unavailable)?
+    else {
+        return Ok(None);
+    };
+    if observation.kind != "submit_pull_request_review" || observation.state != "completed" {
+        return Ok(None);
+    }
+    Ok(Some(observation))
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OperationObservation {
+    fn matches_review(
+        &self,
+        review: &PullRequestReview,
+        repository: &str,
+        pull_number: i64,
+        head_sha: &str,
+        verdict: &str,
+    ) -> bool {
+        let Ok(result) = self
+            .result_json
+            .as_deref()
+            .ok_or(())
+            .and_then(|json| serde_json::from_str::<ReviewResult>(json).map_err(|_| ()))
+        else {
+            return false;
+        };
+        let expected_url = format!("https://github.com/{repository}/pull/{pull_number}");
+        result.review_id == review.id
+            && result.url == review.html_url
+            && result.head_sha == head_sha
+            && result.state == REVIEW_STATE
+            && result.verdict == verdict
+            && (result.url == expected_url
+                || result
+                    .url
+                    .strip_prefix(&expected_url)
+                    .is_some_and(|suffix| suffix.starts_with('#')))
+            && review.body.as_deref().is_some_and(|body| {
+                body.lines().any(|line| {
+                    line.trim() == format!("{REVIEW_VERDICT_PREFIX} {verdict} {head_sha}")
+                })
+            })
     }
 }
 
@@ -8621,6 +8900,7 @@ mod tests {
             operation_id: "11111111-2222-3333-4444-555555555555".into(),
             branch: "agent/work".into(),
             expected_head_sha: "a".repeat(40),
+            merge_parent_sha: None,
             message: "Do the thing".into(),
             changes,
         };
@@ -8771,6 +9051,51 @@ mod tests {
         different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
         assert_ne!(trailer, different_tree.trailer().unwrap());
         assert!(forged("Two\nlines").validate().is_err());
+        // A worker that integrated main publishes the merge it made: the
+        // branch head stays first parent, the integrated commit is second, and
+        // the changes are its diff from that commit rather than a copy of it.
+        let mut merge = base(vec![file("README.md")]);
+        assert_eq!(merge.parents(), vec!["a".repeat(40)]);
+        assert_eq!(merge.tree_base(), "a".repeat(40));
+        merge.merge_parent_sha = Some("b".repeat(40));
+        assert!(merge.validate().is_ok());
+        assert_eq!(merge.parents(), vec!["a".repeat(40), "b".repeat(40)]);
+        assert_eq!(merge.tree_base(), "b".repeat(40));
+        assert_ne!(trailer, merge.trailer().unwrap());
+        for refused in ["a".repeat(40), "B".repeat(40), "b".repeat(39)] {
+            merge.merge_parent_sha = Some(refused);
+            assert_eq!(merge.validate().err(), Some(OperationError::InvalidInput));
+        }
+    }
+
+    #[test]
+    fn a_merge_parent_requires_default_branch_ancestry() {
+        assert!(
+            GitComparison {
+                status: "ahead".into(),
+                ahead_by: 1,
+                behind_by: 0,
+            }
+            .proves_ancestor()
+        );
+        assert!(
+            GitComparison {
+                status: "identical".into(),
+                ahead_by: 0,
+                behind_by: 0,
+            }
+            .proves_ancestor()
+        );
+        for status in ["behind", "diverged", "identical"] {
+            assert!(
+                !GitComparison {
+                    status: status.into(),
+                    ahead_by: if status == "identical" { 1 } else { 0 },
+                    behind_by: 1,
+                }
+                .proves_ancestor()
+            );
+        }
     }
 
     #[test]
@@ -9422,6 +9747,56 @@ mod tests {
         };
         assert!(create.validate().is_ok());
         assert!(create.marked_body().unwrap().contains("Closes #390"));
+        let mut supplied_footer = create.clone();
+        supplied_footer.body.push_str("\n\nCloses #390\n");
+        let rendered = supplied_footer.marked_body().unwrap();
+        assert_eq!(rendered.matches("Closes #390").count(), 1);
+        assert!(rendered.ends_with(&supplied_footer.marker().unwrap()));
+        supplied_footer.body.push_str("Closes #390\n");
+        assert_eq!(
+            supplied_footer
+                .marked_body()
+                .unwrap()
+                .matches("Closes #390")
+                .count(),
+            1
+        );
+        let mut conflicting_footer = create.clone();
+        conflicting_footer.body.push_str("\n\nRefs #391\n");
+        assert_eq!(
+            conflicting_footer.marked_body().err(),
+            Some(OperationError::InvalidInput)
+        );
+        let mut whitespace_separated_conflict = create.clone();
+        whitespace_separated_conflict
+            .body
+            .push_str("\n\nRefs #391\n \t\nCloses #390\n");
+        assert_eq!(
+            whitespace_separated_conflict.marked_body().err(),
+            Some(OperationError::InvalidInput)
+        );
+        let mut whitespace_separated_duplicates = create.clone();
+        whitespace_separated_duplicates
+            .body
+            .push_str("\n\nCloses #390\n \t\nCloses #390\n");
+        assert_eq!(
+            whitespace_separated_duplicates
+                .marked_body()
+                .unwrap()
+                .matches("Closes #390")
+                .count(),
+            1
+        );
+        let mut inline_reference = create.clone();
+        inline_reference
+            .body
+            .push_str("\nRelated context: Refs #391");
+        assert!(
+            inline_reference
+                .marked_body()
+                .unwrap()
+                .contains("Refs #391")
+        );
         let mut references = create.clone();
         references.close_on_merge = false;
         assert!(references.marked_body().unwrap().contains("Refs #390"));
@@ -9604,6 +9979,7 @@ mod tests {
             head_sha: "a".repeat(40),
             event: ReviewEvent::RequestChanges,
             body: "Exact finding.".into(),
+            corrects_review_operation_id: None,
         };
         // `uuidgen` on macOS emits this, and refusing it cost two callers a
         // blind retry before it was canonicalized instead.
@@ -9727,6 +10103,39 @@ mod tests {
         let blocked = posted_block.into_result(&block).unwrap();
         assert_eq!(blocked.state, "COMMENTED");
         assert_eq!(blocked.verdict, "block");
+
+        // A metadata-only correction may clear an erroneous block at the same
+        // head, but only when the fresh independent review names that exact
+        // prior App operation. A plain ALLOW remains insufficient. Actually
+        // clearing the block is journal-authenticated on the wasm32-only
+        // merge path (`Authority::review_blocks_head`), which native `cargo
+        // test` cannot reach; what is provable here is the wire format that
+        // path and `verify-adversarial-review.sh` both read, and that the
+        // pure predicate never clears a block by itself.
+        let correction = SubmitPullRequestReview {
+            repository: block.repository.clone(),
+            operation_id: "4c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: block.pull_number,
+            head_sha: block.head_sha.clone(),
+            event: ReviewEvent::Allow,
+            body: "The prior finding was based on corrected metadata.".into(),
+            corrects_review_operation_id: Some(block.operation_id.clone()),
+        };
+        assert!(correction.clone().validate().is_ok());
+        assert!(correction.marked_body().unwrap().contains(&format!(
+            "{REVIEW_CORRECTION_PREFIX} {}",
+            block.operation_id
+        )));
+        let blocking_review = PullRequestReview {
+            id: 6,
+            html_url:
+                "https://github.com/dark-factory-build/dark-factory/pull/331#pullrequestreview-6"
+                    .into(),
+            body: Some(block.marked_body().unwrap()),
+            commit_id: block.head_sha.clone(),
+            state: REVIEW_STATE.into(),
+        };
+        assert!(blocking_review.is_block_for_head(&block.head_sha));
         assert!(
             PullRequestReview {
                 id: 5,
@@ -9757,6 +10166,14 @@ mod tests {
                 "caller body must not be able to write a verdict: {forged}"
             );
         }
+        assert!(
+            SubmitPullRequestReview {
+                body: format!("Dark-Factory-Review-Correction: {}", block.operation_id),
+                ..allow.clone()
+            }
+            .validate()
+            .is_err()
+        );
 
         // An ALLOW is reconciled from the `COMMENTED` state it was posted as.
         let recovered = PullRequestReview {
@@ -9815,6 +10232,69 @@ mod tests {
                 ..recovered
             }
             .matches(&allow)
+        );
+    }
+
+    /// `corrects_review_operation_id` was added after this operation shipped.
+    /// A retry of a pre-change request still arrives with the field absent,
+    /// deserializes to `None` via `#[serde(default)]`, and must hash to
+    /// exactly the digest it always did -- `skip_serializing_if` is what
+    /// keeps `None` out of the JSON the digest is taken over. Without it, a
+    /// legacy retry would compute a different digest than its own prior
+    /// attempt and hit the journal's `Conflict` path instead of reconciling.
+    #[test]
+    fn corrects_review_operation_id_does_not_change_the_legacy_digest() {
+        #[derive(Serialize)]
+        struct LegacyShape {
+            repository: String,
+            operation_id: String,
+            pull_number: i64,
+            head_sha: String,
+            event: ReviewEvent,
+            body: String,
+        }
+
+        let request = SubmitPullRequestReview {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "5c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 331,
+            head_sha: "d".repeat(40),
+            event: ReviewEvent::Allow,
+            body: "Legacy retry, no correction field.".into(),
+            corrects_review_operation_id: None,
+        };
+        let legacy = LegacyShape {
+            repository: request.repository.clone(),
+            operation_id: request.operation_id.clone(),
+            pull_number: request.pull_number,
+            head_sha: request.head_sha.clone(),
+            event: request.event,
+            body: request.body.clone(),
+        };
+        assert_eq!(
+            request_digest(&request).unwrap(),
+            request_digest(&legacy).unwrap(),
+            "a field-absent replay must reproduce the pre-change digest exactly"
+        );
+
+        // The field is not silently invisible to the digest once it is
+        // actually used: a correction is a different request from the replay
+        // above, and from a request naming a different prior operation.
+        let corrected = SubmitPullRequestReview {
+            corrects_review_operation_id: Some("6c8a5c44-7f1f-11f0-952e-acde48001122".into()),
+            ..request.clone()
+        };
+        assert_ne!(
+            request_digest(&request).unwrap(),
+            request_digest(&corrected).unwrap()
+        );
+        let corrected_other = SubmitPullRequestReview {
+            corrects_review_operation_id: Some("7c8a5c44-7f1f-11f0-952e-acde48001122".into()),
+            ..request
+        };
+        assert_ne!(
+            request_digest(&corrected).unwrap(),
+            request_digest(&corrected_other).unwrap()
         );
     }
 
@@ -10052,8 +10532,8 @@ mod tests {
             commit_id: head.clone(),
             state: "COMMENTED".into(),
         };
-        assert!(app_block.blocks_head(&head));
-        assert!(!app_block.blocks_head(&"b".repeat(40)));
+        assert!(app_block.is_block_for_head(&head));
+        assert!(!app_block.is_block_for_head(&"b".repeat(40)));
         assert!(
             PullRequestReview {
                 id: 3,
@@ -10062,7 +10542,7 @@ mod tests {
                 commit_id: head.clone(),
                 state: "DISMISSED".into(),
             }
-            .blocks_head(&head)
+            .is_block_for_head(&head)
         );
     }
 

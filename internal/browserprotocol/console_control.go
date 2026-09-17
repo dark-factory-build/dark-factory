@@ -1,6 +1,7 @@
 package browserprotocol
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -112,8 +113,10 @@ type RunPaths struct {
 
 // AccountsDiscover asks what provider logins exist on this machine. It is an
 // observation of the operator's own home directory, not durable state, so it
-// carries no selector and no revision.
-type AccountsDiscover struct{}
+// carries no revision. Offset continues a bounded observation.
+type AccountsDiscover struct {
+	Offset uint32 `json:"offset,omitempty"`
+}
 
 // DiscoveredAccount is one CLI login the daemon found. Identity comes from the
 // login's own files; the tokens that prove it never leave the daemon and have
@@ -127,10 +130,70 @@ type DiscoveredAccount struct {
 	DefaultModel           string `json:"default_model"`
 	DefaultReasoningEffort string `json:"default_reasoning_effort"`
 	LinkedID               string `json:"linked_id"`
+	// UnavailableReason is optional so older daemons can still describe a
+	// login without claiming why it cannot serve a particular selection.
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 type Accounts struct {
-	Accounts []DiscoveredAccount `json:"accounts"`
+	Accounts   []DiscoveredAccount `json:"accounts"`
+	NextOffset *uint32             `json:"next_offset,omitempty"`
+}
+
+// PageAccounts returns one complete, byte-bounded account page. The offset is
+// cumulative; it is never a per-page entity number.
+func PageAccounts(all []DiscoveredAccount, offset uint32) (Accounts, error) {
+	if uint64(offset) > uint64(len(all)) {
+		return Accounts{}, ErrMalformed
+	}
+	// Account entries are independent JSON values. Track their exact encoded
+	// bytes instead of repeatedly encoding the growing page (which is
+	// quadratic for a large observation). The maximum cursor allowance covers
+	// every uint32 cursor; the finished page is still encoded and validated.
+	maximumCursor := uint32(^uint32(0))
+	withCursor, err := EncodeAccounts("accounts", Accounts{Accounts: []DiscoveredAccount{}, NextOffset: &maximumCursor})
+	if err != nil {
+		return Accounts{}, err
+	}
+	baseBytes := len(withCursor)
+	page := Accounts{Accounts: make([]DiscoveredAccount, 0, MaxSnapshotEntities)}
+	entryBytes := 0
+	for index := int(offset); index < len(all) && len(page.Accounts) < MaxSnapshotEntities; index++ {
+		if err := ValidDiscoveredAccount(all[index]); err != nil {
+			return Accounts{}, err
+		}
+		encoded, err := json.Marshal(all[index])
+		if err != nil {
+			return Accounts{}, fmt.Errorf("%w: account: %v", ErrMalformed, err)
+		}
+		separator := 0
+		if len(page.Accounts) != 0 {
+			separator = 1
+		}
+		// Leave room for the local API response envelope too. The browser
+		// frame and the API frame must both carry the same complete page.
+		if baseBytes+entryBytes+separator+len(encoded)+1024 > MaxSnapshotBytes {
+			if len(page.Accounts) == 0 {
+				return Accounts{}, ErrOversized
+			}
+			break
+		}
+		page.Accounts = append(page.Accounts, all[index])
+		entryBytes += separator + len(encoded)
+	}
+	end := int(offset) + len(page.Accounts)
+	if end < len(all) {
+		next := uint32(end)
+		page.NextOffset = &next
+	}
+	encoded, err := EncodeAccounts("accounts", page)
+	if err != nil {
+		return Accounts{}, err
+	}
+	if len(encoded)+1024 > MaxSnapshotBytes {
+		return Accounts{}, ErrOversized
+	}
+	return page, nil
 }
 
 // AccountLink registers one login that already exists. Starting a new CLI
@@ -351,7 +414,7 @@ func validConsoleControl(kind MessageType, body any) error {
 		}
 	case AccountsDiscover:
 	case Accounts:
-		if value.Accounts == nil || len(value.Accounts) > MaxJSONArray {
+		if value.Accounts == nil || len(value.Accounts) > MaxSnapshotEntities || value.NextOffset != nil && *value.NextOffset == 0 {
 			return bad()
 		}
 		for _, account := range value.Accounts {
@@ -413,6 +476,7 @@ func ValidDiscoveredAccount(value DiscoveredAccount) error {
 		validateBoundedText(value.Organization, 0, MaxAgentNameBytes) != nil ||
 		validateBoundedText(value.DefaultModel, 0, MaxAgentModelBytes) != nil ||
 		validateBoundedText(value.DefaultReasoningEffort, 0, MaxAgentModelBytes) != nil ||
+		validateBoundedText(value.UnavailableReason, 0, MaxAgentNameBytes) != nil ||
 		value.LinkedID != "" && validateDynamicID(value.LinkedID) != nil {
 		return fmt.Errorf("%w: discovered account", ErrMalformed)
 	}

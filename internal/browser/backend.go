@@ -84,7 +84,8 @@ type AuthRequest struct {
 
 // StateUpdate is exactly one head-only invalidation. It carries no entity
 // data: the client refetches a whole snapshot when it wants current state.
-// Closing Updates is treated as an internal failure and forces reconnect.
+// Closing Updates ends the connection; a retained subscription error determines
+// whether the client may reconnect. Clean closure reconnects through transport loss.
 type StateUpdate struct {
 	Head browserprotocol.Decimal
 }
@@ -212,7 +213,7 @@ type ConsoleBackend interface {
 	UpdateTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error)
 	Topology(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TopologyGet) (browserprotocol.Topology, error)
 	RunPaths(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RunPathsGet) (browserprotocol.RunPaths, error)
-	DiscoverAccounts(context.Context, [browserprotocol.ClientIDSize]byte) (browserprotocol.Accounts, error)
+	DiscoverAccounts(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AccountsDiscover) (browserprotocol.Accounts, error)
 	LinkAccount(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AccountLink) (browserprotocol.AccountLinkResult, error)
 	UpdateAccount(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AccountUpdate) (browserprotocol.AccountUpdateResult, error)
 	// ListBrowserClients and RevokeBrowserClient let an administrator see and

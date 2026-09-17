@@ -143,7 +143,7 @@ func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDi
 	if task.ProjectID != run.ProjectID {
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
-	if task.ID == run.TaskID {
+	if task.ID == run.TaskID || task.AssignedAgentID.zero() {
 		return Task{}, tx.Rollback(ErrConflict)
 	}
 	agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
@@ -163,7 +163,102 @@ func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDi
 	return updated, nil
 }
 
+// RetryTaskForOverseer atomically reassigns a settled blocked/failed worker
+// task and returns that same task identity to the queue. Keeping the
+// assignment change and retry transition in one validated write prevents the
+// old worker from being admitted between two operator calls.
+func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
+	if id.zero() || expected.Int64() < 1 || assigned.zero() {
+		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Task{}, err
+	}
+	defer tx.Close()
+	run, err := overseerRun(ctx, tx.connection, digest)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	task, found, err := taskByID(ctx, tx.connection, id)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if !found {
+		return Task{}, tx.Rollback(ErrNotFound)
+	}
+	if task.ProjectID != run.ProjectID {
+		return Task{}, tx.Rollback(ErrUnauthorized)
+	}
+	if task.Revision != expected {
+		return Task{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if task.Status != TaskBlocked && task.Status != TaskFailed {
+		return Task{}, tx.Rollback(ErrConflict)
+	}
+	if at.Int64() < task.UpdatedAt.Int64() {
+		return Task{}, tx.Rollback(ErrRevisionConflict)
+	}
+	original, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	// A retry is an overseer operation on a settled worker task. Validate the
+	// existing owner as well as the replacement so retry cannot be used to
+	// move an orchestrator-owned task into the worker queue.
+	if !found || original.ProjectID != task.ProjectID || original.Role != RoleWorker {
+		return Task{}, tx.Rollback(ErrUnauthorized)
+	}
+	var active int
+	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runs WHERE task_id = ? AND phase <> 'terminal')`, id.Bytes()).Scan(&active); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if active != 0 {
+		return Task{}, tx.Rollback(ErrConflict)
+	}
+	agent, found, err := agentByID(ctx, tx.connection, assigned)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if !found || agent.ProjectID != run.ProjectID || agent.Role != RoleWorker {
+		return Task{}, tx.Rollback(ErrUnauthorized)
+	}
+	if agent.Archived {
+		return Task{}, tx.Rollback(ErrConflict)
+	}
+	var runs int64
+	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ?`, id.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64()).Scan(&runs); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if runs != 1 {
+		return Task{}, tx.Rollback(ErrConflict)
+	}
+	next := task.WorkRevision.Int64() + 1
+	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET status = 'queued', assigned_agent_id = ?, work_revision = ?, blocked_reason = NULL, result = NULL, completed_at_ms = NULL, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ? AND status IN ('blocked', 'failed')`, assigned.Bytes(), next, at.Int64(), id.Bytes(), expected.Int64())
+	if err := requireOneRow(result, err); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityTask, id: id.Bytes(), revision: expected.Int64() + 1}}); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	updated, found, err := taskByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Task{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, err
+	}
+	return updated, nil
+}
+
 func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note string, at UnixMillis) (Task, error) {
+	if task.AssignedAgentID.zero() {
+		// Never claimed, so there is no run to correct.
+		return Task{}, ErrConflict
+	}
 	agent, found, err := agentByID(ctx, connection, task.AssignedAgentID)
 	if err != nil {
 		return Task{}, err

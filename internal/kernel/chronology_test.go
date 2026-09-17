@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -25,7 +26,7 @@ func TestActivateRunRejectsCausallyEarlyResources(t *testing.T) {
 	}
 }
 
-func TestFactoryTimestampGuardsWritesButNotExactReplay(t *testing.T) {
+func TestFactoryTimestampAndRevisionGuardEveryControlIntent(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
 	initial, err := store.Factory(context.Background())
@@ -44,9 +45,10 @@ func TestFactoryTimestampGuardsWritesButNotExactReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	before = captureWriteFootprint(t, store)
-	replay, err := store.SetCapacity(context.Background(), initial.Revision, 2, mustTime(t, 0))
-	if err != nil || replay.Revision != updated.Revision || replay.updatedAt != updated.updatedAt {
-		t.Fatalf("older factory replay = %+v, %v", replay, err)
+	for _, revision := range []Revision{initial.Revision, updated.Revision} {
+		if _, err := store.SetCapacity(context.Background(), revision, 2, mustTime(t, 0)); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("older same-value control = %v", err)
+		}
 	}
 	if after := captureWriteFootprint(t, store); after != before {
 		t.Fatalf("older factory replay footprint before=%+v after=%+v", before, after)
@@ -267,6 +269,12 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 	if _, err := store.SendBackTask(ctx, sent.ID, sent.Revision, "again", mustTime(t, 92)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("queued task sent back = %v", err)
 	}
+	// Requirements belong in the editable instruction, not the replaceable note.
+	durableInstruction := legacyInstruction + "\nIntegrate reviewed prerequisite #744; preserve exact owner authority."
+	edited, err := store.UpdateTask(ctx, sent.ID, sent.Revision, TaskPatch{Body: &durableInstruction}, mustTime(t, 93))
+	if err != nil || TaskInstruction(edited) != durableInstruction || TaskFeedback(edited) != TaskFeedback(sent) {
+		t.Fatalf("durable correction instruction = %+v, %v", edited, err)
+	}
 	candidate := changeID(t, 110)
 	keys := admissionKeys(t, 100, &candidate)
 	result, err := store.AdmitNext(ctx, keys, mustTime(t, 100))
@@ -302,7 +310,7 @@ func TestSuccessfulTerminalCanBeSentBackAndRetried(t *testing.T) {
 		t.Fatalf("second terminal task = %+v, found=%v, %v", retried, found, err)
 	}
 	second, err := store.SendBackTask(ctx, retried.ID, retried.Revision, "the second note", mustTime(t, 160))
-	if err != nil || second.Body != legacyInstruction+"\n\n## Sent back for work revision 3\n\nthe second note" || second.SentBackInstructionBytes == nil || *second.SentBackInstructionBytes != int64(byteLen(legacyInstruction)) {
+	if err != nil || second.Body != durableInstruction+"\n\n## Sent back for work revision 3\n\nthe second note" || second.SentBackInstructionBytes == nil || *second.SentBackInstructionBytes != int64(byteLen(durableInstruction)) {
 		t.Fatalf("second send-back = %+v, %v", second, err)
 	}
 }
@@ -672,8 +680,7 @@ func TestSourceFailuresThatAreNotRefusalsRetryAsBefore(t *testing.T) {
 		if err != nil || !found || change.Phase != ChangeAvailable {
 			t.Fatalf("available Change = %+v, found=%v, %v", change, found, err)
 		}
-		availability := mustChangeAvailability(t, change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
-		retained, _ := NewRetainedChangeSettlement(change.Revision, availability)
+		retained, _ := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
 		terminal, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, retained, mustTime(t, 80))
 		if err != nil {
 			t.Fatal(err)
@@ -703,8 +710,7 @@ func TestRefusedPublicationOnARetainedRetryAbandonsAndRetriesFresh(t *testing.T)
 	if err != nil || !found || change.Phase != ChangeAvailable {
 		t.Fatalf("available Change = %+v, found=%v, %v", change, found, err)
 	}
-	availability := mustChangeAvailability(t, change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
-	retained, _ := NewRetainedChangeSettlement(change.Revision, availability)
+	retained, _ := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
 	first, err := store.FinalizeWorkerRun(ctx, finalizing.ID, finalizing.Revision, retained, mustTime(t, 80))
 	if err != nil {
 		t.Fatal(err)
@@ -989,6 +995,133 @@ func retryQueuedWorker(t *testing.T, taskUpdatedAt int64) (*Store, Run, AgentID,
 	return store, terminal, agentID, keys
 }
 
+func TestRetryTaskForOverseerAtomicallyReassignsSettledTask(t *testing.T) {
+	ctx := context.Background()
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+	project, found, err := store.Project(ctx, terminal.ProjectID)
+	if err != nil || !found {
+		t.Fatalf("project = %+v, found=%v, err=%v", project, found, err)
+	}
+
+	replacement, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 244), ProjectID: project.ID, Name: "replacement", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 34))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 245), ProjectID: project.ID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 35))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 246), ProjectID: project.ID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 247), Title: "oversee"}, mustTime(t, 36))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseerKeys := admissionKeys(t, 248, nil)
+	overseerAdmission, err := store.AdmitNext(ctx, overseerKeys, mustTime(t, 37))
+	if err != nil || !overseerAdmission.Admitted() {
+		t.Fatalf("overseer admission = %+v, %v", overseerAdmission, err)
+	}
+	_, runningOverseer := activateAllResources(t, store, *overseerAdmission.Run, overseerKeys, 38)
+	session := terminalSessionForRunTest(t, store, runningOverseer.ID)
+	runningOverseer, err = store.ActivateRun(ctx, runningOverseer.ID, session.ID, runningOverseer.Revision, session.Revision, mustTime(t, 42))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeTask, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found {
+		t.Fatalf("terminal task = %+v, found=%v, err=%v", beforeTask, found, err)
+	}
+	beforeHistory, err := store.TaskInterventions(ctx, terminal.ProjectID, terminal.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := store.RetryTaskForOverseer(ctx, overseerKeys.AttemptDigest, terminal.TaskID, terminal.Revision, replacement.ID, mustTime(t, 43))
+	if err != nil {
+		t.Fatalf("atomic retry = %v", err)
+	}
+	nextWorkRevision, _ := NewRevision(beforeTask.WorkRevision.Int64() + 1)
+	nextRevision, _ := NewRevision(beforeTask.Revision.Int64() + 1)
+	if retried.ID != beforeTask.ID || retried.IncarnationID != beforeTask.IncarnationID || retried.AssignedAgentID != replacement.ID || retried.Status != TaskQueued || retried.WorkRevision != nextWorkRevision || retried.Revision != nextRevision {
+		t.Fatalf("retry changed task identity or revisions: before=%+v after=%+v", beforeTask, retried)
+	}
+	afterHistory, err := store.TaskInterventions(ctx, terminal.ProjectID, terminal.TaskID)
+	if err != nil || len(afterHistory) != len(beforeHistory) {
+		t.Fatalf("retry changed intervention history: before=%d after=%d err=%v", len(beforeHistory), len(afterHistory), err)
+	}
+
+	// Admission observes the single committed state; the old worker cannot win
+	// an interleaved admission between reassignment and the retry transition.
+	newKeys := admissionKeys(t, 30, nil)
+	admission, err := store.AdmitNext(ctx, newKeys, mustTime(t, 44))
+	if err != nil || !admission.Admitted() || admission.Run.AgentID != replacement.ID || admission.Run.TaskID != terminal.TaskID || admission.Run.AdmittedTaskWorkRevision != retried.WorkRevision {
+		t.Fatalf("post-retry admission = %+v, %v", admission, err)
+	}
+}
+
+// TestRetryTaskForOverseerRefusesCausallyEarlyTimestamp guards the same
+// chronology every neighbouring send-back/update path enforces against
+// task.UpdatedAt: a retry timestamped before the settled task's own last
+// update must be refused, atomically, with no row changed, rather than
+// committing invalid chronology later validation would reject.
+func TestRetryTaskForOverseerRefusesCausallyEarlyTimestamp(t *testing.T) {
+	ctx := context.Background()
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+	project, found, err := store.Project(ctx, terminal.ProjectID)
+	if err != nil || !found {
+		t.Fatalf("project = %+v, found=%v, err=%v", project, found, err)
+	}
+
+	replacement, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 244), ProjectID: project.ID, Name: "replacement", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 34))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 245), ProjectID: project.ID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 35))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 246), ProjectID: project.ID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 247), Title: "oversee"}, mustTime(t, 36))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseerKeys := admissionKeys(t, 248, nil)
+	overseerAdmission, err := store.AdmitNext(ctx, overseerKeys, mustTime(t, 37))
+	if err != nil || !overseerAdmission.Admitted() {
+		t.Fatalf("overseer admission = %+v, %v", overseerAdmission, err)
+	}
+	_, runningOverseer := activateAllResources(t, store, *overseerAdmission.Run, overseerKeys, 38)
+	session := terminalSessionForRunTest(t, store, runningOverseer.ID)
+	runningOverseer, err = store.ActivateRun(ctx, runningOverseer.ID, session.ID, runningOverseer.Revision, session.Revision, mustTime(t, 42))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeTask, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found {
+		t.Fatalf("terminal task = %+v, found=%v, err=%v", beforeTask, found, err)
+	}
+	beforeHistory, err := store.TaskInterventions(ctx, terminal.ProjectID, terminal.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := mustTime(t, beforeTask.UpdatedAt.Int64()-1)
+	if _, err := store.RetryTaskForOverseer(ctx, overseerKeys.AttemptDigest, terminal.TaskID, terminal.Revision, replacement.ID, stale); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale retry = %v, want ErrRevisionConflict", err)
+	}
+	afterTask, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found {
+		t.Fatalf("after task = %+v, found=%v, err=%v", afterTask, found, err)
+	}
+	if !reflect.DeepEqual(beforeTask, afterTask) {
+		t.Fatalf("stale retry mutated the task: before=%+v after=%+v", beforeTask, afterTask)
+	}
+	afterHistory, err := store.TaskInterventions(ctx, terminal.ProjectID, terminal.TaskID)
+	if err != nil || !reflect.DeepEqual(beforeHistory, afterHistory) {
+		t.Fatalf("stale retry changed intervention history: before=%+v after=%+v err=%v", beforeHistory, afterHistory, err)
+	}
+}
+
 func queueRetryForTerminal(t *testing.T, store *Store, terminal Run, taskUpdatedAt int64) (AgentID, AdmissionKeys) {
 	return queueRetryForTerminalSeed(t, store, terminal, taskUpdatedAt, 220)
 }
@@ -1160,14 +1293,12 @@ func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 		t.Fatal(err)
 	}
 	selection := testChangeSelection(t)
-	stage, _ := NewFileIdentity(70, 80)
-	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, stage, mustTime(t, 12))
+	prepared, err := store.RecordChangePrepared(context.Background(), *run.ChangeID, mustRevision(t, 1), selection, mustTime(t, 12))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	availability := mustChangeAvailability(t, selection.commitment, selection.entries, selection.bytes, stage)
-	if _, err := store.MarkChangeAvailable(context.Background(), *run.ChangeID, prepared.Revision, availability, mustTime(t, 13)); err != nil {
+	if _, err := store.MarkChangeAvailable(context.Background(), *run.ChangeID, prepared.Revision, selection.commit, mustTime(t, 13)); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
@@ -1182,7 +1313,7 @@ func terminalPreRunningAvailableWorker(t *testing.T) (*Store, Run) {
 		store.Close()
 		t.Fatal(err)
 	}
-	settlement, _ := NewRetainedChangeSettlement(mustRevision(t, 3), availability)
+	settlement, _ := NewRetainedChangeSettlement(mustRevision(t, 3), &selection.commit)
 	terminal, err := store.FinalizeWorkerRun(context.Background(), run.ID, finalizing.Revision, settlement, mustTime(t, 33))
 	if err != nil {
 		store.Close()

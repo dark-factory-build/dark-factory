@@ -348,6 +348,76 @@ func TestConcurrentCloseAndWaitReturnOneStableResult(t *testing.T) {
 	assertReleased(t, home, address)
 }
 
+// Cleanup continuations are independent of the scheduler owner, but shutdown
+// must still join them before releasing the daemon and runtime authority.
+func TestShutdownJoinsCleanupContinuation(t *testing.T) {
+	owner := &process{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	owner.cleanupWG.Add(1)
+	go func() {
+		defer owner.cleanupWG.Done()
+		close(started)
+		<-release
+	}()
+	<-started
+
+	done := make(chan error, 1)
+	go func() { done <- owner.shutdown() }()
+	select {
+	case err := <-done:
+		t.Fatalf("shutdown returned before cleanup joined: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("shutdown = %v", err)
+	}
+}
+
+func TestCleanupContinuationRoutesAndDeduplicatesRun(t *testing.T) {
+	owner := &process{
+		cleanupRuns:    make(map[kernel.RunID]struct{}),
+		supervisorSpec: daemon.SupervisorSpec{ChangeParent: "/changes"},
+	}
+	runID, err := kernel.RunIDFromBytes(bytes.Repeat([]byte{0xa5}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := make(chan struct{}, 2)
+	previous := continueUnsettledRun
+	continueUnsettledRun = func(value *daemon.Daemon, ctx context.Context, parent *daemon.RuntimeParent, changeParent string, id kernel.RunID) error {
+		if value != nil || parent != nil || changeParent != "/changes" || id != runID {
+			t.Fatalf("continuation inputs = daemon=%p parent=%p changeParent=%q id=%v", value, parent, changeParent, id)
+		}
+		calls <- struct{}{}
+		close(started)
+		<-release
+		return nil
+	}
+	defer func() { continueUnsettledRun = previous }()
+
+	owner.startCleanupContinuation(context.Background(), runID)
+	<-started
+	<-calls
+	owner.startCleanupContinuation(context.Background(), runID)
+	select {
+	case <-calls:
+		t.Fatal("duplicate cleanup continuation started")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	owner.cleanupWG.Wait()
+	owner.cleanupMu.Lock()
+	_, stillRunning := owner.cleanupRuns[runID]
+	owner.cleanupMu.Unlock()
+	if stillRunning {
+		t.Fatal("cleanup continuation remained registered")
+	}
+}
+
 func initializedHome(t *testing.T) string {
 	t.Helper()
 	root, err := os.MkdirTemp("/private/tmp", "dark-factory-factoryd-")
@@ -484,8 +554,13 @@ func TestDeriveSupervisorSpecResolvesSymlinkedSelfToCommittedSiblings(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantToolPath := filepath.Join(accountHome, ".local", "bin") + string(filepath.ListSeparator) + defaultToolPath
-	if spec.GitExecutable != defaultGitExecutable || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != wantToolPath || spec.AccountHome != accountHome {
+	supportedPath, supportedRoots := install.SupportedToolchain(accountHome)
+	wantToolPath := filepath.Join(accountHome, ".local", "bin") + string(filepath.ListSeparator)
+	if supportedPath != "" {
+		wantToolPath += supportedPath + string(filepath.ListSeparator)
+	}
+	wantToolPath += defaultToolPath
+	if spec.GitExecutable != defaultGitExecutable || spec.BaseRevision != "refs/heads/main" || spec.ToolPath != wantToolPath || spec.ToolchainReadRoots != supportedRoots || spec.AccountHome != accountHome {
 		t.Fatalf("boot inputs = %+v", spec)
 	}
 	if spec.ChangeParent != filepath.Join(home, "changes") || spec.AttemptSocket != install.LocalAPISocketPath(home) {

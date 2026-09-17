@@ -20,7 +20,7 @@ const publicTaskIDs = `WITH public_task_ids AS (
  UNION SELECT r.task_id FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE h.status IN ('open', 'delivering', 'delivery_unknown')
  UNION SELECT id FROM (
   SELECT id, ROW_NUMBER() OVER (PARTITION BY assigned_agent_id ORDER BY updated_at_ms DESC, id DESC) AS rank
-  FROM tasks WHERE status NOT IN ('queued', 'running')
+  FROM tasks WHERE status NOT IN ('queued', 'running') AND assigned_agent_id IS NOT NULL
  ) WHERE rank = 1
 ) `
 
@@ -197,7 +197,7 @@ func scanPublicTasks(rows *sql.Rows) ([]TaskSummary, error) {
 		}
 		id, idErr := TaskIDFromBytes(rawID)
 		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
-		agentID, agentErr := AgentIDFromBytes(rawAgentID)
+		agentID, agentErr := optionalAgentID(rawAgentID)
 		status, statusErr := parseTaskStatus(rawStatus)
 		revision, revisionErr := NewRevision(rawRevision)
 		updatedAt, updatedAtErr := NewUnixMillis(rawUpdatedAt)

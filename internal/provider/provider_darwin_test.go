@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -74,13 +75,36 @@ func requestFor(t *testing.T, kind kernel.Provider, installation Installation, r
 	return roleRequestFor(t, kind, installation, runtime, model, effort, kernel.RoleWorker)
 }
 
+// testAgentID and testIncarnationID stand in for the durable agent and task
+// incarnation identifiers a real supervisor call site always supplies.
+const (
+	testAgentID       = "agent-fixture"
+	testIncarnationID = "incarnation-fixture"
+)
+
 func roleRequestFor(t *testing.T, kind kernel.Provider, installation Installation, runtime RuntimePaths, model, effort string, role kernel.AgentRole) Request {
 	t.Helper()
-	request, err := NewRequest(kind, installation, model, effort, runtime, filepath.Join(t.TempDir(), "change"), role)
+	request, err := NewRequest(kind, installation, model, effort, runtime, filepath.Join(t.TempDir(), "change"), role, testAgentID, testIncarnationID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return request
+}
+
+// wantClaudeWorkerSessionFlag computes the exact --session-id/--resume pair
+// Build derives for a Claude Code worker request, so exact-argv tests can
+// splice in the value without hardcoding a UUID that depends on per-test
+// temp-directory paths.
+func wantClaudeWorkerSessionFlag(t *testing.T, request Request) []string {
+	t.Helper()
+	id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume {
+		return []string{"--resume", id}
+	}
+	return []string{"--session-id", id}
 }
 
 // An orchestrator's Claude session is handed the Maintainer bridge as its one
@@ -88,12 +112,15 @@ func roleRequestFor(t *testing.T, kind kernel.Provider, installation Installatio
 // an orchestrator without the bridge is not launched at all.
 func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	installation, runtime, locator := nativeFixture(t, kernel.ProviderClaudeCode)
-	worker, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleWorker))
+	workerRequest := roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleWorker)
+	worker, err := Build(workerRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(worker.Argv(), []string{"/usr/bin/true", "--dangerously-skip-permissions", "--strict-mcp-config"}) {
-		t.Fatalf("worker argv = %q, want strict MCP with no server", worker.Argv())
+	wantWorkerArgv := append([]string{"/usr/bin/true", "--dangerously-skip-permissions"}, wantClaudeWorkerSessionFlag(t, workerRequest)...)
+	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config")
+	if !reflect.DeepEqual(worker.Argv(), wantWorkerArgv) {
+		t.Fatalf("worker argv = %q, want %q", worker.Argv(), wantWorkerArgv)
 	}
 	if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("orchestrator without the bridge = %v, want ErrUnavailable", err)
@@ -116,6 +143,15 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
+	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
+		t.Fatalf("runner rejected Claude overseer environment: %v", err)
+	}
+	if !slices.Contains(launch.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
+		t.Fatal("Claude overseer lost its exact bridge environment")
+	}
+	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
+		t.Fatal("Claude worker inherited publication authority")
+	}
 	// A bridge that is present but unfit is refused by name, unlike a
 	// missing one, so the operator learns which of the two it is.
 	for name, mode := range map[string]os.FileMode{"not executable": 0o644, "group writable": 0o775} {
@@ -132,8 +168,16 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) || errors.Is(err, errBridgeUnfit) {
 		t.Fatalf("missing bridge = %v, want ErrUnavailable alone", err)
 	}
-	if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.AgentRole(0)); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.AgentRole(0), testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("request without a role = %v, want ErrInvalid", err)
+	}
+	for _, part := range []string{"", string([]byte{0xff}), "id\x00suffix"} {
+		if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.RoleWorker, part, testIncarnationID); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("request with agent id %q = %v, want ErrInvalid", part, err)
+		}
+		if _, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, "/private/change", kernel.RoleWorker, testAgentID, part); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("request with task incarnation id %q = %v, want ErrInvalid", part, err)
+		}
 	}
 }
 
@@ -163,6 +207,7 @@ func TestBuildShellReturnsExactImmutableLaunchAndTask(t *testing.T) {
 		"TMPDIR=" + runtime.temp,
 		"PATH=" + runtime.toolPath,
 		"LANG=C", "LC_ALL=C", "TERM=xterm-256color", "SHELL=/bin/sh",
+		"GIT_AUTHOR_NAME=" + GitIdentityName, "GIT_AUTHOR_EMAIL=" + GitIdentityEmail, "GIT_COMMITTER_NAME=" + GitIdentityName, "GIT_COMMITTER_EMAIL=" + GitIdentityEmail,
 		"GIT_CEILING_DIRECTORIES=" + runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/usr/bin/false", "GIT_SSH_COMMAND=/usr/bin/false", "GH_CONFIG_DIR=/dev/null",
@@ -262,7 +307,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, codexBootstrapPrompt},
+			wantArgv: []string{"/usr/bin/true", "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, codexBootstrapPrompt},
 		},
 	}
 	for _, test := range tests {
@@ -279,12 +324,16 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				t.Fatalf("task delivery=%d, want %d", launch.TaskDelivery(), test.wantDelivery)
 			}
 			wantArgv := test.wantArgv
+			if test.kind == kernel.ProviderClaudeCode {
+				wantArgv = slices.Insert(slices.Clone(wantArgv), 2, wantClaudeWorkerSessionFlag(t, request)...)
+			}
 			if test.kind == kernel.ProviderCodex {
 				permissions, err := codexPermissions(request)
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv = slices.Replace(wantArgv, 10, 11, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+				wantArgv = slices.Replace(wantArgv, 12, 13, codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins", "-c", "mcp_servers."+codexAttemptServerName(request.runtime)+"={command="+tomlBasicString(runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+				wantArgv[len(wantArgv)-1] = codexBootstrapPromptFor(request.runtime)
 			}
 			if got := launch.Argv(); !slices.Equal(got, wantArgv) {
 				t.Fatalf("argv=%q, want %q", got, wantArgv)
@@ -337,7 +386,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatalf("Codex task bytes escaped attempt API delivery: %q", payload)
 				}
 			} else {
-				want := claudeTaskLead + `"PRIVATE_TASK_SENTINEL\nline 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
+				want := runner.ClaudeTaskLead + `"PRIVATE_TASK_SENTINEL\nline 1\n\"quoted\"\u001b café 😀\u007f\u0085"` + "\r"
 				if string(payload) != want {
 					t.Fatalf("startup payload=%q, want %q", payload, want)
 				}
@@ -345,11 +394,414 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 					t.Fatalf("startup payload contains raw terminal control: %q", payload)
 				}
 				var decoded string
-				if err := json.Unmarshal(payload[len(claudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
+				if err := json.Unmarshal(payload[len(runner.ClaudeTaskLead):len(payload)-1], &decoded); err != nil || decoded != string(task) {
 					t.Fatalf("JSON task decoded as %q: %v", decoded, err)
 				}
 			}
 		})
+	}
+}
+
+func TestCodexAttemptMCPNamesAreBoundToRuntimeHome(t *testing.T) {
+	installation, firstRuntime, _ := nativeFixture(t, kernel.ProviderCodex)
+	secondRuntime := runtimeFixture(t, firstRuntime.toolPath, firstRuntime.accountHome)
+	first, err := Build(requestFor(t, kernel.ProviderCodex, installation, firstRuntime, "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Build(requestFor(t, kernel.ProviderCodex, installation, secondRuntime, "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuredName := func(argv []string) string {
+		for _, arg := range argv {
+			if !strings.HasPrefix(arg, "mcp_servers.factory_attempt_") {
+				continue
+			}
+			name, _, _ := strings.Cut(strings.TrimPrefix(arg, "mcp_servers."), "=")
+			return name
+		}
+		t.Fatalf("Codex launch has no attempt MCP server: %q", argv)
+		return ""
+	}
+	firstName := configuredName(first.Argv())
+	secondName := configuredName(second.Argv())
+	if firstName == secondName {
+		t.Fatalf("distinct runtime homes configured the same MCP server %q", firstName)
+	}
+	for _, test := range []struct {
+		name string
+		argv []string
+	}{
+		{name: firstName, argv: first.Argv()},
+		{name: secondName, argv: second.Argv()},
+	} {
+		if !strings.Contains(strings.Join(test.argv, "\n"), test.name+".factory tool") {
+			t.Fatalf("bootstrap prompt does not name its configured server %q: %q", test.name, test.argv)
+		}
+	}
+}
+
+// A worker's Claude Code launch starts a fresh, deterministic session when
+// nothing is on disk yet for its exact cwd, and never for an orchestrator.
+func TestClaudeWorkerSessionStartsFreshWhenNoTranscriptExists(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	cwd := filepath.Join(t.TempDir(), "change")
+	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume {
+		t.Fatal("resume=true with no transcript on disk")
+	}
+	request, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(launch.Argv(), "--session-id") || slices.Contains(launch.Argv(), "--resume") {
+		t.Fatalf("worker argv = %q, want --session-id %q and no --resume", launch.Argv(), id)
+	}
+	if i := slices.Index(launch.Argv(), "--session-id"); i < 0 || launch.Argv()[i+1] != id {
+		t.Fatalf("worker argv = %q, want --session-id %q", launch.Argv(), id)
+	}
+	// TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge covers the
+	// orchestrator side: its exact worker/orchestrator argv comparison shows
+	// no --session-id/--resume reaches an orchestrator launch. Its cwd is a
+	// fresh directory on every run (internal/daemon: the runtime root behind
+	// it), so a chosen id could never be found again; this is not wired up
+	// as a no-op that would never fire.
+}
+
+// A worker's retry (send-back on the same task incarnation, reusing the same
+// Change directory: see internal/kernel/change.go) resumes its own
+// conversation once that conversation's transcript exists on disk, instead of
+// starting an unrelated one.
+func TestClaudeWorkerSessionResumesWhenTranscriptExistsUnderLimit(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	cwd := filepath.Join(t.TempDir(), "change")
+	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	if err != nil || resume {
+		t.Fatalf("initial selection id=%q resume=%v err=%v", id, resume, err)
+	}
+	transcriptDir := filepath.Join(ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome), "projects", escapeClaudeProjectPath(cwd))
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(transcriptDir, id+".jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(launch.Argv(), "--resume"); i < 0 || launch.Argv()[i+1] != id {
+		t.Fatalf("worker argv = %q, want --resume %q", launch.Argv(), id)
+	}
+	if slices.Contains(launch.Argv(), "--session-id") {
+		t.Fatalf("worker argv = %q, want no --session-id once a transcript exists", launch.Argv())
+	}
+}
+
+// A linked Claude account's launch exports CLAUDE_CONFIG_DIR set to the
+// account's own directory (see TestAccountConfigDirectorySelectsTheProviderLogin),
+// so its transcripts live under that directory, not the account home's own
+// default .claude; discovery must look in the exact same place the launch
+// itself was actually told to use (claudeConfigHome, shared with
+// environment()), or a retry on a linked account would always see a fresh
+// session instead of resuming its own.
+func TestClaudeWorkerLinkedAccountSessionResumesUnderItsOwnConfigDirectory(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	accountConfig := filepath.Join(t.TempDir(), "claude-dogfood")
+	if err := os.Mkdir(accountConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := NewRuntimePaths(runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl, runtime.gitCeiling, runtime.toolPath, runtime.accountHome, accountConfig, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(linked.environment(kernel.ProviderClaudeCode), "CLAUDE_CONFIG_DIR="+accountConfig) {
+		t.Fatalf("fixture is not actually a linked account launch: %q", linked.environment(kernel.ProviderClaudeCode))
+	}
+	cwd := filepath.Join(t.TempDir(), "change")
+	id, resume, err := claudeSessionSelection(linked, cwd, testAgentID, testIncarnationID)
+	if err != nil || resume {
+		t.Fatalf("initial selection id=%q resume=%v err=%v", id, resume, err)
+	}
+	// The transcript lives directly under the linked account's own
+	// directory, not a further nested .claude beneath it.
+	transcriptDir := filepath.Join(accountConfig, "projects", escapeClaudeProjectPath(cwd))
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(transcriptDir, id+".jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", linked, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(launch.Argv(), "--resume"); i < 0 || launch.Argv()[i+1] != id {
+		t.Fatalf("linked worker argv = %q, want --resume %q", launch.Argv(), id)
+	}
+	if slices.Contains(launch.Argv(), "--session-id") {
+		t.Fatalf("linked worker argv = %q, want no --session-id once a transcript exists", launch.Argv())
+	}
+}
+
+// Bounding growth: a generation whose transcript has reached the rotation
+// ceiling is retired in favor of a fresh one, the simplest measurable rule
+// for a task incarnation with an unbounded number of send-back retries.
+func TestClaudeWorkerSessionRotatesWhenTranscriptExceedsLimit(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	cwd := filepath.Join(t.TempDir(), "change")
+	firstGeneration, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	if err != nil || resume {
+		t.Fatalf("initial selection id=%q resume=%v err=%v", firstGeneration, resume, err)
+	}
+	transcriptDir := filepath.Join(ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome), "projects", escapeClaudeProjectPath(cwd))
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oversized, err := os.Create(filepath.Join(transcriptDir, firstGeneration+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oversized.Truncate(nativeSessionRotateBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := oversized.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secondGeneration, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume || secondGeneration == firstGeneration {
+		t.Fatalf("rotation id=%q resume=%v, want a fresh id distinct from %q", secondGeneration, resume, firstGeneration)
+	}
+	request, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(launch.Argv(), "--session-id"); i < 0 || launch.Argv()[i+1] != secondGeneration {
+		t.Fatalf("worker argv = %q, want --session-id %q", launch.Argv(), secondGeneration)
+	}
+}
+
+// writeFakeCodexRollout creates a minimal Codex rollout file whose first
+// JSON line records the given session id and cwd, the two fields
+// codexSessionSelection reads. size, when nonzero, pads the file (sparsely)
+// to an exact total size for rotation tests; it must be at least the header
+// line's own length.
+func writeFakeCodexRollout(t *testing.T, dayDirectory, timestamp, id, cwd string, size int64) string {
+	t.Helper()
+	if err := os.MkdirAll(dayDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dayDirectory, fmt.Sprintf("rollout-%s-%s.jsonl", timestamp, id))
+	line, err := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": id, "cwd": cwd}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(append(line, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if size > 0 {
+		if err := file.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A worker's Codex launch is unchanged (no "resume" leading argv) when its
+// account has no rollout history at all yet for its exact cwd.
+func TestCodexWorkerStartsFreshWhenNoRolloutExists(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	cwd := filepath.Join(t.TempDir(), "change")
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] == "resume" {
+		t.Fatalf("worker argv = %q, want no resume with no rollout on disk", launch.Argv())
+	}
+}
+
+// A worker's Codex launch resumes the newest rollout recorded for its exact
+// cwd, ahead of any older rollout for that same cwd and any rollout, however
+// new, for a different one.
+func TestCodexWorkerResumesTheNewestRolloutForItsExactCwd(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	cwd := filepath.Join(t.TempDir(), "change")
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T09-00-00", "01a00000-0000-7000-8000-00000000fefe", "/unrelated/cwd", 0)
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "16"), "2026-09-16T08-00-00", "01a00000-0000-7000-8000-000000000aaa", cwd, 0)
+	const newest = "01a00000-0000-7000-8000-000000000bbb"
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T08-00-00", newest, cwd, 0)
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] != "resume" || launch.Argv()[2] != newest {
+		t.Fatalf("worker argv = %q, want a leading resume of %q", launch.Argv(), newest)
+	}
+}
+
+// A rollout recorded for a different cwd is never mistaken for this one's own.
+func TestCodexWorkerIgnoresRolloutsForOtherCwds(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	cwd := filepath.Join(t.TempDir(), "change")
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T08-00-00", "01a00000-0000-7000-8000-000000000ccc", filepath.Join(t.TempDir(), "other-change"), 0)
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] == "resume" {
+		t.Fatalf("worker argv = %q, want no resume of an unrelated cwd's rollout", launch.Argv())
+	}
+}
+
+// A rollout's payload.id is untrusted file content. An oversized, NUL-laced,
+// or otherwise non-UUID value must never reach argv, where the runner's own
+// argument-size guard would fail the whole launch instead of
+// codexSessionSelection's intended fallback to a fresh session; it is
+// skipped like any other unusable candidate, and the launch stays fresh.
+// The rollout's own filename stays well-formed regardless: only the CLI's
+// own recorded content is untrusted, and codexSessionSelection never reads
+// an id out of a filename.
+func TestCodexWorkerIgnoresRolloutsWithAMalformedSessionID(t *testing.T) {
+	for name, id := range map[string]string{
+		"oversized":          strings.Repeat("a", runner.MaxArgumentBytes+1),
+		"embedded NUL":       "01a00000-0000-7000-8000-00000000\x0000",
+		"not a UUID":         "not-a-uuid-at-all",
+		"uppercase hex":      "01A00000-0000-7000-8000-000000000ABC",
+		"wrong hyphen shape": "01a000000-000-7000-8000-000000000abc",
+	} {
+		t.Run(name, func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+			cwd := filepath.Join(t.TempDir(), "change")
+			dayDirectory := filepath.Join(codexConfigHome(runtime), "sessions", "2026", "09", "17")
+			if err := os.MkdirAll(dayDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			line, err := json.Marshal(map[string]any{"type": "session_meta", "payload": map[string]any{"id": id, "cwd": cwd}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dayDirectory, "rollout-2026-09-17T08-00-00-malformed.jsonl")
+			if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			launch, err := Build(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if launch.Argv()[1] == "resume" {
+				t.Fatalf("worker argv = %q, want no resume of a malformed session id", launch.Argv())
+			}
+		})
+	}
+}
+
+// Bounding growth: once the newest matching rollout has reached the shared
+// rotation ceiling, Build starts fresh rather than resuming it or falling
+// back to an older, smaller rollout for the same cwd.
+func TestCodexWorkerRotatesWhenNewestMatchingRolloutExceedsLimit(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	cwd := filepath.Join(t.TempDir(), "change")
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "16"), "2026-09-16T08-00-00", "01a00000-0000-7000-8000-000000000ddd", cwd, 0)
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T08-00-00", "01a00000-0000-7000-8000-000000000eee", cwd, nativeSessionRotateBytes)
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] == "resume" {
+		t.Fatalf("worker argv = %q, want fresh once the newest matching rollout is over the ceiling", launch.Argv())
+	}
+}
+
+// An orchestrator's own cwd is a fresh runtime root every run, so it cannot
+// carry a resumable session itself; WithPreviousWorkingDirectory (the same
+// agent's last terminal run's cwd, durable through kernel.Store) is what lets
+// its standing tasks share one continuing Codex session.
+func TestCodexOrchestratorResumesFromPreviousWorkingDirectory(t *testing.T) {
+	installation, runtime, locator := nativeFixture(t, kernel.ProviderCodex)
+	bridge := filepath.Join(filepath.Dir(locator), maintainerBridge)
+	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(t.TempDir(), "previous-runtime-home")
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	const previousSession = "01a00000-0000-7000-8000-0000000000ff"
+	writeFakeCodexRollout(t, filepath.Join(sessionsRoot, "2026", "09", "17"), "2026-09-17T08-00-00", previousSession, previous, 0)
+	current := filepath.Join(t.TempDir(), "current-runtime-home")
+	request, err := NewRequest(kernel.ProviderCodex, installation, "", "", runtime, current, kernel.RoleOrchestrator, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutHint, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutHint.Argv()[1] == "resume" {
+		t.Fatalf("orchestrator argv = %q, want no resume without a previous working directory", withoutHint.Argv())
+	}
+	request, err = request.WithPreviousWorkingDirectory(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Argv()[1] != "resume" || launch.Argv()[2] != previousSession {
+		t.Fatalf("orchestrator argv = %q, want a leading resume of %q", launch.Argv(), previousSession)
 	}
 }
 
@@ -425,30 +877,30 @@ func TestNewRequestRejectsMismatchedProviderAndControls(t *testing.T) {
 		{effort: "high"},
 		{model: "model-sentinel", effort: "high"},
 	} {
-		if _, err := NewRequest(kernel.ProviderShell, shell, controls.model, controls.effort, shellRuntime, "/private/change", kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderShell, shell, controls.model, controls.effort, shellRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Shell controls %+v error=%v, want ErrInvalid", controls, err)
 		}
 	}
-	if _, err := NewRequest(kernel.ProviderCodex, shell, "", "", shellRuntime, "/private/change", kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRequest(kernel.ProviderCodex, shell, "", "", shellRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("mismatched installation error=%v, want ErrInvalid", err)
 	}
 	claude, claudeRuntime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
 	for _, effort := range []string{"ultra", "speculative"} {
-		if _, err := NewRequest(kernel.ProviderClaudeCode, claude, "", effort, claudeRuntime, "/private/change", kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderClaudeCode, claude, "", effort, claudeRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("Claude effort %q error=%v, want ErrInvalid", effort, err)
 		}
 	}
 	codex, codexRuntime, _ := nativeFixture(t, kernel.ProviderCodex)
-	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "ultra", codexRuntime, "/private/change", kernel.RoleWorker); err != nil {
+	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "ultra", codexRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); err != nil {
 		t.Fatalf("Codex durable ultra effort rejected: %v", err)
 	}
 	for _, model := range []string{string([]byte{0xff}), "model\x00suffix"} {
-		if _, err := NewRequest(kernel.ProviderCodex, codex, model, "", codexRuntime, "/private/change", kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderCodex, codex, model, "", codexRuntime, "/private/change", kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("model %x error=%v, want ErrInvalid", []byte(model), err)
 		}
 	}
 	for _, workingDirectory := range []string{"", "relative/change", "/", "/private/../change", "/private/change\x00suffix", string([]byte{0xff})} {
-		if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, workingDirectory, kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+		if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, workingDirectory, kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("working directory %q error=%v, want ErrInvalid", workingDirectory, err)
 		}
 	}
@@ -456,7 +908,7 @@ func TestNewRequestRejectsMismatchedProviderAndControls(t *testing.T) {
 	if len(codexUntrustedProjectConfig(tooLarge)) <= runner.MaxArgumentBytes {
 		t.Fatalf("expanded project config=%d, want larger than argv bound", len(codexUntrustedProjectConfig(tooLarge)))
 	}
-	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, tooLarge, kernel.RoleWorker); !errors.Is(err, ErrInvalid) {
+	if _, err := NewRequest(kernel.ProviderCodex, codex, "", "", codexRuntime, tooLarge, kernel.RoleWorker, testAgentID, testIncarnationID); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("oversized encoded working directory error=%v, want ErrInvalid", err)
 	}
 }
@@ -527,19 +979,23 @@ func TestTaskValidationUsesDeliverySpecificBound(t *testing.T) {
 	if _, _, err := PrepareTask(kernel.ProviderShell, append(shellMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Shell over-limit task error=%v, want ErrInvalid", err)
 	}
-	claudeMaximum := bytes.Repeat([]byte{'x'}, maxClaudePrompt-len(claudeTaskLead)-3)
+	claudeMaximum := bytes.Repeat([]byte{'x'}, runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-3)
 	if delivery, _, err := PrepareTask(kernel.ProviderClaudeCode, claudeMaximum); err != nil || delivery != TaskDeliveryStartupTerminal {
 		t.Fatalf("Claude exact startup bound rejected: %v", err)
 	}
 	if _, _, err := PrepareTask(kernel.ProviderClaudeCode, append(claudeMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Claude over-limit task error=%v, want ErrInvalid", err)
 	}
-	codexMaximum := bytes.Repeat([]byte{'x'}, maxCodexTask)
+	codexMaximum := bytes.Repeat([]byte{'x'}, runner.MaxCodexTaskBytes)
 	if delivery, payload, err := PrepareTask(kernel.ProviderCodex, codexMaximum); err != nil || delivery != TaskDeliveryAttemptAPI || payload != nil {
 		t.Fatalf("Codex maximum API task delivery=(%d, %d bytes), error=%v", delivery, len(payload), err)
 	}
 	if _, _, err := PrepareTask(kernel.ProviderCodex, append(codexMaximum, 'x')); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Codex over-limit task error=%v, want ErrInvalid", err)
+	}
+	jsonExpanding := []byte(strings.Repeat("x", runner.MaxClaudePrompt-len(runner.ClaudeTaskLead)-5) + "\u0085")
+	if _, _, err := PrepareTask(kernel.ProviderClaudeCode, jsonExpanding); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Claude expanded valid UTF-8 must exceed the encoded ceiling: %v", err)
 	}
 	if _, _, err := PrepareTask(kernel.Provider(255), []byte("task")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unknown provider error=%v, want ErrInvalid", err)
@@ -706,6 +1162,11 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if err := os.WriteFile(bridge, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	resolvedBridge, err := filepath.EvalSymlinks(bridge)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	overseer, err := Build(request)
 	if err != nil {
 		t.Fatal(err)
@@ -714,6 +1175,15 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 	if !strings.Contains(strings.Join(overseerArgs, " "), "mcp_servers.dark_factory_maintainer={command=") {
 		t.Fatal("overseer lost its explicit Maintainer tools")
 	}
+	if _, err := runner.PrepareCommittedExecSpec(overseer.Executable(), overseer.Argv(), overseer.Environment(), t.TempDir()); err != nil {
+		t.Fatalf("runner rejected Codex overseer environment: %v", err)
+	}
+	if !slices.Contains(overseer.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
+		t.Fatalf("overseer did not export its exact Maintainer bridge: %q", overseer.Environment())
+	}
+	if slices.Contains(worker.Environment(), "DARK_FACTORY_MAINTAINER_BRIDGE="+resolvedBridge) {
+		t.Fatal("worker inherited the overseer's Maintainer bridge")
+	}
 	if strings.Contains(strings.Join(workerArgs, " "), "mcp_servers.dark_factory_maintainer=") {
 		t.Fatal("worker was granted publication tool approvals")
 	}
@@ -721,7 +1191,7 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal("worker was given overseer authority instructions")
 	}
 	prompt := overseerArgs[len(overseerArgs)-1]
-	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App"} {
+	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback"} {
 		if !strings.Contains(prompt, command) {
 			t.Fatalf("overseer cannot discover %q", command)
 		}
@@ -778,6 +1248,9 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(policy, `"/System/Library/OpenSSL/openssl.cnf"="read"`) || strings.Contains(policy, `"/System/Library/OpenSSL"="read"`) {
+		t.Fatal("OpenSSL configuration permission must name only the file")
+	}
 	for _, root := range filepath.SplitList(runtime.toolchainReadRoots) {
 		if !strings.Contains(policy, tomlBasicString(root)+`="read"`) || strings.Contains(policy, tomlBasicString(root)+`="write"`) {
 			t.Fatalf("software root permissions: %s", policy)
@@ -790,7 +1263,7 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 	if _, err := runner.PrepareCommittedExecSpec(launch.Executable(), launch.Argv(), launch.Environment(), t.TempDir()); err != nil {
 		t.Fatalf("generated Codex environment rejected by runner: %v", err)
 	}
-	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "GOMODCACHE=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
+	for _, prefix := range []string{"GOCACHE=", "GOPATH=", "GOMODCACHE=", "CARGO_HOME=", "COREPACK_HOME=", "npm_config_cache=", "XDG_CACHE_HOME="} {
 		found := false
 		for _, value := range launch.Environment() {
 			if strings.HasPrefix(value, prefix+runtime.home+"/") {
@@ -801,10 +1274,13 @@ func TestCodexToolchainRootsAndCachesStaySeparateFromAccount(t *testing.T) {
 			t.Fatalf("cache %s not private", prefix)
 		}
 	}
+	if !slices.Contains(launch.Environment(), "RUSTUP_HOME="+runtime.accountHome+"/.rustup") {
+		t.Fatal("rustup metadata must remain in the selected account installation")
+	}
 	for _, root := range []string{runtime.accountHome, runtime.gitCeiling, runtime.home, runtime.temp} {
 		invalid := runtime
 		invalid.toolchainReadRoots = root
-		if _, err := NewRequest(kernel.ProviderCodex, installation, "", "", invalid, request.workingDirectory, kernel.RoleWorker); err == nil {
+		if _, err := NewRequest(kernel.ProviderCodex, installation, "", "", invalid, request.workingDirectory, kernel.RoleWorker, testAgentID, testIncarnationID); err == nil {
 			t.Fatalf("accepted private read root %q", root)
 		}
 	}
@@ -874,6 +1350,58 @@ func TestCodexToolchainSandbox(t *testing.T) {
 	if out, err := run("/bin/sh", "-c", script, "proof", software, secret); err != nil {
 		t.Fatalf("sandbox isolation: %v\n%s", err, out)
 	}
+	gitDirectory := filepath.Join(root, "repository.git")
+	leaseDirectory := filepath.Join(gitDirectory, "dark-factory-local-ci")
+	if err := os.MkdirAll(leaseDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"refs", "hooks", "objects"} {
+		if err := os.Mkdir(filepath.Join(gitDirectory, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gitDirectory, "config"), []byte("unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	request.runtime, err = request.runtime.WithLocalCILeaseDirectory(leaseDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseScript := `set -eu
+ printf lease > "$DARK_FACTORY_LOCAL_CI_DIRECTORY/proof"
+ for path in "$1/config" "$1/refs/injected" "$1/hooks/injected" "$1/objects/injected"; do
+   if (printf forbidden > "$path") 2>/dev/null; then exit 33; fi
+ done
+ `
+	if out, err := run("/bin/sh", "-c", leaseScript, "proof", gitDirectory); err != nil {
+		t.Fatalf("dedicated lease Git isolation: %v\n%s", err, out)
+	}
+	_, testSource, _, _ := goruntime.Caller(0)
+	leaseScripts := filepath.Join(request.workingDirectory, "scripts")
+	if err := os.Mkdir(leaseScripts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"local-ci-lease.sh", "with-local-ci-lease.sh"} {
+		body, err := os.ReadFile(filepath.Join(filepath.Dir(testSource), "..", "..", "scripts", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(leaseScripts, name), body, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request.runtime.factoryctl = filepath.Join(root, "factoryctl")
+	build := exec.Command("go", "build", "-o", request.runtime.factoryctl, "./cmd/factoryctl")
+	build.Dir = filepath.Join(filepath.Dir(testSource), "..", "..")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build lease observer fixture: %v\n%s", err, out)
+	}
+	if out, err := run("/bin/sh", "-c", "\"$DARK_FACTORY_FACTORYCTL\" --local-ci-process-identity $$"); err != nil {
+		t.Fatalf("lease process observation: %v\n%s", err, out)
+	}
+	if out, err := run("/bin/sh", "-c", "./scripts/with-local-ci-lease.sh /usr/bin/true"); err != nil {
+		t.Fatalf("generated-profile Git-free lease: %v\n%s", err, out)
+	}
 	request.runtime.toolchainReadRoots = ""
 	if out, err := run("/bin/cat", filepath.Join(software, "library")); err == nil {
 		t.Fatalf("baseline unexpectedly reads software: %s", out)
@@ -887,11 +1415,139 @@ func TestCodexToolchainSandbox(t *testing.T) {
 		if !install.ValidToolPath(request.runtime.toolPath) {
 			t.Fatal("set exact DARK_FACTORY_TEST_TOOL_PATH")
 		}
-		// Task-local settings avoid loading operator Go/OpenSSL configuration.
-		out, err := run("/bin/sh", "-c", `set -eu; export OPENSSL_CONF=/dev/null GOENV=off GOTOOLCHAIN=local; node --version; corepack --version; corepack pnpm@11.19.0 --version; go version; printf 'package main\nfunc main() {}\n' > main.go; go run main.go`)
+		// Keep Go local, but exercise Node with the actual launch environment.
+		// Overriding OPENSSL_CONF here would hide a production permission failure.
+		out, err := run("/bin/sh", "-c", `set -eu; export GOENV=off GOTOOLCHAIN=local; node --version; corepack --version; corepack pnpm@11.19.0 --version; go version; printf 'package main\nfunc main() {}\n' > main.go; go run main.go`)
 		if err != nil {
 			t.Fatalf("installed toolchain: %v\n%s", err, out)
 		}
 		t.Logf("installed toolchain proof: %s", out)
+		if slices.Contains(filepath.SplitList(roots), "/Library/Developer/CommandLineTools") {
+			out, err := run("/bin/sh", "-c", `set -eu
+printf '#include <stdio.h>\nint main(void) { puts("sdk-ok"); return 0; }\n' > sdk-proof.c
+/Library/Developer/CommandLineTools/usr/bin/clang -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk sdk-proof.c -o sdk-proof
+./sdk-proof`)
+			if err != nil || !strings.Contains(string(out), "sdk-ok") {
+				t.Fatalf("installed SDK compile: %v\n%s", err, out)
+			}
+			t.Logf("installed SDK compile: %s", out)
+		}
+	}
+	// A worker's profile writes the repository's Git directory, where its
+	// Change branch lives; the repository's working tree stays unreachable.
+	request.runtime, err = request.runtime.WithGitCommonDirectory(gitDirectory, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeScript := `set -eu
+ printf ref > "$1/refs/factory-branch"
+ printf object > "$1/objects/new"
+ if (printf forbidden > "$2/tracked.go") 2>/dev/null; then exit 34; fi
+ `
+	if out, err := run("/bin/sh", "-c", worktreeScript, "proof", gitDirectory, root); err != nil {
+		t.Fatalf("worker Git directory grant: %v\n%s", err, out)
+	}
+	request.runtime, err = request.runtime.WithGitCommonDirectory(gitDirectory, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerScript := `set -eu
+ /bin/cat "$1/refs/factory-branch" >/dev/null
+ if (printf forbidden > "$1/refs/another") 2>/dev/null; then exit 35; fi
+ `
+	if out, err := run("/bin/sh", "-c", readerScript, "proof", gitDirectory); err != nil {
+		t.Fatalf("orchestrator Git directory grant: %v\n%s", err, out)
+	}
+	request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable = "", false
+	if fixture := os.Getenv("DARK_FACTORY_TEST_FIXTURE_BINARY"); fixture != "" {
+		request.runtime.toolchainReadRoots = strings.TrimPrefix(request.runtime.toolchainReadRoots+string(filepath.ListSeparator)+filepath.Dir(fixture), string(filepath.ListSeparator))
+		out, err := run("/usr/bin/env", "DARK_FACTORY_TEST_ANCESTOR_SANDBOX=generated", fixture,
+			"-test.run=^TestDispatchFixtureTraversesUnreadableAncestors$", "-test.count=1")
+		if err != nil {
+			t.Fatalf("generated-profile private fixture: %v\n%s", err, out)
+		}
+		t.Logf("generated-profile private fixture: %s", out)
+	}
+}
+
+func TestCodexLocalCILeaseGrantExcludesGitMetadata(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	lease := "/private/repository/.git/dark-factory-local-ci"
+	withLease, err := runtime.WithLocalCILeaseDirectory(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := requestFor(t, kernel.ProviderCodex, installation, withLease, "", "")
+	policy, err := codexPermissions(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(policy, tomlBasicString(lease)+`="write"`) || strings.Contains(policy, tomlBasicString(filepath.Dir(lease))+`="write"`) {
+		t.Fatalf("lease permission is not narrow: %s", policy)
+	}
+	if !strings.Contains(policy, `"/usr/bin/ruby"="read"`) || strings.Contains(policy, `"/System/Library/Perl"="read"`) {
+		t.Fatalf("lease process-group runtime permission is not exact: %s", policy)
+	}
+	if !slices.Contains(withLease.environment(kernel.ProviderCodex), "DARK_FACTORY_LOCAL_CI_DIRECTORY="+lease) {
+		t.Fatal("lease path missing from launch environment")
+	}
+	for _, invalid := range []string{"/", "/private/repository/.git", "relative/dark-factory-local-ci", "/private/../dark-factory-local-ci"} {
+		if _, err := runtime.WithLocalCILeaseDirectory(invalid); err == nil {
+			t.Fatalf("accepted unsafe lease path %q", invalid)
+		}
+	}
+}
+
+// The one shared thing a Change worktree needs is the repository's Git
+// directory: a worker writes it, an orchestrator reads it, and nothing
+// else of the repository or the Changes parent is granted.
+func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	gitDirectory := "/private/project/.git"
+	for _, writable := range []bool{true, false} {
+		granted, err := runtime.WithGitCommonDirectory(gitDirectory, writable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := requestFor(t, kernel.ProviderCodex, installation, granted, "", "")
+		launch, err := Build(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy := ""
+		for _, argument := range launch.Argv() {
+			if strings.HasPrefix(argument, "permissions."+codexPermissionName(granted)+"=") {
+				policy = argument
+				break
+			}
+		}
+		access := "read"
+		if writable {
+			access = "write"
+		}
+		if !strings.Contains(policy, tomlBasicString(gitDirectory)+`="`+access+`"`) {
+			t.Fatalf("launch omitted the Git directory grant: %q", policy)
+		}
+		if strings.Contains(policy, tomlBasicString("/private/project")+`="`) || strings.Contains(policy, tomlBasicString("/private/factory/changes")+`="`) {
+			t.Fatalf("Git directory grant widened: %q", policy)
+		}
+		for _, environment := range []string{"GIT_AUTHOR_NAME=" + GitIdentityName, "GIT_COMMITTER_EMAIL=" + GitIdentityEmail, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ASKPASS=/usr/bin/false"} {
+			if !slices.Contains(launch.Environment(), environment) {
+				t.Fatalf("launch environment lacks %q", environment)
+			}
+		}
+	}
+	for _, bad := range []string{"relative", "/private/project", "/private/project/.git/", runtime.home} {
+		if _, err := runtime.WithGitCommonDirectory(bad, true); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Git directory %q = %v, want ErrInvalid", bad, err)
+		}
+	}
+}
+
+func TestBothProviderAssignmentsDistinguishOwnedCheckoutFromRetainedReview(t *testing.T) {
+	for name, prompt := range map[string]string{"codex": codexBootstrapPrompt, "claude": runner.ClaudeTaskLead} {
+		if !strings.Contains(prompt, "including corrections after send-back") || !strings.Contains(prompt, "attempt source is only for inspecting a settled retained Change") || !strings.Contains(prompt, "Never substitute another task or private Change path") {
+			t.Fatalf("%s assignment loses checkout/reviewer authority distinction", name)
+		}
 	}
 }

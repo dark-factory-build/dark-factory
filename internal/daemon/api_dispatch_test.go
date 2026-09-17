@@ -6,14 +6,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,16 +26,22 @@ import (
 )
 
 type dispatchFixture struct {
-	daemon   *Daemon
-	store    *kernel.Store
-	listener *api.Listener
-	socket   string
-	operator string
+	databasePath string
+	daemon       *Daemon
+	store        *kernel.Store
+	listener     *api.Listener
+	socket       string
+	operator     string
 }
 
 func newDispatchFixture(t *testing.T) *dispatchFixture {
 	t.Helper()
-	directory, err := os.MkdirTemp("/private/tmp", "dark-factory-dispatch-")
+	return newDispatchFixtureAt(t, "/private/tmp")
+}
+
+func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
+	t.Helper()
+	directory, err := os.MkdirTemp(parent, "dark-factory-dispatch-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +102,7 @@ func newDispatchFixture(t *testing.T) *dispatchFixture {
 		_ = home.Close()
 	})
 	socket := install.LocalAPISocketPath(authHomePath)
-	return &dispatchFixture{daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
+	return &dispatchFixture{databasePath: databasePath, daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
 }
 
 func (fixture *dispatchFixture) serve(t *testing.T) <-chan error {
@@ -146,9 +155,9 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatalf("fresh snapshot = %+v", initialSnapshot)
 	}
 	done = fixture.serve(t)
-	noOp, err := client.SetDispatch(ctx, 1, false)
-	if err != nil || noOp.Head != 0 || noOp.Revision != 1 {
-		t.Fatalf("head-zero no-op mutation = %+v, %v", noOp, err)
+	stop, err := client.SetDispatch(ctx, 1, false)
+	if err != nil || stop.Head != 1 || stop.Revision != 2 {
+		t.Fatalf("explicit stop mutation = %+v, %v", stop, err)
 	}
 	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
@@ -164,7 +173,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	projectInput := api.CreateProjectInput{ID: testID(1), Name: "project", Root: filepath.Join(t.TempDir(), "source-root")}
 	done = fixture.serve(t)
 	projectResult, err := client.CreateProject(ctx, projectInput)
-	if err != nil || projectResult.Revision != 1 || projectResult.Head != 1 {
+	if err != nil || projectResult.Revision != 1 || projectResult.Head != 2 {
 		t.Fatalf("create project = %+v, %v", projectResult, err)
 	}
 	waitDispatch(t, done)
@@ -189,8 +198,27 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		ID: testID(2), ProjectID: projectInput.ID, Name: "agent", Role: "orchestrator",
 		Provider: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium", ToolBudgetLimit: 50,
 	})
-	if err != nil || agentResult.Revision != 1 || agentResult.Head != 3 {
+	if err != nil || agentResult.Revision != 1 || agentResult.Head != 4 {
 		t.Fatalf("create agent = %+v, %v", agentResult, err)
+	}
+	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
+
+	done = fixture.serve(t)
+	policyResult, err := client.SetAgentIdlePolicy(ctx, api.AgentIdlePolicyInput{AgentID: testID(2), ExpectedRevision: agentResult.Revision, Policy: "standing_instruction", AfterSeconds: 60, Instruction: "review retained changes", RunBudget: 3})
+	if err != nil || policyResult.Revision != agentResult.Revision+1 {
+		t.Fatalf("set idle policy = %+v, %v", policyResult, err)
+	}
+	waitDispatch(t, done)
+	assertSchedulerWake(t, fixture.daemon)
+	updated, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(2)))
+	if err != nil || !found || updated.Idle.Policy != kernel.IdleStandingInstruction || updated.Idle.AfterSeconds != 60 || updated.Idle.Instruction != "review retained changes" || updated.Idle.RunBudget != 3 {
+		t.Fatalf("stored idle policy = %+v, found=%v, err=%v", updated.Idle, found, err)
+	}
+
+	done = fixture.serve(t)
+	if _, err := client.SetAgentIdlePolicy(ctx, api.AgentIdlePolicyInput{AgentID: testID(2), ExpectedRevision: agentResult.Revision, Policy: "wait"}); err == nil {
+		t.Fatal("stale idle policy accepted")
 	}
 	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
@@ -215,15 +243,15 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		ID: testID(3), ProjectID: projectInput.ID, AssignedAgentID: testID(2), IncarnationID: testID(4),
 		Title: "public title", Body: "private task body sentinel", Priority: 7,
 	})
-	if err != nil || taskResult.Revision != 1 || taskResult.Head != 4 {
+	if err != nil || taskResult.Revision != 1 || taskResult.Head != 6 {
 		t.Fatalf("enqueue task = %+v, %v", taskResult, err)
 	}
 	waitDispatch(t, done)
 	assertSchedulerWake(t, fixture.daemon)
 
 	done = fixture.serve(t)
-	dispatchResult, err := client.SetDispatch(ctx, 1, true)
-	if err != nil || dispatchResult.Revision != 2 || dispatchResult.Head != 5 {
+	dispatchResult, err := client.SetDispatch(ctx, stop.Revision, true)
+	if err != nil || dispatchResult.Revision != 3 || dispatchResult.Head != 7 {
 		t.Fatalf("set dispatch = %+v, %v", dispatchResult, err)
 	}
 	waitDispatch(t, done)
@@ -235,7 +263,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
-	if snapshot.Head != 5 || len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
+	if snapshot.Head != 7 || len(snapshot.Projects) != 1 || len(snapshot.Agents) != 1 || len(snapshot.Tasks) != 1 {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
 	if snapshot.Projects[0].ID != projectInput.ID || snapshot.Projects[0].Name != projectInput.Name || snapshot.Agents[0].Role != "orchestrator" || snapshot.Tasks[0].Title != "public title" {
@@ -283,7 +311,7 @@ func TestDaemonDispatchesAttemptOutcomeAfterCommit(t *testing.T) {
 	ctx := context.Background()
 	done := fixture.serve(t)
 	result, err := active.client.Succeed(ctx, "private result sentinel")
-	if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 12 {
+	if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 11 {
 		t.Fatalf("attempt succeed = %+v, %v", result, err)
 	}
 	waitDispatch(t, done)
@@ -296,6 +324,118 @@ func TestDaemonDispatchesAttemptOutcomeAfterCommit(t *testing.T) {
 		t.Fatal("revoked attempt credential remained usable")
 	}
 	waitDispatch(t, done)
+}
+
+func TestDaemonOutcomeWaitsForWriterWithoutLosingResult(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 11)
+	lock, err := sql.Open("sqlite3", "file:"+fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	entered := make(chan struct{})
+	var once sync.Once
+	fixture.daemon.now = func() time.Time { once.Do(func() { close(entered) }); return time.UnixMilli(1000) }
+	const resultText = "Implemented the exact provider permission correction; focused tests passed and delivery remains pending."
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	done := fixture.serve(t)
+	result := make(chan error, 1)
+	go func() { _, err := active.client.Succeed(ctx, resultText); result <- err }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("outcome did not reach daemon")
+	}
+	// Hold real writer contention past the live owner's polling timeout. A
+	// complete authenticated mutation must use its request lifetime instead.
+	select {
+	case err := <-result:
+		t.Fatalf("outcome abandoned before writer release: %v", err)
+	case <-time.After(liveAttemptStoreTimeout + 300*time.Millisecond):
+	}
+	if _, err := lock.Exec("ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("outcome after writer release: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("outcome remained blocked")
+	}
+	waitDispatch(t, done)
+	run, found, err := fixture.store.Run(context.Background(), active.run.ID)
+	if err != nil || !found || run.Phase != kernel.RunFinalizing || run.Proposal == nil || run.Proposal.Result() != resultText {
+		t.Fatalf("durable exact result = %+v, found=%v, err=%v", run, found, err)
+	}
+}
+
+func TestDaemonContendedOutcomeHonorsRequestCancellation(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 11)
+	lock, err := sql.Open("sqlite3", "file:"+fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	entered := make(chan struct{})
+	var once sync.Once
+	fixture.daemon.now = func() time.Time { once.Do(func() { close(entered) }); return time.UnixMilli(1000) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		connection, err := fixture.listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		done <- fixture.daemon.HandleConnection(ctx, connection)
+	}()
+	result := make(chan error, 1)
+	go func() {
+		_, err := active.client.Succeed(context.Background(), "cancelled request must not commit")
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("outcome did not reach daemon")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("cancelled request succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled request remained blocked")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled handler remained blocked")
+	}
+	if _, err := lock.Exec("ROLLBACK"); err != nil {
+		t.Fatal(err)
+	}
+	run, found, err := fixture.store.Run(context.Background(), active.run.ID)
+	if err != nil || !found || run.Phase != kernel.RunRunning || run.Proposal != nil {
+		t.Fatalf("cancelled durable outcome = %+v, found=%v, err=%v", run, found, err)
+	}
 }
 
 // A send-back reaches the kernel through both domains with the kernel's own
@@ -566,8 +706,13 @@ type activeAttempt struct {
 
 func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) activeAttempt {
 	t.Helper()
+	return prepareActiveAttemptInProject(t, fixture, seed, testID(seed), "orchestrator")
+}
+
+func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role string) activeAttempt {
+	t.Helper()
 	ctx := context.Background()
-	projectID, agentID, taskID, incarnationID := testID(seed), testID(seed+1), testID(seed+2), testID(seed+3)
+	agentID, taskID, incarnationID := testID(seed+1), testID(seed+2), testID(seed+3)
 	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
 	if err != nil {
 		t.Fatal(err)
@@ -579,22 +724,38 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 		}
 		waitDispatch(t, done)
 	}
+	id, err := parseProjectID(projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, foundProject, err := fixture.store.Project(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !foundProject {
+		call(func() error {
+			_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "project", Root: filepath.Join(filepath.Dir(fixture.socket), "source-root")})
+			return err
+		})
+	}
 	call(func() error {
-		_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "project", Root: filepath.Join(filepath.Dir(fixture.socket), "source-root")})
-		return err
-	})
-	call(func() error {
-		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: "orchestrator", Provider: "shell", ToolBudgetLimit: 10})
+		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: "shell", ToolBudgetLimit: 10})
 		return err
 	})
 	call(func() error {
 		_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "task", Body: "private", Priority: 1})
 		return err
 	})
-	call(func() error {
-		_, err := operator.SetDispatch(ctx, 1, true)
-		return err
-	})
+	factory, err := fixture.store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !factory.DispatchEnabled {
+		call(func() error {
+			_, err := operator.SetDispatch(ctx, uint64(factory.Revision.Int64()), true)
+			return err
+		})
+	}
 	bearer := bytes.Repeat([]byte{seed}, 32)
 	digestBytes := sha256.Sum256(bearer)
 	digest, err := kernel.AttemptDigestFromBytes(digestBytes[:])
@@ -609,9 +770,14 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil {
 		t.Fatal(err)
 	}
+	proof, err := kernel.ResultProofDigestFromBytes(bytes.Repeat([]byte{seed + 20}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
 	keys := kernel.AdmissionKeys{
-		RunID: mustRunID(t, testID(seed+4)), TerminalSessionID: mustTerminalSessionID(t, testID(seed+14)), AttemptDigest: digest, CandidateChangeID: candidateChange,
-		RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), "runtime"),
+		ResultProofDigest: proof,
+		RunID:             mustRunID(t, testID(seed+4)), TerminalSessionID: mustTerminalSessionID(t, testID(seed+14)), AttemptDigest: digest, CandidateChangeID: candidateChange,
+		RuntimeRoot: filepath.Join(filepath.Dir(fixture.socket), fmt.Sprintf("runtime-%d", seed)),
 		Resources: kernel.AdmissionResourceIDs{
 			RuntimeRoot: mustResourceID(t, testID(seed+5)), RunnerProcess: mustResourceID(t, testID(seed+6)),
 			ProviderProcess: mustResourceID(t, testID(seed+7)), ProviderGroup: mustResourceID(t, testID(seed+8)),
@@ -657,11 +823,14 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	if err != nil || !found {
 		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
 	}
+	if role == "worker" {
+		adapterPublishChange(t, fixture.store, *run)
+	}
 	active, err := fixture.store.ActivateRun(ctx, run.ID, session.ID, run2.Revision, session.Revision, at)
 	if err != nil {
 		t.Fatal(err)
 	}
-	attemptToken := filepath.Join(filepath.Dir(fixture.socket), "attempt.token")
+	attemptToken := filepath.Join(filepath.Dir(fixture.socket), fmt.Sprintf("attempt-%d.token", seed))
 	if err := os.WriteFile(attemptToken, bearer, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -675,6 +844,41 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 		t.Fatal(err)
 	}
 	return activeAttempt{client: client, run: active, bearer: append([]byte(nil), bearer...)}
+}
+
+func TestDaemonServesCurrentWorkerAssignmentReceipt(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 201, testID(201), "worker")
+	ctx := context.Background()
+
+	done := fixture.serve(t)
+	receipt, err := active.client.Task(ctx)
+	if err != nil {
+		t.Fatalf("worker task receipt = %v", err)
+	}
+	waitDispatch(t, done)
+
+	change, found, err := fixture.store.Change(ctx, *active.run.ChangeID)
+	if err != nil || !found || change.Selection == nil {
+		t.Fatalf("worker Change = %+v, found=%v, err=%v", change, found, err)
+	}
+	wantBase := hex.EncodeToString(change.Selection.Commit().Bytes())
+	want := api.AttemptTask{
+		Task:                   "private",
+		TaskID:                 active.run.TaskID.String(),
+		IncarnationID:          active.run.TaskIncarnationID.String(),
+		WorkRevision:           uint64(active.run.AdmittedTaskWorkRevision.Int64()),
+		ChangeID:               active.run.ChangeID.String(),
+		AdmittedChangeRevision: uint64(active.run.AdmittedChangeRevision.Int64()),
+		ChangeRevision:         uint64(change.Revision.Int64()),
+		BaseCommit:             wantBase,
+	}
+	if receipt != want {
+		t.Fatalf("worker assignment receipt = %+v, want %+v", receipt, want)
+	}
+	if receipt.AdmittedChangeRevision == receipt.ChangeRevision {
+		t.Fatalf("worker receipt did not distinguish admitted/current Change revisions: %+v", receipt)
+	}
 }
 
 func TestDaemonOverseerTaskUpdateAuthorizesBeforeProviderPreflight(t *testing.T) {
@@ -719,6 +923,55 @@ func TestDaemonOverseerTaskUpdateAuthorizesBeforeProviderPreflight(t *testing.T)
 	}
 }
 
+func TestDaemonOverseerTaskRetryRejectsOrchestratorTask(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	caller := prepareActiveAttempt(t, fixture, 191)
+	target, found, err := fixture.store.Task(ctx, caller.run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("orchestrator task = %+v, found=%v, err=%v", target, found, err)
+	}
+
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementID := testID(211)
+	done := fixture.serve(t)
+	if _, err := operator.CreateAgent(ctx, api.CreateAgentInput{
+		ID: replacementID, ProjectID: caller.run.ProjectID.String(), Name: "replacement", Role: "worker", Provider: "shell", ToolBudgetLimit: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+
+	beforeHistory, err := fixture.store.TaskInterventions(ctx, target.ProjectID, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	_, err = caller.client.OverseerUpdateTask(ctx, api.OverseerTaskUpdateInput{
+		TaskID: target.ID.String(), ExpectedRevision: uint64(target.Revision.Int64()), AssignedAgentID: &replacementID, Retry: true,
+	})
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("orchestrator retry error = %v", err)
+	}
+	afterTask, found, err := fixture.store.Task(ctx, target.ID)
+	if err != nil || !found || !reflect.DeepEqual(afterTask, target) {
+		t.Fatalf("orchestrator retry changed task: before=%+v after=%+v found=%v err=%v", target, afterTask, found, err)
+	}
+	afterRun, found, err := fixture.store.Run(ctx, caller.run.ID)
+	if err != nil || !found || !reflect.DeepEqual(afterRun, caller.run) {
+		t.Fatalf("orchestrator retry changed caller run: before=%+v after=%+v found=%v err=%v", caller.run, afterRun, found, err)
+	}
+	afterHistory, err := fixture.store.TaskInterventions(ctx, target.ProjectID, target.ID)
+	if err != nil || len(afterHistory) != len(beforeHistory) {
+		t.Fatalf("orchestrator retry changed history: before=%d after=%d err=%v", len(beforeHistory), len(afterHistory), err)
+	}
+}
+
 func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -737,7 +990,7 @@ func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 			active := prepareActiveAttempt(t, fixture, byte(21+len(test.name)))
 			done := fixture.serve(t)
 			result, err := test.call(context.Background(), active.client)
-			if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 12 {
+			if err != nil || result.Revision != uint64(active.run.Revision.Int64()+1) || result.Head != 11 {
 				t.Fatalf("outcome = %+v, %v", result, err)
 			}
 			waitDispatch(t, done)
@@ -851,10 +1104,117 @@ func TestDaemonConcurrentAttemptOutcomesHaveOneDurableWinner(t *testing.T) {
 	}
 }
 
+// The first caller pauses before Store admission so the second caller is the
+// first correlated refusal. Arrival order must not replace that proposal.
+func TestDaemonOverlappingRefusalsRetainFirstCorrelatedOutcome(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 81)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal session: found=%v err=%v", found, err)
+	}
+	live := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	live.attemptDigest = active.run.CredentialDigest
+	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, live)
+
+	firstArrived, releaseFirst := make(chan struct{}), make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(releaseFirst) })
+	var clockCalls atomic.Int32
+	var now atomic.Int64
+	now.Store(100) // Before the active run's revision: authenticated refusal.
+	fixture.daemon.now = func() time.Time {
+		if clockCalls.Add(1) == 1 {
+			close(firstArrived)
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+			}
+		}
+		return time.UnixMilli(now.Load())
+	}
+	assertRemote := func(err error, code api.RemoteErrorCode) {
+		t.Helper()
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != code {
+			t.Fatalf("outcome error = %v, want %s", err, code)
+		}
+	}
+	assertPending := func() {
+		t.Helper()
+		proposal, ok := live.pendingOutcomeSnapshot()
+		if !ok || proposal.Kind() != kernel.OutcomeBlocked || proposal.Detail() != "first actual refusal" {
+			t.Fatalf("retained proposal = %+v, present=%v", proposal, ok)
+		}
+	}
+	firstDone := fixture.serve(t)
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := active.client.Succeed(ctx, "later actual refusal")
+		firstResult <- err
+	}()
+	select {
+	case <-firstArrived:
+	case <-ctx.Done():
+		t.Fatal("first request did not reach the clock gate")
+	}
+	secondDone := fixture.serve(t)
+	_, err = active.client.Block(ctx, "first actual refusal")
+	assertRemote(err, api.RemoteRevisionConflict)
+	waitDispatch(t, secondDone)
+	assertPending()
+	release.Do(func() { close(releaseFirst) })
+	assertRemote(<-firstResult, api.RemoteRevisionConflict)
+	waitDispatch(t, firstDone)
+	assertPending()
+
+	wrongToken := filepath.Join(filepath.Dir(fixture.socket), "wrong.token")
+	if err := os.WriteFile(wrongToken, bytes.Repeat([]byte{'z'}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", wrongToken)
+	wrong, err := api.NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	_, err = wrong.Fail(ctx, "foreign proposal")
+	assertRemote(err, api.RemoteUnauthorized)
+	waitDispatch(t, done)
+	assertPending()
+	observed, found, err := fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || observed.Phase != kernel.RunRunning || observed.Proposal != nil {
+		t.Fatalf("refused proposals changed durable run = %+v, found=%v err=%v", observed, found, err)
+	}
+
+	now.Store(2000)
+	done = fixture.serve(t)
+	if _, err := active.client.Succeed(ctx, "durable winner"); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	if proposal, ok := live.pendingOutcomeSnapshot(); ok {
+		t.Fatalf("accepted outcome retained stale proposal: %+v", proposal)
+	}
+	observed, found, err = fixture.store.Run(ctx, active.run.ID)
+	if err != nil || !found || observed.Phase != kernel.RunFinalizing || observed.Proposal == nil || observed.Proposal.Result() != "durable winner" {
+		t.Fatalf("accepted durable proposal = %+v, found=%v err=%v", observed, found, err)
+	}
+}
+
 func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {
 	projectID := mustProjectID(t, testID(51))
 	agentID := mustAgentID(t, testID(52))
 	taskID := mustTaskID(t, testID(53))
+	incarnationID, err := parseIncarnationID(testID(54))
+	if err != nil {
+		t.Fatal(err)
+	}
 	revision := mustRevision(t, 3)
 	head, err := kernel.NewEventSequence(0)
 	if err != nil {
@@ -865,7 +1225,7 @@ func TestProjectionHasNoPrivateFieldsAndKeepsEmptySlices(t *testing.T) {
 		Factory:  kernel.FactorySummary{Capacity: 2, Revision: revision},
 		Projects: []kernel.ProjectSummary{{ID: projectID, Name: "project", RunBudgetLimit: 8, RunsUsed: 3, MaxRunSeconds: 900, Revision: revision}},
 		Agents:   []kernel.AgentSummary{{ID: agentID, ProjectID: projectID, Name: "agent", Role: "worker", Provider: "codex", Revision: revision}},
-		Tasks:    []kernel.TaskSummary{{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, Title: "title", Status: "queued", Priority: 3, Revision: revision}},
+		Tasks:    []kernel.TaskSummary{{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, WorkRevision: revision, Title: "title", Status: "queued", Priority: 3, Revision: revision}},
 	})
 	if projected.Head != 0 || projected.Projects == nil || projected.Agents == nil || projected.Tasks == nil {
 		t.Fatalf("projection emptiness/head = %+v", projected)
@@ -1044,5 +1404,225 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 		if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
 			t.Fatalf("unauthorized target %s returned %v", target, err)
 		}
+	}
+}
+
+func TestDaemonSelectAgentModelRequiresWorkerRevisionAndCompatibleControls(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	project := api.CreateProjectInput{ID: testID(50), Name: "project", Root: filepath.Join(t.TempDir(), "source")}
+	done := fixture.serve(t)
+	if _, err := client.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	for _, input := range []api.CreateAgentInput{
+		{ID: testID(51), ProjectID: project.ID, Name: "worker", Role: "worker", Provider: "codex", ToolBudgetLimit: 1},
+		{ID: testID(52), ProjectID: project.ID, Name: "overseer", Role: "orchestrator", Provider: "codex", ToolBudgetLimit: 1},
+	} {
+		done = fixture.serve(t)
+		if _, err := client.CreateAgent(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	selectModel := api.AgentModelSelectInput{AgentID: testID(51), ExpectedRevision: 1, Model: "gpt-5.6-luna", ReasoningEffort: "medium"}
+	done = fixture.serve(t)
+	updated, err := client.SelectAgentModel(ctx, selectModel)
+	if err != nil || updated.Revision != 2 {
+		t.Fatalf("select worker model = %+v, %v", updated, err)
+	}
+	waitDispatch(t, done)
+	if agent, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(51))); err != nil || !found || agent.Model != selectModel.Model || agent.ReasoningEffort != selectModel.ReasoningEffort {
+		t.Fatalf("stored model selection = %+v, found=%v, err=%v", agent, found, err)
+	}
+	for _, input := range []api.AgentModelSelectInput{
+		{AgentID: testID(51), ExpectedRevision: 1, Model: "gpt-5.6-luna", ReasoningEffort: "medium"},
+		{AgentID: testID(51), ExpectedRevision: 2, Model: "gpt-5.6-luna", ReasoningEffort: "extreme"},
+		{AgentID: testID(52), ExpectedRevision: 1, Model: "gpt-5.6-luna", ReasoningEffort: "medium"},
+	} {
+		done = fixture.serve(t)
+		if _, err := client.SelectAgentModel(ctx, input); err == nil {
+			t.Fatalf("invalid selection accepted: %+v", input)
+		}
+		waitDispatch(t, done)
+	}
+}
+
+func TestDaemonSourceRefusesProviderWithoutReadOnlyBoundary(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 71)
+	done := fixture.serve(t)
+	_, err := active.client.Source(context.Background(), testID(73))
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteUnavailable {
+		t.Fatalf("unprotected source = %v", err)
+	}
+	waitDispatch(t, done)
+}
+
+// An unavailable notification transport must not turn a durable conversation
+// into a failed or unreadable operation. No live terminal is registered here.
+func TestPeerConversationSurvivesUnavailableNotification(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	source := prepareActiveAttemptInProject(t, fixture, 11, testID(11), "worker")
+	target := prepareActiveAttemptInProject(t, fixture, 41, testID(11), "worker")
+	ctx := context.Background()
+	done := fixture.serve(t)
+	_, err := source.client.PeerAsk(ctx, api.PeerQuestionInput{TargetTaskID: target.run.TaskID.String(), IdempotencyKey: testID(91), Question: "review x.go"})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	inbox, err := target.client.PeerInboxPage(ctx, 0, 0)
+	waitDispatch(t, done)
+	if err != nil || len(inbox.Questions) != 1 || inbox.Questions[0].Question != "review x.go" || inbox.Questions[0].RecipientDeliveryState != "unknown" {
+		t.Fatalf("durable question=%+v err=%v", inbox, err)
+	}
+	question := inbox.Questions[0]
+	done = fixture.serve(t)
+	_, err = target.client.PeerAnswer(ctx, api.PeerAnswerInput{QuestionID: question.ID, ExpectedRevision: question.Revision, IdempotencyKey: testID(92), Answer: "reviewed"})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	inbox, err = source.client.PeerInboxPage(ctx, 0, 0)
+	waitDispatch(t, done)
+	if err != nil || len(inbox.Questions) != 1 || inbox.Questions[0].Answer != "reviewed" || inbox.Questions[0].AnswerDeliveryState != "unknown" {
+		t.Fatalf("durable answer=%+v err=%v", inbox, err)
+	}
+}
+
+func TestOperatorTaskRecoveryReportsBoundedExactOutcome(t *testing.T) {
+	for _, kind := range []string{"succeeded", "blocked", "failed"} {
+		t.Run(kind, func(t *testing.T) {
+			fixture := newDispatchFixture(t)
+			ctx := context.Background()
+			initialRevision, _ := kernel.NewRevision(1)
+			if _, err := fixture.store.SetDispatch(ctx, initialRevision, true, mustKernelTime(t, 101)); err != nil {
+				t.Fatal(err)
+			}
+			run := adapterRunningRun(t, fixture.store, 180)
+			result := strings.Repeat("x", api.MaxRecoveryResultBytes-1) + "😀tail"
+			var proposal kernel.Proposal
+			switch kind {
+			case "succeeded":
+				proposal, _ = kernel.NewSuccessProposal(result)
+			case "blocked":
+				proposal, _ = kernel.NewBlockedProposal("missing supported tool")
+			case "failed":
+				proposal, _ = kernel.NewFailureProposal(kernel.FailureInternal, "execution failed")
+			}
+			terminal := completeAdapterRunWithProposal(t, fixture.store, run, proposal)
+			client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+			if err != nil {
+				t.Fatal(err)
+			}
+			read := func() api.TaskRecovery {
+				done := fixture.serve(t)
+				value, err := client.TaskRecovery(ctx, api.TaskRecoveryInput{TaskID: run.TaskID.String(), IncarnationID: run.TaskIncarnationID.String()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				waitDispatch(t, done)
+				return value
+			}
+			value := read()
+			if value.Status != kind || value.RunOutcome != kind || value.RunID != terminal.ID.String() || value.RunWorkRevision != 1 {
+				t.Fatalf("identity/outcome = %+v", value)
+			}
+			if kind == "succeeded" {
+				if !value.ResultTruncated || value.Result != strings.Repeat("x", api.MaxRecoveryResultBytes-1) {
+					t.Fatalf("UTF8 excerpt len=%d truncated=%v", len(value.Result), value.ResultTruncated)
+				}
+			} else if value.RunDetail != proposal.Detail() || kind == "blocked" && value.BlockedReason != proposal.Detail() {
+				t.Fatalf("diagnostic = %+v", value)
+			}
+			task, found, err := fixture.store.Task(ctx, run.TaskID)
+			if err != nil || !found {
+				t.Fatal(err)
+			}
+			if _, err := fixture.store.SendBackTask(ctx, task.ID, task.Revision, "correct this", mustKernelTime(t, 500)); err != nil {
+				t.Fatal(err)
+			}
+			value = read()
+			if value.Status != "queued" || value.WorkRevision != 2 || value.Result != "" || value.ResultTruncated || value.BlockedReason != "" || value.RunWorkRevision != 1 || value.RunOutcome != kind {
+				t.Fatalf("prior outcome presented as current: %+v", value)
+			}
+
+		})
+	}
+}
+
+func TestDaemonSelectOverseerAccountPreservesSelectionGuards(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := api.CreateProjectInput{ID: testID(40), Name: "project", Root: filepath.Join(t.TempDir(), "source")}
+	done := fixture.serve(t)
+	_, err = client.CreateProject(ctx, project)
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done = fixture.serve(t)
+	_, err = client.CreateAgent(ctx, api.CreateAgentInput{ID: testID(41), ProjectID: project.ID, Name: "overseer", Role: "orchestrator", Provider: "codex", ToolBudgetLimit: 1})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, provider := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		id, err := kernel.AccountIDFromBytes(bytes.Repeat([]byte{byte(42 + i)}, kernel.IDBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = fixture.store.LinkAccount(ctx, kernel.NewAccount{ID: id, Provider: provider, Home: filepath.Join(t.TempDir(), "login"), Label: "account"}, mustKernelTime(t, 1000))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := api.AgentAccountSelectInput{AgentID: testID(41), ExpectedRevision: 1, AccountID: testID(42)}
+	done = fixture.serve(t)
+	result, err := client.SelectAgentAccount(ctx, input)
+	waitDispatch(t, done)
+	if err != nil || result.Revision != 2 {
+		t.Fatalf("overseer account = %+v, %v", result, err)
+	}
+	for _, tc := range []struct {
+		input api.AgentAccountSelectInput
+		code  api.RemoteErrorCode
+	}{
+		{input, api.RemoteRevisionConflict},
+		{api.AgentAccountSelectInput{AgentID: testID(41), ExpectedRevision: 2, AccountID: testID(43)}, api.RemoteInvalidRequest},
+		{api.AgentAccountSelectInput{AgentID: testID(99), ExpectedRevision: 1, AccountID: testID(42)}, api.RemoteNotFound},
+	} {
+		done = fixture.serve(t)
+		_, err := client.SelectAgentAccount(ctx, tc.input)
+		waitDispatch(t, done)
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != tc.code {
+			t.Fatalf("selection %+v: %v, want %v", tc.input, err, tc.code)
+		}
+	}
+	agent, found, err := fixture.store.Agent(ctx, mustAgentID(t, testID(41)))
+	if err != nil || !found || agent.AccountID.String() != testID(42) || agent.Revision.Int64() != 2 {
+		t.Fatalf("stored selection: %+v, %v", agent, err)
+	}
+	active := prepareActiveAttempt(t, fixture, 60)
+	done = fixture.serve(t)
+	_, err = client.SelectAgentAccount(ctx, api.AgentAccountSelectInput{AgentID: active.run.AgentID.String(), ExpectedRevision: 1, AccountID: testID(42)})
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("active account edit: %v", err)
 	}
 }

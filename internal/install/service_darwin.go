@@ -757,7 +757,7 @@ func openServiceDirectory(path string) (*serviceDirectory, error) {
 	if !validServicePath(path) || path == "/" {
 		return nil, errors.New("invalid service directory path")
 	}
-	rootFD, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	rootFD, err := unix.Open("/", ancestorOpenFlag|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -768,12 +768,17 @@ func openServiceDirectory(path string) (*serviceDirectory, error) {
 	}
 	directory := &serviceDirectory{files: []*os.File{root}, names: []string{""}}
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	for _, name := range parts {
+	for index, name := range parts {
 		if name == "" || name == "." || name == ".." || len(name) > maxNameSize {
 			_ = directory.close()
 			return nil, errors.New("invalid service directory component")
 		}
-		fd, openErr := unix.Openat(int(directory.files[len(directory.files)-1].Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		// Only the final directory needs data access; ancestors are identity pins.
+		flag := ancestorOpenFlag
+		if index == len(parts)-1 {
+			flag = unix.O_RDONLY
+		}
+		fd, openErr := unix.Openat(int(directory.files[len(directory.files)-1].Fd()), name, flag|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if openErr != nil {
 			_ = directory.close()
 			return nil, openErr

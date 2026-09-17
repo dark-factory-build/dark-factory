@@ -37,6 +37,29 @@ file-binding, dependency, or toolchain changes. A whole-kernel race run is
 exceptional and uses `-timeout 1200s`. One memory-heavy Go run at a time avoids
 macOS resource exhaustion.
 
+## Review and merge ordering
+
+Independent exact-head review precedes enqueue. The protected merge queue then
+runs required CI on the combined tree before merging. A pending future queue
+check is a delivery condition, not by itself a source-review defect. Reviewers
+still block concrete defects and false verification claims; neither local test
+evidence nor an ALLOW verdict bypasses the protected gates.
+
+## Operator human requests
+
+With the existing operator socket and token-file environment configured,
+`factoryctl human list` shows open, delivering, and delivery-unknown requests,
+including overseer questions. Answer an open request with:
+
+```sh
+factoryctl human reply --operation-id HEX32 --request ID --revision REVISION --reply "Answer"
+```
+
+Use the listed request revision and a fresh 32-character hexadecimal operation
+ID. Inspect the returned `human_reply.state`; `delivery_unknown` means input
+may have been delivered and must not be replayed. Operator credentials are
+required; a worker attempt token does not grant this authority.
+
 ## Finish and clean up
 
 After a confirmed merge, the repository agent that owns the checkout removes its
@@ -48,6 +71,18 @@ or in-use worktrees and report the reason. Age alone is not evidence of disuse. 
 tip as an ancestor. For that case, verify the merged PR's exact head equals the
 local branch tip, its recorded merge commit is reachable from `origin/main`, and
 its patch is incorporated. Keep the branch if any proof is missing.
+
+Factory-owned Change worktrees live under the daemon home's `changes`
+directory on `factory/<12 hex>` branches and are registered in the project
+repository like any other linked worktree. Remove one only after the same
+proof: its task is terminal and not queued for correction, no run owns it,
+its branch tip is merged into freshly fetched `origin/main` (or its squash
+merge is verified as above), and the worktree has no uncommitted work. Then
+`git worktree remove <changes/ID>` without force and delete the branch. A
+retained Change of an open task, a dirty worktree, or a worktree whose
+identity you have not verified is preserved and reported. Never `git
+worktree prune` a shared repository: it removes every registration whose
+directory is gone, other people's included.
 
 Run these commands from a surviving checkout of the same repository, never
 from the worktree being removed. Run `git worktree remove <owned-path>` without force. If removal fails, stop and
@@ -106,13 +141,56 @@ home walk rejects symlinks. Run `doctor` while the home is stopped. Every
 operator request needs both client environment variables.
 
 Lifecycle fixtures use a tiny temporary Git repository and the shell provider.
-They must prove the provider receives a daemon-owned `.git`-free Change and
-must independently prove descendants and disposable paths are gone. A shell
+They must prove the provider receives a daemon-owned linked worktree of that
+repository on the Change's own branch, that its commits settle as the Change's
+head, and must independently prove descendants and disposable paths are gone. A shell
 trap, sleep, `Drop`, broad PID scan, or cleanup performed only by the process a
 test kills is not absence proof.
 
 The real disposable launchd check is `scripts/go-service-e2e.sh`. Run it only
 when install or service ownership changes; it is not a routine extra gate.
+
+The local CI lease lives entirely in `dark-factory-local-ci` beneath the
+repository's canonical Git common directory. Workers receive that subtree
+through `DARK_FACTORY_LOCAL_CI_DIRECTORY`; use
+`scripts/with-local-ci-lease.sh <focused check>` to share the host gate, and
+run full `local-ci.sh` from the Change worktree, which is a Git checkout.
+If lease preparation is unavailable or refused, source work can still start with
+no lease grant and an explicit startup diagnostic; required CI remains blocked.
+
+## Cutover to worktree Changes
+
+The worktree runtime changes the SQLite schema (`changes` gains `head_commit`
+and loses the manifest facts) and reads every retained Change through Git.
+Install it at a settled boundary: turn dispatch off, let every running attempt
+reach terminal, then install and restart. The migration keeps every Change
+row, base and settled run; no Change gets a head until its Git-free tree is
+adopted, which happens on the next reopen (a send-back correction) or
+`attempt source` request, in place and with the worker's edits kept as
+uncommitted work at the recorded base. An adopted Change's branch is
+`factory/<12 hex>` in the project repository; an existing local branch of
+that name at another commit refuses the adoption and is the operator's to
+resolve. A build from before the migration refuses the newer `user_version`;
+the rollback plan for an operator home is a backup taken before install.
+
+When installing this lease layout, drain old CI holders, let their existing
+helper clean its lease state, and update active host checkouts before enabling
+worker checks. The new helper refuses legacy lease state, then atomically installs a
+symlink barrier at the former lock pathname. Old helpers already refuse this
+object and cannot create an independent gate. Never grant workers the enclosing
+`.git`, and never delete a held lease to complete this cutover.
+
+To check an older exact host checkout after cutover without changing its source,
+run the current helper from that checkout:
+`/absolute/current/scripts/with-local-ci-lease.sh /bin/sh ./scripts/local-ci.sh`.
+The old entry preserves the held-lease marker and does not acquire a second gate.
+For its process gate, wrap `./scripts/go-ci-owned.sh` directly, not `go-ci.sh`
+(which always tries to acquire another lease).
+
+Native checks use the already-pinned `DARK_FACTORY_FACTORYCTL` binary for only
+same-user process birth and group identity because macOS's setuid `/bin/ps`
+cannot execute inside the provider sandbox. Host checks retain `/bin/ps`.
+Neither path exposes process arguments, credentials, or a new daemon operation.
 
 ## Release and installation
 
@@ -124,6 +202,14 @@ publishes two archives, `SHA256SUMS`, a Homebrew formula candidate, and
 
 The fixed recovery workflow can resume a failed release while remaining bound
 to its tag and exact default-branch workflow commit.
+
+If a runtime was installed through an independently verified operator path,
+reconcile its receipt without deploying with:
+`factory-release.py CONFIG --reconcile --pr N --observed-sha SHA`. This requires
+the exact merged PR, current independent review, a healthy live probe for that
+SHA, and a complete prior-to-target source range. It writes only the verified
+receipt under the release lock; it does not invoke the deployment hook or
+change dispatch. Unresolved or running receipts must be settled first.
 
 The current installer is deliberately fresh and small. `factoryctl service
 install` copies the exact sibling `factoryd`, `factory-runner`, and `factoryctl`

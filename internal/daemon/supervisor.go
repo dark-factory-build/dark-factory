@@ -75,12 +75,14 @@ func (daemon *Daemon) RunNext(ctx context.Context, spec SupervisorSpec) (run ker
 	if err != nil {
 		return kernel.Run{}, err
 	}
-	daemon.rememberSupervisorAccount(spec.ChangeParent, spec.AccountHome)
+	daemon.RememberSupervisorAccount(spec.ChangeParent, spec.AccountHome, spec.GitExecutable)
 	defer func() { daemon.endSupervisor(registration, resultErr) }()
 	run, resultErr = daemon.runNext(registration.ctx, spec)
 	if run.Phase == kernel.RunFinalizing && run.ID != (kernel.RunID{}) {
-		recovered, recoverErr := daemon.recoverReturnedRun(spec.RuntimeParent, spec.ChangeParent, run.ID)
-		run = recovered
+		recovered, recoverErr := daemon.recoverReturnedRun(daemon.cleanupCtx, spec.RuntimeParent, spec.ChangeParent, run.ID)
+		if recovered.ID != (kernel.RunID{}) {
+			run = recovered
+		}
 		resultErr = errors.Join(resultErr, recoverErr)
 	}
 	return run, resultErr

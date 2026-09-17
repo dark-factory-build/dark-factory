@@ -73,6 +73,35 @@ func TestConsoleControlBounds(t *testing.T) {
 	}
 }
 
+func TestPageAccountsUsesCumulativeByteBoundedCursor(t *testing.T) {
+	items := make([]DiscoveredAccount, 8193)
+	for i := range items {
+		items[i] = DiscoveredAccount{Provider: "codex", Home: "/Users/operator/.codex-" + fmt.Sprint(i), Label: "codex", Email: strings.Repeat("e", 128), Organization: strings.Repeat("o", 128), DefaultModel: strings.Repeat("m", 128), DefaultReasoningEffort: strings.Repeat("r", 128)}
+	}
+	seen := 0
+	for offset := uint32(0); ; {
+		page, err := PageAccounts(items, offset)
+		if err != nil || len(page.Accounts) == 0 {
+			t.Fatalf("page at %d = %d accounts, %v", offset, len(page.Accounts), err)
+		}
+		wire, err := EncodeAccounts("accounts", page)
+		if err != nil || len(wire) > MaxSnapshotBytes {
+			t.Fatalf("page wire at %d = %d bytes, %v", offset, len(wire), err)
+		}
+		seen += len(page.Accounts)
+		if page.NextOffset == nil {
+			break
+		}
+		if *page.NextOffset != offset+uint32(len(page.Accounts)) {
+			t.Fatalf("cursor at %d = %d after %d accounts", offset, *page.NextOffset, len(page.Accounts))
+		}
+		offset = *page.NextOffset
+	}
+	if seen != len(items) {
+		t.Fatalf("paged %d accounts, want %d", seen, len(items))
+	}
+}
+
 // TOPOLOGY is the second frame allowed past the 64 KiB control bound: a
 // repository graph does not fit in it. The bound it does have is the
 // snapshot's, and it still fails closed.

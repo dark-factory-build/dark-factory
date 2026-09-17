@@ -1105,3 +1105,58 @@ func TestSlowSubscriberCannotGrowTransportMemoryOrBlockShutdown(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestClosedStateWatchPreservesReconnectClassification(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		cause     error
+		code      browserprotocol.ErrorCode
+		retryable bool
+	}{
+		{name: "clean"},
+		{name: "daemon reload", cause: context.Canceled},
+		{name: "deadline", cause: context.DeadlineExceeded, code: browserprotocol.ErrorInternal},
+		{name: "busy", cause: ErrRateLimited, code: browserprotocol.ErrorRateLimited, retryable: true},
+		{name: "revoked", cause: ErrUnauthorized, code: browserprotocol.ErrorUnauthorized},
+		{name: "fault", cause: errors.New("store failed"), code: browserprotocol.ErrorInternal},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend := newFakeBackend()
+			backend.sub.err = test.cause
+			server, err := Listen(Config{Address: "127.0.0.1:0", AllowedOrigins: []string{testOrigin}, Backend: backend})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = server.Close() }()
+			connection, _ := dialServer(t, server, testOrigin)
+			authenticate(t, connection)
+			watch, _ := browserprotocol.EncodeStateWatch("watch", browserprotocol.StateWatch{AfterHead: 7})
+			writeClientFrame(t, connection, watch)
+			backend.sub.updates <- StateUpdate{Head: 8}
+			if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateChanged {
+				t.Fatalf("watch barrier = %+v", frame)
+			}
+			close(backend.sub.updates)
+			if test.cause == nil || errors.Is(test.cause, context.Canceled) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				if _, wire, err := connection.Read(ctx); err == nil {
+					t.Fatalf("clean closure emitted fatal frame: %s", wire)
+				}
+			} else {
+				frame := readServerFrame(t, connection)
+				verdict, ok := frame.Body.(browserprotocol.Error)
+				if !ok || verdict.Code != test.code || bool(verdict.Retryable) != test.retryable {
+					t.Fatalf("watch error = %+v", frame)
+				}
+			}
+			err = server.Close()
+			if (test.cause == nil || errors.Is(test.cause, context.Canceled)) && err != nil || test.cause != nil && !errors.Is(test.cause, context.Canceled) && !errors.Is(err, ErrSubscriptionUnresolved) {
+				t.Fatalf("cleanup authority = %v", err)
+			}
+			if backend.sub.closed.Load() != 1 {
+				t.Fatalf("subscription joined %d times", backend.sub.closed.Load())
+			}
+		})
+	}
+}

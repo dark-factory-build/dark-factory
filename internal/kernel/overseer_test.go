@@ -78,6 +78,61 @@ func TestOverseerSnapshotPagesWithHeadFenceAndTaskTextChunks(t *testing.T) {
 	}
 }
 
+func TestOverseerSnapshotIncludesAllActionableTasksBeyondHistoryWindow(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	insertTerminal := func(id TaskID, incarnation IncarnationID, status string, blockedReason any, completedAt any, at int64) {
+		_, err := store.writer.ExecContext(ctx, `INSERT INTO tasks(
+			id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body,
+			sent_back_instruction_bytes, status, priority, blocked_reason, result,
+			completed_at_ms, revision, created_at_ms, updated_at_ms
+		) VALUES(?, ?, ?, ?, 1, 'historical', '', NULL, ?, 0, ?, NULL, ?, 1, ?, ?)`,
+			id.Bytes(), run.ProjectID.Bytes(), run.AgentID.Bytes(), incarnation.Bytes(), status, blockedReason, completedAt, at, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := byte(0); index < 32; index++ {
+		at := int64(100 + index)
+		insertTerminal(taskID(t, 20+index), incarnationID(t, 60+index), "succeeded", nil, at, at)
+	}
+	blockedID := taskID(t, 200)
+	failedID := taskID(t, 201)
+	insertTerminal(blockedID, incarnationID(t, 202), "blocked", "needs operator", nil, 1)
+	insertTerminal(failedID, incarnationID(t, 203), "failed", nil, int64(2), 2)
+
+	seen := map[TaskID]bool{}
+	var head EventSequence
+	var offset uint64
+	for {
+		page, err := store.OverseerSnapshotForAttempt(ctx, run.CredentialDigest, OverseerSnapshotRequest{Offset: offset, ExpectedHead: head})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if head.Int64() == 0 {
+			head = page.Head
+		}
+		if len(page.Tasks) > OverseerSnapshotPageSize {
+			t.Fatalf("page exceeded bound: %d", len(page.Tasks))
+		}
+		for _, task := range page.Tasks {
+			seen[task.ID] = true
+		}
+		if page.NextOffset == nil {
+			break
+		}
+		offset = *page.NextOffset
+	}
+	if !seen[blockedID] || !seen[failedID] {
+		t.Fatalf("actionable history omitted: blocked=%v failed=%v", seen[blockedID], seen[failedID])
+	}
+	detail, err := store.OverseerSnapshotForAttempt(ctx, run.CredentialDigest, OverseerSnapshotRequest{TaskID: &blockedID})
+	if err != nil || len(detail.Tasks) != 1 || detail.Tasks[0].Status != TaskBlocked {
+		t.Fatalf("selected blocked task = %+v, %v", detail.Tasks, err)
+	}
+}
+
 func TestOverseerCannotAnswerItsOwnHumanRequest(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
@@ -108,5 +163,73 @@ func TestOverseerHumanReplyTargetsOnlyWorkers(t *testing.T) {
 	delivery, err := store.BeginHumanReplyForAttempt(ctx, overseer.CredentialDigest, request.ID, request.Revision, humanDeliveryID(t, 249), "answer", mustTime(t, 42))
 	if err != nil || delivery.RunID != worker.ID {
 		t.Fatalf("worker reply = %+v, %v", delivery, err)
+	}
+}
+
+func TestRetainedChangeHandoffsInspectCurrentSettledOutcomes(t *testing.T) {
+	succeeded, err := NewSuccessProposal("finished")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := NewBlockedProposal("needs input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := NewFailureProposal(FailureInternal, "worker failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := NewCancelledProposal("operator stopped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		proposal Proposal
+		sendBack bool
+		want     bool
+	}{
+		{name: "current succeeded", proposal: succeeded, want: true},
+		{name: "blocked", proposal: blocked, want: true},
+		{name: "failed", proposal: failed, want: true},
+		{name: "cancelled", proposal: cancelled, want: true},
+		{name: "blocked sent back", proposal: blocked, sendBack: true},
+		{name: "failed sent back", proposal: failed, sendBack: true},
+		{name: "sent back", proposal: succeeded, sendBack: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, test.proposal)
+			defer store.Close()
+			if _, found, err := store.RetainedChangeHandoffForTask(context.Background(), finalizing.ProjectID, finalizing.TaskID); err != nil || found {
+				t.Fatalf("unsettled source handoff: found=%v err=%v", found, err)
+			}
+			terminal, err := finalizeTestRun(t, store, finalizing, 70)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.sendBack {
+				task, found, err := store.Task(context.Background(), terminal.TaskID)
+				if err != nil || !found {
+					t.Fatalf("task = %+v, found=%v, err=%v", task, found, err)
+				}
+				if _, err := store.SendBackTask(context.Background(), task.ID, task.Revision, "repair this", mustTime(t, 80)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			direct, directFound, err := store.RetainedChangeHandoffForTask(context.Background(), terminal.ProjectID, terminal.TaskID)
+			if err != nil {
+				t.Fatalf("direct handoff = %v", err)
+			}
+			if !test.want {
+				if directFound {
+					t.Fatalf("ineligible handoff = %+v", direct)
+				}
+				return
+			}
+			change, found, err := store.Change(context.Background(), *terminal.ChangeID)
+			if err != nil || !found || !directFound || direct.ChangeID != change.ID || direct.TaskID != terminal.TaskID || direct.TaskWorkRevision != terminal.AdmittedTaskWorkRevision || direct.ChangeRevision != change.Revision {
+				t.Fatalf("direct current handoff = %+v, found=%v, err=%v", direct, directFound, err)
+			}
+		})
 	}
 }

@@ -616,7 +616,7 @@ export class FactoryAppController {
     this.#replaceTerminal(selected === undefined ? {} : { agentId: selected.agent.id, agentRevision: selected.agent.revision });
   }
 
-  async enqueueAgentInstruction(instruction: string, mode: "now" | "queue" = "now"): Promise<boolean> {
+  async enqueueAgentInstruction(instruction: string, mode: "now" | "queue" | "any" = "now"): Promise<boolean> {
     const selected = this.#selectedAgent;
     const session = this.#client?.session;
     const body = instruction.trim();
@@ -651,13 +651,14 @@ export class FactoryAppController {
         agentId: selected.agent.id,
         expectedAgentRevision: selected.agent.revision,
         instruction: body,
-        ...(mode === "queue" ? { mode } : {}),
+        ...(mode === "now" ? {} : { mode }),
       });
       const current = this.#selectedAgent;
       if (!this.#current(generation) || current === undefined || current.agent.id !== selected.agent.id || current.instructionAttempt !== attempt) return false;
       current.instructionPending = false;
       current.instructionDraft = "";
-      current.queuedTaskID = task.taskId;
+      // Shared work is not this pane's until a worker claims it.
+      if (mode !== "any") current.queuedTaskID = task.taskId;
       if (this.#state !== undefined) this.#refreshTerminalTask(current, this.#state);
       this.#publish();
       this.#reconcileTerminal();

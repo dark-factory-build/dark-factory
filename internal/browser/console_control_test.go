@@ -147,7 +147,7 @@ func (backend *consoleDispatchBackend) RevokeBrowserClient(_ context.Context, cl
 	return browserprotocol.BrowserClientRevokeResult{ClientID: request.ClientID, Revision: request.ExpectedRevision + 1}, nil
 }
 
-func (backend *consoleDispatchBackend) DiscoverAccounts(_ context.Context, client [browserprotocol.ClientIDSize]byte) (browserprotocol.Accounts, error) {
+func (backend *consoleDispatchBackend) DiscoverAccounts(_ context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.AccountsDiscover) (browserprotocol.Accounts, error) {
 	if err := backend.record(client); err != nil {
 		return browserprotocol.Accounts{}, err
 	}

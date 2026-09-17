@@ -71,7 +71,7 @@ run_packaged_smoke() {
         fi
         if env "$smoke_socket_env" "$smoke_token_env" "$smoke_bin/factoryctl" web status \
             >"$smoke_root/web-status.out" 2>"$smoke_root/web-status.err" &&
-            ruby -rjson -e '
+            /usr/bin/ruby --disable-gems -rjson -e '
               status = JSON.parse(STDIN.read)
               abort unless status["ready"] == true
               address = status.fetch("address")
@@ -127,6 +127,7 @@ build_binary() {
         go build -trimpath -buildvcs=false \
         -ldflags "-s -w -X github.com/dark-factory-build/dark-factory/internal/buildinfo.receipt=$build_receipt" \
         -o "$build_output" "./cmd/$build_component"
+    chmod 0755 "$build_output"
 }
 
 make_binaries() {
@@ -154,7 +155,7 @@ case "$(uname -m)" in
     *) fail "unsupported native macOS architecture" ;;
 esac
 for binary in factoryd factory-runner factoryctl; do
-    "$native_dir/$binary" --build-identity | ruby -rjson -e '
+    "$native_dir/$binary" --build-identity | /usr/bin/ruby --disable-gems -rjson -e '
       value = JSON.parse(STDIN.read)
       abort "version" unless value.fetch("version") == "1.2.3"
       abort "source" unless value.fetch("source") == ARGV.fetch(0)
@@ -204,6 +205,7 @@ mv "$saved_factoryd" "$intel_dir/factoryd"
 # when the file remains one executable Mach-O with the expected name and mode.
 valid_arm_factoryd="$temporary/valid-arm-factoryd"
 cp "$arm_dir/factoryd" "$valid_arm_factoryd"
+chmod 0755 "$valid_arm_factoryd"
 wrong_version_receipt=$("$release_tool" receipt 1.2.4 "$source_sha" darwin/arm64)
 build_binary factoryd arm64 "$wrong_version_receipt" "$arm_dir/factoryd"
 if "$packager" v1.2.3 "$source_sha" "$output" example/project \
@@ -215,6 +217,7 @@ mv "$valid_arm_factoryd" "$arm_dir/factoryd"
 
 valid_arm_factoryd="$temporary/valid-arm-factoryd"
 cp "$arm_dir/factoryd" "$valid_arm_factoryd"
+chmod 0755 "$valid_arm_factoryd"
 wrong_source_receipt=$("$release_tool" receipt 1.2.3 2234567890abcdef1234567890abcdef12345678 darwin/arm64)
 build_binary factoryd arm64 "$wrong_source_receipt" "$arm_dir/factoryd"
 if "$packager" v1.2.3 "$source_sha" "$output" example/project \
@@ -226,6 +229,7 @@ mv "$valid_arm_factoryd" "$arm_dir/factoryd"
 
 valid_arm_factoryd="$temporary/valid-arm-factoryd"
 cp "$arm_dir/factoryd" "$valid_arm_factoryd"
+chmod 0755 "$valid_arm_factoryd"
 bad_build_id=$(printf '%064d' 1)
 bad_receipt="1.2.3|$source_sha|darwin/arm64|$bad_build_id"
 build_binary factoryd arm64 "$bad_receipt" "$arm_dir/factoryd"
@@ -239,6 +243,7 @@ mv "$valid_arm_factoryd" "$arm_dir/factoryd"
 valid_intel_factoryd="$temporary/valid-intel-factoryd"
 mv "$intel_dir/factoryd" "$valid_intel_factoryd"
 cp "$arm_dir/factoryd" "$intel_dir/factoryd"
+chmod 0755 "$intel_dir/factoryd"
 if "$packager" v1.2.3 "$source_sha" "$output" example/project \
     aarch64-apple-darwin "$arm_dir" x86_64-apple-darwin "$intel_dir" \
     >"$temporary/wrong-arch.out" 2>"$temporary/wrong-arch.err"; then
@@ -281,7 +286,7 @@ rm -rf "$smoke_workspace"
 smoke_workspace=
 [ "$smoke_status" -eq 0 ] || fail "packaged archive operational smoke failed"
 
-ruby -rjson -e '
+/usr/bin/ruby --disable-gems -rjson -e '
   manifest = JSON.parse(File.read(ARGV.fetch(0)))
   abort "version" unless manifest["version"] == "1.2.3"
   abort "tag" unless manifest["tag"] == "v1.2.3"
@@ -304,7 +309,7 @@ ruby -rjson -e '
     || fail "manifest is not the exact two-target identity shape"
 
 formula="$output/dark-factory.rb"
-ruby -c "$formula" >/dev/null || fail "formula is not valid Ruby"
+/usr/bin/ruby --disable-gems -c "$formula" >/dev/null || fail "formula is not valid Ruby"
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
     grep -Fq "dark-factory-v1.2.3-$target.tar.gz" "$formula" \
         || fail "formula omitted $target"

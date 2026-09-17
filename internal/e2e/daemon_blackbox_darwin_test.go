@@ -59,6 +59,9 @@ func startupDiagnostic(output func() string) string {
 	for _, line := range strings.Split(output(), "\n") {
 		if strings.HasPrefix(line, "factoryd:") {
 			diagnostic = line
+		} else if diagnostic != "" && line != "" {
+			// errors.Join formats its retained causes on subsequent lines.
+			diagnostic += "\n" + line
 		}
 	}
 	if diagnostic == "" {
@@ -244,7 +247,10 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 	factoryd := requiredExecutable(t, "DARK_FACTORY_E2E_FACTORYD")
 	factoryctl := requiredExecutable(t, "DARK_FACTORY_E2E_FACTORYCTL")
 	requiredExecutable(t, "DARK_FACTORY_E2E_RUNNER")
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-daemon-e2e-")
+	// Short prefix: a runner binds takeover.sock inside a runtime directory,
+	// and a run's 32-character name plus that basename has to stay inside the
+	// same sun_path budget as the local API socket.
+	root, err := os.MkdirTemp("/private/tmp", "df-e2e-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,8 +263,13 @@ func newBlackBoxFixture(t *testing.T) *blackBoxFixture {
 		t.Fatal(err)
 	}
 	fixture := &blackBoxFixture{root: root, home: filepath.Join(root, "factory"), repo: filepath.Join(root, "repo"), factoryd: factoryd, factoryctl: factoryctl}
-	if socket := install.LocalAPISocketPath(fixture.home); len(socket) > install.MaxSocketPathBytes {
-		t.Fatalf("api socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+	for _, socket := range []string{
+		install.LocalAPISocketPath(fixture.home),
+		filepath.Join(install.RuntimesPath(fixture.home), strings.Repeat("0", 32), runner.TakeoverSocketName),
+	} {
+		if len(socket) > install.MaxSocketPathBytes {
+			t.Fatalf("socket path is %d bytes, over the %d-byte budget: %q", len(socket), install.MaxSocketPathBytes, socket)
+		}
 	}
 	if err := os.Mkdir(fixture.repo, 0o700); err != nil {
 		t.Fatal(err)
@@ -281,7 +292,8 @@ func (fixture *blackBoxFixture) startFactoryd(t *testing.T) (*exec.Cmd, *syncBuf
 	t.Helper()
 	output := &syncBuffer{}
 	command := exec.Command(fixture.factoryd, "--home", fixture.home, "--development-browser-address", "127.0.0.1:0")
-	command.Stdout, command.Stderr = output, output
+	// Keep startup diagnostics separate from arbitrary standard output.
+	command.Stderr = output
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -320,6 +332,11 @@ func TestStartupDiagnosticShowsOnlyBoundedFactorydStartupOutput(t *testing.T) {
 	_, _ = output.Write([]byte("provider: secret\nfactoryd: browser: listen tcp4 127.0.0.1:43123: bind: address already in use\n"))
 	if got, want := startupDiagnostic(output.String), `"factoryd: browser: listen tcp4 127.0.0.1:43123: bind: address already in use"`; got != want {
 		t.Fatalf("startup diagnostic = %s, want %s", got, want)
+	}
+	joined := &syncBuffer{}
+	_, _ = joined.Write([]byte("earlier output\nfactoryd: home publication outcome is uncertain\nretained socket identity changed\n"))
+	if got, want := startupDiagnostic(joined.String), `"factoryd: home publication outcome is uncertain\nretained socket identity changed"`; got != want {
+		t.Fatalf("joined startup diagnostic = %s, want %s", got, want)
 	}
 	long := &syncBuffer{}
 	_, _ = long.Write([]byte("factoryd: " + strings.Repeat("x", maxStartupDiagnosticBytes+1)))

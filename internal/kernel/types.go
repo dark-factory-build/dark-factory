@@ -7,13 +7,13 @@ import (
 )
 
 const (
-	IDBytes                = 16
-	DigestBytes            = 32
-	EventRetentionLimit    = 4096
-	SnapshotEntityLimit    = 4096
-	MaxFactoryCapacity     = 1024
-	MaxChangeTreeEntries   = 10_000
-	MaxChangeTreeBlobBytes = 1 << 30
+	IDBytes              = 16
+	DigestBytes          = 32
+	EventRetentionLimit  = 4096
+	SnapshotEntityLimit  = 4096
+	MaxFactoryCapacity   = 1024
+	MaxRecoveryRuns      = 64
+	MaxRecoveryResources = 16
 )
 
 type identifier struct {
@@ -176,7 +176,6 @@ func (d digest) Bytes() []byte {
 
 type AttemptDigest struct{ digest }
 type ResultProofDigest struct{ digest }
-type TreeDigest struct{ digest }
 type BirthDigest struct{ digest }
 
 func AttemptDigestFromBytes(value []byte) (AttemptDigest, error) {
@@ -189,11 +188,6 @@ func ResultProofDigestFromBytes(value []byte) (ResultProofDigest, error) {
 	return ResultProofDigest{d}, err
 }
 
-func TreeDigestFromBytes(value []byte) (TreeDigest, error) {
-	d, err := digestFromBytes(value)
-	return TreeDigest{d}, err
-}
-
 func BirthDigestFromBytes(value []byte) (BirthDigest, error) {
 	d, err := digestFromBytes(value)
 	return BirthDigest{d}, err
@@ -201,7 +195,6 @@ func BirthDigestFromBytes(value []byte) (BirthDigest, error) {
 
 func (d AttemptDigest) Bytes() []byte     { return d.digest.Bytes() }
 func (d ResultProofDigest) bytes() []byte { return d.digest.Bytes() }
-func (d TreeDigest) Bytes() []byte        { return d.digest.Bytes() }
 func (d BirthDigest) Bytes() []byte       { return d.digest.Bytes() }
 
 type BrowserChallengeDigest struct{ digest }
@@ -506,16 +499,26 @@ type NewTask struct {
 	Title           string
 	Body            string
 	Priority        int64
+	Prerequisites   []TaskPrerequisite
+	ConflictPaths   []string
+}
+
+// TaskPrerequisite pins a consumer to the producer's particular corrected
+// work revision. A later send-back cannot silently satisfy this edge.
+type TaskPrerequisite struct {
+	TaskID       TaskID
+	WorkRevision Revision
 }
 
 type FactoryState struct {
 	DaemonID        DaemonID
 	DispatchEnabled bool
 	Capacity        uint16
-	Revision        Revision
-	Head            EventSequence
-	Floor           EventSequence
-	updatedAt       UnixMillis
+	// Revision guards explicit controls; Head tracks activity and all other changes.
+	Revision  Revision
+	Head      EventSequence
+	Floor     EventSequence
+	updatedAt UnixMillis
 }
 
 type Project struct {
@@ -535,7 +538,7 @@ type Project struct {
 }
 
 // IdlePolicy is what an agent does with no run: wait for work, or enqueue a
-// standing instruction to itself after a quiet spell, within a run budget.
+// standing instruction to itself after a quiet spell, without a wake ceiling.
 type IdlePolicy string
 
 const (
@@ -552,7 +555,7 @@ func ParseIdlePolicy(value string) (IdlePolicy, error) {
 }
 
 // IdleRule is an agent's idle rule. IdleRunsUsed counts only the runs the
-// rule enqueued itself; a new budget starts the count again.
+// rule enqueued itself and is retained as history, including when uncapped.
 type IdleRule struct {
 	Policy       IdlePolicy
 	AfterSeconds uint32
@@ -650,6 +653,8 @@ type TaskSummary struct {
 	ID              TaskID
 	ProjectID       ProjectID
 	AssignedAgentID AgentID
+	IncarnationID   IncarnationID
+	WorkRevision    Revision
 	Title           string
 	Status          string
 	Priority        int64

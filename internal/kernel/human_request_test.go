@@ -893,3 +893,25 @@ func TestHumanQuestionCreationRequiresExactRunningAttempt(t *testing.T) {
 		t.Fatalf("oversized question = %v", err)
 	}
 }
+
+func TestOperatorHumanRequestsIncludesOverseerAndRejectsReplay(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(71), QuestionText: "Approve the reviewed delivery?", Options: []string{}}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests, err := store.OperatorHumanRequests(ctx)
+	if err != nil || len(requests) != 1 || requests[0].ID != request.ID || requests[0].AgentID != run.AgentID {
+		t.Fatalf("operator list = %+v, %v", requests, err)
+	}
+	deliveryID := humanDeliveryID(t, 72)
+	delivery, err := store.BeginHumanReplyForOperator(ctx, request.ID, request.Revision, deliveryID, "Proceed", mustTime(t, 401))
+	if err != nil || delivery.RequestID != request.ID || delivery.DeliveryID != deliveryID {
+		t.Fatalf("operator reply = %+v, %v", delivery, err)
+	}
+	if _, err := store.BeginHumanReplyForOperator(ctx, request.ID, request.Revision, deliveryID, "Proceed", mustTime(t, 402)); err == nil {
+		t.Fatal("replayed reply accepted")
+	}
+}

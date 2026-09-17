@@ -274,7 +274,7 @@ export function AgentInstruction({
   terminal: FactoryTerminalView;
   mode?: "now" | "queue";
   onDraftChange?: (instruction: string) => void;
-  onSubmit: (instruction: string, mode?: "now" | "queue") => Promise<boolean>;
+  onSubmit: (instruction: string, mode?: "now" | "queue" | "any") => Promise<boolean>;
 }) {
   const [localInstruction, setLocalInstruction] = useState("");
   const instruction = onDraftChange === undefined ? localInstruction : terminal.instructionDraft ?? "";
@@ -282,10 +282,10 @@ export function AgentInstruction({
     if (onDraftChange === undefined) setLocalInstruction(value);
     else onDraftChange(value);
   };
-  const submit = async (event?: SyntheticEvent) => {
+  const submit = async (event?: SyntheticEvent, target: "now" | "queue" | "any" = mode) => {
     event?.preventDefault();
     if ((mode === "now" && terminal.paused) || terminal.instructionPending || instruction.trim().length === 0) return;
-    if (await onSubmit(instruction, mode)) setInstruction("");
+    if (await onSubmit(instruction, target)) setInstruction("");
   };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void submit(event);
@@ -316,6 +316,9 @@ export function AgentInstruction({
         {errorCopy === undefined ? null : <span role="alert">{errorCopy}</span>}
         <button type="submit" disabled={terminal.instructionPending || instruction.trim().length === 0}>
           {terminal.instructionPending ? "SENDING" : mode === "queue" ? "ADD TO QUEUE" : "START"}
+        </button>
+        <button type="button" aria-label={`Queue for any eligible worker in ${terminal.agentName}'s project`} disabled={terminal.instructionPending || instruction.trim().length === 0} onClick={() => { void submit(undefined, "any"); }}>
+          ANY WORKER
         </button>
       </div>
     </form>
