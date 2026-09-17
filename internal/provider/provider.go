@@ -169,6 +169,21 @@ func codexConfigHome(runtime RuntimePaths) string {
 	return ConfigHome(kernel.ProviderCodex, runtime.accountHome)
 }
 
+// claudeConfigHome is the effective directory a Claude Code launch's own
+// configuration and native session transcripts live under: a linked
+// account's own directory when one differs from the default, else the
+// account home's own .claude directory (what the CLI reaches by default
+// through HOME). This is the one place that rule is spelled: the launch
+// environment (CLAUDE_CONFIG_DIR) and Claude session discovery both ask
+// here, so a linked launch's discovery can never disagree with the
+// directory the CLI itself was actually told to use.
+func claudeConfigHome(runtime RuntimePaths) string {
+	if configDir := filepath.Dir(ClaudeConfigFile(runtime.accountHome, runtime.accountConfig)); configDir != runtime.accountHome {
+		return configDir
+	}
+	return ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome)
+}
+
 func (Installation) String() string   { return "provider installation (private)" }
 func (Installation) GoString() string { return "provider.Installation{private}" }
 
@@ -341,15 +356,16 @@ var claudeSessionNamespace = sha256.Sum256([]byte("dark-factory.claude-code.sess
 // claudeSessionSelection derives the native Claude Code session this worker
 // launch should use and decides fresh vs resume by whether that session's
 // transcript already exists on disk. Claude Code keys a conversation's
-// transcript by the exact launch cwd under the account home
-// (HOME/.claude/projects/<escaped-cwd>/<uuid>.jsonl, see docs/providers.md),
+// transcript by the exact launch cwd under its effective config directory
+// (claudeConfigHome, matching the launch's own CLAUDE_CONFIG_DIR:
+// <config-home>/projects/<escaped-cwd>/<uuid>.jsonl, see docs/providers.md),
 // and a worker's cwd is its task incarnation's Change directory, which a
 // send-back retry reuses (internal/kernel/change.go: one Change row per
 // project+task+incarnation). Deriving the id from provider+agent+incarnation
 // means no extra state is needed to remember which session belongs to which
 // task: the same retry always recomputes the same id.
 func claudeSessionSelection(runtime RuntimePaths, cwd, agentID, taskIncarnationID string) (id string, resume bool, err error) {
-	projectDir := filepath.Join(ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome), "projects", escapeClaudeProjectPath(cwd))
+	projectDir := filepath.Join(claudeConfigHome(runtime), "projects", escapeClaudeProjectPath(cwd))
 	seed := "claude-code\x00" + agentID + "\x00" + taskIncarnationID
 	for generation := 0; generation < maxClaudeSessionGenerations; generation++ {
 		candidate := formatUUID(uuidV5(claudeSessionNamespace, []byte(fmt.Sprintf("%s\x00%d", seed, generation))))
@@ -927,7 +943,7 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 		// lives in $HOME/.claude.json rather than inside it, so naming it
 		// would point the CLI at the flags-only file it does contain and
 		// launch the run with no login at all.
-		if configDir := filepath.Dir(ClaudeConfigFile(runtime.accountHome, runtime.accountConfig)); configDir != runtime.accountHome {
+		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome) {
 			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
 		}
 	}

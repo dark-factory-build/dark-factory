@@ -128,12 +128,17 @@ configuration and capability boundaries are described below.
 
 A worker's Claude Code launch adds `--session-id UUID` or `--resume UUID`
 right after `--dangerously-skip-permissions`. The CLI keys a conversation's
-own transcript by the exact launch directory under the account home
-(`HOME/.claude/projects/<escaped-cwd>/<uuid>.jsonl`); a worker's launch
-directory is its task incarnation's Change worktree, which a send-back retry
-reuses (see `internal/kernel/change.go`), so the same UUID keeps a correction
-in the same native conversation instead of a fresh one that only repeats the
-brief. The UUID is derived (UUID v5, RFC 4122) from provider, agent ID and
+own transcript by the exact launch directory under its effective
+configuration directory (`<config-home>/projects/<escaped-cwd>/<uuid>.jsonl`):
+`HOME/.claude` by default, or a linked account's own directory when one is
+selected, exactly the directory the launch environment names
+`CLAUDE_CONFIG_DIR` (`claudeConfigHome` in `internal/provider/provider.go` is
+the one place this is computed, shared by the launch environment and by
+session discovery so they can never disagree); a worker's launch directory is
+its task incarnation's Change worktree, which a send-back retry reuses (see
+`internal/kernel/change.go`), so the same UUID keeps a correction in the same
+native conversation instead of a fresh one that only repeats the brief. The
+UUID is derived (UUID v5, RFC 4122) from provider, agent ID and
 task incarnation ID, so no extra state records which session belongs to which
 task, and `--resume` is chosen only when that exact transcript file already
 exists on disk; a first attempt, or a transcript past the shared rotation

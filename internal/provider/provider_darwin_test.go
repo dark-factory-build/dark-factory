@@ -469,6 +469,56 @@ func TestClaudeWorkerSessionResumesWhenTranscriptExistsUnderLimit(t *testing.T) 
 	}
 }
 
+// A linked Claude account's launch exports CLAUDE_CONFIG_DIR set to the
+// account's own directory (see TestAccountConfigDirectorySelectsTheProviderLogin),
+// so its transcripts live under that directory, not the account home's own
+// default .claude; discovery must look in the exact same place the launch
+// itself was actually told to use (claudeConfigHome, shared with
+// environment()), or a retry on a linked account would always see a fresh
+// session instead of resuming its own.
+func TestClaudeWorkerLinkedAccountSessionResumesUnderItsOwnConfigDirectory(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	accountConfig := filepath.Join(t.TempDir(), "claude-dogfood")
+	if err := os.Mkdir(accountConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := NewRuntimePaths(runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl, runtime.gitCeiling, runtime.toolPath, runtime.accountHome, accountConfig, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(linked.environment(kernel.ProviderClaudeCode), "CLAUDE_CONFIG_DIR="+accountConfig) {
+		t.Fatalf("fixture is not actually a linked account launch: %q", linked.environment(kernel.ProviderClaudeCode))
+	}
+	cwd := filepath.Join(t.TempDir(), "change")
+	id, resume, err := claudeSessionSelection(linked, cwd, testAgentID, testIncarnationID)
+	if err != nil || resume {
+		t.Fatalf("initial selection id=%q resume=%v err=%v", id, resume, err)
+	}
+	// The transcript lives directly under the linked account's own
+	// directory, not a further nested .claude beneath it.
+	transcriptDir := filepath.Join(accountConfig, "projects", escapeClaudeProjectPath(cwd))
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(transcriptDir, id+".jsonl"), []byte(`{"type":"session_meta"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request, err := NewRequest(kernel.ProviderClaudeCode, installation, "", "", linked, cwd, kernel.RoleWorker, testAgentID, testIncarnationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i := slices.Index(launch.Argv(), "--resume"); i < 0 || launch.Argv()[i+1] != id {
+		t.Fatalf("linked worker argv = %q, want --resume %q", launch.Argv(), id)
+	}
+	if slices.Contains(launch.Argv(), "--session-id") {
+		t.Fatalf("linked worker argv = %q, want no --session-id once a transcript exists", launch.Argv())
+	}
+}
+
 // Bounding growth: a generation whose transcript has reached the rotation
 // ceiling is retired in favor of a fresh one, the simplest measurable rule
 // for a task incarnation with an unbounded number of send-back retries.
