@@ -1575,7 +1575,15 @@ test("settings keeps an unavailable linked account visible with recovery guidanc
     linked_id: account.id,
     unavailable_reason: "login is no longer discoverable",
   }] });
-  assert.match(markup, /ACCOUNT UNAVAILABLE · login is no longer discoverable\. Sign in again in this directory, then refresh\./);
+  assert.match(markup, /ACCOUNT UNAVAILABLE · login is no longer discoverable\./);
+  assert.ok(markup.includes(`Sign in again using <code>${account.home}</code>, then refresh.`));
+});
+
+test("settings explains the next step when discovery finds no provider logins", () => {
+  const state = { ...baseState(), accounts: new Map() };
+  const guidance = "Sign in with your provider CLI on this Mac, then refresh.";
+  assert.ok(render({ settingsOpen: true, state, accounts: [] }).includes(guidance));
+  assert.equal(render({ settingsOpen: true, state }).includes(guidance), false, "no discovery result is not an empty result");
 });
 
 test("the RULES block saves an idle rule and sends only what changed", async () => {

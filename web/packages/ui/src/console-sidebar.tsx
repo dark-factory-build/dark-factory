@@ -670,7 +670,7 @@ function AccountsSection({
   return (
     <div className="dfConsoleSidebar__section" aria-label="ACCOUNTS">
       <h3>PROVIDER LOGINS</h3>
-      <p className="dfConsoleSidebar__inherit">Link a login already available on this Mac.</p>
+      <p className="dfConsoleSidebar__inherit">{accounts !== undefined && linked.length === 0 && unlinked.length === 0 ? "Sign in with your provider CLI on this Mac, then refresh." : "Link a login already available on this Mac."}</p>
       <button type="button" disabled={pending || onRefresh === undefined} onClick={onRefresh}>{pending ? "REFRESHING" : "REFRESH ACCOUNTS"}</button>
       {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{EDIT_ERRORS.get(error) ?? "THE FACTORY REFUSED THIS"}</p>}
       {linked.length === 0 ? <p className="dfFactoryConsole__empty">NO ACCOUNTS LINKED</p> : (
@@ -682,7 +682,7 @@ function AccountsSection({
               <li key={`${account.id}:${account.revision}`} className="dfConsoleSidebar__account">
                 <p className="dfConsoleRow__title">{account.label} · {account.provider}</p>
                 <p>{identity === "" ? `${account.provider} login linked` : identity}</p>
-                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again in this directory, then refresh.</p>}
+                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again using <code>{account.home}</code>, then refresh.</p>}
                 <div className="dfConsoleSidebar__taskActions">
                   <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-linked-account-${account.id}`}>Label for {account.label}</label>
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />

@@ -10,13 +10,14 @@ owned by their existing client/controller surfaces.
 | Observed state | Primary action | Optional disclosure |
 | --- | --- | --- |
 | Local Settings open | Pair a phone or link a provider login | Run limits, only when the operator chooses them |
-| No discovered logins | Refresh accounts | None; signing in remains the provider CLI’s job |
+| Discovery found no logins | Sign in with the provider CLI, then refresh | No installation or account mutation is inferred from an empty result |
 | Discovered unlinked login | Choose a label and link it | Provider identity (email/organisation) when available |
 | Linked login in use | Rename or leave it linked | Unlink is disabled until agents are reassigned |
+| Linked login unavailable | Sign in again using its displayed profile directory, then refresh | The directory is shown only when needed for recovery |
 | Remote device has no factory | Paste or open a one-shot pairing link | None; install advice appears only if enabling alerts requires it |
 
 Non-actionable factory metrics, local diagnostic address/revision, account
-home paths, default model details, and setup recipes were removed from the
+home paths outside recovery, default model details, and setup recipes were removed from the
 common flow. Credentials and login history remain with the provider; unlinking
 does not delete them. Pairing and revoke confirmations remain state-dependent.
 
