@@ -193,8 +193,8 @@ func (Installation) GoString() string { return "provider.Installation{private}" 
 // capabilities that make these paths true immediately around Build and exec.
 // This value is never authority by itself.
 type RuntimePaths struct {
-	localCILeaseDir                                                          string
-	home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome string
+	localCILeaseDir                                                                        string
+	home, temp, socket, token, sessionToken, factoryctl, gitCeiling, toolPath, accountHome string
 	// accountConfig is one linked provider login's own configuration
 	// directory. Empty means the provider's default, which is what every
 	// launch used before accounts existed.
@@ -239,6 +239,17 @@ func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath
 	if !runtime.valid() {
 		return RuntimePaths{}, ErrInvalid
 	}
+	return runtime, nil
+}
+
+// WithSessionTokenPath gives a resumed native provider session a stable token
+// locator. The daemon retargets it to the current runtime token before each
+// launch, so a retained MCP child follows the current attempt.
+func (runtime RuntimePaths) WithSessionTokenPath(path string) (RuntimePaths, error) {
+	if path != "" && !validAbsolute(path, maxPathBytes) {
+		return RuntimePaths{}, ErrInvalid
+	}
+	runtime.sessionToken = path
 	return runtime, nil
 }
 
@@ -701,7 +712,10 @@ func codexPermissions(request Request) (string, error) {
 		}
 		entries = append(entries, tomlBasicString(path)+`="write"`)
 	}
-	for _, path := range []string{request.installation.executable.Path(), request.runtime.factoryctl, request.runtime.token, request.runtime.socket} {
+	for _, path := range []string{request.installation.executable.Path(), request.runtime.factoryctl, request.runtime.token, request.runtime.sessionToken, request.runtime.socket} {
+		if path == "" {
+			continue
+		}
 		entries = append(entries, tomlBasicString(path)+`="read"`)
 	}
 	// Node/Corepack reads the system OpenSSL configuration before dispatch.
@@ -900,6 +914,9 @@ func (runtime RuntimePaths) valid() bool {
 		return false
 	}
 	paths := []string{runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl}
+	if runtime.sessionToken != "" {
+		paths = append(paths, runtime.sessionToken)
+	}
 	for _, path := range paths {
 		if !validAbsolute(path, maxPathBytes) {
 			return false
@@ -917,9 +934,13 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 	if kind == kernel.ProviderClaudeCode {
 		home = runtime.accountHome
 	}
+	token := runtime.token
+	if runtime.sessionToken != "" {
+		token = runtime.sessionToken
+	}
 	environment := []string{
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
-		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
+		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
 		"HOME=" + home,
 		"TMPDIR=" + runtime.temp,
