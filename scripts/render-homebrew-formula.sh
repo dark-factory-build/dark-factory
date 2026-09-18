@@ -131,8 +131,9 @@ ${version_stanza}  sha256 "$manifest_sha"
       \`brew upgrade\` replaces these commands but never mutates a running home.
       There is no in-runtime updater or rollback-version store.
 
-      \`brew uninstall dark-factory\` removes only the commands. Stop any daemon
-      started outside Homebrew before removing a retained factory home.
+      \`brew uninstall dark-factory\` removes commands and optional controller
+      assets. Stop or unload any daemon or controller job first; retained factory
+      data is untouched.
     EOS
   end
 
