@@ -193,6 +193,7 @@ func (Installation) GoString() string { return "provider.Installation{private}" 
 // capabilities that make these paths true immediately around Build and exec.
 // This value is never authority by itself.
 type RuntimePaths struct {
+	customerMaintainer                                                       bool
 	localCILeaseDir                                                          string
 	home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome string
 	// accountConfig is one linked provider login's own configuration
@@ -241,6 +242,12 @@ func (runtime RuntimePaths) WithRetainedSourceReview(sourcePath, gitDirectory st
 	}
 	runtime.sourceReviewPath, runtime.sourceReviewGitDir = sourcePath, gitDirectory
 	return runtime, nil
+}
+
+// WithCustomerMaintainer uses the installed attempt bridge for opted-in homes.
+func (runtime RuntimePaths) WithCustomerMaintainer(enabled bool) RuntimePaths {
+	runtime.customerMaintainer = enabled
+	return runtime
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
@@ -627,7 +634,9 @@ func Build(request Request) (Launch, error) {
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
-		if request.role == kernel.RoleOrchestrator {
+		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
+			servers["maintainer"] = map[string]any{"command": request.runtime.factoryctl, "args": []string{"attempt", "maintainer-mcp"}}
+		} else if request.role == kernel.RoleOrchestrator {
 			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
 			if err != nil {
 				return Launch{}, errors.Join(err, fmt.Errorf("%s on %s", maintainerBridge, request.runtime.toolPath))
@@ -695,7 +704,9 @@ func Build(request Request) (Launch, error) {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
 		environment := request.runtime.environment(request.provider)
-		if request.role == kernel.RoleOrchestrator {
+		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
+			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
+		} else if request.role == kernel.RoleOrchestrator {
 			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
 			if err != nil {
 				return Launch{}, err

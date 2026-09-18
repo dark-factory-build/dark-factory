@@ -312,6 +312,18 @@ orchestrator's session is given, from the Change's branch and head. Factoryd
 exposes no repository status, commit, push, pull-request, or publication
 operation of its own.
 
+A customer home's installed `factoryctl attempt maintainer-mcp` adapter forwards
+one bounded JSON-RPC request through the attempt API. The daemon requires a live
+orchestrator, limits targets and issue sources to that attempt's project, and
+joins immutable numeric repository IDs against live broker grants before
+forwarding. The opaque connection credential remains in the private host store;
+the broker retains all GitHub tokens and repeats authorization on every call.
+An operator explicitly binds each publication checkout's configured origin to
+a live delegated numeric ID. Provider calls cannot learn or replace that binding.
+First connection refuses while any legacy overseer is nonterminal, including
+admissions not yet in the live registry. Disconnect permanently preserves customer
+mode, so later launches cannot fall back to the owner's external legacy bridge.
+
 Repository registration checks the actual Git root and local base, then pins
 the root and Git administration file identities plus a digest of origin
 settings. Fresh launches recheck that proof before source selection or fetch;

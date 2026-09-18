@@ -1652,3 +1652,26 @@ func TestBothProviderAssignmentsDistinguishOwnedCheckoutFromRetainedReview(t *te
 		}
 	}
 }
+
+func TestCustomerMaintainerUsesInstalledBridgeWithoutExternalExecutable(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, kind)
+			runtime = runtime.WithCustomerMaintainer(true)
+			for _, role := range []kernel.AgentRole{kernel.RoleOrchestrator, kernel.RoleWorker} {
+				request := roleRequestFor(t, kind, installation, runtime, "", "", role)
+				launch, err := Build(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				argv := strings.Join(launch.Argv(), " ")
+				if strings.Contains(argv, "maintainer-mcp") != (role == kernel.RoleOrchestrator) {
+					t.Fatalf("wrong bridge role: %s", argv)
+				}
+				if strings.Contains(argv, maintainerBridge) || strings.Contains(strings.Join(launch.Environment(), " "), "DARK_FACTORY_MAINTAINER_BRIDGE=") {
+					t.Fatal("customer retained external legacy bridge")
+				}
+			}
+		})
+	}
+}

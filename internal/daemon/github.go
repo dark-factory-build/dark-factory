@@ -6,6 +6,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 )
 
@@ -34,6 +35,19 @@ func (daemon *Daemon) GitHubConnection(ctx context.Context, input api.GitHubConn
 	var err error
 	switch input.Action {
 	case "connect":
+		daemon.maintainerMu.Lock()
+		defer daemon.maintainerMu.Unlock()
+		if !daemon.github.CustomerMode() {
+			runs, readErr := daemon.store.RecoverableRuns(ctx)
+			if readErr != nil {
+				return api.GitHubConnectionResult{State: "unavailable"}
+			}
+			for _, run := range runs {
+				if run.Run.Role == kernel.RoleOrchestrator {
+					return api.GitHubConnectionResult{State: "legacy_overseers_running"}
+				}
+			}
+		}
 		value, callErr := daemon.github.Connect(ctx)
 		err = callErr
 		result.Authorization = &value

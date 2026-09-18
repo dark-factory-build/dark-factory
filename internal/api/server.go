@@ -86,6 +86,7 @@ const (
 	CallOutcomeRead
 	CallOutcomeList
 	CallGitHubConnection
+	CallMaintainer
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -103,6 +104,7 @@ func digestAttemptCredential(bearer credential) AttemptDigest {
 // Call is an immutable decoded request. Only the accessor matching Kind
 // returns true.
 type Call struct {
+	maintainer          MaintainerInput
 	githubConnection    GitHubConnectionInput
 	attempt             bool
 	terminalObserve     TerminalObserveInput
@@ -164,6 +166,10 @@ func (call Call) GitHubConnectionInput() (GitHubConnectionInput, bool) {
 	return call.githubConnection, call.kind == CallGitHubConnection
 }
 
+func (call Call) MaintainerInput() (MaintainerInput, bool) {
+	return call.maintainer, call.kind == CallMaintainer
+}
+
 func (call Call) Kind() CallKind { return call.kind }
 func (call Call) String() string { return "Call(<redacted>)" }
 func (call Call) GoString() string {
@@ -175,7 +181,7 @@ func (call Call) AttemptDigest() (AttemptDigest, bool) {
 		return AttemptDigest{}, false
 	}
 	switch call.kind {
-	case CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
+	case CallMaintainer, CallAttemptTask, CallAttemptSource, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerStatus, CallPeerAsk, CallPeerAnswer, CallTerminalObserve, CallSendBack, CallOverseerSnapshot, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:
 		return call.digest, true
 	default:
 		return AttemptDigest{}, false
@@ -794,6 +800,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		call.digest = digestAttemptCredential(bearer)
 	}
 	switch kind {
+	case CallMaintainer:
+		if err := decodeExact(request.Params, &call.maintainer); err != nil || len(call.maintainer.Request) == 0 || len(call.maintainer.Request) > 512<<10 || !json.Valid(call.maintainer.Request) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallGitHubConnection:
 		if err := decodeExact(request.Params, &call.githubConnection); err != nil || !ValidGitHubConnectionInput(call.githubConnection) {
 			return Call{}, RemoteInvalidRequest
@@ -1124,6 +1134,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallWebListClients, operatorDomain
 	case "web_revoke_client":
 		return CallWebRevokeClient, operatorDomain
+	case "attempt_maintainer":
+		return CallMaintainer, attemptDomain
 	case "github_connection":
 		return CallGitHubConnection, operatorDomain
 	case "remote_status":
@@ -1314,7 +1326,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebClients
 	case CallWebRevokeClient:
 		return reply == replyWebRevoke
-	case CallGitHubConnection:
+	case CallMaintainer, CallGitHubConnection:
 		return reply == replyContent
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus
