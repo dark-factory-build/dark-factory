@@ -24,7 +24,8 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
   let revoked = false, removed = false, push = true, bobWrite = false, refreshed = 0, exchanged = 0;
   let unavailable = '', unavailableStatus = 503, sourceVisible = true, wrongGrant = false, wrongInstallation = false, replacedPath = false, repositoryReads = 0, sourceReads = 0;
   const permissionSet = { contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' };
-  const grants = [];
+  const grants = [], requestedPermissions = [];
+  const pull = { number: 12, node_id: 'PR_fixture', html_url: 'https://github.com/team/shared/pull/12', title: 'review', body: 'Refs team/backlog#9', draft: false, head: { ref: 'topic', sha: 'b'.repeat(40) }, base: { ref: 'release+hotfix', sha: 'a'.repeat(40) }, state: 'open' };
   const repository = name => ({ id: 2, full_name: 'team/shared', permissions: { pull: true, push: name === 'alice' ? push : bobWrite } });
   const mf = new Miniflare(convertV4MiniflareOptions({ durableObjectsPersist: persistence, name: "fixture",
     modules: [{ type: 'ESModule', path: resolve('build/index.js'), contents: await readFile('build/index.js', 'utf8') }, { type: 'CompiledWasm', path: resolve('build/index_bg.wasm'), contents: await readFile('build/index_bg.wasm') }],
@@ -53,14 +54,22 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
         assert.equal(body.repository_ids.length, 1);
         const id = body.repository_ids[0];
         assert.ok([2, 3].includes(id));
-        grants.push(id);
+        grants.push(id); requestedPermissions.push(body.permissions);
         return json({ token: `app-${id}-fixture-installation-token`, permissions: body.permissions, repositories: [{ id: wrongGrant ? 999 : id, full_name: id === 2 ? 'team/shared' : 'team/backlog', owner: { id: 1 } }] });
       }
       if (request.headers.get('authorization')?.startsWith('Bearer app-')) {
         repositoryReads++;
         if (replacedPath) { assert.equal(request.headers.get('authorization'), 'Bearer app-2-fixture-installation-token'); return json({}, 404); }
         if (url.pathname.includes('/git/ref/')) return json({ ref: 'refs/heads/main', object: { type: 'commit', sha: 'a'.repeat(40) } });
-        if (url.pathname.endsWith('/pulls')) return json([]);
+        if (url.pathname.endsWith('/pulls')) {
+          if (url.searchParams.get('state') === 'open' && url.searchParams.get('sort') === 'created') {
+            assert.equal(url.searchParams.get('per_page'), '1');
+            return json(url.searchParams.get('page') === '1' ? [pull] : []);
+          }
+          return json([]);
+        }
+        if (url.pathname === '/repos/team/shared/pulls/12') return json({...pull, state: 'closed'});
+        if (url.pathname === '/repos/team/shared/pulls/12/reviews/55') return json({id: 55, html_url: 'https://github.com/team/shared/pull/12#pullrequestreview-55', commit_id: pull.head.sha, body: 'BLOCK: exact reviewed body', state: 'COMMENTED'});
         if (url.pathname === '/repos/team/shared/issues' || url.pathname === '/repos/team/shared/issues/9') {
           if (url.pathname.endsWith('/issues')) {
             assert.equal(url.searchParams.get('per_page'), '25');
@@ -192,6 +201,31 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal((await migrate(bob)).status,409,'even Access cannot reassign another customer receipt');
     bobWrite=false;
     assert.equal((await (await call(bob,'observe_operation',legacyObserve)).json()).result.structuredContent.state,'missing');
+    // A read-only collaborator can inspect review inputs without borrowing
+    // the App's publication authority or its optional merge/deploy grants.
+    const pullArgs = {repository: 'team/shared', page: 1, per_page: 1};
+    const pulls = (await (await call(bob, 'list_pull_requests', pullArgs)).json()).result.structuredContent;
+    assert.deepEqual(pulls, {repository_id: 2, pull_requests: [{number: 12, body: pull.body, head_sha: pull.head.sha, base_sha: pull.base.sha, base_ref: 'release+hotfix'}], next_page: 2});
+    assert.deepEqual(requestedPermissions.at(-1), {metadata: 'read', pull_requests: 'read'});
+    assert.deepEqual((await (await call(bob, 'list_pull_requests', {...pullArgs, page: 2})).json()).result.structuredContent.pull_requests, []);
+    const exactPull = (await (await call(bob, 'list_pull_requests', {...pullArgs, pull_number: 12})).json()).result.structuredContent;
+    assert.equal(exactPull.next_page, null, 'an exact lookup never advertises another page');
+    assert.equal(exactPull.pull_requests[0].number, 12, 'exact lookups retain closed PRs for recovery');
+    const reviewArgs = {repository: 'team/shared', pull_number: 12, review_id: 55};
+    const review = (await (await call(bob, 'observe_pull_request_review', reviewArgs)).json()).result.structuredContent;
+    assert.deepEqual(review, {id: 55, commit_id: pull.head.sha, body: 'BLOCK: exact reviewed body'});
+    assert.deepEqual(requestedPermissions.at(-1), {metadata: 'read', pull_requests: 'read'});
+    for (const [name, args] of [['list_pull_requests', pullArgs], ['observe_pull_request_review', reviewArgs]]) {
+      assert.equal((await call(bob, name, {...args, repository: 'team/guessed'})).status, 401);
+      unavailable = name === 'list_pull_requests' ? '/repos/team/shared/pulls' : '/repos/team/shared/pulls/12/reviews/55';
+      for (const status of [403, 404, 429, 503]) {
+        unavailableStatus = status;
+        const failed = await (await call(bob, name, args)).json();
+        assert.equal(failed.result.isError, true);
+        assert.match(failed.result.content[0].text, /unavailable/);
+      }
+    }
+    unavailable = ''; unavailableStatus = 503;
     const issuePage = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'needs triage' })).json()).result.structuredContent;
     assert.equal(issuePage.repository_id, 2);
     assert.equal(issuePage.issues[0].body, 'exact content');

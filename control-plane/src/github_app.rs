@@ -509,6 +509,46 @@ pub(crate) struct ListIssues {
     pub(crate) label: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListPullRequests {
+    pub(crate) repository: String,
+    pub(crate) page: u32,
+    pub(crate) per_page: u32,
+    pub(crate) pull_number: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObservePullRequestReview {
+    pub(crate) repository: String,
+    pub(crate) pull_number: i64,
+    pub(crate) review_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PullRequestPage {
+    pub(crate) repository_id: i64,
+    pub(crate) pull_requests: Vec<PullRequestCandidate>,
+    pub(crate) next_page: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PullRequestCandidate {
+    pub(crate) number: i64,
+    pub(crate) body: String,
+    pub(crate) head_sha: String,
+    pub(crate) base_sha: String,
+    pub(crate) base_ref: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PullRequestReviewObservation {
+    pub(crate) id: i64,
+    pub(crate) commit_id: String,
+    pub(crate) body: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct IssuePage {
     pub(crate) repository_id: i64,
@@ -1234,6 +1274,77 @@ impl AppAuthority {
             });
         }
         Ok(page)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn list_pull_requests(
+        &self,
+        mut request: ListPullRequests,
+    ) -> Result<PullRequestPage, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("pull_requests", "read"), ("metadata", "read")]),
+            )
+            .await
+            .map_err(issue_read_error)?;
+        let path = format!(
+            "https://api.github.com/repos/{}/{}/pulls",
+            token.repository.owner, token.repository.name
+        );
+        let entries = if let Some(number) = request.pull_number {
+            let pull: PullRequest = github_json(&format!("{path}/{number}"), token.as_str())
+                .await
+                .map_err(|error: Error| issue_read_error(error.into()))?;
+            if pull.number != number {
+                return Err(OperationError::Conflict);
+            }
+            vec![pull]
+        } else {
+            github_json(
+                &format!(
+                    "{path}?state=open&sort=created&direction=asc&per_page={}&page={}",
+                    request.per_page, request.page
+                ),
+                token.as_str(),
+            )
+            .await
+            .map_err(|error: Error| issue_read_error(error.into()))?
+        };
+        pull_request_page(token.repository_id, &request, entries)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn observe_pull_request_review(
+        &self,
+        mut request: ObservePullRequestReview,
+    ) -> Result<PullRequestReviewObservation, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("pull_requests", "read"), ("metadata", "read")]),
+            )
+            .await
+            .map_err(issue_read_error)?;
+        let review: PullRequestReview = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}/reviews/{}",
+                token.repository.owner,
+                token.repository.name,
+                request.pull_number,
+                request.review_id
+            ),
+            token.as_str(),
+        )
+        .await
+        .map_err(|error: Error| issue_read_error(error.into()))?;
+        review_observation(request.review_id, review)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3616,6 +3727,28 @@ impl ListIssues {
             }
         }
         Ok(())
+    }
+}
+
+impl ListPullRequests {
+    fn validate(&self) -> Result<(), OperationError> {
+        if !(1..=1000).contains(&self.page) || !(1..=100).contains(&self.per_page) {
+            return Err(OperationError::InvalidInput);
+        }
+        if let Some(number) = self.pull_number {
+            valid_exact_integer(number)?;
+            if self.page != 1 {
+                return Err(OperationError::InvalidInput);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ObservePullRequestReview {
+    fn validate(&self) -> Result<(), OperationError> {
+        valid_exact_integer(self.pull_number)?;
+        valid_exact_integer(self.review_id)
     }
 }
 
@@ -6303,6 +6436,69 @@ fn issue_read_error(error: OperationError) -> OperationError {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn pull_request_page(
+    repository_id: i64,
+    request: &ListPullRequests,
+    entries: Vec<PullRequest>,
+) -> Result<PullRequestPage, OperationError> {
+    if entries.len() > request.per_page as usize {
+        return Err(OperationError::Unavailable);
+    }
+    let next_page = if request.pull_number.is_none() && entries.len() == request.per_page as usize {
+        if request.page == 1000 {
+            return Err(OperationError::Unavailable);
+        }
+        Some(request.page + 1)
+    } else {
+        None
+    };
+    let mut pull_requests = Vec::new();
+    for pull in entries {
+        // Preserve complete content. Invalid or excessive upstream data is a
+        // failed read, never an empty page or a truncated approval instruction.
+        let body = pull.body.unwrap_or_default();
+        valid_exact_integer(pull.number).map_err(|_| OperationError::Unavailable)?;
+        valid_sha(&pull.head.sha).map_err(|_| OperationError::Unavailable)?;
+        valid_sha(&pull.base.sha).map_err(|_| OperationError::Unavailable)?;
+        valid_text(&pull.base.name, 1, 4096, false).map_err(|_| OperationError::Unavailable)?;
+        valid_text(&body, 0, 262_144, true).map_err(|_| OperationError::Unavailable)?;
+        if request.pull_number.is_none() && pull.state != "open" {
+            return Err(OperationError::Unavailable);
+        }
+        pull_requests.push(PullRequestCandidate {
+            number: pull.number,
+            body,
+            head_sha: pull.head.sha,
+            base_sha: pull.base.sha,
+            base_ref: pull.base.name,
+        });
+    }
+    Ok(PullRequestPage {
+        repository_id,
+        pull_requests,
+        next_page,
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn review_observation(
+    expected: i64,
+    review: PullRequestReview,
+) -> Result<PullRequestReviewObservation, OperationError> {
+    if review.id != expected {
+        return Err(OperationError::Conflict);
+    }
+    valid_sha(&review.commit_id).map_err(|_| OperationError::Unavailable)?;
+    let body = review.body.unwrap_or_default();
+    valid_text(&body, 0, 262_144, true).map_err(|_| OperationError::Unavailable)?;
+    Ok(PullRequestReviewObservation {
+        id: review.id,
+        commit_id: review.commit_id,
+        body,
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn issue_page(
     repository_id: i64,
     page: u32,
@@ -8558,6 +8754,87 @@ mod tests {
                 .0
                 .request_digest
         );
+    }
+
+    #[test]
+    fn pull_request_reads_are_bounded_exact_and_preserve_nondefault_base() {
+        let mut request = ListPullRequests {
+            repository: "team/code".into(),
+            page: 1,
+            per_page: 1,
+            pull_number: None,
+        };
+        let raw = serde_json::json!({"number": 12, "node_id": "PR_example", "html_url": "https://github.com/team/code/pull/12", "title": "work", "body": "Refs team/source#9", "draft": false, "head": {"ref": "topic", "sha": "b".repeat(40)}, "base": {"ref": "release", "sha": "a".repeat(40)}, "state": "open"});
+        let entry = || serde_json::from_value::<PullRequest>(raw.clone()).unwrap();
+        let page = pull_request_page(42, &request, vec![entry()]).unwrap();
+        assert_eq!(page.next_page, Some(2));
+        assert_eq!(page.pull_requests[0].body, "Refs team/source#9");
+        assert_eq!(page.pull_requests[0].base_ref, "release");
+        for branch in ["release+hotfix", "release/été", "release@next"] {
+            let mut pull = entry();
+            pull.base.name = branch.into();
+            assert_eq!(
+                pull_request_page(42, &request, vec![pull])
+                    .unwrap()
+                    .pull_requests[0]
+                    .base_ref,
+                branch
+            );
+        }
+        request.page = 1000;
+        assert!(matches!(
+            pull_request_page(42, &request, vec![entry()]),
+            Err(OperationError::Unavailable)
+        ));
+        request.pull_number = Some(12);
+        assert!(request.validate().is_err());
+        request.page = 1;
+        assert!(request.validate().is_ok());
+        assert_eq!(
+            pull_request_page(42, &request, vec![entry()])
+                .unwrap()
+                .next_page,
+            None
+        );
+        let mut invalid = entry();
+        invalid.head.sha = "wrong".into();
+        assert!(matches!(
+            pull_request_page(42, &request, vec![invalid]),
+            Err(OperationError::Unavailable)
+        ));
+        let mut excessive = entry();
+        excessive.body = Some("x".repeat(262_145));
+        assert!(matches!(
+            pull_request_page(42, &request, vec![excessive]),
+            Err(OperationError::Unavailable)
+        ));
+        for (page, per_page) in [(0, 1), (1001, 1), (1, 0), (1, 101)] {
+            request.page = page;
+            request.per_page = per_page;
+            assert!(request.validate().is_err());
+        }
+        let review = || {
+            serde_json::from_value::<PullRequestReview>(serde_json::json!({"id":55,"html_url":"https://github.com/team/code/pull/12#pullrequestreview-55","commit_id":"b".repeat(40),"body":"BLOCK: reviewed content","state":"COMMENTED"})).unwrap()
+        };
+        assert_eq!(
+            review_observation(55, review()).unwrap().body,
+            "BLOCK: reviewed content"
+        );
+        assert!(matches!(
+            review_observation(56, review()),
+            Err(OperationError::Conflict)
+        ));
+        for (pull_number, review_id) in [(0, 55), (12, 0), (12, MAX_EXACT_INTEGER + 1)] {
+            assert!(
+                ObservePullRequestReview {
+                    repository: "team/code".into(),
+                    pull_number,
+                    review_id
+                }
+                .validate()
+                .is_err()
+            );
+        }
     }
 
     #[test]

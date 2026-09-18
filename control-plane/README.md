@@ -90,6 +90,13 @@ Access policy, or App configuration is live.
   A publication cannot target the
   live default branch: generated refs move only forward from a stated head or
   disappear after their exact pull request is proven merged.
+- Customer review controllers can use `list_pull_requests` (1–100 entries per
+  page, up to page 1000) or an exact `pull_number` at page 1, and
+  `observe_pull_request_review` for one known review ID. Both require only
+  Pull requests read and Metadata read. Results retain the actual base branch,
+  complete bounded body, and exact head/base commits. A full last page or an
+  upstream refusal is unavailable, never an empty backlog. These reads do not
+  create local work or grant publication permission.
 - The product webhook and operator/PWA namespaces have no routes.
 
 Missing, empty, partial, or syntactically invalid authority produces the fixed
