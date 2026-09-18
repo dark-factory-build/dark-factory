@@ -112,14 +112,17 @@ def linked_issue(config, pr, journal, existing=None):
     if not isinstance(body, str):
         raise ReviewError("pull request body is invalid")
     footer = publication.terminal_footer(body)
-    numbers = {int(value) for value in publication.FOOTER.findall(body)}
+    numbers = {int(value) for repository, value in publication.FOOTER.findall(body)
+               if not repository or repository.casefold() == config["repository"].casefold()}
     known = {record.get("number") for record in journal["issues"].values() if isinstance(record, dict) and record.get("managed")}
     matched = numbers & known
     if len(matched) > 1:
         raise ReviewError("pull request links multiple tracked source issues")
     if footer is None:
         return None
-    issue = int(footer.group(2))
+    if footer.group(2) and footer.group(2).casefold() != config["repository"].casefold():
+        return None  # Another source controller owns this fully qualified backlog.
+    issue = int(footer.group(3))
     if issue in known:
         return issue
     if matched:
