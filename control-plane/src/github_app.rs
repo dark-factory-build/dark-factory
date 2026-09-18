@@ -1192,7 +1192,8 @@ impl AppAuthority {
                 repository,
                 BTreeMap::from([("issues", "read"), ("metadata", "read")]),
             )
-            .await?;
+            .await
+            .map_err(issue_read_error)?;
         if let Some(number) = request.issue_number {
             let entry: IssuePageEntry = github_json(
                 &format!(
@@ -1201,7 +1202,8 @@ impl AppAuthority {
                 ),
                 token.as_str(),
             )
-            .await?;
+            .await
+            .map_err(issue_read_error)?;
             if entry.issue.number != number || !entry.issue.is_real_issue() {
                 return Err(OperationError::Conflict);
             }
@@ -1214,7 +1216,7 @@ impl AppAuthority {
             .unwrap_or_default();
         let issues: Vec<IssuePageEntry> = github_json(&format!(
             "https://api.github.com/repos/{}/{}/issues?state=open&sort=created&direction=asc&per_page=25&page={}&labels={}",
-            token.repository.owner, token.repository.name, request.page, label), token.as_str()).await?;
+            token.repository.owner, token.repository.name, request.page, label), token.as_str()).await.map_err(issue_read_error)?;
         issue_page(token.repository_id, request.page, issues)
     }
 
@@ -6214,6 +6216,16 @@ struct IssuePageEntry {
     id: i64,
     node_id: String,
     user: IssueAuthor,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn issue_read_error(error: OperationError) -> OperationError {
+    // A GitHub read refusal includes ambiguous rate limits and missing data;
+    // it cannot establish an empty backlog or permanently retire a source.
+    match error {
+        OperationError::Refused(_) => OperationError::Unavailable,
+        other => other,
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]

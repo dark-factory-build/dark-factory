@@ -162,6 +162,14 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     const exact = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, issue_number: 9 })).json()).result.structuredContent;
     assert.equal(exact.issues[0].state, 'closed');
     assert.equal(exact.issues[0].node_id, 'I_fixture');
+    unavailable = '/repos/team/shared/issues';
+    for (const status of [403, 404, 429, 503]) {
+      unavailableStatus = status;
+      const failure = await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1 })).json();
+      assert.equal(failure.result.isError, true);
+      assert.match(failure.result.content[0].text, /unavailable/);
+    }
+    unavailable = ''; unavailableStatus = 503;
     assert.equal((await call(bob, 'list_issues', { repository: 'team/guessed', page: 1 })).status, 401);
     const observe = { repository: 'team/shared', operation_id: id };
     assert.equal((await (await call(alice, 'observe_operation', observe)).json()).result.structuredContent.state, 'completed');
