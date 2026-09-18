@@ -1173,6 +1173,12 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.match(disconnectPending, /RETRY DISCONNECT/);
   const awaitingConfirmation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "awaiting_confirmation", repositories: [] } } } });
   assert.match(awaitingConfirmation, /RESET GITHUB ACCESS/);
+  const expired = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } });
+  assert.match(expired, /RESET GITHUB ACCESS/);
+  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } })); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RESET GITHUB ACCESS").props.onClick(); });
+  assert.equal(calls.at(-1).action, "disconnect");
+  renderer.unmount();
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "unavailable" } } })); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RETRY GITHUB ACCESS").props.onClick(); });
   assert.equal(calls.at(-1).action, "refresh");
@@ -1196,6 +1202,7 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   const repositoryProps = (repositories, delegated = statusRepositories, installationID = 7) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: installationID, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
   act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
   act(() => { renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
   await act(async () => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 102, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }))); });
   act(() => { renderer.root.findAllByType("button").find((button) => String(button.props.children).startsWith("DELEGATE SELECTED")).props.onClick(); });
@@ -1205,6 +1212,7 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   const delegated = [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }];
   act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, []))); });
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);

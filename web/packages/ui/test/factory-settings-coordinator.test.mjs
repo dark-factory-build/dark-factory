@@ -60,6 +60,7 @@ test("a failed confirmation keeps its form and does not refresh away the retry",
       calls.push(request.action);
       if (request.action === "connect") return { state: "ok", authorization };
       if (request.action === "confirm") return { state: "denied" };
+      if (request.action === "status") return { state: "denied" };
       throw new Error(`unexpected ${request.action}`);
     },
   };
@@ -68,5 +69,8 @@ test("a failed confirmation keeps its form and does not refresh away the retry",
   await coordinator.githubConnection({ action: "connect" });
   await coordinator.githubConnection({ action: "confirm", code: "0123456789" });
   assert.deepEqual(calls, ["connect", "confirm"]);
+  assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
+  await coordinator.githubConnection({ action: "status" });
+  assert.deepEqual(calls, ["connect", "confirm", "status"]);
   assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
 });
