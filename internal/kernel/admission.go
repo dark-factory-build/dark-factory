@@ -160,6 +160,17 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 	if err := validateAdmissionLocatorOwnership(ctx, tx.connection, keys); err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
+	continuationContexts, err := resolvedContinuationContextsForTask(ctx, tx.connection, task)
+	if err != nil {
+		return AdmissionResult{}, tx.Rollback(err)
+	}
+	baseTask := task.Body
+	if agent.Provider != ProviderShell && baseTask == "" {
+		baseTask = task.Title
+	}
+	if !ContinuationTaskFits(agent.Provider, baseTask, continuationContexts) && !ContinuationTaskCanUseFetchFallback(agent.Provider, continuationContexts) {
+		return AdmissionResult{}, tx.Rollback(fmt.Errorf("%w: continuation context exceeds provider task bound", ErrInvalidValue))
+	}
 
 	// Empty probes only read. Validate the complete graph before the first
 	// admission write, while retaining the same reserved transaction.
@@ -263,10 +274,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		}
 		return AdmissionResult{}, tx.Rollback(err)
 	}
-	run.ContinuationContexts, err = resolvedContinuationContextsForTask(ctx, tx.connection, task)
-	if err != nil {
-		return AdmissionResult{}, tx.Rollback(err)
-	}
+	run.ContinuationContexts = continuationContexts
 	if err := tx.Commit(ctx); err != nil {
 		return AdmissionResult{}, err
 	}

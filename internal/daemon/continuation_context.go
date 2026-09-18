@@ -14,8 +14,23 @@ import (
 const continuationTaskFetchInstruction = `This is resumed work. Run "$DARK_FACTORY_FACTORYCTL" attempt task before doing anything else to read the complete original task and Factory continuation context.`
 
 func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, contexts []kernel.ContinuationContext) ([]byte, error) {
+	limit := runner.MaxProviderTaskBytes
+	if kind == kernel.ProviderCodex {
+		limit = runner.MaxCodexTaskBytes
+	}
+	return taskWithContinuationContext(kind, task, contexts, limit)
+}
+
+func attemptTaskWithContinuationContext(kind kernel.Provider, task []byte, contexts []kernel.ContinuationContext) ([]byte, error) {
+	return taskWithContinuationContext(kind, task, contexts, kernel.MaxContinuationTaskBytes)
+}
+
+func taskWithContinuationContext(kind kernel.Provider, task []byte, contexts []kernel.ContinuationContext, limit int) ([]byte, error) {
 	if len(contexts) == 0 {
 		return task, nil
+	}
+	if len(task) > limit {
+		return nil, fmt.Errorf("%w: continuation context exceeds task delivery bound", kernel.ErrInvalidValue)
 	}
 	var builder strings.Builder
 	builder.Grow(len(task) + len(contexts)*128)
@@ -41,7 +56,7 @@ func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, cont
 		builder.WriteString(continuation.ResolutionDetail)
 		builder.WriteByte('\n')
 	}
-	if builder.Len() > runner.MaxProviderTaskBytes {
+	if builder.Len() > limit {
 		return nil, fmt.Errorf("%w: continuation context exceeds task delivery bound", kernel.ErrInvalidValue)
 	}
 	return []byte(builder.String()), nil
