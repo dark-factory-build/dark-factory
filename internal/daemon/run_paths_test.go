@@ -63,7 +63,12 @@ func TestLiveRunLocationsExposeWorkerAndOverseerRoots(t *testing.T) {
 			t.Fatalf("session: %v %v", found, err)
 		}
 		owner := newLiveAttempt(fixture.daemon, run.ID, session.ID, nil)
-		owner.agentID, owner.changeID = run.AgentID, *run.ChangeID
+		owner.agentID = run.AgentID
+		wantSource := ""
+		if run.ChangeID != nil {
+			owner.changeID = *run.ChangeID
+			wantSource = filepath.Join(changeParent, run.ChangeID.String())
+		}
 		owner.pathsSince = *run.RunningAt
 		if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
 			t.Fatal(err)
@@ -83,8 +88,8 @@ func TestLiveRunLocationsExposeWorkerAndOverseerRoots(t *testing.T) {
 				wantRuntime = resource.Path
 			}
 		}
-		if runID != run.ID || source != filepath.Join(changeParent, run.ChangeID.String()) || runtime != wantRuntime {
-			t.Fatalf("%s locations = %s %s %s, want %s %s %s", role, runID, source, runtime, run.ID, filepath.Join(changeParent, run.ChangeID.String()), wantRuntime)
+		if runID != run.ID || source != wantSource || runtime != wantRuntime {
+			t.Fatalf("%s locations = %s %s %s, want %s %s %s", role, runID, source, runtime, run.ID, wantSource, wantRuntime)
 		}
 	}
 }
