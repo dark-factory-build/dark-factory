@@ -792,13 +792,14 @@ class ReleaseFixtures(unittest.TestCase):
                 self.fail("timed-out hook left its child running")
 
     def test_failed_hook_keeps_stage_exit_and_redacted_bounded_stderr(self):
-        code = "import sys; sys.stderr.write('x' * 5000 + '\\nstage: reinstall-service.sh --install-prepared exit=1\\nAuthorization: Basic hunter3 hunter4\\nbearer hunter5 token=hunter2 ghs_abc123 in " + str(Path.home()) + "/private\\x1b[0m\\n'); sys.exit(7)"
+        code = "import sys; sys.stderr.write('Authorization: Basic hunter3 hunter4\\n' + 'e' * 1975 + '\\nbearer hunter5 token=hunter2 ghs_abc123 in " + str(Path.home()) + "/private\\x1b[0m\\nstage: reinstall-service.sh --install-prepared exit=1\\n'); sys.exit(7)"
         with self.assertRaises(release.ReleaseError) as raised:
             release.run([sys.executable, "-c", code])
         error = str(raised.exception)
         self.assertIn("-c exit=7: ", error)
-        self.assertIn("stage: reinstall-service.sh --install-prepared exit=1 Authorization: *** bearer *** token=*** *** in ~/private", error)
-        for leaked in ("hunter2", "hunter3", "hunter4", "hunter5", "ghs_abc123", str(Path.home()), "\x1b", "\n"):
+        # deploy-runtime's order: long output with a label past the cut, stage last.
+        self.assertTrue(error.endswith("eee bearer *** token=*** *** in ~/private [0m stage: reinstall-service.sh --install-prepared exit=1"), error[-200:])
+        for leaked in ("hunter2", "hunter3", "hunter4", "hunter5", "Basic", "ghs_abc123", str(Path.home()), "\x1b", "\n"):
             self.assertNotIn(leaked, error)
         self.assertLess(len(error), 2100)
 

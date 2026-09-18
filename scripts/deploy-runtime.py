@@ -108,7 +108,9 @@ if __name__ == '__main__':
         print('deploy-runtime: ' + str(error), file=sys.stderr)
         cause = error.__cause__ or error
         if isinstance(cause, subprocess.SubprocessError):
-            # The failing stage and its last output are the only evidence of why.
-            print('stage: ' + ' '.join(Path(str(arg)).name for arg in cause.cmd[:5]) + ' exit=' + str(getattr(cause, 'returncode', 'timeout'))
-                  + '\n' + str(cause.stderr or '')[-2000:], file=sys.stderr)
+            # The failing stage and its output are the only evidence of why. The
+            # stage goes last and the output uncut: the release controller
+            # redacts whole labels and then keeps the tail.
+            print(str(cause.stderr or '') + '\nstage: ' + ' '.join(Path(str(arg)).name for arg in cause.cmd[:5])
+                  + ' exit=' + str(getattr(cause, 'returncode', 'timeout')), file=sys.stderr)
         raise SystemExit(1)
