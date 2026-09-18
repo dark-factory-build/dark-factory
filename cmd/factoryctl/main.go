@@ -1646,7 +1646,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentIdlePolicy:
-		if command.agent == "" || command.expectedRevision == 0 || (command.provider != "wait" && command.provider != "standing_instruction") || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
+		if command.agent == "" || command.expectedRevision == 0 || command.provider == "" || (command.provider == "wait" && (command.maxRunSeconds != 0 || command.text != "" || command.toolBudget != 0)) || (command.provider == "standing_instruction" && (command.maxRunSeconds == 0 || command.text == "")) {
 			return attemptCommand{}, false, false
 		}
 	case commandAgentSelectAccount:

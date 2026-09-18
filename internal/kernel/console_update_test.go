@@ -3,7 +3,10 @@ package kernel
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // Pausing an agent through the console must actually stop dispatch: the
@@ -207,6 +210,24 @@ func TestUpdateAgentPausesALegacyAgentItCouldNotRelaunch(t *testing.T) {
 	}
 }
 
+func TestUpdateAgentPausesLegacyZeroBudgetStandingInstruction(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	legacy, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 235), ProjectID: project.ID, Name: "legacy-idle", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`UPDATE agents SET idle_policy = 'standing_instruction', idle_after_seconds = 1, idle_instruction = 'legacy scope', idle_run_budget = 0 WHERE id = ?`, legacy.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	paused := true
+	updated, err := store.UpdateAgent(ctx, legacy.ID, legacy.Revision, AgentPatch{Paused: &paused}, mustTime(t, 5))
+	if err != nil || !updated.Paused || updated.Idle.RunBudget != 0 || updated.Idle.Instruction != "legacy scope" {
+		t.Fatalf("pause legacy zero-budget agent = %+v, %v", updated, err)
+	}
+}
+
 func TestUpdateTaskEditsAndCancelsOnlyWhileQueued(t *testing.T) {
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -366,6 +387,83 @@ func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
 	emptyInstruction := ""
 	if _, err := store.UpdateAgent(ctx, worker.ID, updated.Revision, AgentPatch{IdleInstruction: &emptyInstruction}, mustTime(t, 8)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("empty standing instruction = %v", err)
+	}
+}
+
+func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
+	store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	ctx := context.Background()
+	policy, after, budget := IdleStandingInstruction, uint32(60), uint32(3)
+	over := strings.Repeat("x", runner.MaxCodexTaskBytes+1)
+	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &over, IdleRunBudget: &budget}, mustTime(t, 6)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("oversized Codex instruction = %v", err)
+	}
+	unchanged, found, err := store.Agent(ctx, worker.ID)
+	if err != nil || !found || unchanged.Revision != worker.Revision || unchanged.Idle != worker.Idle {
+		t.Fatalf("oversized edit changed stored rule = %+v, found=%v, err=%v", unchanged, found, err)
+	}
+	boundary := strings.Repeat("x", runner.MaxCodexTaskBytes)
+	updated, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &boundary, IdleRunBudget: &budget}, mustTime(t, 7))
+	if err != nil || updated.Idle.Instruction != boundary {
+		t.Fatalf("Codex boundary instruction = %+v, %v", updated.Idle, err)
+	}
+	shell, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 8), ProjectID: project.ID, Name: "shell", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 5}, mustTime(t, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide := strings.Repeat("x", maxIdleInstruction)
+	if _, err := store.UpdateAgent(ctx, shell.ID, shell.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &wide, IdleRunBudget: &budget}, mustTime(t, 9)); err != nil {
+		t.Fatalf("non-Codex idle instruction fallback = %v", err)
+	}
+}
+
+func TestClaudeIdlePolicyWriteUsesEncodedDeliveryBound(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	ctx := context.Background()
+	claude, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 10), ProjectID: project.ID, Name: "claude", Role: RoleWorker, Provider: ProviderClaudeCode, ToolBudgetLimit: 5}, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, budget := IdleStandingInstruction, uint32(60), uint32(3)
+	if _, err := runner.PrepareClaudeTask([]byte(strings.Repeat("x", 8000))); err == nil {
+		t.Fatal("8000-byte ASCII Claude instruction unexpectedly fits")
+	}
+	escaped := strings.Repeat("\x1f", 2000)
+	if _, err := runner.PrepareClaudeTask([]byte(escaped)); err == nil {
+		t.Fatal("escaping-heavy Claude instruction unexpectedly fits")
+	}
+	for _, instruction := range []string{strings.Repeat("x", 8000), escaped} {
+		if _, err := store.UpdateAgent(ctx, claude.ID, claude.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget}, mustTime(t, 11)); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("oversized Claude instruction = %v", err)
+		}
+		unchanged, found, err := store.Agent(ctx, claude.ID)
+		if err != nil || !found || unchanged.Revision != claude.Revision || unchanged.Idle != claude.Idle {
+			t.Fatalf("oversized Claude edit changed stored rule = %+v, found=%v, err=%v", unchanged, found, err)
+		}
+	}
+	max := runner.MaxClaudePrompt - len(runner.ClaudeTaskLead) - 3
+	boundary := strings.Repeat("x", max)
+	for len(boundary) > 0 {
+		if _, err := runner.PrepareClaudeTask([]byte(boundary)); err == nil {
+			break
+		}
+		boundary = boundary[:len(boundary)-1]
+	}
+	if boundary == "" {
+		t.Fatal("could not find legal Claude delivery boundary")
+	}
+	updated, err := store.UpdateAgent(ctx, claude.ID, claude.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &boundary, IdleRunBudget: &budget}, mustTime(t, 12))
+	if err != nil || updated.Idle.Instruction != boundary {
+		t.Fatalf("Claude legal boundary = %+v, %v", updated.Idle, err)
+	}
+	if _, err := store.UpdateAgent(ctx, claude.ID, updated.Revision, AgentPatch{IdleInstruction: &escaped}, mustTime(t, 13)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("escaping-heavy Claude replacement = %v", err)
+	}
+	unchanged, found, err := store.Agent(ctx, claude.ID)
+	if err != nil || !found || unchanged.Revision != updated.Revision || unchanged.Idle.Instruction != boundary {
+		t.Fatalf("rejected Claude replacement changed stored rule = %+v, found=%v, err=%v", unchanged, found, err)
 	}
 }
 

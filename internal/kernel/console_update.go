@@ -155,7 +155,12 @@ func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id A
 	if patch.IdleRunBudget != nil {
 		agent.Idle.RunBudget = *patch.IdleRunBudget
 	}
-	if err := validateIdleRule(agent.Idle); err != nil {
+	idleChanged := patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil
+	if idleChanged {
+		if err := validateIdleRuleForProvider(agent.Provider, agent.Idle); err != nil {
+			return Agent{}, tx.Rollback(err)
+		}
+	} else if err := validateIdleRule(agent.Idle); err != nil {
 		return Agent{}, tx.Rollback(err)
 	}
 	// Only an edit that touches a launch control is held to the launch rules.
