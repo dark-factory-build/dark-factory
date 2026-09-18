@@ -47,9 +47,8 @@ func terminalTextProjection(payload []byte, droppedPrefix bool, limit int) strin
 	if droppedPrefix {
 		// The retained floor may be inside a credential or private path. Apply
 		// the raw cursor reader's rule, so text never shows more than raw: drop
-		// the partial first line and hide orphaned values. The appended line
-		// end keeps the newest partial line, which the pass below redacts.
-		payload, _ = redactTerminalWindow(append(payload[:len(payload):len(payload)], '\n'), 1)
+		// the partial first and last lines and hide orphaned values.
+		payload, _ = redactTerminalWindow(payload, 1)
 	}
 	text := make([]byte, 0, len(payload))
 	space := func() {

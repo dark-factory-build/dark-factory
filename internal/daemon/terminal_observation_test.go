@@ -107,7 +107,7 @@ func TestTerminalTextProjectionNormalizesControlsBeforeRedaction(t *testing.T) {
 			t.Fatalf("projection retained terminal control %#x in %q", value, got)
 		}
 	}
-	if got := terminalTextProjection([]byte("cret\": \"frag\x1b[2Cment\ncontinued-value\",\nvisible state\x1b["), true, 65536); got != "***************** visible state" {
+	if got := terminalTextProjection([]byte("cret\": \"frag\x1b[2Cment\ncontinued-value\",\nvisible state\nnewest partial\x1b["), true, 65536); got != "***************** visible state" {
 		t.Fatalf("dropped prefix or incomplete escape projection = %q", got)
 	}
 	if got := terminalTextProjection([]byte("cret-fragment\x1b[2Ccontinued"), true, 65536); got != "" {
