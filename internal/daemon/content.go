@@ -44,7 +44,7 @@ func attachmentDTO(v kernel.TaskContentReference) api.ContentAttachment {
 }
 
 func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewContent, revision uint64) (kernel.NewContent, error) {
-	project, found, err := daemon.store.Project(ctx, spec.ProjectID)
+	repository, found, err := daemon.store.DefaultProjectRepository(ctx, spec.ProjectID)
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrNotFound
@@ -55,7 +55,7 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 	if configured := daemon.gitExecutable.Load(); configured != nil && *configured != "" {
 		git = *configured
 	}
-	identity, err := inspectRepositoryIdentity(project.Root)
+	identity, err := inspectRepositoryIdentity(repository.Root)
 	if err != nil {
 		return kernel.NewContent{}, err
 	}
@@ -80,6 +80,13 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 			}
 		}
 		if previous.Commit != "" {
+			repository, found, readErr = daemon.store.ContentRepository(ctx, previous.ID, previous.Revision)
+			if readErr != nil || !found {
+				if readErr == nil {
+					readErr = kernel.ErrCorruptState
+				}
+				return kernel.NewContent{}, readErr
+			}
 			identity, readErr = change.NewRepositoryIdentity(uint64(previous.RepositoryDevice), uint64(previous.RepositoryInode))
 			if readErr != nil {
 				return kernel.NewContent{}, readErr
@@ -93,13 +100,14 @@ func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewCon
 	}
 	var source change.ContentSource
 	if spec.Commit != "" {
-		source, err = change.PinContentSource(ctx, git, project.Root, identity, spec.Commit, spec.Path, ref)
+		source, err = change.PinContentSource(ctx, git, repository.Root, identity, spec.Commit, spec.Path, ref)
 	} else {
-		source, err = change.WriteContentSource(ctx, git, project.Root, identity, parent, path, spec.Body, ref)
+		source, err = change.WriteContentSource(ctx, git, repository.Root, identity, parent, path, spec.Body, ref)
 	}
 	if err != nil {
 		return kernel.NewContent{}, err
 	}
+	spec.RepositoryID = repository.ID
 	spec.Body, spec.ObjectFormat, spec.Commit, spec.Path = "", source.Commit.Format().Name(), source.Commit.Hex(), source.Path
 	spec.RepositoryDevice, spec.RepositoryInode = int64(identity.Device()), int64(identity.Inode())
 	return spec, nil
@@ -118,7 +126,7 @@ func (daemon *Daemon) exportLegacyContent(ctx context.Context, id kernel.Content
 	if err != nil {
 		return kernel.ContentRevision{}, err
 	}
-	if err := daemon.store.CompleteContentExport(ctx, id, revision, body, pinned.ObjectFormat, pinned.Commit, pinned.Path, pinned.RepositoryDevice, pinned.RepositoryInode); err != nil {
+	if err := daemon.store.CompleteContentExport(ctx, id, revision, body, pinned.ObjectFormat, pinned.Commit, pinned.Path, pinned.RepositoryID, pinned.RepositoryDevice, pinned.RepositoryInode); err != nil {
 		return kernel.ContentRevision{}, err
 	}
 	return daemon.store.Content(ctx, id, revision)
@@ -128,7 +136,7 @@ func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.Cont
 	if content.Commit == "" {
 		return "", kernel.ErrConflict
 	}
-	project, found, err := daemon.store.Project(ctx, content.ProjectID)
+	repository, found, err := daemon.store.ContentRepository(ctx, content.ID, content.Revision)
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrNotFound
@@ -147,7 +155,7 @@ func (daemon *Daemon) readContentSource(ctx context.Context, content kernel.Cont
 	if err != nil {
 		return "", err
 	}
-	return change.ReadContentSource(ctx, git, project.Root, identity, change.ContentSource{Commit: id, Path: content.Path})
+	return change.ReadContentSource(ctx, git, repository.Root, identity, change.ContentSource{Commit: id, Path: content.Path})
 }
 
 func (daemon *Daemon) contentBodySource(ctx context.Context, content kernel.ContentRevision) (kernel.ContentRevision, string, error) {

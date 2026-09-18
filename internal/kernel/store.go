@@ -44,14 +44,12 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 		}
 		return Project{}, tx.Rollback(ErrConflict)
 	}
-	var conflicting int
-	if err := tx.connection.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects WHERE root = ?", spec.Root).Scan(&conflicting); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 1, ?, ?)`, spec.ID.Bytes(), spec.Name, spec.Root, spec.VerificationPolicy.String(), at.Int64(), at.Int64()); err != nil {
 		return Project{}, tx.Rollback(err)
 	}
-	if conflicting != 0 {
-		return Project{}, tx.Rollback(ErrConflict)
-	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 1, ?, ?)`, spec.ID.Bytes(), spec.Name, spec.Root, spec.VerificationPolicy.String(), at.Int64(), at.Int64()); err != nil {
+	// Project creation keeps the old root input as the first durable binding so
+	// existing CLI invocations remain valid while every later route uses it.
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'HEAD', 1, 1, 1, ?, ?)`, spec.ID.Bytes(), spec.ID.Bytes(), spec.Root, at.Int64(), at.Int64()); err != nil {
 		return Project{}, tx.Rollback(err)
 	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityProject, id: spec.ID.Bytes(), revision: 1}}); err != nil {
@@ -161,6 +159,13 @@ func taskCreationReplay(ctx context.Context, connection *sql.Conn, spec NewTask)
 	if !taskMatchesCreation(existing, spec) {
 		return Task{}, false, ErrConflict
 	}
+	var existingRepository []byte
+	if err := connection.QueryRowContext(ctx, `SELECT repository_id FROM task_repository_bindings WHERE task_id = ?`, spec.ID.Bytes()).Scan(&existingRepository); err != nil {
+		return Task{}, false, err
+	}
+	if !spec.RepositoryID.zero() && string(existingRepository) != string(spec.RepositoryID.Bytes()) {
+		return Task{}, false, ErrConflict
+	}
 	var prerequisiteCount, conflictPathCount int
 	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_prerequisites WHERE task_id = ?`, spec.ID.Bytes()).Scan(&prerequisiteCount); err != nil {
 		return Task{}, false, err
@@ -193,6 +198,10 @@ func taskCreationReplay(ctx context.Context, connection *sql.Conn, spec NewTask)
 }
 
 func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewTask, at UnixMillis) (Task, error) {
+	repository, err := resolveTaskRepository(ctx, connection, spec.ProjectID, spec.RepositoryID)
+	if err != nil {
+		return Task{}, err
+	}
 	if spec.AssignedAgentID.zero() {
 		// Any eligible worker: the project must exist; admission picks the agent.
 		if _, found, err := projectByID(ctx, connection, spec.ProjectID); err != nil || !found {
@@ -220,6 +229,9 @@ func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewT
 		created_at_ms, updated_at_ms
 	    ) VALUES(?, ?, ?, ?, 1, ?, ?, NULL, 'queued', ?, NULL, NULL, NULL, 1, ?, ?)`,
 		spec.ID.Bytes(), spec.ProjectID.Bytes(), nullableAgentID(spec.AssignedAgentID), spec.IncarnationID.Bytes(), spec.Title, spec.Body, spec.Priority, at.Int64(), at.Int64()); err != nil {
+		return Task{}, err
+	}
+	if _, err := connection.ExecContext(ctx, `INSERT INTO task_repository_bindings(task_id, repository_id, base_ref) VALUES(?, ?, ?)`, spec.ID.Bytes(), repository.ID.Bytes(), repository.BaseRef); err != nil {
 		return Task{}, err
 	}
 	for _, prerequisite := range spec.Prerequisites {

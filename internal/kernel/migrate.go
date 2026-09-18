@@ -44,6 +44,7 @@ const (
 	v17UserVersion      = 17
 	v18UserVersion      = 18
 	v19UserVersion      = 19
+	v20UserVersion      = 20
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -478,8 +479,9 @@ func v17SchemaStatements() []string {
 
 // v18 predates retained terminal diagnostics and yielded continuations.
 func v18SchemaStatements() []string {
-	statements := make([]string, 0, len(schemaStatements)-4)
-	for _, statement := range schemaStatements {
+	base := v20SchemaStatements()
+	statements := make([]string, 0, len(base)-4)
+	for _, statement := range base {
 		_, name := schemaObjectIdentity(statement)
 		if name == "terminal_diagnostics" || name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
 			continue
@@ -494,14 +496,30 @@ func v18SchemaStatements() []string {
 
 // v19 has retained terminal diagnostics but predates yielded continuations.
 func v19SchemaStatements() []string {
-	statements := make([]string, 0, len(schemaStatements)-3)
-	for _, statement := range schemaStatements {
+	base := v20SchemaStatements()
+	statements := make([]string, 0, len(base)-3)
+	for _, statement := range base {
 		_, name := schemaObjectIdentity(statement)
 		if name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
 			continue
 		}
 		if name == "invalidations" {
 			statement = strings.Replace(statement, ", 'continuation'", "", 1)
+		}
+		statements = append(statements, statement)
+	}
+	return statements
+}
+
+// v20 is the final single-root schema. Keep it frozen: v21 adds repository
+// bindings without changing any existing project, task, Change, or history ID.
+func v20SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-5)
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		switch name {
+		case "project_repositories", "project_repositories_root_unique", "project_repositories_one_default", "task_repository_bindings", "content_repository_bindings":
+			continue
 		}
 		statements = append(statements, statement)
 	}
@@ -620,6 +638,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v18SchemaStatements(), true
 	case v19UserVersion:
 		return v19SchemaStatements(), true
+	case v20UserVersion:
+		return v20SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -645,7 +665,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -686,6 +706,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[17:]
 	case v19UserVersion:
 		steps = all[18:]
+	case v20UserVersion:
+		steps = all[19:]
 	default:
 		return connection.Close()
 	}
@@ -1124,6 +1146,31 @@ func migrateV19Transaction(ctx context.Context, connection *sql.Conn) error {
 				return err
 			}
 		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v20UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v20UserVersion, v20SchemaStatements())
+}
+
+func migrateV20Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v20UserVersion, v20SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	for _, name := range []string{"project_repositories", "project_repositories_root_unique", "project_repositories_one_default", "task_repository_bindings", "content_repository_bindings"} {
+		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
+			return fmt.Errorf("create %s: %w", name, err)
+		}
+	}
+	if _, err := connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) SELECT id, id, root, 'HEAD', 1, 1, 1, created_at_ms, updated_at_ms FROM projects`); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, `INSERT INTO task_repository_bindings(task_id, repository_id, base_ref) SELECT id, project_id, 'HEAD' FROM tasks`); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) SELECT id, revision, project_id FROM project_content_revisions WHERE commit_oid IS NOT NULL`); err != nil {
+		return err
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err

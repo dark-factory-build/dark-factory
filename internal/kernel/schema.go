@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 20
+	userVersion   = 21
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -44,6 +44,19 @@ var schemaStatements = []string{
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX projects_root_unique ON projects(root)`,
+	`CREATE TABLE project_repositories (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    root TEXT NOT NULL CHECK (length(CAST(root AS BLOB)) BETWEEN 1 AND 4096 AND substr(root, 1, 1) = '/'),
+    base_ref TEXT NOT NULL CHECK (length(CAST(base_ref AS BLOB)) BETWEEN 1 AND 256),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    is_default INTEGER NOT NULL CHECK (is_default IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX project_repositories_root_unique ON project_repositories(root)`,
+	`CREATE UNIQUE INDEX project_repositories_one_default ON project_repositories(project_id) WHERE is_default = 1`,
 	`CREATE TABLE accounts (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex')),
@@ -113,6 +126,11 @@ var schemaStatements = []string{
 	`CREATE TABLE task_prerequisites (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), upstream_task_id BLOB NOT NULL CHECK (length(upstream_task_id) = 16) REFERENCES tasks(id), upstream_work_revision INTEGER NOT NULL CHECK (upstream_work_revision >= 1), consumed_run_id BLOB CHECK (consumed_run_id IS NULL OR length(consumed_run_id) = 16) REFERENCES runs(id), PRIMARY KEY (task_id, upstream_task_id), CHECK (task_id <> upstream_task_id)) STRICT, WITHOUT ROWID`,
 	`CREATE INDEX task_prerequisites_upstream ON task_prerequisites(upstream_task_id, upstream_work_revision)`,
 	`CREATE TABLE task_conflict_paths (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), path TEXT NOT NULL CHECK (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) <> '/' AND instr(path, char(0)) = 0), PRIMARY KEY (task_id, path)) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE task_repository_bindings (
+    task_id BLOB PRIMARY KEY CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    repository_id BLOB NOT NULL CHECK (length(repository_id) = 16) REFERENCES project_repositories(id),
+    base_ref TEXT NOT NULL CHECK (length(CAST(base_ref AS BLOB)) BETWEEN 1 AND 256)
+) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE project_outcome_revisions (
     id BLOB NOT NULL CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
@@ -147,6 +165,13 @@ var schemaStatements = []string{
 	CHECK ((object_format IS NULL AND commit_oid IS NULL AND path IS NULL AND repository_dev IS NULL AND repository_inode IS NULL) OR (object_format IS NOT NULL AND commit_oid IS NOT NULL AND path IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE INDEX project_content_revisions_project_kind ON project_content_revisions(project_id, kind, id, revision DESC)`,
+	`CREATE TABLE content_repository_bindings (
+    content_id BLOB NOT NULL CHECK (length(content_id) = 16),
+    content_revision INTEGER NOT NULL CHECK (content_revision >= 1),
+    repository_id BLOB NOT NULL CHECK (length(repository_id) = 16) REFERENCES project_repositories(id),
+    PRIMARY KEY(content_id, content_revision),
+    FOREIGN KEY(content_id, content_revision) REFERENCES project_content_revisions(id, revision)
+) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE project_content_evidence (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
