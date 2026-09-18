@@ -474,6 +474,23 @@ func (daemon *Daemon) overseerIntervention(ctx context.Context, digest kernel.At
 	return daemon.deliverIntervention(ctx, receipt, newlyReserved)
 }
 
+func (daemon *Daemon) operatorIntervention(ctx context.Context, request kernel.TaskInterventionRequest) (kernel.TaskIntervention, error) {
+	if !terminalEffectsSupported {
+		return kernel.TaskIntervention{}, ErrTerminalEffectsUnsupported
+	}
+	daemon.operationMu.Lock()
+	defer daemon.operationMu.Unlock()
+	at, err := daemon.timestamp()
+	if err != nil {
+		return kernel.TaskIntervention{}, err
+	}
+	receipt, newlyReserved, err := daemon.store.ReserveTaskInterventionForOperator(ctx, request, at)
+	if err != nil {
+		return kernel.TaskIntervention{}, err
+	}
+	return daemon.deliverIntervention(ctx, receipt, newlyReserved)
+}
+
 // deliverIntervention performs the one PTY action owned by a freshly reserved
 // receipt. A replay never writes again: a pending receipt is durably marked
 // unknown while operationMu proves no live delivery is still in flight.

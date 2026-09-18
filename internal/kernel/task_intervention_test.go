@@ -122,6 +122,30 @@ func TestTaskInterventionAttemptReceiptPreventsPendingReplay(t *testing.T) {
 	}
 }
 
+func TestOperatorInterventionReservationUsesExactCASAndIdempotency(t *testing.T) {
+	store, worker, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	task, _, err := store.Task(context.Background(), worker.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, _ := TaskInterventionIDFromBytes(bytes.Repeat([]byte{211}, IDBytes))
+	request := TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: worker.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: worker.Revision, Kind: TaskInterventionMessage, Payload: "continue"}
+	stale := request
+	stale.ExpectedTaskRevision = mustRevision(t, task.Revision.Int64()+1)
+	if _, _, err := store.ReserveTaskInterventionForOperator(context.Background(), stale, mustTime(t, 60)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale operator message = %v", err)
+	}
+	receipt, reserved, err := store.ReserveTaskInterventionForOperator(context.Background(), request, mustTime(t, 61))
+	if err != nil || !reserved || receipt.Actor != TaskInterventionOperator || receipt.State != TaskInterventionPending {
+		t.Fatalf("operator reservation = %+v, reserved=%v, err=%v", receipt, reserved, err)
+	}
+	replay, reserved, err := store.ReserveTaskInterventionForOperator(context.Background(), request, mustTime(t, 62))
+	if err != nil || reserved || replay.OperationID != receipt.OperationID || replay.State != receipt.State || replay.UpdatedAt != receipt.UpdatedAt {
+		t.Fatalf("operator replay = %+v, reserved=%v, err=%v", replay, reserved, err)
+	}
+}
+
 func TestTaskInterventionForAttemptRejectsLegacyOrchestratorTarget(t *testing.T) {
 	ctx := context.Background()
 	store, worker, overseer, _ := runningWorkerAndOverseer(t)

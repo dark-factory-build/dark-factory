@@ -1048,6 +1048,41 @@ func TestDaemonOperatorTaskRetryAndAgentPauseUseExactRevisions(t *testing.T) {
 	}
 }
 
+func TestDaemonOperatorStopUsesOperatorAuthorityAndExactRevisions(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 213, testID(213), "worker")
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, found, err := fixture.store.Task(context.Background(), active.run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task = %+v, found=%v, err=%v", task, found, err)
+	}
+	input := api.OverseerRunStopInput{OperationID: testID(214), TaskID: task.ID.String(), ExpectedTaskRevision: uint64(task.Revision.Int64()), RunID: active.run.ID.String(), ExpectedRunRevision: uint64(active.run.Revision.Int64())}
+	stale := input
+	stale.ExpectedRunRevision++
+	done := fixture.serve(t)
+	_, err = client.StopRun(context.Background(), stale)
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteRevisionConflict {
+		t.Fatalf("stale operator stop = %v", err)
+	}
+	done = fixture.serve(t)
+	result, err := client.StopRun(context.Background(), input)
+	waitDispatch(t, done)
+	if err != nil || result.Intervention == nil || result.Intervention.OperationID != input.OperationID || result.Intervention.State != "delivered" {
+		t.Fatalf("operator stop = %+v, %v", result, err)
+	}
+	done = fixture.serve(t)
+	replay, err := client.StopRun(context.Background(), input)
+	waitDispatch(t, done)
+	if err != nil || !reflect.DeepEqual(replay.Intervention, result.Intervention) {
+		t.Fatalf("operator stop replay = %+v, %v", replay, err)
+	}
+}
+
 func TestDaemonOperatorTaskReadBindsRevisionAndPagesUTF8(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)

@@ -41,6 +41,10 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "dispatch off", args: []string{"dispatch", "off"}},
 		{name: "dispatch guarded", args: []string{"dispatch", "on", "--revision", "7"}},
 		{name: "worker capacity", args: []string{"capacity", "--workers", "2", "--revision", "7"}},
+		{name: "worker stop", args: []string{"worker", "stop", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3"}},
+		{name: "worker replace", args: []string{"worker", "replace", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3", "--successor-task", strings.Repeat("cd", 16), "--successor-incarnation", strings.Repeat("ef", 16), "--instruction", "continue"}},
+		{name: "worker message", args: []string{"worker", "message", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3", "--message", "continue"}},
+		{name: "worker interrupt", args: []string{"worker", "interrupt", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3"}},
 	}
 	for _, test := range valid {
 		t.Run(test.name, func(t *testing.T) {
@@ -123,6 +127,29 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		if _, help, ok := parse(args); !help || !ok {
 			t.Fatalf("help form rejected: %v", args)
 		}
+	}
+}
+
+func TestWorkerStopUsesOperatorClient(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	id := strings.Repeat("ab", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.OverseerRunStopInput()
+		if !ok || call.Kind() != api.CallOperatorStopRun || input.OperationID != id || input.ExpectedTaskRevision != 2 || input.ExpectedRunRevision != 3 {
+			t.Errorf("operator stop call = kind %v input %+v ok=%v", call.Kind(), input, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 4, Revision: 5, Intervention: &api.OverseerInterventionResult{OperationID: id, State: "delivered"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"worker", "stop", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3"}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"state":"delivered"`) {
+		t.Fatalf("worker stop = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
 
