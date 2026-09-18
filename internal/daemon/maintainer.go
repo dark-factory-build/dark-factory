@@ -143,6 +143,22 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	default:
 		return failure("invalid")
 	}
+	if observedAcceptance != nil {
+		if err := daemon.github.AuthorizeRepositories(ctx, repositories); err != nil {
+			if errors.Is(err, maintainer.ErrDenied) {
+				return failure("denied")
+			}
+			if errors.Is(err, maintainer.ErrInvalid) {
+				return failure("invalid")
+			}
+			return failure("unavailable")
+		}
+		response, err := frozenAcceptedIssueResponse(request, *observedAcceptance)
+		if err != nil {
+			return failure("invalid")
+		}
+		return api.NewContentReply(api.MaintainerResult{State: "ok", Response: response})
+	}
 	// Re-encode the parsed envelope; never forward a second hidden method/ID.
 	encoded, err := json.Marshal(request)
 	if err != nil {
@@ -157,9 +173,6 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			return failure("invalid")
 		}
 		return failure("unavailable")
-	}
-	if observedAcceptance != nil && !observedAcceptedContent(response, *observedAcceptance) {
-		return failure("accepted_snapshot_required")
 	}
 	return api.NewContentReply(api.MaintainerResult{State: "ok", Response: response})
 }
@@ -204,22 +217,36 @@ func (daemon *Daemon) projectMaintainerRepositories(ctx context.Context, project
 	return targets, sources, unbound, nil
 }
 
-// Never return revised issue text as execution instructions, including the MCP
-// text duplicate. The attempt task already carries the reviewed snapshot.
-func observedAcceptedContent(response json.RawMessage, accepted kernel.IntakeAcceptance) bool {
-	var reply struct {
-		Result struct {
-			IsError bool `json:"isError"`
-			Issue   *struct {
+// frozenAcceptedIssueResponse never asks the broker to fetch an accepted
+// issue. The attempt receives only the immutable reviewed snapshot.
+func frozenAcceptedIssueResponse(request maintainerRequest, accepted kernel.IntakeAcceptance) (json.RawMessage, error) {
+	return json.Marshal(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  struct {
+			Issue struct {
 				Number uint64 `json:"number"`
 				Title  string `json:"title"`
 				Body   string `json:"body"`
 			} `json:"structuredContent"`
 		} `json:"result"`
-	}
-	if json.Unmarshal(response, &reply) != nil || reply.Result.IsError || reply.Result.Issue == nil {
-		return false
-	}
-	issue := reply.Result.Issue
-	return issue.Number == accepted.Snapshot.IssueNumber && issue.Title == accepted.Snapshot.Title && issue.Body == accepted.Snapshot.Body
+	}{
+		JSONRPC: request.JSONRPC,
+		ID:      request.ID,
+		Result: struct {
+			Issue struct {
+				Number uint64 `json:"number"`
+				Title  string `json:"title"`
+				Body   string `json:"body"`
+			} `json:"structuredContent"`
+		}{Issue: struct {
+			Number uint64 `json:"number"`
+			Title  string `json:"title"`
+			Body   string `json:"body"`
+		}{
+			Number: accepted.Snapshot.IssueNumber,
+			Title:  accepted.Snapshot.Title,
+			Body:   accepted.Snapshot.Body,
+		}},
+	})
 }

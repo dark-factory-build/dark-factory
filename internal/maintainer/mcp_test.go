@@ -37,6 +37,9 @@ func TestHostMCPRechecksNumericIdentityAndRevocation(t *testing.T) {
 	host := &Host{client: NewClient(), connection: connectionRecord{ID: id, Secret: secret}}
 	host.client.origin = server.URL
 	request := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_operation","arguments":{"repository":"team/repo","operation_id":"opaque-original-uuid"}}}`)
+	if err := host.AuthorizeRepositories(context.Background(), map[string]uint64{"team/repo": 7}); err != nil || calls != 0 {
+		t.Fatalf("authorization unexpectedly called MCP: %v calls=%d", err, calls)
+	}
 	if _, err := host.MCP(context.Background(), request, map[string]uint64{"team/repo": 7}); err != nil || calls != 1 {
 		t.Fatalf("initial request: %v calls=%d", err, calls)
 	}
