@@ -21,7 +21,7 @@ func TestPublicBacklogDoesNotUseAmbientProxy(t *testing.T) {
 	t.Setenv("HTTP_PROXY", proxy.URL)
 	t.Setenv("ALL_PROXY", proxy.URL)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(out http.ResponseWriter, request *http.Request) {
-		if request.Host != "darkfactory.build" || request.URL.Path != "/api/backlog" || request.Header.Get("Proxy-Authorization") != "" {
+		if request.Host != "www.darkfactory.build" || request.URL.Path != "/api/backlog" || request.Header.Get("Proxy-Authorization") != "" {
 			t.Errorf("unexpected public request: %s %s", request.Host, request.URL.Path)
 		}
 		_, _ = io.WriteString(out, `{"status":"ok","repository":"dark-factory-build/dark-factory","issues":[],"as_of":"2026-09-18T12:00:00Z","truncated":false}`)

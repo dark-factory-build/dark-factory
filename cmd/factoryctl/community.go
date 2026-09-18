@@ -16,7 +16,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 )
 
-const publicBacklogURL = "https://darkfactory.build/api/backlog"
+const publicBacklogURL = "https://www.darkfactory.build/api/backlog"
 
 func publicBacklogClient() *http.Client {
 	return &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
