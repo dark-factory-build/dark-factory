@@ -1305,6 +1305,7 @@ func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply
 		IdempotencyKey: key,
 		QuestionText:   input.Question,
 		Options:        input.Options,
+		ReuseExisting:  input.ReuseExisting,
 	}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))

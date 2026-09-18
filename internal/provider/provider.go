@@ -660,7 +660,8 @@ func Build(request Request) (Launch, error) {
 		// runtime. The runner's committed cwd is request.workingDirectory, so
 		// select that authorized current directory through Codex's native
 		// resume configuration before any prompt can be shown.
-		argv = append(argv, "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
+		notify := "notify=[" + tomlBasicString(request.runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
+		argv = append(argv, "-c", notify, "--strict-config", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		attemptServer := codexAttemptServerName(request.runtime)
 		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {

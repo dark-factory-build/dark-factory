@@ -1001,6 +1001,7 @@ type HumanQuestionInput struct {
 	IdempotencyKey string   `json:"idempotency_key"`
 	Question       string   `json:"question"`
 	Options        []string `json:"options,omitempty"`
+	ReuseExisting  bool     `json:"reuse_existing,omitempty"`
 }
 
 type PeerQuestionInput struct {
