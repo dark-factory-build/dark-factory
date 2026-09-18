@@ -62,6 +62,11 @@ impl McpState {
         self.access.ready().await.map_err(|_| ())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn installation_url(&self) -> Result<String, crate::github_app::Error> {
+        self.app.installation_url().await
+    }
+
     pub(crate) const fn headless(&self) -> bool {
         self.access.headless()
     }

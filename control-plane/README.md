@@ -393,3 +393,10 @@ not an empty backlog. This operation does not accept or enqueue work. Oversized
 content remains intact for the host to show as ineligible rather than truncating
 instructions. Existing accepted identities must be reconciled independently of
 new-candidate discovery limits.
+
+Authenticated connection installation discovery includes `installation_url`,
+derived from the configured App's signed GitHub identity. It opens GitHub's
+native installation/request-approval form even when the user has no visible
+installation yet. It grants no local repository delegation; selected repositories
+still require live user permission checks before use. Pending organisation
+approval remains a GitHub state, and an empty list is not proof of approval.

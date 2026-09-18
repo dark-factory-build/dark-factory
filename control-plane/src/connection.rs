@@ -634,6 +634,17 @@ mod cloudflare {
                 return reply(json!({"error":"invalid_page"}), 400);
             }
             if path.ends_with("/installations") {
+                let state = BrokerState::from_worker_env(env)
+                    .map_err(|_| worker::Error::RustError("inactive".into()))?;
+                let Some(mcp) = state.mcp else {
+                    return denied();
+                };
+                let installation_url = match mcp.installation_url().await {
+                    Ok(url) => url,
+                    // App identity failure is broker unavailability, not loss
+                    // of the authenticated customer's GitHub authorization.
+                    Err(_) => return github_failure(GitHubError::Unavailable),
+                };
                 let response: InstallationPage = match github_json(
                     &format!("https://api.github.com/user/installations?per_page=100&page={page}"),
                     token,
@@ -653,7 +664,7 @@ mod cloudflare {
                         let mut value = serde_json::to_value(&i).expect("installation serialization");
                         value["eligibility"] = json!(eligibility);
                         value
-                    }).collect::<Vec<_>>(),"next_page":next_page}),
+                    }).collect::<Vec<_>>(),"next_page":next_page,"installation_url":installation_url}),
                     200,
                 );
             }
