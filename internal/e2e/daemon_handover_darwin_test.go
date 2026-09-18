@@ -44,7 +44,7 @@ type terminalObservation struct {
 // restarts: not its process, not its PTY, not its output.
 func TestBlackBoxDaemonHandoverReplacesFactorydUnderALiveProvider(t *testing.T) {
 	if os.Getenv("DARK_FACTORY_DAEMON_E2E") != "1" {
-		t.Skip("run through scripts/go-daemon-e2e.sh")
+		t.Skip("run through scripts/go-e2e.sh daemon")
 	}
 	fixture := newBlackBoxFixture(t)
 

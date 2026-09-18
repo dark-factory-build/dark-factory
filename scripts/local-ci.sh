@@ -31,9 +31,9 @@ if [ "$local_ci_mode" = ui ]; then
     echo "local-ci: UI source and browser smoke gate"
     ./scripts/go-check.sh --ui
     if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then
-        ./scripts/go-browser-e2e.sh
+        ./scripts/go-e2e.sh browser --client-built
     else
-        "$script_dir/with-local-ci-lease.sh" ./scripts/go-browser-e2e.sh
+        "$script_dir/with-local-ci-lease.sh" ./scripts/go-e2e.sh browser --client-built
     fi
     echo "local-ci: PASS (ui)"
     exit 0
@@ -70,9 +70,9 @@ if [ "$local_ci_mode" = full ] || [ "$local_ci_mode" = runtime ]; then
     echo "local-ci: process-sensitive gate"
     ./scripts/test-go-e2e-tools.sh
     if [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ]; then
-        /bin/sh "$script_dir/go-ci-owned.sh"
+        /bin/sh "$script_dir/go-ci-owned.sh" --client-built
     else
-        "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh"
+        "$script_dir/with-local-ci-lease.sh" /bin/sh "$script_dir/go-ci-owned.sh" --client-built
     fi
 fi
 

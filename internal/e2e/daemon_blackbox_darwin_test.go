@@ -87,7 +87,7 @@ type blackBoxFixture struct {
 // record, and the SIGKILL crash cuts the recovery matrix proves black-box.
 func TestBlackBoxDaemonLifecycle(t *testing.T) {
 	if os.Getenv("DARK_FACTORY_DAEMON_E2E") != "1" {
-		t.Skip("run through scripts/go-daemon-e2e.sh")
+		t.Skip("run through scripts/go-e2e.sh daemon")
 	}
 	fixture := newBlackBoxFixture(t)
 

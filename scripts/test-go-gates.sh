@@ -98,6 +98,8 @@ case "${1-}":"${2-}" in
     --version:) printf '%s\n' v22.20.0; exit 0 ;;
     *:--version) printf '%s\n' 0.34.0; exit 0 ;;
     --test:*)
+        [ "${2-}" = --test-reporter=spec ] \
+            || { echo 'fixture Node test reporter was not spec' >&2; exit 1; }
         [ "${DF_GATE_FAULT-}" != ts-test ] \
             || { echo 'fixture TypeScript test failure' >&2; exit 1; }
         exit 0
@@ -156,9 +158,7 @@ process="$temporary/process"
 /bin/cp "$ordinary/bin/go" "$process/bin/go"
 /bin/cp "$ordinary/bin/node" "$process/bin/node"
 /bin/cp "$ordinary/bin/corepack" "$process/bin/corepack"
-for process_script in go-browser-e2e.sh go-daemon-e2e.sh; do
-    printf '%s\n' '#!/bin/sh' 'exit 0' >"$process/scripts/$process_script"
-done
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$process/scripts/go-e2e.sh"
 /bin/chmod 755 "$process/scripts/"*.sh "$process/bin/go"
 set +e
 process_output=$(CDPATH= cd -- "$process" && DF_GATE_FAULT=go-test \
@@ -323,7 +323,7 @@ EOF
 #!/bin/sh
 name=$(/usr/bin/basename "$0")
 case "$name" in
-    go-ci-owned.sh|go-browser-e2e.sh|test-package-release.sh)
+    go-ci-owned.sh|go-e2e.sh|test-package-release.sh)
         [ "${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}" = 1 ] || exit 98 ;;
 esac
 if [ "${DF_GATE_FAULT-}" = env ]; then
@@ -389,7 +389,7 @@ for local_child in \
     test-github-step-summary.sh test-verify-adversarial-review.sh \
     test-cloudflare-env.sh test-bootstrap-maintainer-v2.sh test-repository-settings.sh \
     test-go-gates.sh test-go-e2e-tools.sh go-ci-owned.sh \
-    go-browser-e2e.sh \
+    go-e2e.sh \
     test-prepare-release-source.sh test-publish-release.sh test-package-release.sh \
     test-publication-parents.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
