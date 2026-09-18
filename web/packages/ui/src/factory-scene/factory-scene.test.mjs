@@ -803,6 +803,13 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
     assert.equal(timers.size, 0);
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers, connected: true })); });
     assert.equal(timers.size, 1);
+    const planningWorkers = [...workers, { ...workers[0], id: "planning", location: "unobserved", nodeId: undefined }];
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: planningWorkers, connected: true, appearance: { scenery: "subtle", animation: "off" } })); });
+    assert.equal(timers.size, 0, "animation-off stops the clock");
+    assert.equal(frames.size, 0, "animation-off stops movement");
+    assert.equal(renderer.root.findByProps({ "data-worker-id": "planning" }).findAllByProps({ "data-planning-light": "" }).length, 1, "connected planning lamp stays lit with animation off");
+    await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: planningWorkers, connected: false, appearance: { scenery: "subtle", animation: "off" } })); });
+    assert.equal(renderer.root.findAllByProps({ "data-planning-light": "" }).length, 0, "disconnect extinguishes planning lamps");
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: workers.map((worker) => ({ ...worker, activity: "waiting", location: "resting" })), connected: false })); });
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: [], connected: true })); });
     assert.equal(timers.size, 0, "idle floor leaves no continuous animation clock");

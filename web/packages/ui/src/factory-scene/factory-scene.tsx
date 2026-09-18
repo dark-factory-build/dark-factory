@@ -176,17 +176,18 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
   tasks: readonly SceneTask[];
   connected: boolean;
+  animate: boolean;
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
   const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, placements, layout]);
-  const positions = useSceneMotion(layout, placements, geometryKey, connected, active);
+  const positions = useSceneMotion(layout, placements, geometryKey, connected && animate, active);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   return <>{placements.map((placement) => {
         const worker = workerById.get(placement.id);
@@ -372,7 +373,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected && appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
 
       {queued === 0 ? null : <g data-floor-queue="" {...sceneAction(onOpenQueue)} aria-label={`Open queue, ${queued} tasks`}>
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x={ROOM_LEFT + index * 3} y={boardTop + index * 3} width="24" height="28" fill="#d9d2b5" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
