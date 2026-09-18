@@ -44,7 +44,21 @@ func attachmentDTO(v kernel.TaskContentReference) api.ContentAttachment {
 }
 
 func (daemon *Daemon) writeContentSource(ctx context.Context, spec kernel.NewContent, revision uint64) (kernel.NewContent, error) {
-	repository, found, err := daemon.store.DefaultProjectRepository(ctx, spec.ProjectID)
+	var repository kernel.ProjectRepository
+	var found bool
+	var err error
+	switch {
+	case spec.RepositoryID != (kernel.RepositoryID{}):
+		repository, found, err = daemon.store.ProjectRepository(ctx, spec.RepositoryID)
+	case revision > 1:
+		previousRevision, revisionErr := kernel.NewRevision(int64(revision - 1))
+		if revisionErr != nil {
+			return kernel.NewContent{}, revisionErr
+		}
+		repository, found, err = daemon.store.ContentRepository(ctx, spec.ID, previousRevision)
+	default:
+		repository, found, err = daemon.store.DefaultProjectRepository(ctx, spec.ProjectID)
+	}
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrNotFound
@@ -121,7 +135,14 @@ func (daemon *Daemon) exportLegacyContent(ctx context.Context, id kernel.Content
 		}
 		return kernel.ContentRevision{}, err
 	}
-	spec := kernel.NewContent{ID: legacy.ID, ProjectID: legacy.ProjectID, Body: body}
+	repository, found, err := daemon.store.ContentRepository(ctx, legacy.ID, legacy.Revision)
+	if err != nil {
+		return kernel.ContentRevision{}, err
+	}
+	if !found {
+		return kernel.ContentRevision{}, kernel.ErrCorruptState
+	}
+	spec := kernel.NewContent{ID: legacy.ID, ProjectID: legacy.ProjectID, RepositoryID: repository.ID, Body: body}
 	pinned, err := daemon.writeContentSource(ctx, spec, uint64(revision))
 	if err != nil {
 		return kernel.ContentRevision{}, err

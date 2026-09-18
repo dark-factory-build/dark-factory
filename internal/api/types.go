@@ -1051,10 +1051,16 @@ type ProjectRepositoryInput struct {
 	Enabled          *bool  `json:"enabled,omitempty"`
 }
 type ProjectRepository struct {
-	ID, ProjectID, Name, Root, BaseRef string
-	Enabled, Default                   bool
-	Revision                           uint64
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	Root      string `json:"root"`
+	BaseRef   string `json:"base_ref"`
+	Enabled   bool   `json:"enabled"`
+	Default   bool   `json:"default"`
+	Revision  uint64 `json:"revision"`
 }
+
 type ProjectRepositories struct {
 	Repositories []ProjectRepository `json:"repositories"`
 }
