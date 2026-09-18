@@ -64,10 +64,6 @@ const (
 	CallOverseerReplyHuman
 	CallOperatorUpdateTask
 	CallOperatorUpdateAgent
-	CallOperatorStopRun
-	CallOperatorReplaceRun
-	CallOperatorMessageWorker
-	CallOperatorInterruptWorker
 	CallHumanRequests
 	CallHumanReply
 	CallContentCreate
@@ -193,19 +189,19 @@ func (call Call) OverseerAgentUpdateInput() (OverseerAgentUpdateInput, bool) {
 }
 
 func (call Call) OverseerRunStopInput() (OverseerRunStopInput, bool) {
-	return call.overseerRun, call.kind == CallOverseerStopRun || call.kind == CallOperatorStopRun
+	return call.overseerRun, call.kind == CallOverseerStopRun
 }
 
 func (call Call) OverseerRunReplaceInput() (OverseerRunReplaceInput, bool) {
-	return call.overseerReplace, call.kind == CallOverseerReplaceRun || call.kind == CallOperatorReplaceRun
+	return call.overseerReplace, call.kind == CallOverseerReplaceRun
 }
 
 func (call Call) OverseerWorkerMessageInput() (OverseerWorkerMessageInput, bool) {
-	return call.overseerMessage, call.kind == CallOverseerMessageWorker || call.kind == CallOperatorMessageWorker
+	return call.overseerMessage, call.kind == CallOverseerMessageWorker
 }
 
 func (call Call) OverseerWorkerInterruptInput() (OverseerWorkerInterruptInput, bool) {
-	return call.overseerInterrupt, call.kind == CallOverseerInterruptWorker || call.kind == CallOperatorInterruptWorker
+	return call.overseerInterrupt, call.kind == CallOverseerInterruptWorker
 }
 
 func (call Call) OverseerHumanReplyInput() (OverseerHumanReplyInput, bool) {
@@ -920,19 +916,19 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerStopRun, CallOperatorStopRun:
+	case CallOverseerStopRun:
 		if err := decodeExact(request.Params, &call.overseerRun); err != nil || !validOverseerRunStopInput(call.overseerRun) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerReplaceRun, CallOperatorReplaceRun:
+	case CallOverseerReplaceRun:
 		if err := decodeExact(request.Params, &call.overseerReplace); err != nil || !validOverseerRunReplaceInput(call.overseerReplace) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerMessageWorker, CallOperatorMessageWorker:
+	case CallOverseerMessageWorker:
 		if err := decodeExact(request.Params, &call.overseerMessage); err != nil || !validOverseerWorkerMessageInput(call.overseerMessage) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerInterruptWorker, CallOperatorInterruptWorker:
+	case CallOverseerInterruptWorker:
 		if err := decodeExact(request.Params, &call.overseerInterrupt); err != nil || !validOverseerWorkerInterruptInput(call.overseerInterrupt) {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -1108,14 +1104,6 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOperatorUpdateTask, operatorDomain
 	case "operator_update_agent":
 		return CallOperatorUpdateAgent, operatorDomain
-	case "operator_stop_run":
-		return CallOperatorStopRun, operatorDomain
-	case "operator_replace_run":
-		return CallOperatorReplaceRun, operatorDomain
-	case "operator_message_worker":
-		return CallOperatorMessageWorker, operatorDomain
-	case "operator_interrupt_worker":
-		return CallOperatorInterruptWorker, operatorDomain
 	case "content_create":
 		return CallContentCreate, operatorDomain
 	case "content_revise":
@@ -1258,7 +1246,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
 		return reply == replyOverseerSnapshot
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallHumanReply:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus

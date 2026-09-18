@@ -28,21 +28,6 @@ func (store *Store) StopRunForBrowser(ctx context.Context, clientID BrowserClien
 	return store.stopRunTx(ctx, tx, request, successor, at)
 }
 
-// StopRunForOperator applies the same CAS and durable intervention receipt as
-// browser control, with the local operator as the actor.
-func (store *Store) StopRunForOperator(ctx context.Context, request TaskInterventionRequest, successor *NewTask, at UnixMillis) (TaskIntervention, error) {
-	if request.Actor != 0 || request.ActorRunID != nil || request.ActorBrowserClientID != nil {
-		return TaskIntervention{}, ErrInvalidValue
-	}
-	tx, err := store.beginValidatedWrite(ctx)
-	if err != nil {
-		return TaskIntervention{}, err
-	}
-	defer tx.Close()
-	request.Actor = TaskInterventionOperator
-	return store.stopRunTx(ctx, tx, request, successor, at)
-}
-
 func (store *Store) StopRunForAttempt(ctx context.Context, digest AttemptDigest, request TaskInterventionRequest, successor *NewTask, at UnixMillis) (TaskIntervention, error) {
 	if request.Actor != 0 || request.ActorRunID != nil || request.ActorBrowserClientID != nil {
 		return TaskIntervention{}, ErrInvalidValue

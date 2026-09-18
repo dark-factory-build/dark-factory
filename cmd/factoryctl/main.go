@@ -52,6 +52,7 @@ const (
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
+  factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
   factoryctl attempt send-back --task ID --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
 	factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]
