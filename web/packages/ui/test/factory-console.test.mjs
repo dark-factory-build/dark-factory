@@ -1171,6 +1171,8 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.match(unavailable, /GITHUB IS UNAVAILABLE/);
   const disconnectPending = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } } });
   assert.match(disconnectPending, /RETRY DISCONNECT/);
+  const awaitingConfirmation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "awaiting_confirmation", repositories: [] } } } });
+  assert.match(awaitingConfirmation, /RESET GITHUB ACCESS/);
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "unavailable" } } })); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RETRY GITHUB ACCESS").props.onClick(); });
   assert.equal(calls.at(-1).action, "refresh");
@@ -1191,7 +1193,7 @@ test("private GitHub settings stays behind the paired admin surface", async () =
 
   const repositoryCalls = [];
   const statusRepositories = [];
-  const repositoryProps = (repositories, delegated = statusRepositories) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
+  const repositoryProps = (repositories, delegated = statusRepositories, installationID = 7) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: installationID, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
   act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
   act(() => { renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
@@ -1206,6 +1208,11 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, []))); });
   assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 0);
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 202, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
+  assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 1);
   renderer.unmount();
 });
 
