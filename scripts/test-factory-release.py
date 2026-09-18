@@ -43,7 +43,7 @@ def snapshot():
             "headRefOid": HEAD,
         },
         SHA,
-        [{"commit_id": HEAD, "state": "APPROVED", "user": {"id": 319516570},
+        [{"commit_id": HEAD, "state": "APPROVED", "user": {"id": 101},
           "body": f"Dark-Factory-Review: allow {HEAD}"}],
         [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
     )
@@ -73,6 +73,46 @@ class ReleaseFixtures(unittest.TestCase):
         with self.assertRaises(release.ReleaseError):
             release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
 
+    def test_any_positive_numeric_publisher_can_allow_exact_head(self):
+        pr, default, reviews, checks = snapshot()
+        for author in (101, "202", 987654321):
+            reviews[0]["user"]["id"] = author
+            self.assertEqual(
+                release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA),
+                HEAD,
+            )
+
+    def test_invalid_publishers_and_stale_reviews_do_not_allow(self):
+        pr, default, reviews, checks = snapshot()
+        for author in (0, -1, "0", "-1", "202.0", True, None):
+            reviews[0]["user"]["id"] = author
+            with self.assertRaises(release.ReleaseError):
+                release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+        reviews[0]["user"]["id"] = 1
+        reviews[0]["state"] = "PENDING"
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+        reviews[0]["state"] = "DISMISSED"
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+
+    def test_block_precedes_allow_and_exact_correction_clears_it(self):
+        pr, default, reviews, checks = snapshot()
+        operation = "11111111-1111-4111-8111-111111111111"
+        reviews[:] = [
+            {"commit_id": HEAD, "state": "COMMENTED", "user": {"id": 1},
+             "body": f"Dark-Factory-Review: block {HEAD} <!-- dark-factory-operation:{operation}:old -->"},
+            {"commit_id": HEAD, "state": "COMMENTED", "user": {"id": 2},
+             "body": f"Dark-Factory-Review: allow {HEAD} Dark-Factory-Review-Correction: {operation} <!-- dark-factory-operation:22222222-2222-4222-8222-222222222222:new -->"},
+        ]
+        self.assertEqual(
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA),
+            HEAD,
+        )
+        reviews[1]["body"] = f"Dark-Factory-Review: allow {HEAD}"
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+
     def test_failed_check_is_rejected(self):
         pr, default, reviews, checks = snapshot()
         checks[0]["conclusion"] = "FAILURE"
@@ -83,11 +123,12 @@ class ReleaseFixtures(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             cfg = config(Path(directory) / "release.json")
             with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
-                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "review_gate") as verifier, \
                  mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
                  mock.patch.object(release, "run") as command:
                 result = release.once(cfg, 633)
             self.assertEqual(result["state"], "verified")
+            verifier.assert_called_once_with(cfg, HEAD, snapshot()[2])
             command.assert_not_called()
 
     def test_reconcile_records_verified_receipt_without_deploy_hook(self):
@@ -96,7 +137,7 @@ class ReleaseFixtures(unittest.TestCase):
             cfg = config(journal)
             release.atomic_json(journal, {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}})
             with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
-                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "review_gate") as verifier, \
                  mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
                  mock.patch.object(release, "range_sources", return_value=([{"pr": 633, "merge_sha": SHA, "issue": 602, "reference": "refs"}], "range")), \
                  mock.patch.object(release, "run", return_value=json.dumps({"status": "ahead", "merge_base_commit": {"sha": SHA}})) as command:
@@ -104,6 +145,7 @@ class ReleaseFixtures(unittest.TestCase):
             self.assertEqual(result["state"], "verified")
             self.assertEqual(release.load(journal)["live_tip"]["sha"], SHA)
             self.assertEqual(result["reconciliation"], {"mode": "operator_observed", "observed_sha": SHA})
+            verifier.assert_called_once_with(cfg, HEAD, snapshot()[2])
             command.assert_called_once()
 
     def test_reconcile_accepts_reviewed_ancestor_when_default_advanced(self):
@@ -142,7 +184,8 @@ class ReleaseFixtures(unittest.TestCase):
             before = {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}}
             release.atomic_json(journal, before)
             current = (dict(snapshot()[0], mergeCommitSha=SHA), SECOND, snapshot()[2], snapshot()[3])
-            with mock.patch.object(release, "gh_snapshot", return_value=current), mock.patch.object(release, "run") as command:
+            with mock.patch.object(release, "gh_snapshot", return_value=current), \
+                 mock.patch.object(release, "review_gate"), mock.patch.object(release, "run") as command:
                 with self.assertRaisesRegex(release.ReleaseError, "not at the merged SHA"):
                     release.once(cfg, 633)
             self.assertEqual(release.load(journal), before)
@@ -201,6 +244,7 @@ class ReleaseFixtures(unittest.TestCase):
             before = {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}}
             release.atomic_json(journal, before)
             with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
                  mock.patch.object(release, "run") as command:
                 with self.assertRaisesRegex(release.ReleaseError, "does not match"):
                     release.reconcile(cfg, 633, OLD)
@@ -474,7 +518,7 @@ class ReleaseFixtures(unittest.TestCase):
         release.review_gate(config(Path("/tmp/release.json")), HEAD, [{
             "commit_id": HEAD,
             "state": "APPROVED",
-            "user": {"id": 319516570},
+            "user": {"id": 101},
             "body": f"findings\nDark-Factory-Review:\tallow {HEAD}\nfinal",
         }])
 
@@ -483,7 +527,7 @@ class ReleaseFixtures(unittest.TestCase):
             release.review_gate(config(Path("/tmp/release.json")), HEAD, [{
                 "commit_id": HEAD,
                 "state": "CHANGES_REQUESTED",
-                "user": {"id": 319516570},
+                "user": {"id": 202},
                 "body": f"findings\nDark-Factory-Review: block {HEAD}",
             }])
 
