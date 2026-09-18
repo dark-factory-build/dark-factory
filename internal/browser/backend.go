@@ -250,3 +250,11 @@ type AgentControlBackend interface {
 type TaskListBackend interface {
 	TaskList(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskListGet) (browserprotocol.TaskList, error)
 }
+
+// ContentBackend serves the optional project library through one finite,
+// lazily requested operation union. The JSON payload is decoded by the daemon
+// adapter so this transport package does not import API or kernel DTOs.
+type ContentBackend interface {
+	Backend
+	ProjectContent(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.ProjectContent) (browserprotocol.ProjectContentResult, error)
+}

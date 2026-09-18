@@ -1318,7 +1318,7 @@ function expand(node, result = []) {
   if (!isValidElement(node)) return result;
   if (typeof node.type === "function") {
     // Stateful surfaces have their own renderer checks; this walk tests sibling intent callbacks.
-    if (["QueuePanel", "FactoryFloor"].includes(node.type.name)) return result;
+    if (["QueuePanel", "FactoryFloor", "ProjectLibrary"].includes(node.type.name)) return result;
     expand(node.type(node.props), result);
     return result;
   }
@@ -2027,7 +2027,9 @@ test("same-path observed roots choose package then module independent of served 
       assert.deepEqual(task.roomIds, [exact]);
       assert.equal(task.representativeRoomId, exact);
       assert.equal(task.displayRoomId, `${ids.project}:${display}`);
-      assert.equal(scene.workers.find((worker) => worker.id === ids.agent).nodeId, task.displayRoomId);
+      const worker = scene.workers.find((worker) => worker.id === ids.agent);
+      assert.equal(worker.nodeId, task.displayRoomId);
+      assert.equal(worker.observedBayId, scope === `${ids.project}:${root.id}` && nodes.includes(pkg) ? exact : undefined, "only an exact direct child is placed in a pictured bay");
     }
   }
 });

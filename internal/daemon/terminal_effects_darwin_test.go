@@ -1021,6 +1021,34 @@ func TestBrowserHumanReplyDoesNotReconcileUnknownBeforeEffect(t *testing.T) {
 	expectNoTerminalEffectWire(t, fixture.peer)
 }
 
+// A Claude Code worker reads the reply written into its terminal as a paste
+// and shows it in its input box; without the runner's own later Enter it is
+// never submitted, and an overseer's message accumulates the same way. The
+// deferred submit is requested for every interactive provider, not Codex
+// alone.
+func TestClaudeHumanReplyRequestsDeferredSubmit(t *testing.T) {
+	fixture := newTerminalEffectFixtureWithProvider(t, kernel.ProviderClaudeCode)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 215))
+	request, err := fixture.adapter.store.CreateHumanQuestionForAttempt(context.Background(), fixture.run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "question"}, adapterTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.adapter.daemon.humanReply(context.Background(), fixture.principal, request.ID, request.Revision, "exact reply")
+		done <- err
+	}()
+	command := readTerminalEffectWire(t, fixture.peer)
+	if command.Kind != string(runner.TerminalHumanReply) || string(command.Payload) != "exact reply" || !command.Submit {
+		t.Fatalf("claude human reply command = %+v", command)
+	}
+	replyTerminalEffect(t, fixture.peer, command, runner.TerminalResultOK, uint32(len(command.Payload)))
+	if err := <-done; err != nil {
+		t.Fatalf("claude human reply = %v", err)
+	}
+}
+
 func TestHumanReplyKeepsShellPayloadRaw(t *testing.T) {
 	fixture := newTerminalEffectFixtureWithProvider(t, kernel.ProviderShell)
 	var key [kernel.IDBytes]byte

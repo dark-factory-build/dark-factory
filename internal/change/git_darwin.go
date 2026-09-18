@@ -38,11 +38,12 @@ const (
 )
 
 type gitCommandSpec struct {
-	program    string
-	repository string
-	home       string
-	arguments  []string
-	hook       gitProcessHook
+	program     string
+	repository  string
+	home        string
+	arguments   []string
+	environment []string
+	hook        gitProcessHook
 }
 
 type gitCapture struct {
@@ -682,7 +683,7 @@ func gitEnvironment(home, repository string) []string {
 func (s gitCommandSpec) command() *exec.Cmd {
 	command := exec.Command(s.program, s.arguments...)
 	command.Dir = s.repository
-	command.Env = gitEnvironment(s.home, s.repository)
+	command.Env = append(gitEnvironment(s.home, s.repository), s.environment...)
 	return command
 }
 
@@ -1056,10 +1057,14 @@ func (a *gitAuthority) close() { _ = cleanupGitHome(a.home) }
 // and executable identity after it exits, so a replaced repository or Git
 // cannot pass an earlier check.
 func (a *gitAuthority) run(ctx context.Context, maximum int, arguments ...string) (gitCapture, error) {
+	return a.runWithEnvironment(ctx, maximum, nil, arguments...)
+}
+
+func (a *gitAuthority) runWithEnvironment(ctx context.Context, maximum int, environment []string, arguments ...string) (gitCapture, error) {
 	if err := verifyGitAuthority(a.repositoryRoot, a.repository, a.gitExecutable, a.gitIdentity); err != nil {
 		return gitCapture{}, err
 	}
-	spec := gitCommandSpec{program: a.gitExecutable, repository: a.repositoryRoot, home: a.home, hook: a.hook, arguments: arguments}
+	spec := gitCommandSpec{program: a.gitExecutable, repository: a.repositoryRoot, home: a.home, hook: a.hook, arguments: arguments, environment: environment}
 	result, err := runGitCapture(ctx, spec, maximum)
 	if err != nil {
 		return gitCapture{}, err

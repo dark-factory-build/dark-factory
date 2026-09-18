@@ -688,6 +688,43 @@ test("pictured contents and occupied surface slots leave door routes clear in ev
   }
 });
 
+test("pictured child bays use a side approach around shared work surfaces in every footprint", () => {
+  const clearOfContents = (from, route, room) => {
+    let previous = from;
+    for (const point of route.points) {
+      const left = Math.min(previous.x, point.x), right = Math.max(previous.x, point.x);
+      const top = Math.min(previous.y, point.y), bottom = Math.max(previous.y, point.y);
+      for (const item of room.contents) {
+        assert.ok(left >= item.x + item.width + 8 || right <= item.x - 8 || top >= item.y + item.height + 8 || bottom <= item.y - 8,
+          `${room.id}: route crosses ${item.key}`);
+      }
+      previous = point;
+    }
+  };
+  for (const sizeBucket of ["empty", "tiny", "small", "medium", "large"]) {
+    const child = { id: `child-${sizeBucket}`, label: "Pictured child" };
+    const node = { ...inventoryTopology.nodes[0], sizeBucket, components: [child] };
+    const layout = layoutScene({ digest: `child-${sizeBucket}`, nodes: [node] });
+    const room = layout.rooms[0];
+    const worker = placeWorkers(layout, [{ ...workers[0], observedBayId: child.id, nodeId: node.id }])[0];
+    assert.equal(worker.bayId, child.id);
+    const start = { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop };
+    const route = routeFromSpine(layout, start, worker);
+    assert.ok(route);
+    clearOfContents(start, route, room);
+    assertRouteGeometry(layout, start, route, `${sizeBucket} child bay`);
+    const returnRoute = routeBetween(layout, worker, { ...worker, area: "resting", roomId: undefined, x: start.x, y: start.y });
+    assert.ok(returnRoute);
+    clearOfContents(worker, returnRoute, room);
+    assertRouteGeometry(layout, worker, returnRoute, `${sizeBucket} child bay exit`);
+    const surface = room.contents.find((item) => item.workSurface);
+    const bench = { ...worker, bayId: undefined, x: surface.x + surface.width / 2, y: surface.y + surface.height + 8 };
+    const reassigned = routeBetween(layout, worker, bench);
+    assert.ok(reassigned);
+    clearOfContents(worker, reassigned, room);
+  }
+});
+
 test("room inspection distinguishes bounded static evidence, hidden endpoints and unavailable support", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const links = Array.from({ length: 10 }, (_, index) => ({ nodeId: `hidden-${index}`, label: `Hidden ${index}`, path: `area-${index}`, direction: "to", weight: 1 }));
@@ -813,4 +850,41 @@ test("direct rooms picture only direct counts while subtree rooms retain descend
   const displayed = (inventoryScope) => layoutScene({ digest: "scope", nodes: [{ ...node, inventoryScope }] }).rooms[0].contents;
   assert.deepEqual(displayed("direct").map(({ kind, count }) => ({ kind, count })), [{ kind: "source", count: 1 }]);
   assert.equal(displayed("subtree").find((item) => item.kind === "source").count, fileCounts.source);
+});
+
+test("named direct-child bays are bounded and only exact observations occupy them", () => {
+  const node = { ...inventoryTopology.nodes[0], components: Array.from({ length: 8 }, (_, index) => ({ id: `child-${index}`, label: `Child ${index}` })) };
+  const room = layoutScene({ digest: "bays", nodes: [node] }).rooms[0];
+  const bays = room.contents.filter((item) => item.kind === "component");
+  assert.equal(room.arrangement, "hall");
+  assert.ok(bays.length > 0 && bays.length <= 6);
+  assert.deepEqual(bays.map((item) => item.targetId), ["child-0", "child-1", "child-2"]);
+  const exact = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [{ ...workers[0], nodeId: node.id, observedBayId: "child-1" }])[0];
+  const representative = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [{ ...workers[0], nodeId: node.id, observedBayId: "not-pictured" }])[0];
+  assert.equal(exact.bayId, "child-1");
+  assert.equal(representative.bayId, undefined);
+  assert.notDeepEqual({ x: exact.x, y: exact.y }, { x: representative.x, y: representative.y });
+  const occupied = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [
+    { ...workers[0], id: "a", nodeId: node.id, observedBayId: "child-0" },
+    { ...workers[0], id: "b", nodeId: node.id, observedBayId: "child-1" },
+    { ...workers[0], id: "c", nodeId: node.id, observedBayId: "child-0" },
+    { ...workers[0], id: "d", nodeId: node.id, observedBayId: "not-pictured" },
+  ]);
+  assert.deepEqual(occupied.map(({ id, area, bayId }) => [id, area, bayId]), [
+    ["a", "room", "child-0"], ["b", "room", "child-1"], ["c", "overflow", undefined], ["d", "room", undefined],
+  ]);
+  assert.notDeepEqual([occupied[0].x, occupied[0].y], [occupied[1].x, occupied[1].y], "distinct child bays have distinct standing points");
+  assert.equal(layoutScene({ digest: "parent", nodes: [{ ...node, id: "parent", parentId: "root" }] }).rooms[0].arrangement, "parent");
+  assert.equal(layoutScene({ digest: "leaf", nodes: [{ ...node, id: "leaf", parentId: "root", components: [] }] }).rooms[0].arrangement, "bench");
+  const hall = layoutScene({ digest: "hall", nodes: [{ ...node, sizeBucket: "large" }] }).rooms[0];
+  const parent = layoutScene({ digest: "parent-bays", nodes: [{ ...node, id: "parent-bays", parentId: "root", sizeBucket: "large" }] }).rooms[0];
+  const leaf = layoutScene({ digest: "leaf-bays", nodes: [{ ...node, id: "leaf-bays", parentId: "root", components: [], sizeBucket: "large" }] }).rooms[0];
+  assert.deepEqual(hall.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - hall.y]), [[184, 40], [184, 68], [184, 96]]);
+  for (let index = 0; index < hall.contents.length; index++) for (const other of hall.contents.slice(index + 1))
+    assert.equal(overlaps(hall.contents[index], other), false, "pictured stations cannot overlap equipment");
+  assert.deepEqual(parent.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - parent.y]), [[184, 40]]);
+  assert.equal(leaf.contents.some((item) => item.kind === "component"), false);
+  assert.equal(hall.omittedBayCount, 5);
+  assert.ok(hall.contents.filter((item) => item.kind !== "component" && !item.workSurface).length <= 1, "three bays retain one secondary installation");
+  assert.ok(leaf.contents.filter((item) => item.kind !== "component" && !item.workSurface).length <= 2, "leaf never grows a third support");
 });

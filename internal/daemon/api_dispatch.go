@@ -254,6 +254,10 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.overseerInterruptWorker(ctx, call)
 	case api.CallOverseerReplyHuman:
 		return daemon.overseerReplyHuman(ctx, call)
+	case api.CallContentCreate, api.CallContentRevise, api.CallContentDeprecate, api.CallContentList, api.CallContentRead, api.CallContentBody, api.CallContentEvidence, api.CallContentAttach, api.CallContentEvidenceList, api.CallContentAttachments:
+		return daemon.content(ctx, call)
+	case api.CallOutcomeWrite, api.CallOutcomeRead, api.CallOutcomeList:
+		return daemon.outcomes(ctx, call)
 	case api.CallWebStatus:
 		status, err := daemon.WebStatus(ctx)
 		if err != nil {
@@ -362,6 +366,32 @@ func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply
 		for _, resource := range recovery.Artifacts {
 			if resource.Path != "" {
 				value.ArtifactPaths = append(value.ArtifactPaths, resource.Path)
+			}
+		}
+		value.Disposition, value.OverseerNotification, value.LastProgressAtMs = recovery.Disposition(), string(recovery.OverseerNotification), recovery.LastProgressAt.Int64()
+		if recovery.HumanRequest != nil {
+			value.HumanRequestID = recovery.HumanRequest.String()
+		}
+		if recovery.Overseer != nil {
+			value.OverseerAgentID = recovery.Overseer.String()
+		}
+		if recovery.OverseerTask != nil {
+			value.OverseerTaskID, value.OverseerTaskStatus, value.OverseerTaskTitle = recovery.OverseerTask.ID.String(), recovery.OverseerTask.Status.String(), recovery.OverseerTask.Title
+		}
+		if recovery.Change != nil && recovery.Change.HeadCommit != nil {
+			value.ChangeHeadCommit = hex.EncodeToString(recovery.Change.HeadCommit.Bytes())
+		}
+		if run := recovery.Run; run != nil {
+			if run.RunningAt != nil && run.TerminalAt != nil {
+				value.RunRunningMs = run.TerminalAt.Int64() - run.RunningAt.Int64()
+			}
+			if exit := run.ProviderExit; exit != nil {
+				value.RunProviderExit = "absent"
+				if code, ok := exit.Code(); ok {
+					value.RunProviderExit = fmt.Sprintf("code %d", code)
+				} else if signal, ok := exit.Signal(); ok {
+					value.RunProviderExit = fmt.Sprintf("signal %d", signal)
+				}
 			}
 		}
 	}
@@ -1275,6 +1305,7 @@ func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply
 		IdempotencyKey: key,
 		QuestionText:   input.Question,
 		Options:        input.Options,
+		ReuseExisting:  input.ReuseExisting,
 	}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
@@ -1418,17 +1449,19 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 		assignedAgentID = &agentID
 	}
 	if input.Retry {
-		if assignedAgentID == nil {
-			return newErrorReply(api.RemoteInvalidRequest)
+		// A zero agent keeps the task's current worker.
+		var assigned kernel.AgentID
+		if assignedAgentID != nil {
+			assigned = *assignedAgentID
 		}
-		if err := prepareTaskRetry(ctx, daemon.store, id, expected, *assignedAgentID); err != nil {
+		if err := prepareTaskRetry(ctx, daemon.store, id, expected, assigned); err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
 		at, err := daemon.timestamp()
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
-		task, err := daemon.store.RetryTaskForOverseer(ctx, digest, id, expected, *assignedAgentID, at)
+		task, err := daemon.store.RetryTaskForOverseer(ctx, digest, id, expected, assigned, at)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}

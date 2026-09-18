@@ -1,7 +1,11 @@
 #!/bin/sh
 set -eu
 
-[ "$#" -eq 0 ] || { echo "usage: scripts/go-check.sh" >&2; exit 2; }
+case "$#:${1-}" in
+    0:) go_check_mode=source ;;
+    1:--ui) go_check_mode=ui ;;
+    *) echo "usage: scripts/go-check.sh [--ui]" >&2; exit 2 ;;
+esac
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 CDPATH= cd -- "$repository_root"
@@ -28,29 +32,32 @@ echo "go-check: download and verify Go modules"
 go mod download
 go mod verify
 
-echo "go-check: gofmt"
-if ! gofmt_output=$(git ls-files -z -- '*.go' | xargs -0 gofmt -l); then
-    echo "go-check: gofmt failed" >&2
-    exit 1
+if [ "$go_check_mode" = source ]; then
+
+    echo "go-check: gofmt"
+    if ! gofmt_output=$(git ls-files -z -- '*.go' | xargs -0 gofmt -l); then
+        echo "go-check: gofmt failed" >&2
+        exit 1
+    fi
+    [ -z "$gofmt_output" ] || {
+        printf '%s\n' "$gofmt_output" >&2
+        echo "go-check: gofmt required" >&2
+        exit 1
+    }
+
+    echo "go-check: go vet ./..."
+    go vet ./...
+
+    # These packages contain ordinary source and data-contract tests. Packages
+    # that create sockets, PTYs, subprocesses, or services run in the process gate.
+    echo "go-check: ordinary Go tests"
+    go test -short -timeout=20m \
+        ./cmd/cloudflare-admin \
+        ./internal/browserprotocol \
+        ./internal/cloudflareadmin \
+        ./internal/provider \
+        ./internal/topology
 fi
-[ -z "$gofmt_output" ] || {
-    printf '%s\n' "$gofmt_output" >&2
-    echo "go-check: gofmt required" >&2
-    exit 1
-}
-
-echo "go-check: go vet ./..."
-go vet ./...
-
-# These packages contain ordinary source and data-contract tests. Packages
-# that create sockets, PTYs, subprocesses, or services run in go-ci instead.
-echo "go-check: ordinary Go tests"
-go test -short -timeout=20m \
-    ./cmd/cloudflare-admin \
-    ./internal/browserprotocol \
-    ./internal/cloudflareadmin \
-    ./internal/provider \
-    ./internal/topology
 
 echo "go-check: TypeScript install, build, typecheck, and tests"
 (

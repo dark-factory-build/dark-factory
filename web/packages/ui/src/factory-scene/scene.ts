@@ -41,6 +41,8 @@ export type SceneWorker = Readonly<{
   /** The displayed room contains the more specific observed area. */
   locationWithin?: boolean;
   nodeId?: string;
+  /** Exact observed direct child, retained separately from its displayed parent. */
+  observedBayId?: string;
 }>;
 
 export type ScenePoint = Readonly<{ x: number; y: number }>;
@@ -48,6 +50,8 @@ export type ScenePoint = Readonly<{ x: number; y: number }>;
 type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type SceneRoomLayout = SceneRect & Readonly<{
   id: string;
+  arrangement: "hall" | "parent" | "bench";
+  omittedBayCount: number;
   door: ScenePoint;
   contents: readonly RoomContent[];
 }>;
@@ -67,6 +71,8 @@ export type SceneWorkerPlacement = Readonly<{
   id: string;
   area: "room" | "resting" | "staging" | "outside" | "overflow";
   roomId?: string;
+  /** A worker only occupies a named bay when its exact observed child is pictured. */
+  bayId?: string;
   x: number;
   y: number;
 }>;
@@ -117,7 +123,9 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
       const y = bottom - height;
       const center = x + width / 2;
       const rectangle = { x, y, width, height };
-      rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle),
+      const arrangement = node.parentId === undefined || node.parentId === "" ? "hall" : (node.components?.length ?? 0) > 0 ? "parent" : "bench";
+      const contents = composeRoom(node, rectangle, arrangement);
+      rooms.push({ id: node.id, ...rectangle, arrangement, omittedBayCount: Math.max(0, (node.components?.length ?? 0) - contents.filter((item) => item.kind === "component").length), contents,
         door: { x: center, y: bottom } });
       if (index % columns === 0) corridors.push({ x: PADDING, y: bottom, width: CORRIDOR + Math.min(columns, members.length - index) * ROOM_WIDTH, height: CORRIDOR });
     });
@@ -142,11 +150,14 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     }
     const room = worker.nodeId === undefined ? undefined : rooms.get(worker.nodeId);
     if (room === undefined) { areas.outside.push(worker); continue; }
-    const slot = roomCounts.get(room.id) ?? 0;
-    const positions = workPositions(room);
+    const bay = worker.observedBayId !== undefined && room.contents.some((item) => item.targetId === worker.observedBayId)
+      ? worker.observedBayId : undefined;
+    const occupancy = JSON.stringify([room.id, bay ?? null]);
+    const slot = roomCounts.get(occupancy) ?? 0;
+    const positions = workPositions(room, bay);
     if (slot >= positions.length) { areas.overflow.push(worker); continue; }
-    roomCounts.set(room.id, slot + 1);
-    placed.push({ id: worker.id, area: "room", roomId: room.id, ...positions[slot]! });
+    roomCounts.set(occupancy, slot + 1);
+    placed.push({ id: worker.id, area: "room", roomId: room.id, ...(bay === undefined ? {} : { bayId: bay }), ...positions[slot]! });
   }
   let top = layout.restingTop;
   for (const area of ["resting", "staging", "outside", "overflow"] as const) {
@@ -161,9 +172,13 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
 
 
 /** Pictured surface slots also determine standing destinations; no parallel workstation map. */
-export function workPositions(room: SceneRoomLayout): readonly ScenePoint[] {
-  const surface = room.contents.find((item) => item.workSurface);
+export function workPositions(room: SceneRoomLayout, bayId?: string): readonly ScenePoint[] {
+  const surface = bayId === undefined ? room.contents.find((item) => item.workSurface) : room.contents.find((item) => item.targetId === bayId);
   if (surface === undefined) return [{ x: room.door.x, y: room.door.y - 32 }];
+  // Component bays share the composition's reserved right-hand approach. This
+  // is the same pictured rectangle used by rendering and hit testing, rather
+  // than a second map of invented workstations.
+  if (bayId !== undefined) return [{ x: room.x + room.width - 12, y: surface.y + surface.height / 2 }];
   const offsets = surface.width >= 120 ? [0, -24, 24, -48, 48] : surface.width >= 88 ? [0, -24, 24] : [0, -24];
   return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + 8 }));
 }
@@ -172,31 +187,44 @@ export const inventoryLabels = { source: "Source", tests: "Tests", documentation
 type ContentKind = keyof typeof inventoryLabels | "component";
 export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string; workSurface?: boolean }>;
 
-/** One installation per category, with named component plans on the back wall. */
-function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
+/** Three bounded arrangements: a root hall, parent edge bays, or a leaf bench. */
+function composeRoom(node: SceneNode, room: SceneRect, arrangement: SceneRoomLayout["arrangement"]): readonly RoomContent[] {
   const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
   const kinds = (Object.keys(inventoryLabels) as Array<keyof typeof inventoryLabels>)
     .filter((kind) => (counts?.[kind] ?? 0) > 0)
     .sort((left, right) => counts![right] - counts![left] || compareText(left, right));
   const primary = kinds[0];
   const contents: RoomContent[] = [];
-  const planWidth = room.width >= 192 ? (room.width - 32) / 2 : room.width - 24;
   const children = [...(node.components ?? [])].sort((a, b) => compareText(a.label, b.label) || compareText(a.id, b.id));
-  children.slice(0, room.width >= 192 ? 2 : 1).forEach((child, index) => contents.push({
-    key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id,
-    x: room.x + 12 + index * (planWidth + 8), y: room.y + 46, width: planWidth, height: 28,
-  }));
+  // All pictured rectangles stop before this 20px edge strip. Its centre is
+  // the 8px-clear side approach used for both the bench and direct-child bays.
+  const contentLeft = room.x + 20;
+  const contentWidth = room.width - 40;
+  // Full-width stations keep each worker beside its own pictured child bay.
+  const bayLimit = arrangement === "bench" ? 0 : arrangement === "parent" ? 1 : room.width >= 216 ? 3 : room.width >= 192 ? 2 : 1;
+  const bays = children.slice(0, Math.min(6, bayLimit));
+  const bayHeight = 24;
+  bays.forEach((child, index) => {
+    contents.push({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id,
+      x: contentLeft, y: room.y + 40 + index * (bayHeight + 4), width: contentWidth, height: bayHeight,
+    });
+  });
   if (primary === undefined) return contents;
-  const width = Math.max(room.width >= 160 ? 112 : 80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary]));
+  const width = Math.min(contentWidth, Math.max(room.width >= 160 ? 112 : 80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary])));
   const height = room.height >= 184 ? 64 : 32;
   contents.push({ key: primary, kind: primary, label: inventoryLabels[primary], count: counts![primary], workSurface: true,
-    x: room.x + (room.width - width) / 2, y: room.y + room.height - height - 40, width, height });
+    // Keep the doorway and its horizontal approach clear by a full sprite.
+    x: contentLeft, y: room.y + room.height - height - 32, width, height });
   // Tests retain a supporting place even beside a much larger source installation.
   const secondary = kinds.filter((kind) => kind !== primary).sort((a, b) => Number(b === "tests") - Number(a === "tests") || compareText(a, b));
-  const slots = children.length === 0 ? (room.width >= 192 ? 3 : 2) : room.height >= 208 ? 2 : 0;
-  secondary.slice(0, slots).forEach((kind, index) => contents.push({
+  const slots = arrangement === "bench" ? 2 : bays.length >= 3 ? 1 : 2;
+  const bayBottom = contents.filter((item) => item.kind === "component").reduce((bottom, item) => Math.max(bottom, item.y + item.height), room.y + 32);
+  const supportY = bayBottom + 8;
+  const primaryTop = contents.find((item) => item.workSurface)!.y;
+  const supportCount = supportY + 24 <= primaryTop - 8 ? Math.min(slots, Math.floor(contentWidth / 56)) : 0;
+  secondary.slice(0, supportCount).forEach((kind, index) => contents.push({
     key: kind, kind, label: inventoryLabels[kind], count: counts![kind],
-    x: room.x + 12 + index * 56, y: room.y + (children.length === 0 ? 46 : 78), width: 48, height: 28,
+    x: contentLeft + index * 56, y: supportY, width: 48, height: 24,
   }));
   return contents;
 }

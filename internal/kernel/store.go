@@ -497,12 +497,14 @@ func validateAccountFields(provider Provider, home, label string) error {
 
 // LinkAccount registers one CLI login that already exists on this machine.
 // (provider, home) is the login's identity, so relinking the same directory
-// returns the row that is already there instead of making a second one.
+// returns the row that is already there instead of making a second one. These
+// ordinary account writes validate the affected row and references in the
+// transaction; broad unrelated corruption remains for open/recovery checks.
 func (store *Store) LinkAccount(ctx context.Context, spec NewAccount, at UnixMillis) (Account, error) {
 	if spec.ID.zero() || validateAccountFields(spec.Provider, spec.Home, spec.Label) != nil {
 		return Account{}, fmt.Errorf("%w: invalid account", ErrInvalidValue)
 	}
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return Account{}, err
 	}
@@ -554,7 +556,7 @@ func (store *Store) UpdateAccount(ctx context.Context, id AccountID, expected Re
 	if id.zero() || expected.Int64() < 1 || (label == nil) != remove {
 		return Account{}, fmt.Errorf("%w: invalid account update", ErrInvalidValue)
 	}
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return Account{}, err
 	}
