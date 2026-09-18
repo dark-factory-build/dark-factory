@@ -115,8 +115,8 @@ the current Change, not a process working directory. Task recovery below names
 the exact Change and retained run artifacts.
 
 `factoryctl terminal observe --project ID --task ID --run ID` reads a bounded,
-redacted terminal window for a running worker or overseer through operator
-authority. Use its cursor and byte-budget options for subsequent windows.
+redacted terminal window for a worker or overseer through operator authority,
+including retained diagnostics after settlement. Use its cursor and byte-budget options for subsequent windows.
 `factoryctl task update --task ID --revision REVISION` supports edits, cancel,
 or retry; retry may include reassignment but cannot be combined with text edits.
 `factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION`

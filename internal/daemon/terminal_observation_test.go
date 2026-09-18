@@ -366,3 +366,24 @@ func TestOperatorTerminalObservationReadsExactRunningWorkerAndOverseer(t *testin
 		}
 	}
 }
+
+func TestOperatorTerminalObservationReadsSettledDiagnostics(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 41, testID(11), "orchestrator")
+	completeAdapterRun(t, fixture.store, active.run, "finished")
+	ctx := context.Background()
+	payload := []byte("finished output\nAuthorization: Bearer private-value\n")
+	if err := fixture.store.SaveTerminalDiagnostics(ctx, kernel.TerminalDiagnostics{RunID: active.run.ID, Head: uint64(len(payload)), Payload: payload, CapturedAt: mustKernelTime(t, 2000)}); err != nil {
+		t.Fatal(err)
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	observed, err := operator.TerminalObserve(ctx, api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 1024})
+	waitDispatch(t, done)
+	if err != nil || observed.Source != "stored" || !bytes.Contains(observed.Payload, []byte("finished output")) || bytes.Contains(observed.Payload, []byte("private-value")) {
+		t.Fatalf("settled observation = %+v, %v", observed, err)
+	}
+}
