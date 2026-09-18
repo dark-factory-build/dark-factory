@@ -106,8 +106,9 @@ They do not wait for an idle factory or move the registered checkout. Failed
 fetches fail source preparation visibly, without using a stale tracking ref.
 Retained Changes are not refreshed or rebased; a correction continues on its
 exact branch, and integrating it with current main is a separate reviewed
-operation. Explicit
-local revision policies remain local. See README for `--base-revision`.
+operation. Explicit local revision policies remain local. See the
+[installation guide](../install.md) for `--base-revision` and repository base
+settings.
 If a source supervisor reaches its duration limit while a human decision is
 unanswered, intake records `needs_operator_recovery`.
 It does not repeat that task. Edit the source issue materially to create a new

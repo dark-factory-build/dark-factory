@@ -93,6 +93,21 @@ factoryctl remote status
 The CLI cannot delete origin-scoped browser storage; pairing afresh from the
 pair page makes that manual browser action unnecessary.
 
+## Working in the console
+
+Select an agent on the floor or in the roster. Its terminal, queue and Needs
+You decisions share the side panel. A terminal instruction to a ready agent
+creates durable work; Message steers a running session. Interrupt stops Codex
+generation while preserving the task, while Stop ends it. Send a completed
+result back with feedback or start a separate replacement without losing its
+history. Add to queue can hold later work while an agent is busy.
+
+Assign work to a named worker or Any eligible worker in the project. Named
+work is taken first; the next free eligible worker then claims shared work.
+Recent Work loads completed and blocked results on demand. Pause prevents
+future admissions, and Show archived lets you inspect or restore a drained
+worker without erasing its history.
+
 ## Feedback and public backlog
 
 Settings → Help and feedback opens the public reporting and backlog pages,
@@ -213,6 +228,17 @@ reviews. Disable prevents new selection while preserving history. Removal is
 refused while a binding remains referenced and never removes the checkout.
 Private Git fetch authentication remains operator-owned and separate from the
 Maintainer connection.
+
+For a newly created project's first repository, `factoryd` defaults to
+`--base-revision HEAD`; this boot setting initializes the binding and does not
+retarget existing work. With `HEAD` on a branch that has a configured remote
+upstream, a fresh Change fetches and pins that upstream's exact commit. A
+`refs/remotes/upstream/main` base selects a different remote branch. Detached
+HEAD, branches without an upstream, and explicit local refs or commit IDs stay
+local. A configured fetch failure stops source preparation rather than using
+a stale tracking ref. Fetching does not move the registered checkout or update
+tracking refs or `FETCH_HEAD`. Retained Changes keep their original source and
+edits; use the repository `base` setting for future work in that binding.
 
 ## Reviewed issue intake (next release)
 
