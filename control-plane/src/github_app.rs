@@ -1212,12 +1212,23 @@ impl AppAuthority {
         let label = request
             .label
             .as_deref()
+            // GitHub splits this query parameter on commas, even after decoding.
+            .filter(|label| !label.contains(','))
             .map(percent_encode)
             .unwrap_or_default();
         let issues: Vec<IssuePageEntry> = github_json(&format!(
             "https://api.github.com/repos/{}/{}/issues?state=open&sort=created&direction=asc&per_page=25&page={}&labels={}",
             token.repository.owner, token.repository.name, request.page, label), token.as_str()).await.map_err(|error: Error| issue_read_error(error.into()))?;
-        issue_page(token.repository_id, request.page, issues)
+        let mut page = issue_page(token.repository_id, request.page, issues)?;
+        if let Some(label) = request.label.as_deref().filter(|label| label.contains(',')) {
+            page.issues.retain(|issue| {
+                issue
+                    .labels
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(label))
+            });
+        }
+        Ok(page)
     }
 
     #[cfg(target_arch = "wasm32")]

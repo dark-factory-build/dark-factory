@@ -53,9 +53,9 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
         if (url.pathname === '/repos/team/shared/issues' || url.pathname === '/repos/team/shared/issues/9') {
           if (url.pathname.endsWith('/issues')) {
             assert.equal(url.searchParams.get('per_page'), '25');
-            assert.equal(url.searchParams.get('labels'), 'needs triage');
+            assert.ok(['needs triage', ''].includes(url.searchParams.get('labels')));
           }
-          const issue = { id: 81, node_id: 'I_fixture', number: 9, html_url: 'https://github.com/team/shared/issues/9', title: 'review me', body: 'exact content', user: { login: 'outsider', type: 'User' }, state: 'open', updated_at: '2026-09-18T12:00:00Z', labels: [{ name: 'needs triage' }] };
+          const issue = { id: 81, node_id: 'I_fixture', number: 9, html_url: 'https://github.com/team/shared/issues/9', title: 'review me', body: 'exact content', user: { login: 'outsider', type: 'User' }, state: 'open', updated_at: '2026-09-18T12:00:00Z', labels: [{ name: 'needs triage' }, { name: 'bug, urgent' }] };
           return json(url.pathname.endsWith('/9') ? {...issue, state: 'closed'} : [issue]);
         }
         if (url.pathname === '/repos/team/backlog/issues/1') {
@@ -159,6 +159,10 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(issuePage.issues[0].body, 'exact content');
     assert.equal(issuePage.issues[0].author.login, 'outsider');
     assert.equal(issuePage.next_page, null);
+    const commaPage = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'bug, urgent' })).json()).result.structuredContent;
+    assert.equal(commaPage.issues[0].number, 9);
+    const noMatch = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'different, label' })).json()).result.structuredContent;
+    assert.deepEqual(noMatch.issues, []);
     const exact = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, issue_number: 9 })).json()).result.structuredContent;
     assert.equal(exact.issues[0].state, 'closed');
     assert.equal(exact.issues[0].node_id, 'I_fixture');
