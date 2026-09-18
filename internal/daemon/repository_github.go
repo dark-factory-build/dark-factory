@@ -21,6 +21,13 @@ func (daemon *Daemon) BindProjectRepositoryGitHub(ctx context.Context, id kernel
 	if !found || !repository.Enabled {
 		return kernel.ErrConflict
 	}
+	current, err := inspectRegisteredRepository(ctx, repository.Root, repository.BaseRef)
+	if err != nil {
+		return err
+	}
+	if err := daemon.store.BindRepositorySource(ctx, id, current); err != nil {
+		return err
+	}
 	source, verified, err := daemon.store.RepositorySourceIdentity(ctx, id)
 	if err != nil {
 		return err

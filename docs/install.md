@@ -180,6 +180,20 @@ Git fetch authentication remains separate: use the operator-owned Git setup in
 the [provider guide](providers.md). A working Maintainer connection does not
 make a private checkout fetchable.
 
+After registering a checkout, check its configured source with
+`factoryctl project repository fetch --id REPOSITORY_ID`. This uses the same
+Git selection and authentication boundary as new work, preserves operator edits
+and branch refs, and reports `ready` or `setup_required`. Configure private Git
+access for that checkout using your existing Git setup and retry when needed.
+Credentials are never accepted as CLI flags or passed from the GitHub broker.
+An explicit check also verifies the checkout identity for migrated projects;
+ordinary repository listing performs no fetch or identity changes.
+
+Use `factoryctl project repository github --id REPOSITORY_ID` to bind its
+configured publication repository to the live GitHub connection. Fetch readiness
+and publication binding are separate checks. A verified publication binding
+still requires live write permission for every publication operation.
+
 ## Project repositories (next release)
 
 Project settings can register several existing Git checkouts. Creating a project

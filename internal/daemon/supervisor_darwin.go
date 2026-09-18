@@ -194,7 +194,12 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			resultRun = kernel.Run{ID: admittedRunID}
 		}
 	}()
+	// Serialize the one-way customer transition with admission. Connect refuses
+	// every nonterminal legacy overseer, including one not yet in the live map.
+	daemon.maintainerMu.Lock()
+	customerMaintainer := daemon.github != nil && daemon.github.CustomerMode()
 	admission, err := daemon.store.AdmitNext(ctx, admissionKeys, at)
+	daemon.maintainerMu.Unlock()
 	if err == nil && admission.Admitted() {
 		admittedRunID = admission.Run.ID
 	}
@@ -452,7 +457,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSpawn, err)
 	}
 	config := changeworker.Config{
-		Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
+		CustomerMaintainer: customerMaintainer, Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,

@@ -31,7 +31,8 @@ const (
 var ErrInvalidContract = errors.New("Change worker: invalid private contract")
 
 type Config struct {
-	Provider kernel.Provider
+	CustomerMaintainer bool
+	Provider           kernel.Provider
 	// Role decides whether the run works in a Change. A worker's Change is
 	// prepared or reopened below; an orchestrator has none and works in its
 	// private runtime home, so its FinalName and Retained are
@@ -120,6 +121,7 @@ type resultWire struct {
 }
 
 type configWire struct {
+	CustomerMaintainer       bool              `json:"customer_maintainer"`
 	Provider                 string            `json:"provider"`
 	Role                     string            `json:"role"`
 	Model                    string            `json:"model"`
@@ -165,7 +167,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	wire := configWire{
+	wire := configWire{CustomerMaintainer: config.CustomerMaintainer,
 		Provider: config.Provider.String(), Role: config.Role.String(), Model: config.Model, ReasoningEffort: config.ReasoningEffort,
 		AgentID: config.AgentID, TaskIncarnationID: config.TaskIncarnationID, PreviousWorkingDirectory: config.PreviousWorkingDirectory,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
@@ -217,7 +219,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		r := wire.RetainedSourceReview
 		sourceReview = &SourceReview{r.TaskID, r.ChangeID, r.TaskWorkRevision, r.ChangeRevision, r.BaseCommit, r.HeadCommit, r.SourcePath, r.GitDirectory}
 	}
-	config := Config{
+	config := Config{CustomerMaintainer: wire.CustomerMaintainer,
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},

@@ -16,6 +16,7 @@ import (
 
 func TestConfigRoundTripIsExactBoundedAndPrivate(t *testing.T) {
 	want := configFixture(t)
+	want.CustomerMaintainer = true
 	encoded, err := EncodeConfig(want)
 	if err != nil {
 		t.Fatal(err)

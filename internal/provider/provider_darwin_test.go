@@ -1209,10 +1209,13 @@ func TestCodexOverseerDiscoversScopedControlsWithoutChangingWorkerTask(t *testin
 		t.Fatal("worker was given overseer authority instructions")
 	}
 	prompt := overseerArgs[len(overseerArgs)-1]
-	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback"} {
+	for _, command := range []string{`["attempt","task"]`, "overseer status", "next_offset", "next_text_offset", "worker interrupt", "worker replace", "Maintainer App", "structuredContent", "capability refusal", "causal wake", "Continue actionable supervision", "without idle polling", "overseer task update --body", "preserve the original acceptance criteria", "Send-back replaces previous feedback", "accepted snapshot", "fully qualified source repository"} {
 		if !strings.Contains(prompt, command) {
 			t.Fatalf("overseer cannot discover %q", command)
 		}
+	}
+	if strings.Contains(prompt, "docs/development/OVERSEER.md") {
+		t.Fatal("overseer requires Dark Factory development documents in a customer checkout")
 	}
 	if overseer.TaskDelivery() != TaskDeliveryAttemptAPI {
 		t.Fatal("overseer stopped reading the exact durable task")
@@ -1650,5 +1653,28 @@ func TestBothProviderAssignmentsDistinguishOwnedCheckoutFromRetainedReview(t *te
 		if !strings.Contains(prompt, "including corrections after send-back") || !strings.Contains(prompt, "attempt source is only for inspecting a settled retained Change") || !strings.Contains(prompt, "Never substitute another task or private Change path") {
 			t.Fatalf("%s assignment loses checkout/reviewer authority distinction", name)
 		}
+	}
+}
+
+func TestCustomerMaintainerUsesInstalledBridgeWithoutExternalExecutable(t *testing.T) {
+	for _, kind := range []kernel.Provider{kernel.ProviderCodex, kernel.ProviderClaudeCode} {
+		t.Run(kind.String(), func(t *testing.T) {
+			installation, runtime, _ := nativeFixture(t, kind)
+			runtime = runtime.WithCustomerMaintainer(true)
+			for _, role := range []kernel.AgentRole{kernel.RoleOrchestrator, kernel.RoleWorker} {
+				request := roleRequestFor(t, kind, installation, runtime, "", "", role)
+				launch, err := Build(request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				argv := strings.Join(launch.Argv(), " ")
+				if strings.Contains(argv, "maintainer-mcp") != (role == kernel.RoleOrchestrator) {
+					t.Fatalf("wrong bridge role: %s", argv)
+				}
+				if strings.Contains(argv, maintainerBridge) || strings.Contains(strings.Join(launch.Environment(), " "), "DARK_FACTORY_MAINTAINER_BRIDGE=") {
+					t.Fatal("customer retained external legacy bridge")
+				}
+			}
+		})
 	}
 }

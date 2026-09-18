@@ -910,13 +910,18 @@ const maxJSONDepth = 64
 // but this exact local protocol does not: malformed UTF-8, unpaired UTF-16
 // escapes, and duplicate object names. The frame bound caps total work and
 // storage; maxJSONDepth caps stack.
-func validateJSONNames(encoded []byte) error {
+func validateJSONNames(encoded []byte) error { return validateJSON(encoded, true) }
+
+// validateJSON preserves the local decoder's Unicode, duplicate-name and depth
+// checks for an embedded foreign JSON document. MCP defines camel-case names,
+// so only its enclosing local-API object uses canonicalJSONName.
+func validateJSON(encoded []byte, canonicalNames bool) error {
 	if len(encoded) == 0 || len(encoded) > maxFrameBytes || !utf8.Valid(encoded) || !validJSONUnicodeEscapes(encoded) {
 		return ErrProtocol
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.UseNumber()
-	if err := validateJSONValue(decoder, 0); err != nil {
+	if err := validateJSONValue(decoder, 0, canonicalNames); err != nil {
 		return ErrProtocol
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -987,7 +992,7 @@ func jsonHexCodeUnit(encoded []byte) (uint16, bool) {
 	return value, true
 }
 
-func validateJSONValue(decoder *json.Decoder, depth int) error {
+func validateJSONValue(decoder *json.Decoder, depth int, canonicalNames bool) error {
 	if depth > maxJSONDepth {
 		return ErrProtocol
 	}
@@ -1008,14 +1013,14 @@ func validateJSONValue(decoder *json.Decoder, depth int) error {
 				return err
 			}
 			name, ok := nameToken.(string)
-			if !ok || !canonicalJSONName(name) {
+			if !ok || canonicalNames && !canonicalJSONName(name) {
 				return ErrProtocol
 			}
 			if _, duplicate := names[name]; duplicate {
 				return ErrProtocol
 			}
 			names[name] = struct{}{}
-			if err := validateJSONValue(decoder, depth+1); err != nil {
+			if err := validateJSONValue(decoder, depth+1, canonicalNames); err != nil {
 				return err
 			}
 		}
@@ -1025,7 +1030,7 @@ func validateJSONValue(decoder *json.Decoder, depth int) error {
 		}
 	case '[':
 		for decoder.More() {
-			if err := validateJSONValue(decoder, depth+1); err != nil {
+			if err := validateJSONValue(decoder, depth+1, canonicalNames); err != nil {
 				return err
 			}
 		}

@@ -193,6 +193,7 @@ func (Installation) GoString() string { return "provider.Installation{private}" 
 // capabilities that make these paths true immediately around Build and exec.
 // This value is never authority by itself.
 type RuntimePaths struct {
+	customerMaintainer                                                       bool
 	localCILeaseDir                                                          string
 	home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome string
 	// accountConfig is one linked provider login's own configuration
@@ -241,6 +242,12 @@ func (runtime RuntimePaths) WithRetainedSourceReview(sourcePath, gitDirectory st
 	}
 	runtime.sourceReviewPath, runtime.sourceReviewGitDir = sourcePath, gitDirectory
 	return runtime, nil
+}
+
+// WithCustomerMaintainer uses the installed attempt bridge for opted-in homes.
+func (runtime RuntimePaths) WithCustomerMaintainer(enabled bool) RuntimePaths {
+	runtime.customerMaintainer = enabled
+	return runtime
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
@@ -627,7 +634,9 @@ func Build(request Request) (Launch, error) {
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
-		if request.role == kernel.RoleOrchestrator {
+		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
+			servers["maintainer"] = map[string]any{"command": request.runtime.factoryctl, "args": []string{"attempt", "maintainer-mcp"}}
+		} else if request.role == kernel.RoleOrchestrator {
 			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
 			if err != nil {
 				return Launch{}, errors.Join(err, fmt.Errorf("%s on %s", maintainerBridge, request.runtime.toolPath))
@@ -695,7 +704,9 @@ func Build(request Request) (Launch, error) {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
 		environment := request.runtime.environment(request.provider)
-		if request.role == kernel.RoleOrchestrator {
+		if request.role == kernel.RoleOrchestrator && request.runtime.customerMaintainer {
+			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","maintainer-mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,default_tools_approval_mode="approve"}`)
+		} else if request.role == kernel.RoleOrchestrator {
 			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
 			if err != nil {
 				return Launch{}, err
@@ -705,7 +716,7 @@ func Build(request Request) (Launch, error) {
 		}
 		prompt := codexBootstrapPromptFor(request.runtime)
 		if request.role == kernel.RoleOrchestrator {
-			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Continue actionable supervision and delivery in this session; when none remains, report a durable checkpoint and exit without idle polling. Events remain pending for the next supervision task. Use attempt request-human only for operator decisions; non-shell overseers yield and release their lane, while shell overseers remain live for the answer."
+			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. Use the registered repository and its configured base for edits and checks; inspect the exact retained Change and resolve review findings before publishing through your Maintainer App. For accepted intake, the attempt task body is the accepted snapshot: preserve its acceptance criteria and destination when delegating, and never replace it with newer GitHub title or body text. Revised issue content requires operator acceptance. Carry the fully qualified source repository and issue number into publication; reference cross-repository sources without closing them, and never publish private source details into a public result. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Continue actionable supervision and delivery in this session; when none remains, report a durable checkpoint and exit without idle polling. Events remain pending for the next supervision task. Use attempt request-human only for operator decisions; non-shell overseers yield and release their lane, while shell overseers remain live for the answer."
 		}
 		argv = append(argv, prompt)
 		return Launch{

@@ -64,6 +64,9 @@ func TestHostDisconnectPersistsBeforeRemoteRevocation(t *testing.T) {
 	if _, err := host.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !host.CustomerMode() {
+		t.Fatal("pending connection is not customer mode")
+	}
 	if strings.Contains(fmt.Sprintf("%v %#v", host, host), secret) {
 		t.Fatal("host exposes credential")
 	}
@@ -99,5 +102,16 @@ func TestHostDisconnectPersistsBeforeRemoteRevocation(t *testing.T) {
 	status, err = host.Status(ctx)
 	if err != nil || status.State != "disconnected" {
 		t.Fatal("revocation retry did not settle")
+	}
+	if !host.CustomerMode() {
+		t.Fatal("disconnect lost customer mode")
+	}
+	restarted, err := OpenHost(home)
+	if err != nil || !restarted.CustomerMode() {
+		t.Fatal("restart reenabled legacy mode")
+	}
+	restarted.client.origin = server.URL
+	if _, err := restarted.Connect(ctx); err != nil || !restarted.CustomerMode() {
+		t.Fatalf("reconnect: %v", err)
 	}
 }
