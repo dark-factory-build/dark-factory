@@ -26,6 +26,9 @@ configuration to schedule intake and review; schedule its separate
 is moved away from the source checkout. Homebrew installs the same directory
 under its formula `libexec` path. The controller scripts require Python 3 on
 `PATH`; they do not require a Dark Factory source checkout.
+If review scheduling is enabled with `review_mirror_root`, the host also needs
+`git`, the selected Codex or Claude provider, and the operator-installed
+Maintainer bridge on `PATH`; those host tools and credentials are not bundled.
 
 Create and install one managed home. Those two commands are the whole terminal
 side of setup: an install that starts a fresh service loads the launchd job,
