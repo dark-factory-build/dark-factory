@@ -547,7 +547,8 @@ pub(crate) struct ObservePullRequestMerge {
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) base: String,
-    pub(crate) reviewed_body_digest: String,
+    #[serde(default)]
+    pub(crate) reviewed_body_digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2296,10 +2297,6 @@ impl AppAuthority {
         mut request: EnqueuePullRequest,
     ) -> Result<EnqueueResult, OperationError> {
         request.validate()?;
-        let reviewed_body_digest = request
-            .reviewed_body_digest
-            .as_deref()
-            .ok_or(OperationError::InvalidInput)?;
         let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("enqueue_pull_request")?;
         let state = journal
@@ -2309,6 +2306,14 @@ impl AppAuthority {
         if let Some(result) = completed_or_conflict::<EnqueueResult>(&state)? {
             return Ok(result);
         }
+        // Older completed enqueue operations were intentionally bound without
+        // a body digest. Reconcile that exact journal row before requiring the
+        // digest that protects new writes; never invent a current-body digest
+        // or replay a legacy refused/uncertain operation.
+        let reviewed_body_digest = request
+            .reviewed_body_digest
+            .as_deref()
+            .ok_or(OperationError::InvalidInput)?;
         let token = self
             .0
             .installation_token(
@@ -2368,13 +2373,7 @@ impl AppAuthority {
         if pull.base.name != request.base {
             return Err(OperationError::Conflict);
         }
-        if pull
-            .body
-            .as_deref()
-            .map(text_digest)
-            .as_deref()
-            != Some(reviewed_body_digest)
-        {
+        if pull.body.as_deref().map(text_digest).as_deref() != Some(reviewed_body_digest) {
             return Err(OperationError::Conflict);
         }
         match journal
@@ -2814,7 +2813,7 @@ impl AppAuthority {
             pull_number: request.pull_number,
             head_sha: request.head_sha.clone(),
             base: request.base.clone(),
-            reviewed_body_digest: Some(request.reviewed_body_digest.clone()),
+            reviewed_body_digest: request.reviewed_body_digest.clone(),
         };
         enqueue_request.validate()?;
         let enqueue_operation = enqueue_request.operation("enqueue_pull_request")?;
@@ -3429,7 +3428,10 @@ impl ObservePullRequestMerge {
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
         valid_ref(&self.base)?;
-        valid_digest(&self.reviewed_body_digest)
+        if let Some(digest) = self.reviewed_body_digest.as_deref() {
+            valid_digest(digest)?;
+        }
+        Ok(())
     }
 }
 
@@ -9750,7 +9752,7 @@ mod tests {
             pull_number: 390,
             head_sha: "d".repeat(40),
             base: "main".into(),
-            reviewed_body_digest: "sha256:".to_owned() + &"d".repeat(64),
+            reviewed_body_digest: Some("sha256:".to_owned() + &"d".repeat(64)),
         };
         assert!(merge.validate().is_ok());
         assert!(

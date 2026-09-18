@@ -736,7 +736,7 @@ fn tools() -> Value {
                 "base": {"type": "string", "minLength": 1, "maxLength": 240},
                 "reviewed_body_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
             },
-            "required": ["repository", "enqueue_operation_id", "pull_number", "head_sha", "base", "reviewed_body_digest"],
+            "required": ["repository", "enqueue_operation_id", "pull_number", "head_sha", "base"],
             "additionalProperties": false
         },
         "outputSchema": {

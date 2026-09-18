@@ -439,6 +439,14 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertEqual({'state': 'ACTIVE_QUEUE', 'pull_state': 'open'}, review.observe_merge(self.config, operation))
         self.assertEqual('sha256:' + ('0' * 64), bridge.call_args.args[1]['reviewed_body_digest'])
 
+    def test_legacy_merge_observation_preserves_original_request_binding(self):
+        operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444', enqueue_base='main')
+        observed = {'structuredContent': {'pull_number': 9, 'head_sha': SHA, 'base': 'main',
+                     'pull_state': 'open', 'state': 'ACTIVE_QUEUE'}, 'isError': False}
+        with patch.object(review, 'bridge_call', return_value=observed) as bridge:
+            self.assertEqual({'state': 'ACTIVE_QUEUE', 'pull_state': 'open'}, review.observe_merge(self.config, operation))
+        self.assertNotIn('reviewed_body_digest', bridge.call_args.args[1])
+
     def test_queued_replay_observes_after_body_edit_without_revalidation(self):
         self.observe.return_value = 'allow'
         operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',

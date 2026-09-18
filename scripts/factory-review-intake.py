@@ -312,13 +312,13 @@ def observe_enqueue(config, operation):
 
 def observe_merge(config, operation):
     reviewed_body_digest = operation.get("reviewed_body_digest")
-    if not isinstance(reviewed_body_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", reviewed_body_digest):
+    if reviewed_body_digest is not None and (not isinstance(reviewed_body_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", reviewed_body_digest)):
         raise ReviewError("merge observation lacks the reviewed body digest")
-    result = bridge_call("observe_pull_request_merge", {"repository": config["repository"],
-                                                         "enqueue_operation_id": operation["enqueue_operation"],
-                                                         "pull_number": operation["pr"], "head_sha": operation["head"],
-                                                         "base": operation["enqueue_base"],
-                                                         "reviewed_body_digest": reviewed_body_digest})
+    arguments = {"repository": config["repository"], "enqueue_operation_id": operation["enqueue_operation"],
+                 "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"]}
+    if reviewed_body_digest is not None:
+        arguments["reviewed_body_digest"] = reviewed_body_digest
+    result = bridge_call("observe_pull_request_merge", arguments)
     value = result.get("structuredContent")
     if result.get("isError") or not isinstance(value, dict) or value.get("pull_number") != operation["pr"] \
             or value.get("head_sha") != operation["head"] or value.get("base") != operation["enqueue_base"] \
@@ -555,7 +555,11 @@ def run_locked(config, path, journal, journal_path):
             # block read-only merge reconciliation; the App receipt remains
             # bound to the persisted reviewed_body_digest.
             if not operation.get("reviewed_body_digest"):
-                verify_review_body(config, pr, operation)
+                existing_enqueue = observe_enqueue(config, operation) if operation.get("enqueue_operation") else "missing"
+                if existing_enqueue == "missing":
+                    verify_review_body(config, pr, operation)
+                elif existing_enqueue == "queued":
+                    operation["enqueue_state"] = "queued"
             enqueue_allowed(config, operation, journal_path, receipts)
             if operation.get("enqueue_state") == "queued":
                 merge = observe_merge(config, operation)
