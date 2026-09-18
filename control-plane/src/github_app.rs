@@ -1203,7 +1203,7 @@ impl AppAuthority {
                 token.as_str(),
             )
             .await
-            .map_err(issue_read_error)?;
+            .map_err(|error: Error| issue_read_error(error.into()))?;
             if entry.issue.number != number || !entry.issue.is_real_issue() {
                 return Err(OperationError::Conflict);
             }
@@ -1216,7 +1216,7 @@ impl AppAuthority {
             .unwrap_or_default();
         let issues: Vec<IssuePageEntry> = github_json(&format!(
             "https://api.github.com/repos/{}/{}/issues?state=open&sort=created&direction=asc&per_page=25&page={}&labels={}",
-            token.repository.owner, token.repository.name, request.page, label), token.as_str()).await.map_err(issue_read_error)?;
+            token.repository.owner, token.repository.name, request.page, label), token.as_str()).await.map_err(|error: Error| issue_read_error(error.into()))?;
         issue_page(token.repository_id, request.page, issues)
     }
 
