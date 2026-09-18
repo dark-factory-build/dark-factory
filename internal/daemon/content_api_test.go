@@ -389,3 +389,59 @@ func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing
 		t.Fatalf("refused requests mutated foreign content, evidence, or references")
 	}
 }
+
+func TestAttemptCreatesContentInItsOriginalRepositoryAfterDefaultChanges(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := testID(101)
+	root := contentRepositoryFixture(t)
+	done := fixture.serve(t)
+	if _, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: project, Name: "content routing", Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	active := prepareActiveAttemptInProject(t, fixture, 102, project, "worker")
+	first, found, err := fixture.store.TaskRepository(ctx, active.run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("author route: %v %v", found, err)
+	}
+	secondID, _ := kernel.RepositoryIDFromBytes([]byte(strings.Repeat("x", 16)))
+	second, err := fixture.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: secondID, ProjectID: active.run.ProjectID, Name: "new default", Root: contentRepositoryFixture(t), BaseRef: "HEAD"}, supervisorTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetProjectRepositoryDefault(ctx, second.ID, second.Revision, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	currentFirst, _, err := fixture.store.ProjectRepository(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetProjectRepositoryEnabled(ctx, first.ID, currentFirst.Revision, false, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	var created api.Content
+	for i, id := range []string{testID(103), testID(104)} {
+		input := api.ContentInput{ID: id, ProjectID: project, Kind: "custom", Title: "task content", Body: "Only the author's repository receives this content"}
+		if i == 1 {
+			input.Body = ""
+			input.Commit = created.Commit
+			input.Path = created.Path
+		}
+		done = fixture.serve(t)
+		created, err = active.client.ContentCreate(ctx, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+		contentID, _ := contentID(id)
+		binding, found, err := fixture.store.ContentRepository(ctx, contentID, mustRevision(t, 1))
+		if err != nil || !found || binding.ID != first.ID {
+			t.Fatalf("content retargeted: %v %v %v", binding.ID, found, err)
+		}
+	}
+}

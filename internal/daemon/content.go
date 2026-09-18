@@ -226,6 +226,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 	if err != nil && !projectOptional {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	var authorTask kernel.TaskID
 	if attempt && err == nil {
 		authority, authErr := daemon.store.AuthenticateAttempt(ctx, kd)
 		if authErr != nil {
@@ -234,6 +235,7 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 		if pid != authority.ProjectID {
 			return newErrorReply(api.RemoteUnauthorized)
 		}
+		authorTask = authority.TaskID
 	}
 	makeSpec := func() (kernel.NewContent, error) {
 		id, e := contentID(input.ID)
@@ -268,6 +270,14 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 				spec.RepositoryDevice, spec.RepositoryInode = existing.RepositoryDevice, existing.RepositoryInode
 			} else if existingErr != kernel.ErrNotFound {
 				return newErrorReply(remoteErrorCode(existingErr))
+			} else if attempt {
+				repository, found, readErr := daemon.store.TaskRepository(ctx, authorTask)
+				if readErr != nil {
+					return newErrorReply(remoteErrorCode(readErr))
+				}
+				if found {
+					spec.RepositoryID = repository.ID
+				}
 			}
 			spec, specErr = daemon.writeContentSource(ctx, spec, 1)
 			if specErr != nil {

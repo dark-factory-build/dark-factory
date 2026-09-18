@@ -100,10 +100,10 @@ func (store *Store) CreateContent(ctx context.Context, spec NewContent, at UnixM
 		return ContentRevision{}, err
 	}
 	defer tx.Close()
-	return createContentTx(ctx, tx, spec, at)
+	return createContentTx(ctx, tx, spec, at, nil)
 }
 
-func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixMillis) (ContentRevision, error) {
+func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixMillis, authorTask *TaskID) (ContentRevision, error) {
 	if err := validateContent(spec); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
@@ -126,9 +126,23 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, object_format, commit_oid, path, repository_dev, repository_inode, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), string(spec.Kind), spec.Title, spec.Description, spec.Body, spec.Author, spec.SourceReferences, nullableString(spec.ObjectFormat), nullableString(spec.Commit), nullableString(spec.Path), spec.RepositoryDevice, spec.RepositoryInode, at.Int64()); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
-	repository, err := resolveTaskRepository(ctx, tx.connection, spec.ProjectID, spec.RepositoryID)
-	if err != nil {
-		return ContentRevision{}, tx.Rollback(err)
+	var repository ProjectRepository
+	var found bool
+	var err error
+	if authorTask != nil {
+		repository, found, err = taskRepository(ctx, tx.connection, *authorTask)
+		if err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+		if found && (repository.ProjectID != spec.ProjectID || !spec.RepositoryID.zero() && spec.RepositoryID != repository.ID) {
+			return ContentRevision{}, tx.Rollback(ErrUnauthorized)
+		}
+	}
+	if !found {
+		repository, err = resolveTaskRepository(ctx, tx.connection, spec.ProjectID, spec.RepositoryID)
+		if err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
 	}
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, 1, ?)`, spec.ID.Bytes(), repository.ID.Bytes()); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
@@ -596,7 +610,7 @@ func (store *Store) CreateContentForAttempt(ctx context.Context, digest AttemptD
 		return ContentRevision{}, tx.Rollback(ErrUnauthorized)
 	}
 	spec.Author = contentProvenance(authority)
-	return createContentTx(ctx, tx, spec, at)
+	return createContentTx(ctx, tx, spec, at, &authority.TaskID)
 }
 
 func (store *Store) ListContentForAttempt(ctx context.Context, digest AttemptDigest, kind ContentKind, offset, limit int) (ContentPage, error) {
