@@ -208,3 +208,104 @@ func (store *Store) SetProjectRepositoryDefault(ctx context.Context, id Reposito
 	}
 	return updated, nil
 }
+
+func (store *Store) SetProjectRepositoryEnabled(ctx context.Context, id RepositoryID, expected Revision, enabled bool, at UnixMillis) (ProjectRepository, error) {
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return ProjectRepository{}, err
+	}
+	defer tx.Close()
+	value, found, err := repositoryByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	if value.Revision != expected {
+		return ProjectRepository{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if !enabled && value.Default {
+		return ProjectRepository{}, tx.Rollback(ErrConflict)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE project_repositories SET enabled = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, boolInt(enabled), at.Int64(), id.Bytes(), expected.Int64()); err != nil {
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	updated, found, err := repositoryByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProjectRepository{}, err
+	}
+	return updated, nil
+}
+
+// UpdateProjectRepositoryBase affects only future selection; bindings retain
+// their copied base ref. Root and publication identity have no update path.
+func (store *Store) UpdateProjectRepositoryBase(ctx context.Context, id RepositoryID, expected Revision, base string, at UnixMillis) (ProjectRepository, error) {
+	if byteLen(base) < 1 || byteLen(base) > 256 {
+		return ProjectRepository{}, ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return ProjectRepository{}, err
+	}
+	defer tx.Close()
+	value, found, err := repositoryByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	if value.Revision != expected {
+		return ProjectRepository{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE project_repositories SET base_ref = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, base, at.Int64(), id.Bytes(), expected.Int64()); err != nil {
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	updated, found, err := repositoryByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProjectRepository{}, err
+	}
+	return updated, nil
+}
+
+func (store *Store) RemoveProjectRepository(ctx context.Context, id RepositoryID, expected Revision) error {
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	value, found, err := repositoryByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return tx.Rollback(err)
+	}
+	if value.Revision != expected || value.Default {
+		return tx.Rollback(ErrConflict)
+	}
+	var references int
+	if err := tx.connection.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM task_repository_bindings WHERE repository_id = ?) + (SELECT COUNT(*) FROM content_repository_bindings WHERE repository_id = ?)`, id.Bytes(), id.Bytes()).Scan(&references); err != nil {
+		return tx.Rollback(err)
+	}
+	if references != 0 {
+		return tx.Rollback(ErrConflict)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `DELETE FROM project_repositories WHERE id = ? AND revision = ?`, id.Bytes(), expected.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}

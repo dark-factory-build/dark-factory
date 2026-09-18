@@ -60,16 +60,9 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if git == nil || *git == "" || parent == nil || *parent == "" {
 		return unverifiableSuccessSource("Change worktree path or Git executable is unavailable")
 	}
-	readProject := daemon.store.Project
-	if daemon.successSourceProject != nil {
-		readProject = daemon.successSourceProject
-	}
-	project, found, err := readProject(ctx, changeState.ProjectID)
+	route, err := daemon.repositoryForChange(ctx, changeState)
 	if err != nil {
-		return unverifiableSuccessSource(fmt.Sprintf("project facts unavailable: %v", err))
-	}
-	if !found {
-		return unverifiableSuccessSource("project facts are missing")
+		return unverifiableSuccessSource(fmt.Sprintf("repository route unavailable: %v", err))
 	}
 	repository, err := changeRepositoryIdentity(changeState.Selection.RepositoryIdentity())
 	if err != nil {
@@ -81,7 +74,7 @@ func (daemon *Daemon) validateSuccessSource(ctx context.Context, live *liveAttem
 	if daemon.successSourceInspect != nil {
 		inspect = daemon.successSourceInspect
 	}
-	facts, err := inspect(ctx, *git, project.Root, repository, filepath.Join(*parent, changeState.ID.String()))
+	facts, err := inspect(ctx, *git, route.Root, repository, filepath.Join(*parent, changeState.ID.String()))
 	if err != nil {
 		return unverifiableSuccessSource(fmt.Sprintf("Change worktree facts unavailable: %v", err))
 	}

@@ -1074,6 +1074,7 @@ func validCreateAgentInput(input CreateAgentInput) bool {
 type EnqueueTaskInput struct {
 	ID              string                  `json:"id"`
 	ProjectID       string                  `json:"project_id"`
+	RepositoryID    string                  `json:"repository_id,omitempty"`
 	AssignedAgentID string                  `json:"assigned_agent_id"`
 	IncarnationID   string                  `json:"incarnation_id"`
 	Title           string                  `json:"title"`

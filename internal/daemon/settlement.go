@@ -115,11 +115,8 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 	if git == nil || *git == "" {
 		return kernel.ChangeSettlement{}, fmt.Errorf("%w: no Git executable for settlement", kernel.ErrConflict)
 	}
-	project, found, err := daemon.store.Project(ctx, changeState.ProjectID)
-	if err != nil || !found {
-		if err == nil {
-			err = kernel.ErrCorruptState
-		}
+	route, err := daemon.repositoryForChange(ctx, changeState)
+	if err != nil {
 		return kernel.ChangeSettlement{}, err
 	}
 	repository, err := changeRepositoryIdentity(changeState.Selection.RepositoryIdentity())
@@ -130,7 +127,7 @@ func (daemon *Daemon) retainedSettlement(ctx context.Context, changeParent strin
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		return kernel.NewRefusedChangeSettlement(changeState.Revision, "the Change worktree is gone from changes/"+changeState.ID.String())
 	}
-	facts, err := change.InspectWorktree(ctx, *git, project.Root, repository, path)
+	facts, err := change.InspectWorktree(ctx, *git, route.Root, repository, path)
 	if err != nil {
 		return kernel.ChangeSettlement{}, errors.Join(fmt.Errorf("%w: Change worktree did not verify", kernel.ErrConflict), err)
 	}

@@ -32,11 +32,8 @@ func (daemon *Daemon) attemptSourceHandoff(ctx context.Context, handoff kernel.R
 	if !found || changeState.Phase != kernel.ChangeRetained || changeState.Revision != handoff.ChangeRevision || changeState.Selection == nil {
 		return api.RetainedChangeHandoff{}, errors.Join(kernel.ErrConflict, errInvalidContract)
 	}
-	project, found, err := daemon.store.Project(ctx, changeState.ProjectID)
-	if err != nil || !found {
-		if err == nil {
-			err = kernel.ErrCorruptState
-		}
+	route, err := daemon.repositoryForChange(ctx, changeState)
+	if err != nil {
 		return api.RetainedChangeHandoff{}, err
 	}
 	repository, err := changeRepositoryIdentity(changeState.Selection.RepositoryIdentity())
@@ -51,7 +48,7 @@ func (daemon *Daemon) attemptSourceHandoff(ctx context.Context, handoff kernel.R
 	branch := change.BranchName(changeState.ID.String())
 	var facts change.WorktreeFacts
 	if changeState.HeadCommit == nil {
-		facts, err = change.AdoptWorktree(ctx, *git, project.Root, repository, path, branch, base)
+		facts, err = change.AdoptWorktree(ctx, *git, route.Root, repository, path, branch, base)
 		if err != nil {
 			return api.RetainedChangeHandoff{}, err
 		}
@@ -63,7 +60,7 @@ func (daemon *Daemon) attemptSourceHandoff(ctx context.Context, handoff kernel.R
 			return api.RetainedChangeHandoff{}, err
 		}
 	} else {
-		facts, err = change.InspectWorktree(ctx, *git, project.Root, repository, path)
+		facts, err = change.InspectWorktree(ctx, *git, route.Root, repository, path)
 		if err != nil {
 			return api.RetainedChangeHandoff{}, err
 		}

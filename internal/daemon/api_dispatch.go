@@ -1158,6 +1158,17 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	var repositoryID kernel.RepositoryID
+	if input.RepositoryID != "" {
+		raw, parseErr := parseID(input.RepositoryID)
+		if parseErr != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		repositoryID, err = kernel.RepositoryIDFromBytes(raw)
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+	}
 	agentID, err := parseOptionalAgentID(input.AssignedAgentID)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -1170,7 +1181,7 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	spec, err := newTaskSpec(id, projectID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
+	spec, err := newTaskSpec(id, projectID, repositoryID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1185,8 +1196,8 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	return daemon.mutation(ctx, task.Revision)
 }
 
-func newTaskSpec(id kernel.TaskID, projectID kernel.ProjectID, agentID kernel.AgentID, incarnationID kernel.IncarnationID, title, body string, priority int64, prerequisites []api.TaskPrerequisiteInput, paths []string) (kernel.NewTask, error) {
-	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: title, Body: body, Priority: priority, ConflictPaths: append([]string(nil), paths...)}
+func newTaskSpec(id kernel.TaskID, projectID kernel.ProjectID, repositoryID kernel.RepositoryID, agentID kernel.AgentID, incarnationID kernel.IncarnationID, title, body string, priority int64, prerequisites []api.TaskPrerequisiteInput, paths []string) (kernel.NewTask, error) {
+	spec := kernel.NewTask{ID: id, ProjectID: projectID, RepositoryID: repositoryID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: title, Body: body, Priority: priority, ConflictPaths: append([]string(nil), paths...)}
 	spec.Prerequisites = make([]kernel.TaskPrerequisite, 0, len(prerequisites))
 	for _, input := range prerequisites {
 		taskID, err := parseTaskID(input.TaskID)
@@ -1564,7 +1575,7 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	spec, err := newTaskSpec(id, authority.ProjectID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
+	spec, err := newTaskSpec(id, authority.ProjectID, kernel.RepositoryID{}, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}

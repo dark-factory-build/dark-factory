@@ -84,7 +84,7 @@ const (
   factoryctl agent select-account --agent ID --revision REVISION --account ID
 	factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
 	factoryctl agent paths --agent ID
-  factoryctl task add --project ID --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+  factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
@@ -216,6 +216,7 @@ type attemptCommand struct {
 	name             string
 	root             string
 	project          string
+	repository       string
 	agent            string
 	role             string
 	provider         string
@@ -1435,6 +1436,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.root = value
 		case name == "--project" && (command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd) && validHumanRequestKey(value):
 			command.project = value
+		case name == "--repository" && command.kind == commandTaskAdd && validHumanRequestKey(value):
+			command.repository = value
 		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy):
 			revision, ok := parseRevision(value)
 			if !ok {
@@ -2152,7 +2155,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "task add", err)
 			}
 		}
-		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, RepositoryID: command.repository, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task add", callErr)
 		}

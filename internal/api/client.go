@@ -357,7 +357,7 @@ func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput)
 }
 
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
-	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
+	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.RepositoryID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "enqueue_task", input)
