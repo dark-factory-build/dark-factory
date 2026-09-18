@@ -102,15 +102,13 @@ function enterRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], to: 
  * The only moving route: leave a known room through its existing door, use the
  * corridor spine, then enter the next room beside its pictured work surface.
  * The connected resting/staging common space is also reachable by that spine;
- * omitted rooms never gain an invented route.
+ * workers outside displayed rooms use the planning tables.
  */
 export function routeBetween(
   layout: SceneLayout,
   from: SceneWorkerPlacement,
   to: SceneWorkerPlacement,
 ): Route | undefined {
-  const common = (area: SceneWorkerPlacement["area"]) => area === "resting" || area === "staging";
-  if ((from.area !== "room" && !common(from.area)) || (to.area !== "room" && !common(to.area))) return undefined;
   const source = from.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === from.roomId);
   const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
   if (from.area === "room" && source === undefined || to.area === "room" && destination === undefined) return undefined;
@@ -136,7 +134,6 @@ function route(points: readonly ScenePoint[]): Route {
 
 /** Continue from a point already in a corridor or the spine to a known room or common space. */
 export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneWorkerPlacement): Route | undefined {
-  if (to.area !== "room" && to.area !== "resting" && to.area !== "staging") return undefined;
   const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
   const mainSpine = spine(layout);
   if (to.area === "room" && destination === undefined || mainSpine === undefined) return undefined;

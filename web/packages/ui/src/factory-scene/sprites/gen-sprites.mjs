@@ -264,17 +264,17 @@ const sprites = new Map();
 const providers = { claude_code: 'c', codex: 't', shell: 's' };
 const activities = ['busy', 'waiting', 'needs-you', 'idle'];
 const add = (name, build) => { const pixels = blank(); build(pixels); sprites.set(name, pixels); };
-const arms = activity => activity === 'waiting' ? [foldedArms] : activity === 'busy' ? [typingArms] : activity === 'needs-you' ? [relaxedArm, mirror(relaxedArm), raisedArm] : [relaxedArm, mirror(relaxedArm)];
-const armPosition = (activity, index) => index === 0 ? [activity === 'waiting' || activity === 'busy' ? 4 : 3, activity === 'waiting' ? 11 : 9] : index === 1 ? [11, 9] : [2, 4];
-for (const [skinIndex, tone] of skinTones.entries()) for (const activity of activities) add(`person.skin.${skinIndex}.${activity}`, pixels => {
+const arms = activity => activity === 'waiting' ? [foldedArms] : activity === 'busy' ? [typingArms] : activity === 'typing' ? [grid(`ou....uo\noaaa..ao\n....aa..`)] : activity === 'needs-you' ? [relaxedArm, mirror(relaxedArm), raisedArm] : [relaxedArm, mirror(relaxedArm)];
+const armPosition = (activity, index) => index === 0 ? [activity === 'waiting' || activity === 'busy' || activity === 'typing' ? 4 : 3, activity === 'waiting' ? 11 : 9] : index === 1 ? [11, 9] : [2, 4];
+for (const [skinIndex, tone] of skinTones.entries()) for (const activity of [...activities, 'typing']) add(`person.skin.${skinIndex}.${activity}`, pixels => {
   const colour = rows => rows.map(row => row.replace(/[ab]/g, key => key === 'a' ? tone.skin : tone.shadow));
   draw(pixels, colour(head), 5, 2);
   arms(activity).forEach((part, index) => draw(pixels, keep(colour(part).map(row => row.replaceAll('u', tone.skin)), [tone.skin, tone.shadow]), ...armPosition(activity, index)));
 });
-for (const [outfitIndex, outfit] of outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const activity of activities) add(`person.outfit.${outfitIndex}.${colourIndex}.${activity}`, pixels => {
+for (const [outfitIndex, outfit] of outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const activity of [...activities, 'typing']) add(`person.outfit.${outfitIndex}.${colourIndex}.${activity}`, pixels => {
   draw(pixels, tint(outfit, colour.colour), 4, 6);
   draw(pixels, outfitIndex === 1 ? legs.map(row => row.replaceAll('m', colour.colour)) : legs, 4, outfitIndex === 1 ? 12 : 13);
-  if (activity === 'busy') draw(pixels, keyboard, 2, 12);
+  if (activity === 'busy' || activity === 'typing') draw(pixels, keyboard, 2, 12);
   arms(activity).forEach((part, index) => {
     const [x, y] = armPosition(activity, index);
     if (outfitIndex === 2) part = part.map((row, dy) => y + dy === 9 ? row : row.replaceAll('u', 'a'));
@@ -306,28 +306,6 @@ for (const direction of ['north', 'south', 'east', 'west']) for (const step of [
   if (direction === 'west') draw(pixels, grid(`tt`), 2 - shift, 11);
   if (direction === 'north') draw(pixels, grid(`t`), 8, shift);
   if (direction === 'south') draw(pixels, grid(`t`), 8, 15 - shift);
-});
-for (const step of [0, 1]) add(`person.motion.interact.${step}`, pixels => {
-  // Raised forearms reach the pictured surface north of the worker.
-  draw(pixels, grid(`os
-os
-os
-os`), 2, 3);
-  draw(pixels, grid(`so
-so
-so
-so`), 12, 3);
-  draw(pixels, grid(`ll`), 2, step === 0 ? 1 : 2);
-  draw(pixels, grid(`ll`), 12, step === 0 ? 2 : 1);
-});
-// A shared table has two seated silhouettes that turn toward one another.
-// Small overlays keep each worker's existing clothes and hair layers.
-for (const direction of ['left', 'right']) for (const [index, tone] of skinTones.entries()) add(`person.ambient.face.${index}.${direction}`, pixels => {
-  const profile = grid('ooaaa.\n.aaoo.\naaaa..\n.aa...');
-  draw(pixels, (direction === 'left' ? profile : mirror(profile)).map(row => row.replaceAll('a', tone.skin)), 5, 4);
-});
-add('person.ambient.seated', pixels => {
-  draw(pixels, grid('..mmmmmm..\n.oommmmmoo\n.oossssoo.\n.oo....oo.'), 3, 12);
 });
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const portrait = (activity, appearance = {}) => {

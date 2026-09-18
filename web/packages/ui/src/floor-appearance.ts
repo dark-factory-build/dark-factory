@@ -1,21 +1,13 @@
 export type FloorAppearance = Readonly<{
   scenery: "off" | "subtle" | "rich";
-  dependencyLinks: "selected-room" | "overview" | "off";
-  labels: "names" | "names-and-counts";
-  taskProps: boolean;
   animation: "follow-device" | "off";
-  ambientLife: "off" | "quiet" | "lively";
 }>;
 
 const STORAGE_KEY = "dark-factory.floor-appearance";
 
 export const DEFAULT_FLOOR_APPEARANCE: FloorAppearance = {
   scenery: "rich",
-  dependencyLinks: "selected-room",
-  labels: "names",
-  taskProps: true,
   animation: "follow-device",
-  ambientLife: "quiet",
 };
 
 function oneOf<T extends string>(value: unknown, values: readonly T[], fallback: T): T {
@@ -31,11 +23,7 @@ export function readFloorAppearance(value: string | null): FloorAppearance {
   } catch { /* browser-local preferences must never break the console */ }
   return {
     scenery: oneOf(parsed.scenery, ["off", "subtle", "rich"], DEFAULT_FLOOR_APPEARANCE.scenery),
-    dependencyLinks: oneOf(parsed.dependencyLinks, ["selected-room", "overview", "off"], DEFAULT_FLOOR_APPEARANCE.dependencyLinks),
-    labels: oneOf(parsed.labels, ["names", "names-and-counts"], DEFAULT_FLOOR_APPEARANCE.labels),
-    taskProps: typeof parsed.taskProps === "boolean" ? parsed.taskProps : DEFAULT_FLOOR_APPEARANCE.taskProps,
     animation: oneOf(parsed.animation, ["follow-device", "off"], DEFAULT_FLOOR_APPEARANCE.animation),
-    ambientLife: oneOf(parsed.ambientLife, ["off", "quiet", "lively"], DEFAULT_FLOOR_APPEARANCE.ambientLife),
   };
 }
 
