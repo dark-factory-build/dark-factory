@@ -107,3 +107,22 @@ test("clearing GitHub state drops private observations before a replacement sess
   coordinator.clearGitHub();
   assert.equal(coordinator.github.result, undefined);
 });
+
+test("reopening settings reloads installations from page one", async () => {
+  const calls = [];
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request);
+      if (request.action === "status") return { state: "ok", status: { connection_id: "same", state: "connected", repositories: [] } };
+      if (request.action === "installations") return { state: "ok", installations: { installations: [], next_page: undefined } };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "status" });
+  assert.deepEqual(calls, [{ action: "status" }, { action: "installations", page: 1 }]);
+  assert.equal(coordinator.github.result.installations.installations.length, 0);
+});

@@ -105,8 +105,8 @@ export class FactorySettingsCoordinator {
           ...result,
           authorization: result.authorization ?? (result.status?.state === "pending" || result.status?.state === "awaiting_confirmation" ? this.#github.authorization : undefined),
           status: result.status ?? this.#github.status,
-          installations: request.action === "refresh" ? result.installations : sameConnection ? result.installations ?? this.#github.installations : result.installations,
-          repositories: request.action === "refresh" ? result.repositories : sameConnection ? result.repositories ?? this.#github.repositories : result.repositories,
+          installations: request.action === "refresh" || request.action === "status" ? result.installations : sameConnection ? result.installations ?? this.#github.installations : result.installations,
+          repositories: request.action === "refresh" || request.action === "status" ? result.repositories : sameConnection ? result.repositories ?? this.#github.repositories : result.repositories,
         };
       }
       this.#githubError = undefined;
@@ -117,7 +117,7 @@ export class FactorySettingsCoordinator {
       if (this.#owner.current(generation)) this.#githubPending = false;
     }
     this.#owner.publish();
-    if (request.action === "confirm" && this.#github?.state === "ok" || request.action === "refresh" && this.#github?.status?.state === "connected") {
+    if (request.action === "confirm" && this.#github?.state === "ok" || (request.action === "refresh" || request.action === "status") && this.#github?.status?.state === "connected") {
       if (request.action === "confirm") await this.githubConnection({ action: "refresh" });
       else await this.githubConnection({ action: "installations", page: 1 });
     }
