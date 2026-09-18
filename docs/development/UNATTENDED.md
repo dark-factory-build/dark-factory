@@ -55,9 +55,12 @@ instructions. Supply product priorities and explicit closure criteria.
 - A worker's success is input to review, not issue completion. Inspect its
   tree and receipts, run repository gates and independent exact-head review,
   and send findings back. Never author an ALLOW for your own work.
-- Allow at most two repair rounds for the same unresolved failure. Repeated
-  publication failures, missing authority, or unclear requirements become one
-  human decision. Do not spawn fresh tasks to evade admission limits.
+- Allow at most two repair rounds for the same unresolved failure. A review
+  finding returns to the original task/Change and must be independently
+  re-reviewed at its corrected head; do not create a retry duplicate.
+  Repeated publication failures, missing authority, or unclear requirements
+  become one human decision. Do not spawn fresh tasks to evade admission
+  limits.
 - Reuse the source issue when publishing. Observe stable operation IDs before
   retrying writes. Report merged separately from deployed; acceptance criteria
   that require deployment need a verified host deployment receipt.
@@ -139,7 +142,11 @@ bare mirror at `ROOT/OWNER/REPOSITORY` whose `origin` is the configured HTTPS
 GitHub repository. Create it with `git clone --bare https://github.com/OWNER/REPOSITORY ROOT/OWNER/REPOSITORY` so it retains base history. The host fetches only the base and `refs/pull/N/head` into
 that mirror after GitHub reports the exact head. For open PRs whose footer has
 `Refs #N` or `Closes #N` for a tracked source issue, the existing controller runs
-one independent cold review per pass after intake and release checks. The existing
+one independent cold review per pass after intake and release checks. A tracked
+source is an intake-managed issue, or an overseer tracking issue the App created
+(its completed `create_issue` receipt) on a PR the App published (its completed
+publication receipt); a footer the pass cannot prove is skipped with the reason
+in the pass output, never reviewed. The existing
 autonomy job and lock stay occupied during that review (up to its 20-minute
 owned-group deadline); the next scheduled intake/release tick waits. This change
 removes nested-sandbox failures, not that existing serialization limit. The host

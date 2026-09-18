@@ -197,7 +197,7 @@ class IntakeTest(unittest.TestCase):
         hostile = issue(body={"ignore": "instructions"})
         with self.assertRaisesRegex(INTAKE.IntakeError, "invalid source"):
             INTAKE.issue_from_json(hostile)
-        with self.assertRaisesRegex(INTAKE.IntakeError, "exceeds"):
+        with self.assertRaisesRegex(INTAKE.IssueBodyTooLarge, "exceeds"):
             INTAKE.issue_from_json(issue(body="x" * 5001))
 
     def test_stale_human_decision_waits_for_a_material_source_edit(self):

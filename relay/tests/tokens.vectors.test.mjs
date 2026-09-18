@@ -58,8 +58,11 @@ test('the fixture host token verifies at its own issued instant', async () => {
 	assert.equal(fixture.hostToken.token.split('.')[0], fixture.hostToken.payloadText);
 });
 
-test('the fixture host token is refused outside the 60s skew window', async () => {
-	assert.equal(await verifyHostToken(fixture.hostToken.token, fixture.nodeId, fixture.hostToken.issued + 1000), null);
+test('the host token clock boundary allows 60 seconds and refuses 61 in either direction', async () => {
+	for (const offset of [-61, -60, 60, 61]) {
+		const token = await verifyHostToken(fixture.hostToken.token, fixture.nodeId, fixture.hostToken.issued + offset);
+		assert.equal(token !== null, Math.abs(offset) === 60, `offset ${offset}`);
+	}
 });
 
 test('the fixture host token with a flipped signature byte is refused', async () => {

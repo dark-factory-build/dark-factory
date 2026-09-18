@@ -202,6 +202,112 @@ func TestSettleRunReadsTheWorktreeHeadWhileTheClockAdvances(t *testing.T) {
 	}
 }
 
+func TestSuccessfulWorkerOutcomeRefusesDirtySourceUntilCorrection(t *testing.T) {
+	fixture := newRecoveryFixtureWithRole(t, 0x6e, kernel.RoleWorker)
+	ctx := context.Background()
+	_, path := fixture.settlementWorktree(t)
+	success, err := kernel.NewSuccessProposal("done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}
+	if err := fixture.daemon.validateSuccessSource(ctx, live, success); err != nil {
+		t.Fatalf("clean no-change success refused: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "uncommitted.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.daemon.validateSuccessSource(ctx, live, success); !errors.Is(err, errDirtyWorkerChange) || !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("dirty success refusal = %v", err)
+	}
+	settlementGit(t, change.TrustedGitExecutable, path, "add", "uncommitted.txt")
+	settlementGit(t, change.TrustedGitExecutable, path, "commit", "-q", "-m", "corrected")
+	if err := fixture.daemon.validateSuccessSource(ctx, live, success); err != nil {
+		t.Fatalf("corrected success refused: %v", err)
+	}
+}
+
+func TestSuccessfulWorkerOutcomeRefusesUnavailableSourceFacts(t *testing.T) {
+	success, err := kernel.NewSuccessProposal("done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := map[string]func(*recoveryFixture, string){
+		"Store.Run": func(fixture *recoveryFixture, _ string) {
+			fixture.daemon.successSourceRun = func(context.Context, kernel.RunID) (kernel.Run, bool, error) {
+				return kernel.Run{}, false, errors.New("injected Store.Run failure")
+			}
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+		"Change": func(fixture *recoveryFixture, _ string) {
+			fixture.daemon.successSourceChange = func(context.Context, kernel.ChangeID) (kernel.Change, bool, error) {
+				return kernel.Change{}, false, errors.New("injected Change read failure")
+			}
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+		"Selection": func(fixture *recoveryFixture, _ string) {
+			fixture.daemon.successSourceChange = func(ctx context.Context, id kernel.ChangeID) (kernel.Change, bool, error) {
+				state, found, err := fixture.store.Change(ctx, id)
+				state.Selection = nil
+				return state, found, err
+			}
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+		"Store.Project": func(fixture *recoveryFixture, _ string) {
+			fixture.daemon.successSourceProject = func(context.Context, kernel.ProjectID) (kernel.Project, bool, error) {
+				return kernel.Project{}, false, errors.New("injected Project read failure")
+			}
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+		"repository identity": func(fixture *recoveryFixture, _ string) {
+			execSupervisorSQL(t, fixture.storePath, `UPDATE changes SET repository_inode = CASE WHEN repository_inode = 9223372036854775807 THEN repository_inode - 1 ELSE repository_inode + 1 END WHERE id = ?`, fixture.run.ChangeID.Bytes())
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+		"Git/toolchain/path": func(fixture *recoveryFixture, _ string) {
+			fixture.daemon.gitExecutable.Store(nil)
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+		"InspectWorktree": func(fixture *recoveryFixture, path string) {
+			if err := os.Remove(filepath.Join(path, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
+			if !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("refusal = %v", err)
+			}
+		},
+	}
+	for name, inject := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixture := newRecoveryFixtureWithRole(t, byte(len(name)+0xa0), kernel.RoleWorker)
+			_, path := fixture.settlementWorktree(t)
+			inject(fixture, path)
+			observed, found, err := fixture.store.Run(context.Background(), fixture.run.ID)
+			if err != nil || !found || observed.Phase != kernel.RunAdmitted || observed.Proposal != nil {
+				t.Fatalf("unavailable source changed durable run: %+v found=%v err=%v", observed, found, err)
+			}
+		})
+	}
+}
+
 func TestSettleRunAbandonsUnpublishedWorkerChange(t *testing.T) {
 	fixture := newRecoveryFixtureWithRole(t, 0x70, kernel.RoleWorker)
 	fixture.failBeforeRuntime(t)

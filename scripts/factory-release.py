@@ -25,6 +25,7 @@ PUBLICATION_SPEC.loader.exec_module(publication)
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_RANGE_COMMITS = 100
 MAX_RANGE_PULLS = 100
+MAX_SUPERSEDED_PRS = 100
 
 
 class ReleaseError(Exception):
@@ -188,8 +189,9 @@ def reviewed_merge_gate(pr, reviews, checks, config, expected):
         raise ReleaseError("pull request head is invalid")
     if not check_runs_ok(checks):
         raise ReleaseError("pull request checks are incomplete or failing")
-    if not any(f"Dark-Factory-Review: allow {head}" in str(item.get("body", "")) and str(item.get("commit_id")) == head and str((item.get("user") or {}).get("id", "")) == "319516570" for item in reviews):
-        raise ReleaseError("no exact independent Maintainer ALLOW review at the pull request head")
+    # Keep the shared exact-head verifier inside this gate so every caller
+    # proves the independent review before delivery proceeds.
+    review_gate(config, head, reviews)
     return head
 
 
@@ -361,6 +363,55 @@ def predeploy_blocked(receipt):
     }
 
 
+def superseded_recovered(receipt, journal):
+    """Return whether reconciliation safely settled this old blocked receipt."""
+    marker = receipt.get("superseded_by")
+    if not isinstance(marker, dict) or type(marker.get("pr")) is not int or marker.get("pr") < 1:
+        return False
+    if (type(marker.get("source_pr")) is not int or marker.get("source_pr") != receipt.get("pr")
+            or not SHA.fullmatch(str(marker.get("sha", "")))
+            or marker.get("source_sha") != receipt.get("sha")):
+        return False
+    target = journal.get("releases", {}).get(str(marker["pr"]))
+    if not isinstance(target, dict) or target.get("pr") != marker["pr"] or target.get("sha") != marker["sha"]:
+        return False
+    verification = target.get("verification")
+    reconciliation = target.get("reconciliation")
+    return (target.get("state") == "verified"
+            and isinstance(verification, dict) and verification.get("sha") == marker["sha"]
+            and verification.get("healthy") is True
+            and isinstance(reconciliation, dict)
+            and reconciliation.get("mode") == "operator_observed"
+            and reconciliation.get("observed_sha") == marker["sha"]
+            and isinstance(reconciliation.get("superseded_prs"), list)
+            and len(reconciliation["superseded_prs"]) <= MAX_SUPERSEDED_PRS
+            and {"pr": marker["source_pr"], "sha": marker["source_sha"]}
+            in reconciliation.get("superseded_prs", []))
+
+
+def prior_superseded_records(entry, journal, target_pr, target_sha):
+    if not isinstance(entry, dict) or entry.get("state") != "verified" or entry.get("sha") != target_sha:
+        return []
+    reconciliation = entry.get("reconciliation")
+    records = reconciliation.get("superseded_prs") if isinstance(reconciliation, dict) else None
+    if records is None:
+        return []
+    if not isinstance(records, list) or len(records) > MAX_SUPERSEDED_PRS:
+        raise ReleaseError("release receipt has invalid superseded receipts")
+    for record in records:
+        if (not isinstance(record, dict) or type(record.get("pr")) is not int or record.get("pr") < 1
+                or record.get("pr") == target_pr or not SHA.fullmatch(str(record.get("sha", "")))):
+            raise ReleaseError("release receipt has invalid superseded receipts")
+        old = journal.get("releases", {}).get(str(record["pr"]))
+        marker = old.get("superseded_by") if isinstance(old, dict) else None
+        if (not isinstance(old, dict) or old.get("state") != "blocked" or old.get("sha") != record["sha"]
+                or not isinstance(marker, dict) or marker.get("pr") != target_pr
+                or marker.get("sha") != target_sha or marker.get("source_pr") != record["pr"]
+                or marker.get("source_sha") != record["sha"]):
+            raise ReleaseError("release receipt has invalid superseded receipts")
+    return records
+
+
 def once(config, number, retry=False):
     journal_path = Path(config["journal"])
     lock_path = Path(str(journal_path) + ".lock")
@@ -402,7 +453,8 @@ def once(config, number, retry=False):
                 return ((isinstance(verification, dict) and verification.get("sha") == receipt.get("sha")
                          and verification.get("healthy") is True)
                         or (isinstance(live_tip, dict) and live_tip.get("sha") == receipt.get("sha")
-                            and live_tip.get("healthy") is True))
+                            and live_tip.get("healthy") is True)
+                        or superseded_recovered(receipt, journal))
 
             # An opaque historical blocked receipt may have been written after
             # the hook started.  It remains a global barrier even when the
@@ -473,7 +525,6 @@ def once(config, number, retry=False):
         merge_gate(pr, default, reviews, checks, config, sha)
         if entry and entry.get("sha") != sha:
             raise ReleaseError("journal has a different SHA for this pull request")
-        review_gate(config, pr["headRefOid"], reviews)
         entry = entry or {"pr": number, "sha": sha, "state": "planned"}
         entry.update({"sha": sha, "state": "planned", "phase": "predeploy",
                       "config_fingerprint": fingerprint, "updated_at": int(time.time())})
@@ -543,7 +594,7 @@ def once(config, number, retry=False):
         return entry
 
 
-def reconcile(config, number, expected):
+def reconcile(config, number, expected, supersede_prs=(), baseline_current=False):
     if not SHA.fullmatch(expected):
         raise ReleaseError("observed SHA must be a full commit SHA")
     journal_path = Path(config["journal"])
@@ -576,6 +627,13 @@ def reconcile(config, number, expected):
                     or entry.get("sha") != unresolved["sha"]):
                 raise ReleaseError("release receipt is not the unresolved deployment")
             matching_unresolved = True
+        supersede_prs = list(supersede_prs)
+        if len(supersede_prs) > MAX_SUPERSEDED_PRS or len(set(supersede_prs)) != len(supersede_prs):
+            raise ReleaseError("superseded pull requests must be distinct and no more than 100")
+        if any(type(pr) is not int or pr < 1 or pr == number for pr in supersede_prs):
+            raise ReleaseError("superseded pull requests must be positive and cannot target the reconciled pull request")
+        if supersede_prs and any(unresolved is not None and unresolved.get("pr") == pr for pr in supersede_prs):
+            raise ReleaseError("an unresolved deployment cannot be superseded")
         for receipt_number, receipt in journal["releases"].items():
             if isinstance(receipt, dict) and receipt.get("state") == "running":
                 if not (matching_unresolved and str(receipt_number) == str(number) and receipt is entry):
@@ -588,24 +646,67 @@ def reconcile(config, number, expected):
         target_is_ancestor(config, sha, default)
         if entry and entry.get("sha") != sha:
             raise ReleaseError("journal has a different SHA for this pull request")
-        review_gate(config, pr["headRefOid"], reviews)
         value = probe(config, expected)
         if value.get("sha") != expected or value.get("healthy") is not True:
             raise ReleaseError("live probe did not prove the expected healthy SHA")
         prior_tip = journal.get("live_tip")
         previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
-        if previous is not None and previous == expected:
+        if baseline_current:
+            sources, delivery_mode = [], "baseline_current"
+        elif previous is not None and previous == expected:
             sources, delivery_mode = [], "unchanged"
         elif previous is None:
             sources, delivery_mode = [], "baseline_current"
         else:
             sources, delivery_mode = range_sources(config, previous, expected)
         entry = entry or {"pr": number}
+        existing_reconciliation = entry.get("reconciliation") if isinstance(entry, dict) else None
+        reconciliation = {"mode": "operator_observed", "observed_sha": expected}
+        previous_superseded = prior_superseded_records(entry, journal, number, expected)
+        if isinstance(existing_reconciliation, dict):
+            for key in ("baseline_sha", "baseline_live_tip"):
+                if key in existing_reconciliation:
+                    reconciliation[key] = existing_reconciliation[key]
+        if baseline_current:
+            reconciliation.setdefault("baseline_sha", previous or expected)
+            if "baseline_live_tip" not in reconciliation and isinstance(prior_tip, dict):
+                reconciliation["baseline_live_tip"] = dict(prior_tip)
+        if previous_superseded:
+            reconciliation["superseded_prs"] = previous_superseded
         entry.update({"sha": expected, "state": "verified", "config_fingerprint": fingerprint,
                       "delivery_from_sha": previous or expected, "delivery_sources": sources,
                       "delivery_mode": delivery_mode, "verification": value,
-                      "reconciliation": {"mode": "operator_observed", "observed_sha": expected},
+                      "reconciliation": reconciliation,
                       "verified_at": int(time.time()), "updated_at": int(time.time())})
+        superseded_records = []
+        for old_pr in supersede_prs:
+            old = journal["releases"].get(str(old_pr))
+            if (not isinstance(old, dict) or old.get("pr") != old_pr
+                    or old.get("state") != "blocked"
+                    or not SHA.fullmatch(str(old.get("sha", "")))):
+                raise ReleaseError("superseded receipt is missing, malformed, or not blocked")
+            old_unresolved = journal.get("unresolved_deployment")
+            if isinstance(old_unresolved, dict) and old_unresolved.get("pr") == old_pr:
+                raise ReleaseError("an unresolved deployment cannot be superseded")
+            old_pr_data, _, _, _ = gh_snapshot(config, old_pr)
+            old_sha = old_pr_data.get("mergeCommitSha")
+            if (old_pr_data.get("state") != "MERGED" or old_pr_data.get("baseRefName") != config["base"]
+                    or old_sha != old.get("sha")):
+                raise ReleaseError("superseded receipt does not match its merged pull request")
+            if old.get("sha") == expected:
+                raise ReleaseError("superseded receipt must be a strict ancestor of the reconciled SHA")
+            target_is_ancestor(config, old.get("sha"), expected)
+            old["superseded_by"] = {"pr": number, "sha": expected,
+                                     "source_pr": old_pr, "source_sha": old.get("sha")}
+            superseded_records.append({"pr": old_pr, "sha": old.get("sha")})
+        if superseded_records:
+            combined = list(previous_superseded)
+            for record in superseded_records:
+                if record not in combined:
+                    combined.append(record)
+            if len(combined) > MAX_SUPERSEDED_PRS:
+                raise ReleaseError("superseded receipts exceed the bound")
+            reconciliation["superseded_prs"] = combined
         journal["releases"][str(number)] = entry
         record_live_tip(journal, value)
         if matching_unresolved:
@@ -625,6 +726,8 @@ def main(argv=None):
     parser.add_argument("--retry", action="store_true")
     parser.add_argument("--reconcile", action="store_true")
     parser.add_argument("--observed-sha")
+    parser.add_argument("--supersede-pr", action="append", type=int, default=[])
+    parser.add_argument("--baseline-current", action="store_true")
     args = parser.parse_args(argv)
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -636,6 +739,8 @@ def main(argv=None):
         if args.reconcile:
             if args.pr is None or args.latest or args.retry or args.observed_sha is None:
                 raise ReleaseError("--reconcile requires --pr and --observed-sha and cannot use --latest or --retry")
+        elif args.supersede_pr or args.baseline_current:
+            raise ReleaseError("--supersede-pr and --baseline-current require --reconcile")
         if not args.reconcile and (args.pr is None) == (not args.latest):
             raise ReleaseError("choose exactly one of --pr or --latest")
         number = args.pr if args.reconcile else (latest_pr(config) if args.latest else args.pr)
@@ -644,7 +749,8 @@ def main(argv=None):
             return 0
         if number < 1:
             raise ReleaseError("pull request number is invalid")
-        result = reconcile(config, number, args.observed_sha) if args.reconcile else once(config, number, args.retry)
+        result = (reconcile(config, number, args.observed_sha, args.supersede_pr, args.baseline_current)
+                  if args.reconcile else once(config, number, args.retry))
         print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, json.JSONDecodeError, ReleaseError) as exc:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -223,4 +224,34 @@ func continuationIDForTest(t *testing.T, seed byte) ContinuationID {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestReusedHumanQuestionYieldsAtomically(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		t.Run(fmt.Sprint(reuse), func(t *testing.T) {
+			ctx := context.Background()
+			store, run, keys := runningWorkerRun(t)
+			defer store.Close()
+			input := NewHumanQuestion{IdempotencyKey: humanKey(234), QuestionText: "existing question"}
+			original, err := store.CreateHumanQuestionForAttempt(ctx, keys.AttemptDigest, input, mustTime(t, 40))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reuse {
+				input.IdempotencyKey = humanKey(235)
+				input.ReuseExisting = true
+				input.QuestionText = "completion callback"
+			}
+			request, err := store.CreateHumanQuestionAndYieldForAttempt(ctx, keys.AttemptDigest, input, mustTime(t, 41))
+			if err != nil || request.ID != original.ID {
+				t.Fatalf("reuse: %+v, %v", request, err)
+			}
+			if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
+				t.Fatalf("old authority: %v", err)
+			}
+			var condition ContinuationConditionID
+			copy(condition[:], request.ID.Bytes())
+			continuationForRequest(t, store, run, condition)
+		})
+	}
 }

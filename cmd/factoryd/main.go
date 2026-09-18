@@ -386,6 +386,13 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		}
 		_, _ = fmt.Fprintf(recoveryLog, "factoryd: recovered run %s: %s\n", disposition.RunID.String(), disposition.Action)
 	}
+	// Like an unresolved run above, a refused mark (a clock that moved
+	// backwards) is reported residue, never a boot refusal.
+	if unknown, err := owner.daemon.RecoverHumanDeliveries(ownedContext); err != nil {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: human reply deliveries left by the previous daemon were not marked uncertain: %v\n", err)
+	} else if unknown != 0 {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: %d human reply deliveries left uncertain by the previous daemon\n", unknown)
+	}
 	startupPhase("recovery sweep")
 	owner.apiAuthority, err = owner.home.OpenLocalAPI(ownedContext)
 	if err != nil {
