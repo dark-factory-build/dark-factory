@@ -11723,6 +11723,33 @@ mod tests {
             Err(OperationError::Refused(RefusalReason::MergePreconditions))
         ));
     }
+    #[test]
+    fn issue_read_filter_accepts_the_configured_source_byte_bound() {
+        for label in ["x".repeat(51), "é".repeat(50), "x".repeat(100)] {
+            assert!(
+                ListIssues {
+                    repository: "team/code".into(),
+                    issue_number: None,
+                    page: 1,
+                    label: Some(label)
+                }
+                .validate()
+                .is_ok()
+            );
+        }
+        for label in ["x".repeat(101), "é".repeat(51)] {
+            assert!(
+                ListIssues {
+                    repository: "team/code".into(),
+                    issue_number: None,
+                    page: 1,
+                    label: Some(label)
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -11761,31 +11788,4 @@ fn installation_route_uses_only_a_valid_app_slug() {
         .installation_url()
         .is_err()
     );
-    #[test]
-    fn issue_read_filter_accepts_the_configured_source_byte_bound() {
-        for label in ["x".repeat(51), "é".repeat(50), "x".repeat(100)] {
-            assert!(
-                ListIssues {
-                    repository: "team/code".into(),
-                    issue_number: None,
-                    page: 1,
-                    label: Some(label)
-                }
-                .validate()
-                .is_ok()
-            );
-        }
-        for label in ["x".repeat(101), "é".repeat(51)] {
-            assert!(
-                ListIssues {
-                    repository: "team/code".into(),
-                    issue_number: None,
-                    page: 1,
-                    label: Some(label)
-                }
-                .validate()
-                .is_err()
-            );
-        }
-    }
 }
