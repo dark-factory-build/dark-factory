@@ -60,28 +60,29 @@ func terminalTextProjection(payload []byte, droppedPrefix bool, limit int) strin
 			index = terminalEscapeEnd(payload, index)
 			continue
 		}
-		if payload[index] == 0x9b {
-			index = terminalCSIEnd(payload, index+1)
-			continue
-		}
-		if payload[index] == 0x90 || payload[index] == 0x98 || payload[index] == 0x9d || payload[index] == 0x9e || payload[index] == 0x9f {
-			index = terminalStringEnd(payload, index+1, payload[index] == 0x9d)
-			continue
-		}
-		if payload[index] < 0x20 || payload[index] == 0x7f || payload[index] >= 0x80 && payload[index] <= 0x9f {
-			index++
-			space()
-			continue
-		}
 		value, width := utf8.DecodeRune(payload[index:])
 		if value == utf8.RuneError && width == 1 {
-			index++
-			space()
+			// Native terminals may emit standalone 8-bit C1 controls. A
+			// continuation byte inside valid UTF-8 is never a control.
+			value = rune(payload[index])
+			if value < 0x80 || value > 0x9f {
+				index++
+				continue
+			}
+		}
+		if value == 0x9b {
+			index = terminalCSIEnd(payload, index+width)
+			continue
+		}
+		if value == 0x90 || value == 0x98 || value == 0x9d || value == 0x9e || value == 0x9f {
+			index = terminalStringEnd(payload, index+width, value == 0x9d)
 			continue
 		}
 		if value < 0x20 || value >= 0x7f && value <= 0x9f {
 			index += width
-			space()
+			if value == '\r' || value == '\n' || value == '\t' {
+				space()
+			}
 			continue
 		}
 		text = append(text, payload[index:index+width]...)
@@ -128,13 +129,18 @@ func terminalCSIEnd(payload []byte, start int) int {
 }
 
 func terminalStringEnd(payload []byte, start int, bellTerminated bool) int {
-	for index := start; index < len(payload); index++ {
-		if bellTerminated && payload[index] == 0x07 || payload[index] == 0x9c {
-			return index + 1
+	for index := start; index < len(payload); {
+		value, width := utf8.DecodeRune(payload[index:])
+		if value == utf8.RuneError && width == 1 {
+			value = rune(payload[index])
 		}
-		if payload[index] == 0x1b && index+1 < len(payload) && payload[index+1] == '\\' {
+		if bellTerminated && value == 0x07 || value == 0x9c {
+			return index + width
+		}
+		if value == 0x1b && index+1 < len(payload) && payload[index+1] == '\\' {
 			return index + 2
 		}
+		index += width
 	}
 	return len(payload)
 }

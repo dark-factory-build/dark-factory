@@ -121,6 +121,19 @@ func TestTerminalTextProjectionNormalizesControlsBeforeRedaction(t *testing.T) {
 			t.Fatalf("incomplete sensitive projection leaked: %q", got)
 		}
 	}
+	for _, hidden := range []string{
+		"\x1b]title \u015c hunter2\a",
+		"\u009dtitle hunter2\a",
+		"\u009dtitle hunter2\u009c",
+		"\u0090hidden hunter2\u009c",
+		"\x9dtitle \u015c hunter2\x9c",
+		"tok\ben=hunter2",
+	} {
+		got := terminalTextProjection([]byte("visible "+hidden), false, 65536)
+		if !strings.Contains(got, "visible") || strings.Contains(got, "hunter2") {
+			t.Fatalf("encoded control leaked hidden text: %q", got)
+		}
+	}
 	bounded := terminalTextProjection([]byte("old state\x1b[Hcurrent state"), false, 7)
 	if bounded != "t state" || !utf8.ValidString(bounded) {
 		t.Fatalf("bounded projection = %q", bounded)
