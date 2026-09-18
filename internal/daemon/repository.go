@@ -35,13 +35,26 @@ func registerProjectRepository(ctx context.Context, store *kernel.Store, spec ke
 
 func registerProject(ctx context.Context, store *kernel.Store, spec kernel.NewProject, at kernel.UnixMillis) (kernel.Project, error) {
 	var base string
-	current, found, err := store.DefaultProjectRepository(ctx, spec.ID)
+	current, found, err := store.ProjectRepository(ctx, kernel.RepositoryID(spec.ID))
 	if err != nil {
 		return kernel.Project{}, err
 	}
 	if found {
+		_, verified, err := store.RepositorySourceIdentity(ctx, current.ID)
+		if err != nil {
+			return kernel.Project{}, err
+		}
+		if verified {
+			return store.CreateProject(ctx, spec, at)
+		}
 		base = current.BaseRef
 	} else {
+		if _, exists, err := store.Project(ctx, spec.ID); err != nil || exists {
+			if err != nil {
+				return kernel.Project{}, err
+			}
+			return store.CreateProject(ctx, spec, at)
+		}
 		base, err = store.InitialRepositoryBase(ctx)
 		if err != nil {
 			return kernel.Project{}, err

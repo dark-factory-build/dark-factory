@@ -52,6 +52,15 @@ func TestSupervisorCompletesTasksFromEachRegisteredRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Creation replay uses the original registration, not the new default's
+	// release branch (which does not exist in the first checkout).
+	if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: first.Root, VerificationPolicy: project.VerificationPolicy}, supervisorTime()); err != nil {
+		t.Fatalf("project creation replay after default change: %v", err)
+	}
+	if _, err := registerProject(ctx, fixture.store, kernel.NewProject{ID: project.ID, Name: project.Name, Root: second.Root, VerificationPolicy: project.VerificationPolicy}, supervisorTime()); err == nil {
+		t.Fatal("creation replay retargeted the original project root")
+	}
+
 	firstRun, err := fixture.daemon.RunNext(ctx, fixture.spec)
 	if err != nil {
 		t.Fatalf("first RunNext: %v", err)
