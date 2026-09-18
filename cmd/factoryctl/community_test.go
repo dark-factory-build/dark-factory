@@ -24,7 +24,7 @@ func TestPublicBacklogDoesNotUseAmbientProxy(t *testing.T) {
 		if request.Host != "darkfactory.build" || request.URL.Path != "/api/backlog" || request.Header.Get("Proxy-Authorization") != "" {
 			t.Errorf("unexpected public request: %s %s", request.Host, request.URL.Path)
 		}
-		_, _ = io.WriteString(out, `{"status":"ok","repository":"dark-factory-build/dark-factory","issues":[]}`)
+		_, _ = io.WriteString(out, `{"status":"ok","repository":"dark-factory-build/dark-factory","issues":[],"as_of":"2026-09-18T12:00:00Z","truncated":false}`)
 	}))
 	defer server.Close()
 	client := publicBacklogClient()
@@ -53,7 +53,9 @@ func TestPublicBacklogFixedReadAndFailures(t *testing.T) {
 		status int
 		valid  bool
 	}{
-		{`{"status":"ok","repository":"dark-factory-build/dark-factory","issues":[{"title":"hostile\u001b[31m","thumbs_up":3}],"truncated":true}`, 200, true},
+		{`{"status":"ok","repository":"dark-factory-build/dark-factory","issues":[{"title":"hostile\u001b[31m","thumbs_up":3}],"truncated":true,"as_of":"2026-09-18T12:00:00Z"}`, 200, true},
+		{`{"status":"ok","repository":"dark-factory-build/dark-factory","issues":[]}`, 200, false},
+		{`{"status":"ok","repository":"dark-factory-build/dark-factory","issues":[],"as_of":"invalid","truncated":false}`, 200, false},
 		{`{"status":"unavailable"}`, 503, false},
 		{`{"status":"ok","repository":"private/other"}`, 200, false},
 		{`{"status":"ok","repository":"dark-factory-build/dark-factory"} trailing`, 200, false},

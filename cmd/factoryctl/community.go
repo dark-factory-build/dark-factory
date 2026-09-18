@@ -60,10 +60,13 @@ func readPublicBacklog(ctx context.Context, client *http.Client, stdout io.Write
 		return err
 	}
 	var result struct {
-		Status     string `json:"status"`
-		Repository string `json:"repository"`
+		Status     string            `json:"status"`
+		Repository string            `json:"repository"`
+		AsOf       time.Time         `json:"as_of"`
+		Truncated  *bool             `json:"truncated"`
+		Issues     []json.RawMessage `json:"issues"`
 	}
-	if response.StatusCode != http.StatusOK || len(body) > maxBytes || json.Unmarshal(body, &result) != nil || result.Status != "ok" || result.Repository != "dark-factory-build/dark-factory" {
+	if response.StatusCode != http.StatusOK || len(body) > maxBytes || json.Unmarshal(body, &result) != nil || result.Status != "ok" || result.Repository != "dark-factory-build/dark-factory" || result.AsOf.IsZero() || result.Truncated == nil || result.Issues == nil {
 		return fmt.Errorf("invalid public backlog response")
 	}
 	// Re-encode to keep issue-controlled terminal escape sequences inert.
