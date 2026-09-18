@@ -15,6 +15,9 @@ MODULE = Path(__file__).with_name("factory-release.py")
 SPEC = importlib.util.spec_from_file_location("factory_release", MODULE)
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
+SITE_SPEC = importlib.util.spec_from_file_location("verify_live_site", MODULE.with_name("verify-live-site.py"))
+site = importlib.util.module_from_spec(SITE_SPEC)
+SITE_SPEC.loader.exec_module(site)
 
 
 SHA = "a" * 40
@@ -50,6 +53,12 @@ def snapshot():
 
 
 class ReleaseFixtures(unittest.TestCase):
+    def test_site_probe_requires_exact_ready_production_deployment(self):
+        deployment = {"readyState": "READY", "target": "production"}
+        self.assertTrue(site.deployment_healthy(deployment, SHA, SHA, True, True))
+        self.assertFalse(site.deployment_healthy(deployment, HEAD, SHA, True, True))
+        self.assertFalse(site.deployment_healthy(deployment, SHA, SHA, True, False))
+
     def test_shared_atomic_writer_preserves_receipt_on_replace_failure(self):
         self.assertIs(release.atomic_json, release.intake.atomic_json)
         with tempfile.TemporaryDirectory() as directory:
