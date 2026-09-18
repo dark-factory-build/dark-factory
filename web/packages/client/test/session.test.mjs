@@ -326,7 +326,7 @@ test("private repository administration and enqueue selection are exact-correlat
   const projectId = "7a".repeat(16);
   const repositoryId = "7b".repeat(16);
   const agentId = "7c".repeat(16);
-  const item = { id: repositoryId, project_id: projectId, name: "Checkout", root: "/private/checkout", base_ref: "main", enabled: true, default: true, revision: 3n };
+  const item = { id: repositoryId, project_id: projectId, name: "Checkout", root: "/private/checkout", base_ref: "main", enabled: true, default: true, revision: 3n, fetch_state: "unchecked", publication_state: "unbound", readiness_message: "Run the operator check." };
 
   const listed = session.getRepositories(projectId);
   const listFrame = decodeClientControl(socket.sent.at(-1));
@@ -339,6 +339,18 @@ test("private repository administration and enqueue selection are exact-correlat
   assert.deepEqual(updateFrame.body, { action: "base", id: repositoryId, expected_revision: 3n, base_ref: "release" });
   socket.reply(encodeRepositoryMutateResult(updateFrame.id, { repository: { ...item, base_ref: "release", revision: 4n } }));
   assert.equal((await updated).base_ref, "release");
+
+  const fetch = session.mutateRepository({ projectId, repositoryId, action: "fetch" });
+  const fetchFrame = decodeClientControl(socket.sent.at(-1));
+  assert.deepEqual(fetchFrame.body, { action: "fetch", id: repositoryId });
+  socket.reply(encodeRepositoryMutateResult(fetchFrame.id, { repository: { ...item, base_ref: "release", revision: 5n, fetch_state: "ready", readiness_message: "Checkout is ready." } }));
+  assert.equal((await fetch).fetch_state, "ready");
+
+  const github = session.mutateRepository({ projectId, repositoryId, action: "github" });
+  const githubFrame = decodeClientControl(socket.sent.at(-1));
+  assert.deepEqual(githubFrame.body, { action: "github", id: repositoryId });
+  socket.reply(encodeRepositoryMutateResult(githubFrame.id, { repository: { ...item, base_ref: "release", revision: 6n, publication_state: "ready", github_repository_id: 123456n } }));
+  assert.equal((await github).github_repository_id, 123456n);
 
   const enqueue = session.enqueueAgentTask({ agentId, expectedAgentRevision: 2n, repositoryId, instruction: "Use the selected checkout" });
   const enqueueFrame = decodeClientControl(socket.sent.at(-1));

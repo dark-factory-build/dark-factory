@@ -201,6 +201,7 @@ export type RepositoryView = Readonly<RepositoryItem>;
 export type ProjectCreateResult = Readonly<{ projectId: string; revision: bigint }>;
 export type RepositoryMutation =
   | Readonly<{ projectId: string; action: "add"; name: string; root: string; baseRef: string }>
+  | Readonly<{ projectId: string; repositoryId: string; action: "github" | "fetch" }>
   | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "name"; name: string }>
   | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "base"; baseRef: string }>
   | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "default" | "remove" }>
@@ -410,15 +411,20 @@ export class BrowserSession {
       if (bounded(request.name, MAX_AGENT_NAME_BYTES) || bounded(request.root, 4096) || bounded(request.baseRef, 4096) || !request.root.startsWith("/")) return Promise.reject(new SessionError("invalid_request"));
       try { repositoryId = this.#randomID(); } catch (error) { return Promise.reject(error); }
       body = { action: "add", id: repositoryId, project_id: request.projectId, name: request.name, root: request.root, base_ref: request.baseRef };
+    } else if (request.action === "github" || request.action === "fetch") {
+      if (!validDynamicID(request.repositoryId)) return Promise.reject(new SessionError("invalid_request"));
+      repositoryId = request.repositoryId;
+      body = { action: request.action, id: repositoryId };
     } else {
-      if (!validDynamicID(request.repositoryId) || request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
+      if (!validDynamicID(request.repositoryId) || !("expectedRevision" in request) || request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
       repositoryId = request.repositoryId;
       body = { action: request.action, id: repositoryId, expected_revision: request.expectedRevision };
       if (request.action === "name") { if (bounded(request.name, MAX_AGENT_NAME_BYTES)) return Promise.reject(new SessionError("invalid_request")); body.name = request.name; }
       if (request.action === "base") { if (bounded(request.baseRef, 4096)) return Promise.reject(new SessionError("invalid_request")); body.base_ref = request.baseRef; }
       if (request.action === "enabled") body.enabled = request.enabled;
     }
-    return this.#accountRequest("REPOSITORY_MUTATE_RESULT", CAPABILITIES.administration, "repository-mutate", (id) => encodeRepositoryMutate(id, body), { entityId: repositoryId, expectedRevision: request.action === "add" ? undefined : request.expectedRevision, action: request.action });
+    const expectedRevision = "expectedRevision" in request ? request.expectedRevision : undefined;
+    return this.#accountRequest("REPOSITORY_MUTATE_RESULT", CAPABILITIES.administration, "repository-mutate", (id) => encodeRepositoryMutate(id, body), { entityId: repositoryId, expectedRevision, action: request.action });
   }
 
   /** Edit one still-queued task: its brief, priority, assignment, or cancel it. */

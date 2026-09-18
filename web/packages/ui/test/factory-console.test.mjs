@@ -102,11 +102,16 @@ test("floor appearance is local, field-validated, and available before a connect
 test("repository roots stay inside private settings", () => {
   const project = fixtureState.projects.get(ids.project);
   const root = "/private/operator/checkout";
-  const repositories = new Map([[project.id, [{ id: "ad".repeat(16), project_id: project.id, name: "Checkout", root, base_ref: "main", enabled: true, default: true, revision: 1n }]]]);
+  const repositories = new Map([[project.id, [{ id: "ad".repeat(16), project_id: project.id, name: "Checkout", root, base_ref: "main", enabled: true, default: true, revision: 1n, fetch_state: "setup_required", publication_state: "ready", github_repository_id: 123456n, readiness_message: "Git checkout needs operator setup." }]]]);
   assert.equal(render({ repositories }).includes(root), false);
   const settings = render({ settingsOpen: true, repositories });
   assert.match(settings, /Repositories/);
   assert.match(settings, new RegExp(root));
+  assert.match(settings, /FETCH: SETUP_REQUIRED/);
+  assert.match(settings, /GITHUB: READY · ID 123456/);
+  assert.match(settings, /CHECK FETCH READINESS/);
+  assert.match(settings, /REFRESH GITHUB ACCESS/);
+  assert.match(settings, /Git checkout needs operator setup\./);
   assert.match(settings, /ADD CHECKOUT/);
 });
 

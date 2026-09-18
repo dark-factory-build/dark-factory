@@ -108,10 +108,11 @@ export type ProjectLimitsResultBody = { project_id: string; revision: bigint };
 export type ProjectCreateBody = { project_id: string; name: string; root: string };
 export type ProjectCreateResultBody = { project_id: string; revision: bigint };
 /** Administration-only private repository configuration; it is never STATE. */
-export type RepositoryItem = { id: string; project_id: string; name: string; root: string; base_ref: string; enabled: boolean; default: boolean; revision: bigint };
+export type RepositoryReadinessState = "unchecked" | "ready" | "unbound" | "setup_required";
+export type RepositoryItem = { id: string; project_id: string; name: string; root: string; base_ref: string; enabled: boolean; default: boolean; revision: bigint; github_repository_id?: bigint; fetch_state?: RepositoryReadinessState; publication_state?: RepositoryReadinessState; readiness_message?: string };
 export type RepositoriesGetBody = { project_id: string };
 export type RepositoriesBody = { project_id: string; items: RepositoryItem[] };
-export type RepositoryMutateBody = { action: "add" | "name" | "base" | "default" | "enabled" | "remove"; id?: string; project_id?: string; name?: string; root?: string; base_ref?: string; expected_revision?: bigint; enabled?: boolean };
+export type RepositoryMutateBody = { action: "add" | "name" | "base" | "default" | "enabled" | "remove" | "github" | "fetch"; id?: string; project_id?: string; name?: string; root?: string; base_ref?: string; expected_revision?: bigint; enabled?: boolean };
 export type RepositoryMutateResultBody = { repository?: RepositoryItem };
 export type TaskUpdateBody = { task_id: string; expected_revision: bigint; title?: string; body?: string; priority?: number; assigned_agent_id?: string; status?: "cancelled" };
 export type TaskUpdateResultBody = { task_id: string; revision: bigint };
@@ -608,9 +609,19 @@ const TOPOLOGY_BUCKETS = ["empty", "tiny", "small", "medium", "large"] as const;
 function topologySource(value: unknown): string { if (typeof value !== "string" || value !== "" && !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) malformed(); return value; }
 function repositoryItem(value: unknown, wire: boolean): RepositoryItem {
   if (!isObject(value)) malformed();
-  requireKeys(value, ["id", "project_id", "name", "root", "base_ref", "enabled", "default", "revision"], wire);
+  requireKeys(value, ["id", "project_id", "name", "root", "base_ref", "enabled", "default", "revision"], wire, ["github_repository_id", "fetch_state", "publication_state", "readiness_message"]);
   if (typeof value.enabled !== "boolean" || typeof value.default !== "boolean") malformed();
-  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), root: boundedText(value.root, 1, 4096), base_ref: boundedText(value.base_ref, 1, 4096), enabled: value.enabled, default: value.default, revision: decimal(value.revision, wire, true) };
+  const fetch_state = present(value, "fetch_state") ? readinessState(value.fetch_state) : undefined;
+  const publication_state = present(value, "publication_state") ? readinessState(value.publication_state) : undefined;
+  const readiness_message = present(value, "readiness_message") ? boundedText(value.readiness_message, 0, 512) : undefined;
+  if (readiness_message !== undefined && /[\u0000\r\n]/.test(readiness_message)) malformed();
+  const github_repository_id = present(value, "github_repository_id") ? decimal(value.github_repository_id, wire, true) : undefined;
+  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), root: boundedText(value.root, 1, 4096), base_ref: boundedText(value.base_ref, 1, 4096), enabled: value.enabled, default: value.default, revision: decimal(value.revision, wire, true), ...(github_repository_id === undefined ? {} : { github_repository_id }), ...(fetch_state === undefined ? {} : { fetch_state }), ...(publication_state === undefined ? {} : { publication_state }), ...(readiness_message === undefined ? {} : { readiness_message }) };
+}
+
+function readinessState(value: unknown): RepositoryReadinessState {
+  if (value !== "unchecked" && value !== "ready" && value !== "unbound" && value !== "setup_required") malformed();
+  return value;
 }
 
 function repositoriesBody(body: Record<string, unknown>, wire: boolean): RepositoriesBody {
@@ -625,7 +636,7 @@ function repositoriesBody(body: Record<string, unknown>, wire: boolean): Reposit
 function repositoryMutateBody(body: Record<string, unknown>, wire: boolean): RepositoryMutateBody {
   requireKeys(body, ["action"], wire, ["id", "project_id", "name", "root", "base_ref", "expected_revision", "enabled"]);
   const action = body.action;
-  if (action !== "add" && action !== "name" && action !== "base" && action !== "default" && action !== "enabled" && action !== "remove") malformed();
+  if (action !== "add" && action !== "name" && action !== "base" && action !== "default" && action !== "enabled" && action !== "remove" && action !== "github" && action !== "fetch") malformed();
   const id = present(body, "id") ? dynamicID(body.id) : undefined;
   const project_id = present(body, "project_id") ? dynamicID(body.project_id) : undefined;
   const name = present(body, "name") ? boundedText(body.name, 1, MAX_AGENT_NAME_BYTES) : undefined;
@@ -636,6 +647,8 @@ function repositoryMutateBody(body: Record<string, unknown>, wire: boolean): Rep
   const enabled = present(body, "enabled") ? body.enabled as boolean : undefined;
   if (action === "add") {
     if (id === undefined || project_id === undefined || name === undefined || root === undefined || base_ref === undefined) malformed();
+  } else if (action === "github" || action === "fetch") {
+    if (id === undefined || expected_revision !== undefined || project_id !== undefined || name !== undefined || root !== undefined || base_ref !== undefined || enabled !== undefined) malformed();
   } else if (id === undefined || expected_revision === undefined || action === "name" && name === undefined || action === "base" && base_ref === undefined || action === "enabled" && enabled === undefined) malformed();
   return { action, ...(id === undefined ? {} : { id }), ...(project_id === undefined ? {} : { project_id }), ...(name === undefined ? {} : { name }), ...(root === undefined ? {} : { root }), ...(base_ref === undefined ? {} : { base_ref }), ...(expected_revision === undefined ? {} : { expected_revision }), ...(enabled === undefined ? {} : { enabled }) };
 }

@@ -65,14 +65,18 @@ type RepositoriesGet struct {
 	ProjectID string `json:"project_id"`
 }
 type Repository struct {
-	ID        string  `json:"id"`
-	ProjectID string  `json:"project_id"`
-	Name      string  `json:"name"`
-	Root      string  `json:"root"`
-	BaseRef   string  `json:"base_ref"`
-	Enabled   Bool    `json:"enabled"`
-	Default   Bool    `json:"default"`
-	Revision  Decimal `json:"revision"`
+	ID                 string   `json:"id"`
+	ProjectID          string   `json:"project_id"`
+	Name               string   `json:"name"`
+	Root               string   `json:"root"`
+	BaseRef            string   `json:"base_ref"`
+	Enabled            Bool     `json:"enabled"`
+	Default            Bool     `json:"default"`
+	Revision           Decimal  `json:"revision"`
+	GitHubRepositoryID *Decimal `json:"github_repository_id,omitempty"`
+	FetchState         string   `json:"fetch_state,omitempty"`
+	PublicationState   string   `json:"publication_state,omitempty"`
+	ReadinessMessage   string   `json:"readiness_message,omitempty"`
 }
 type Repositories struct {
 	ProjectID string       `json:"project_id"`
@@ -90,6 +94,21 @@ type RepositoryMutate struct {
 }
 type RepositoryMutateResult struct {
 	Repository *Repository `json:"repository,omitempty"`
+}
+
+func validateRepository(value Repository) error {
+	if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Name, 1, 128) != nil || validateBoundedText(value.Root, 1, 4096) != nil || validateBoundedText(value.BaseRef, 1, 4096) != nil || value.Revision == 0 {
+		return fmt.Errorf("%w: repository", ErrMalformed)
+	}
+	if value.GitHubRepositoryID != nil && *value.GitHubRepositoryID == 0 {
+		return fmt.Errorf("%w: github repository id", ErrMalformed)
+	}
+	if value.FetchState != "" && value.FetchState != "unchecked" && value.FetchState != "ready" && value.FetchState != "setup_required" ||
+		value.PublicationState != "" && value.PublicationState != "unchecked" && value.PublicationState != "ready" && value.PublicationState != "unbound" && value.PublicationState != "setup_required" ||
+		validateBoundedText(value.ReadinessMessage, 0, 512) != nil || strings.ContainsAny(value.ReadinessMessage, "\x00\r\n") {
+		return fmt.Errorf("%w: repository readiness", ErrMalformed)
+	}
+	return nil
 }
 
 // TaskUpdate edits one still-queued task. Status is the only member that is
@@ -422,16 +441,20 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 		for _, item := range value.Items {
-			if validateDynamicID(item.ID) != nil || item.ProjectID != value.ProjectID || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 4096) != nil || item.Revision == 0 {
+			if validateRepository(item) != nil || item.ProjectID != value.ProjectID {
 				return bad()
 			}
 		}
 	case RepositoryMutate:
-		if value.Action != "add" && value.Action != "name" && value.Action != "base" && value.Action != "default" && value.Action != "enabled" && value.Action != "remove" {
+		if value.Action != "add" && value.Action != "name" && value.Action != "base" && value.Action != "default" && value.Action != "enabled" && value.Action != "remove" && value.Action != "github" && value.Action != "fetch" {
 			return bad()
 		}
 		if value.Action == "add" {
 			if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Name, 1, 128) != nil || validateBoundedText(value.Root, 1, 4096) != nil || validateBoundedText(value.BaseRef, 1, 4096) != nil {
+				return bad()
+			}
+		} else if value.Action == "github" || value.Action == "fetch" {
+			if validateDynamicID(value.ID) != nil || value.ExpectedRevision != 0 || value.ProjectID != "" || value.Name != "" || value.Root != "" || value.BaseRef != "" || value.Enabled != nil {
 				return bad()
 			}
 		} else if validateDynamicID(value.ID) != nil || value.ExpectedRevision == 0 || value.Action == "base" && validateBoundedText(value.BaseRef, 1, 4096) != nil || value.Action == "enabled" && value.Enabled == nil {
@@ -440,7 +463,7 @@ func validConsoleControl(kind MessageType, body any) error {
 	case RepositoryMutateResult:
 		if value.Repository != nil {
 			item := *value.Repository
-			if validateDynamicID(item.ID) != nil || validateDynamicID(item.ProjectID) != nil || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 4096) != nil || item.Revision == 0 {
+			if validateRepository(item) != nil {
 				return bad()
 			}
 		}

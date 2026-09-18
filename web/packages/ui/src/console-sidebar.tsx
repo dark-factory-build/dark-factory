@@ -664,12 +664,19 @@ function RepositoryProject({ project, items, pending, error, onMutate }: { proje
 function RepositoryRow({ project, item, pending, onMutate }: { project: ProjectItem; item: RepositoryView; pending: boolean; onMutate?: (request: RepositoryMutation) => void }) {
   const [name, setName] = useState(item.name); const [baseRef, setBaseRef] = useState(item.base_ref);
   const request = (action: RepositoryMutation["action"], values: Partial<{ name: string; baseRef: string; enabled: boolean }> = {}) => {
-    if (action === "name") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, name: values.name ?? name });
+    if (action === "github" || action === "fetch") onMutate?.({ projectId: project.id, repositoryId: item.id, action });
+    else if (action === "name") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, name: values.name ?? name });
     else if (action === "base") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, baseRef: values.baseRef ?? baseRef });
     else if (action === "enabled") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, enabled: values.enabled ?? !item.enabled });
     else if (action === "default" || action === "remove") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action });
   };
+  const fetchState = item.fetch_state ?? "unchecked";
+  const publicationState = item.publication_state ?? "unchecked";
+  const githubID = item.github_repository_id === undefined ? undefined : item.github_repository_id.toString();
   return <li className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.name}{item.default ? " · DEFAULT" : ""}</p><p className="dfFactoryConsole__eyebrow">{item.root}</p>
+    <div aria-label="Repository readiness"><p className="dfFactoryConsole__eyebrow">FETCH: {fetchState.toUpperCase()}</p><p className="dfFactoryConsole__eyebrow">GITHUB: {publicationState.toUpperCase()}{githubID === undefined ? "" : ` · ID ${githubID}`}</p>{item.readiness_message === undefined ? null : <p role="status">{item.readiness_message}</p>}
+      <button type="button" disabled={pending} onClick={() => request("fetch")}>{fetchState === "ready" ? "REFRESH FETCH READINESS" : "CHECK FETCH READINESS"}</button><button type="button" disabled={pending} onClick={() => request("github")}>{publicationState === "ready" ? "REFRESH GITHUB ACCESS" : "VERIFY GITHUB ACCESS"}</button>
+    </div>
     <label>Name<input value={name} disabled={pending} onChange={(event) => setName(event.currentTarget.value)} /></label><button type="button" disabled={pending || !name.trim() || name === item.name} onClick={() => request("name")}>SAVE NAME</button>
     <label>Base<input value={baseRef} disabled={pending} onChange={(event) => setBaseRef(event.currentTarget.value)} /></label><button type="button" disabled={pending || !baseRef.trim() || baseRef === item.base_ref} onClick={() => request("base")}>SAVE BASE</button>
     <button type="button" disabled={pending || item.default} onClick={() => request("default")}>MAKE DEFAULT</button><button type="button" disabled={pending || item.default} onClick={() => request("enabled", { enabled: !item.enabled })}>{item.enabled ? "DISABLE" : "ENABLE"}</button><button type="button" disabled={pending || item.default} onClick={() => request("remove")}>REMOVE</button>
