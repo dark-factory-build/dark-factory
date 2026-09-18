@@ -292,7 +292,8 @@ export function AgentInstruction({
 }) {
   const [localInstruction, setLocalInstruction] = useState("");
   const enabled = repositories?.filter((repository) => repository.enabled) ?? [];
-  const [repositoryId, setRepositoryId] = useState<string>("");
+  const [requestedRepositoryId, setRepositoryId] = useState<string>("");
+  const repositoryId = enabled.some((repository) => repository.id === requestedRepositoryId) ? requestedRepositoryId : "";
   const instruction = onDraftChange === undefined ? localInstruction : terminal.instructionDraft ?? "";
   const setInstruction = (value: string) => {
     if (onDraftChange === undefined) setLocalInstruction(value);
