@@ -1,10 +1,10 @@
 # Dark Factory
 
-**Run supervised coding work on your own Mac.** Dark Factory keeps a durable
-queue, launches local coding providers, and gives you one calm place to see
-what is running, what needs a decision, and what finished. It is for people
-who want coding agents to work in real repositories without handing their
-projects to a hosted agent platform.
+**Turn a repository backlog into supervised coding work on your own Mac.** Dark
+Factory gives a programme a durable queue, local coding providers, and a shared
+view of work in progress. It coordinates several agents on real repositories,
+keeps decisions visible, and carries completed work through independent review
+and publication.
 
 <picture>
   <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
@@ -13,39 +13,40 @@ projects to a hosted agent platform.
 
 *Demo: a live codebase topology rendered with sample workers and a synthetic Needs You request; no daemon is connected.*
 
-The daemon runs locally. Your browser and `factoryctl` are authenticated local
-clients; closing either does not stop queued work. Dark Factory never commits,
-pushes, opens pull requests, or publishes a repository for you.
+The daemon, queue, worktrees, and providers stay on your machine. A paired
+console and `factoryctl` direct the same local factory. The Maintainer handles
+publication: it can publish the independently reviewed completed change to a
+GitHub branch and pull request, leaving a durable record of what happened.
 
+[Website](https://darkfactory.build) · [Console](https://app.darkfactory.build) ·
+[Backlog](https://github.com/dark-factory-build/dark-factory/issues) ·
 [Install](docs/install.md) · [Provider support](docs/providers.md) ·
-[Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) ·
-[Development](docs/development/WORKFLOW.md)
+[Architecture](ARCHITECTURE.md) · [Security](SECURITY.md)
 
 ## Why use it
 
-- Keep a visible, durable queue while agents work in separate Git worktrees.
-- Use Codex or a shell provider today; Claude Code support is available for an
-  existing local CLI, with real-provider smoke coverage still pending.
-- Pause, message, interrupt, stop, or send work back with a recorded reason.
-- See human questions and completed work without exposing private instructions
-  in the public floor view.
-- Assign work to one worker or let the next eligible worker claim it.
-- Keep source checkout, task lifecycle, and provider processes on your Mac.
+- Keep a durable, visible queue while several agents work in separate Git worktrees.
+- Run local Codex, Claude Code, or shell providers against repositories you choose.
+- See active work, questions that need a human decision, and finished outcomes in one floor view.
+- Pause, redirect, stop, or send work back with the reason recorded beside it.
+- Keep repository checkout, task history, and provider processes on your Mac.
+- Publish reviewed completed work through the Maintainer rather than losing the path from task to pull request.
 
 ## A typical workflow
 
-Create a project from an existing checkout, add a worker, and open the paired
-console. Put an instruction in a ready worker’s terminal pane or add a task
-from the CLI. The daemon creates a fresh worktree for an admitted task and
-starts the configured provider. Watch the floor for progress, answer a Needs
-You request when one appears, and review the durable outcome when the task
-finishes. You decide what happens to the resulting branch.
+Choose a repository and define the work you want done. Add workers with the
+provider accounts already available on the machine, then put tasks in the
+queue. Dark Factory makes an isolated worktree for each accepted task and
+starts the chosen provider. Watch the floor, answer a Needs You request when
+judgement is required, and inspect the completed result. The Maintainer then
+publishes the reviewed change as a GitHub branch and pull request.
 
 ## Quick start
 
-Dark Factory **v0.3.5** is macOS-only. Install the current binaries using the
-[installation guide](docs/install.md), then initialise a private home and set
-the operator environment used by `factoryctl`:
+Dark Factory **v0.3.5** runs on macOS. You need Git plus a provider CLI that is
+installed and signed in, such as `codex` or `claude`. Install the current
+binaries with the [installation guide](docs/install.md), initialise a private
+home, and set the operator environment used by `factoryctl`:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"
@@ -55,7 +56,7 @@ export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 ```
 
 Register the checkout you want to supervise. `factoryctl project create` prints
-the project ID; use that value below.
+the project ID; use it to add a worker and task.
 
 ```sh
 factoryctl project create --name "My project" --root "$PWD"
@@ -64,13 +65,12 @@ factoryctl agent create --project PROJECT_ID --name builder --provider codex \
 factoryctl task add --project PROJECT_ID --agent any --title "Describe the next change"
 ```
 
-Follow [installation](docs/install.md) to install and start `factoryd`; it
-opens the local pairing page at <http://127.0.0.1:43123/pair>. The console is
-for observing and directing work, while the CLI remains useful for setup and
-repeatable operations.
+The installation starts `factoryd` and opens the local pairing page at
+<http://127.0.0.1:43123/pair>. Pair the console to observe and direct the
+factory; keep the CLI for setup and repeatable operations.
 
-Repository routing, issue intake, and release scheduling are coordinated for
-the next release and are not part of v0.3.5’s public quick start. Technical
-operation details remain in the linked documentation.
+Repository routing, issue intake, and Maintainer publication are coordinated
+for the next release; they are not part of the v0.3.5 quick start. More
+technical detail is in the [development workflow](docs/development/WORKFLOW.md).
 
 Dark Factory is MIT licensed.
