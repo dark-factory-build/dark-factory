@@ -89,20 +89,37 @@ func TestConnectRefusesLegacyOverseerBeforeCredentialActivation(t *testing.T) {
 	}
 }
 
-func TestAcceptedIssueObservationDoesNotReplaceReviewedInstructions(t *testing.T) {
+func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 	accepted := kernel.IntakeAcceptance{Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "reviewed", Body: "safe snapshot"}}
-	for _, tc := range []struct {
-		response string
-		want     bool
-	}{
-		{`{"result":{"structuredContent":{"number":9,"title":"reviewed","body":"safe snapshot"}}}`, true},
-		{`{"result":{"structuredContent":{"number":9,"title":"reviewed","body":"edited instructions"},"content":[{"type":"text","text":"edited instructions"}]}}`, false},
-		{`{"result":{"structuredContent":{"number":8,"title":"reviewed","body":"safe snapshot"}}}`, false},
-		{`{"result":{"isError":true}}`, false},
-	} {
-		if got := observedAcceptedContent([]byte(tc.response), accepted); got != tc.want {
-			t.Fatalf("observation allowed=%v want=%v", got, tc.want)
-		}
+	// A broker response can carry revised instructions in content even when
+	// structuredContent still happens to resemble the accepted issue.
+	upstream := []byte(`{"result":{"structuredContent":{"number":9,"title":"reviewed","body":"safe snapshot"},"content":[{"type":"text","text":"revised untrusted instructions"}]}}`)
+	if !bytes.Contains(upstream, []byte("revised untrusted instructions")) {
+		t.Fatal("divergent broker fixture lost its untrusted content")
+	}
+	response, err := frozenAcceptedIssueResponse(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(response, []byte("revised untrusted instructions")) || bytes.Contains(response, []byte(`"content"`)) {
+		t.Fatalf("frozen response exposed broker content: %s", response)
+	}
+	var reply struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  struct {
+			Issue struct {
+				Number uint64 `json:"number"`
+				Title  string `json:"title"`
+				Body   string `json:"body"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(response, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.JSONRPC != "2.0" || string(reply.ID) != "1" || reply.Result.Issue.Number != accepted.Snapshot.IssueNumber || reply.Result.Issue.Title != accepted.Snapshot.Title || reply.Result.Issue.Body != accepted.Snapshot.Body {
+		t.Fatalf("frozen response = %s", response)
 	}
 }
 
