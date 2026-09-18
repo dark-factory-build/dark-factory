@@ -142,7 +142,10 @@ function FixtureTour() {
   const githubAction = (request: GitHubConnectionBody) => {
     if (githubMode === null) return;
     if (request.action === "connect") setGithub(githubFixture("approval"));
-    else if (request.action === "confirm") setGithub(githubFixture("connected"));
+    else if (request.action === "confirm") {
+      setGithub({ pending: false, result: { state: "ok" } });
+      setTimeout(() => githubAction({ action: "refresh" }), 0);
+    }
     else if (request.action === "installations") setGithub({ pending: false, result: { state: "ok", status: { connection_id: "fixture", state: "connected", repositories: [] }, installations: { installations: githubInstallations, next_page: request.page === 1 ? 2 : undefined } } });
     else if (request.action === "repositories") setGithub({ pending: false, result: { state: "ok", status: { connection_id: "fixture", state: "connected", repositories: [] }, installations: { installations: githubInstallations }, repositories: { repositories: githubRepositories } } });
     else if (request.action === "disconnect") setGithub(githubFixture("disconnected"));
