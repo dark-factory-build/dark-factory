@@ -96,9 +96,16 @@ func (store *Store) stopRunTx(ctx context.Context, tx *writeTx, request TaskInte
 			return TaskIntervention{}, ErrUnauthorized
 		}
 	}
+	accepted, linked, err := intakeAcceptanceForTask(ctx, tx.connection, task.ID)
+	if err != nil {
+		return TaskIntervention{}, err
+	}
 	var spec NewTask
 	if successor != nil {
 		spec = NewTask{ID: successor.ID, IncarnationID: successor.IncarnationID, ProjectID: task.ProjectID, AssignedAgentID: task.AssignedAgentID, Title: "Direct instruction", Body: successor.Body, Priority: task.Priority}
+		if linked {
+			spec.RepositoryID = accepted.RepositoryID
+		}
 		if spec.ID == task.ID {
 			return TaskIntervention{}, ErrInvalidValue
 		}
@@ -127,8 +134,16 @@ func (store *Store) stopRunTx(ctx context.Context, tx *writeTx, request TaskInte
 		return existing, nil
 	}
 	if successor != nil {
+		if linked && accepted.WithdrawnAt != nil {
+			return TaskIntervention{}, ErrConflict
+		}
 		if _, err := insertTaskOnConnection(ctx, tx.connection, spec, at); err != nil {
 			return TaskIntervention{}, err
+		}
+		if linked {
+			if err := bindIntakeTask(ctx, tx.connection, spec.ID, accepted.ID); err != nil {
+				return TaskIntervention{}, err
+			}
 		}
 	}
 	if _, _, err := reserveTaskInterventionTx(ctx, tx, request, at); err != nil {
