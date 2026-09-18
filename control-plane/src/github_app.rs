@@ -6460,7 +6460,7 @@ fn pull_request_page(
         valid_exact_integer(pull.number).map_err(|_| OperationError::Unavailable)?;
         valid_sha(&pull.head.sha).map_err(|_| OperationError::Unavailable)?;
         valid_sha(&pull.base.sha).map_err(|_| OperationError::Unavailable)?;
-        valid_ref(&pull.base.name).map_err(|_| OperationError::Unavailable)?;
+        valid_text(&pull.base.name, 1, 4096, false).map_err(|_| OperationError::Unavailable)?;
         valid_text(&body, 0, 262_144, true).map_err(|_| OperationError::Unavailable)?;
         if request.pull_number.is_none() && pull.state != "open" {
             return Err(OperationError::Unavailable);
@@ -8770,6 +8770,17 @@ mod tests {
         assert_eq!(page.next_page, Some(2));
         assert_eq!(page.pull_requests[0].body, "Refs team/source#9");
         assert_eq!(page.pull_requests[0].base_ref, "release");
+        for branch in ["release+hotfix", "release/été", "release@next"] {
+            let mut pull = entry();
+            pull.base.name = branch.into();
+            assert_eq!(
+                pull_request_page(42, &request, vec![pull])
+                    .unwrap()
+                    .pull_requests[0]
+                    .base_ref,
+                branch
+            );
+        }
         request.page = 1000;
         assert!(matches!(
             pull_request_page(42, &request, vec![entry()]),
