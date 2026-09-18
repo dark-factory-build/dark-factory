@@ -144,6 +144,16 @@ export class RemoteManager {
     this.#changed();
   }
 
+  /** The name is this device's own: it is stored here and told to no factory. */
+  async rename(nodeId: string, label: string): Promise<void> {
+    const entry = this.#entries.get(nodeId);
+    const name = label.trim().slice(0, 32);
+    if (this.#closed || entry === undefined || name.length === 0) throw new SessionError("invalid_request");
+    entry.binding.label = name;
+    if (entry.binding.key !== undefined) await this.#store.put(entry.binding);
+    this.#changed();
+  }
+
   #sendPush(entry: Entry): void {
     const subscription = entry.binding.push;
     if (subscription === undefined || entry.status !== "ready") return;
@@ -213,7 +223,7 @@ export class RemoteManager {
     }
     const binding: RemoteBinding = {
       // A factory is named by the head of its node id: an invitation carries no
-      // label, and this console has no rename.
+      // label; rename() is how the person replaces it.
       nodeId,
       label: nodeId.slice(0, 8),
       relayOrigin: invitation.relay,

@@ -66,6 +66,9 @@ test("pairing through the relay persists the identity and reconnects on the cont
   assert.equal(binding.key.extractable, false, "a device identity is never exportable");
   assert.equal(binding.label, factory.node.slice(0, 8), "a factory is named by the head of its node id");
   assert.equal(parseTicket(binding.relayTicket).purpose, "control");
+  await manager.rename(factory.node, "  Garage  ");
+  assert.equal((await row(store, factory.node)).label, "Garage", "a rename is durable and local");
+  await assert.rejects(manager.rename(factory.node, "   "));
   const durable = await row(store, factory.node);
   assert.equal(durable.clientId, binding.clientId);
   assert.equal(durable.capabilities, ALL_CAPABILITIES);
@@ -521,7 +524,7 @@ test("the manager exposes the client's own one-shot APIs and adds no retry of it
   }
   assert.deepEqual(
     Object.getOwnPropertyNames(Object.getPrototypeOf(manager)).filter((name) => name !== "constructor").sort(),
-    ["bindings", "client", "close", "factories", "forget", "forgetDevice", "needsYou", "pair", "push", "select", "selected", "setPush", "start"],
+    ["bindings", "client", "close", "factories", "forget", "forgetDevice", "needsYou", "pair", "push", "rename", "select", "selected", "setPush", "start"],
   );
   manager.close();
 });
