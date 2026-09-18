@@ -61,6 +61,19 @@ func TestRetainedConfigRoundTripPreservesExactPublicationAuthority(t *testing.T)
 
 }
 
+func TestRetainedSourceReviewConfigRoundTripPreservesReceiptIdentity(t *testing.T) {
+	want := configFixture(t)
+	want.RetainedSourceReview = &SourceReview{TaskID: "task", ChangeID: "change", TaskWorkRevision: 3, ChangeRevision: 7, BaseCommit: "base", HeadCommit: "head", SourcePath: "/private/producer-change", GitDirectory: "/private/producer-repo/.git"}
+	encoded, err := EncodeConfig(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeConfig(encoded)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("source review config changed: %v", err)
+	}
+}
+
 // An orchestrator's config names no Change: its names and retained result
 // are empty, and a worker's may not be.
 func TestOrchestratorConfigCarriesNoChange(t *testing.T) {

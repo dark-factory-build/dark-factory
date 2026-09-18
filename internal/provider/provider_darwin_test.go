@@ -1562,6 +1562,51 @@ func TestCodexLaunchGrantsTheRepositoryGitDirectoryByRole(t *testing.T) {
 	}
 }
 
+func TestCodexLaunchGrantsOnlyAuthenticatedRetainedReviewPathsReadOnly(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderCodex)
+	owned, err := runtime.WithGitCommonDirectory("/private/reviewer/.git", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	granted, err := owned.WithRetainedSourceReview("/private/producer-change", "/private/producer-repo/.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := Build(requestFor(t, kernel.ProviderCodex, installation, granted, "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := ""
+	for _, argument := range launch.Argv() {
+		if strings.HasPrefix(argument, "permissions."+codexPermissionName(granted)+"=") {
+			policy = argument
+		}
+	}
+	for _, path := range []string{"/private/producer-change", "/private/producer-repo/.git"} {
+		if !strings.Contains(policy, tomlBasicString(path)+`="read"`) {
+			t.Fatalf("retained review path %q missing read grant: %q", path, policy)
+		}
+		if strings.Contains(policy, tomlBasicString(path)+`="write"`) {
+			t.Fatalf("retained review path %q writable: %q", path, policy)
+		}
+	}
+	for _, path := range []string{"/private/producer-repo", "/private/dark-factory/changes"} {
+		if strings.Contains(policy, tomlBasicString(path)+`="`) {
+			t.Fatalf("retained review grant widened to %q: %q", path, policy)
+		}
+	}
+	// The canonical layout shares the Git directory with the reviewer's own
+	// Change; the existing write grant remains the sole entry and is not
+	// duplicated as a second, conflicting TOML key.
+	shared, err := owned.WithRetainedSourceReview("/private/producer-change", "/private/reviewer/.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(requestFor(t, kernel.ProviderCodex, installation, shared, "", "")); err != nil {
+		t.Fatalf("shared canonical Git directory rejected: %v", err)
+	}
+}
+
 func TestBothProviderAssignmentsDistinguishOwnedCheckoutFromRetainedReview(t *testing.T) {
 	for name, prompt := range map[string]string{"codex": codexBootstrapPrompt, "claude": runner.ClaudeTaskLead} {
 		if !strings.Contains(prompt, "including corrections after send-back") || !strings.Contains(prompt, "attempt source is only for inspecting a settled retained Change") || !strings.Contains(prompt, "Never substitute another task or private Change path") {

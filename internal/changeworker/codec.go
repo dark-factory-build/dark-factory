@@ -75,10 +75,19 @@ type Config struct {
 	AttemptSocket string
 	// Retained is the Change to reopen instead of making a fresh worktree.
 	Retained *Result
+	// RetainedSourceReview is a daemon-authenticated exact source receipt for
+	// an independent Codex reviewer. It is absent for ordinary workers.
+	RetainedSourceReview *SourceReview
 	// ProviderTask selects and verifies the provider's closed delivery path.
 	// Shell seals it on fd 11 and Claude receives a terminal-safe prompt. It is
 	// empty for Codex, whose task remains in the daemon behind the attempt API.
 	ProviderTask []byte
+}
+
+type SourceReview struct {
+	TaskID, ChangeID                                 string
+	TaskWorkRevision, ChangeRevision                 uint64
+	BaseCommit, HeadCommit, SourcePath, GitDirectory string
 }
 
 func (Config) String() string   { return "Change worker config (private)" }
@@ -109,31 +118,43 @@ type resultWire struct {
 }
 
 type configWire struct {
-	Provider                 string       `json:"provider"`
-	Role                     string       `json:"role"`
-	Model                    string       `json:"model"`
-	ReasoningEffort          string       `json:"reasoning_effort"`
-	AgentID                  string       `json:"agent_id"`
-	TaskIncarnationID        string       `json:"task_incarnation_id"`
-	PreviousWorkingDirectory string       `json:"previous_working_directory,omitempty"`
-	RuntimePath              string       `json:"runtime_path"`
-	RuntimeIdentity          identityWire `json:"runtime_identity"`
-	GitExecutable            string       `json:"git_executable"`
-	FactoryctlExecutable     string       `json:"factoryctl_executable"`
-	ToolPath                 string       `json:"tool_path"`
-	ToolchainReadRoots       string       `json:"toolchain_read_roots,omitempty"`
-	LocalCILeaseDir          string       `json:"local_ci_lease_directory,omitempty"`
-	AccountHome              string       `json:"account_home"`
-	AccountConfigDir         string       `json:"account_config_dir"`
-	RepositoryRoot           string       `json:"repository_root"`
-	RepositoryIdentity       identityWire `json:"repository_identity"`
-	GitCommonDir             string       `json:"git_common_dir"`
-	Revision                 string       `json:"revision"`
-	ChangeParent             string       `json:"change_parent"`
-	FinalName                string       `json:"final_name"`
-	AttemptSocket            string       `json:"attempt_socket"`
-	Retained                 *resultWire  `json:"retained,omitempty"`
-	ProviderTask             []byte       `json:"provider_task"`
+	Provider                 string            `json:"provider"`
+	Role                     string            `json:"role"`
+	Model                    string            `json:"model"`
+	ReasoningEffort          string            `json:"reasoning_effort"`
+	AgentID                  string            `json:"agent_id"`
+	TaskIncarnationID        string            `json:"task_incarnation_id"`
+	PreviousWorkingDirectory string            `json:"previous_working_directory,omitempty"`
+	RuntimePath              string            `json:"runtime_path"`
+	RuntimeIdentity          identityWire      `json:"runtime_identity"`
+	GitExecutable            string            `json:"git_executable"`
+	FactoryctlExecutable     string            `json:"factoryctl_executable"`
+	ToolPath                 string            `json:"tool_path"`
+	ToolchainReadRoots       string            `json:"toolchain_read_roots,omitempty"`
+	LocalCILeaseDir          string            `json:"local_ci_lease_directory,omitempty"`
+	AccountHome              string            `json:"account_home"`
+	AccountConfigDir         string            `json:"account_config_dir"`
+	RepositoryRoot           string            `json:"repository_root"`
+	RepositoryIdentity       identityWire      `json:"repository_identity"`
+	GitCommonDir             string            `json:"git_common_dir"`
+	Revision                 string            `json:"revision"`
+	ChangeParent             string            `json:"change_parent"`
+	FinalName                string            `json:"final_name"`
+	AttemptSocket            string            `json:"attempt_socket"`
+	Retained                 *resultWire       `json:"retained,omitempty"`
+	RetainedSourceReview     *sourceReviewWire `json:"retained_source_review,omitempty"`
+	ProviderTask             []byte            `json:"provider_task"`
+}
+
+type sourceReviewWire struct {
+	TaskID           string `json:"task_id"`
+	ChangeID         string `json:"change_id"`
+	TaskWorkRevision uint64 `json:"task_work_revision"`
+	ChangeRevision   uint64 `json:"change_revision"`
+	BaseCommit       string `json:"base_commit"`
+	HeadCommit       string `json:"head_commit"`
+	SourcePath       string `json:"source_path"`
+	GitDirectory     string `json:"git_directory"`
 }
 
 func EncodeConfig(config Config) ([]byte, error) {
@@ -152,6 +173,10 @@ func EncodeConfig(config Config) ([]byte, error) {
 	if config.Retained != nil {
 		retained := resultToWire(*config.Retained)
 		wire.Retained = &retained
+	}
+	if config.RetainedSourceReview != nil {
+		r := config.RetainedSourceReview
+		wire.RetainedSourceReview = &sourceReviewWire{r.TaskID, r.ChangeID, r.TaskWorkRevision, r.ChangeRevision, r.BaseCommit, r.HeadCommit, r.SourcePath, r.GitDirectory}
 	}
 	return encodeJSON(wire, ConfigLimit)
 }
@@ -181,6 +206,11 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		}
 		retained = &result
 	}
+	var sourceReview *SourceReview
+	if wire.RetainedSourceReview != nil {
+		r := wire.RetainedSourceReview
+		sourceReview = &SourceReview{r.TaskID, r.ChangeID, r.TaskWorkRevision, r.ChangeRevision, r.BaseCommit, r.HeadCommit, r.SourcePath, r.GitDirectory}
+	}
 	config := Config{
 		Provider: providerKind, Role: role, Model: wire.Model, ReasoningEffort: wire.ReasoningEffort,
 		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
@@ -189,6 +219,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName,
 		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
+		RetainedSourceReview: sourceReview,
 	}
 	if err := validateConfig(config); err != nil {
 		return Config{}, err
@@ -238,6 +269,16 @@ func validateConfig(config Config) error {
 		if validateResult(*config.Retained) != nil {
 			return invalidContract(nil)
 		}
+	}
+	if config.RetainedSourceReview != nil && validateSourceReview(*config.RetainedSourceReview) != nil {
+		return invalidContract(nil)
+	}
+	return nil
+}
+
+func validateSourceReview(review SourceReview) error {
+	if !validText(review.TaskID, maximumSessionKeyPartBytes) || !validText(review.ChangeID, maximumSessionKeyPartBytes) || review.TaskWorkRevision == 0 || review.ChangeRevision == 0 || !validText(review.BaseCommit, maximumRevisionBytes) || !validText(review.HeadCommit, maximumRevisionBytes) || !validAbsolute(review.SourcePath, maximumLocatorBytes) || !validAbsolute(review.GitDirectory, maximumLocatorBytes) || filepath.Base(review.GitDirectory) != ".git" {
+		return ErrInvalidContract
 	}
 	return nil
 }
