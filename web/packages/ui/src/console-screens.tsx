@@ -17,7 +17,7 @@ function shortID(value: string): string {
 }
 
 /** The phone's floor: every agent as its own sprite, with what it is doing. */
-export function AgentStrip({ state }: { state: StateView | undefined }) {
+export function AgentStrip({ state, onAsk }: { state: StateView | undefined; onAsk?: (agentId: string) => void }) {
   return (
     <nav className="dfConsoleStrip" aria-label="Agents">
       <ul className="dfConsoleStrip__agents">
@@ -28,11 +28,19 @@ export function AgentStrip({ state }: { state: StateView | undefined }) {
         ) : (
           [...state.agents.values()].filter((agent) => !agent.archived).map((agent) => {
             const status = agentStatus(agent, state);
-            return (
-              <li key={agent.id} className={`dfConsoleStrip__agent dfConsoleStrip__agent--${status}`}>
+            const cell = (
+              <>
                 <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
                 <span className="dfConsoleStrip__agentName">{agent.name}</span>
                 <span className="dfConsoleStrip__agentPhase">{status === "needs-you" ? "! needs you" : status}</span>
+              </>
+            );
+            const className = `dfConsoleStrip__agent dfConsoleStrip__agent--${status}`;
+            return (
+              <li key={agent.id}>
+                {status === "needs-you" && onAsk !== undefined
+                  ? <button type="button" className={className} onClick={() => onAsk(agent.id)}>{cell}</button>
+                  : <span className={className}>{cell}</span>}
               </li>
             );
           })

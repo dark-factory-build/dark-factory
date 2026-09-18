@@ -307,11 +307,11 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         {install === "safari"
           ? "Tap Share in the toolbar, then Add to Home Screen."
           : "Tap Share at the end of the address bar, then Add to Home Screen."}
-        {" "}Open Dark Factory from the Home Screen: alerts only work there, and the app keeps its own pairing, apart from this tab.
+        {" "}Alerts only work in the app, and it pairs separately from this tab.
       </p>
       {held === undefined ? null : (
         <p className="dfRemote__prose">
-          Your invitation is waiting and lasts five minutes. Copy it first, install, then paste it under SETUP in the app.
+          Copy your invitation first, then paste it under SETUP in the app. It lasts five minutes.
         </p>
       )}
       <div className="dfRemote__actions">
@@ -347,7 +347,6 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   const setup = (
     <div id="dfRemoteSetup" className="dfRemote__setup">
         <section className="dfFactoryConsole__section dfRemote__pair" aria-label="Pair a factory">
-          <div className="dfFactoryConsole__sectionHeading"><h2>PAIR A FACTORY</h2></div>
           {pairing.phase === "pairing" ? (
             <p className="dfRemote__pairing" role="status">PAIRING FACTORY…</p>
           ) : null}
@@ -390,7 +389,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               disabled={!online || pairing.phase === "pairing"}
               onClick={() => { setPasting(true); setPairing(IDLE); }}
             >
-              PAIR A FACTORY
+              {factories.length === 0 ? "PAIR A FACTORY" : "PAIR ANOTHER FACTORY"}
             </button>
           )}
         </section>
@@ -399,12 +398,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           <section className="dfFactoryConsole__section dfRemote__none" aria-label="No factories">
             <div className="dfFactoryConsole__sectionHeading"><h2>NO FACTORY ON THIS DEVICE</h2></div>
             <p className="dfRemote__prose">
-              On a paired desktop, open the factory console and choose PAIR A PHONE, then scan the
-              code or open its link on this phone.
-            </p>
-            <p className="dfRemote__prose">
-              You can also paste that link above. The link works once and only on the device that
-              opens it.
+              In the desktop console choose PAIR A PHONE and scan the code on this phone, or paste
+              its link above. The link works once.
             </p>
           </section>
         ) : null}
@@ -444,21 +439,16 @@ export function RemoteApp(props: RemoteAppProps = {}) {
             </div>
             {alerts.phase === "failed" ? <p className="dfRemote__pairError" role="alert">{alerts.copy}</p> : null}
             {!alertsOn ? (
-              <>
-                <p className="dfRemote__prose">Get a notification on this device when a factory needs you.</p>
-                <button type="button" className="dfRemote__alertsOn" disabled={!online || alerts.phase === "working"} onClick={enableAlerts}>
-                  {alerts.phase === "working" ? "TURNING ON…" : "ENABLE ALERTS"}
-                </button>
-              </>
-            ) : (
-              <p className="dfRemote__prose">This device is woken when any paired factory needs you.</p>
-            )}
+              <button type="button" className="dfRemote__alertsOn" disabled={!online || alerts.phase === "working"} onClick={enableAlerts}>
+                {alerts.phase === "working" ? "TURNING ON…" : "ENABLE ALERTS"}
+              </button>
+            ) : null}
           </section>
         )}
 
         {selected === undefined ? null : (
           <div className="dfFactoryConsole__section dfRemote__rename">
-            <label htmlFor="dfRemoteName">FACTORY NAME ON THIS DEVICE</label>
+            <label htmlFor="dfRemoteName">NAME ON THIS DEVICE</label>
             <input id="dfRemoteName" className="dfRemote__nameText" value={name ?? selected.label} maxLength={32} onChange={(event) => setName(event.currentTarget.value)} />
             <button
               type="button"
@@ -508,8 +498,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           <a className="dfRemote__barName" href="#dfRemoteTop">
             <span aria-hidden="true">{selected === undefined ? "·" : REMOTE_STATUS_GLYPH[selected.status]}</span> {selected?.label ?? "DARK FACTORY"}
           </a>
-          {needsYou.length === 0 ? null : <a className="dfRemote__barAlert" href="#dfRemoteTop">! {needsYou.length} NEEDS YOU</a>}
-          <a href="#dfRemoteWork">WORK</a>
+          {needsYou.length === 0 ? null : <a className="dfRemote__barAlert" href="#dfRemoteTop" aria-label={`${needsYou.length} needs you`}>! {needsYou.length}</a>}
           <a href="#dfRemoteSetup">SETUP</a>
         </nav>
         {online ? null : (
@@ -527,18 +516,16 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         {factories.length === 0 ? null : (
           <section className="dfFactoryConsole__section dfRemote__needsYou" aria-label="NEEDS YOU">
             {needsYou.length === 0 ? (
-              <p className="dfFactoryConsole__empty">all quiet — nothing needs you</p>
+              <p className="dfFactoryConsole__empty">nothing needs you</p>
             ) : (
               <ul className="dfFactoryConsole__list">
                 {needsYou.map((item) => (
                   <li className="dfFactoryConsole__card dfRemote__question" key={`${item.nodeId}:${item.request.id}`}>
                     <div className="dfFactoryConsole__cardTitle">
                       <strong>{entityName(byNode.get(item.nodeId)?.state?.agents, item.request.agent_id, "AGENT")} asks</strong>
-                      <span className="dfRemote__tag">{item.label}</span>
+                      {factories.length < 2 ? null : <span className="dfRemote__tag">{item.label}</span>}
                     </div>
-                    <p>
-                      {entityName(byNode.get(item.nodeId)?.state?.projects, item.request.project_id, "project")} · TASK {shortRemoteID(item.request.task_id)}
-                    </p>
+                    <p>{entityName(byNode.get(item.nodeId)?.state?.tasks, item.request.task_id, "TASK")}</p>
                     <button
                       type="button"
                       className="dfRemote__answer"
@@ -557,7 +544,14 @@ export function RemoteApp(props: RemoteAppProps = {}) {
 
         {selected === undefined ? null : (
           <>
-            <AgentStrip state={selected.state} />
+            <AgentStrip
+              state={selected.state}
+              // Offered only when it could work, like every other control here.
+              onAsk={!actionable(selected.nodeId) || working ? undefined : (agentId) => {
+                const item = needsYou.find((entry) => entry.nodeId === selected.nodeId && entry.request.agent_id === agentId);
+                if (item !== undefined) open(item.nodeId, item.label, item.request);
+              }}
+            />
             <ProjectsSection state={selected.state} />
           </>
         )}
@@ -577,8 +571,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               CLOSE
             </button>
             <div className="dfFactoryConsole__sectionHeading">
-              <h2>{detail.scope.label}</h2>
-              <span>{detail.phase === "replying" ? "REPLYING" : detail.phase === "cancelling" ? "CANCELLING" : detail.phase.toUpperCase()}</span>
+              <h2>{entityName(byNode.get(detail.scope.nodeId)?.state?.agents, detail.request.agent_id, "AGENT")} asks</h2>
             </div>
             {detail.notice === undefined ? null : (
               <p className="dfRemote__notice" role="status">{detail.notice}</p>
@@ -588,7 +581,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               <>
                 <p className="dfRemote__questionText">{detail.detail.question}</p>
                 <AnswerControls surface="remote" options={detail.detail.options} canReply={detail.detail.canReply} reply={detail.reply} replyMaxBytes={detail.detail.replyMaxBytes} busy={busy(detail)} disabled={!actionable(detail.scope.nodeId)} onReplyChange={changeReply} onReply={reply} submitLabel="REPLY" submittingLabel="REPLYING…" />
-                {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
+                {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "READ-ONLY: ITS AGENT IS NOT RUNNING." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
                 {detail.detail.cancelRun === null ? null : cancelPhrase === undefined ? (
                   <button
                     type="button"

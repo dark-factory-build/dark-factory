@@ -499,6 +499,11 @@
 }
 
 .dfConsoleStrip__agent {
+  width: 100%;
+  height: 100%;
+  font: inherit;
+  color: inherit;
+  text-transform: none;
   display: grid;
   justify-items: center;
   gap: 0.25rem;
@@ -1064,7 +1069,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   text-decoration: none;
 }
 
-.dfRemote__bar .dfRemote__barName { flex: 1 1 auto; min-width: 0; padding-left: 0; gap: 0.5rem; color: var(--df-console-text); overflow-wrap: anywhere; }
+.dfRemote__bar .dfRemote__barName { flex: 1 1 auto; min-width: 0; padding-left: 0; gap: 0.5rem; color: var(--df-console-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dfRemote__barName span { color: var(--df-console-accent); }
 .dfRemote__bar .dfRemote__barAlert { color: var(--df-console-warning); }
 .dfRemote__openSafari { color: var(--df-console-text); border: 1px solid var(--df-console-rule); }

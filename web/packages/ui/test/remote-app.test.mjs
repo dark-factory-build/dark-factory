@@ -260,7 +260,7 @@ test("NEEDS YOU aggregates both factories and tags each item with its label", as
     assert.match(aggregate, /Harbour One asks/);
     assert.match(aggregate, /South Shop/);
     assert.equal(buttons(renderer, "dfRemote__answer").length, 2, "each question is listed once");
-    assert.match(sectionText(renderer, "dfRemote__bar"), /! 2 NEEDS YOU/);
+    assert.match(sectionText(renderer, "dfRemote__bar"), /! 2/);
   });
 });
 
@@ -338,7 +338,7 @@ test("read-only questions keep their suggested answers disabled", async () => {
     assert.ok(suggested !== undefined);
     assert.equal(suggested.props.disabled, true);
     assert.equal(renderer.root.findAllByProps({ className: "dfRemote__replyText" }).length, 0);
-    assert.match(sectionText(renderer, "dfRemote__detail"), /THIS OPEN DECISION IS READ-ONLY IN THIS VIEW\./);
+    assert.match(sectionText(renderer, "dfRemote__detail"), /READ-ONLY: ITS AGENT IS NOT RUNNING\./);
   });
 });
 
@@ -565,6 +565,19 @@ test("a replaced session cannot refresh an old reply or cancellation", async () 
       assert.equal(action === "reply" ? replacement.calls.reply.length : replacement.calls.cancel.length, 0, `${action} is never replayed`);
     });
   }
+});
+
+test("the asking agent's sprite opens its question, and only while that could work", async () => {
+  const session = fakeSession({ detail: () => detailFor(northRequest) });
+  const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
+  await withApp(props(manager), async (renderer) => {
+    await act(async () => { button(renderer, "dfConsoleStrip__agent--needs-you").props.onClick(); });
+    await settle();
+    assert.match(sectionText(renderer, "dfRemote__detail"), /Proceed with the migration\?/);
+  });
+  await withApp(props(fakeManager([northFactory({ status: "offline" })])), (renderer) => {
+    assert.equal(buttons(renderer, "dfConsoleStrip__agent--needs-you").length, 0);
+  });
 });
 
 test("ANSWER opens one question at a time", async () => {
