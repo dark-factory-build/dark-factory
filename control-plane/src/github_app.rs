@@ -1021,6 +1021,11 @@ impl AppAuthority {
         self.0.verify().await
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn installation_url(&self) -> Result<String, Error> {
+        self.0.identity().await?.installation_url()
+    }
+
     pub(crate) const fn permission_revision(&self) -> &'static str {
         PERMISSION_REVISION
     }
@@ -4136,10 +4141,25 @@ impl RepositoryToken {
 
 /// The App the private key belongs to, which is all readiness can prove without
 /// naming a repository.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
 struct AppIdentity {
     id: i64,
+    #[serde(default)]
+    slug: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl AppIdentity {
+    fn installation_url(&self) -> Result<String, Error> {
+        if self.id <= 0 || !valid_path_segment(&self.slug, 100, false) {
+            return Err(Error::Unavailable);
+        }
+        Ok(format!(
+            "https://github.com/apps/{}/installations/new",
+            self.slug
+        ))
+    }
 }
 
 fn valid_path_segment(value: &str, max: usize, allow_dot_underscore: bool) -> bool {
@@ -4171,6 +4191,10 @@ fn jwt_unsigned(app_id: i64, now: i64) -> String {
 #[cfg(target_arch = "wasm32")]
 impl Authority {
     async fn verify(&self) -> Result<(), Error> {
+        self.identity().await.map(|_| ())
+    }
+
+    async fn identity(&self) -> Result<AppIdentity, Error> {
         // Readiness is an App fact, not a repository fact. There is no configured
         // repository to look an installation up by, and inventing one would make
         // readiness answer a narrower question than the App can serve. Prove the
@@ -4185,7 +4209,7 @@ impl Authority {
         let app: AppIdentity =
             github_json_as_app("https://api.github.com/app", jwt.as_str()).await?;
         (app.id == self.app_id)
-            .then_some(())
+            .then_some(app)
             .ok_or(Error::Unavailable)
     }
 
@@ -11359,4 +11383,42 @@ mod tests {
             Err(OperationError::Refused(RefusalReason::MergePreconditions))
         ));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn installation_route_uses_only_a_valid_app_slug() {
+    let app = AppIdentity {
+        id: 42,
+        slug: "factory-maintainer".into(),
+    };
+    assert_eq!(
+        app.installation_url().unwrap(),
+        "https://github.com/apps/factory-maintainer/installations/new"
+    );
+    for slug in [
+        "",
+        "../other",
+        "owner/app",
+        "app?redirect=evil",
+        "app#evil",
+        "app\n",
+    ] {
+        assert!(
+            AppIdentity {
+                id: 42,
+                slug: slug.into()
+            }
+            .installation_url()
+            .is_err()
+        );
+    }
+    assert!(
+        AppIdentity {
+            id: 0,
+            slug: "factory".into()
+        }
+        .installation_url()
+        .is_err()
+    );
 }

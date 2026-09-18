@@ -12,6 +12,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 test('two principals: callback, pagination, refresh, replay, grants and revocation', async () => {
   const persistence = await mkdtemp(join(tmpdir(), 'df-connections-'));
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  let wrongApp = false;
   let revoked = false, removed = false, push = true, bobWrite = false, refreshed = 0, exchanged = 0;
   let unavailable = '', unavailableStatus = 503, sourceVisible = true, wrongGrant = false, wrongInstallation = false, replacedPath = false, repositoryReads = 0, sourceReads = 0;
   const permissionSet = { contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' };
@@ -25,6 +26,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
       const url = new URL(request.url);
       assert.ok(['github.com', 'api.github.com'].includes(url.hostname));
       if (url.pathname === unavailable) return json({}, unavailableStatus);
+      if (url.pathname === '/app') return json({ id: wrongApp ? 999 : 5678, slug: 'fixture-maintainer' });
       if (url.pathname === '/login/oauth/access_token') {
         assert.equal(request.headers.get('accept'), 'application/json');
         const body = await request.json();
@@ -129,7 +131,12 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(refreshed, 1, 'concurrent requests serialize one refresh');
     assert.equal((await send(`${alice.path}/mcp`, 'POST', {}, bob.credential)).status, 401);
     assert.equal((await send(`${alice.path}/mcp`, 'POST', {})).status, 401);
-    assert.deepEqual(await (await send(`${alice.path}/installations`, 'GET', undefined, alice.credential)).json(), { installations: [], next_page: 2 });
+    assert.deepEqual(await (await send(`${alice.path}/installations`, 'GET', undefined, alice.credential)).json(), { installations: [], next_page: 2, installation_url: 'https://github.com/apps/fixture-maintainer/installations/new' });
+    wrongApp = true;
+    assert.equal((await send(`${alice.path}/installations`, 'GET', undefined, alice.credential)).status, 503, 'installation link must belong to the configured App');
+    wrongApp = false; unavailable = '/app';
+    assert.equal((await send(`${alice.path}/installations`, 'GET', undefined, alice.credential)).status, 503, 'unavailable App identity is not an empty installation list');
+    unavailable = '';
     const second = await (await send(`${alice.path}/installations?page=2`, 'GET', undefined, alice.credential)).json();
     assert.equal(second.installations[0].id, 7);
     assert.equal(second.installations[0].account.type, 'Organization');
