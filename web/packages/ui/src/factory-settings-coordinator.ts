@@ -47,6 +47,7 @@ export class FactorySettingsCoordinator {
   #repositoryMutationErrors = new Set<string>();
   #github: GitHubConnectionResult | undefined;
   #githubPending = false;
+  #githubStatusQueued = false;
   #githubError: string | undefined;
 
   constructor(owner: SettingsOwner) {
@@ -85,7 +86,11 @@ export class FactorySettingsCoordinator {
 
   async githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> {
     const session = this.#owner.session();
-    if (!this.#owner.ready() || session === undefined || this.#githubPending) return;
+    if (!this.#owner.ready() || session === undefined) return;
+    if (this.#githubPending) {
+      if (request.action === "status") this.#githubStatusQueued = true;
+      return;
+    }
     const generation = this.#owner.generation();
     this.#githubPending = true;
     this.#owner.publish();
@@ -117,6 +122,11 @@ export class FactorySettingsCoordinator {
       if (this.#owner.current(generation)) this.#githubPending = false;
     }
     this.#owner.publish();
+    if (this.#githubStatusQueued && request.action !== "status") {
+      this.#githubStatusQueued = false;
+      await this.githubConnection({ action: "status" });
+      return;
+    }
     if (request.action === "confirm" && this.#github?.state === "ok" || (request.action === "refresh" || request.action === "status") && this.#github?.status?.state === "connected") {
       if (request.action === "confirm") await this.githubConnection({ action: "refresh" });
       else await this.githubConnection({ action: "installations", page: 1 });

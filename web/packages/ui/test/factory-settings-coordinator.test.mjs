@@ -126,3 +126,37 @@ test("reopening settings reloads installations from page one", async () => {
   assert.deepEqual(calls, [{ action: "status" }, { action: "installations", page: 1 }]);
   assert.equal(coordinator.github.result.installations.installations.length, 0);
 });
+
+test("reopening settings queues status behind a pending installation page", async () => {
+  const calls = [];
+  let release;
+  let installationRequest = 0;
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request);
+      if (request.action === "status") return { state: "ok", status: { connection_id: "same", state: "connected", repositories: [] } };
+      if (request.action === "installations") {
+        installationRequest += 1;
+        if (installationRequest === 1) return await new Promise((resolve) => { release = resolve; });
+        return { state: "ok", installations: { installations: [{ id: 9, account: { id: 10, login: "page-one" }, suspended_at: null, eligibility: "available" }], next_page: undefined } };
+      }
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  const first = coordinator.githubConnection({ action: "status" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await coordinator.githubConnection({ action: "status" });
+  release({ state: "ok", installations: { installations: [{ id: 8, account: { id: 9, login: "page-two" }, suspended_at: null, eligibility: "available" }], next_page: 3 } });
+  await first;
+  assert.deepEqual(calls.map(({ action, page }) => page === undefined ? { action } : { action, page }), [
+    { action: "status" },
+    { action: "installations", page: 1 },
+    { action: "status" },
+    { action: "installations", page: 1 },
+  ]);
+  assert.equal(coordinator.github.result.installations.installations[0].account.login, "page-one");
+});
