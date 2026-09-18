@@ -256,7 +256,7 @@ def managed_tick(home, factoryctl):
                     status = 'unavailable'
                 next_page, tasks = reply.get('next_page'), reply.get('imported_tasks', [])
                 next_cursor = reply.get('acceptance_cursor', '')
-                if not isinstance(next_cursor, str) or (next_cursor and (len(next_cursor) != 32 or any(c not in '0123456789abcdef' for c in next_cursor))):
+                if type(reply.get('acceptance_progress', False)) is not bool or not isinstance(next_cursor, str) or (next_cursor and (len(next_cursor) != 32 or any(c not in '0123456789abcdef' for c in next_cursor))):
                     status = 'invalid'
                 if status in ('ok', 'paused') and ((next_page is not None and (type(next_page) is not int or not page < next_page <= 1000)) or not isinstance(tasks, list) or len(tasks) > 200 or any(not isinstance(task, str) or len(task) != 32 or any(c not in '0123456789abcdef' for c in task) for task in tasks)):
                     status = 'invalid'
@@ -267,7 +267,13 @@ def managed_tick(home, factoryctl):
                 else:
                     error = status
                     record.update(next_due=now + min(interval, 60), error=status, state='error')
-                # A lost response keeps the page for the daemon's idempotent
+                    if status in ('unavailable', 'denied', 'conflict') and reply.get('acceptance_progress') is True:
+                        record.update(acceptance_cursor=next_cursor, next_due=now + 5)
+                        if isinstance(tasks, list) and len(tasks) <= 200 and all(isinstance(task, str) and len(task) == 32 and all(c in '0123456789abcdef' for c in task) for task in tasks):
+                            record['imported_tasks'] = len(tasks)
+                            imported += len(tasks)
+                # A confirmed partial response advances only receipt scanning; the
+                # source error stays visible. A lost response keeps the page for the daemon's idempotent
                 # acceptance/import path. Never infer a task from a timeout.
                 atomic_json(state / 'journal.json', journal)
         if error not in ('', 'denied', 'unavailable', 'invalid', 'stale', 'conflict', 'paused', 'overflow'):
