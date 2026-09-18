@@ -57,6 +57,25 @@ func (authority *gitAuthority) sourceIdentity(ctx context.Context) (RepositorySo
 		}
 		values[i] = strings.TrimSuffix(value, "\x00")
 	}
+	// Git expands insteadOf/pushInsteadOf before transport. Bind the effective
+	// destinations, so a later local rewrite cannot silently retarget work.
+	if values[0] != "" {
+		for i := range values {
+			arguments := []string{"-C", authority.repositoryRoot, "remote", "get-url", "--all"}
+			if i == 1 {
+				arguments = append(arguments, "--push")
+			}
+			output, err := authority.succeed(ctx, maxGitSelectionOutput, append(arguments, "origin")...)
+			if err != nil {
+				return RepositorySourceIdentity{}, err
+			}
+			value := string(output)
+			if !strings.HasSuffix(value, "\n") || strings.Count(value, "\n") != 1 || strings.ContainsAny(value, "\x00\r") {
+				return RepositorySourceIdentity{}, &ValidationError{Reason: "origin must have one effective fetch and publication target"}
+			}
+			values[i] = strings.TrimSuffix(value, "\n")
+		}
+	}
 	digest, publication, err := remoteSourceDigest(values[0], values[1])
 	if err != nil {
 		return RepositorySourceIdentity{}, err
