@@ -181,6 +181,10 @@ func parseCredential(id, secret string) (Credential, error) {
 	return Credential{id: id, secret: secret}, nil
 }
 func (client *Client) request(ctx context.Context, credential Credential, method, path string, input, output any) error {
+	return client.requestBounded(ctx, credential, method, path, input, output, 1<<20)
+}
+
+func (client *Client) requestBounded(ctx context.Context, credential Credential, method, path string, input, output any, maximum int64) error {
 	if path != prefix {
 		if _, err := parseCredential(credential.id, credential.secret); err != nil {
 			return ErrDenied
@@ -214,9 +218,8 @@ func (client *Client) request(ctx context.Context, credential Credential, method
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return ErrUnavailable
 	}
-	const maximum = 1 << 20
 	data, err := io.ReadAll(io.LimitReader(response.Body, maximum+1))
-	if err != nil || len(data) > maximum {
+	if err != nil || int64(len(data)) > maximum {
 		return ErrUnavailable
 	}
 	if !json.Valid(data) {
