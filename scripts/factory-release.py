@@ -63,14 +63,15 @@ def run(argv, timeout=60, env=None):
     return stdout
 
 
-SECRET = re.compile(r"(?i)(authorization|bearer|api[_-]?key|password|token|secret)(\W{1,4})(?:bearer\s+)?\S+|\b(gh[pousr]_|github_pat_)\w+")
+AUTHORIZATION = re.compile(r"(?i)(authorization\W{1,4})[^\r\n]+")
+SECRET = re.compile(r"(?i)(bearer|api[_-]?key|password|token|secret)(\W{1,4})\S+|\b(gh[pousr]_|github_pat_)\w+")
 
 
 def failure_tail(stderr):
     # Hooks may write credentials or private task text to stderr, and receipts
     # are durable: keep only a bounded, single-line tail with labelled values
     # and GitHub tokens starred and the operator's home shortened.
-    text = SECRET.sub(lambda match: (match.group(1) or "") + (match.group(2) or "") + "***", stderr.replace(str(Path.home()), "~"))
+    text = SECRET.sub(lambda match: (match.group(1) or "") + (match.group(2) or "") + "***", AUTHORIZATION.sub(r"\1***", stderr.replace(str(Path.home()), "~")))
     return " ".join(re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text).split())[-2000:]
 
 

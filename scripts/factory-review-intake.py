@@ -545,7 +545,7 @@ def run_locked(config, path, journal, journal_path):
                 # The body still describes a predecessor head. A review would
                 # only block on it, so wake the overseer and wait for the body.
                 # One wake per distinct body: a rewrite that still omits the head wakes again.
-                followup = review_followup(config, operation, "stale-body:" + hashlib.sha256(pr["body"].encode()).hexdigest()[:8])
+                followup = review_followup(config, operation, "stale-body:" + hashlib.sha256(pr["body"].encode()).hexdigest())
                 if intake.task_state(config, followup) is None:
                     intake.enqueue(config, followup)
                     messages.append("woke PR #" + str(pr["number"]) + " stale body")
