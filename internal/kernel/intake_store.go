@@ -436,6 +436,15 @@ func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSou
 		}
 		return existing, nil
 	}
+	// Distinct receipts need an unambiguous order. Exact-content retries above
+	// replay even after clock rollback; a new snapshot waits for a later tick.
+	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, snapshot.GitHubRepositoryID, snapshot.IssueNumber, snapshot.NodeID, source.ProjectID, source.TargetRepositoryID)
+	if err != nil {
+		return IntakeAcceptance{}, tx.Rollback(err)
+	}
+	if found && at.Int64() <= latest.CreatedAt.Int64() {
+		return IntakeAcceptance{}, tx.Rollback(ErrRevisionConflict)
+	}
 	bodyHash := snapshot.BodyHash()
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_acceptances(`+intakeAcceptanceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`, source.GitHubRepositoryName, id.Bytes(), int64(snapshot.GitHubRepositoryID), int64(snapshot.IssueNumber), snapshot.NodeID, snapshot.Title, snapshot.Body, bodyHash[:], source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), nullableAgentID(source.OverseerAgentID), task.Bytes(), incarnation.Bytes(), at.Int64()); err != nil {
 		return IntakeAcceptance{}, tx.Rollback(err)

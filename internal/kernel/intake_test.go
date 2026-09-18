@@ -276,6 +276,14 @@ func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *
 	}
 	newerSnapshot := older
 	newerSnapshot.Body = "newer reviewed body"
+	for _, timestamp := range []int64{4, 3} {
+		if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, newerSnapshot, mustTime(t, timestamp)); !errors.Is(err, ErrRevisionConflict) {
+			t.Fatalf("distinct acceptance at non-increasing time %d: %v", timestamp, err)
+		}
+	}
+	if replay, err := store.AcceptIntakeSnapshot(ctx, source.ID, older, mustTime(t, 3)); err != nil || replay.ID != first.ID {
+		t.Fatalf("exact acceptance retry with earlier time: %+v %v", replay, err)
+	}
 	newer, err := store.AcceptIntakeSnapshot(ctx, source.ID, newerSnapshot, mustTime(t, 5))
 	if err != nil {
 		t.Fatal(err)
