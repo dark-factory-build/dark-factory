@@ -344,6 +344,10 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			_, err := client.EnqueueTask(context.Background(), EnqueueTaskInput{ID: id('3'), ProjectID: id('1'), AssignedAgentID: "", IncarnationID: id('4'), Title: "task", Body: "any eligible worker"})
 			return err
 		}},
+		{name: "content create", response: mutationResponse(), request: `{"method":"content_create","params":{"id":"` + id('6') + `","project_id":"` + id('1') + `","kind":"procedure","title":"procedure","description":"short","body":"steps","source_references":"docs"}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.ContentCreate(context.Background(), ContentInput{ID: id('6'), ProjectID: id('1'), Kind: "procedure", Title: "procedure", Description: "short", Body: "steps", SourceReferences: "docs"})
+			return err
+		}},
 		{name: "set dispatch", response: mutationResponse(), request: `{"method":"set_dispatch","params":{"expected_revision":3,"enabled":true}}`, invoke: func(client *OperatorClient) error {
 			_, err := client.SetDispatch(context.Background(), 3, true)
 			return err
@@ -397,9 +401,10 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 	attemptBearer := testCredential('A')
 	operatorBearer := testCredential('O')
 	tests := []struct {
-		name    string
-		request string
-		invoke  func(*AttemptClient) error
+		name     string
+		request  string
+		response string
+		invoke   func(*AttemptClient) error
 	}{
 		{name: "succeed", request: `{"method":"succeed","params":{"result":"result"}}`, invoke: func(client *AttemptClient) error {
 			_, err := client.Succeed(context.Background(), "result")
@@ -425,6 +430,14 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 			_, err := client.SendBack(context.Background(), SendBackInput{TaskID: "0123456789abcdef0123456789abcdef", Note: "private-note-sentinel"})
 			return err
 		}},
+		{name: "content read", request: `{"method":"attempt_content_read","params":{"id":"` + id('6') + `","revision":1}}`, response: successResponse(`{"id":"` + id('6') + `","project_id":"` + id('1') + `","kind":"procedure","title":"procedure","revision":1}`), invoke: func(client *AttemptClient) error {
+			_, err := client.ContentRead(context.Background(), ContentReadInput{ID: id('6'), Revision: 1})
+			return err
+		}},
+		{name: "content body", request: `{"method":"attempt_content_body","params":{"id":"` + id('6') + `","revision":1,"offset":0,"limit":32}}`, response: successResponse(`{"id":"` + id('6') + `","revision":1,"body":"steps","complete":true}`), invoke: func(client *AttemptClient) error {
+			_, err := client.ContentBody(context.Background(), ContentBodyInput{ID: id('6'), Revision: 1, Limit: 32})
+			return err
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -432,7 +445,11 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 				if wireOutcomeRequest(request) {
 					return writeTestOutcomeResponse(connection, wireAttemptDomain, mutationResponse())
 				}
-				return writeTestResponse(connection, wireAttemptDomain, mutationResponse())
+				response := test.response
+				if response == "" {
+					response = mutationResponse()
+				}
+				return writeTestResponse(connection, wireAttemptDomain, response)
 			})
 			operatorPath := filepath.Join(fixture.directory, "operator.token")
 			writeTestToken(t, operatorPath, operatorBearer)
@@ -449,7 +466,7 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 			if encoded != test.request {
 				t.Fatalf("attempt request = %s, want %s", encoded, test.request)
 			}
-			if strings.Contains(encoded, `"id"`) || strings.Contains(encoded, `"code"`) || strings.Contains(encoded, string(operatorBearer[:])) {
+			if (!strings.HasPrefix(test.name, "content") && (strings.Contains(encoded, `"id"`) || strings.Contains(encoded, `"code"`))) || strings.Contains(encoded, string(operatorBearer[:])) {
 				t.Fatalf("attempt request widened scope: %s", encoded)
 			}
 			fixture.wait(t)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
@@ -39,6 +40,13 @@ type Daemon struct {
 	// scheduledRun is a package-test-only seam for the scheduler's terminal
 	// completion reread. Production reads from the concrete Store.
 	scheduledRun func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	// successSource* are package-test-only seams for failure-injection coverage;
+	// production source validation always reads the concrete Store.
+	successSourceRun      func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	successSourceChange   func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
+	successSourceProject  func(context.Context, kernel.ProjectID) (kernel.Project, bool, error)
+	beforeSuccessProposal func()
+	successSourceInspect  func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
 
 	browserMu          sync.Mutex
 	browserLifecycleMu sync.Mutex
@@ -246,6 +254,10 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.overseerInterruptWorker(ctx, call)
 	case api.CallOverseerReplyHuman:
 		return daemon.overseerReplyHuman(ctx, call)
+	case api.CallContentCreate, api.CallContentRevise, api.CallContentDeprecate, api.CallContentList, api.CallContentRead, api.CallContentBody, api.CallContentEvidence, api.CallContentAttach, api.CallContentEvidenceList, api.CallContentAttachments:
+		return daemon.content(ctx, call)
+	case api.CallOutcomeWrite, api.CallOutcomeRead, api.CallOutcomeList:
+		return daemon.outcomes(ctx, call)
 	case api.CallWebStatus:
 		status, err := daemon.WebStatus(ctx)
 		if err != nil {
@@ -354,6 +366,32 @@ func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply
 		for _, resource := range recovery.Artifacts {
 			if resource.Path != "" {
 				value.ArtifactPaths = append(value.ArtifactPaths, resource.Path)
+			}
+		}
+		value.Disposition, value.OverseerNotification, value.LastProgressAtMs = recovery.Disposition(), string(recovery.OverseerNotification), recovery.LastProgressAt.Int64()
+		if recovery.HumanRequest != nil {
+			value.HumanRequestID = recovery.HumanRequest.String()
+		}
+		if recovery.Overseer != nil {
+			value.OverseerAgentID = recovery.Overseer.String()
+		}
+		if recovery.OverseerTask != nil {
+			value.OverseerTaskID, value.OverseerTaskStatus, value.OverseerTaskTitle = recovery.OverseerTask.ID.String(), recovery.OverseerTask.Status.String(), recovery.OverseerTask.Title
+		}
+		if recovery.Change != nil && recovery.Change.HeadCommit != nil {
+			value.ChangeHeadCommit = hex.EncodeToString(recovery.Change.HeadCommit.Bytes())
+		}
+		if run := recovery.Run; run != nil {
+			if run.RunningAt != nil && run.TerminalAt != nil {
+				value.RunRunningMs = run.TerminalAt.Int64() - run.RunningAt.Int64()
+			}
+			if exit := run.ProviderExit; exit != nil {
+				value.RunProviderExit = "absent"
+				if code, ok := exit.Code(); ok {
+					value.RunProviderExit = fmt.Sprintf("code %d", code)
+				} else if signal, ok := exit.Signal(); ok {
+					value.RunProviderExit = fmt.Sprintf("signal %d", signal)
+				}
 			}
 		}
 	}
@@ -986,7 +1024,10 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
+	spec, err := newTaskSpec(id, projectID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, false); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -996,6 +1037,23 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	}
 	daemon.notifyScheduler()
 	return daemon.mutation(ctx, task.Revision)
+}
+
+func newTaskSpec(id kernel.TaskID, projectID kernel.ProjectID, agentID kernel.AgentID, incarnationID kernel.IncarnationID, title, body string, priority int64, prerequisites []api.TaskPrerequisiteInput, paths []string) (kernel.NewTask, error) {
+	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: title, Body: body, Priority: priority, ConflictPaths: append([]string(nil), paths...)}
+	spec.Prerequisites = make([]kernel.TaskPrerequisite, 0, len(prerequisites))
+	for _, input := range prerequisites {
+		taskID, err := parseTaskID(input.TaskID)
+		if err != nil {
+			return kernel.NewTask{}, err
+		}
+		workRevision, err := kernel.NewRevision(int64(input.WorkRevision))
+		if err != nil {
+			return kernel.NewTask{}, err
+		}
+		spec.Prerequisites = append(spec.Prerequisites, kernel.TaskPrerequisite{TaskID: taskID, WorkRevision: workRevision})
+	}
+	return spec, nil
 }
 
 func (daemon *Daemon) setDispatch(ctx context.Context, call api.Call) api.Reply {
@@ -1064,6 +1122,20 @@ func (daemon *Daemon) proposeOutcome(ctx context.Context, call api.Call) (api.Re
 		return newErrorReply(api.RemoteInternal), nil
 	}
 	daemon.operationMu.Lock()
+	// Source validation and the durable proposal share one linearization gate.
+	// The second validation is a checked snapshot fence: a source mutation
+	// observed between the first inspection and proposal is refused.
+	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
+		daemon.operationMu.Unlock()
+		return newErrorReply(remoteErrorCode(err)), nil
+	}
+	if daemon.beforeSuccessProposal != nil {
+		daemon.beforeSuccessProposal()
+	}
+	if err := daemon.validateSuccessSource(ctx, live, proposal); err != nil {
+		daemon.operationMu.Unlock()
+		return newErrorReply(remoteErrorCode(err)), nil
+	}
 	// This durable transition and the owner-side attach check share one
 	// linearization gate. Whichever operation acquires it first owns the
 	// running/finalizing boundary; notification carries no authority.
@@ -1233,6 +1305,7 @@ func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply
 		IdempotencyKey: key,
 		QuestionText:   input.Question,
 		Options:        input.Options,
+		ReuseExisting:  input.ReuseExisting,
 	}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
@@ -1335,7 +1408,10 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	spec := kernel.NewTask{ID: id, ProjectID: authority.ProjectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: input.Title, Body: input.Body, Priority: input.Priority}
+	spec, err := newTaskSpec(id, authority.ProjectID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
 	if err := prepareTaskEnqueue(ctx, daemon.store, spec, true); err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
@@ -1373,17 +1449,19 @@ func (daemon *Daemon) overseerUpdateTask(ctx context.Context, call api.Call) api
 		assignedAgentID = &agentID
 	}
 	if input.Retry {
-		if assignedAgentID == nil {
-			return newErrorReply(api.RemoteInvalidRequest)
+		// A zero agent keeps the task's current worker.
+		var assigned kernel.AgentID
+		if assignedAgentID != nil {
+			assigned = *assignedAgentID
 		}
-		if err := prepareTaskRetry(ctx, daemon.store, id, expected, *assignedAgentID); err != nil {
+		if err := prepareTaskRetry(ctx, daemon.store, id, expected, assigned); err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
 		at, err := daemon.timestamp()
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
-		task, err := daemon.store.RetryTaskForOverseer(ctx, digest, id, expected, *assignedAgentID, at)
+		task, err := daemon.store.RetryTaskForOverseer(ctx, digest, id, expected, assigned, at)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}

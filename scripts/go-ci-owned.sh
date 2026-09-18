@@ -22,7 +22,8 @@ trap 'go_gate_signal 15' TERM
 export GOTOOLCHAIN=local
 # These three packages own process boundaries that have demonstrated cross-
 # package scheduling sensitivity. Keep each causal stage uncached and isolated;
-# every other process package remains parallel.
+# every other package is discovered below so a new package cannot silently skip
+# tests. The five ordinary packages and internal/e2e have their own gates.
 echo "go-ci: Git boundary resource census"
 go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/change
 
@@ -33,18 +34,26 @@ echo "go-ci: daemon process tests"
 go_gate_stage 1200 go test -short -timeout=20m -count=1 ./internal/daemon
 
 echo "go-ci: process-sensitive Go tests"
-go_gate_stage 1200 go test -short -timeout=20m -count=1 \
-    ./cmd/factory-runner \
-    ./cmd/factoryctl \
-    ./cmd/factoryd \
-    ./internal/api \
-    ./internal/browser \
-    ./internal/buildinfo/... \
-    ./internal/install \
-    ./internal/kernel \
-    ./internal/relayhost \
-    ./internal/runner \
-    ./spikes/browser-connectivity
+set --
+packages=$(go list ./...)
+for package in $packages; do
+    case "$package" in
+        github.com/dark-factory-build/dark-factory/cmd/cloudflare-admin|\
+        github.com/dark-factory-build/dark-factory/internal/browserprotocol|\
+        github.com/dark-factory-build/dark-factory/internal/cloudflareadmin|\
+        github.com/dark-factory-build/dark-factory/internal/provider|\
+        github.com/dark-factory-build/dark-factory/internal/topology|\
+        github.com/dark-factory-build/dark-factory/internal/change|\
+        github.com/dark-factory-build/dark-factory/internal/changeworker|\
+        github.com/dark-factory-build/dark-factory/internal/daemon|\
+        github.com/dark-factory-build/dark-factory/internal/e2e)
+            ;;
+        *) set -- "$@" "$package" ;;
+    esac
+done
+if [ "$#" -gt 0 ]; then
+    go_gate_stage 1200 go test -short -timeout=20m -count=1 "$@"
+fi
 
 echo "go-ci: browser terminal and PTY E2E"
 go_gate_stage 600 "$script_dir/go-browser-e2e.sh"

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
@@ -71,52 +70,6 @@ func TestBrowserStateWatchAnnouncesACommitFromTheSnapshotGap(t *testing.T) {
 	refreshed, _ := adapterSnapshot(t, fixture, connection, "state-2")
 	if refreshed.Head != committed || len(refreshed.Projects) != 1 || refreshed.Projects[0].ID != projectID.String() {
 		t.Fatalf("refreshed snapshot = %+v", refreshed)
-	}
-}
-
-// The gap above is closed causally, not by the poll: the producer's very first
-// action is a durable-head read, and this proves the announcement is produced
-// by that read alone. The second read blocks forever, so no poll iteration can
-// contribute the notification.
-func TestBrowserStateWatchRereadsTheDurableHeadBeforeAnyWait(t *testing.T) {
-	head, err := kernel.NewEventSequence(9)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := kernel.NewEventSequence(7)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backend := &browserBackend{subs: make(map[*browserStateWatch]struct{})}
-	ownerContext, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	watch := &browserStateWatch{
-		backend: backend, notified: after,
-		ctx: ownerContext, cancel: cancel, updates: make(chan browser.StateUpdate, browserStateWatchQueue), done: make(chan struct{}),
-	}
-	backend.subs[watch] = struct{}{}
-	reads := make(chan struct{}, 2)
-	go watch.runReading(func() (kernel.EventSequence, error) {
-		select {
-		case reads <- struct{}{}:
-			return head, nil
-		default:
-		}
-		<-ownerContext.Done()
-		return kernel.EventSequence{}, context.Canceled
-	})
-	update, ok := <-watch.Updates()
-	if !ok || update.Head != decimalSequence(head) {
-		t.Fatalf("first update = %+v, ok=%v", update, ok)
-	}
-	cancel()
-	select {
-	case <-watch.Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("watch did not join after cancellation")
-	}
-	if len(backend.subs) != 0 {
-		t.Fatalf("watch did not deregister: %d remain", len(backend.subs))
 	}
 }
 

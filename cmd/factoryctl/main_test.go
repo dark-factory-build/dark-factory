@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -220,6 +221,19 @@ func TestParseExactAttemptCommands(t *testing.T) {
 				t.Fatalf("parse = %+v, help=%t ok=%t", command, help, ok)
 			}
 		})
+	}
+}
+
+func TestParseCodexTurnCompleteNotification(t *testing.T) {
+	notification := `{"type":"agent-turn-complete","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`
+	command, help, ok := parse([]string{"attempt", "turn-complete", notification})
+	digest := sha256.Sum256([]byte("thread-1\x00turn-1\x00/private/runtime"))
+	if !ok || help || command.kind != commandTurnComplete || command.idempotencyKey != hex.EncodeToString(digest[:16]) || command.text == "" {
+		t.Fatalf("parse notification = %+v, help=%t ok=%t", command, help, ok)
+	}
+	invalid, help, ok := parse([]string{"attempt", "turn-complete", `{"type":"other","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`})
+	if ok || help || invalid.kind != 0 {
+		t.Fatalf("parse invalid notification = %+v, help=%t ok=%t", invalid, help, ok)
 	}
 }
 
@@ -458,6 +472,7 @@ func TestHelpIsExactAndHasNoClientEffect(t *testing.T) {
 }
 
 func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
+	turnDigest := sha256.Sum256([]byte("thread-1\x00turn-1\x00/private/runtime"))
 	tests := []struct {
 		name string
 		args []string
@@ -472,6 +487,7 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 		{name: "fail detail", args: []string{"attempt", "fail", "--detail", "private-fail-sentinel"}, kind: api.CallFail, text: "private-fail-sentinel"},
 		{name: "send back", args: []string{"attempt", "send-back", "--task", "fedcba9876543210fedcba9876543210", "--note", "private-note-sentinel"}, kind: api.CallSendBack, key: "fedcba9876543210fedcba9876543210", text: "private-note-sentinel"},
 		{name: "human request", args: []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question-sentinel"}, kind: api.CallRequestHuman, key: "0123456789abcdef0123456789abcdef", text: "private-question-sentinel"},
+		{name: "Codex turn complete", args: []string{"attempt", "turn-complete", `{"type":"agent-turn-complete","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`}, kind: api.CallRequestHuman, key: hex.EncodeToString(turnDigest[:16]), text: "Codex turn completed without a durable attempt outcome; resume this session and record succeed, block, or fail."},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -514,7 +530,11 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 				}
 			case api.CallRequestHuman:
 				input, ok := result.call.HumanQuestionInput()
-				if !ok || !reflect.DeepEqual(input, api.HumanQuestionInput{IdempotencyKey: test.key, Question: test.text}) {
+				wantInput := api.HumanQuestionInput{IdempotencyKey: test.key, Question: test.text}
+				if strings.HasPrefix(test.name, "Codex") {
+					wantInput.ReuseExisting = true
+				}
+				if !ok || !reflect.DeepEqual(input, wantInput) {
 					t.Fatalf("human question = %+v, %t", input, ok)
 				}
 			case api.CallSendBack:
@@ -526,6 +546,9 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 			wantOutput := "attempt outcome request accepted: head=17 revision=9\n"
 			if test.kind == api.CallRequestHuman {
 				wantOutput = "human request accepted: head=17 revision=9\n"
+				if strings.HasPrefix(test.name, "Codex") {
+					wantOutput = ""
+				}
 			} else if test.kind == api.CallSendBack {
 				wantOutput = "task sent back: head=17 revision=9\n"
 			}
@@ -602,7 +625,7 @@ func TestAttemptTaskInvalidEnvironmentFailsNormally(t *testing.T) {
 				}
 				return ""
 			}, &stdout, &stderr)
-			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: attempt client configuration is invalid\n" {
+			if exit != exitFailure || stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), "factoryctl: attempt client configuration is invalid\n") || (test.socket == "") != strings.Contains(stderr.String(), "factory tool") {
 				t.Fatalf("invalid environment = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 			}
 		})
@@ -681,7 +704,7 @@ func TestMissingSocketOrAttemptTokenCannotFallBack(t *testing.T) {
 		t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", "/private/missing-attempt-token")
 		var stdout, stderr bytes.Buffer
 		exit := run(context.Background(), []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question"}, func(string) string { return "" }, &stdout, &stderr)
-		if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: attempt client configuration is invalid\n" {
+		if exit != exitFailure || stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), "factoryctl: attempt client configuration is invalid\nfactoryctl: DARK_FACTORY_SOCKET is not set in this shell") {
 			t.Fatalf("missing socket = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 		}
 	})

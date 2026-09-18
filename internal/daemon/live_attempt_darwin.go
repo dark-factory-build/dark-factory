@@ -265,10 +265,18 @@ func (attempt *liveAttempt) processLifecycle(ctx context.Context) (bool, error) 
 	}
 	if attempt.outcomeRefusal != nil {
 		// The refusal was authenticated to this exact owner. Consume the
-		// bounded cause and converge the owned controller; no durable state
-		// claim is made here and no other live attempt can be affected.
+		// bounded cause without making a durable state claim. Dirty-source
+		// refusals leave the controller live for correction; other refusals
+		// converge it, and no other live attempt can be affected.
+		refusal := attempt.outcomeRefusal
 		attempt.outcomeRefusal = nil
+		if errors.Is(refusal, errDirtyWorkerChange) {
+			attempt.pendingOutcome = nil
+		}
 		attempt.daemon.operationMu.Unlock()
+		if errors.Is(refusal, errDirtyWorkerChange) {
+			return false, nil
+		}
 		return false, attempt.terminateController()
 	}
 	if attempt.resultReturned {
@@ -1120,7 +1128,7 @@ func (attempt *liveAttempt) finishSubscribers(err error) {
 }
 
 func toTerminalEvent(frame runner.TerminalFrame) TerminalEvent {
-	return TerminalEvent{Kind: terminalEventKind(frame.Kind), Accepted: frame.Status == runner.TerminalResultOK, Sequence: frame.Sequence, Start: frame.Start, End: frame.End, Floor: frame.Floor, Head: frame.Head, Payload: append([]byte(nil), frame.Payload...)}
+	return TerminalEvent{Kind: terminalEventKind(frame.Kind), Accepted: frame.Status == runner.TerminalResultOK, Sequence: frame.Sequence, Start: frame.Start, End: frame.End, Floor: frame.Floor, Head: frame.Head, Payload: append([]byte(nil), frame.Payload...), ContextStart: frame.ContextStart, Context: append([]byte(nil), frame.Context...)}
 }
 
 func terminalEventKind(kind runner.TerminalEventKind) TerminalEventKind {

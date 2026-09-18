@@ -1,3 +1,4 @@
+import { projectContentOperation, projectContentObject, type ProjectContentRequest, type ProjectContentResult } from "./project-content.js";
 import { malformed, normalizeBoundary, ProtocolError } from "./errors.js";
 import {
   CONTROL_MANIFEST,
@@ -196,7 +197,7 @@ export type TerminalServerControlFrame =
   | { type: "TERMINAL_EXIT"; id: string; body: TerminalExitBody }
   | { type: "TERMINAL_RESET"; id: string; body: TerminalResetBody };
 
-export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
+export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
   | { type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
   | { type: "TASK_ENQUEUE_RESULT"; id: string; body: TaskEnqueueResultBody }
@@ -218,7 +219,7 @@ export type ServerControlFrame = HelloFrame | PairResultFrame | AuthResultFrame 
   | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
   | TerminalServerControlFrame | ErrorFrame;
-export type ClientControlFrame = PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
+export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
   | { type: "TASK_ENQUEUE"; id: string; body: TaskEnqueueBody }
@@ -358,6 +359,8 @@ function validateControlID(type: ControlType, hasID: boolean, id: unknown): void
 function validateBody(type: ControlType, body: unknown, wire: boolean): ControlBody {
   if (!isObject(body)) malformed();
   switch (type) {
+    case "PROJECT_CONTENT": requireKeys(body, ["operation", "input"], wire); return { operation: projectContentOperation(body.operation), input: projectContentObject(body.input) };
+    case "PROJECT_CONTENT_RESULT": requireKeys(body, ["operation", "output"], wire); return { operation: projectContentOperation(body.operation), output: projectContentObject(body.output) };
     case "HELLO": requireKeys(body, ["daemon_id", "boot_id", "connection_nonce"], wire); return { daemon_id: fixedHex(body.daemon_id, HEX_BYTES.daemon_id), boot_id: fixedHex(body.boot_id, HEX_BYTES.boot_id), connection_nonce: fixedHex(body.connection_nonce, HEX_BYTES.connection_nonce) };
     case "PAIR_PROVE": requireKeys(body, ["challenge", "public_key_sec1", "signature"], wire); return { challenge: fixedHex(body.challenge, HEX_BYTES.challenge), public_key_sec1: fixedHex(body.public_key_sec1, HEX_BYTES.public_key_sec1, true), signature: fixedHex(body.signature, HEX_BYTES.signature) };
     case "AUTH_PROVE": requireKeys(body, ["client_id", "signature"], wire); return { client_id: fixedHex(body.client_id, HEX_BYTES.client_id), signature: fixedHex(body.signature, HEX_BYTES.signature) };

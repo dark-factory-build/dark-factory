@@ -94,17 +94,19 @@ type StateUpdate struct {
 // runner identity or descriptor and is delivered from the daemon's existing
 // bounded attachment queue.
 type TerminalEvent struct {
-	Kind       TerminalEventKind
-	Accepted   bool
-	Sequence   uint64
-	Start      uint64
-	End        uint64
-	Floor      uint64
-	Head       uint64
-	ExitCode   int
-	ExitSignal int
-	Aborted    bool
-	Payload    []byte
+	Kind         TerminalEventKind
+	Accepted     bool
+	Sequence     uint64
+	Start        uint64
+	End          uint64
+	Floor        uint64
+	Head         uint64
+	ExitCode     int
+	ExitSignal   int
+	Aborted      bool
+	Payload      []byte
+	ContextStart uint64
+	Context      []byte
 }
 
 type TerminalEventKind uint8
@@ -249,4 +251,12 @@ type AgentControlBackend interface {
 // TaskListBackend serves bounded completed work independently of live state.
 type TaskListBackend interface {
 	TaskList(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskListGet) (browserprotocol.TaskList, error)
+}
+
+// ContentBackend serves the optional project library through one finite,
+// lazily requested operation union. The JSON payload is decoded by the daemon
+// adapter so this transport package does not import API or kernel DTOs.
+type ContentBackend interface {
+	Backend
+	ProjectContent(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.ProjectContent) (browserprotocol.ProjectContentResult, error)
 }

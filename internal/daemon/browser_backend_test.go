@@ -783,17 +783,18 @@ func TestBrowserCloseJoinsSharedCleanupAndRetainsRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateWatch]struct{})}
-	blocked := &browserStateWatch{backend: backend, done: make(chan struct{}), cancel: func() {}}
-	backend.subs[blocked] = struct{}{}
+	// Block the shared producer's join, which now owns subscription cleanup.
+	backend.observerCancel = func() {}
+	backend.observerDone = make(chan struct{})
 	runtime := &BrowserRuntime{daemon: daemon, backend: backend}
 	daemon.browserMu.Lock()
 	daemon.browsers[runtime] = struct{}{}
 	daemon.browserMu.Unlock()
 	release := func() {
 		select {
-		case <-blocked.done:
+		case <-backend.observerDone:
 		default:
-			close(blocked.done)
+			close(backend.observerDone)
 		}
 	}
 	defer release()
@@ -856,17 +857,18 @@ func TestDaemonCloseFirstSharesRuntimeCleanupWithDirectClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	backend := &browserBackend{store: store, boot: boot, subs: make(map[*browserStateWatch]struct{})}
-	blocked := &browserStateWatch{backend: backend, done: make(chan struct{}), cancel: func() {}}
-	backend.subs[blocked] = struct{}{}
+	// Block the shared producer's join, which now owns subscription cleanup.
+	backend.observerCancel = func() {}
+	backend.observerDone = make(chan struct{})
 	runtime := &BrowserRuntime{daemon: daemon, backend: backend}
 	daemon.browserMu.Lock()
 	daemon.browsers[runtime] = struct{}{}
 	daemon.browserMu.Unlock()
 	release := func() {
 		select {
-		case <-blocked.done:
+		case <-backend.observerDone:
 		default:
-			close(blocked.done)
+			close(backend.observerDone)
 		}
 	}
 	defer release()

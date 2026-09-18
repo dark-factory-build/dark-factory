@@ -160,4 +160,48 @@ func TestAccountUpdateRefusesReferencedAccount(t *testing.T) {
 	}
 }
 
+func TestAccountWritesDeferUnrelatedCorruptionButRejectAffectedCorruption(t *testing.T) {
+	t.Run("unrelated corruption is deferred to open", func(t *testing.T) {
+		store, path := newTestStore(t)
+		project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 30), Name: "unrelated", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		corruptSQL(t, store, `UPDATE projects SET name = '' WHERE id = ?`, project.ID.Bytes())
+		account, err := store.LinkAccount(context.Background(), NewAccount{ID: accountID(t, 31), Provider: ProviderCodex, Home: "/Users/operator/.codex-deferred", Label: "deferred"}, mustTime(t, 2))
+		if err != nil {
+			t.Fatalf("link over unrelated corruption = %v", err)
+		}
+		if _, err := store.UpdateAccount(context.Background(), account.ID, account.Revision, stringPtr("renamed"), false, mustTime(t, 3)); err != nil {
+			t.Fatalf("rename over unrelated corruption = %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if reopened, err := Open(context.Background(), path); !errors.Is(err, ErrCorruptState) {
+			if reopened != nil {
+				reopened.Close()
+			}
+			t.Fatalf("Open after deferred corruption = %v", err)
+		}
+	})
+
+	t.Run("affected corruption is rejected without a write", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		defer store.Close()
+		account, err := store.LinkAccount(context.Background(), NewAccount{ID: accountID(t, 32), Provider: ProviderCodex, Home: "/Users/operator/.codex-affected", Label: "affected"}, mustTime(t, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		corruptSQL(t, store, `UPDATE accounts SET label = char(0) WHERE id = ?`, account.ID.Bytes())
+		before := captureWriteFootprint(t, store)
+		if _, err := store.UpdateAccount(context.Background(), account.ID, account.Revision, stringPtr("replacement"), false, mustTime(t, 2)); !errors.Is(err, ErrCorruptState) {
+			t.Fatalf("update affected corruption = %v", err)
+		}
+		if after := captureWriteFootprint(t, store); after != before {
+			t.Fatalf("affected corruption changed write footprint: before=%+v after=%+v", before, after)
+		}
+	})
+}
+
 func stringPtr(value string) *string { return &value }

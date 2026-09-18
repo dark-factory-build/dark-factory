@@ -79,6 +79,34 @@ func TestLiveAttemptGlobalResetAdvancesEveryObserverCursor(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptAdoptionReplaysRetainedDiagnostics(t *testing.T) {
+	controller, peer := readyTerminalEffectController(t)
+	defer controller.Close()
+	defer peer.Close()
+	runID, sessionID := liveTestIDs(t, 10007)
+	attempt := newLiveAttempt(nil, runID, sessionID, controller)
+	if stop, err := attempt.handleRunnerEvent(runner.AttemptEvent{Kind: runner.AttemptHandoverAttached, Floor: 40, Head: 48}); err != nil || stop {
+		t.Fatalf("handover attached = stop %v err %v", stop, err)
+	}
+	attach := readTerminalEffectWire(t, peer)
+	if attach.Kind != string(runner.TerminalAttach) || attach.Sequence != 40 || attach.Correlation == 0 {
+		t.Fatalf("diagnostic replay attach = %+v", attach)
+	}
+	if credit := readTerminalEffectWire(t, peer); credit.Kind != string(runner.TerminalCredit) || credit.Credit != liveAttemptCredit {
+		t.Fatalf("diagnostic replay credit = %+v", credit)
+	}
+	if err := attempt.routeFrame(runner.TerminalFrame{Kind: runner.TerminalAttached, Correlation: attach.Correlation, Sequence: 40, Floor: 40, Head: 48, Status: runner.TerminalResultOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := attempt.routeFrame(runner.TerminalFrame{Kind: runner.TerminalOutput, Correlation: attach.Correlation, Start: 40, End: 48, Payload: []byte("retained")}); err != nil {
+		t.Fatal(err)
+	}
+	floor, head, payload := attempt.diagnosticSnapshot()
+	if floor != 40 || head != 48 || string(payload) != "retained" {
+		t.Fatalf("adopted diagnostics = floor %d head %d payload %q", floor, head, payload)
+	}
+}
+
 func TestLiveAttemptDeliversResultNoticeAndBroadcastsCommittedExit(t *testing.T) {
 	for _, test := range []struct {
 		name              string
