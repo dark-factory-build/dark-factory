@@ -245,6 +245,10 @@ pub(crate) struct CreatePullRequest {
     pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) issue_number: i64,
+    /// Omitted means the publication repository, preserving old request digests.
+    /// A different source is referenced, never automatically closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_repository: Option<String>,
     pub(crate) head: String,
     pub(crate) head_sha: String,
     pub(crate) base: String,
@@ -1291,22 +1295,16 @@ impl AppAuthority {
         if let Some(result) = completed_or_conflict::<PullRequestResult>(&state)? {
             return Ok(result);
         }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("contents", "read"),
-                    ("issues", "read"),
-                    ("metadata", "read"),
-                    ("pull_requests", "write"),
-                ]),
-            )
-            .await?;
-        let repository = self.0.repository_metadata(&token).await?;
-        if request.base != repository.default_branch {
-            return Err(OperationError::InvalidInput);
+        let mut permissions = BTreeMap::from([
+            ("contents", "read"),
+            ("metadata", "read"),
+            ("pull_requests", "write"),
+        ]);
+        if request.cross_repository_source().is_none() {
+            permissions.insert("issues", "read");
         }
+        let token = self.0.installation_token(repository, permissions).await?;
+        let repository = self.0.repository_metadata(&token).await?;
         if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
             return complete(journal, &operation, result).await;
         }
@@ -1320,7 +1318,24 @@ impl AppAuthority {
                 .map_err(|_| OperationError::Unavailable)?;
             return Err(OperationError::Indeterminate);
         }
-        let issue = self.0.read_issue(&token, request.issue_number).await?;
+        let issue = if let Some(source) = request.cross_repository_source() {
+            let source_token = self
+                .0
+                .installation_token(
+                    RepositoryName::new(source.to_owned())?,
+                    BTreeMap::from([("issues", "read"), ("metadata", "read")]),
+                )
+                .await?;
+            let source_metadata = self.0.repository_metadata(&source_token).await?;
+            // Unknown visibility fails closed. A private backlog cannot be
+            // disclosed by linking it from a public pull request.
+            validate_source_visibility(source_metadata.private, repository.private)?;
+            self.0
+                .read_issue(&source_token, request.issue_number)
+                .await?
+        } else {
+            self.0.read_issue(&token, request.issue_number).await?
+        };
         if !issue.is_real_open_issue() {
             return Err(OperationError::Conflict);
         }
@@ -2938,6 +2953,9 @@ impl AppAuthority {
 impl CreatePullRequest {
     fn validate(&mut self) -> Result<(), OperationError> {
         canonical_operation_id(&mut self.operation_id)?;
+        if let Some(source) = self.source_repository.as_mut() {
+            RepositoryName::requested(source)?;
+        }
         valid_exact_integer(self.issue_number)?;
         valid_ref(&self.head)?;
         valid_ref(&self.base)?;
@@ -2966,7 +2984,10 @@ impl CreatePullRequest {
     }
 
     fn marked_body(&self) -> Result<String, OperationError> {
-        let footer = if self.close_on_merge {
+        let cross_source = self.cross_repository_source();
+        let footer = if let Some(source) = cross_source {
+            format!("Refs {source}#{}", self.issue_number)
+        } else if self.close_on_merge {
             format!("Closes #{}", self.issue_number)
         } else {
             format!("Refs #{}", self.issue_number)
@@ -2975,6 +2996,10 @@ impl CreatePullRequest {
             character == '\n' || character == '\r' || character == ' ' || character == '\t'
         });
         while let Some(line) = body.rsplit('\n').next() {
+            if cross_source.is_some() && line.trim() == footer {
+                body = body[..body.len() - line.len()].trim_end();
+                continue;
+            }
             let Some((kind, issue_number)) = pull_request_footer(line) else {
                 break;
             };
@@ -2983,18 +3008,62 @@ impl CreatePullRequest {
             } else {
                 "Refs"
             };
-            if kind != expected_kind || issue_number != self.issue_number {
+            if cross_source.is_some() || kind != expected_kind || issue_number != self.issue_number
+            {
                 return Err(OperationError::InvalidInput);
             }
             body = body[..body.len() - line.len()].trim_end_matches(|character: char| {
                 character == '\n' || character == '\r' || character == ' ' || character == '\t'
             });
         }
+        if cross_source.is_some() {
+            // Cross-repository source references must be qualified. Reject
+            // automatic-closing prose too, rather than closing a shared source
+            // when only this pull request has finished.
+            let words: Vec<_> = body.split_whitespace().collect();
+            if words.iter().any(|word| {
+                let target = word.trim_start_matches(['(', '[', '*', '_', '`']);
+                target.starts_with('#') && target.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+            }) {
+                return Err(OperationError::InvalidInput);
+            }
+            for pair in words.windows(2) {
+                let keyword = pair[0].trim_matches(|c: char| !c.is_ascii_alphabetic());
+                let target = pair[1].trim_start_matches(['(', '[']);
+                if [
+                    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves",
+                    "resolved",
+                ]
+                .iter()
+                .any(|word| keyword.eq_ignore_ascii_case(word))
+                    && (target.contains('#') || target.contains("/issues/"))
+                {
+                    return Err(OperationError::InvalidInput);
+                }
+            }
+        }
         if body.is_empty() {
             Ok(format!("{}\n\n{}", footer, self.marker()?))
         } else {
             Ok(format!("{}\n\n{}\n\n{}", body, footer, self.marker()?))
         }
+    }
+
+    fn cross_repository_source(&self) -> Option<&str> {
+        self.source_repository
+            .as_deref()
+            .filter(|source| !source.eq_ignore_ascii_case(&self.repository))
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn validate_source_visibility(
+    source_private: Option<bool>,
+    destination_private: Option<bool>,
+) -> Result<(), OperationError> {
+    match (source_private, destination_private) {
+        (Some(false), Some(_)) | (Some(true), Some(true)) => Ok(()),
+        _ => Err(OperationError::InvalidInput),
     }
 }
 
@@ -9962,6 +10031,7 @@ mod tests {
             repository: "dark-factory-build/dark-factory".into(),
             operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             issue_number: 390,
+            source_repository: None,
             head: "feature/maintainer".into(),
             head_sha: "a".repeat(40),
             base: "main".into(),
@@ -9973,6 +10043,55 @@ mod tests {
         };
         assert!(create.validate().is_ok());
         assert!(create.marked_body().unwrap().contains("Closes #390"));
+        assert!(
+            serde_json::to_value(&create)
+                .unwrap()
+                .get("source_repository")
+                .is_none()
+        );
+        let original_digest = request_digest(&create).unwrap();
+        let decoded: CreatePullRequest =
+            serde_json::from_value(serde_json::to_value(&create).unwrap()).unwrap();
+        assert_eq!(request_digest(&decoded).unwrap(), original_digest);
+        let mut cross = create.clone();
+        cross.source_repository = Some("Team/Backlog".into());
+        cross.base = "develop".into();
+        assert!(cross.validate().is_ok());
+        assert!(
+            cross
+                .marked_body()
+                .unwrap()
+                .contains("Refs team/backlog#390")
+        );
+        assert!(!cross.marked_body().unwrap().contains("Closes"));
+        assert!(!cross.marked_body().unwrap().contains("Refs #390"));
+        for body in [
+            "Refs #390",
+            "Closes #390",
+            "This fixes team/backlog#390",
+            "Closes https://github.com/team/backlog/issues/390",
+        ] {
+            cross.body = body.into();
+            assert!(
+                cross.marked_body().is_err(),
+                "accepted ambiguous or closing source reference: {body}"
+            );
+        }
+        cross.body = "Change.\n\nRefs team/backlog#390\n".into();
+        assert_eq!(
+            cross
+                .marked_body()
+                .unwrap()
+                .matches("Refs team/backlog#390")
+                .count(),
+            1
+        );
+        assert!(validate_source_visibility(Some(false), Some(false)).is_ok());
+        assert!(validate_source_visibility(Some(false), Some(true)).is_ok());
+        assert!(validate_source_visibility(Some(true), Some(true)).is_ok());
+        assert!(validate_source_visibility(Some(true), Some(false)).is_err());
+        assert!(validate_source_visibility(None, Some(false)).is_err());
+        assert!(validate_source_visibility(Some(false), None).is_err());
         let mut supplied_footer = create.clone();
         supplied_footer.body.push_str("\n\nCloses #390\n");
         let rendered = supplied_footer.marked_body().unwrap();

@@ -355,3 +355,16 @@ and completed replay, then constructs the scoped journal. The existing Access
 owner workflow remains at `/mcp`. See [the connection protocol and activation
 requirements](../docs/development/GITHUB_CONNECTIONS.md), including the
 ownership-aware rollback boundary and separate live second-user proof.
+### Issue sources separate from publication repositories
+
+`create_pull_request` accepts optional `source_repository` (`owner/name`). Omit
+it for existing same-repository calls and operation replays. A different source
+is read with its own installation grant and always produces a qualified
+`Refs owner/name#N` footer, never an automatic closure. The source must be open;
+a private or unknown-visibility source cannot be linked into a public PR.
+Cross-repository requests reject unqualified issue references and closing
+footers in the supplied body. The selected base may be any actual branch whose
+exact SHA matches the request; optional merge/deployment policy is unchanged.
+
+This protocol support does not configure intake or accept an issue. Those
+operator operations must supply their reviewed source snapshot and destination.
