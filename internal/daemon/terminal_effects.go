@@ -346,6 +346,14 @@ func (daemon *Daemon) humanReply(ctx context.Context, principal browser.Principa
 	if err != nil {
 		return 0, err
 	}
+	if handled, continuationErr := daemon.store.ResolveHumanContinuationForBrowser(ctx, clientID, requestID, expected, reply, at); continuationErr == nil && handled {
+		// The reply is the durable wake edge. The next attempt must be admitted
+		// without waiting for the scheduler's periodic reconciliation tick.
+		daemon.notifyScheduler()
+		return 0, nil
+	} else if continuationErr != nil && !errors.Is(continuationErr, kernel.ErrNotFound) && !errors.Is(continuationErr, kernel.ErrConflict) && !errors.Is(continuationErr, kernel.ErrRevisionConflict) {
+		return 0, continuationErr
+	}
 	delivery, err := daemon.store.BeginHumanReply(ctx, clientID, requestID, expected, deliveryID, reply, at)
 	if err != nil {
 		if terminalStoreOutcomeUnknown(err) {
@@ -374,7 +382,10 @@ func (daemon *Daemon) deliverHumanReply(ctx context.Context, delivery kernel.Hum
 		return 0, errors.Join(err, unknownErr)
 	}
 	payload := append([]byte(nil), delivery.Reply...)
-	result := attempt.submitEffect(ctx, terminalEffect{kind: terminalEffectHumanReply, payload: payload, submit: delivery.Provider == kernel.ProviderCodex})
+	// Every interactive CLI reads text arriving in one write as a paste, which
+	// does not submit; the runner sends the Enter as its own later keystroke.
+	// Shell reads raw stdin and is owed no keystroke.
+	result := attempt.submitEffect(ctx, terminalEffect{kind: terminalEffectHumanReply, payload: payload, submit: delivery.Provider != kernel.ProviderShell})
 	effectErr := result.effectError(len(payload))
 	if effectErr != nil {
 		unknownErr := daemon.markHumanReplyUnknown(delivery.RequestID, delivery.DeliveryID, delivery.Revision)
@@ -471,6 +482,23 @@ func (daemon *Daemon) overseerIntervention(ctx context.Context, digest kernel.At
 	return daemon.deliverIntervention(ctx, receipt, newlyReserved)
 }
 
+func (daemon *Daemon) operatorIntervention(ctx context.Context, request kernel.TaskInterventionRequest) (kernel.TaskIntervention, error) {
+	if !terminalEffectsSupported {
+		return kernel.TaskIntervention{}, ErrTerminalEffectsUnsupported
+	}
+	daemon.operationMu.Lock()
+	defer daemon.operationMu.Unlock()
+	at, err := daemon.timestamp()
+	if err != nil {
+		return kernel.TaskIntervention{}, err
+	}
+	receipt, newlyReserved, err := daemon.store.ReserveTaskInterventionForOperator(ctx, request, at)
+	if err != nil {
+		return kernel.TaskIntervention{}, err
+	}
+	return daemon.deliverIntervention(ctx, receipt, newlyReserved)
+}
+
 // deliverIntervention performs the one PTY action owned by a freshly reserved
 // receipt. A replay never writes again: a pending receipt is durably marked
 // unknown while operationMu proves no live delivery is still in flight.
@@ -489,7 +517,7 @@ func (daemon *Daemon) deliverIntervention(ctx context.Context, receipt kernel.Ta
 	if err != nil {
 		return daemon.resolveIntervention(receipt, kernel.TaskInterventionRejected, "terminal intervention is unavailable")
 	}
-	payload, submit := []byte(receipt.Payload), run.Provider == kernel.ProviderCodex
+	payload, submit := []byte(receipt.Payload), true
 	if receipt.Kind == kernel.TaskInterventionInterrupt {
 		payload, submit = []byte{0x1b}, false
 	}

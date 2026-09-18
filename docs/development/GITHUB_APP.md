@@ -152,7 +152,9 @@ The live maintainer broker exposes only these repository-scoped operations:
 - replace one open PR body and return its observed head;
 - close one PR only while it still names the caller's exact head;
 - submit one bounded exact-head review verdict through the Pull Request Review
-  API;
+  API; an independent ALLOW may explicitly correct a prior App review
+  operation at the same head when the correction is bound to that exact
+  operation;
 - observe Check Runs, bounded workflow/job/step state, a bounded failed-job log
   tail, and eventual merge state for one exact PR head;
 - rerun failed jobs from one exact completed failed workflow attempt;
@@ -205,19 +207,31 @@ Workflow and CODEOWNERS publication is outside the maintainer broker's typed
 surface. It can proceed through another repository authority without widening
 the broker.
 
-When the maintainer App also authored the PR — which is every PR it reviews —
+When the maintainer App also authored the PR,
 GitHub refuses a self-review that takes a side, `APPROVE` and `REQUEST_CHANGES`
 alike. So the formal review is always submitted as a `COMMENT` and carries its
 bounded findings plus one App-written verdict line, which is what the required
 `review` check reads; the GitHub review state never carries the verdict. The
 review is not an independent GitHub approval and cannot satisfy a
-distinct-reviewer requirement. The status check consumes a cold review from a
-separate agent or person.
+distinct-reviewer requirement. The status check consumes an attestation of a
+cold review from a separate agent or person. Any GitHub review publisher may
+record that attestation; the App identity has no special status in the
+repository gate. Host publication uses the same exact-head verdict format
+described in [WORKFLOW.md](WORKFLOW.md). The App's operation journal still
+governs its own submission and recovery path.
 
 The two typed merge operations are mutually exclusive; neither silently falls
 back to the other. Before queue enqueue, the broker re-reads the PR and requires
-the bound base and head. The GraphQL mutation supplies `expectedHeadOid`, never
-`jump`, and the broker reconciles the exact queue entry. The enqueue result
+the bound base, head and SHA-256 digest of the independently reviewed rendered
+body after claiming the durable operation. A known mismatch refuses the write;
+an uncertain outcome is never blindly replayed. The GraphQL mutation supplies
+`expectedHeadOid`, never `jump`, and the broker reconciles the exact queue entry.
+Only the head check is atomic: GitHub has no expected-body condition on enqueue,
+so a body edit can race with the final network call. The digest is a checked
+precondition, not an atomic body lock or a guarantee that metadata stays unchanged
+while queued. Adding another read cannot remove that limit. Existing completed
+legacy operations keep their original digest-free identity and stored result;
+new enqueue operations require the reviewed-body digest. The enqueue result
 reports the state the entry was created in, which makes an immediately
 `UNMERGEABLE` entry visible. An entry already present before the durable claim
 is refused as external; it is never adopted as an App enqueue. The read-only

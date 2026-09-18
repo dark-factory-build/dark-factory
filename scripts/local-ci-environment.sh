@@ -4,6 +4,8 @@
 # Node/Corepack pair from the caller's toolchain before replacing the
 # environment with the small, credential-free set the gate needs.
 ci_original_path=${PATH-}
+ci_original_home=${HOME-}
+ci_requested_cache_root=${DF_CI_CACHE_ROOT-}
 ci_node=${DF_CI_NODE-}
 ci_corepack=${DF_CI_COREPACK-}
 ci_old_ifs=$IFS
@@ -66,6 +68,8 @@ IFS=$ci_old_ifs
 
 ci_saved_df_gate_fault=${DF_GATE_FAULT-}
 ci_have_df_gate_fault=${DF_GATE_FAULT+yes}
+ci_saved_local_ci_directory=${DARK_FACTORY_LOCAL_CI_DIRECTORY-}
+ci_saved_local_ci_factoryctl=${DARK_FACTORY_FACTORYCTL-}
 ci_saved_local_ci_lease_held=${DARK_FACTORY_LOCAL_CI_LEASE_HELD-}
 ci_have_local_ci_lease_held=${DARK_FACTORY_LOCAL_CI_LEASE_HELD+yes}
 ci_saved_local_ci_wait=${DARK_FACTORY_LOCAL_CI_WAIT-}
@@ -97,45 +101,103 @@ IFS=$ci_old_ifs
 
 ci_script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 ci_repository_root=$(CDPATH= cd -- "$ci_script_dir/.." && pwd -P)
+if [ -n "$ci_requested_cache_root" ]; then
+    ci_cache_root=$ci_requested_cache_root
+elif [ -n "$ci_original_home" ] && [ "$ci_original_home" != /dev/null ]; then
+    ci_cache_root="$ci_original_home/Library/Caches/dark-factory/local-ci/trusted"
+else
+    echo "local-ci: HOME is required when DF_CI_CACHE_ROOT is unset" >&2
+    return 1
+fi
+case "$ci_cache_root" in
+    /)
+        echo "local-ci: cache root must be canonical and non-root" >&2
+        return 1
+        ;;
+    "$ci_repository_root"|"$ci_repository_root"/*)
+        echo "local-ci: cache root must be outside the checkout" >&2
+        return 1
+        ;;
+esac
+case "$ci_cache_root" in
+    /*) ;;
+    *) echo "local-ci: cache root must be absolute" >&2; return 1 ;;
+esac
+while [ "${ci_cache_root%/}" != "$ci_cache_root" ]; do ci_cache_root=${ci_cache_root%/}; done
+case "$ci_cache_root" in
+    ''|*/../*|*/..|*/./*|*/.)
+        echo "local-ci: cache root must be canonical and non-root" >&2
+        return 1
+        ;;
+esac
+ci_cache_parent=$(/usr/bin/dirname -- "$ci_cache_root")
+ci_cache_leaf=$(/usr/bin/basename -- "$ci_cache_root")
+[ -d "$ci_cache_parent" ] || /bin/mkdir -p "$ci_cache_parent"
+ci_cache_parent=$(CDPATH= cd -- "$ci_cache_parent" && pwd -P)
+ci_cache_root="$ci_cache_parent/$ci_cache_leaf"
+case "$ci_cache_root" in
+    "$ci_repository_root"|"$ci_repository_root"/*)
+        echo "local-ci: cache root must be outside the checkout" >&2
+        return 1
+        ;;
+esac
+if [ -L "$ci_cache_root" ] || { [ -e "$ci_cache_root" ] && [ ! -d "$ci_cache_root" ]; }; then
+    echo "local-ci: refusing unsafe cache root path" >&2
+    return 1
+fi
 ci_tools_root="$ci_repository_root/.tools"
 if [ -L "$ci_tools_root" ] || { [ -e "$ci_tools_root" ] && [ ! -d "$ci_tools_root" ]; }; then
     echo "local-ci: refusing unsafe .tools path" >&2
     return 1
 fi
 [ -d "$ci_tools_root" ] || /bin/mkdir "$ci_tools_root"
-ci_cache_root="$ci_tools_root/local-ci"
-if [ -L "$ci_cache_root" ] || { [ -e "$ci_cache_root" ] && [ ! -d "$ci_cache_root" ]; }; then
-    echo "local-ci: refusing unsafe .tools/local-ci path" >&2
+ci_private_root="$ci_tools_root/local-ci-state"
+if [ -L "$ci_private_root" ] || { [ -e "$ci_private_root" ] && [ ! -d "$ci_private_root" ]; }; then
+    echo "local-ci: refusing unsafe .tools/local-ci-state path" >&2
     return 1
 fi
-[ -d "$ci_cache_root" ] || /bin/mkdir "$ci_cache_root"
-ci_cache_children='corepack go-build go-mod go cache data state'
-for ci_cache_child in $ci_cache_children; do
-    ci_cache_path="$ci_cache_root/$ci_cache_child"
-    if [ -L "$ci_cache_path" ] || { [ -e "$ci_cache_path" ] && [ ! -d "$ci_cache_path" ]; }; then
-        echo "local-ci: refusing unsafe .tools/local-ci/$ci_cache_child path" >&2
+for ci_private_child in data state; do
+    ci_private_path="$ci_private_root/$ci_private_child"
+    if [ -L "$ci_private_path" ] || { [ -e "$ci_private_path" ] && [ ! -d "$ci_private_path" ]; }; then
+        echo "local-ci: refusing unsafe .tools/local-ci-state/$ci_private_child path" >&2
         return 1
     fi
 done
-/bin/chmod 700 "$ci_cache_root"
+/bin/mkdir -p "$ci_private_root/data" "$ci_private_root/state"
+/bin/chmod 700 "$ci_private_root"
+/bin/mkdir -p -m 700 "$ci_cache_root"
+ci_cache_children='corepack go-build go-mod go cache npm pnpm-store'
+for ci_cache_child in $ci_cache_children; do
+    ci_cache_path="$ci_cache_root/$ci_cache_child"
+    if [ -L "$ci_cache_path" ] || { [ -e "$ci_cache_path" ] && [ ! -d "$ci_cache_path" ]; }; then
+        echo "local-ci: refusing unsafe cache/$ci_cache_child path" >&2
+        return 1
+    fi
+done
 for ci_cache_child in $ci_cache_children; do
     ci_cache_path="$ci_cache_root/$ci_cache_child"
     [ -d "$ci_cache_path" ] || /bin/mkdir "$ci_cache_path"
 done
 
+if [ -n "$ci_saved_local_ci_directory" ]; then
+    export DARK_FACTORY_LOCAL_CI_DIRECTORY="$ci_saved_local_ci_directory"
+    if [ -n "$ci_saved_local_ci_factoryctl" ]; then export DARK_FACTORY_FACTORYCTL="$ci_saved_local_ci_factoryctl"; fi
+fi
 export DF_CI_NODE="$ci_node" DF_CI_COREPACK="$ci_corepack"
 export DARK_FACTORY_E2E_NODE="$ci_node" DARK_FACTORY_E2E_COREPACK="$ci_corepack"
 export DF_CI_CACHE_ROOT="$ci_cache_root"
 export PATH=/opt/homebrew/bin:/usr/bin:/bin
 export HOME=/var/empty TMPDIR=/tmp GOENV=off
 export XDG_CONFIG_HOME=/var/empty XDG_CACHE_HOME="$ci_cache_root/cache"
-export XDG_DATA_HOME="$ci_cache_root/data" XDG_STATE_HOME="$ci_cache_root/state"
+export XDG_DATA_HOME="$ci_private_root/data" XDG_STATE_HOME="$ci_private_root/state"
 export COREPACK_HOME="$ci_cache_root/corepack"
 export npm_config_userconfig=/var/empty/.npmrc NPM_CONFIG_USERCONFIG=/var/empty/.npmrc
 export npm_config_globalconfig=/var/empty/.npmrc-global NPM_CONFIG_GLOBALCONFIG=/var/empty/.npmrc-global
+export npm_config_cache="$ci_cache_root/npm" NPM_CONFIG_CACHE="$ci_cache_root/npm"
+export pnpm_config_store_dir="$ci_cache_root/pnpm-store"
 export NETRC=/dev/null
 export GOPATH="$ci_cache_root/go" GOCACHE="$ci_cache_root/go-build" GOMODCACHE="$ci_cache_root/go-mod"
-# Keep disposable checkout caches removable by ordinary worktree cleanup.
+# Keep module directories removable when retiring a cache root.
 export GOFLAGS=-modcacherw
 export LC_ALL=C
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0

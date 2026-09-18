@@ -35,10 +35,13 @@ type AttemptSpec struct {
 type AttemptEventKind string
 
 const (
-	AttemptInnerReady    AttemptEventKind = "inner-ready"
-	AttemptCheckpoint    AttemptEventKind = "checkpoint"
-	AttemptResultReady   AttemptEventKind = "attempt-result-ready"
-	AttemptTerminalFrame AttemptEventKind = "terminal-frame"
+	AttemptInnerReady       AttemptEventKind = "inner-ready"
+	AttemptCheckpoint       AttemptEventKind = "checkpoint"
+	AttemptResultReady      AttemptEventKind = "attempt-result-ready"
+	AttemptTerminalFrame    AttemptEventKind = "terminal-frame"
+	AttemptHandoverQuiesced AttemptEventKind = "handover-quiesced"
+	AttemptHandoverAttached AttemptEventKind = "handover-attached"
+	AttemptHandoverRejected AttemptEventKind = "handover-rejected"
 )
 
 // TerminalCommandKind and TerminalEventKind are intentionally closed unions.
@@ -85,6 +88,7 @@ const (
 	// below its independent 8 KiB browser/terminal contract. Provider task bytes
 	// never enter this framed control path.
 	maxTerminalFramePayload = 8 << 10
+	maxTerminalLookbehind   = 512
 	maxTerminalCredit       = 1 << 20
 	maxTerminalDimension    = 4096
 	maxTerminalCorrelation  = ^uint64(0) >> 1
@@ -110,19 +114,21 @@ type TerminalCommand struct {
 // The same bounded fields are used for every event kind, with strict
 // per-kind validation preventing accidental cross-operation interpretation.
 type TerminalFrame struct {
-	Kind        TerminalEventKind
-	Correlation uint64
-	Generation  uint64
-	Sequence    uint64
-	Start       uint64
-	End         uint64
-	Floor       uint64
-	Head        uint64
-	Count       uint32
-	Rows        uint16
-	Cols        uint16
-	Status      TerminalResultStatus
-	Payload     []byte
+	Kind         TerminalEventKind
+	Correlation  uint64
+	Generation   uint64
+	Sequence     uint64
+	Start        uint64
+	End          uint64
+	Floor        uint64
+	Head         uint64
+	Count        uint32
+	Rows         uint16
+	Cols         uint16
+	Status       TerminalResultStatus
+	Payload      []byte
+	ContextStart uint64
+	Context      []byte
 }
 
 func (c TerminalCommand) validate() error {
@@ -183,7 +189,7 @@ func (f TerminalFrame) validate() error {
 			return ErrState
 		}
 	case TerminalAttached:
-		if !validTerminalCorrelation(f.Correlation) || f.Generation != 0 || f.Floor > f.Head || f.Rows != 0 || f.Cols != 0 || f.Count != 0 || f.Start != 0 || f.End != 0 || len(f.Payload) != 0 {
+		if !validTerminalCorrelation(f.Correlation) || f.Generation != 0 || f.Floor > f.Head || f.Rows != 0 || f.Cols != 0 || f.Count != 0 || f.Start != 0 || f.End != 0 || len(f.Payload) != 0 || len(f.Context) > maxTerminalLookbehind || f.ContextStart > f.Sequence || (len(f.Context) > 0 && f.ContextStart+uint64(len(f.Context)) != f.Sequence) {
 			return ErrState
 		}
 		switch f.Status {
@@ -240,6 +246,8 @@ type AttemptEvent struct {
 	Payload  []byte
 	Result   *AttemptResultNotice
 	Frame    *TerminalFrame
+	Floor    uint64
+	Head     uint64
 }
 
 const attemptControlTimeout = 4 * time.Second

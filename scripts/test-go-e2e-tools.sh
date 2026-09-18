@@ -15,26 +15,20 @@ fake_node="$temporary/fake-node"
 fake_corepack="$temporary/fake-corepack"
 log="$temporary/tools.log"
 
-make_fake_tool() {
-    tool=$1
-    output=$2
-    /bin/cat >"$tool" <<EOF
+/bin/cat >"$fake_go" <<EOF
 #!/bin/sh
-printf '%s\\n' '$output' >>"$log"
+printf 'go:%s\n' "\$*" >>"$log"
 EOF
-    /bin/chmod 700 "$tool"
-}
-
-make_fake_tool "$fake_go" go-used
+/bin/chmod 700 "$fake_go"
 /bin/cat >"$fake_node" <<EOF
 #!/bin/sh
-printf '%s\n' node-used >>"$log"
-[ "\$#" -eq 0 ] || exec "\$@"
+printf 'node:%s\n' "\$*" >>"$log"
+exec "\$@"
 EOF
 /bin/chmod 700 "$fake_node"
 /bin/cat >"$fake_corepack" <<EOF
 #!/bin/sh
-printf 'corepack-used:%s\n' "\${CI-unset}" >>"$log"
+printf 'corepack:%s:%s\n' "\${CI-unset}" "\$*" >>"$log"
 EOF
 /bin/chmod 700 "$fake_corepack"
 . "$repository_root/scripts/go-e2e-tools.sh"
@@ -56,57 +50,80 @@ esac
     "$repository_root/scripts/go-e2e-tools.sh" >/dev/null \
     || fail "temporary-directory helper lost the portable default"
 
-# Exercise the real browser wrapper in both arms with no tool available from
-# PATH. The fakes make build, package-manager and test commands observable
-# without compiling Go or installing packages.
-for browser_mode in serial race; do
+# Exercise every consolidated mode with no tool available from PATH. The
+# fakes make build, package-manager and test commands observable without
+# compiling Go or installing packages.
+for mode in browser browser-race daemon all; do
     : >"$log"
-    if [ "$browser_mode" = serial ]; then
-        set --
-    else
-        set -- --race
-    fi
     /usr/bin/env -i \
         PATH=/usr/bin:/bin HOME="$temporary" TMPDIR="$temporary/" \
         DARK_FACTORY_E2E_GO="$fake_go" \
         DARK_FACTORY_E2E_NODE="$fake_node" \
         DARK_FACTORY_E2E_COREPACK="$fake_corepack" \
-        /bin/sh "$repository_root/scripts/go-browser-e2e.sh" "$@" \
-        >"$temporary/browser-$browser_mode.log"
-    [ "$(/usr/bin/grep -c -F -x go-used "$log")" -eq 3 ] \
-        || fail "browser $browser_mode mode did not use injected Go exactly three times"
-    [ "$(/usr/bin/grep -c -F -x corepack-used:true "$log")" -eq 2 ] \
-        || fail "browser $browser_mode mode did not use injected Corepack exactly twice"
-    [ "$(/usr/bin/grep -c -F -x node-used "$log")" -eq 2 ] \
-        || fail "browser $browser_mode mode did not use injected Node exactly twice"
-    /usr/bin/grep -F "go-browser-e2e: PASS" "$temporary/browser-$browser_mode.log" >/dev/null \
-        || fail "browser $browser_mode mode did not complete"
+        /bin/sh "$repository_root/scripts/go-e2e.sh" "$mode" \
+        >"$temporary/$mode.log"
+    [ "$(/usr/bin/grep -c '^go:build ' "$log")" -eq 1 ] \
+        || fail "$mode did not build exactly once"
+    case "$mode" in
+        browser) /usr/bin/grep -F 'go:build -o ' "$log" | /usr/bin/grep -F './cmd/factory-runner ./cmd/factoryctl' >/dev/null || fail "$mode build packages were wrong" ;;
+        daemon) /usr/bin/grep -F 'go:build -o ' "$log" | /usr/bin/grep -F './cmd/factory-runner ./cmd/factoryctl ./cmd/factoryd' >/dev/null || fail "$mode daemon build packages were wrong" ;;
+        browser-race) /usr/bin/grep -F 'go:build -o ' "$log" | /usr/bin/grep -F -- ' -race ./cmd/factory-runner ./cmd/factoryctl' >/dev/null || fail "$mode race build was wrong" ;;
+        all) /usr/bin/grep -F 'go:build -o ' "$log" | /usr/bin/grep -F './cmd/factory-runner ./cmd/factoryctl ./cmd/factoryd' >/dev/null || fail "all build packages were wrong" ;;
+    esac
+    case "$mode" in
+        browser) [ "$(/usr/bin/grep -c '^go:test ' "$log")" -eq 1 ] || fail "$mode did not run one browser test" ;;
+        browser-race) /usr/bin/grep -F 'go:test -race ' "$log" >/dev/null || fail "$mode did not run a race test" ;;
+        daemon) [ "$(/usr/bin/grep -c '^go:test ' "$log")" -eq 1 ] || fail "daemon did not run one daemon test" ;;
+        all) [ "$(/usr/bin/grep -c '^go:test ' "$log")" -eq 2 ] || fail "all did not run both test commands" ;;
+    esac
+    /usr/bin/grep -F "PASS" "$temporary/$mode.log" >/dev/null || fail "$mode did not complete"
 done
 
-for e2e_script in go-browser-e2e.sh go-daemon-e2e.sh go-service-e2e.sh; do
-    path="$repository_root/scripts/$e2e_script"
-    if /usr/bin/grep -Eq '(^|[[:space:]])go[[:space:]]+(build|test)' "$path"; then
-        fail "$e2e_script regressed to a bare Go command"
-    fi
-done
-if /usr/bin/grep -Eq '(^|[[:space:]])corepack[[:space:]]+pnpm' \
-    "$repository_root/scripts/go-browser-e2e.sh"; then
-    fail "go-browser-e2e.sh regressed to a bare Corepack command"
-fi
-/usr/bin/grep -F '"$node" "$corepack" pnpm install' \
-    "$repository_root/scripts/go-browser-e2e.sh" >/dev/null \
-    || fail "browser wrapper does not invoke Corepack through injected Node"
+# Standalone browser preparation runs install/build; the combined source gate
+# explicitly skips that redundant preparation.
+: >"$log"
+/usr/bin/env -i PATH=/usr/bin:/bin HOME="$temporary" TMPDIR="$temporary/" \
+    DARK_FACTORY_E2E_GO="$fake_go" DARK_FACTORY_E2E_NODE="$fake_node" \
+    DARK_FACTORY_E2E_COREPACK="$fake_corepack" \
+    /bin/sh "$repository_root/scripts/go-e2e.sh" browser >/dev/null
+[ "$(/usr/bin/grep -c '^node:' "$log")" -eq 2 ] || fail "standalone browser did not prepare the client"
+[ "$(/usr/bin/grep -c '^corepack:true:pnpm ' "$log")" -eq 2 ] || fail "standalone browser did not use CI Corepack commands"
+: >"$log"
+/usr/bin/env -i PATH=/usr/bin:/bin HOME="$temporary" TMPDIR="$temporary/" \
+    DARK_FACTORY_E2E_GO="$fake_go" DARK_FACTORY_E2E_NODE="$fake_node" \
+    DARK_FACTORY_E2E_COREPACK="$fake_corepack" \
+    /bin/sh "$repository_root/scripts/go-e2e.sh" browser --client-built >/dev/null
+[ "$(/usr/bin/grep -c '^node:' "$log" || :)" -eq 0 ] || fail "explicit client-built browser still ran preparation"
+
+: >"$log"
+/usr/bin/env -i PATH=/usr/bin:/bin HOME="$temporary" TMPDIR="$temporary/" \
+    DARK_FACTORY_E2E_GO="$fake_go" DARK_FACTORY_E2E_NODE="$fake_node" \
+    DARK_FACTORY_E2E_COREPACK="$fake_corepack" \
+    /bin/sh "$repository_root/scripts/go-e2e.sh" all --client-built >/dev/null
+[ "$(/usr/bin/grep -c '^go:test ' "$log")" -eq 2 ] || fail "explicit client-built all did not run both tests"
+[ "$(/usr/bin/grep -c '^node:' "$log" || :)" -eq 0 ] || fail "explicit client-built all still ran preparation"
+
 for expected in \
     'go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")' \
     'node=$(go_e2e_resolve_tool node "${DARK_FACTORY_E2E_NODE-}")' \
     'corepack=$(go_e2e_resolve_tool corepack "${DARK_FACTORY_E2E_COREPACK-}")'; do
-    /usr/bin/grep -F "$expected" "$repository_root/scripts/go-browser-e2e.sh" >/dev/null \
-        || fail "browser wrapper lost explicit tool resolution: $expected"
+    /usr/bin/grep -F "$expected" "$repository_root/scripts/go-e2e.sh" >/dev/null \
+        || fail "consolidated wrapper lost explicit tool resolution: $expected"
 done
-for e2e_script in go-daemon-e2e.sh go-service-e2e.sh; do
+
+for e2e_script in go-e2e.sh go-service-e2e.sh; do
+    if /usr/bin/grep -Eq '(^|[[:space:]])go[[:space:]]+(build|test)' "$repository_root/scripts/$e2e_script"; then
+        fail "$e2e_script regressed to a bare Go command"
+    fi
     /usr/bin/grep -F 'go=$(go_e2e_resolve_tool go "${DARK_FACTORY_E2E_GO-}")' \
         "$repository_root/scripts/$e2e_script" >/dev/null \
         || fail "$e2e_script lost explicit Go resolution"
+done
+
+for invalid_args in 'bogus' 'browser nope' 'browser --client-built extra'; do
+    if /bin/sh "$repository_root/scripts/go-e2e.sh" $invalid_args >/dev/null 2>&1; then
+        fail "invalid arguments passed: $invalid_args"
+    fi
 done
 
 echo "Go E2E tool tests passed"

@@ -36,6 +36,9 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 	if err != nil || finalizing.Phase != RunFinalizing || finalizing.Proposal == nil || !finalizing.Proposal.equal(proposal) {
 		t.Fatalf("proposal = %+v, %v", finalizing, err)
 	}
+	if _, err := store.CreateHumanQuestionForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{IdempotencyKey: humanKey(250), QuestionText: "late completion notification", ReuseExisting: true}, mustTime(t, 41)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("human request after durable outcome = %v", err)
+	}
 	if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("finalizing credential = %v", err)
 	}
@@ -51,6 +54,31 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 		}
 	}
 	_ = running
+}
+
+func TestExactBearerRefusedProposalsDoNotPersistOutcome(t *testing.T) {
+	store, run, keys := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	// A stale timestamp reaches the kernel's refusal edge while leaving the
+	// running footprint valid, so validation cannot mask the outcome fence.
+	first, _ := NewSuccessProposal("first refused")
+	second, _ := NewFailureProposal(FailureInternal, "second refused")
+	for _, proposal := range []Proposal{first, second} {
+		_, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 29))
+		var refusal *OutcomeRefusal
+		if !errors.As(err, &refusal) || (!errors.Is(err, ErrConflict) && !errors.Is(err, ErrRevisionConflict)) {
+			t.Fatalf("proposal %q error = %v, want exact refusal", proposal.Detail(), err)
+		}
+	}
+	current, found, err := store.Run(ctx, run.ID)
+	if err != nil || !found {
+		t.Fatalf("refused run read = %+v, found=%v, err=%v", current, found, err)
+	}
+	if current.Phase != RunRunning || current.Proposal != nil || current.CredentialRevokedAt != nil {
+		t.Fatalf("refused proposals changed durable outcome = %+v", current)
+	}
 }
 
 func TestAttemptAuthorityUsesExactEffectiveTask(t *testing.T) {
@@ -235,7 +263,7 @@ func TestFinalizerRequiresEveryReleasedResourceAndExactTask(t *testing.T) {
 		t.Fatalf("terminal task = %+v", freshTask)
 	}
 	after, _ := store.Factory(context.Background())
-	if after.Head.Int64() != before.Head.Int64()+3 {
+	if after.Head.Int64() != before.Head.Int64()+2 || after.Revision != before.Revision {
 		t.Fatalf("terminal invalidations before=%+v after=%+v", before, after)
 	}
 	replay, err := store.FinalizeRun(context.Background(), admitted.ID, finalizing.Revision, mustTime(t, 0))
@@ -682,16 +710,13 @@ func TestWorkerRunCannotActivateBeforeExactChangeIsAvailable(t *testing.T) {
 	}
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
-	digest := changeTreeDigest(t, 2)
 	repository, _ := NewFileIdentity(61, 62)
-	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
-	stage, _ := NewFileIdentity(3, 4)
-	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, stage, mustTime(t, 32))
+	selection, _ := NewChangeSelection(format, commit, repository)
+	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, mustTime(t, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
-	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, availability, mustTime(t, 33)); err != nil {
+	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, selection.commit, mustTime(t, 33)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ActivateRun(context.Background(), admission.Run.ID, session.ID, activatedRun.Revision, session.Revision, mustTime(t, 34)); err != nil {
@@ -940,17 +965,14 @@ func finalizingReleasedRun(t *testing.T, role AgentRole, policy VerificationPoli
 	if candidate != nil {
 		format, _ := NewObjectFormat("sha1")
 		commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, 20))
-		digest := changeTreeDigest(t, 2)
 		repository, _ := NewFileIdentity(61, 62)
-		selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
-		stage, _ := NewFileIdentity(3, 4)
-		prepared, err := store.RecordChangePrepared(context.Background(), *candidate, mustRevision(t, 1), selection, stage, mustTime(t, 12))
+		selection, _ := NewChangeSelection(format, commit, repository)
+		prepared, err := store.RecordChangePrepared(context.Background(), *candidate, mustRevision(t, 1), selection, mustTime(t, 12))
 		if err != nil {
 			store.Close()
 			t.Fatal(err)
 		}
-		availability, _ := NewChangeAvailability(digest, 1, 1, stage)
-		if _, err := store.MarkChangeAvailable(context.Background(), *candidate, prepared.Revision, availability, mustTime(t, 13)); err != nil {
+		if _, err := store.MarkChangeAvailable(context.Background(), *candidate, prepared.Revision, selection.commit, mustTime(t, 13)); err != nil {
 			store.Close()
 			t.Fatal(err)
 		}
@@ -1015,14 +1037,10 @@ func finalizeTestRun(t *testing.T, store *Store, run Run, at int64) (Run, error)
 		}
 		return result, nil
 	}
-	if change.Selection == nil || change.TreeIdentity == nil {
+	if change.Selection == nil {
 		return Run{}, fmt.Errorf("read worker Change for settlement: %w", ErrCorruptState)
 	}
-	availability, err := NewChangeAvailability(change.Selection.commitment, change.Selection.entries, change.Selection.bytes, *change.TreeIdentity)
-	if err != nil {
-		return Run{}, err
-	}
-	settlement, err := NewRetainedChangeSettlement(change.Revision, availability)
+	settlement, err := NewRetainedChangeSettlement(change.Revision, change.HeadCommit)
 	if err != nil {
 		return Run{}, err
 	}

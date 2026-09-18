@@ -142,6 +142,28 @@ func TestUpdateAgentValidatesLaunchControlsAtTheObservedRevision(t *testing.T) {
 	}
 }
 
+func TestUpdateAgentModelChangesFutureAdmissionsWhileRunIsActive(t *testing.T) {
+	store, running, _, _ := runningWorkerAndOverseer(t)
+	defer store.Close()
+	ctx := context.Background()
+	agent, found, err := store.Agent(ctx, running.AgentID)
+	if err != nil || !found {
+		t.Fatalf("worker agent = %+v, found=%v, err=%v", agent, found, err)
+	}
+	model, effort := "gpt-5.6-luna", "medium"
+	updated, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{Model: &model, ReasoningEffort: &effort}, mustTime(t, 60))
+	if err != nil || updated.Model != model || updated.ReasoningEffort != effort {
+		t.Fatalf("active worker selection = %+v, %v", updated, err)
+	}
+	frozen, found, err := store.Run(ctx, running.ID)
+	if err != nil || !found || frozen.Model != running.Model || frozen.ReasoningEffort != running.ReasoningEffort {
+		t.Fatalf("admitted snapshot changed = %+v, found=%v, err=%v", frozen, found, err)
+	}
+	if _, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{Model: &model, ReasoningEffort: &effort}, mustTime(t, 61)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale active selection = %v", err)
+	}
+}
+
 func TestUpdateAgentAppearancePersistsAndResetsAtomically(t *testing.T) {
 	store, _, _, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()
@@ -326,6 +348,24 @@ func TestUpdateAgentForOverseerOnlyControlsWorkerLifecycle(t *testing.T) {
 	}
 	if _, err := store.UpdateAgent(ctx, restored.ID, restored.Revision, AgentPatch{Archived: &archive, Paused: &restore}, mustTime(t, 47)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("operator mixed archive update = %v", err)
+	}
+}
+
+func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
+	store, _, _, worker := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	ctx := context.Background()
+	policy, after, instruction, budget := IdleStandingInstruction, uint32(60), "review retained changes", uint32(3)
+	updated, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget}, mustTime(t, 6))
+	if err != nil || updated.Idle.Policy != policy || updated.Idle.AfterSeconds != after || updated.Idle.Instruction != instruction || updated.Idle.RunBudget != budget || updated.Idle.RunsUsed != 0 {
+		t.Fatalf("standing policy = %+v, %v", updated.Idle, err)
+	}
+	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget}, mustTime(t, 7)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale policy = %v", err)
+	}
+	emptyInstruction := ""
+	if _, err := store.UpdateAgent(ctx, worker.ID, updated.Revision, AgentPatch{IdleInstruction: &emptyInstruction}, mustTime(t, 8)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("empty standing instruction = %v", err)
 	}
 }
 

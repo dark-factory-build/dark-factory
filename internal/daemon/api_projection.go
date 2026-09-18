@@ -29,30 +29,32 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 		})
 	}
 	for _, agent := range snapshot.Agents {
-		result.Agents = append(result.Agents, api.AgentSummary{
-			ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
-			Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64()),
-		})
+		result.Agents = append(result.Agents, projectAgentSummary(agent))
 	}
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.TaskSummary{
-			ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(),
-			Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()),
+			ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: optionalAgentText(task.AssignedAgentID),
+			IncarnationID: task.IncarnationID.String(), WorkRevision: uint64(task.WorkRevision.Int64()), Title: task.Title, Status: task.Status, Priority: task.Priority, Revision: uint64(task.Revision.Int64()),
 		})
 	}
 	return result
 }
 
-func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) api.OverseerSnapshot {
+// projectOverseerSnapshot carries each settled Change's identities. Where
+// to read one comes only from an explicit attempt source request.
+func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) (api.OverseerSnapshot, error) {
 	result := api.OverseerSnapshot{
 		ProjectID: snapshot.ProjectID.String(), Head: uint64(snapshot.Head.Int64()), NextOffset: snapshot.NextOffset, NextTextOffset: snapshot.NextTextOffset,
-		Agents: []api.AgentSummary{}, Tasks: []api.OverseerTask{}, Runs: []api.OverseerRun{}, Questions: []api.OverseerQuestion{}, PeerQuestions: []api.PeerQuestion{}, History: []api.OverseerIntervention{},
+		Agents: []api.AgentSummary{}, Tasks: []api.OverseerTask{}, Runs: []api.OverseerRun{}, Questions: []api.OverseerQuestion{}, PeerQuestions: []api.PeerQuestion{}, History: []api.OverseerIntervention{}, Handoffs: []api.RetainedChangeHandoff{},
 	}
 	for _, agent := range snapshot.Agents {
-		result.Agents = append(result.Agents, api.AgentSummary{ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name, Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64())})
+		result.Agents = append(result.Agents, projectAgentSummary(agent))
 	}
 	for _, task := range snapshot.Tasks {
-		result.Tasks = append(result.Tasks, api.OverseerTask{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: task.AssignedAgentID.String(), Title: task.Title, Objective: task.Objective, ObjectiveTruncated: task.ObjectiveTruncated, Status: task.Status.String(), Priority: task.Priority, BlockedReason: task.BlockedReason, Result: task.Result, ResultTruncated: task.ResultTruncated, Revision: uint64(task.Revision.Int64())})
+		result.Tasks = append(result.Tasks, api.OverseerTask{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: optionalAgentText(task.AssignedAgentID), Title: task.Title, Objective: task.Objective, ObjectiveTruncated: task.ObjectiveTruncated, Status: task.Status.String(), Priority: task.Priority, BlockedReason: task.BlockedReason, Result: task.Result, ResultTruncated: task.ResultTruncated, Revision: uint64(task.Revision.Int64())})
+	}
+	for _, handoff := range snapshot.Handoffs {
+		result.Handoffs = append(result.Handoffs, projectHandoffIdentity(handoff))
 	}
 	for _, run := range snapshot.Runs {
 		result.Runs = append(result.Runs, api.OverseerRun{ID: run.ID.String(), AgentID: run.AgentID.String(), TaskID: run.TaskID.String(), Phase: run.Phase.String(), Revision: uint64(run.Revision.Int64())})
@@ -78,7 +80,32 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) api.OverseerSnaps
 		}
 		result.History = append(result.History, api.OverseerIntervention{OperationID: item.OperationID.String(), TaskID: item.TaskID.String(), RunID: item.RunID.String(), SuccessorTaskID: successor, Kind: item.Kind.String(), Actor: item.Actor.String(), Payload: payload, PayloadTruncated: truncated, State: item.State.String(), Detail: detail, CreatedAtMs: uint64(item.CreatedAt.Int64())})
 	}
-	return result
+	return result, nil
+}
+
+func projectAgentSummary(agent kernel.AgentSummary) api.AgentSummary {
+	return api.AgentSummary{
+		ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
+		Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived,
+		Model: agent.Model, ReasoningEffort: agent.ReasoningEffort,
+		ToolBudgetLimit: agent.ToolBudgetLimit, ToolCallsUsed: agent.ToolCallsUsed,
+		IdlePolicy: string(agent.Idle.Policy), IdleAfterSeconds: agent.Idle.AfterSeconds,
+		IdleInstruction: agent.Idle.Instruction, IdleRunBudget: agent.Idle.RunBudget, IdleRunsUsed: agent.Idle.RunsUsed,
+		AccountID: optionalAccountText(agent.AccountID), Revision: uint64(agent.Revision.Int64()),
+	}
+}
+
+func optionalAccountText(account kernel.AccountID) string {
+	if account == (kernel.AccountID{}) {
+		return ""
+	}
+	return account.String()
+}
+
+// projectHandoffIdentity projects the durable identities of one settled
+// Change: no path, and the head only once the Change has a worktree.
+func projectHandoffIdentity(handoff kernel.RetainedChangeHandoff) api.RetainedChangeHandoff {
+	return api.RetainedChangeHandoff{ChangeID: handoff.ChangeID.String(), BaseCommit: handoff.BaseCommit, HeadCommit: handoff.HeadCommit, TaskID: handoff.TaskID.String(), TaskWorkRevision: uint64(handoff.TaskWorkRevision.Int64()), ChangeRevision: uint64(handoff.ChangeRevision.Int64())}
 }
 
 func overseerAPIExcerpt(value string) (string, bool) {
@@ -118,6 +145,32 @@ func parseAgentID(value string) (kernel.AgentID, error) {
 		return kernel.AgentID{}, err
 	}
 	return kernel.AgentIDFromBytes(decoded)
+}
+
+// optionalAgentText serves a task's assigned agent: the zero identity is an
+// empty string, an unclaimed task any eligible worker may take.
+func optionalAgentText(id kernel.AgentID) string {
+	if id == (kernel.AgentID{}) {
+		return ""
+	}
+	return id.String()
+}
+
+// parseOptionalAgentID reads a task's assigned agent: empty means any
+// eligible worker in the project.
+func parseOptionalAgentID(value string) (kernel.AgentID, error) {
+	if value == "" {
+		return kernel.AgentID{}, nil
+	}
+	return parseAgentID(value)
+}
+
+func parseAccountID(value string) (kernel.AccountID, error) {
+	decoded, err := parseID(value)
+	if err != nil {
+		return kernel.AccountID{}, err
+	}
+	return kernel.AccountIDFromBytes(decoded)
 }
 
 func parseTaskID(value string) (kernel.TaskID, error) {

@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -444,7 +445,11 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return Run{}, tx.Rollback(ErrUnauthorized)
 	}
-	return store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil)
+	finalizing, err := store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil, nil)
+	if err != nil && (errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict)) {
+		return Run{}, NewOutcomeRefusal(err)
+	}
+	return finalizing, err
 }
 
 // FailRun records a daemon-owned infrastructure failure before or during a
@@ -480,7 +485,7 @@ func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision,
 	if run.Phase != RunAdmitted && run.Phase != RunRunning {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	return store.enterFinalizing(ctx, tx, run, expected, failure, at, nil)
+	return store.enterFinalizing(ctx, tx, run, expected, failure, at, nil, nil)
 }
 
 // FailRunWithRuntimeAbsent is the sole no-runtime-effect failure edge. Its
@@ -543,7 +548,7 @@ func (store *Store) FailRunWithRuntimeAbsent(ctx context.Context, runID RunID, r
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, runID, at, false, nil)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, runID, at, false, nil, nil)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
@@ -602,10 +607,18 @@ func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revisio
 	if run.Phase != RunAdmitted && run.Phase != RunRunning {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	return store.enterFinalizing(ctx, tx, run, expected, proposal, at, nil)
+	return store.enterFinalizing(ctx, tx, run, expected, proposal, at, nil, nil)
 }
 
-func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID) (Run, error) {
+func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID, preserveCondition *ContinuationConditionID) (Run, error) {
+	return store.enterFinalizingWithCommit(ctx, tx, run, expected, proposal, at, cancelRequest, preserveCondition, true)
+}
+
+func (store *Store) enterFinalizingInTransaction(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID, preserveCondition *ContinuationConditionID) (Run, error) {
+	return store.enterFinalizingWithCommit(ctx, tx, run, expected, proposal, at, cancelRequest, preserveCondition, false)
+}
+
+func (store *Store) enterFinalizingWithCommit(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID, preserveCondition *ContinuationConditionID, commit bool) (Run, error) {
 	if run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -658,7 +671,7 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 		}
 	}
 	pending := []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1}}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, cancelRequest)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, cancelRequest, preserveCondition)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
@@ -673,8 +686,10 @@ func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, e
 		}
 		return Run{}, tx.Rollback(err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Run{}, err
+	if commit {
+		if err := tx.Commit(ctx); err != nil {
+			return Run{}, err
+		}
 	}
 	return run, nil
 }
@@ -752,7 +767,7 @@ func (store *Store) ObserveProviderExit(ctx context.Context, runID RunID, expect
 		if err := moveTerminalToReleasing(ctx, tx.connection, session, at); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
-		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil)
+		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil, nil)
 		if transitionErr != nil {
 			return Run{}, tx.Rollback(transitionErr)
 		}
@@ -926,7 +941,12 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		if settlingChange == nil || run.ChangeID == nil || settlingChange.Revision != settlement.expected || at.Int64() < settlingChange.UpdatedAt.Int64() || !relationships.changeOwnership.canSettleAs(settlement.phase, settlement.refusal != nil) {
 			return Run{}, tx.Rollback(ErrConflict)
 		}
-		if settlement.phase == ChangeRetained && (settlement.availability == nil || settlingChange.TreeIdentity == nil || *settlingChange.TreeIdentity != settlement.availability.tree || run.RunningAt == nil && !changeAvailabilityMatches(*settlingChange, *settlement.availability)) {
+		// A worktree Change keeps a head from the moment it exists; a settlement
+		// that observed none would erase that fact. A Change still Git-free at
+		// settlement has no head to observe and stays that way. Before the
+		// worker ran, nothing can have moved the branch: only the base settles.
+		if settlement.phase == ChangeRetained && (settlingChange.HeadCommit != nil && settlement.head == nil || settlingChange.HeadCommit == nil && settlement.head != nil ||
+			settlement.head != nil && (settlement.head.format != settlingChange.Selection.format || run.RunningAt == nil && !settlement.head.equal(settlingChange.Selection.commit))) {
 			return Run{}, tx.Rollback(ErrConflict)
 		}
 		changeRevision = settlingChange.Revision.Int64() + 1
@@ -945,9 +965,13 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 		change := settlingChange
 		switch settlement.phase {
 		case ChangeRetained:
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE changes SET phase = 'retained', tree_digest = ?, entry_count = ?, total_bytes = ?, settled_run_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'available' AND revision = ? AND settled_run_id IS NULL AND tree_dev = ? AND tree_inode = ?`, settlement.availability.commitment.Bytes(), int64(settlement.availability.entries), int64(settlement.availability.bytes), run.ID.Bytes(), at.Int64(), change.ID.Bytes(), settlement.expected.Int64(), settlement.availability.tree.device, settlement.availability.tree.inode)
+			var head any
+			if settlement.head != nil {
+				head = settlement.head.Bytes()
+			}
+			updated, err = tx.connection.ExecContext(ctx, `UPDATE changes SET phase = 'retained', head_commit = ?, settled_run_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'available' AND revision = ? AND settled_run_id IS NULL`, head, run.ID.Bytes(), at.Int64(), change.ID.Bytes(), settlement.expected.Int64())
 		case ChangeAbandoned:
-			updated, err = tx.connection.ExecContext(ctx, `UPDATE changes SET phase = 'abandoned', object_format = NULL, base_commit = NULL, repository_dev = NULL, repository_inode = NULL, tree_digest = NULL, entry_count = NULL, total_bytes = NULL, tree_dev = NULL, tree_inode = NULL, prepared_at_ms = NULL, available_at_ms = NULL, settled_run_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('reserved', 'prepared', 'available') AND revision = ? AND settled_run_id IS NULL`, run.ID.Bytes(), at.Int64(), change.ID.Bytes(), settlement.expected.Int64())
+			updated, err = tx.connection.ExecContext(ctx, `UPDATE changes SET phase = 'abandoned', object_format = NULL, base_commit = NULL, repository_dev = NULL, repository_inode = NULL, head_commit = NULL, prepared_at_ms = NULL, available_at_ms = NULL, settled_run_id = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase IN ('reserved', 'prepared', 'available') AND revision = ? AND settled_run_id IS NULL`, run.ID.Bytes(), at.Int64(), change.ID.Bytes(), settlement.expected.Int64())
 		default:
 			return Run{}, tx.Rollback(ErrCorruptState)
 		}
@@ -955,17 +979,15 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 			return Run{}, tx.Rollback(err)
 		}
 	}
-	factoryRevision := factory.Revision.Int64() + 1
-	updated, err = tx.connection.ExecContext(ctx, `UPDATE factory SET revision = revision + 1, updated_at_ms = ? WHERE singleton = 1 AND revision = ?`, at.Int64(), factory.Revision.Int64())
+	updated, err = tx.connection.ExecContext(ctx, `UPDATE factory SET updated_at_ms = ? WHERE singleton = 1 AND revision = ?`, at.Int64(), factory.Revision.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, true, nil)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, true, nil, nil)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
 	pending := []pendingInvalidation{
-		{kind: EntityFactory, id: factoryEntityID[:], revision: factoryRevision},
 		{kind: EntityTask, id: task.ID.Bytes(), revision: taskRevision},
 		{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1},
 	}

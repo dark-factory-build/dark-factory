@@ -80,10 +80,19 @@ func TestV6MigrationPreservesSendBackAndSupervision(t *testing.T) {
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}
+	for _, statement := range []string{"DROP INDEX continuations_admission_queue", "DROP INDEX continuations_one_waiting_per_condition", "DROP TABLE continuations"} {
+		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := rebuildTable(ctx, connection, expectedSchemaOf(v6SchemaStatements()), "agents", v7AgentColumns, "agents_id_project_unique", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := rebuildTable(ctx, connection, expectedSchemaOf(v6SchemaStatements()), "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v6SchemaStatements()), "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
+		"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
 		t.Fatal(err)
 	}
 	target := expectedSchemaOf(v6SchemaStatements())
@@ -92,6 +101,14 @@ func TestV6MigrationPreservesSendBackAndSupervision(t *testing.T) {
 	}
 	if err := rebuildTable(ctx, connection, target, "human_requests", "id, run_id, idempotency_key, kind, reason_code, question_text, status, delivery_id, delivery_started_at_ms, resolution_kind, closed_at_ms, revision, created_at_ms, updated_at_ms", "human_requests_one_unresolved_per_run", "", ""); err != nil {
 		t.Fatal(err)
+	}
+	if err := rebuildTable(ctx, connection, target, "tasks", testTaskColumnsV5, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{"DROP TABLE terminal_diagnostics", "DROP TABLE project_outcome_revisions", "DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites", "DROP TABLE task_conflict_paths"} {
+		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, statement := range []string{"DROP TABLE peer_questions", "PRAGMA user_version = 6", "COMMIT"} {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {

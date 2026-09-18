@@ -3,11 +3,29 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
+
+func retainedReviewHandoffMismatch(expected, actual kernel.RetainedChangeHandoff) error {
+	switch {
+	case expected.TaskID != actual.TaskID:
+		return fmt.Errorf("%w: retained review task identity mismatch", kernel.ErrConflict)
+	case expected.ChangeID != actual.ChangeID:
+		return fmt.Errorf("%w: retained review Change identity mismatch", kernel.ErrConflict)
+	case expected.BaseCommit != actual.BaseCommit:
+		return fmt.Errorf("%w: retained review base commit mismatch", kernel.ErrConflict)
+	case expected.TaskWorkRevision != actual.TaskWorkRevision:
+		return fmt.Errorf("%w: retained review task work revision mismatch", kernel.ErrConflict)
+	case expected.ChangeRevision != actual.ChangeRevision:
+		return fmt.Errorf("%w: retained review Change revision mismatch", kernel.ErrConflict)
+	default:
+		return nil
+	}
+}
 
 const (
 	supervisorReconcileAttempts = 3
@@ -31,6 +49,7 @@ type SupervisorSpec struct {
 	RunnerExecutable     string
 	FactoryctlExecutable string
 	ToolPath             string
+	ToolchainReadRoots   string
 	AccountHome          string
 
 	// UnsettledCompletion reports a scheduled attempt whose durable
@@ -74,12 +93,14 @@ func (daemon *Daemon) RunNext(ctx context.Context, spec SupervisorSpec) (run ker
 	if err != nil {
 		return kernel.Run{}, err
 	}
-	daemon.rememberSupervisorAccount(spec.ChangeParent, spec.AccountHome)
+	daemon.RememberSupervisorAccount(spec.ChangeParent, spec.AccountHome, spec.GitExecutable)
 	defer func() { daemon.endSupervisor(registration, resultErr) }()
 	run, resultErr = daemon.runNext(registration.ctx, spec)
 	if run.Phase == kernel.RunFinalizing && run.ID != (kernel.RunID{}) {
-		recovered, recoverErr := daemon.recoverReturnedRun(spec.RuntimeParent, spec.ChangeParent, run.ID)
-		run = recovered
+		recovered, recoverErr := daemon.recoverReturnedRun(daemon.cleanupCtx, spec.RuntimeParent, spec.ChangeParent, run.ID)
+		if recovered.ID != (kernel.RunID{}) {
+			run = recovered
+		}
 		resultErr = errors.Join(resultErr, recoverErr)
 	}
 	return run, resultErr

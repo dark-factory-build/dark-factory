@@ -17,7 +17,7 @@ import (
 func TestSchedulerRetriesUncertainTerminalCompletionRead(t *testing.T) {
 	fixture := newRecoveryFixture(t, 0x87)
 	fixture.failBeforeRuntime(t)
-	terminal, err := fixture.daemon.settleRun(fixture.changeParent, fixture.run.ID)
+	terminal, err := fixture.daemon.settleRun(context.Background(), fixture.changeParent, fixture.run.ID)
 	if err != nil || terminal.Phase != kernel.RunTerminal {
 		t.Fatalf("terminal row = %+v, %v", terminal, err)
 	}

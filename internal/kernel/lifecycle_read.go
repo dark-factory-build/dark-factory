@@ -455,14 +455,62 @@ func (store *Store) Resource(ctx context.Context, id ResourceID) (Resource, bool
 	return resource, true, nil
 }
 
+// LatestTerminalRuntimeRoot returns the runtime_root resource path of the
+// given agent's most recently terminal run, or found=false when the agent
+// has none yet. A resource row is retained after release (see
+// internal/kernel/schema.go: resources has no path-clearing transition), so
+// this stays readable long after the directory itself is gone; the daemon
+// uses it only as a durable text key, such as matching a past provider
+// transcript recorded against that exact path, not to reopen the directory.
+func (store *Store) LatestTerminalRuntimeRoot(ctx context.Context, agentID AgentID) (string, bool, error) {
+	if agentID.zero() {
+		return "", false, fmt.Errorf("%w: zero agent identifier", ErrInvalidValue)
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Close()
+	var path string
+	err = tx.connection.QueryRowContext(ctx, `SELECT resources.path FROM resources
+	    JOIN runs ON runs.id = resources.run_id
+	    WHERE runs.agent_id = ? AND runs.phase = 'terminal' AND resources.kind = 'runtime_root' AND resources.path IS NOT NULL
+	    ORDER BY runs.terminal_at_ms DESC, runs.id DESC LIMIT 1`, agentID.Bytes()).Scan(&path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return path, true, nil
+}
+
 func resourcesForRun(ctx context.Context, connection *sql.Conn, runID RunID) ([]Resource, error) {
-	rows, err := connection.QueryContext(ctx, `SELECT `+resourceColumns+` FROM resources WHERE run_id = ? ORDER BY kind, id`, runID.Bytes())
+	return resourcesForRunWithLimit(ctx, connection, runID, 0)
+}
+
+func resourcesForRunBounded(ctx context.Context, connection *sql.Conn, runID RunID, limit int) ([]Resource, error) {
+	return resourcesForRunWithLimit(ctx, connection, runID, limit)
+}
+
+func resourcesForRunWithLimit(ctx context.Context, connection *sql.Conn, runID RunID, limit int) ([]Resource, error) {
+	query := `SELECT ` + resourceColumns + ` FROM resources WHERE run_id = ? ORDER BY kind, id`
+	args := []any{runID.Bytes()}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit+1)
+	}
+	rows, err := connection.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var resources []Resource
 	for rows.Next() {
+		if limit > 0 && len(resources) == limit {
+			_ = rows.Close()
+			return nil, fmt.Errorf("%w: run has more than %d resources", ErrRecoveryBounds, limit)
+		}
 		resource, found, err := scanResource(rows)
 		if err != nil {
 			return nil, err
@@ -559,17 +607,24 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 		return AttemptAuthority{}, err
 	}
 	defer tx.Close()
-	run, found, err := runByDigest(ctx, tx.connection, digest)
+	return authenticateAttempt(ctx, tx.connection, digest)
+}
+
+// authenticateAttempt performs all credential and relationship checks on the
+// caller's existing read connection. Read routes use it to keep authorization
+// and the authorized row read in one transaction snapshot.
+func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest AttemptDigest) (AttemptAuthority, error) {
+	run, found, err := runByDigest(ctx, connection, digest)
 	if err != nil {
 		return AttemptAuthority{}, err
 	}
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil || !bytes.Equal(run.CredentialDigest.Bytes(), digest.Bytes()) {
 		return AttemptAuthority{}, ErrUnauthorized
 	}
-	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+	if err := validateOwnershipLocators(ctx, connection); err != nil {
 		return AttemptAuthority{}, err
 	}
-	relationships, err := loadRunRelationships(ctx, tx.connection, run)
+	relationships, err := loadRunRelationships(ctx, connection, run)
 	if err != nil {
 		return AttemptAuthority{}, err
 	}
@@ -577,5 +632,19 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 	if run.Provider != ProviderShell && effectiveTask == "" {
 		effectiveTask = relationships.task.Title
 	}
-	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, task: effectiveTask}, nil
+	var currentChangeRevision *Revision
+	var baseCommit []byte
+	if relationships.change != nil {
+		current := relationships.change.Revision
+		currentChangeRevision = &current
+		if relationships.change.Selection == nil {
+			return AttemptAuthority{}, fmt.Errorf("%w: running worker Change has no selected base", ErrCorruptState)
+		}
+		baseCommit = relationships.change.Selection.Commit().Bytes()
+	}
+	contexts, err := resolvedContinuationContextsForTask(ctx, connection, relationships.task)
+	if err != nil {
+		return AttemptAuthority{}, err
+	}
+	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, AdmittedTaskWorkRevision: run.AdmittedTaskWorkRevision, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, AdmittedChangeRevision: run.AdmittedChangeRevision, CurrentChangeRevision: currentChangeRevision, BaseCommit: baseCommit, ContinuationContexts: contexts, task: effectiveTask}, nil
 }

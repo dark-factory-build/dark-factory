@@ -11,6 +11,7 @@ import { prepareFloor, selectFloor, projectFloor } from "../dist/src/console-vie
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
+import { DEFAULT_FLOOR_APPEARANCE, readFloorAppearance } from "../dist/src/floor-appearance.js";
 import { fixtureState, fixtureTopologies, fixtureTopology } from "../../../fixtures/state.mjs";
 
 const ids = {
@@ -30,6 +31,12 @@ const render = (props = {}) => renderToStaticMarkup(createElement(FactoryConsole
   state: baseState(),
   ...props,
 }));
+
+function consoleElements(props) {
+  let tree;
+  act(() => { tree = create(createElement(FactoryConsole, props)); });
+  return tree.root.findAll((node) => typeof node.type === "string").map((node) => ({ type: node.type, props: node.props }));
+}
 
 const VIEWS = ["floor", "agents"];
 
@@ -72,17 +79,71 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
 });
 
+test("floor appearance is local, field-validated, and available before a connection", () => {
+  assert.deepEqual(readFloorAppearance('{"scenery":"off","dependencyLinks":"bad","labels":"names-and-counts","taskProps":false,"animation":"off"}'), {
+    scenery: "off", dependencyLinks: "selected-room", labels: "names-and-counts", taskProps: false, animation: "off", ambientLife: "quiet",
+  });
+  assert.deepEqual(readFloorAppearance('{"scenery":"subtle"}'), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "subtle" });
+  assert.deepEqual(readFloorAppearance("not json"), DEFAULT_FLOOR_APPEARANCE);
+  const markup = render({ status: "closed", settingsOpen: true });
+  for (const text of ["Scenery", "Dependency links", "Labels", "Task props", "Animation", "Ambient life", "Reset floor appearance", "Saved in this browser. Does not change how the factory runs."]) assert.match(markup, new RegExp(text));
+  assert.match(markup, /<option value="selected-room" selected="">Selected room<\/option>/);
+});
+
+test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
+  const priorWindow = globalThis.window;
+  const entries = new Map([
+    ["dark-factory.floor-appearance", '{"scenery":"subtle","dependencyLinks":"overview","labels":"bad","taskProps":"bad","animation":"off"}'],
+    ["dark-factory.pairing", "keep"],
+  ]);
+  const writes = [];
+  globalThis.window = { localStorage: {
+    getItem: (key) => entries.get(key) ?? null,
+    setItem: (key, value) => { writes.push([key, value]); entries.set(key, value); },
+    removeItem: (key) => { writes.push([key]); entries.delete(key); },
+  } };
+  try {
+    let tree;
+    act(() => { tree = create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); });
+    assert.deepEqual(writes, [], "loading never writes defaults");
+    const selects = tree.root.findAllByType("select").slice(-6);
+    assert.equal(selects[0].props.value, "subtle");
+    assert.equal(selects[1].props.value, "overview");
+    assert.equal(selects[2].props.value, "names");
+    assert.equal(selects[3].props.value, "on");
+    act(() => { selects[0].props.onChange({ currentTarget: { value: "off" } }); });
+    assert.deepEqual(JSON.parse(entries.get("dark-factory.floor-appearance")), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", dependencyLinks: "overview", animation: "off" });
+    act(() => { tree.root.findAllByType("button").find((button) => button.props.children === "Reset floor appearance").props.onClick(); });
+    assert.equal(entries.has("dark-factory.floor-appearance"), false);
+    assert.equal(entries.get("dark-factory.pairing"), "keep");
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
+});
+
+test("blocked floor-appearance storage leaves the console renderable", () => {
+  const priorWindow = globalThis.window;
+  globalThis.window = { localStorage: { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => { throw new Error("blocked"); } } };
+  try {
+    assert.doesNotThrow(() => act(() => { create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); }));
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
+});
+
 test("one screen keeps Factory and the operator panels together", () => {
   const markup = render();
   assert.match(markup, /<main class="dfFactoryConsole" aria-label="Factory operator console">/);
-  for (const label of ["Factory floor", "Selected detail", "NEEDS YOU", "Left view", "Right panel"]) {
+  for (const label of ["Factory floor", "Selected detail", "Needs you", "Left view", "Right panel"]) {
     assert.match(markup, new RegExp(`aria-label="${label}"`));
   }
   assert.doesNotMatch(markup, /ACTIVE RUNS|OPERATOR VIEW/);
   assert.equal(markup.includes("<dt>QUEUED</dt>"), false);
   assert.equal(markup.includes("<dt>NEEDS YOU</dt>"), false);
   assert.match(markup, /Needs you <span>1<\/span>/);
-  assert.match(markup, />Tasks<\/button>/);
+  assert.match(markup, />Queue<\/button>/);
   assert.match(markup, /Builder One asks/);
   assert.match(markup, /Review the state projection/);
   assert.match(markup, /North Workshop · Review the state projection/);
@@ -102,7 +163,7 @@ test("a selected decision names the action and keeps one collapse control", () =
 
 test("suggested answers fill the reply without sending it", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value) }));
+  const elements = consoleElements({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value) });
   elements.find((element) => element.type === "button" && Array.isArray(element.props.children) && element.props.children[0] === "Continue").props.onClick();
   assert.deepEqual(calls, ["Continue"]);
   const markup = render({ selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }) });
@@ -548,8 +609,8 @@ test("unknown and inherited error codes use a finite fallback", () => {
 
 test("Needs You and Queue keep every served item reachable", () => {
   const emptyState = baseState({ projects: new Map(), agents: new Map(), tasks: new Map(), humanRequests: new Map() });
-  assert.match(render({ state: emptyState }), /all quiet — nothing needs you/);
-  assert.match(render({ state: emptyState, detail: "queue" }), /NO QUEUED TASKS/);
+  assert.match(render({ state: emptyState }), /Nothing needs your attention/);
+  assert.match(render({ state: emptyState, detail: "queue" }), /No queued tasks/);
   assert.match(render({ state: emptyState, view: "agents" }), /no agents/);
 
   const agents = new Map();
@@ -570,7 +631,7 @@ test("Needs You and Queue keep every served item reachable", () => {
   const queue = render({ state: bounded, detail: "queue" });
   assert.equal((queue.match(/<li class="dfConsoleItem"/g) ?? []).length, 9);
   assert.equal((markup.match(/\+1 more/g) ?? []).length, 0);
-  assert.match(markup, />9 ITEMS</);
+  assert.match(markup, />9 items</);
   assert.match(queue, /Task 8/);
   assert.equal((render({ state: bounded, view: "agents" }).match(/dfAgentList__row/g) ?? []).length, 0, "no handler, no button");
   assert.equal((render({ state: bounded, view: "agents", onSelectAgent: () => {} }).match(/dfAgentList__row/g) ?? []).length, 9);
@@ -608,10 +669,10 @@ test("the production console exposes no speculative or unsupported surface", () 
 
 test("an unavailable snapshot is explicit and does not invent runtime state", () => {
   const markup = render({ state: undefined, status: "syncing" });
-  assert.match(markup, /WAITING FOR SNAPSHOT/);
-  assert.match(markup, /WAITING FOR SNAPSHOT/);
+  assert.match(markup, /Waiting for the latest state…/);
+  assert.match(markup, /Waiting for the latest state…/);
   assert.match(markup, /Connection status: SYNCING/);
-  assert.match(markup, />Tasks<\/button>/);
+  assert.match(markup, />Queue<\/button>/);
   assert.equal(markup.includes("NO QUEUED TASKS"), false);
   assert.equal(markup.includes("all quiet"), false);
   assert.match(render({ state: undefined, status: "syncing", view: "agents" }), /waiting for the factory/);
@@ -698,9 +759,9 @@ test("opening a selected question restores that agent's terminal panel", async (
   try {
     let renderer;
     await act(async () => { renderer = create(createElement(ConsoleHarness)); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "CONFIG").props.onClick(); });
+    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Settings" && typeof button.props.onClick === "function").props.onClick(); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ").props.onClick(); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "OPEN TERMINAL").props.onClick(); });
+    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
     const terminal = renderer.root.findByProps({ "aria-label": "Terminal" });
     const config = renderer.root.findByProps({ "aria-label": "Agent configuration" });
     assert.equal(terminal.props.hidden, false);
@@ -722,8 +783,8 @@ test("selecting an agent exposes terminal and configuration controls", () => {
   assert.match(markup, /aria-label="Agent Builder One"/);
   assert.match(markup, /Builder One[\s\S]*?claude_code · claude-opus-5/);
   assert.match(markup, /aria-label="Agent controls"/);
-  assert.match(markup, />TERMINAL</);
-  assert.match(markup, />CONFIG</);
+  assert.match(markup, />Terminal</);
+  assert.match(markup, />Settings</);
   assert.match(markup, /aria-label="Agent configuration"/);
   assert.match(markup, /value="claude-opus-5"/);
   assert.match(markup, /value="high"/);
@@ -734,7 +795,7 @@ test("selecting an agent exposes terminal and configuration controls", () => {
   // Without handlers the sidebar is a readout, never a dead form.
   const readOnly = render({ selectedAgent: agentSelection() });
   assert.equal(readOnly.includes("<input"), false);
-  assert.equal(readOnly.includes("OPEN TERMINAL"), false);
+  assert.equal(readOnly.includes("Open terminal"), false);
 });
 
 test("a paused agent with queued work says the queue is paused", () => {
@@ -749,6 +810,20 @@ test("a paused agent with queued work says the queue is paused", () => {
   });
   assert.match(markup, />QUEUE PAUSED</);
   assert.equal(markup.includes("QUEUED · WAITING FOR CAPACITY"), false);
+});
+
+test("unclaimed shared work waits under its project until an eligible worker claims it", () => {
+  const template = [...fixtureState.tasks.values()].find((task) => task.status === "queued");
+  const shared = { ...template, id: "3a".repeat(16), title: "Anyone free", assigned_agent_id: "" };
+  const markup = render({
+    state: baseState({ tasks: new Map([[shared.id, shared]]) }),
+    detail: "queue",
+    selectedAgent: agentSelection(),
+    onEditTask: () => {},
+  });
+  assert.match(markup, /Anyone free/);
+  assert.match(markup, /ANY ELIGIBLE WORKER · QUEUED · PRIORITY/);
+  assert.match(markup, /<option value="" disabled=""[^>]*>Any eligible worker<\/option>/);
 });
 
 test("the queued task row keeps served order and changes its exact priority", async () => {
@@ -833,7 +908,7 @@ test("the queued task row keeps served order and changes its exact priority", as
     await act(async () => { renderer.root.findAllByType("input").find((input) => input.props.id === `df-title-${queued.id}`).props.onChange({ currentTarget: { value: "Keep this draft" } }); });
     await act(async () => { renderer.root.findAllByType("textarea").find((input) => input.props.id === `df-instruction-${queued.id}`).props.onChange({ currentTarget: { value: "Keep this instruction" } }); });
     assert.equal(titleValue(), "Keep this draft");
-    await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "OLDER CONVERSATION").props.onClick(); });
+    await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "Older conversation").props.onClick(); });
     assert.equal(titleValue(), "Keep this draft");
     assert.equal(instructionValue(), "Keep this instruction");
     assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((item) => String(item.props.children).includes("SAVE OR DISCARD YOUR DRAFT")));
@@ -1008,11 +1083,11 @@ test("a rejected edit says plainly that the durable value did not change", () =>
     onSaveAgentConfig: () => {},
     edit: { target: ids.agent, pending: false, error: new SessionError("stale") },
   });
-  assert.match(markup, /SOMEONE ELSE CHANGED THIS — REOPEN IT AND TRY AGAIN/);
+  assert.match(markup, /Someone else changed this\. Reopen it and try again\./);
   assert.match(markup, /role="alert"/);
   assert.equal((markup.match(/role="alert"/g) ?? []).length, 1, "a config refusal has one shared alert");
   const unknown = render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { target: ids.agent, pending: false, error: { code: "internal" } } });
-  assert.match(unknown, /THE EDIT DID NOT COMPLETE/);
+  assert.match(unknown, /The edit did not complete\./);
   assert.match(render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { pending: true } }), />SAVING</);
 });
 
@@ -1026,25 +1101,24 @@ test("a queued edit refusal remains visible after its task leaves the queue", ()
   ];
   for (const state of states) {
     const markup = render({ state, detail: "needs-you", edit: rejected });
-    assert.match(markup, /SOMEONE ELSE CHANGED THIS — REOPEN IT AND TRY AGAIN/);
+    assert.match(markup, /Someone else changed this\. Reopen it and try again\./);
     assert.equal((markup.match(/role="alert"/g) ?? []).length, 1);
   }
 });
 
-test("the settings modal carries the factory readout and a pairing mount point", () => {
+test("the settings modal keeps actionable settings compact", () => {
   const markup = render({ settingsOpen: true, onToggleSettings: () => {} });
   assert.match(markup, /<dialog class="dfConsoleDialog" aria-label="Settings">/);
-  assert.match(markup, /aria-label="BUILDING"/);
-  assert.match(markup, /<dt>DISPATCH<\/dt><dd>ENABLED<\/dd>/);
-  // Project values have one editable home, rather than duplicate narrow metrics.
+  assert.doesNotMatch(markup, /aria-label="BUILDING"/);
+  assert.doesNotMatch(markup, /<dt>DISPATCH<\/dt>/);
+  assert.doesNotMatch(markup, /aria-label="This factory"/);
+  assert.match(markup, /aria-label="Run limits"/);
   assert.doesNotMatch(markup, /<dt>(RUN ALLOWANCE|PER-RUN LIMIT)<\/dt>/);
   assert.equal((markup.match(/aria-label="Limits for North Workshop"/g) ?? []).length, 1);
   assert.equal((markup.match(/aria-label="Limits for South Workshop"/g) ?? []).length, 1);
   assert.match(markup, /5 RUNS USED · 7 FUTURE RUNS LEFT/);
   assert.match(markup, /3 RUNS USED · UNLIMITED/);
   assert.match(markup, /value="900"/);
-  assert.match(markup, /Revision 42/);
-  assert.match(markup, /127\.0\.0\.1:43123/);
   assert.match(markup, /aria-label="PAIRING"/);
   assert.match(markup, /Pairing unavailable/);
   // The peer PR drops its own component into the same slot.
@@ -1059,7 +1133,7 @@ test("the settings modal carries the factory readout and a pairing mount point",
 
 test("settings edits project limits as future runs with an explicit unlimited choice", () => {
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, onSaveProjectLimits: () => {} });
-  assert.match(markup, /aria-label="PROJECT LIMITS"/);
+  assert.match(markup, /aria-label="Project limits"/);
   assert.match(markup, /value="7"/);
   assert.match(markup, /REMAINING RUN ALLOWANCE/);
   assert.match(markup, /UNLIMITED RUNS/);
@@ -1176,7 +1250,7 @@ test("a refused appearance edit keeps the editor and its draft", async () => {
     await act(async () => { dialog.findAllByType("select")[0].props.onChange({ target: { value: "3" } }); });
     await act(async () => { await dialog.findByType("form").props.onSubmit({ preventDefault() {} }); });
     assert.equal(closes, 0);
-    assert.equal(dialog.findByProps({ role: "alert" }).children.join(""), "SOMEONE ELSE CHANGED THIS — REOPEN IT AND TRY AGAIN");
+    assert.equal(dialog.findByProps({ role: "alert" }).children.join(""), "Someone else changed this. Reopen it and try again.");
     assert.equal(dialog.findAllByType("select")[0].props.value, 3);
     await act(async () => { renderer.unmount(); });
   } finally { globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct; }
@@ -1197,7 +1271,7 @@ test("FactoryApp server-renders without reading browser globals", () => {
   const markup = renderToStaticMarkup(createElement(FactoryApp));
   assert.match(markup, /Factory operator console/);
   assert.match(markup, />IDLE</);
-  assert.match(markup, /WAITING FOR SNAPSHOT/);
+  assert.match(markup, /Waiting for the latest state…/);
 });
 
 test("selected hostile private detail is escaped and actions remain semantic", () => {
@@ -1236,17 +1310,17 @@ test("request, reply, cancel, and summary collapse forward only presentation int
     onCloseHumanRequest: () => calls.push(["close"]),
   };
 
-  const requestElements = expand(FactoryConsole(baseProps));
+  const requestElements = consoleElements(baseProps);
   requestElements.find((element) => element.type === "summary" && element.props.className === "dfConsoleItem__summary").props.onClick({ preventDefault() {} });
   assert.equal(calls[0][0], "select");
   assert.equal(calls[0][1], request);
-  const busyElements = expand(FactoryConsole({ ...baseProps, selectedHumanRequest: selectedRequest({ phase: "replying" }) }));
+  const busyElements = consoleElements({ ...baseProps, selectedHumanRequest: selectedRequest({ phase: "replying" }) });
   const busySummary = busyElements.find((element) => element.type === "summary" && element.props.className === "dfConsoleItem__summary");
   assert.equal(busySummary.props["aria-disabled"], true);
   busySummary.props.onClick({ preventDefault() {} });
   assert.equal(calls.length, 1, "an in-flight answer cannot be collapsed or switched");
 
-  const selectedElements = expand(FactoryConsole({ ...baseProps, selectedHumanRequest: selectedRequest() }));
+  const selectedElements = consoleElements({ ...baseProps, selectedHumanRequest: selectedRequest() });
   selectedElements.find((element) => element.type === "textarea").props.onChange({ currentTarget: { value: "Proceed." } });
   let prevented = false;
   selectedElements.find((element) => element.type === "form").props.onSubmit({ preventDefault: () => { prevented = true; } });
@@ -1269,7 +1343,7 @@ test("agent and question terminal actions expose only current public intent", as
   })); });
   const row = renderer.root.findAllByType("button").find((element) => typeof element.props.className === "string" && element.props.className.includes("dfAgentList__row"));
   await act(async () => { row.props.onClick(); });
-  await act(async () => { renderer.root.findAllByType("button").filter((element) => element.props.children === "OPEN TERMINAL").at(-1).props.onClick(); });
+  await act(async () => { renderer.root.findAllByType("button").filter((element) => element.props.children === "Open terminal").at(-1).props.onClick(); });
   assert.equal(calls[0][0], "agent");
   assert.equal(calls[0][1].id, agent.id);
   assert.equal(calls[0][1].revision, agent.revision);
@@ -1284,12 +1358,12 @@ test("agent and question terminal actions expose only current public intent", as
 
 test("the view toggle and settings forward exactly one intent each", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({
+  const elements = consoleElements({
     status: "ready",
     state: baseState(),
     onView: (value) => calls.push(["view", value]),
     onToggleSettings: () => calls.push(["settings"]),
-  }));
+  });
   const chrome = elements.filter((element) => element.type === "button" && element.props.disabled !== true);
   assert.deepEqual(chrome.map((element) => element.props.children), ["Settings", "Floor", "Agents"]);
   chrome[0].props.onClick();
@@ -1305,7 +1379,7 @@ function expand(node, result = []) {
   if (!isValidElement(node)) return result;
   if (typeof node.type === "function") {
     // Stateful surfaces have their own renderer checks; this walk tests sibling intent callbacks.
-    if (["QueuePanel", "FactoryFloor"].includes(node.type.name)) return result;
+    if (["QueuePanel", "FactoryFloor", "ProjectLibrary"].includes(node.type.name)) return result;
     expand(node.type(node.props), result);
     return result;
   }
@@ -1497,6 +1571,7 @@ test("settings asks the daemon for logins on open and links the one the operator
       default_model: "gpt-6-astra",
       default_reasoning_effort: "high",
       linked_id: "",
+      unavailable_reason: "",
     };
     const asked = [];
     const linkings = [];
@@ -1517,7 +1592,9 @@ test("settings asks the daemon for logins on open and links the one the operator
     assert.deepEqual(asked, ["asked"]);
     const section = renderer.root.findAllByProps({ "aria-label": "ACCOUNTS" })[0];
     assert.ok(section !== undefined);
-    const label = renderer.root.findAllByType("input").find((input) => input.props.id === `df-account-label-${login.home}`);
+    assert.equal(JSON.stringify(renderer.toJSON()).includes(login.home), false, "account paths stay out of the common flow");
+    assert.equal(JSON.stringify(renderer.toJSON()).includes(login.default_model), false, "model details stay out of account linking");
+    const label = renderer.root.findAllByType("input").find((input) => input.props.id === `df-account-label-${login.provider}-0`);
     await act(async () => { label.props.onChange({ currentTarget: { value: "dogfood" } }); });
     const link = renderer.root.findAllByType("button").find((button) => button.props.children === "LINK");
     await act(async () => { link.props.onClick(); });
@@ -1546,6 +1623,30 @@ test("settings asks the daemon for logins on open and links the one the operator
   }
 });
 
+test("settings keeps an unavailable linked account visible with recovery guidance", () => {
+  const account = [...baseState().accounts.values()][0];
+  const markup = render({ settingsOpen: true, accounts: [{
+    provider: account.provider,
+    home: account.home,
+    label: account.label,
+    email: "",
+    organization: "",
+    default_model: "",
+    default_reasoning_effort: "",
+    linked_id: account.id,
+    unavailable_reason: "login is no longer discoverable",
+  }] });
+  assert.match(markup, /ACCOUNT UNAVAILABLE · login is no longer discoverable\./);
+  assert.ok(markup.includes(`Sign in again using <code>${account.home}</code>, then refresh.`));
+});
+
+test("settings explains the next step when discovery finds no provider logins", () => {
+  const state = { ...baseState(), accounts: new Map() };
+  const guidance = "Sign in with your provider CLI on this Mac, then refresh.";
+  assert.ok(render({ settingsOpen: true, state, accounts: [] }).includes(guidance));
+  assert.equal(render({ settingsOpen: true, state }).includes(guidance), false, "no discovery result is not an empty result");
+});
+
 test("the RULES block saves an idle rule and sends only what changed", async () => {
   const edits = [];
   const props = { status: "ready", state: baseState(), selectedAgent: agentSelection(), onSaveAgentConfig: (config) => edits.push(config) };
@@ -1558,9 +1659,9 @@ test("the RULES block saves an idle rule and sends only what changed", async () 
   await act(async () => { field(`df-idle-${ids.agent}`).props.onChange({ currentTarget: { value: "standing_instruction" } }); });
   await act(async () => { field(`df-idle-after-${ids.agent}`).props.onChange({ currentTarget: { value: "2" } }); });
   await act(async () => { field(`df-idle-instruction-${ids.agent}`).props.onChange({ currentTarget: { value: "Look for follow-up work." } }); });
-  await act(async () => { field(`df-idle-budget-${ids.agent}`).props.onChange({ currentTarget: { value: "3" } }); });
+  assert.equal(field(`df-idle-budget-${ids.agent}`), undefined);
   await act(async () => { form().props.onSubmit({ preventDefault() {} }); });
-  assert.deepEqual(edits.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 2, idleInstruction: "Look for follow-up work.", idleRunBudget: 3 });
+  assert.deepEqual(edits.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 2, idleInstruction: "Look for follow-up work." });
   // A rule the daemon would refuse never leaves the form: no wait means no
   // save, and the form says why.
   await act(async () => { field(`df-idle-after-${ids.agent}`).props.onChange({ currentTarget: { value: "0" } }); });
@@ -1573,22 +1674,19 @@ test("the RULES block saves an idle rule and sends only what changed", async () 
   await act(async () => { field(`df-idle-after-${ids.agent}`).props.onChange({ currentTarget: { value: "1" } }); });
   assert.equal(saveButton().props.disabled, false);
   await act(async () => { form().props.onSubmit({ preventDefault() {} }); });
-  assert.deepEqual(edits.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "Look for follow-up work.", idleRunBudget: 3 });
-  // On a spent rule, editing the text leaves the budget out, so the count
-  // stands; retyping the same budget sends it, which restarts the count.
+  assert.deepEqual(edits.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 1, idleInstruction: "Look for follow-up work." });
+  // Editing a standing rule preserves its recorded wake history.
   const spent = { ...fixtureState.agents.get(ids.agent), idle_policy: "standing_instruction", idle_after_seconds: 600, idle_instruction: "Look for follow-up work.", idle_run_budget: 3, idle_runs_used: 3 };
   const spentState = baseState({ agents: new Map([...fixtureState.agents, [spent.id, spent]]) });
   const again = [];
   let spentRenderer;
   await act(async () => { spentRenderer = create(createElement(FactoryConsole, { status: "ready", state: spentState, selectedAgent: agentSelection(), onSaveAgentConfig: (config) => again.push(config) })); });
   const spentField = (id) => spentRenderer.root.findAll((node) => node.props.id === id)[0];
-  assert.match(renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: spentState, selectedAgent: agentSelection(), onSaveAgentConfig: () => {} })), /3 of 3 idle runs used/);
+  assert.match(renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: spentState, selectedAgent: agentSelection(), onSaveAgentConfig: () => {} })), /3 idle runs/);
   await act(async () => { spentField(`df-idle-instruction-${ids.agent}`).props.onChange({ currentTarget: { value: "Look for follow-up work, then tidy." } }); });
   await act(async () => { spentRenderer.root.findAllByType("form")[0].props.onSubmit({ preventDefault() {} }); });
   assert.deepEqual(again.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 600, idleInstruction: "Look for follow-up work, then tidy." });
-  await act(async () => { spentField(`df-idle-budget-${ids.agent}`).props.onChange({ currentTarget: { value: "3" } }); });
-  await act(async () => { spentRenderer.root.findAllByType("form")[0].props.onSubmit({ preventDefault() {} }); });
-  assert.deepEqual(again.at(-1), { idlePolicy: "standing_instruction", idleAfterSeconds: 600, idleInstruction: "Look for follow-up work, then tidy.", idleRunBudget: 3 });
+  assert.equal(spentField(`df-idle-budget-${ids.agent}`), undefined);
 });
 
 test("overseer supervision names worker events and a seconds cooldown", () => {
@@ -1685,7 +1783,7 @@ test("floor objects select the exact existing task detail and question route", a
   assert.equal(loaded[0], task);
   assert.deepEqual(queueSelections, [task.id]);
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title);
-  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "BACK").props.onClick(); });
+  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Back").props.onClick(); });
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title, "navigation retains the existing detail selection");
   await act(async () => { tree.root.findByProps({ "data-enter-room-id": kernelID }).props.onClick(); });
   await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Back to tasks").props.onClick(); });
@@ -1763,9 +1861,9 @@ test("a viewed module shows direct contents beside distinct child subtrees", () 
 
 test("mobile navigation switches presentation without mutating work", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({ status: "ready", state: fixtureState, detail: "floor", onDetail: (value) => calls.push(value) }));
+  const elements = consoleElements({ status: "ready", state: fixtureState, detail: "floor", onDetail: (value) => calls.push(value) });
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
-  const buttons = expand(nav).filter((element) => element.type === "button");
+  const buttons = nav.props.children.filter((element) => element.type === "button");
   assert.equal(buttons[0].props["aria-pressed"], true);
   buttons[2].props.onClick();
   assert.deepEqual(calls, ["queue"]);
@@ -1856,6 +1954,19 @@ test("nested observed areas follow visible served ancestors without duplicating 
   const archived = { ...fixtureState, agents: new Map(fixtureState.agents).set(ids.agent, { ...fixtureState.agents.get(ids.agent), archived: true }) };
   assert.equal(floorScene(archived, fixtureTopologies, samples).workers.some((worker) => worker.id === ids.agent), false);
   assert.equal(floorScene(archived, fixtureTopologies, samples).tasks.some((task) => task.id === ids.task), false);
+});
+
+test("a deep observation stays on its displayed parent's shared workbench", () => {
+  const root = fixtureTopology.nodes[0];
+  const store = fixtureTopology.nodes.find((node) => node.path === "internal/kernel/store");
+  const deep = { id: "e5".repeat(32), parent_id: store.id, kind: "directory", path: "internal/kernel/store/deep", label: "deep", language: "go", size_bucket: "tiny" };
+  const topology = served({ ...fixtureTopology, nodes: [...fixtureTopology.nodes, deep] });
+  const samples = new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/store/deep/file.go"])]]);
+  const scene = floorScene(fixtureState, topology, samples, undefined, `${ids.project}:${root.id}`);
+  const worker = scene.workers.find((entry) => entry.id === ids.agent);
+  assert.equal(worker.nodeId, `${ids.project}:${fixtureTopology.nodes[1].id}`);
+  assert.equal(worker.locationWithin, true);
+  assert.equal(worker.observedBayId, undefined, "an ancestor's pictured child is not the exact observed component");
 });
 
 test("paging reaches all served siblings and leaf inspection; stale scopes and pages reconcile", () => {
@@ -1990,7 +2101,9 @@ test("same-path observed roots choose package then module independent of served 
       assert.deepEqual(task.roomIds, [exact]);
       assert.equal(task.representativeRoomId, exact);
       assert.equal(task.displayRoomId, `${ids.project}:${display}`);
-      assert.equal(scene.workers.find((worker) => worker.id === ids.agent).nodeId, task.displayRoomId);
+      const worker = scene.workers.find((worker) => worker.id === ids.agent);
+      assert.equal(worker.nodeId, task.displayRoomId);
+      assert.equal(worker.observedBayId, scope === `${ids.project}:${root.id}` && nodes.includes(pkg) ? exact : undefined, "only an exact direct child is placed in a pictured bay");
     }
   }
 });

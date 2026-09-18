@@ -11,6 +11,12 @@ on:
   # persistent Mac. A conflict-free merge is not followed by a duplicate
   # full gate: the PR and merge-queue trees already supplied that evidence.
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Mac runner (hosted can seed the main-branch cache)
+        type: choice
+        default: dark-factory-mac
+        options: [dark-factory-mac, macos-latest]
 
 permissions:
   contents: read
@@ -41,53 +47,68 @@ jobs:
           git diff --check "$BASE_SHA" "$GITHUB_SHA"
 
   # This classifier lives in the CODEOWNED workflow, not in a PR-publishable
-  # script. The two root files consumed by both source trees run both gates;
-  # unclassified paths fail closed through Darwin. The diff is the queue's
-  # whole combined tree, so entries ahead of this one cannot escape its
-  # selected gates.
+  # script. The diff is the queue's whole combined tree, so entries ahead of
+  # this one cannot escape its selected gates. Only presentation source gets
+  # the narrow UI mode; runtime paths use the runtime gate, release paths use
+  # the release gate, and protocol, dependency, CI, or unknown paths use the
+  # full Darwin gate.
   scope:
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       macos: ${{ steps.select.outputs.macos }}
+      macos_mode: ${{ steps.select.outputs.macos_mode }}
       control_plane: ${{ steps.select.outputs.control_plane }}
       relay: ${{ steps.select.outputs.relay }}
     steps:
       - name: Select fixed gates from the combined tree
         id: select
-        env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           emit_all() {
             for gate in macos control_plane relay; do
               printf '%s=true\n' "$gate"
             done >>"$GITHUB_OUTPUT"
+            printf 'macos_mode=full\n' >>"$GITHUB_OUTPUT"
           }
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             emit_all
             exit 0
           fi
-          for sha in "$BASE_SHA" "$GITHUB_SHA"; do
-            case "$sha" in
-              *[!0-9a-f]*|'') echo "invalid merge-group commit" >&2; exit 1 ;;
-            esac
-            [ "${#sha}" -eq 40 ] || { echo "invalid merge-group commit" >&2; exit 1; }
-          done
+          case "$GITHUB_SHA" in
+            *[!0-9a-f]*|'') echo "invalid merge-group commit" >&2; exit 1 ;;
+          esac
+          [ "${#GITHUB_SHA}" -eq 40 ] || { echo "invalid merge-group commit" >&2; exit 1; }
           git init
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          git fetch --no-tags --depth=1 origin "$BASE_SHA" "$GITHUB_SHA"
-          git diff --check "$BASE_SHA" "$GITHUB_SHA"
-          git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$BASE_SHA" "$GITHUB_SHA" \
+          # The event's base_sha can be the preceding synthetic queue entry.
+          # Full ancestry against main includes every still-pending entry;
+          # blob filtering avoids downloading unrelated historical contents.
+          git fetch --no-tags --filter=blob:none origin refs/heads/main:refs/remotes/origin/main "$GITHUB_SHA"
+          merge_base=$(git merge-base refs/remotes/origin/main "$GITHUB_SHA")
+          git diff --check "$merge_base" "$GITHUB_SHA"
+          git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$merge_base" "$GITHUB_SHA" \
             >"$RUNNER_TEMP/changed-paths"
 
           macos=false
+          macos_mode=none
           control_plane=false
           relay=false
+          select_macos_mode() {
+            if [ "$macos_mode" = none ] || [ "$macos_mode" = "$1" ]; then
+              macos_mode=$1
+            else
+              macos_mode=full
+            fi
+          }
           while IFS= read -r -d '' path; do
             case "$path" in
               docs/*|README.md|ARCHITECTURE.md|CONTRIBUTING.md|ROADMAP.md|SECURITY.md|CLAUDE.md|LICENSE|LICENSE.*|launchd/README.md)
+                ;;
+              web/packages/ui/src/*.tsx|web/packages/ui/src/*.css|web/packages/ui/src/factory-scene/*|web/packages/ui/test/*)
+                macos=true
+                select_macos_mode ui
                 ;;
               control-plane|control-plane/*)
                 control_plane=true
@@ -95,32 +116,50 @@ jobs:
               .github/workflows/deploy-control-plane.yml)
                 control_plane=true
                 ;;
+              relay/fixtures/*|relay/src/*)
+                macos=true; select_macos_mode full; relay=true
+                ;;
               relay|relay/*)
                 relay=true
                 ;;
               .github/workflows/ci.yml)
-                macos=true; control_plane=true; relay=true
+                macos=true; select_macos_mode full; control_plane=true; relay=true
+                ;;
+              VERSION)
+                macos=true; select_macos_mode full
+                ;;
+              scripts/package-release.sh|scripts/prepare-release-source.sh|scripts/publish-release.sh|scripts/render-homebrew-formula.sh|scripts/test-package-release.sh|scripts/test-prepare-release-source.sh|scripts/test-publish-release.sh)
+                macos=true; select_macos_mode release
                 ;;
               .gitignore|scripts/bootstrap-maintainer-v2.sh)
-                macos=true; control_plane=true
+                macos=true; select_macos_mode full; control_plane=true
+                ;;
+              protocol/*|web/fixtures/*|spikes/browser-connectivity/*|internal/browser/*|internal/browserprotocol/*|internal/buildinfo/*|internal/install/*|cmd/factoryctl/*|scripts/reinstall-service.sh|launchd/*)
+                macos=true; select_macos_mode full
+                ;;
+              cmd/*|internal/*|launchd/*|spikes/*)
+                macos=true
+                select_macos_mode runtime
                 ;;
               *)
-                macos=true
+                macos=true; select_macos_mode full
                 ;;
             esac
           done <"$RUNNER_TEMP/changed-paths"
           {
             printf 'macos=%s\n' "$macos"
+            printf 'macos_mode=%s\n' "$macos_mode"
             printf 'control_plane=%s\n' "$control_plane"
             printf 'relay=%s\n' "$relay"
           } >>"$GITHUB_OUTPUT"
 
-  # Darwin runtime changes use the existing gate unchanged. Documentation and
+  # Darwin runtime changes use the source and process gates. Presentation-only web
+  # changes use the source and browser smoke gates; documentation and
   # control-plane-only changes never allocate a hosted Mac.
   checks:
     needs: scope
     if: needs.scope.result == 'success' && needs.scope.outputs.macos == 'true'
-    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || 'dark-factory-mac' }}
+    runs-on: ${{ github.event_name == 'merge_group' && 'macos-latest' || inputs.runner || 'dark-factory-mac' }}
     timeout-minutes: 30
     steps:
       # No actions/checkout: codeload.github.com (which serves an action's
@@ -139,9 +178,8 @@ jobs:
       # detect and repair each kind of leftover state, then `git checkout
       # --force --detach` lands on the target commit and `git clean -ffdx`
       # removes anything else a prior job left in the working tree. That
-      # clean never touches the Go build cache: the gate provisions its own
-      # GOCACHE and GOMODCACHE under an isolated stage root (see
-      # docs/development/WORKFLOW.md, "The self-hosted runner").
+      # reusable compiler and package caches live under RUNNER_TEMP, outside
+      # this checkout. Generated outputs and fixture state are still cleaned.
       #
       # $GITHUB_SHA is the selected commit for `merge_group` and
       # `workflow_dispatch`; GitHub serves `git fetch` by arbitrary commit SHA.
@@ -157,7 +195,7 @@ jobs:
           git checkout --force --detach FETCH_HEAD
           git clean -ffdx
 
-      - name: Provide the Homebrew Go and Node toolchains
+      - name: Provide the Homebrew Go toolchain
         run: |
           set -euxo pipefail
           if [ ! -x /opt/homebrew/bin/go ]; then
@@ -166,12 +204,70 @@ jobs:
             brew update
             HOMEBREW_NO_AUTO_UPDATE=1 brew install go
           fi
-          node_major=$(node -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
-          [ "$node_major" -ge 22 ] || HOMEBREW_NO_AUTO_UPDATE=1 brew install node
           /opt/homebrew/bin/go version
 
+      - name: Provide an isolated Node and Corepack pair
+        run: |
+          set -euo pipefail
+          case $(uname -m) in
+            arm64) node_arch=arm64 ;;
+            x86_64) node_arch=x64 ;;
+            *) echo "unsupported macOS architecture" >&2; exit 1 ;;
+          esac
+          node_release=node-v22.20.0-darwin-$node_arch
+          node_archive=$node_release.tar.gz
+          node_url=https://nodejs.org/dist/v22.20.0
+          curl --fail --silent --show-error --location "$node_url/$node_archive" -o "$RUNNER_TEMP/$node_archive"
+          curl --fail --silent --show-error --location "$node_url/SHASUMS256.txt" -o "$RUNNER_TEMP/node-shasums.txt"
+          checksum=$(awk -v archive="$node_archive" '$2 == archive { print }' "$RUNNER_TEMP/node-shasums.txt")
+          test -n "$checksum"
+          (cd "$RUNNER_TEMP" && printf '%s\n' "$checksum" | shasum -a 256 -c -)
+          tar -xzf "$RUNNER_TEMP/$node_archive" -C "$RUNNER_TEMP"
+          node_bin=$RUNNER_TEMP/$node_release/bin
+          "$node_bin/node" --version
+          "$node_bin/node" "$node_bin/corepack" --version
+          printf '%s\n' "$node_bin" >> "$GITHUB_PATH"
+          printf 'DF_CI_NODE=%s/node\nDF_CI_COREPACK=%s/corepack\n' "$node_bin" "$node_bin" >> "$GITHUB_ENV"
+
+      - name: Name reusable caches
+        id: cache-toolchain
+        run: |
+          printf 'DF_CI_CACHE_ROOT=%s/dark-factory-ci-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'go=%s\n' "$(/opt/homebrew/bin/go env GOVERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore reusable compiler and package caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/dark-factory-ci-cache/go-build
+            ${{ runner.temp }}/dark-factory-ci-cache/go-mod
+            ${{ runner.temp }}/dark-factory-ci-cache/corepack
+            ${{ runner.temp }}/dark-factory-ci-cache/pnpm-store
+          key: ci-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.cache-toolchain.outputs.go }}-node22.20.0-${{ hashFiles('go.sum', 'web/pnpm-lock.yaml', 'web/package.json') }}
+
       - name: Run the macOS source gate
-        run: ./scripts/local-ci.sh
+        env:
+          MACOS_MODE: ${{ needs.scope.outputs.macos_mode }}
+        run: |
+          set -euo pipefail
+          case "$MACOS_MODE" in
+            ui)
+              ./scripts/local-ci.sh --ui
+              ;;
+            runtime)
+              ./scripts/local-ci.sh --runtime
+              ;;
+            release)
+              ./scripts/local-ci.sh --release
+              ;;
+            full)
+              ./scripts/local-ci.sh
+              ;;
+            *)
+              echo "unknown macOS gate mode: $MACOS_MODE" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Publish bounded workflow summary
         if: always()
@@ -243,7 +339,7 @@ jobs:
         run: |
           echo "no adversarial review verdict at the head being merged (review=${{ needs.review.result }})" >&2
           echo "  A reviewer that did not write the change records:" >&2
-          echo "  submit_pull_request_review, event: ALLOW, head_sha: <this exact head>" >&2
+          echo "  Publish a GitHub review at this exact commit with Dark-Factory-Review: allow <head_sha>" >&2
           exit 1
 
       # This is diagnostic defence against repository-setting drift. The

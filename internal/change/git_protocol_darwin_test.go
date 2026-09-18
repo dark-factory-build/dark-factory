@@ -39,7 +39,6 @@ func TestSelectGitUsesSealedMetadataOnlyBoundary(t *testing.T) {
 	repository := fakeRepository(t)
 	format := mustFormat(t, "sha1")
 	base := mustID(t, format, bytes.Repeat([]byte{0x11}, format.OIDLength()))
-	blob := mustEntry(t, format, []byte("file"), "100644", []byte("secret"))
 	logPath := filepath.Join(filepath.Dir(repository), "commands")
 	environmentPath := filepath.Join(filepath.Dir(repository), "environment")
 	blobWitness := filepath.Join(filepath.Dir(repository), "blob-read")
@@ -50,24 +49,23 @@ printf '%%s\n' "$*" >> %q
 case "$*" in
   *" config "*) /usr/bin/env > %q; exit 1 ;;
   *" rev-parse "*) printf '%%s\nsha1\n%%s\n' %q %q ;;
-  *" ls-tree "*) printf '100644 blob %%s       6\tfile\0' %q ;;
-  *" cat-file "*) : > %q; exit 91 ;;
+  *" cat-file "*|*" ls-tree "*) : > %q; exit 91 ;;
   *) exit 92 ;;
 esac
-`, logPath, environmentPath, repository, base.Hex(), blob.oid.Hex(), blobWitness)
+`, logPath, environmentPath, repository, base.Hex(), blobWitness)
 	git := writeFakeGit(t, script)
 	selected, err := selectGit(context.Background(), git, repository, "refs/heads/main", mustRepositoryIdentity(t, repository), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !selected.Base().equal(base) || !manifestsEqual(selected.Manifest(), mustManifest(t, format, base, []Entry{blob})) {
-		t.Fatal("fake metadata selection did not produce the exact manifest")
+	if !selected.Base().equal(base) || selected.ObjectFormat() != format {
+		t.Fatal("fake metadata selection did not produce the exact base")
 	}
 	if _, err := os.Lstat(blobWitness); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("selection crossed the blob boundary: %v", err)
+		t.Fatalf("selection read tree or blob contents: %v", err)
 	}
 	commands := mustReadFile(t, logPath)
-	if bytes.Contains(commands, []byte("cat-file")) || !bytes.Contains(commands, []byte("rev-parse")) || !bytes.Contains(commands, []byte("ls-tree")) {
+	if bytes.Contains(commands, []byte("cat-file")) || bytes.Contains(commands, []byte("ls-tree")) || !bytes.Contains(commands, []byte("rev-parse")) {
 		t.Fatalf("selection commands=%q", commands)
 	}
 	environment := mustReadFile(t, environmentPath)
@@ -82,184 +80,6 @@ esac
 	}
 	if bytes.Contains(environment, []byte("DARK_FACTORY_AMBIENT_SENTINEL")) {
 		t.Fatal("ambient environment crossed the Git boundary")
-	}
-}
-
-func TestGitBlobsValidatesExactOrderAndFramingWithoutLeakingOutput(t *testing.T) {
-	cases := map[string]func(string) string{
-		"wrong oid":       func(oid string) string { return strings.Repeat("0", len(oid)) + " blob 6\\nsecret\\n" },
-		"wrong type":      func(oid string) string { return oid + " tree 6\\nsecret\\n" },
-		"wrong size":      func(oid string) string { return oid + " blob 5\\nshort\\n" },
-		"wrong blob hash": func(oid string) string { return oid + " blob 6\\nwrong!\\n" },
-		"oversize":        func(oid string) string { return fmt.Sprintf("%s blob %d\\n", oid, MaxBlobBytes+1) },
-		"truncated":       func(oid string) string { return oid + " blob 6\\nsec" },
-		"delimiter":       func(oid string) string { return oid + " blob 6\\nsecretX" },
-		"missing":         func(oid string) string { return oid + " missing\\n" },
-	}
-	for name, response := range cases {
-		t.Run(name, func(t *testing.T) {
-			repository := fakeRepository(t)
-			selection, entry := fakeSelection(t, repository, "", []byte("secret"))
-			responseText := response(entry.oid.Hex())
-			script := fmt.Sprintf("#!/bin/sh\nIFS= read -r request || exit 2\nprintf '%%b' %q\n", responseText)
-			git := writeFakeGit(t, script)
-			selection.gitExecutable = git
-			selection.gitIdentity = mustGitFileIdentity(t, git)
-			blobs, err := openGitBlobs(context.Background(), git, repository, selection, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = blobs.Read(context.Background(), entry.oid)
-			if err == nil {
-				t.Fatal("malformed batch response accepted")
-			}
-			var protocol *GitError
-			if !errors.As(err, &protocol) {
-				t.Fatalf("error=%T %v, want GitError", err, err)
-			}
-			if strings.Contains(err.Error(), "secret") {
-				t.Fatalf("private output leaked: %v", err)
-			}
-		})
-	}
-
-	repository := fakeRepository(t)
-	selection, first := fakeSelection(t, repository, "a", []byte("first"))
-	format := selection.format
-	second := mustEntry(t, format, []byte("b"), "100644", []byte("second"))
-	selection.manifest = mustManifest(t, format, selection.base, []Entry{first, second})
-	logPath := filepath.Join(filepath.Dir(repository), "requests")
-	script := fmt.Sprintf(`#!/bin/sh
-while IFS= read -r request; do
-  printf '%%s\n' "$request" >> %q
-  case "$request" in
-    %s) printf '%%s blob 5\nfirst\n' "$request" ;;
-    %s) printf '%%s blob 6\nsecond\n' "$request" ;;
-    *) exit 3 ;;
-  esac
-done
-`, logPath, first.oid.Hex(), second.oid.Hex())
-	git := writeFakeGit(t, script)
-	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-	blobs, err := openGitBlobs(context.Background(), git, repository, selection, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blobs.Read(context.Background(), second.oid); err == nil {
-		t.Fatal("out-of-order object request accepted")
-	}
-	if got := mustReadFile(t, logPath); len(got) != 0 {
-		t.Fatalf("out-of-order request reached Git: %q", got)
-	}
-}
-
-func TestGitBlobsCloseRequiresExactProtocolEOF(t *testing.T) {
-	repository := fakeRepository(t)
-	selection, entry := fakeSelection(t, repository, "", []byte("secret"))
-	script := `#!/bin/sh
-IFS= read -r request || exit 2
-printf '%s blob 6\nsecret\nTRAILING-PRIVATE-BYTES' "$request"
-while IFS= read -r ignored; do :; done
-`
-	git := writeFakeGit(t, script)
-	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-	blobs, err := openGitBlobs(context.Background(), git, repository, selection, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := blobs.Read(context.Background(), entry.oid)
-	if err != nil || string(data) != "secret" {
-		t.Fatalf("read=%q err=%v", data, err)
-	}
-	err = blobs.Close()
-	if err == nil || strings.Contains(err.Error(), "TRAILING-PRIVATE-BYTES") {
-		t.Fatalf("trailing protocol output was accepted or leaked: %v", err)
-	}
-}
-
-func TestGitBlobsBoundsAndRedactsStderrAndRejectsIncompleteClose(t *testing.T) {
-	const sentinel = "PRIVATE-BLOB-TOKEN"
-	repository := fakeRepository(t)
-	selection, entry := fakeSelection(t, repository, "", []byte("secret"))
-	script := fmt.Sprintf("#!/bin/sh\nIFS= read -r request || exit 2\nexec /usr/bin/perl -e 'print STDERR q(%s) x %d; while(1){}'\n", sentinel, maxGitStderrBytes)
-	git := writeFakeGit(t, script)
-	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-	recorder := &gitEventRecorder{}
-	blobs, err := openGitBlobs(context.Background(), git, repository, selection, recorder.record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, err = blobs.Read(ctx, entry.oid)
-	if err == nil || errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("stderr bound did not terminate the child: %v", err)
-	}
-	if strings.Contains(err.Error(), sentinel) || strings.Contains(err.Error(), "secret") {
-		t.Fatalf("private stderr/blob leaked: %v", err)
-	}
-	recorder.require(t, 1, 1, 0, 1)
-
-	repository = fakeRepository(t)
-	selection, _ = fakeSelection(t, repository, "", []byte("secret"))
-	git = writeFakeGit(t, "#!/bin/sh\nwhile IFS= read -r request; do exit 4; done\n")
-	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-	blobs, err = openGitBlobs(context.Background(), git, repository, selection, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := blobs.Close(); err == nil {
-		t.Fatal("incomplete blob source closed successfully")
-	}
-}
-
-func TestGitBlobsReadsOnlySelectedObjectsInOrderAndWaitsOnce(t *testing.T) {
-	repository := fakeRepository(t)
-	selection, first := fakeSelection(t, repository, "a", []byte("first"))
-	second := mustEntry(t, selection.format, []byte("b"), "100644", []byte("second"))
-	selection.manifest = mustManifest(t, selection.format, selection.base, []Entry{first, second})
-	logPath := filepath.Join(filepath.Dir(repository), "requests")
-	pidPath := filepath.Join(filepath.Dir(repository), "pid")
-	script := fmt.Sprintf(`#!/bin/sh
-printf '%%s' "$$" > %q
-while IFS= read -r request; do
-  printf '%%s\n' "$request" >> %q
-  case "$request" in
-    %s) printf '%%s blob 5\nfirst\n' "$request" ;;
-    %s) printf '%%s blob 6\nsecond\n' "$request" ;;
-    *) exit 3 ;;
-  esac
-done
-`, pidPath, logPath, first.oid.Hex(), second.oid.Hex())
-	git := writeFakeGit(t, script)
-	selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-	recorder := &gitEventRecorder{}
-	blobs, err := openGitBlobs(context.Background(), git, repository, selection, recorder.record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, expected := range []struct {
-		entry Entry
-		data  string
-	}{{first, "first"}, {second, "second"}} {
-		data, err := blobs.Read(context.Background(), expected.entry.oid)
-		if err != nil || string(data) != expected.data {
-			t.Fatalf("read=%q err=%v", data, err)
-		}
-	}
-	if err := blobs.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(mustReadFile(t, logPath)), first.oid.Hex()+"\n"+second.oid.Hex()+"\n"; got != want {
-		t.Fatalf("requests=%q want=%q", got, want)
-	}
-	recorder.require(t, 1, 0, 0, 1)
-	pid, err := strconv.Atoi(string(mustReadFile(t, pidPath)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := unix.Kill(pid, 0); !errors.Is(err, unix.ESRCH) {
-		t.Fatalf("exact Git child %d remains observable after Close: %v", pid, err)
 	}
 }
 
@@ -279,33 +99,6 @@ func TestGitChildCancellationKillsAndWaitsExactlyOnce(t *testing.T) {
 		waitForFile(t, ready)
 		cancel()
 		err := <-result
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("error=%v", err)
-		}
-		recorder.require(t, 1, 1, 1, 1)
-		recorder.requireOrder(t, gitProcessStarted, gitProcessTermed, gitProcessKilled, gitProcessWaited)
-	})
-	t.Run("blob", func(t *testing.T) {
-		repository := fakeRepository(t)
-		selection, entry := fakeSelection(t, repository, "", []byte("secret"))
-		ready := filepath.Join(filepath.Dir(repository), "ready")
-		script := fmt.Sprintf("#!/bin/sh\nIFS= read -r request || exit 2\nexec /usr/bin/perl -e '$SIG{TERM}=q(IGNORE); open(F,q(>%s)); print F q(x); close(F); while(1){}'\n", ready)
-		git := writeFakeGit(t, script)
-		selection.gitExecutable, selection.gitIdentity = git, mustGitFileIdentity(t, git)
-		recorder := &gitEventRecorder{}
-		blobs, err := openGitBlobs(context.Background(), git, repository, selection, recorder.record)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		result := make(chan error, 1)
-		go func() {
-			_, err := blobs.Read(ctx, entry.oid)
-			result <- err
-		}()
-		waitForFile(t, ready)
-		cancel()
-		err = <-result
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("error=%v", err)
 		}
@@ -357,7 +150,7 @@ func TestGitSignalsOnlyWhileExactLeaderIsUnreaped(t *testing.T) {
 		}
 	}
 	var err error
-	child, err = startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository), hook: hook}, false)
+	child, err = startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository), hook: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +274,7 @@ while (1) { sleep 1; }
 func TestGitChildInheritsCurrentRegisteredWrapperGroup(t *testing.T) {
 	repository := fakeRepository(t)
 	git := writeFakeGit(t, "#!/usr/bin/perl\n$SIG{TERM}=sub{exit 0}; while(1){select(undef,undef,undef,1)}\n")
-	child, err := startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository)}, false)
+	child, err := startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,27 +404,6 @@ func waitForFileUntil(t testing.TB, path string, timeout time.Duration) {
 	}
 }
 
-func TestSelectedLooseObjectRemovalFailsWithoutFallback(t *testing.T) {
-	fixture := newLocalGitFixture(t, "sha1")
-	selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first := selected.manifest.entries[0]
-	objectPath := filepath.Join(fixture.repository, ".git", "objects", first.oid.Hex()[:2], first.oid.Hex()[2:])
-	quarantine := objectPath + ".quarantine"
-	if err := os.Rename(objectPath, quarantine); err != nil {
-		t.Fatalf("quarantine selected loose object: %v", err)
-	}
-	blobs, err := OpenGitBlobs(context.Background(), fixture.git, fixture.repository, selected)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blobs.Read(context.Background(), first.oid); err == nil {
-		t.Fatal("missing selected object was read after selection")
-	}
-}
-
 func TestGitStartFailureLeavesNoOwnedProcessDescriptorOrHome(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	repository := fakeRepository(t)
@@ -717,25 +489,6 @@ func fakeRepository(t testing.TB) string {
 		t.Fatal(err)
 	}
 	return repository
-}
-
-func fakeSelection(t testing.TB, repository, path string, data []byte) (Selection, Entry) {
-	t.Helper()
-	format := mustFormat(t, "sha1")
-	base := mustID(t, format, bytes.Repeat([]byte{0x22}, format.OIDLength()))
-	if path == "" {
-		path = "file"
-	}
-	entry := mustEntry(t, format, []byte(path), "100644", data)
-	repositoryIdentity := mustRepositoryIdentity(t, repository)
-	repositoryCheckpoint, err := checkpointRepository(repository, repositoryIdentity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return Selection{
-		repositoryRoot: repository, repository: repositoryCheckpoint,
-		format: format, base: base, manifest: mustManifest(t, format, base, []Entry{entry}),
-	}, entry
 }
 
 func writeFakeGit(t testing.TB, contents string) string {

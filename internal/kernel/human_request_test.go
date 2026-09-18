@@ -376,6 +376,45 @@ func TestHumanQuestionBoundAndRunUniquenessAreTransactional(t *testing.T) {
 	}
 }
 
+func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	first, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(40), QuestionText: "already waiting"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(41), QuestionText: "turn completed", ReuseExisting: true}, mustTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.ID != first.ID || reused.QuestionText != first.QuestionText {
+		t.Fatalf("open request reuse = %+v, first = %+v", reused, first)
+	}
+	delivery, err := store.BeginHumanReplyForOperator(ctx, reused.ID, reused.Revision, humanDeliveryID(t, 42), "acknowledged", mustTime(t, 402))
+	if err != nil {
+		t.Fatalf("begin reused=%+v: %v", reused, err)
+	}
+	if err := store.AcknowledgeHumanReply(ctx, first.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 403)); err != nil {
+		t.Fatalf("ack delivery=%+v reused=%+v: %v", delivery, reused, err)
+	}
+	replayed, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(41), QuestionText: "turn completed", ReuseExisting: true}, mustTime(t, 404))
+	if err != nil || replayed.ID != reused.ID {
+		t.Fatalf("duplicate callback = %+v, err=%v", replayed, err)
+	}
+	later, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(43), QuestionText: "next turn", ReuseExisting: true}, mustTime(t, 404))
+	if err != nil || later.ID == reused.ID || later.QuestionText != "next turn" {
+		t.Fatalf("later callback = %+v, err=%v", later, err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.HumanRequests) != 1 {
+		t.Fatalf("snapshot requests = %d, want one new open request", len(snapshot.HumanRequests))
+	}
+}
+
 func TestHumanQuestionInvalidationFailureRollsBackRequestAndRun(t *testing.T) {
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)
@@ -891,5 +930,27 @@ func TestHumanQuestionCreationRequiresExactRunningAttempt(t *testing.T) {
 	}
 	if _, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(8), QuestionText: strings.Repeat("x", MaxHumanRequestQuestionBytes+1)}, mustTime(t, 400)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("oversized question = %v", err)
+	}
+}
+
+func TestOperatorHumanRequestsIncludesOverseerAndRejectsReplay(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	request, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(71), QuestionText: "Approve the reviewed delivery?", Options: []string{}}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests, err := store.OperatorHumanRequests(ctx)
+	if err != nil || len(requests) != 1 || requests[0].ID != request.ID || requests[0].AgentID != run.AgentID {
+		t.Fatalf("operator list = %+v, %v", requests, err)
+	}
+	deliveryID := humanDeliveryID(t, 72)
+	delivery, err := store.BeginHumanReplyForOperator(ctx, request.ID, request.Revision, deliveryID, "Proceed", mustTime(t, 401))
+	if err != nil || delivery.RequestID != request.ID || delivery.DeliveryID != deliveryID {
+		t.Fatalf("operator reply = %+v, %v", delivery, err)
+	}
+	if _, err := store.BeginHumanReplyForOperator(ctx, request.ID, request.Revision, deliveryID, "Proceed", mustTime(t, 402)); err == nil {
+		t.Fatal("replayed reply accepted")
 	}
 }

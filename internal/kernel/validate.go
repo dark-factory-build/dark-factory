@@ -35,9 +35,6 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validateChanges(ctx, connection); err != nil {
 		return FactoryState{}, fmt.Errorf("validate Changes: %w", err)
 	}
-	if err := validateRuns(ctx, connection); err != nil {
-		return FactoryState{}, fmt.Errorf("validate runs: %w", err)
-	}
 	if err := validateResources(ctx, connection); err != nil {
 		return FactoryState{}, fmt.Errorf("validate resources: %w", err)
 	}
@@ -56,10 +53,78 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validatePeerQuestions(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
+	if err := validateContinuations(ctx, connection); err != nil {
+		return FactoryState{}, err
+	}
 	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
 	return state, nil
+}
+
+func validateContinuations(ctx context.Context, connection *sql.Conn) error {
+	rows, err := connection.QueryContext(ctx, `SELECT id FROM continuations ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return err
+		}
+		id, err := ContinuationIDFromBytes(raw)
+		if err != nil {
+			return fmt.Errorf("%w: continuation identifier", ErrCorruptState)
+		}
+		continuation, found, err := continuationByID(ctx, connection, id)
+		if err != nil {
+			return err
+		}
+		if !found || continuation.ID != id {
+			return fmt.Errorf("%w: continuation lookup", ErrCorruptState)
+		}
+		switch continuation.State {
+		case ContinuationWaiting:
+			if continuation.ResolutionDetail != "" || continuation.ResolvedAt != nil {
+				return fmt.Errorf("%w: waiting continuation is resolved", ErrCorruptState)
+			}
+		case ContinuationQueued, ContinuationResolved, ContinuationCancelled:
+			if continuation.ResolutionDetail == "" || continuation.ResolvedAt == nil {
+				return fmt.Errorf("%w: resolved continuation lacks resolution", ErrCorruptState)
+			}
+		default:
+			return fmt.Errorf("%w: unknown continuation state", ErrCorruptState)
+		}
+		var taskProject []byte
+		var taskIncarnation []byte
+		var taskWork, taskRevision int64
+		var taskStatus string
+		if err := connection.QueryRowContext(ctx, `SELECT project_id, incarnation_id, work_revision, status, revision FROM tasks WHERE id = ?`, continuation.TaskID.Bytes()).Scan(&taskProject, &taskIncarnation, &taskWork, &taskStatus, &taskRevision); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: continuation task is missing", ErrCorruptState)
+			}
+			return err
+		}
+		project, err := ProjectIDFromBytes(taskProject)
+		if err != nil || project != continuation.ProjectID {
+			return fmt.Errorf("%w: continuation project relationship", ErrCorruptState)
+		}
+		incarnation, err := IncarnationIDFromBytes(taskIncarnation)
+		if err != nil || incarnation != continuation.TaskIncarnationID || taskRevision < 1 {
+			return fmt.Errorf("%w: continuation task identity", ErrCorruptState)
+		}
+		if (continuation.State == ContinuationWaiting || continuation.State == ContinuationQueued) && taskWork != continuation.WorkRevision.Int64() {
+			return fmt.Errorf("%w: continuation task identity", ErrCorruptState)
+		}
+		// Queued continuations retain the task's current lifecycle row until
+		// admission is wired to the continuation queue. Historical resolved
+		// rows likewise outlive the task state that created them.
+		if continuation.State == ContinuationWaiting && taskStatus != TaskRunning.String() && taskStatus != TaskCancelled.String() && taskStatus != TaskFailed.String() && taskStatus != TaskBlocked.String() && taskStatus != TaskSucceeded.String() {
+			return fmt.Errorf("%w: continuation task state", ErrCorruptState)
+		}
+	}
+	return rows.Err()
 }
 
 func validatePeerQuestions(ctx context.Context, connection *sql.Conn) error {
@@ -113,9 +178,13 @@ func validateHumanRequests(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 		validPhase := false
+		var continuationWaiting int
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM continuations WHERE condition_kind='human_request' AND condition_id=? AND state IN ('waiting','queued'))`, request.ID.Bytes()).Scan(&continuationWaiting); err != nil {
+			return err
+		}
 		switch request.Status {
 		case HumanRequestOpen, HumanRequestDelivering:
-			validPhase = phase == RunRunning.String()
+			validPhase = phase == RunRunning.String() || continuationWaiting != 0 && (phase == RunFinalizing.String() || phase == RunTerminal.String())
 		case HumanRequestDeliveryUnknown:
 			// Recovery can discover an uncertain delivery while the run is
 			// still running; finalization preserves that uncertainty until
@@ -295,12 +364,18 @@ func closeValidatedBrowserRows(rows *sql.Rows) error {
 }
 
 func validateResourceIdentityCollisions(ctx context.Context, connection *sql.Conn) error {
+	// A resource carries either a path identity or a process identity, so
+	// one join per identity kind finds the same pairs as one OR-joined query
+	// while letting SQLite index the inner side instead of scanning it per row.
 	rows, err := connection.QueryContext(ctx, `SELECT left_resource.run_id, left_resource.kind, right_resource.run_id, right_resource.kind
 		FROM resources AS left_resource
-		JOIN resources AS right_resource ON left_resource.id < right_resource.id AND (
-			(left_resource.path_dev IS NOT NULL AND left_resource.path_dev = right_resource.path_dev AND left_resource.path_inode = right_resource.path_inode) OR
-			(left_resource.pid IS NOT NULL AND left_resource.pid = right_resource.pid AND left_resource.pgid = right_resource.pgid AND left_resource.birth_digest = right_resource.birth_digest)
-		)`)
+		JOIN resources AS right_resource ON left_resource.id < right_resource.id
+			AND left_resource.path_dev IS NOT NULL AND left_resource.path_dev = right_resource.path_dev AND left_resource.path_inode = right_resource.path_inode
+		UNION ALL
+		SELECT left_resource.run_id, left_resource.kind, right_resource.run_id, right_resource.kind
+		FROM resources AS left_resource
+		JOIN resources AS right_resource ON left_resource.id < right_resource.id
+			AND left_resource.pid IS NOT NULL AND left_resource.pid = right_resource.pid AND left_resource.pgid = right_resource.pgid AND left_resource.birth_digest = right_resource.birth_digest`)
 	if err != nil {
 		return err
 	}
@@ -340,11 +415,17 @@ func validateRunRelationships(ctx context.Context, connection *sql.Conn) error {
 		}
 		runs = append(runs, run)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	// validateTasks has already walked every task's run history once; walking
+	// it again per run made this pass quadratic in each task's retry depth.
 	for _, run := range runs {
-		if _, err := loadRunRelationships(ctx, connection, run); err != nil {
+		if _, err := loadRunRelationshipsWithTopology(ctx, connection, run, false); err != nil {
 			return err
 		}
 	}
@@ -558,6 +639,12 @@ func workerChangeProvenanceForRun(ctx context.Context, connection *sql.Conn, run
 }
 
 func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (runRelationships, error) {
+	return loadRunRelationshipsWithTopology(ctx, connection, run, true)
+}
+
+// loadRunRelationshipsWithTopology skips the task's run-history walk only when
+// the caller has already validated it in the same transaction.
+func loadRunRelationshipsWithTopology(ctx context.Context, connection *sql.Conn, run Run, validateTopology bool) (runRelationships, error) {
 	task, found, err := taskByID(ctx, connection, run.TaskID)
 	if err != nil || !found {
 		if err == nil {
@@ -568,8 +655,10 @@ func loadRunRelationships(ctx context.Context, connection *sql.Conn, run Run) (r
 	if task.ProjectID != run.ProjectID || task.IncarnationID != run.TaskIncarnationID {
 		return runRelationships{}, fmt.Errorf("%w: task does not match run", ErrCorruptState)
 	}
-	if err := validateTaskRunTopology(ctx, connection, task); err != nil {
-		return runRelationships{}, err
+	if validateTopology {
+		if err := validateTaskRunTopology(ctx, connection, task); err != nil {
+			return runRelationships{}, err
+		}
 	}
 	if run.Phase != RunTerminal {
 		if !taskMatchesRun(task, run) {
@@ -847,7 +936,21 @@ func taskMatchesRun(task Task, run Run) bool {
 }
 
 func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Task) error {
-	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs WHERE task_id = ? AND task_incarnation_id = ? ORDER BY admitted_task_work_revision`, task.ID.Bytes(), task.IncarnationID.Bytes())
+	return validateTaskRunTopologyWithLimit(ctx, connection, task, 0)
+}
+
+func validateTaskRunTopologyBounded(ctx context.Context, connection *sql.Conn, task Task, limit int) error {
+	return validateTaskRunTopologyWithLimit(ctx, connection, task, limit)
+}
+
+func validateTaskRunTopologyWithLimit(ctx context.Context, connection *sql.Conn, task Task, limit int) error {
+	query := `SELECT ` + runColumns + ` FROM runs WHERE task_id = ? AND task_incarnation_id = ? ORDER BY admitted_task_work_revision`
+	args := []any{task.ID.Bytes(), task.IncarnationID.Bytes()}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit+1)
+	}
+	rows, err := connection.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -856,6 +959,10 @@ func validateTaskRunTopology(ctx context.Context, connection *sql.Conn, task Tas
 	found := false
 	var invalid error
 	for rows.Next() {
+		if limit > 0 && expectedRevision > int64(limit) {
+			_ = rows.Close()
+			return fmt.Errorf("%w: task has more than %d runs", ErrRecoveryBounds, limit)
+		}
 		run, present, err := scanRun(rows)
 		if err != nil || !present || run.ProjectID != task.ProjectID || run.TaskID != task.ID || run.TaskIncarnationID != task.IncarnationID || run.AdmittedTaskWorkRevision.Int64() != expectedRevision {
 			if err != nil {
@@ -1090,6 +1197,55 @@ func validateTasks(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 	}
+	if err := validateTaskScheduling(ctx, connection); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateTaskScheduling keeps dependency receipts inside the same project
+// and binds every consumed receipt to the exact successful producer version.
+// The admission query is the normal writer; this pass also protects recovery
+// and every other mutation from accepting a damaged scheduling graph.
+func validateTaskScheduling(ctx context.Context, connection *sql.Conn) error {
+	var invalid int
+	err := connection.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1
+		FROM task_prerequisites AS prerequisite
+		JOIN tasks AS consumer ON consumer.id = prerequisite.task_id
+		LEFT JOIN tasks AS producer ON producer.id = prerequisite.upstream_task_id
+		LEFT JOIN runs AS consumed ON consumed.id = prerequisite.consumed_run_id
+		WHERE producer.id IS NULL
+		   OR consumer.project_id <> producer.project_id
+		   OR producer.id = consumer.id
+		   OR prerequisite.upstream_work_revision < 1
+		   OR prerequisite.consumed_run_id IS NOT NULL AND (
+				consumed.id IS NULL
+				OR consumed.project_id <> consumer.project_id
+				OR consumed.task_id <> producer.id
+				OR consumed.task_incarnation_id <> producer.incarnation_id
+				OR consumed.admitted_task_work_revision <> prerequisite.upstream_work_revision
+				OR consumed.phase <> 'terminal'
+				OR consumed.terminal_kind <> 'succeeded'
+			)
+	)`).Scan(&invalid)
+	if err != nil {
+		return err
+	}
+	if invalid != 0 {
+		return fmt.Errorf("%w: invalid task prerequisite receipt", ErrCorruptState)
+	}
+	err = connection.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM task_conflict_paths
+		WHERE path IS NULL OR length(path) < 1 OR length(path) > 4096
+		   OR substr(path, 1, 1) = '/' OR instr(path, char(0)) > 0
+	)`).Scan(&invalid)
+	if err != nil {
+		return err
+	}
+	if invalid != 0 {
+		return fmt.Errorf("%w: invalid task conflict path", ErrCorruptState)
+	}
 	return nil
 }
 
@@ -1147,20 +1303,6 @@ func validateChanges(ctx context.Context, connection *sql.Conn) error {
 		}
 	}
 	return nil
-}
-
-func validateRuns(ctx context.Context, connection *sql.Conn) error {
-	rows, err := connection.QueryContext(ctx, `SELECT `+runColumns+` FROM runs`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		if _, _, err := scanRun(rows); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
 }
 
 func validateResources(ctx context.Context, connection *sql.Conn) error {

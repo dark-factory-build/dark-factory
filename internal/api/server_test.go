@@ -201,6 +201,10 @@ func replyForCall(call Call) Reply {
 			Projects: []ProjectSummary{}, Agents: []AgentSummary{}, Tasks: []TaskSummary{},
 		})
 		return reply
+	case CallAgentPaths:
+		input, _ := call.AgentPathsInput()
+		reply, _ := NewAgentPathsReply(AgentPaths{AgentID: input.AgentID, Paths: []string{}})
+		return reply
 	case CallAttemptTask:
 		reply, _ := NewAttemptTaskReply(AttemptTask{Task: "private-attempt-task"})
 		return reply
@@ -243,6 +247,12 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 	}{
 		{name: "health", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"health","params":{}}`, kind: CallHealth},
 		{name: "snapshot", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"snapshot","params":{}}`, kind: CallSnapshot},
+		{name: "agent paths", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"agent_paths","params":{"agent_id":"` + id('2') + `"}}`, kind: CallAgentPaths, check: func(t *testing.T, call Call) {
+			input, ok := call.AgentPathsInput()
+			if !ok || input.AgentID != id('2') {
+				t.Fatalf("agent paths input = %+v, %t", input, ok)
+			}
+		}},
 		{name: "create project", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_project","params":{"id":"` + id('1') + `","name":"project","root":"/private/sentinel-root"}}`, kind: CallCreateProject, check: func(t *testing.T, call Call) {
 			input, ok := call.CreateProjectInput()
 			if !ok || input.Root != "/private/sentinel-root" {
@@ -267,6 +277,12 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				t.Fatalf("agent input = %+v, %t", input, ok)
 			}
 		}},
+		{name: "agent idle policy", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"agent_idle_policy","params":{"agent_id":"` + id('2') + `","expected_revision":7,"policy":"standing_instruction","after_seconds":60,"instruction":"review retained changes","run_budget":3}}`, kind: CallAgentIdlePolicy, check: func(t *testing.T, call Call) {
+			input, ok := call.AgentIdlePolicyInput()
+			if !ok || input.Policy != "standing_instruction" || input.AfterSeconds != 60 || input.Instruction != "review retained changes" || input.RunBudget != 3 {
+				t.Fatalf("idle policy input = %+v, %t", input, ok)
+			}
+		}},
 		{name: "enqueue task", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"enqueue_task","params":{"id":"` + id('3') + `","project_id":"` + id('1') + `","assigned_agent_id":"` + id('2') + `","incarnation_id":"` + id('4') + `","title":"task","body":"private-body-sentinel","priority":7}}`, kind: CallEnqueueTask, check: func(t *testing.T, call Call) {
 			input, ok := call.EnqueueTaskInput()
 			if !ok || input.Body != "private-body-sentinel" {
@@ -283,6 +299,12 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 			revision, capacity, ok := call.Capacity()
 			if !ok || revision != 3 || capacity != 2 {
 				t.Fatalf("capacity = %d, %d, %t", revision, capacity, ok)
+			}
+		}},
+		{name: "select agent model", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"agent_select_model","params":{"agent_id":"` + id('2') + `","expected_revision":3,"model":"gpt-5.6-luna","reasoning_effort":"medium"}}`, kind: CallAgentSelectModel, check: func(t *testing.T, call Call) {
+			input, ok := call.AgentModelSelectInput()
+			if !ok || input.AgentID != id('2') || input.ExpectedRevision != 3 || input.Model != "gpt-5.6-luna" || input.ReasoningEffort != "medium" {
+				t.Fatalf("model selection = %+v, %t", input, ok)
 			}
 		}},
 		{name: "task", domain: attemptDomain, bearer: attemptBearer, body: `{"method":"task","params":{}}`, kind: CallAttemptTask},
@@ -338,6 +360,8 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				output = &HealthStatus{}
 			case CallSnapshot:
 				output = &DashboardSnapshot{}
+			case CallAgentPaths:
+				output = &AgentPaths{}
 			case CallAttemptTask:
 				output = &AttemptTask{}
 			default:
@@ -385,10 +409,9 @@ func TestOutcomeReceiptIsExactAndRequired(t *testing.T) {
 	}{
 		{name: "wrong receipt", wantError: true, send: func(connection *net.UnixConn, receipt []byte) error {
 			receipt[0] ^= 0xff
-			if err := writeFrame(connection, receipt); err != nil {
-				return err
-			}
-			return connection.CloseWrite()
+			// A wrong receipt is rejected immediately, before client EOF.
+			// Half-closing here races the server's expected rejection/close.
+			return writeFrame(connection, receipt)
 		}},
 		{name: "dropped receipt", wantError: true, send: func(connection *net.UnixConn, _ []byte) error {
 			return connection.CloseWrite()
@@ -437,6 +460,9 @@ func TestOutcomeReceiptIsExactAndRequired(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := <-done
+			if test.name == "wrong receipt" && !errors.Is(result.err, ErrProtocol) {
+				t.Fatalf("wrong receipt must fail before client EOF: %v", result.err)
+			}
 			if result.call.Kind() != CallSucceed || (result.err != nil) != test.wantError {
 				t.Fatalf("outcome receipt = %v, %v", result.call.Kind(), result.err)
 			}
@@ -458,6 +484,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "attempt bearer does not authorize operator", domain: operatorDomain, bearer: attemptBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteUnauthorized},
 		{name: "operator domain cannot invoke attempt", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"fail","params":{"detail":"x"}}`), code: RemoteForbidden},
 		{name: "operator domain cannot read attempt task", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"task","params":{}}`), code: RemoteForbidden},
+		{name: "attempt domain cannot read operator paths", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"agent_paths","params":{"agent_id":"` + id('2') + `"}}`), code: RemoteForbidden},
 		{name: "attempt domain cannot set capacity", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"set_capacity","params":{"expected_revision":1,"capacity":2}}`), code: RemoteForbidden},
 		{name: "unknown method", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
 		{name: "null params", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":null}`), code: RemoteInvalidRequest},
@@ -746,7 +773,7 @@ func TestServerFramingDeadlinePeerAndResponseBounds(t *testing.T) {
 		listener, socketPath := newAPITestListener(t, bearer)
 		tasks := make([]TaskSummary, maxSnapshotEntries)
 		for index := range tasks {
-			tasks[index] = TaskSummary{ID: id('1'), ProjectID: id('2'), AssignedAgentID: id('3'), Title: strings.Repeat("x", 1024), Status: "queued", Revision: 1}
+			tasks[index] = TaskSummary{ID: id('1'), ProjectID: id('2'), AssignedAgentID: id('3'), IncarnationID: id('4'), WorkRevision: 1, Title: strings.Repeat("x", 1024), Status: "queued", Revision: 1}
 		}
 		snapshot := DashboardSnapshot{Head: 1, Factory: FactorySummary{Capacity: 1, Revision: 1}, Projects: []ProjectSummary{}, Agents: []AgentSummary{}, Tasks: tasks}
 		reply, err := NewSnapshotReply(snapshot)
@@ -1304,5 +1331,49 @@ func TestRawRequestHelperProducesOneExactFrame(t *testing.T) {
 	}
 	if _, err := reader.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("test request has trailing bytes: %v", err)
+	}
+}
+
+func TestAuthenticatedDispatchRefreshesTransportDeadline(t *testing.T) {
+
+	bearer := testCredential('R')
+	listener, socketPath := newAPITestListener(t, bearer)
+	done := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer connection.Close()
+		receiveCtx, receiveCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		call, err := connection.Receive(receiveCtx)
+		receiveCancel()
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err = connection.RefreshDeadline(ctx)
+			if err == nil {
+				time.Sleep(100 * time.Millisecond)
+				_, err = connection.Dispatch(func(Call) Reply { return NewHealthReply(HealthStatus{Ready: true}) })
+				if err == nil {
+					err = connection.Respond(NewHealthReply(HealthStatus{Ready: true}))
+				}
+			}
+		}
+		_ = call
+		done <- err
+	}()
+	client, err := NewOperatorClient(socketPath, filepath.Join(filepath.Dir(filepath.Dir(socketPath)), "operator.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if status, err := client.Health(ctx); err != nil || !status.Ready {
+		t.Fatalf("delayed authenticated response = %+v, %v", status, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

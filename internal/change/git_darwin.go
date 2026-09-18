@@ -3,21 +3,19 @@
 package change
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"debug/macho"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -27,21 +25,25 @@ import (
 
 const (
 	maxGitSelectionOutput = 4 << 10
-	maxGitTreeOutput      = int(MaxEntryCount+1) * (MaxRelativePathBytes + 128)
-	maxGitBlobHeader      = 256
+	maxGitListOutput      = 4 << 20
+	maxGitStatusOutput    = 1 << 20
 	maxGitStderrBytes     = 64 << 10
 	maxGitConfigBytes     = 1 << 20
 	maxGitExecutableBytes = 64 << 20
+	maxRevisionBytes      = 255
+	gitLockRetries        = 5
+	gitLockRetryDelay     = 200 * time.Millisecond
 	gitTerminateGrace     = 250 * time.Millisecond
 	gitPipeDrainGrace     = time.Second
 )
 
 type gitCommandSpec struct {
-	program    string
-	repository string
-	home       string
-	arguments  []string
-	hook       gitProcessHook
+	program     string
+	repository  string
+	home        string
+	arguments   []string
+	environment []string
+	hook        gitProcessHook
 }
 
 type gitCapture struct {
@@ -55,8 +57,9 @@ type gitStreamResult struct {
 	err      error
 }
 
-// SelectGit resolves revision once, validates the complete recursive tree
-// metadata, and returns without reading any blob contents.
+// SelectGit resolves revision once to the exact commit a Change is made
+// from, refreshing a configured upstream first, without touching the
+// checkout.
 func SelectGit(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity) (Selection, error) {
 	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected, nil, true)
 }
@@ -111,6 +114,13 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 		return Selection{}, newGitError(gitFailureProcess)
 	}
 
+	revision, err = refreshTrackingRevision(ctx, spec, revision, func() error {
+		return verifyGitAuthority(repositoryRoot, repository, gitExecutable, gitIdentity)
+	})
+	if err != nil {
+		return Selection{}, err
+	}
+
 	spec.arguments = []string{"-C", repositoryRoot, "rev-parse", "--show-toplevel", "--show-object-format", "--verify", "--end-of-options", revision + "^{commit}"}
 	resolved, err := runGitCapture(ctx, spec, maxGitSelectionOutput)
 	if err != nil {
@@ -126,31 +136,100 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 	if err != nil {
 		return Selection{}, err
 	}
-
-	spec.arguments = []string{"-C", repositoryRoot, "ls-tree", "-rz", "-l", "--full-tree", "--no-abbrev", base.Hex()}
-	tree, err := runGitCapture(ctx, spec, maxGitTreeOutput)
-	if err != nil {
-		return Selection{}, err
-	}
-	if tree.exitCode != 0 {
-		return Selection{}, newGitError(gitFailureProcess)
-	}
-	if err := verifyGitAuthority(repositoryRoot, repository, gitExecutable, gitIdentity); err != nil {
-		return Selection{}, err
-	}
-	manifest, err := parseGitTree(format, base, tree.output)
-	if err != nil {
-		return Selection{}, err
-	}
 	return Selection{
 		repositoryRoot: repositoryRoot, repository: repository,
 		gitExecutable: gitExecutable, gitIdentity: gitIdentity,
-		format: format, base: base, manifest: manifest,
+		format: format, base: base,
 	}, nil
 }
 
+// refreshTrackingRevision runs only for a fresh Change, before its commit is
+// pinned. Retained Changes and explicit local revisions never refresh source.
+func refreshTrackingRevision(ctx context.Context, spec gitCommandSpec, revision string, verify func() error) (string, error) {
+	run := func(arguments ...string) ([]byte, error) {
+		spec.arguments = append([]string{"-C", spec.repository}, arguments...)
+		result, err := runGitCapture(ctx, spec, maxGitSelectionOutput)
+		if err != nil {
+			return nil, err
+		}
+		if err := verify(); err != nil {
+			return nil, err
+		}
+		if result.exitCode != 0 {
+			return nil, &ValidationError{Reason: "source refresh failed; configured remote source was not selected"}
+		}
+		return result.output, nil
+	}
+	var remote, branch string
+	if revision == "HEAD" {
+		// Empty upstream means a deliberately local project, including detached
+		// HEAD. This does not fall back when an actual configured fetch fails.
+		head, err := run("rev-parse", "--symbolic-full-name", "HEAD")
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(string(head)) == "HEAD" {
+			return revision, nil
+		}
+		revision = strings.TrimSpace(string(head))
+		output, err := run("for-each-ref", "--count=1", "--format=%(upstream) %(upstream:remotename) %(upstream:remoteref)", revision)
+		if err != nil {
+			return "", err
+		}
+		fields := strings.Fields(string(output))
+		if len(fields) == 0 {
+			// Git also prints an empty upstream for broken tracking config.
+			// Only genuinely unconfigured branches may use their local source.
+			for _, field := range []string{"remote", "merge"} {
+				value, err := run("config", "--default", "", "--get", "branch."+strings.TrimPrefix(revision, "refs/heads/")+"."+field)
+				if err != nil {
+					return "", err
+				}
+				if len(bytes.TrimSpace(value)) != 0 {
+					return "", &ValidationError{Reason: "configured source upstream is invalid"}
+				}
+			}
+			return revision, nil
+		}
+		if len(fields) != 3 {
+			return "", &ValidationError{Reason: "configured source upstream is invalid"}
+		}
+		revision, remote, branch = fields[0], fields[1], fields[2]
+	} else if suffix, ok := strings.CutPrefix(revision, "refs/remotes/"); ok {
+		var found bool
+		remote, branch, found = strings.Cut(suffix, "/")
+		if !found || remote == "" || branch == "" {
+			return "", &ValidationError{Reason: "configured remote source is invalid"}
+		}
+		branch = "refs/heads/" + branch
+	}
+	if remote == "" || remote == "." {
+		return revision, nil
+	}
+	if strings.HasPrefix(remote, "-") || !strings.HasPrefix(branch, "refs/heads/") {
+		return "", &ValidationError{Reason: "configured remote source is invalid"}
+	}
+	// Pin the remote observation before fetching objects. No shared ref or
+	// FETCH_HEAD is written, so simultaneous fresh starts cannot race a ref
+	// lock or rewrite an operator's branch through a custom fetch mapping.
+	observed, err := run("ls-remote", "--exit-code", "--refs", remote, branch)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(observed))
+	if len(fields) != 2 || fields[1] != branch {
+		return "", &ValidationError{Reason: "configured remote source was not observed exactly"}
+	}
+	commit, err := hex.DecodeString(fields[0])
+	if err != nil || (len(commit) != 20 && len(commit) != 32) {
+		return "", &ValidationError{Reason: "configured remote source commit is invalid"}
+	}
+	_, err = run("-c", "core.hooksPath=/dev/null", "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "--no-auto-maintenance", "--refmap=", remote, fields[0])
+	return fields[0], err
+}
+
 func validateRevision(revision string) error {
-	if revision == "" || len(revision) > MaxComponentBytes || !utf8.ValidString(revision) || strings.IndexByte(revision, 0) >= 0 {
+	if revision == "" || len(revision) > maxRevisionBytes || !utf8.ValidString(revision) || strings.IndexByte(revision, 0) >= 0 {
 		return &ValidationError{Reason: "revision policy value is invalid"}
 	}
 	for _, character := range revision {
@@ -178,48 +257,6 @@ func parseSelectionOutput(repositoryRoot string, output []byte) (ObjectFormat, O
 		return 0, ObjectID{}, err
 	}
 	return format, base, nil
-}
-
-func parseGitTree(format ObjectFormat, base ObjectID, output []byte) (Manifest, error) {
-	if len(output) == 0 {
-		return NewManifest(format, base, nil)
-	}
-	if output[len(output)-1] != 0 {
-		return Manifest{}, newGitError(gitFailureProtocol)
-	}
-	records := bytes.Split(output[:len(output)-1], []byte{0})
-	entries := make([]Entry, 0, min(len(records), int(MaxEntryCount)))
-	for _, record := range records {
-		metadata, path, found := bytes.Cut(record, []byte{'\t'})
-		if !found || len(path) == 0 {
-			return Manifest{}, newGitError(gitFailureProtocol)
-		}
-		fields := bytes.Fields(metadata)
-		if len(fields) != 4 || len(fields[0]) == 0 || !bytes.Equal(fields[1], []byte("blob")) {
-			return Manifest{}, &ValidationError{Reason: "Git tree contains a non-regular entry"}
-		}
-		mode := string(fields[0])
-		if mode != "100644" && mode != "100755" {
-			return Manifest{}, &ValidationError{Reason: "Git tree contains a symlink, gitlink, or unsupported mode"}
-		}
-		oid, err := parseGitOID(format, fields[2])
-		if err != nil {
-			return Manifest{}, err
-		}
-		size, err := strconv.ParseUint(string(fields[3]), 10, 64)
-		if err != nil || strconv.FormatUint(size, 10) != string(fields[3]) {
-			return Manifest{}, newGitError(gitFailureProtocol)
-		}
-		entry, err := NewEntry(path, mode, size, oid)
-		if err != nil {
-			return Manifest{}, err
-		}
-		entries = append(entries, entry)
-		if uint64(len(entries)) > MaxEntryCount {
-			return Manifest{}, &LimitError{Reason: "tree file count exceeded"}
-		}
-	}
-	return NewManifest(format, base, entries)
 }
 
 func parseGitOID(format ObjectFormat, encoded []byte) (ObjectID, error) {
@@ -338,7 +375,7 @@ func openGitAdminDirectory(parentFD int, name string) (int, gitAdminIdentity, er
 }
 
 func readGitAdminFile(parentFD int, name string, maximum int64) (gitAdminIdentity, []byte, error) {
-	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return gitAdminIdentity{}, nil, err
 	}
@@ -646,7 +683,7 @@ func gitEnvironment(home, repository string) []string {
 func (s gitCommandSpec) command() *exec.Cmd {
 	command := exec.Command(s.program, s.arguments...)
 	command.Dir = s.repository
-	command.Env = gitEnvironment(s.home, s.repository)
+	command.Env = append(gitEnvironment(s.home, s.repository), s.environment...)
 	return command
 }
 
@@ -656,7 +693,6 @@ type gitChild struct {
 	pgid    int
 	kq      int
 	exit    <-chan error
-	stdin   *os.File
 	stdout  *os.File
 	stderr  *os.File
 	hook    gitProcessHook
@@ -671,7 +707,7 @@ type gitReap struct {
 	observerErr  error
 }
 
-func startGitChild(spec gitCommandSpec, withInput bool) (*gitChild, error) {
+func startGitChild(spec gitCommandSpec) (*gitChild, error) {
 	command := spec.command()
 	pgid := unix.Getpgrp()
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
@@ -680,31 +716,20 @@ func startGitChild(spec gitCommandSpec, withInput bool) (*gitChild, error) {
 		return nil, newGitError(gitFailureProcess)
 	}
 	unix.CloseOnExec(kq)
-	var childStdin *os.File
-	var stdin *os.File
-	if withInput {
-		childStdin, stdin, err = os.Pipe()
-		if err != nil {
-			unix.Close(kq)
-			return nil, newGitError(gitFailurePrivateIO)
-		}
-		command.Stdin = childStdin
-	}
 	stdout, childStdout, err := os.Pipe()
 	if err != nil {
-		closeGitFiles(childStdin, stdin)
 		unix.Close(kq)
 		return nil, newGitError(gitFailurePrivateIO)
 	}
 	stderr, childStderr, err := os.Pipe()
 	if err != nil {
-		closeGitFiles(childStdin, stdin, stdout, childStdout)
+		closeGitFiles(stdout, childStdout)
 		unix.Close(kq)
 		return nil, newGitError(gitFailurePrivateIO)
 	}
 	command.Stdout, command.Stderr = childStdout, childStderr
 	if err := command.Start(); err != nil {
-		closeGitFiles(childStdin, stdin, stdout, childStdout, stderr, childStderr)
+		closeGitFiles(stdout, childStdout, stderr, childStderr)
 		unix.Close(kq)
 		return nil, newGitError(gitFailureProcess)
 	}
@@ -713,9 +738,9 @@ func startGitChild(spec gitCommandSpec, withInput bool) (*gitChild, error) {
 	}
 	child := &gitChild{
 		command: command, pid: command.Process.Pid, pgid: pgid, kq: kq,
-		stdin: stdin, stdout: stdout, stderr: stderr, hook: spec.hook, groupOK: true,
+		stdout: stdout, stderr: stderr, hook: spec.hook, groupOK: true,
 	}
-	if closeGitFiles(childStdin, childStdout, childStderr) != nil {
+	if closeGitFiles(childStdout, childStderr) != nil {
 		return nil, child.failStart()
 	}
 	exit := make(chan error, 1)
@@ -743,7 +768,7 @@ func (c *gitChild) failStart() error {
 		}
 		c.waited = true
 	}
-	closeGitFiles(c.stdin, c.stdout, c.stderr)
+	closeGitFiles(c.stdout, c.stderr)
 	_ = unix.Close(c.kq)
 	return newGitCleanupError(gitFailureProcess)
 }
@@ -876,31 +901,11 @@ observedExit:
 	return result
 }
 
-func (c *gitChild) reapObserved(observed error) gitReap {
-	if c.waited {
-		return gitReap{observerErr: errors.New("Git child waited more than once"), cleanup: true}
-	}
-	_ = unix.Close(c.kq)
-	result := gitReap{observerErr: observed, cleanup: observed != nil}
-	if observed != nil {
-		c.signal(unix.SIGKILL)
-	}
-	if !c.checkGroup(true) {
-		result.cleanup = true
-	}
-	result.waitErr = c.command.Wait()
-	c.waited = true
-	if c.hook != nil {
-		c.hook(gitProcessWaited)
-	}
-	return result
-}
-
 func runGitCapture(ctx context.Context, spec gitCommandSpec, maximum int) (gitCapture, error) {
 	if err := ctx.Err(); err != nil {
 		return gitCapture{}, newGitContextError(err, false)
 	}
-	child, err := startGitChild(spec, false)
+	child, err := startGitChild(spec)
 	if err != nil {
 		return gitCapture{}, err
 	}
@@ -963,23 +968,14 @@ func readGitDiscard(reader io.Reader, maximum int64) gitStreamResult {
 }
 
 func readGitCapture(reader io.Reader, maximum int) gitStreamResult {
-	data := make([]byte, 0, min(maximum, 64<<10))
-	buffer := make([]byte, 32<<10)
-	for {
-		n, err := reader.Read(buffer)
-		if n > 0 {
-			if len(data) > maximum-n {
-				return gitStreamResult{overflow: true}
-			}
-			data = append(data, buffer[:n]...)
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return gitStreamResult{data: data}
-			}
-			return gitStreamResult{err: err}
-		}
+	data, err := io.ReadAll(io.LimitReader(reader, int64(maximum)+1))
+	if len(data) > maximum {
+		return gitStreamResult{overflow: true}
 	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return gitStreamResult{err: err}
+	}
+	return gitStreamResult{data: data}
 }
 
 func isExitError(err error) bool {
@@ -987,225 +983,921 @@ func isExitError(err error) bool {
 	return errors.As(err, &exitError)
 }
 
-// GitBlobs owns one exact ordered git cat-file --batch child.
-type GitBlobs struct {
-	mu sync.Mutex
-
-	selection Selection
-	home      string
-	child     *gitChild
-	stdin     *os.File
-	stdoutFD  *os.File
-	stdout    *bufio.Reader
-	stderrFD  *os.File
-	stderr    <-chan gitStreamResult
-	next      int
-	closed    bool
-	stderrSet bool
-	stderrVal gitStreamResult
+// gitAuthority is the repository and executable identity every Git
+// operation on a Change is checked against before and after each process.
+type gitAuthority struct {
+	repositoryRoot string
+	repository     repositoryCheckpoint
+	gitExecutable  string
+	gitIdentity    gitFileIdentity
+	home           string
+	hook           gitProcessHook
 }
 
-// OpenGitBlobs starts one bounded exact-object reader after rechecking the
-// repository and executable identities captured by SelectGit.
-func OpenGitBlobs(ctx context.Context, gitExecutable, repositoryRoot string, selection Selection) (*GitBlobs, error) {
-	if !selection.gitIdentity.trusted {
-		return nil, &ValidationError{Reason: "blob reader selection lacks trusted Git authority"}
+func openGitAuthority(gitExecutable, repositoryRoot string, expected RepositoryIdentity, hook gitProcessHook, trusted bool) (*gitAuthority, error) {
+	repository, err := checkpointRepository(repositoryRoot, expected)
+	if err != nil {
+		return nil, err
 	}
-	return openGitBlobs(ctx, gitExecutable, repositoryRoot, selection, nil)
-}
-
-func openGitBlobs(ctx context.Context, gitExecutable, repositoryRoot string, selection Selection, hook gitProcessHook) (*GitBlobs, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, newGitContextError(err, false)
-	}
-	if !selection.valid() || repositoryRoot != selection.repositoryRoot || gitExecutable != selection.gitExecutable {
-		return nil, &ValidationError{Reason: "blob reader does not match the immutable selection"}
-	}
-	if err := verifyGitAuthority(repositoryRoot, selection.repository, gitExecutable, selection.gitIdentity); err != nil {
+	gitIdentity, err := checkpointExpectedGitExecutable(gitExecutable, trusted)
+	if err != nil {
 		return nil, err
 	}
 	home, err := newGitHome()
 	if err != nil {
 		return nil, err
 	}
-	spec := gitCommandSpec{
-		program: gitExecutable, repository: repositoryRoot, home: home,
-		arguments: []string{"-C", repositoryRoot, "cat-file", "--batch"}, hook: hook,
+	return &gitAuthority{repositoryRoot: repositoryRoot, repository: repository, gitExecutable: gitExecutable, gitIdentity: gitIdentity, home: home, hook: hook}, nil
+}
+
+func (a *gitAuthority) close() { _ = cleanupGitHome(a.home) }
+
+// run runs one Git command in the repository and rechecks the repository
+// and executable identity after it exits, so a replaced repository or Git
+// cannot pass an earlier check.
+func (a *gitAuthority) run(ctx context.Context, maximum int, arguments ...string) (gitCapture, error) {
+	return a.runWithEnvironment(ctx, maximum, nil, arguments...)
+}
+
+func (a *gitAuthority) runWithEnvironment(ctx context.Context, maximum int, environment []string, arguments ...string) (gitCapture, error) {
+	if err := verifyGitAuthority(a.repositoryRoot, a.repository, a.gitExecutable, a.gitIdentity); err != nil {
+		return gitCapture{}, err
 	}
-	child, err := startGitChild(spec, true)
+	spec := gitCommandSpec{program: a.gitExecutable, repository: a.repositoryRoot, home: a.home, hook: a.hook, arguments: arguments, environment: environment}
+	result, err := runGitCapture(ctx, spec, maximum)
 	if err != nil {
-		_ = cleanupGitHome(home)
+		return gitCapture{}, err
+	}
+	if err := verifyGitAuthority(a.repositoryRoot, a.repository, a.gitExecutable, a.gitIdentity); err != nil {
+		return gitCapture{}, err
+	}
+	return result, nil
+}
+
+// succeed runs one Git command that must exit zero.
+func (a *gitAuthority) succeed(ctx context.Context, maximum int, arguments ...string) ([]byte, error) {
+	result, err := a.run(ctx, maximum, arguments...)
+	if err != nil {
 		return nil, err
 	}
-	stderrChannel := make(chan gitStreamResult, 1)
-	go func() { stderrChannel <- readGitDiscard(child.stderr, maxGitStderrBytes) }()
-	blobs := &GitBlobs{
-		selection: selection, home: home, child: child, stdin: child.stdin,
-		stdoutFD: child.stdout, stdout: bufio.NewReaderSize(child.stdout, maxGitBlobHeader+1),
-		stderrFD: child.stderr, stderr: stderrChannel,
+	if result.exitCode != 0 {
+		return nil, newGitError(gitFailureProcess)
 	}
-	if err := verifyGitAuthority(repositoryRoot, selection.repository, gitExecutable, selection.gitIdentity); err != nil {
-		_ = blobs.abortLocked()
-		return nil, newGitCleanupError(gitFailureProcess)
-	}
-	return blobs, nil
+	return result.output, nil
 }
 
-// Read returns the next exact selected blob. Calls must follow Manifest entry
-// order; arbitrary repository objects are never accepted.
-func (b *GitBlobs) Read(ctx context.Context, requested ObjectID) ([]byte, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return nil, &LifecycleError{Reason: "blob read after close"}
+// rewriteConfig runs one Git command that must exit zero and may rewrite
+// the local config file in place.
+func (a *gitAuthority) rewriteConfig(ctx context.Context, maximum int, arguments ...string) error {
+	spec := gitCommandSpec{program: a.gitExecutable, repository: a.repositoryRoot, home: a.home, hook: a.hook, arguments: arguments}
+	result, err := runGitCapture(ctx, spec, maximum)
+	if err != nil {
+		return err
 	}
-	if b.next >= len(b.selection.manifest.entries) || !requested.equal(b.selection.manifest.entries[b.next].oid) {
-		_ = b.abortLocked()
-		return nil, newGitCleanupError(gitFailureProtocol)
+	if err := a.refresh(); err != nil {
+		return err
 	}
-	if err := ctx.Err(); err != nil {
-		_ = b.abortLocked()
-		return nil, newGitContextError(err, true)
-	}
-	expected := b.selection.manifest.entries[b.next]
-	result := make(chan gitStreamResult, 1)
-	go func() { result <- b.readOne(ctx, expected) }()
-	select {
-	case response := <-result:
-		if response.err != nil || response.overflow {
-			_ = b.abortLocked()
-			return nil, newGitCleanupError(gitFailureProtocol)
-		}
-		b.next++
-		return response.data, nil
-	case stderrResult := <-b.stderr:
-		b.stderrSet, b.stderrVal = true, stderrResult
-		_ = b.abortLocked()
-		<-result
-		return nil, newGitCleanupError(gitFailurePrivateIO)
-	case observed := <-b.child.exit:
-		_ = b.finishObservedLocked(observed)
-		<-result
-		return nil, newGitCleanupError(gitFailureProcess)
-	case <-ctx.Done():
-		_ = b.abortLocked()
-		<-result
-		return nil, newGitContextError(ctx.Err(), true)
-	}
-}
-
-func (b *GitBlobs) readOne(ctx context.Context, expected Entry) gitStreamResult {
-	if _, err := io.WriteString(b.stdin, expected.oid.Hex()+"\n"); err != nil {
-		return gitStreamResult{err: err}
-	}
-	header, err := b.stdout.ReadSlice('\n')
-	if err != nil || len(header) > maxGitBlobHeader || len(header) == 0 {
-		return gitStreamResult{err: errors.New("blob header framing")}
-	}
-	fields := bytes.Fields(header[:len(header)-1])
-	if len(fields) != 3 || !bytes.Equal(fields[0], []byte(expected.oid.Hex())) || !bytes.Equal(fields[1], []byte("blob")) {
-		return gitStreamResult{err: errors.New("blob header identity or type")}
-	}
-	size, err := strconv.ParseUint(string(fields[2]), 10, 64)
-	if err != nil || strconv.FormatUint(size, 10) != string(fields[2]) || size != expected.size || size > MaxBlobBytes {
-		return gitStreamResult{err: errors.New("blob header size")}
-	}
-	data := make([]byte, int(size))
-	if _, err := io.ReadFull(b.stdout, data); err != nil {
-		return gitStreamResult{err: err}
-	}
-	delimiter, err := b.stdout.ReadByte()
-	if err != nil || delimiter != '\n' {
-		return gitStreamResult{err: errors.New("blob delimiter")}
-	}
-	actual, err := hashBlobContext(ctx, expected.oid.format, data, nil)
-	if err != nil || !actual.equal(expected.oid) {
-		return gitStreamResult{err: errors.New("blob object hash mismatch")}
-	}
-	return gitStreamResult{data: data}
-}
-
-// Close closes stdin, waits once for the exact child, drains private stderr,
-// and removes the private Git HOME.
-func (b *GitBlobs) Close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return &LifecycleError{Reason: "close blob reader more than once"}
-	}
-	if b.next != len(b.selection.manifest.entries) {
-		return b.abortLocked()
-	}
-	b.closed = true
-	stdinErr := b.stdin.Close()
-	closeContext, cancel := context.WithTimeout(context.Background(), gitPipeDrainGrace)
-	reaped := b.child.reap(closeContext, false)
-	cancel()
-	trailingChannel := make(chan gitStreamResult, 1)
-	go func() {
-		_, err := b.stdout.ReadByte()
-		if errors.Is(err, io.EOF) {
-			trailingChannel <- gitStreamResult{}
-			return
-		}
-		trailingChannel <- gitStreamResult{err: errors.New("trailing batch output")}
-	}()
-	trailing, stdoutDrained := collectGitStream(trailingChannel, b.stdoutFD)
-	stderrResult, stderrDrained := b.collectStderr()
-	pipeErr := closeGitFiles(b.stdoutFD, b.stderrFD)
-	homeErr := cleanupGitHome(b.home)
-	if reaped.cleanup || reaped.observerErr != nil || !stdoutDrained || !stderrDrained {
-		return newGitCleanupError(gitFailureProcess)
-	}
-	if trailing.err != nil {
-		return newGitError(gitFailureProtocol)
-	}
-	if stdinErr != nil || pipeErr != nil || stderrResult.err != nil || stderrResult.overflow || homeErr != nil || reaped.waitErr != nil {
-		return newGitError(gitFailurePrivateIO)
+	if result.exitCode != 0 {
+		return newGitError(gitFailureProcess)
 	}
 	return nil
 }
 
-// Abort terminates and waits once for the exact child without exposing output.
-func (b *GitBlobs) Abort() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return &LifecycleError{Reason: "abort blob reader after close"}
-	}
-	return b.abortLocked()
+// AddWorktree makes the Change's worktree: one linked worktree of the
+// selected repository at path, on its own branch, checked out at the
+// selected base. A leftover of an earlier attempt that never reached a
+// provider (the same branch still at the base, at this path or registered
+// for it) is removed and remade; anything else at the path or on the branch
+// is refused, never replaced.
+func AddWorktree(ctx context.Context, selection Selection, path, branch string) (WorktreeFacts, error) {
+	return addWorktree(ctx, selection, path, branch, nil, true)
 }
 
-func (b *GitBlobs) abortLocked() error {
-	if b.closed {
+// GitDirectoryForChange returns the deterministic private administration for
+// a Change worktree. It lives below the project's Git directory, not below
+// the worker-readable worktree parent.
+func GitDirectoryForChange(repositoryRoot, path string) string {
+	return filepath.Join(repositoryRoot, ".git", "dark-factory-changes", filepath.Base(path), ".git")
+}
+
+func preparePrivateGitParent(repositoryRoot, path string) error {
+	parent := filepath.Dir(GitDirectoryForChange(repositoryRoot, path))
+	for _, directory := range []string{filepath.Dir(parent), parent} {
+		if err := os.Mkdir(directory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		fd, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return &ValidationError{Reason: "private Git parent is not local"}
+		}
+		stat, statErr := fstatGit(fd)
+		_ = unix.Close(fd)
+		if statErr != nil || stat.Uid != uint32(os.Geteuid()) || !safeGitMode(stat.Mode, gitModeDirectory) {
+			return &ValidationError{Reason: "private Git parent is unsafe"}
+		}
+	}
+	return nil
+}
+
+func validatePrivateGitAdmin(path string) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path {
+		return &ValidationError{Reason: "private Change Git administration contains a symlink"}
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return &ValidationError{Reason: "private Change Git administration is unavailable"}
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(unix.Geteuid()) || !safeGitMode(uint16(stat.Mode), gitModeDirectory) {
+		return &ValidationError{Reason: "private Change Git administration is unsafe"}
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &ValidationError{Reason: "private Change Git administration is unavailable"}
+	}
+	defer unix.Close(fd)
+	_, config, readErr := readGitAdminFile(fd, "config", maxGitConfigBytes)
+	if readErr != nil || !validLocalGitConfig(config) {
+		return &ValidationError{Reason: "private Change Git config is unsafe"}
+	}
+	// A worker can edit its config. Daemon reads must never execute its
+	// filters, monitors, helpers, hooks, or storage extensions.
+	section := ""
+	for _, raw := range strings.Split(strings.ToLower(string(config)), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			continue
+		}
+		key, _, _ := strings.Cut(line, "=")
+		switch section + "." + strings.TrimSpace(key) {
+		case "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode", "core.symlinks", "core.quotepath", "core.autocrlf", "core.eol", "core.safecrlf", "extensions.objectformat", "user.name", "user.email":
+		default:
+			return &ValidationError{Reason: "private Change Git config grants unsupported authority"}
+		}
+	}
+	if err := rejectDirectGitAdminEntry(fd, "commondir"); err != nil {
+		return err
+	}
+	if err := rejectDirectGitAdminEntry(fd, "config.worktree"); err != nil {
+		return err
+	}
+	objectsFD, _, err := openGitAdminDirectory(fd, "objects")
+	if err != nil {
+		return &ValidationError{Reason: "private Change Git objects are unavailable"}
+	}
+	defer unix.Close(objectsFD)
+	for _, name := range []string{"alternates", "http-alternates"} {
+		if err := rejectGitAdminEntry(objectsFD, "info", name); err != nil {
+			return err
+		}
+	}
+	if err := rejectGitAdminEntry(fd, "info", "grafts"); err != nil {
+		return err
+	}
+	if err := rejectGitAdminEntry(fd, "refs", "replace"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func privateGitfileTarget(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", &ValidationError{Reason: "private Change Gitfile is not regular"}
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", newGitError(gitFailurePrivateIO)
+	}
+	file := os.NewFile(uintptr(fd), "")
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil || len(data) > 4096 {
+		return "", newGitError(gitFailurePrivateIO)
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, "gitdir: ") || strings.ContainsAny(line, "\r\n") {
+		return "", &ValidationError{Reason: "private Change Gitfile syntax is invalid"}
+	}
+	target := strings.TrimPrefix(line, "gitdir: ")
+	if !filepath.IsAbs(target) || filepath.Clean(target) != target {
+		return "", &ValidationError{Reason: "private Change Gitfile target is not canonical"}
+	}
+	return target, nil
+}
+
+// AddPrivateWorktree creates a linked worktree backed by a private bare Git
+// administration without changing the project's refs or worktree registry.
+func AddPrivateWorktree(ctx context.Context, selection Selection, path, branch string) (WorktreeFacts, error) {
+	if !selection.valid() || !validWorktreeBranch(branch) {
+		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection or branch is invalid"}
+	}
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	authority, err := openGitAuthority(selection.gitExecutable, selection.repositoryRoot, selection.repository.root, nil, true)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	if _, err := os.Lstat(path); err == nil {
+		facts, inspectErr := authority.inspectWorktree(ctx, path)
+		if inspectErr == nil && facts.GitDirectory() == GitDirectoryForChange(selection.repositoryRoot, path) && facts.Branch() == branch && facts.Head().equal(selection.base) && !facts.Dirty() {
+			return facts, nil
+		}
+		return WorktreeFacts{}, &ValidationError{Reason: "private Change path is already taken"}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	admin := GitDirectoryForChange(selection.repositoryRoot, path)
+	if filepath.Base(path) == "." || filepath.Base(path) == ".." {
+		return WorktreeFacts{}, &ValidationError{Reason: "private Change path has no stable identity"}
+	}
+	if info, err := os.Lstat(admin); err == nil && !info.IsDir() {
+		return WorktreeFacts{}, &ValidationError{Reason: "private Change Git administration is not a directory"}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if err := preparePrivateGitParent(selection.repositoryRoot, path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if _, err := os.Stat(filepath.Join(admin, "config")); err == nil {
+		if err := validatePrivateGitAdmin(admin); err != nil {
+			return WorktreeFacts{}, err
+		}
+		if err := authority.removeUnusedPrivateWorktree(ctx, admin, path, branch, selection.base); err != nil {
+			return WorktreeFacts{}, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "init", "--bare", "--object-format="+selection.format.Name(), admin); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if err := validatePrivateGitAdmin(admin); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "--git-dir", admin, "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", selection.repositoryRoot, selection.base.Hex()); err != nil {
+		return WorktreeFacts{}, newGitError(gitFailureProcess)
+	}
+	if err := validatePrivateGitAdmin(admin); err != nil {
+		return WorktreeFacts{}, err
+	}
+	worktreeArgs := []string{"-c", "core.hooksPath=/dev/null", "--git-dir", admin, "worktree", "add", "--quiet"}
+	branchTip, branchErr := authority.run(ctx, maxGitSelectionOutput, "-c", "core.hooksPath=/dev/null", "--git-dir", admin, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
+	if branchErr != nil {
+		return WorktreeFacts{}, branchErr
+	}
+	if branchTip.exitCode == 0 {
+		tip, parseErr := parseGitOID(selection.format, bytes.TrimSpace(branchTip.output))
+		if parseErr != nil || !tip.equal(selection.base) {
+			return WorktreeFacts{}, &ValidationError{Reason: "private Change branch already exists at another commit"}
+		}
+		worktreeArgs = append(worktreeArgs, path, branch)
+	} else {
+		worktreeArgs = append(worktreeArgs, "-b", branch, path, selection.base.Hex())
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, worktreeArgs...); err != nil {
+		return WorktreeFacts{}, newGitError(gitFailureProcess)
+	}
+	return inspectWorktree(ctx, selection.gitExecutable, selection.repositoryRoot, selection.repository.root, path, nil, true)
+}
+
+func addWorktree(ctx context.Context, selection Selection, path, branch string, hook gitProcessHook, trusted bool) (WorktreeFacts, error) {
+	if !selection.valid() || !validWorktreeBranch(branch) {
+		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection or branch is invalid"}
+	}
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	authority, err := openGitAuthority(selection.gitExecutable, selection.repositoryRoot, selection.repository.root, hook, trusted)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	if err := authority.removeUnusedWorktree(ctx, path, branch, selection.base); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return WorktreeFacts{}, &ValidationError{Reason: "Change path is taken by something that is not its worktree"}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if err := authority.addWorktree(ctx, path, branch, selection.base, false); err != nil {
+		return WorktreeFacts{}, err
+	}
+	return authority.verifyWorktree(ctx, path, branch, selection.base)
+}
+
+// InspectWorktree verifies that path is a linked worktree of the repository
+// and reports its head, branch and cleanliness.
+func InspectWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string) (WorktreeFacts, error) {
+	return inspectWorktree(ctx, gitExecutable, repositoryRoot, expected, path, nil, true)
+}
+
+func inspectWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string, hook gitProcessHook, trusted bool) (WorktreeFacts, error) {
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	authority, err := openGitAuthority(gitExecutable, repositoryRoot, expected, hook, trusted)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	return authority.inspectWorktree(ctx, path)
+}
+
+// DescendsFrom reports whether the worktree's head descends from base: the
+// Change's recorded base is an ancestor of the work on its branch.
+func DescendsFrom(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path string, base ObjectID) (bool, error) {
+	if err := validateWorktreePath(path); err != nil {
+		return false, err
+	}
+	if !base.format.valid() {
+		return false, &ValidationError{Reason: "worktree base is invalid"}
+	}
+	authority, err := openGitAuthority(gitExecutable, repositoryRoot, expected, nil, true)
+	if err != nil {
+		return false, err
+	}
+	defer authority.close()
+	if _, err := authority.inspectWorktree(ctx, path); err != nil {
+		return false, err
+	}
+	result, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "merge-base", "--is-ancestor", base.Hex(), "HEAD")
+	if err != nil {
+		return false, err
+	}
+	switch result.exitCode {
+	case 0:
+		return true, nil
+	case 1:
+		return false, nil
+	default:
+		return false, newGitError(gitFailureProcess)
+	}
+}
+
+// AdoptWorktree turns a Git-free tree at path, published before managed
+// worktrees from the commit base, into the Change's worktree: the same
+// files, now on the Change's own branch at base, with the worker's edits
+// showing as uncommitted work. It is idempotent across a crash at any step
+// and refuses a path that is already a worktree of something else.
+func AdoptWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path, branch string, base ObjectID) (WorktreeFacts, error) {
+	return adoptWorktree(ctx, gitExecutable, repositoryRoot, expected, path, branch, base, nil, true)
+}
+
+func adoptWorktree(ctx context.Context, gitExecutable, repositoryRoot string, expected RepositoryIdentity, path, branch string, base ObjectID, hook gitProcessHook, trusted bool) (WorktreeFacts, error) {
+	if !validWorktreeBranch(branch) || !base.format.valid() {
+		return WorktreeFacts{}, &ValidationError{Reason: "worktree branch or base is invalid"}
+	}
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return WorktreeFacts{}, &ValidationError{Reason: "the Change tree to adopt is not a directory"}
+	}
+	authority, err := openGitAuthority(gitExecutable, repositoryRoot, expected, hook, trusted)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	gitFile := filepath.Join(path, ".git")
+	if _, err := os.Lstat(gitFile); err == nil {
+		// Already adopted, or someone else's repository: the facts decide.
+		return authority.verifyWorktree(ctx, path, branch, base)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	// The gitfile is minted in a sibling directory with no checkout, then
+	// moved into the tree, so the tree's files are never written by Git.
+	stage := path + ".adopt"
+	stageGitFile := filepath.Join(stage, ".git")
+	if _, err := os.Lstat(stageGitFile); errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(stage); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return WorktreeFacts{}, &ValidationError{Reason: "adoption staging directory is not empty"}
+		}
+		if err := authority.addWorktree(ctx, stage, branch, base, true); err != nil {
+			return WorktreeFacts{}, err
+		}
+	} else if err != nil {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if err := os.Rename(stageGitFile, gitFile); err != nil {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if err := os.Remove(stage); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", repositoryRoot, "worktree", "repair", path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	// A mixed reset fills the index from HEAD and leaves every file alone.
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", path, "reset", "-q", "--"); err != nil {
+		return WorktreeFacts{}, err
+	}
+	return authority.verifyWorktree(ctx, path, branch, base)
+}
+
+// addWorktree runs git worktree add, creating the branch at base or checking
+// out an existing branch that already sits at base; a branch at any other
+// commit belongs to work this Change may not replace. Concurrent attempts
+// in one repository contend for Git's own locks, so a refused add is
+// retried a few times before it is a failure.
+func (a *gitAuthority) addWorktree(ctx context.Context, path, branch string, base ObjectID, staging bool) error {
+	arguments := []string{"-C", a.repositoryRoot, "-c", "core.hooksPath=/dev/null", "worktree", "add", "--quiet"}
+	if staging {
+		arguments = append(arguments, "--no-checkout", "--force")
+	}
+	tip, exists, err := a.branchTip(ctx, base.format, branch)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if !tip.equal(base) {
+			return &ValidationError{Reason: "the Change branch already exists at another commit"}
+		}
+		arguments = append(arguments, path, branch)
+	} else {
+		arguments = append(arguments, "-b", branch, path, base.Hex())
+	}
+	// ponytail: fixed retry on any nonzero exit; a per-cause classification
+	// would need Git's stderr, which stays private.
+	for attempt := 0; ; attempt++ {
+		result, err := a.run(ctx, maxGitSelectionOutput, arguments...)
+		if err != nil {
+			return err
+		}
+		if result.exitCode == 0 {
+			return nil
+		}
+		if attempt == gitLockRetries {
+			return newGitError(gitFailureProcess)
+		}
+		if _, err := os.Lstat(path); err == nil {
+			return newGitError(gitFailureProcess)
+		}
+		select {
+		case <-ctx.Done():
+			return newGitContextError(ctx.Err(), false)
+		case <-time.After(gitLockRetryDelay):
+		}
+	}
+}
+
+// removeUnusedWorktree removes a registration of path, or of the Change's
+// branch, that an earlier attempt left before any provider ran: it must
+// still be the Change's branch at the Change's base. Nothing else is touched.
+func (a *gitAuthority) removeUnusedWorktree(ctx context.Context, path, branch string, base ObjectID) error {
+	registrations, err := a.worktrees(ctx)
+	if err != nil {
+		return err
+	}
+	registered, ok := registrations[path]
+	if !ok {
+		for _, candidate := range registrations {
+			if candidate.branch == "refs/heads/"+branch {
+				registered, ok = candidate, true
+				break
+			}
+		}
+	}
+	if !ok {
 		return nil
 	}
-	b.closed = true
-	_ = b.stdin.Close()
-	reaped := b.child.reap(context.Background(), true)
-	_ = closeGitFiles(b.stdoutFD, b.stderrFD)
-	stderrResult, _ := b.collectStderr()
-	homeErr := cleanupGitHome(b.home)
-	_ = reaped
-	_ = stderrResult
-	_ = homeErr
-	return newGitCleanupError(gitFailureProcess)
-}
-
-func (b *GitBlobs) finishObservedLocked(observed error) error {
-	b.closed = true
-	_ = b.stdin.Close()
-	_ = b.child.reapObserved(observed)
-	_ = closeGitFiles(b.stdoutFD, b.stderrFD)
-	_, _ = b.collectStderr()
-	_ = cleanupGitHome(b.home)
-	return newGitCleanupError(gitFailureProcess)
-}
-
-func (b *GitBlobs) collectStderr() (gitStreamResult, bool) {
-	if b.stderrSet {
-		return b.stderrVal, true
+	if registered.branch != "refs/heads/"+branch || registered.head != base.Hex() {
+		return &ValidationError{Reason: "the Change path or branch is registered to a worktree that is not its unused one"}
 	}
-	b.stderrVal, b.stderrSet = collectGitStream(b.stderr, b.stderrFD)
-	return b.stderrVal, b.stderrSet
+	if _, err := os.Lstat(registered.path); err == nil {
+		facts, err := a.inspectWorktree(ctx, registered.path)
+		if err != nil || !facts.head.equal(base) || facts.branch != branch || facts.dirty {
+			return errors.Join(&ValidationError{Reason: "the Change path holds a worktree with work in it"}, err)
+		}
+	}
+	if err := a.rewriteConfig(ctx, maxGitSelectionOutput, "-C", a.repositoryRoot, "worktree", "remove", "--force", registered.path); err != nil {
+		return err
+	}
+	tip, exists, err := a.branchTip(ctx, base.format, branch)
+	if err != nil {
+		return err
+	}
+	if exists && tip.equal(base) {
+		return a.rewriteConfig(ctx, maxGitSelectionOutput, "-C", a.repositoryRoot, "branch", "--quiet", "-D", branch)
+	}
+	return nil
+}
+
+// removeUnusedPrivateWorktree removes only the private registration left by a
+// deleted pre-provider worktree. Its index must still equal HEAD, so staged
+// work is never discarded; all refs and objects remain in the private admin.
+func (a *gitAuthority) removeUnusedPrivateWorktree(ctx context.Context, admin, path, branch string, base ObjectID) error {
+	// Git permits registration names that are unrelated to the worktree
+	// basename. Only the deterministic name made by AddPrivateWorktree is
+	// eligible for recovery; an alternate registration is left untouched and
+	// the subsequent native add fails closed.
+	registration := filepath.Join(admin, "worktrees", filepath.Base(path))
+	if info, err := os.Lstat(registration); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil || !info.IsDir() {
+		return &ValidationError{Reason: "private Change registration is unavailable"}
+	}
+	if err := validatePrivateWorktreeRegistration(registration, path, admin, &base); err != nil {
+		return err
+	}
+	registrations, err := a.privateWorktrees(ctx, admin)
+	if err != nil {
+		return err
+	}
+	registered, ok := registrations[path]
+	for candidatePath, candidate := range registrations {
+		if candidate.branch == "refs/heads/"+branch && candidatePath != path {
+			return &ValidationError{Reason: "private Change branch is registered to another worktree"}
+		}
+	}
+	if !ok {
+		return &ValidationError{Reason: "private Change registration is not recognized by Git"}
+	}
+	if registered.branch != "refs/heads/"+branch || registered.head != base.Hex() {
+		return &ValidationError{Reason: "private Change registration is not its unused one"}
+	}
+	if registered.path != path {
+		return &ValidationError{Reason: "private Change registration path is not exact"}
+	}
+	index, err := a.run(ctx, maxGitSelectionOutput, "--git-dir", registration, "diff", "--cached", "--quiet", "--no-ext-diff", "--no-textconv", base.Hex(), "--")
+	if err != nil {
+		return err
+	}
+	if index.exitCode == 1 {
+		return &ValidationError{Reason: "private Change registration has staged work"}
+	}
+	if index.exitCode != 0 {
+		return newGitError(gitFailureProcess)
+	}
+	// Do not remove a path that appeared after the initial admission check.
+	if _, err := os.Lstat(path); err == nil {
+		return &ValidationError{Reason: "private Change path was recreated during recovery"}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return newGitError(gitFailurePrivateIO)
+	}
+	if _, err := a.succeed(ctx, maxGitSelectionOutput, "--git-dir", admin, "worktree", "remove", "--force", path); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validatePrivateWorktreeRegistration proves the exact worker-editable
+// registration before Git is allowed to interpret it. Unknown entries are
+// refused because Git operation state in this directory must not be silently
+// discarded by worktree remove --force.
+func validatePrivateWorktreeRegistration(registration, path, admin string, expectedBase *ObjectID) error {
+	adminFD, err := unix.Open(admin, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &ValidationError{Reason: "private Change Git administration is unavailable"}
+	}
+	defer unix.Close(adminFD)
+	worktreesFD, _, err := openGitAdminDirectory(adminFD, "worktrees")
+	if err != nil {
+		return &ValidationError{Reason: "private Change registrations are unavailable"}
+	}
+	defer unix.Close(worktreesFD)
+	regFD, err := unix.Openat(worktreesFD, filepath.Base(registration), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &ValidationError{Reason: "private Change registration is unavailable"}
+	}
+	regFile := os.NewFile(uintptr(regFD), "")
+	defer regFile.Close()
+	regStat, err := fstatGit(regFD)
+	if err != nil || regStat.Uid != uint32(unix.Geteuid()) || !safeGitMode(regStat.Mode, gitModeDirectory) {
+		return &ValidationError{Reason: "private Change registration is unsafe"}
+	}
+	if _, _, err := readGitAdminFile(regFD, "HEAD", maxGitSelectionOutput); err != nil {
+		return &ValidationError{Reason: "private Change registration HEAD is unsafe"}
+	}
+	_, gitdir, err := readGitAdminFile(regFD, "gitdir", maxGitSelectionOutput)
+	if err != nil || strings.TrimSpace(string(gitdir)) != filepath.Join(path, ".git") {
+		return &ValidationError{Reason: "private Change registration points elsewhere"}
+	}
+	relativeAdmin, relErr := filepath.Rel(registration, admin)
+	if relErr != nil {
+		return &ValidationError{Reason: "private Change common directory redirects"}
+	}
+	_, commondir, err := readGitAdminFile(regFD, "commondir", maxGitSelectionOutput)
+	if err != nil || strings.TrimSpace(string(commondir)) != relativeAdmin {
+		return &ValidationError{Reason: "private Change common directory redirects"}
+	}
+	// Reading the index with O_NOFOLLOW both rejects a missing index and
+	// prevents a worker-created alias from becoming Git input.
+	if _, _, err := readGitAdminFile(regFD, "index", maxGitListOutput); err != nil {
+		return &ValidationError{Reason: "private Change registration index is unsafe"}
+	}
+	if err := rejectDirectGitAdminEntry(regFD, "config.worktree"); err != nil {
+		return err
+	}
+	if expectedBase == nil {
+		return nil // Inspection preserves split-index and in-progress operation state.
+	}
+	entries, err := regFile.Readdirnames(-1)
+	if err != nil {
+		return &ValidationError{Reason: "private Change registration cannot be inspected"}
+	}
+	for _, name := range entries {
+		switch name {
+		case "HEAD", "commondir", "gitdir", "index", "logs":
+		case "ORIG_HEAD":
+			_, data, err := readGitAdminFile(regFD, name, maxGitSelectionOutput)
+			if err != nil || strings.TrimSpace(string(data)) != expectedBase.Hex() {
+				return &ValidationError{Reason: "private Change registration retains another original head"}
+			}
+		case "refs":
+			refsFD, _, err := openGitAdminDirectory(regFD, name)
+			if err != nil {
+				return err
+			}
+			refs := os.NewFile(uintptr(refsFD), "")
+			names, readErr := refs.Readdirnames(-1)
+			closeErr := refs.Close()
+			if readErr != nil || closeErr != nil || len(names) != 0 {
+				return &ValidationError{Reason: "private Change registration retains worktree refs"}
+			}
+		default:
+			return &ValidationError{Reason: "private Change registration contains unknown state"}
+		}
+	}
+	logsFD, _, logsErr := openGitAdminDirectory(regFD, "logs")
+	if errors.Is(logsErr, unix.ENOENT) {
+		return nil
+	}
+	if logsErr != nil {
+		return &ValidationError{Reason: "private Change registration logs are unsafe"}
+	}
+	logs := os.NewFile(uintptr(logsFD), "")
+	defer logs.Close()
+	logEntries, err := logs.Readdirnames(-1)
+	if err != nil {
+		return &ValidationError{Reason: "private Change registration logs cannot be inspected"}
+	}
+	for _, name := range logEntries {
+		if name != "HEAD" {
+			return &ValidationError{Reason: "private Change registration contains unknown log state"}
+		}
+		_, logData, err := readGitAdminFile(logsFD, name, maxGitListOutput)
+		if err != nil || expectedBase != nil && !validPrivateWorktreeReflog(logData, *expectedBase) {
+			return &ValidationError{Reason: "private Change registration log is unsafe"}
+		}
+	}
+	return nil
+}
+
+func validPrivateWorktreeReflog(data []byte, base ObjectID) bool {
+	zero := strings.Repeat("0", len(base.Hex()))
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || (fields[0] != zero && fields[0] != base.Hex()) || (fields[1] != zero && fields[1] != base.Hex()) {
+			return false
+		}
+	}
+	return true
+}
+
+type worktreeRegistration struct {
+	path, head, branch string
+}
+
+// worktrees parses git worktree list --porcelain into one record per path.
+func (a *gitAuthority) worktrees(ctx context.Context) (map[string]worktreeRegistration, error) {
+	output, err := a.succeed(ctx, maxGitListOutput, "-C", a.repositoryRoot, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktrees(output), nil
+}
+
+func (a *gitAuthority) privateWorktrees(ctx context.Context, admin string) (map[string]worktreeRegistration, error) {
+	output, err := a.succeed(ctx, maxGitListOutput, "--git-dir", admin, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktrees(output), nil
+}
+
+func parseWorktrees(output []byte) map[string]worktreeRegistration {
+	result := make(map[string]worktreeRegistration)
+	var current worktreeRegistration
+	for _, line := range strings.Split(string(output), "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			current = worktreeRegistration{path: strings.TrimPrefix(line, "worktree ")}
+		case strings.HasPrefix(line, "HEAD "):
+			current.head = strings.TrimPrefix(line, "HEAD ")
+		case strings.HasPrefix(line, "branch "):
+			current.branch = strings.TrimPrefix(line, "branch ")
+		case line == "":
+			if current.path != "" {
+				result[current.path] = current
+			}
+			current = worktreeRegistration{}
+		}
+	}
+	return result
+}
+
+func (a *gitAuthority) branchTip(ctx context.Context, format ObjectFormat, branch string) (ObjectID, bool, error) {
+	result, err := a.run(ctx, maxGitSelectionOutput, "-C", a.repositoryRoot, "rev-parse", "--verify", "--quiet", "--end-of-options", "refs/heads/"+branch+"^{commit}")
+	if err != nil {
+		return ObjectID{}, false, err
+	}
+	if result.exitCode != 0 {
+		return ObjectID{}, false, nil
+	}
+	tip, err := parseGitOID(format, bytes.TrimSpace(result.output))
+	if err != nil {
+		return ObjectID{}, false, err
+	}
+	return tip, true, nil
+}
+
+func (a *gitAuthority) verifyWorktree(ctx context.Context, path, branch string, base ObjectID) (WorktreeFacts, error) {
+	facts, err := a.inspectWorktree(ctx, path)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	if facts.branch != branch || !facts.head.equal(base) {
+		return WorktreeFacts{}, &ValidationError{Reason: fmt.Sprintf("the Change worktree is on %q at %s, not on %q at %s", facts.branch, facts.head.Hex(), branch, base.Hex())}
+	}
+	return facts, nil
+}
+
+// refresh re-reads the repository checkpoint after a Git command that
+// rewrites the local config file in place (branch deletion, worktree
+// removal): the same root, administration, object store and config bytes
+// under a fresh config inode is Git's own rewrite, anything else is not.
+func (a *gitAuthority) refresh() error {
+	fresh, err := checkpointRepository(a.repositoryRoot, a.repository.root)
+	if err != nil {
+		return err
+	}
+	if fresh.root != a.repository.root || fresh.git != a.repository.git || fresh.objects != a.repository.objects || fresh.config.digest != a.repository.config.digest || fresh.config.size != a.repository.config.size || fresh.config.uid != a.repository.config.uid || fresh.config.mode != a.repository.config.mode {
+		return &ValidationError{Reason: "Git administrative identity differs"}
+	}
+	a.repository = fresh
+	return nil
+}
+
+// inspectWorktree proves path is a linked worktree of this repository, then
+// reads its head, branch and cleanliness.
+func (a *gitAuthority) inspectWorktree(ctx context.Context, path string) (WorktreeFacts, error) {
+	gitEntry, err := os.Lstat(filepath.Join(path, ".git"))
+	if err != nil || !gitEntry.Mode().IsRegular() {
+		return WorktreeFacts{}, &ValidationError{Reason: "the Change path is not a Git worktree"}
+	}
+	gitfileTarget := ""
+	if gitEntry.Mode().IsRegular() {
+		gitfileTarget, err = privateGitfileTarget(filepath.Join(path, ".git"))
+		if err != nil {
+			return WorktreeFacts{}, err
+		}
+		private := GitDirectoryForChange(a.repositoryRoot, path)
+		canonical := filepath.Join(a.repositoryRoot, ".git")
+		canonicalWorktree := filepath.Join(canonical, "worktrees")
+		privateWorktree := filepath.Join(private, "worktrees")
+		if filepath.Dir(gitfileTarget) != canonicalWorktree && filepath.Dir(gitfileTarget) != privateWorktree {
+			return WorktreeFacts{}, &ValidationError{Reason: "the Change Gitfile target is not authorized"}
+		}
+		if filepath.Dir(gitfileTarget) == privateWorktree {
+			if err := validatePrivateGitAdmin(private); err != nil {
+				return WorktreeFacts{}, err
+			}
+		}
+		resolvedTarget, targetErr := filepath.EvalSymlinks(gitfileTarget)
+		if targetErr != nil || resolvedTarget != gitfileTarget {
+			return WorktreeFacts{}, &ValidationError{Reason: "the Change Gitfile registration is not local"}
+		}
+		if filepath.Dir(gitfileTarget) == privateWorktree {
+			if err := validatePrivateWorktreeRegistration(gitfileTarget, path, private, nil); err != nil {
+				return WorktreeFacts{}, err
+			}
+		} else {
+			registrationFD, openErr := unix.Open(gitfileTarget, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+			if openErr != nil {
+				return WorktreeFacts{}, &ValidationError{Reason: "the Change Gitfile registration is unsafe"}
+			}
+			defer unix.Close(registrationFD)
+			_, data, readErr := readGitAdminFile(registrationFD, "gitdir", 4096)
+			if readErr != nil || strings.TrimSpace(string(data)) != filepath.Join(path, ".git") {
+				return WorktreeFacts{}, &ValidationError{Reason: "the Change Gitfile registration points elsewhere"}
+			}
+			if err := rejectDirectGitAdminEntry(registrationFD, "config.worktree"); err != nil {
+				return WorktreeFacts{}, err
+			}
+			if _, commonData, commonErr := readGitAdminFile(registrationFD, "commondir", maxGitSelectionOutput); commonErr == nil {
+				commonPath := strings.TrimSpace(string(commonData))
+				resolvedCommon, resolveErr := filepath.EvalSymlinks(filepath.Clean(filepath.Join(gitfileTarget, commonPath)))
+				if resolveErr != nil || resolvedCommon != canonical {
+					return WorktreeFacts{}, &ValidationError{Reason: "the Change Git common directory redirects"}
+				}
+			} else {
+				return WorktreeFacts{}, &ValidationError{Reason: "the Change Git common directory is unsafe"}
+			}
+		}
+	}
+	layout, err := a.succeed(ctx, maxGitSelectionOutput, "-C", path, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--show-object-format")
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	lines := strings.Split(strings.TrimSuffix(string(layout), "\n"), "\n")
+	if len(lines) != 3 || lines[0] != path {
+		return WorktreeFacts{}, &ValidationError{Reason: "the Change path is not a worktree of the project repository"}
+	}
+	common := filepath.Clean(lines[1])
+	canonical := filepath.Join(a.repositoryRoot, ".git")
+	private := GitDirectoryForChange(a.repositoryRoot, path)
+	if common != canonical && common != private {
+		return WorktreeFacts{}, &ValidationError{Reason: "the Change Git directory is not private"}
+	}
+	if common == private {
+		if !gitEntry.Mode().IsRegular() || filepath.Dir(gitfileTarget) != filepath.Join(private, "worktrees") {
+			return WorktreeFacts{}, &ValidationError{Reason: "the private Change must be a linked worktree"}
+		}
+		info, statErr := os.Lstat(common)
+		statOK := false
+		var stat *syscall.Stat_t
+		if statErr == nil {
+			stat, statOK = info.Sys().(*syscall.Stat_t)
+		}
+		if statErr != nil || !info.IsDir() || !statOK || stat.Uid != uint32(unix.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
+			return WorktreeFacts{}, &ValidationError{Reason: "the private Change Git directory is unsafe"}
+		}
+	}
+	format, err := NewObjectFormat(lines[2])
+	if err != nil {
+		return WorktreeFacts{}, newGitError(gitFailureProtocol)
+	}
+	headOutput, err := a.succeed(ctx, maxGitSelectionOutput, "-C", path, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	head, err := parseGitOID(format, bytes.TrimSpace(headOutput))
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	symbolic, err := a.run(ctx, maxGitSelectionOutput, "-C", path, "symbolic-ref", "--quiet", "HEAD")
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	var branch string
+	if symbolic.exitCode == 0 {
+		ref := strings.TrimSpace(string(symbolic.output))
+		if !strings.HasPrefix(ref, "refs/heads/") {
+			return WorktreeFacts{}, newGitError(gitFailureProtocol)
+		}
+		branch = strings.TrimPrefix(ref, "refs/heads/")
+	} else if symbolic.exitCode != 1 {
+		return WorktreeFacts{}, newGitError(gitFailureProcess)
+	}
+	status, err := a.run(ctx, maxGitStatusOutput, "-C", path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all")
+	dirty := true
+	var limit *LimitError
+	if errors.As(err, &limit) {
+		err = nil
+	} else if err == nil {
+		if status.exitCode != 0 {
+			return WorktreeFacts{}, newGitError(gitFailureProcess)
+		}
+		dirty = len(status.output) != 0
+	}
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	return WorktreeFacts{head: head, branch: branch, dirty: dirty, gitDirectory: common}, nil
+}
+
+func validateWorktreePath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" || strings.EqualFold(filepath.Base(path), ".git") {
+		return &ValidationError{Reason: "worktree path must be canonical and absolute"}
+	}
+	return nil
+}
+
+func validWorktreeBranch(branch string) bool {
+	if !strings.HasPrefix(branch, "factory/") || len(branch) > maxRevisionBytes {
+		return false
+	}
+	for _, character := range branch {
+		if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '/' || character == '-') {
+			return false
+		}
+	}
+	return !strings.HasSuffix(branch, "/") && !strings.Contains(branch, "//")
 }

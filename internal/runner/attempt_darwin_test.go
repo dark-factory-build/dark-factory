@@ -2882,3 +2882,66 @@ func TestWorkerOutputInTheAdoptionWindowStaysInTheTerminalStream(t *testing.T) {
 	}
 	t.Logf("adoption window retained: delivered=%d markers=%d", len(stream), markers)
 }
+
+func TestWorkerErrorReportsOnlyInActivePreparationStages(t *testing.T) {
+	for _, state := range []workerState{workerConfig, workerConfigConsumed, workerSelection, workerSelectionReported, workerPreparation, workerPreparationReported, workerPopulation, workerPopulationReported, workerProvider, workerExec} {
+		t.Run(fmt.Sprint(state), func(t *testing.T) {
+			worker, peer := newWorkerConfigFixture(t)
+			worker.state = state
+			err := worker.ReportProviderError(errors.New("specific source refusal"))
+			allowed := state == workerConfigConsumed || state == workerSelection || state == workerPreparation || state == workerPopulation || state == workerProvider
+			if !allowed {
+				if !errors.Is(err, ErrState) {
+					t.Fatalf("inactive stage accepted error: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var frame attemptFrame
+			if err := readFrame(peer, &frame, maxFrameBytes); err != nil || !validProviderErrorFrame(frame) {
+				t.Fatalf("frame=%+v err=%v", frame, err)
+			}
+			if err := worker.ReportProviderError(errors.New("second refusal")); !errors.Is(err, ErrState) {
+				t.Fatalf("replayed failure=%v", err)
+			}
+		})
+	}
+}
+
+func TestControllerAcceptsWorkerFailureOnlyWhileAwaitingCheckpoint(t *testing.T) {
+	for _, state := range []attemptControllerState{controllerConfigured, controllerInnerReady, controllerSelectionReleased, controllerSelectionReported, controllerPreparationReleased, controllerPreparationReported, controllerPopulationReleased, controllerPopulationReported, controllerProviderReleased} {
+		t.Run(fmt.Sprint(state), func(t *testing.T) {
+			own, peer, err := newControlPair("failure-controller", "failure-peer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer own.Close()
+			defer peer.Close()
+			controller := &AttemptController{file: own, state: state}
+			frame := attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: []byte("specific source refusal")}
+			if err := writeControlFrame(peer, frame, maxFrameBytes); err != nil {
+				t.Fatal(err)
+			}
+			_, err = controller.Next(time.Second)
+			allowed := state == controllerSelectionReleased || state == controllerPreparationReleased || state == controllerPopulationReleased
+			if allowed {
+				if err == nil || !strings.Contains(err.Error(), "specific source refusal") || !controller.Spent() {
+					t.Fatalf("lost failure or live capability: %v", err)
+				}
+			} else if !errors.Is(err, ErrState) || controller.Spent() {
+				t.Fatalf("invalid-stage report consumed capability: %v", err)
+			}
+		})
+	}
+	for _, payload := range [][]byte{nil, []byte{0}, []byte{0xff}, bytes.Repeat([]byte("x"), maxProviderErrorBytes+1)} {
+		if validProviderErrorFrame(attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: payload}) {
+			t.Fatalf("accepted invalid payload length %d", len(payload))
+		}
+	}
+	frame := attemptFrame{Version: 1, Kind: "provider-exec-error", Payload: []byte("source refusal"), Stage: StagePreparation}
+	if validProviderErrorFrame(frame) {
+		t.Fatal("accepted error carrying checkpoint authority")
+	}
+}

@@ -307,7 +307,7 @@ func id(character byte) string { return strings.Repeat(string(character), 32) }
 
 func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 	bearer := testCredential('O')
-	snapshotJSON := `{"head":8,"factory":{"dispatch_enabled":true,"capacity":4,"active_runs":1,"revision":3},"projects":[{"id":"` + id('1') + `","name":"project","revision":1}],"agents":[{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","paused":false,"revision":2}],"tasks":[{"id":"` + id('3') + `","project_id":"` + id('1') + `","assigned_agent_id":"` + id('2') + `","title":"task","status":"queued","priority":7,"revision":3}]}`
+	snapshotJSON := `{"head":8,"factory":{"dispatch_enabled":true,"capacity":4,"active_runs":1,"revision":3},"projects":[{"id":"` + id('1') + `","name":"project","revision":1}],"agents":[{"id":"` + id('2') + `","project_id":"` + id('1') + `","name":"agent","role":"worker","provider":"codex","paused":false,"revision":2}],"tasks":[{"id":"` + id('3') + `","project_id":"` + id('1') + `","assigned_agent_id":"` + id('2') + `","incarnation_id":"` + id('4') + `","work_revision":1,"title":"task","status":"queued","priority":7,"revision":3}]}`
 	tests := []struct {
 		name     string
 		response string
@@ -328,6 +328,20 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			}
 			return err
 		}},
+		{name: "terminal observe", response: successResponse(`{"project_id":"` + id('1') + `","task_id":"` + id('2') + `","run_id":"` + id('3') + `","cursor":0,"next_cursor":7,"floor":0,"head":7,"source":"stored","gap":false,"omitted":0,"payload":"b3V0cHV0Cg=="}`), request: `{"method":"operator_terminal_observe","params":{"project_id":"` + id('1') + `","task_id":"` + id('2') + `","run_id":"` + id('3') + `","cursor":0,"max_bytes":1024}}`, invoke: func(client *OperatorClient) error {
+			result, err := client.TerminalObserve(context.Background(), TerminalObserveInput{ProjectID: id('1'), TaskID: id('2'), RunID: id('3'), MaxBytes: 1024})
+			if err == nil && string(result.Payload) != "output\n" {
+				return errors.New("terminal observation differs")
+			}
+			return err
+		}},
+		{name: "terminal text", response: successResponse(`{"project_id":"` + id('1') + `","task_id":"` + id('2') + `","run_id":"` + id('3') + `","cursor":0,"next_cursor":0,"floor":0,"head":7,"source":"stored","gap":false,"omitted":0,"payload":null,"text_mode":true,"text":"waiting"}`), request: `{"method":"operator_terminal_observe","params":{"project_id":"` + id('1') + `","task_id":"` + id('2') + `","run_id":"` + id('3') + `","cursor":0,"max_bytes":1024,"text":true}}`, invoke: func(client *OperatorClient) error {
+			result, err := client.TerminalObserve(context.Background(), TerminalObserveInput{ProjectID: id('1'), TaskID: id('2'), RunID: id('3'), MaxBytes: 1024, Text: true})
+			if err == nil && result.Text != "waiting" {
+				return errors.New("terminal text differs")
+			}
+			return err
+		}},
 		{name: "create project", response: mutationResponse(), request: `{"method":"create_project","params":{"id":"` + id('1') + `","name":"project","root":"/private/project"}}`, invoke: func(client *OperatorClient) error {
 			_, err := client.CreateProject(context.Background(), CreateProjectInput{ID: id('1'), Name: "project", Root: "/private/project"})
 			return err
@@ -340,12 +354,24 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			_, err := client.EnqueueTask(context.Background(), EnqueueTaskInput{ID: id('3'), ProjectID: id('1'), AssignedAgentID: id('2'), IncarnationID: id('4'), Title: "task", Body: "private body", Priority: 7})
 			return err
 		}},
+		{name: "enqueue shared task", response: mutationResponse(), request: `{"method":"enqueue_task","params":{"id":"` + id('3') + `","project_id":"` + id('1') + `","assigned_agent_id":"","incarnation_id":"` + id('4') + `","title":"task","body":"any eligible worker","priority":0}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.EnqueueTask(context.Background(), EnqueueTaskInput{ID: id('3'), ProjectID: id('1'), AssignedAgentID: "", IncarnationID: id('4'), Title: "task", Body: "any eligible worker"})
+			return err
+		}},
+		{name: "content create", response: mutationResponse(), request: `{"method":"content_create","params":{"id":"` + id('6') + `","project_id":"` + id('1') + `","kind":"procedure","title":"procedure","description":"short","body":"steps","source_references":"docs"}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.ContentCreate(context.Background(), ContentInput{ID: id('6'), ProjectID: id('1'), Kind: "procedure", Title: "procedure", Description: "short", Body: "steps", SourceReferences: "docs"})
+			return err
+		}},
 		{name: "set dispatch", response: mutationResponse(), request: `{"method":"set_dispatch","params":{"expected_revision":3,"enabled":true}}`, invoke: func(client *OperatorClient) error {
 			_, err := client.SetDispatch(context.Background(), 3, true)
 			return err
 		}},
 		{name: "set capacity", response: mutationResponse(), request: `{"method":"set_capacity","params":{"expected_revision":3,"capacity":2}}`, invoke: func(client *OperatorClient) error {
 			_, err := client.SetCapacity(context.Background(), 3, 2)
+			return err
+		}},
+		{name: "select agent model", response: mutationResponse(), request: `{"method":"agent_select_model","params":{"agent_id":"` + id('2') + `","expected_revision":3,"model":"gpt-5.6-luna","reasoning_effort":"medium"}}`, invoke: func(client *OperatorClient) error {
+			_, err := client.SelectAgentModel(context.Background(), AgentModelSelectInput{AgentID: id('2'), ExpectedRevision: 3, Model: "gpt-5.6-luna", ReasoningEffort: "medium"})
 			return err
 		}},
 	}
@@ -370,13 +396,29 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 	}
 }
 
+func TestOperatorDiscoverAccountsRejectsForwardJump(t *testing.T) {
+	bearer := testCredential('A')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireOperatorDomain, successResponse(`{"accounts":[{"provider":"codex","home":"/Users/operator/.codex","label":"codex"}],"next_offset":2}`))
+	})
+	client, err := NewOperatorClient(fixture.socket, fixture.token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.DiscoverAccounts(context.Background()); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("forward cursor error = %v, want protocol error", err)
+	}
+	fixture.wait(t)
+}
+
 func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) {
 	attemptBearer := testCredential('A')
 	operatorBearer := testCredential('O')
 	tests := []struct {
-		name    string
-		request string
-		invoke  func(*AttemptClient) error
+		name     string
+		request  string
+		response string
+		invoke   func(*AttemptClient) error
 	}{
 		{name: "succeed", request: `{"method":"succeed","params":{"result":"result"}}`, invoke: func(client *AttemptClient) error {
 			_, err := client.Succeed(context.Background(), "result")
@@ -402,6 +444,14 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 			_, err := client.SendBack(context.Background(), SendBackInput{TaskID: "0123456789abcdef0123456789abcdef", Note: "private-note-sentinel"})
 			return err
 		}},
+		{name: "content read", request: `{"method":"attempt_content_read","params":{"id":"` + id('6') + `","revision":1}}`, response: successResponse(`{"id":"` + id('6') + `","project_id":"` + id('1') + `","kind":"procedure","title":"procedure","revision":1}`), invoke: func(client *AttemptClient) error {
+			_, err := client.ContentRead(context.Background(), ContentReadInput{ID: id('6'), Revision: 1})
+			return err
+		}},
+		{name: "content body", request: `{"method":"attempt_content_body","params":{"id":"` + id('6') + `","revision":1,"offset":0,"limit":32}}`, response: successResponse(`{"id":"` + id('6') + `","revision":1,"body":"steps","complete":true}`), invoke: func(client *AttemptClient) error {
+			_, err := client.ContentBody(context.Background(), ContentBodyInput{ID: id('6'), Revision: 1, Limit: 32})
+			return err
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -409,7 +459,11 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 				if wireOutcomeRequest(request) {
 					return writeTestOutcomeResponse(connection, wireAttemptDomain, mutationResponse())
 				}
-				return writeTestResponse(connection, wireAttemptDomain, mutationResponse())
+				response := test.response
+				if response == "" {
+					response = mutationResponse()
+				}
+				return writeTestResponse(connection, wireAttemptDomain, response)
 			})
 			operatorPath := filepath.Join(fixture.directory, "operator.token")
 			writeTestToken(t, operatorPath, operatorBearer)
@@ -426,7 +480,7 @@ func TestAttemptClientHasExactScopedOutcomesAndNoOperatorFallback(t *testing.T) 
 			if encoded != test.request {
 				t.Fatalf("attempt request = %s, want %s", encoded, test.request)
 			}
-			if strings.Contains(encoded, `"id"`) || strings.Contains(encoded, `"code"`) || strings.Contains(encoded, string(operatorBearer[:])) {
+			if (!strings.HasPrefix(test.name, "content") && (strings.Contains(encoded, `"id"`) || strings.Contains(encoded, `"code"`))) || strings.Contains(encoded, string(operatorBearer[:])) {
 				t.Fatalf("attempt request widened scope: %s", encoded)
 			}
 			fixture.wait(t)
@@ -460,8 +514,27 @@ func TestPeerStatusPageRejectsMismatchedContinuationHead(t *testing.T) {
 	if _, err := client.PeerStatusPage(context.Background(), 1, 0, 7); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("mismatched continuation head = %v", err)
 	}
-	if got := requestJSON(t, <-fixture.request, wireAttemptDomain, bearer); got != `{"method":"peer_status","params":{"offset":1,"target_offset":0,"expected_head":7}}` {
+	if got := requestJSON(t, <-fixture.request, wireAttemptDomain, bearer); got != `{"method":"peer_status","params":{"offset":1,"target_offset":0,"expected_head":7,"include_targets":true}}` {
 		t.Fatalf("peer status request = %s", got)
+	}
+	fixture.wait(t)
+}
+
+func TestPeerInboxPageAvoidsTargetDirectory(t *testing.T) {
+	bearer := testCredential('P')
+	fixture := newWireFixture(t, bearer, func(connection net.Conn, _ []byte) error {
+		return writeTestResponse(connection, wireAttemptDomain, successResponse(`{"head":8,"targets":[],"questions":[],"next_target_offset":null,"next_offset":null}`))
+	})
+	t.Setenv(attemptTokenFileEnv, fixture.token)
+	client, err := NewAttemptClientFromEnvironment(fixture.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.PeerInboxPage(context.Background(), 0, 0); err != nil {
+		t.Fatalf("peer inbox = %v", err)
+	}
+	if got := requestJSON(t, <-fixture.request, wireAttemptDomain, bearer); got != `{"method":"peer_status","params":{"offset":0,"target_offset":0,"expected_head":0,"include_targets":false}}` {
+		t.Fatalf("peer inbox request = %s", got)
 	}
 	fixture.wait(t)
 }
@@ -1064,6 +1137,147 @@ func TestTokenAndSocketPathsFailClosed(t *testing.T) {
 	})
 }
 
+func TestAttemptClientPinsRetainedCredentialAcrossRotation(t *testing.T) {
+	first := testCredential('A')
+	second := testCredential('B')
+	directory := privateTestDirectory(t)
+	tokenA := filepath.Join(directory, "run-a.token")
+	tokenB := filepath.Join(directory, "run-b.token")
+	writeTestToken(t, tokenA, first)
+	writeTestToken(t, tokenB, second)
+	listener, socket := testListener(t, directory)
+	defer listener.Close()
+	t.Setenv(attemptTokenFileEnv, tokenA)
+	clientA, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		responses := []string{successResponse(`{"task":"exact"}`), successResponse(`{"head":1,"revision":1}`), successResponse(`{"head":2,"revision":2}`), `{"ok":false,"error":"unauthorized"}`, `{"ok":false,"error":"unauthorized"}`, `{"ok":false,"error":"unauthorized"}`}
+		want := []credential{first, second, second, first, first, first}
+		for index := range responses {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			frame, readErr := readTestFrame(connection)
+			if readErr == nil && (len(frame) < wireRequestPrelude || frame[0] != wireAttemptDomain || !bytes.Equal(frame[1:wireRequestPrelude], want[index][:])) {
+				readErr = fmt.Errorf("attempt frame %d carried the wrong credential", index)
+			}
+			if readErr == nil {
+				readErr = writeTestResponse(connection, wireAttemptDomain, responses[index])
+			}
+			_ = connection.Close()
+			if readErr != nil {
+				done <- readErr
+				return
+			}
+		}
+		done <- nil
+	}()
+	if _, err := clientA.Task(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(attemptTokenFileEnv, tokenB)
+	clientB, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := PeerQuestionInput{TargetTaskID: strings.Repeat("1", 32), IdempotencyKey: strings.Repeat("2", 32), Question: "write"}
+	if _, err := clientB.PeerAsk(context.Background(), write); err != nil {
+		t.Fatal(err)
+	}
+	write.IdempotencyKey = strings.Repeat("3", 32)
+	if _, err := clientB.PeerAsk(context.Background(), write); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh client created from the old run's environment remains bound to A;
+	// constructing it after B starts must not retarget it to the new run.
+	t.Setenv(attemptTokenFileEnv, tokenA)
+	freshA, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := freshA.Task(context.Background()); err == nil {
+		t.Fatalf("fresh client from old run task after new run = %v", err)
+	}
+	write.IdempotencyKey = strings.Repeat("4", 32)
+	if _, err := freshA.PeerAsk(context.Background(), write); err == nil {
+		t.Fatalf("fresh client from old run control after new run = %v", err)
+	}
+	if _, err := freshA.Succeed(context.Background(), "stale write"); err == nil {
+		t.Fatalf("fresh client from old run outcome after new run = %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAttemptClientRejectsResponseAfterTokenRotation(t *testing.T) {
+	first := testCredential('C')
+	second := testCredential('D')
+	directory := privateTestDirectory(t)
+	token := filepath.Join(directory, "token")
+	writeTestToken(t, token, first)
+	listener, socket := testListener(t, directory)
+	defer listener.Close()
+	t.Setenv(attemptTokenFileEnv, token)
+	client, err := NewAttemptClientFromEnvironment(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan error, 1)
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			received <- acceptErr
+			done <- acceptErr
+			return
+		}
+		defer connection.Close()
+		frame, readErr := readTestFrame(connection)
+		if readErr == nil && (len(frame) < wireRequestPrelude || !bytes.Equal(frame[1:wireRequestPrelude], first[:])) {
+			readErr = fmt.Errorf("in-flight request did not carry run A credential")
+		}
+		received <- readErr
+		if readErr != nil {
+			done <- readErr
+			return
+		}
+		<-release
+		if err := writeTestResponse(connection, wireAttemptDomain, successResponse(`{"task":"late"}`)); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+	callDone := make(chan error, 1)
+	go func() {
+		_, callErr := client.Task(context.Background())
+		callDone <- callErr
+	}()
+	if err := <-received; err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(directory, "replacement")
+	writeTestToken(t, replacement, second)
+	if err := os.Rename(replacement, token); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-callDone; !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("response after token rotation = %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testListener(t testing.TB, directory string) (*net.UnixListener, string) {
 	t.Helper()
 	socket := filepath.Join(directory, "api.sock")
@@ -1156,6 +1370,17 @@ func TestInputBoundsFailBeforeConnection(t *testing.T) {
 		t.Run("create agent "+name, func(t *testing.T) {
 			if _, err := operator.CreateAgent(context.Background(), input); !errors.Is(err, ErrInvalidInput) {
 				t.Fatalf("invalid agent = %v", err)
+			}
+		})
+	}
+	for name, input := range map[string]AgentIdlePolicyInput{
+		"missing instruction": {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", AfterSeconds: 1, RunBudget: 1},
+		"missing cooldown":    {AgentID: id('2'), ExpectedRevision: 1, Policy: "standing_instruction", Instruction: "x", RunBudget: 1},
+		"wait partial":        {AgentID: id('2'), ExpectedRevision: 1, Policy: "wait", RunBudget: 1},
+	} {
+		t.Run("idle policy "+name, func(t *testing.T) {
+			if _, err := operator.SetAgentIdlePolicy(context.Background(), input); !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("invalid idle policy = %v", err)
 			}
 		})
 	}
@@ -1290,3 +1515,41 @@ type clonedFileInfo struct {
 }
 
 func (info clonedFileInfo) Sys() any { return &info.stat }
+
+func TestTerminalObserveBindsReturnedSnapshotToRequest(t *testing.T) {
+	input := TerminalObserveInput{ProjectID: strings.Repeat("1", 32), TaskID: strings.Repeat("2", 32), RunID: strings.Repeat("3", 32), Cursor: 10000000, MaxBytes: 8}
+	for _, test := range []struct {
+		name   string
+		mutate func(*TerminalObservation)
+	}{
+		{"valid", func(*TerminalObservation) {}},
+		{"wrong project", func(v *TerminalObservation) { v.ProjectID = strings.Repeat("4", 32) }},
+		{"wrong task", func(v *TerminalObservation) { v.TaskID = strings.Repeat("4", 32) }},
+		{"wrong run", func(v *TerminalObservation) { v.RunID = strings.Repeat("4", 32) }},
+		{"wrong cursor", func(v *TerminalObservation) { v.Cursor--; v.Omitted++ }},
+		{"raw budget exceeded", func(v *TerminalObservation) { v.NextCursor += 8; v.Omitted += 8 }},
+		{"bad byte accounting", func(v *TerminalObservation) { v.Omitted++ }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value := TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: input.Cursor + 5, Head: input.Cursor + 100, Source: "stored", Payload: []byte("safe\n")}
+			test.mutate(&value)
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture := newWireFixture(t, testCredential('T'), func(connection net.Conn, _ []byte) error {
+				return writeTestResponse(connection, wireAttemptDomain, successResponse(string(encoded)))
+			})
+			t.Setenv(attemptTokenFileEnv, fixture.token)
+			client, err := NewAttemptClientFromEnvironment(fixture.socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.TerminalObserve(context.Background(), input)
+			if test.name == "valid" && err != nil || test.name != "valid" && !errors.Is(err, ErrProtocol) {
+				t.Fatalf("snapshot validation=%v", err)
+			}
+			fixture.wait(t)
+		})
+	}
+}

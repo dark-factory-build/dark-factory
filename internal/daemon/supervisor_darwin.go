@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -44,6 +45,11 @@ type supervisorAttemptOwner struct {
 	activated  bool
 	reaped     bool
 	outerExit  *runner.Exit
+	// handedOver is set once the live attempt has cleanly quiesced its
+	// controller onto the runner's own takeover endpoint during shutdown.
+	// The outer child is then reparented and must never be waited, reaped,
+	// or signalled by this owner.
+	handedOver bool
 }
 
 // reap waits the exact outer child and keeps what it learned. The status is the
@@ -104,6 +110,15 @@ func (owner *supervisorAttemptOwner) close() error {
 		}
 		controllerErr = owner.controller.Close()
 	}
+	if owner.handedOver {
+		// The runner now owns the sole control capability and outlives this
+		// process: it is reparented when factoryd exits. Drop the outer
+		// child without waiting, reaping, or signalling it — OwnedChild.Close
+		// would terminate an unwaited, activated child, which is exactly the
+		// live provider group this handover keeps alive.
+		owner.child = nil
+		return errors.Join(terminationErr, controllerErr)
+	}
 	if owner.child != nil {
 		if owner.activated && !owner.reaped {
 			// Once activated, the outer runner is the only owner of the inner
@@ -129,7 +144,7 @@ func (owner *supervisorAttemptOwner) close() error {
 	return errors.Join(terminationErr, controllerErr)
 }
 
-func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kernel.Run, resultErr error) {
+func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultRun kernel.Run, resultErr error) {
 	if ctx == nil || daemon == nil || daemon.store == nil || spec.RuntimeParent == nil ||
 		spec.ChangeParent == "" || !filepath.IsAbs(spec.ChangeParent) || filepath.Clean(spec.ChangeParent) != spec.ChangeParent ||
 		spec.GitExecutable == "" || spec.BaseRevision == "" || spec.AttemptSocket == "" || spec.RunnerExecutable == "" || spec.FactoryctlExecutable == "" ||
@@ -166,7 +181,18 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		RunID: keys.run, TerminalSessionID: keys.session, AttemptDigest: digest, ResultProofDigest: proofDigest, CandidateChangeID: keys.change,
 		Resources: keys.resources, RuntimeRoot: runtimeRoot,
 	}
+	// Keep only a proven admission identity when an uncertain operation
+	// returns no row. The scheduler rereads durable state before acting.
+	var admittedRunID kernel.RunID
+	defer func() {
+		if resultRun.ID == (kernel.RunID{}) {
+			resultRun = kernel.Run{ID: admittedRunID}
+		}
+	}()
 	admission, err := daemon.store.AdmitNext(ctx, admissionKeys, at)
+	if err == nil && admission.Admitted() {
+		admittedRunID = admission.Run.ID
+	}
 	admissionObserved := false
 	if err == nil && spec.admissionObserved != nil {
 		spec.admissionObserved(admission.Admitted())
@@ -185,18 +211,18 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		var reconcileErr error
 		for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-			reconcileCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
+			reconcileCtx := daemon.cleanupCtx
 			reconciled, readErr := reconcileAdmission(reconcileCtx, admissionKeys)
-			cancel()
 			reconcileErr = readErr
 			if reconcileErr != nil {
 				continue
 			}
 			if reconciled.Admitted() {
+				admittedRunID = reconciled.Run.ID
 				if !admissionObserved && spec.admissionObserved != nil {
 					spec.admissionObserved(true)
 				}
-				return daemon.failRunBeforeRuntime(*reconciled.Run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, *reconciled.Run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 			}
 			if reconciled.Reason == kernel.NoAdmissionNotReconciled {
 				// The reconciliation read proves the failed write created no run, so
@@ -223,49 +249,52 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		if err == nil {
 			err = kernel.ErrCorruptState
 		}
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	if project.VerificationPolicy != run.VerificationPolicy || project.VerificationPolicy != kernel.VerificationNone {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue))
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue))
 	}
 	// The account is read from the agent at launch, not copied onto the run:
 	// it is configuration, not part of the admitted work.
 	accountConfigDir, err := daemon.agentAccountConfigDir(ctx, run.AgentID)
 	if err != nil {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	factoryctl, err := runner.CommitExecutableLocator(spec.FactoryctlExecutable)
 	if err != nil {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
 	repositoryIdentity, err := inspectRepositoryIdentity(project.Root)
 	if err != nil {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
 	}
 	if worker != (run.ChangeID != nil && run.AdmittedChangeRevision != nil) {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 	}
 	var changeID kernel.ChangeID
-	var finalName, stagingName string
+	var finalName string
 	if worker {
 		changeID = *run.ChangeID
 		finalName = changeID.String()
-		stagingName = "." + finalName + ".stage"
 	}
 	task, found, err := daemon.store.Task(ctx, run.TaskID)
 	if err != nil || !found {
 		if err == nil {
 			err = kernel.ErrCorruptState
 		}
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 	}
 	rawProviderTask := []byte(task.Body)
 	if run.Provider != kernel.ProviderShell && len(rawProviderTask) == 0 {
 		rawProviderTask = []byte(task.Title)
 	}
+	rawProviderTask, err = providerTaskForContinuationLaunch(run.Provider, rawProviderTask, run.ContinuationContexts)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+	}
 	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
 	var startupInput []byte
 	providerTask := rawProviderTask
@@ -276,14 +305,50 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		startupInput = preparedTask
 	case provider.TaskDeliveryAttemptAPI:
 		if len(preparedTask) != 0 {
-			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 		}
 		providerTask = nil
 	default:
-		return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, provider.ErrInvalid)
 	}
 	var changeState kernel.Change
 	var retained *changeworker.Result
+	var retainedSourceReview *changeworker.SourceReview
+	if run.Provider == kernel.ProviderCodex && run.Role == kernel.RoleWorker {
+		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(task.Body)
+		if parseErr != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, parseErr)
+		}
+		if review {
+			handoff, found, sourceErr := daemon.store.RetainedChangeHandoffForTask(ctx, run.ProjectID, expected.TaskID)
+			if sourceErr != nil || !found {
+				if sourceErr == nil {
+					sourceErr = kernel.ErrConflict
+				}
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
+			}
+			if mismatch := retainedReviewHandoffMismatch(expected, handoff); mismatch != nil {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, mismatch)
+			}
+			receipt, sourceErr := daemon.attemptSourceHandoff(ctx, handoff)
+			if sourceErr != nil {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
+			}
+			if receipt.TaskID != expected.TaskID.String() || receipt.ChangeID != expected.ChangeID.String() || receipt.BaseCommit != expected.BaseCommit || receipt.TaskWorkRevision != uint64(expected.TaskWorkRevision.Int64()) || receipt.ChangeRevision != uint64(expected.ChangeRevision.Int64()) {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, kernel.ErrConflict)
+			}
+			reviewID := receipt.ChangeID
+			reviewTask := receipt.TaskID
+			reviewBase := receipt.BaseCommit
+			reviewHead := receipt.HeadCommit
+			reviewChange := receipt.ChangeRevision
+			reviewWork := receipt.TaskWorkRevision
+			reviewSource := receipt.SourcePath
+			reviewGit := receipt.GitDirectory
+			received := changeworker.SourceReview{TaskID: reviewTask, ChangeID: reviewID, TaskWorkRevision: reviewWork, ChangeRevision: reviewChange, BaseCommit: reviewBase, HeadCommit: reviewHead, SourcePath: reviewSource, GitDirectory: reviewGit}
+			retainedSourceReview = &received
+		}
+	}
 	if worker {
 		var found bool
 		changeState, found, err = daemon.store.Change(ctx, changeID)
@@ -291,19 +356,44 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 			if err == nil {
 				err = kernel.ErrCorruptState
 			}
-			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
 		}
 		if changeState.Phase == kernel.ChangeAvailable && changeState.Revision == *run.AdmittedChangeRevision {
 			var retainedRepository change.RepositoryIdentity
 			retained, retainedRepository, err = retainedWorkerCheckpoint(changeState)
 			if err != nil || !retainedRepository.Equal(repositoryIdentity) {
-				return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureSource, errors.Join(err, errInvalidContract))
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, errors.Join(err, errInvalidContract))
 			}
 		} else if changeState.Phase != kernel.ChangeReserved || changeState.Revision != *run.AdmittedChangeRevision {
-			return daemon.failRunBeforeRuntime(run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
-
+	// The repository's Git directory holds every Change worktree's refs and
+	// commits; a run that cannot resolve it has no source to work in. CI is an
+	// optional execution capability on top: an unavailable or unsafe lease
+	// must not block otherwise valid source work; no lease directory is
+	// granted.
+	gitCommonDir, err := resolveGitCommonDir(ctx, spec.GitExecutable, project.Root)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
+	}
+	var localCILeaseDir string
+	if worker {
+		localCILeaseDir, _ = prepareLocalCILeaseDirectory(gitCommonDir)
+	}
+	// An orchestrator's own working directory is a fresh runtime root every
+	// run, so it names its own agent's most recent terminal run's working
+	// directory instead, for the provider boundary to look for that run's own
+	// native session (see provider.codexSessionSelection). This is a resume
+	// hint, not admission authority: an unavailable or absent prior run must
+	// not block otherwise valid supervision, so any failure here just means
+	// no hint, the same as a first-ever run.
+	var previousWorkingDirectory string
+	if !worker {
+		if previousRuntimeRoot, found, err := daemon.store.LatestTerminalRuntimeRoot(ctx, run.AgentID); err == nil && found {
+			previousWorkingDirectory = filepath.Join(previousRuntimeRoot, changeworker.HomeName)
+		}
+	}
 	// From CreateRuntime until the runtime resource is durably active, a
 	// failure cannot be finalized live: the exact-edge grammar requires either
 	// trusted runtime absence (unprovable after an uncertain create) or an
@@ -338,10 +428,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 	config := changeworker.Config{
 		Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
+		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity,
-		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName, StagingName: stagingName,
-		AttemptSocket: spec.AttemptSocket, Retained: retained, ProviderTask: providerTask,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity, GitCommonDir: gitCommonDir,
+		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName,
+		AttemptSocket: spec.AttemptSocket, Retained: retained, RetainedSourceReview: retainedSourceReview, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
 	if err != nil {
@@ -509,7 +600,6 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 	var workerResult changeworker.Result
 	var selection kernel.ChangeSelection
-	var stage kernel.FileIdentity
 	if worker {
 		if workerResult, err = changeworker.DecodeResult(preparationEvent.Payload); err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
@@ -517,18 +607,17 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		if selection, err = kernelSelectionCheckpoint(workerResult, repositoryIdentity); err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
 		}
-		if stage, err = kernelStageIdentity(workerResult.Tree); err != nil {
-			return daemon.failRun(run, kernel.FailureSource, err)
-		}
 		at, err = daemon.timestamp()
 		if err != nil {
 			return daemon.failRun(run, kernel.FailureInternal, err)
 		}
 		if retained == nil {
-			changeState, err = daemon.store.RecordChangePrepared(ctx, changeID, changeState.Revision, selection, stage, at)
+			changeState, err = daemon.store.RecordChangePrepared(ctx, changeID, changeState.Revision, selection, at)
 			if err != nil {
 				return daemon.failRun(run, kernel.FailureSource, err)
 			}
+		} else if !kernelSelectionEqual(*changeState.Selection, selection) {
+			return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 		}
 	} else if len(preparationEvent.Payload) != 0 {
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
@@ -541,24 +630,34 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
-		facts, err := change.InspectPublished(ctx, spec.ChangeParent, finalName, workerResult.Tree, workerResult.Format, workerResult.Base)
-		if err != nil || !resultMatchesFacts(workerResult, facts) {
+		// The daemon reads the worktree itself: fresh Changes use private Git
+		// administration; retained worktrees keep their layout. Verify the branch
+		// at the base for a fresh or adopted Change and at the settled head for
+		// a reopened one.
+		facts, err := change.InspectWorktree(ctx, spec.GitExecutable, project.Root, repositoryIdentity, filepath.Join(spec.ChangeParent, finalName))
+		if err != nil || facts.Branch() != change.BranchName(finalName) || retained == nil && facts.GitDirectory() != change.GitDirectoryForChange(project.Root, filepath.Join(spec.ChangeParent, finalName)) {
 			return daemon.failRun(run, kernel.FailureSource, errors.Join(err, errInvalidContract))
 		}
-		availability, err := kernelAvailability(facts)
+		head, err := kernelCommit(facts.Head())
 		if err != nil {
 			return daemon.failRun(run, kernel.FailureSource, err)
 		}
-		if retained == nil {
+		switch {
+		case retained == nil:
 			at, err = daemon.timestamp()
 			if err != nil {
 				return daemon.failRun(run, kernel.FailureInternal, err)
 			}
-			changeState, err = daemon.store.MarkChangeAvailable(ctx, changeID, changeState.Revision, availability, at)
+			changeState, err = daemon.store.MarkChangeAvailable(ctx, changeID, changeState.Revision, head, at)
 			if err != nil {
 				return daemon.failRun(run, kernel.FailureSource, err)
 			}
-		} else if !retainedWorkerCheckpointsMatch(changeState, selection, stage, availability) {
+		case changeState.HeadCommit == nil:
+			changeState, err = daemon.store.RecordChangeWorktree(ctx, changeID, changeState.Revision, head)
+			if err != nil {
+				return daemon.failRun(run, kernel.FailureSource, err)
+			}
+		case !kernelCommitEqual(*changeState.HeadCommit, head):
 			return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 		}
 	}
@@ -581,6 +680,14 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	// until it observes TerminalReady, but it already owns the controller and
 	// will synchronously converge it if any later step fails.
 	live := newLiveAttempt(daemon, run.ID, session.ID, controller)
+	if worker && changeState.AvailableAt != nil && run.RunningAt != nil {
+		live.agentID, live.changeID = run.AgentID, changeState.ID
+		live.pathsSince = *changeState.AvailableAt
+		if run.RunningAt.Int64() > live.pathsSince.Int64() {
+			live.pathsSince = *run.RunningAt
+		}
+	}
+	live.attemptDigest = digest
 	live.beforeProviderStateCheck = spec.beforeProviderStateCheck
 	if err := daemon.registerLiveAttempt(live); err != nil {
 		return daemon.failRun(run, kernel.FailureInternal, err)
@@ -617,14 +724,98 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	}
 
 	resultOutcome := live.waitResult()
+	if resultOutcome.handedOver {
+		// The controller quiesced onto the runner's own takeover endpoint
+		// during shutdown. The run stays durably running with every resource
+		// still active; this daemon makes no further Store mutation for it,
+		// and the outer child is reparented rather than reaped.
+		owner.handedOver = true
+		return run, nil
+	}
+	recordConvergence := func() (kernel.Run, error) {
+		if !owner.reaped {
+			if _, waitErr := owner.reap(8 * time.Second); waitErr != nil {
+				return kernel.Run{}, fmt.Errorf("daemon: wait outer runner: %w", waitErr)
+			}
+		}
+		exitAt, tsErr := daemon.timestamp()
+		if tsErr != nil {
+			return kernel.Run{}, tsErr
+		}
+		exit, exitErr := kernelProcessExit(*owner.outerExit, exitAt)
+		if exitErr != nil {
+			return kernel.Run{}, exitErr
+		}
+		return daemon.recordLiveRunnerExit(daemon.cleanupCtx, run.ID, keys.resources.RunnerProcess, runnerResourceIdentity, exit)
+	}
+	awaitConvergence := func() error {
+		if owner.reaped {
+			return nil
+		}
+		_, err := owner.reap(8 * time.Second)
+		return err
+	}
+	closeRuntime := func() error {
+		if err := child.Close(); err != nil {
+			return err
+		}
+		owner.child = nil
+		if err := live.join(); err != nil && resultOutcome.err == nil {
+			return err
+		}
+		// A dead owner loop whose result was recovered from disk is already
+		// consumed evidence; its controller was closed by its own shutdown.
+		owner.live = nil
+		owner.controller = nil
+		if err := lease.Close(); err != nil {
+			return err
+		}
+		leaseOpen = false
+		if err := errors.Join(runtimeDirectory.Close(), lifetime.Close()); err != nil {
+			return err
+		}
+		filesOpen = false
+		if err := runtimeValue.Close(); err != nil {
+			return err
+		}
+		runtimeOpen = false
+		return nil
+	}
+	run, err = daemon.attemptResultTail(ctx, spec.RuntimeParent, spec.ChangeParent, run, live, resultOutcome, runtimeDirectory, runtimeIdentity, keys.resources.RunnerProcess, keys.resources.RuntimeRoot, awaitConvergence, recordConvergence, closeRuntime)
+	return run, err
+}
+
+// attemptResultTail is the shared post-release convergence both a freshly
+// launched run and one this daemon adopted from a live handover take once
+// their live attempt has released the provider: authenticate the exact
+// result, consume it durably, broadcast the committed exit, record the
+// runner's convergence, close the terminal, remove the result spool, then —
+// after closeRuntime releases whatever runtime-ownership handles the caller
+// holds — remove the runtime and settle the run. Only how each caller waits
+// the runner's convergence (an owned exit vs. an absence observation) and
+// holds the runtime (a fresh Runtime vs. a lease-free adopted directory)
+// differ; both live behind awaitConvergence/recordConvergence/closeRuntime.
+func (daemon *Daemon) attemptResultTail(
+	ctx context.Context,
+	runtimeParent *RuntimeParent,
+	changeParent string,
+	run kernel.Run,
+	live *liveAttempt,
+	resultOutcome liveAttemptResult,
+	runtimeDirectory *os.File,
+	runtimeIdentity kernel.ResourceIdentity,
+	runnerResourceID, runtimeRootID kernel.ResourceID,
+	awaitConvergence func() error,
+	recordConvergence func() (kernel.Run, error),
+	closeRuntime func() error,
+) (kernel.Run, error) {
 	// The notice is shape-only and its socket is best-effort: a late credit or
 	// terminate write racing the runner's own exit poisons the control socket
 	// and loses queued frames. Authority is the exact no-replace artifact in
 	// the runtime directory; ConsumeAttemptResult binds it to the durable run,
 	// including the equality of the stored result-proof digest. With no notice,
-	// wait the owned outer child and authenticate from disk alone.
+	// wait the runner's convergence and authenticate from disk alone.
 	var record *runner.AttemptResultRecord
-	var outerExit runner.Exit
 	if resultOutcome.notice != nil {
 		authenticated, authErr := runner.AuthenticateAttemptResult(runtimeDirectory, run.ID.String(), resultOutcome.notice)
 		if authErr != nil {
@@ -632,11 +823,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 		}
 		record = authenticated
 	} else {
-		fallbackExit, waitErr := owner.reap(8 * time.Second)
-		if waitErr != nil {
+		if waitErr := awaitConvergence(); waitErr != nil {
 			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, waitErr))
 		}
-		outerExit = fallbackExit
 		authenticated, authErr := runner.AuthenticateAttemptResult(runtimeDirectory, run.ID.String(), nil)
 		if authErr != nil {
 			return daemon.failRun(run, kernel.FailureProtocol, errors.Join(resultOutcome.err, authErr))
@@ -647,127 +836,83 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (_ kerne
 	if err != nil {
 		return daemon.failRun(run, kernel.FailureProtocol, err)
 	}
-	run, err = daemon.consumeAttemptResult(result, false)
+	// A provider can finish after its outcome call was refused by a transient
+	// finalization race. The exact live owner retains that proposal; retry it
+	// once the authenticated runner result proves the provider has converged.
+	// A competing durable outcome wins normally: its unauthorized response is
+	// not a license to replace that outcome.
+	if pending, ok := live.pendingOutcomeSnapshot(); ok {
+		at, proposalErr := daemon.timestamp()
+		if proposalErr != nil {
+			return kernel.Run{}, proposalErr
+		}
+		proposalRun, proposeErr := daemon.store.ProposeAttemptOutcome(ctx, live.attemptDigest, pending, at)
+		if proposeErr == nil {
+			run = proposalRun
+		} else if !errors.Is(proposeErr, kernel.ErrUnauthorized) {
+			return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: retained outcome proposal: %w", proposeErr))
+		}
+	}
+	run, err = daemon.consumeAttemptResult(daemon.cleanupCtx, result, false)
 	if err != nil {
 		return kernel.Run{}, err
+	}
+	if floor, head, payload := live.diagnosticSnapshot(); len(payload) > 0 {
+		if capturedAt, timestampErr := daemon.timestamp(); timestampErr == nil {
+			_ = daemon.store.SaveTerminalDiagnostics(daemon.cleanupCtx, kernel.TerminalDiagnostics{RunID: run.ID, Floor: floor, Head: head, Payload: payload, CapturedAt: capturedAt})
+		}
 	}
 	exitEvent, err := terminalExitEvent(record)
 	if err != nil {
 		return run, err
 	}
 	if resultOutcome.observersRetained {
-		if err := live.finishExit(context.Background(), exitEvent); err != nil {
+		if err := live.finishExit(daemon.cleanupCtx, exitEvent); err != nil {
 			return run, fmt.Errorf("daemon: broadcast committed exit: %w", err)
 		}
 	}
-	if !owner.reaped {
-		waitedExit, waitErr := owner.reap(8 * time.Second)
-		if waitErr != nil {
-			return run, fmt.Errorf("daemon: wait outer runner: %w", waitErr)
+	run, err = recordConvergence()
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	run, err = daemon.closeTerminalAfterRunner(daemon.cleanupCtx, result)
+	if err != nil {
+		return kernel.Run{}, err
+	}
+	if err := daemon.removeAttemptResult(daemon.cleanupCtx, runtimeDirectory, result, record); err != nil {
+		return run, err
+	}
+	if closeRuntime != nil {
+		if err := closeRuntime(); err != nil {
+			return run, err
 		}
-		outerExit = waitedExit
 	}
-	exitAt, err := daemon.timestamp()
+	runtimeFileID, err := runtimeFileIdentity(runtimeIdentity)
 	if err != nil {
 		return run, err
 	}
-	exit, err := kernelProcessExit(outerExit, exitAt)
-	if err != nil {
-		return run, err
-	}
-	run, err = daemon.recordLiveRunnerExit(run.ID, keys.resources.RunnerProcess, runnerResourceIdentity, exit)
-	if err != nil {
-		return kernel.Run{}, err
-	}
-	run, err = daemon.closeTerminalAfterRunner(result)
-	if err != nil {
-		return kernel.Run{}, err
-	}
-	if err := daemon.removeAttemptResult(runtimeDirectory, result, record); err != nil {
-		return run, err
-	}
-	if err := child.Close(); err != nil {
-		return run, err
-	}
-	owner.child = nil
-	if err := live.join(); err != nil && resultOutcome.err == nil {
-		return run, err
-	}
-	// A dead owner loop whose result was recovered from disk is already
-	// consumed evidence; its controller was closed by its own shutdown.
-	owner.live = nil
-	owner.controller = nil
-	if err := lease.Close(); err != nil {
-		return run, err
-	}
-	leaseOpen = false
-	if err := errors.Join(runtimeDirectory.Close(), lifetime.Close()); err != nil {
-		return run, err
-	}
-	filesOpen = false
-	if err := runtimeValue.Close(); err != nil {
-		return run, err
-	}
-	runtimeOpen = false
-
-	presence, err := ObserveRuntimeLifetime(spec.RuntimeParent, keys.run.String(), runtimeFileIdentity)
+	presence, err := ObserveRuntimeLifetime(runtimeParent, run.ID.String(), runtimeFileID)
 	if err != nil || presence != RuntimeLeaseAvailable {
-		return daemon.unresolvedRuntime(run, keys.resources.RuntimeRoot, errors.Join(err, errRetainedRuntime))
+		return daemon.unresolvedRuntime(run, runtimeRootID, errors.Join(err, errRetainedRuntime))
 	}
 	for {
-		done, removeErr := RemoveRecordedRuntime(context.Background(), spec.RuntimeParent, keys.run.String(), runtimeFileIdentity)
+		done, removeErr := RemoveRecordedRuntime(daemon.cleanupCtx, runtimeParent, run.ID.String(), runtimeFileID)
 		if removeErr != nil {
-			return daemon.unresolvedRuntime(run, keys.resources.RuntimeRoot, removeErr)
+			return daemon.unresolvedRuntime(run, runtimeRootID, removeErr)
 		}
 		if done {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if err := daemon.releaseResources(context.Background(), run.ID, kernel.ResourceRuntimeRoot); err != nil {
+	if err := daemon.releaseResources(daemon.cleanupCtx, run.ID, kernel.ResourceRuntimeRoot); err != nil {
 		return run, err
 	}
-	current, found, err := daemon.store.Run(context.Background(), run.ID)
-	if err != nil || !found {
-		if err == nil {
-			err = kernel.ErrCorruptState
-		}
-		return run, err
-	}
-	at, err = daemon.timestamp()
+	settled, err := daemon.settleRun(daemon.cleanupCtx, changeParent, run.ID)
 	if err != nil {
-		return run, err
+		return run, errors.Join(err, ctx.Err())
 	}
-	if !worker {
-		final, err := daemon.store.FinalizeRun(context.Background(), run.ID, current.Revision, at)
-		return final, errors.Join(err, ctx.Err())
-	}
-	var settleErr error
-	changeState, found, settleErr = daemon.store.Change(context.Background(), changeID)
-	if settleErr != nil || !found {
-		if settleErr == nil {
-			settleErr = kernel.ErrCorruptState
-		}
-		return current, errors.Join(settleErr, ctx.Err())
-	}
-	var settlement kernel.ChangeSettlement
-	settledFacts, settleErr := change.InspectPublished(context.Background(), spec.ChangeParent, finalName, workerResult.Tree, workerResult.Format, workerResult.Base)
-	if refused, refusal := publicationRefused(settleErr); refused {
-		// The tree the worker left cannot be published as it is. That is the
-		// run's outcome, recorded now, not a reason to leave it finalizing.
-		settlement, settleErr = refusedSettlement(spec.ChangeParent, changeState, run.ID, refusal)
-	} else if settleErr == nil {
-		var settledAvailability kernel.ChangeAvailability
-		settledAvailability, settleErr = kernelAvailability(settledFacts)
-		if settleErr == nil {
-			settlement, settleErr = kernel.NewRetainedChangeSettlement(changeState.Revision, settledAvailability)
-		}
-	}
-	if settleErr != nil {
-		return current, errors.Join(settleErr, ctx.Err())
-	}
-	final, err := daemon.store.FinalizeWorkerRun(context.Background(), run.ID, current.Revision, settlement, at)
-	return final, errors.Join(err, ctx.Err())
+	return settled, ctx.Err()
 }
 
 func newSupervisorKeys(reader io.Reader) (supervisorKeys, error) {
@@ -843,9 +988,12 @@ func releaseCheckpoint(controller *runner.AttemptController, stage runner.Attemp
 	return event, nil
 }
 
-func resultMatchesFacts(result changeworker.Result, facts change.TreeFacts) bool {
-	return result.Tree.Equal(facts.Identity()) && result.Commitment.Equal(facts.Commitment()) &&
-		result.EntryCount == facts.EntryCount() && result.BlobBytes == facts.BlobBytes()
+func kernelSelectionEqual(left, right kernel.ChangeSelection) bool {
+	return left.ObjectFormat() == right.ObjectFormat() && kernelCommitEqual(left.Commit(), right.Commit()) && left.RepositoryIdentity() == right.RepositoryIdentity()
+}
+
+func kernelCommitEqual(left, right kernel.CommitID) bool {
+	return left.Format() == right.Format() && bytes.Equal(left.Bytes(), right.Bytes())
 }
 
 func (daemon *Daemon) activateResource(ctx context.Context, runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity) (kernel.Resource, error) {
@@ -977,10 +1125,8 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, run.ID)
+		current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 		if readErr != nil || !found {
-			cancel()
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
@@ -988,17 +1134,14 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 			continue
 		}
 		if current.Phase != kernel.RunAdmitted && current.Phase != kernel.RunRunning {
-			cancel()
 			return current, cause
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		failed, failErr := daemon.store.FailRun(storeCtx, current.ID, current.Revision, failure, at)
-		cancel()
+		failed, failErr := daemon.store.FailRun(daemon.cleanupCtx, current.ID, current.Revision, failure, at)
 		if failErr == nil {
 			return failed, cause
 		}
@@ -1013,19 +1156,17 @@ func (daemon *Daemon) failRun(run kernel.Run, code kernel.FailureCode, cause err
 // failRunBeforeRuntime finalizes an admitted run whose runtime was never
 // created. The caller must not have attempted CreateRuntime for this run;
 // trusted absence is exactly that precondition.
-func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.ResourceID, code kernel.FailureCode, cause error) (kernel.Run, error) {
-	daemon.operationMu.Lock()
-	defer daemon.operationMu.Unlock()
+func (daemon *Daemon) failRunBeforeRuntime(ctx context.Context, run kernel.Run, runtimeID kernel.ResourceID, code kernel.FailureCode, cause error) (kernel.Run, error) {
+	// No runtime or live owner exists here. The kernel transaction checks the
+	// exact run/resource revisions; the live-operation gate adds no authority.
 	failure, err := kernel.NewFailureProposal(code, failureDetail(cause))
 	if err != nil {
 		return run, errors.Join(cause, err)
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, run.ID)
+		current, found, readErr := daemon.store.Run(ctx, run.ID)
 		if readErr != nil || !found {
-			cancel()
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
@@ -1033,12 +1174,10 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 			continue
 		}
 		if current.Phase != kernel.RunAdmitted {
-			cancel()
 			return current, cause
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(storeCtx, runtimeID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(ctx, runtimeID)
 		if resourceErr != nil || !resourceFound {
-			cancel()
 			lastErr = resourceErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
@@ -1047,12 +1186,10 @@ func (daemon *Daemon) failRunBeforeRuntime(run kernel.Run, runtimeID kernel.Reso
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		failed, failErr := daemon.store.FailRunWithRuntimeAbsent(storeCtx, current.ID, runtimeID, current.Revision, resource.Revision, failure, at)
-		cancel()
+		failed, failErr := daemon.store.FailRunWithRuntimeAbsent(ctx, current.ID, runtimeID, current.Revision, resource.Revision, failure, at)
 		if failErr == nil {
 			return failed, cause
 		}
@@ -1070,19 +1207,16 @@ func (daemon *Daemon) convergeUnstartedRunner(run kernel.Run, owner *supervisorA
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, run.ID)
+		current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 		if readErr != nil || !found {
-			cancel()
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
 			}
 			continue
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(storeCtx, runnerID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(daemon.cleanupCtx, runnerID)
 		if resourceErr != nil || !resourceFound {
-			cancel()
 			lastErr = resourceErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
@@ -1091,12 +1225,10 @@ func (daemon *Daemon) convergeUnstartedRunner(run kernel.Run, owner *supervisorA
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		converged, convergeErr := daemon.store.RecordUnregisteredRunnerConverged(storeCtx, run.ID, runnerID, current.Revision, resource.Revision, at)
-		cancel()
+		converged, convergeErr := daemon.store.RecordUnregisteredRunnerConverged(daemon.cleanupCtx, run.ID, runnerID, current.Revision, resource.Revision, at)
 		if convergeErr == nil {
 			return converged, cause
 		}
@@ -1178,7 +1310,7 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 		if resultErr != nil {
 			return kernel.Run{}, kernel.NewOutcomeUnknownError(errors.Join(cause, resultErr))
 		}
-		converged, consumeErr := daemon.consumeAttemptResult(result, false)
+		converged, consumeErr := daemon.consumeAttemptResult(daemon.cleanupCtx, result, false)
 		if consumeErr != nil {
 			return kernel.Run{}, errors.Join(cause, consumeErr)
 		}
@@ -1190,15 +1322,15 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 		if exitErr != nil {
 			return converged, errors.Join(cause, exitErr)
 		}
-		converged, exitErr = daemon.recordLiveRunnerExit(run.ID, runnerID, runnerIdentity, exit)
+		converged, exitErr = daemon.recordLiveRunnerExit(daemon.cleanupCtx, run.ID, runnerID, runnerIdentity, exit)
 		if exitErr != nil {
 			return kernel.Run{}, errors.Join(cause, exitErr)
 		}
-		converged, closeErr := daemon.closeTerminalAfterRunner(result)
+		converged, closeErr := daemon.closeTerminalAfterRunner(daemon.cleanupCtx, result)
 		if closeErr != nil {
 			return kernel.Run{}, errors.Join(cause, closeErr)
 		}
-		if removeErr := daemon.removeAttemptResult(runtimeDirectory, result, record); removeErr != nil {
+		if removeErr := daemon.removeAttemptResult(daemon.cleanupCtx, runtimeDirectory, result, record); removeErr != nil {
 			return converged, errors.Join(cause, removeErr)
 		}
 		return converged, cause
@@ -1208,19 +1340,16 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 	}
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, run.ID)
+		current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 		if readErr != nil || !found {
-			cancel()
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
 			}
 			continue
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(storeCtx, runnerID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(daemon.cleanupCtx, runnerID)
 		if resourceErr != nil || !resourceFound {
-			cancel()
 			lastErr = resourceErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
@@ -1229,12 +1358,10 @@ func (daemon *Daemon) convergeActivatedRunner(run kernel.Run, owner *supervisorA
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		converged, absenceErr := daemon.store.RecordRecoveredPreSessionRunnerAbsence(storeCtx, run.ID, runnerID, current.Revision, resource.Revision, runnerIdentity, at)
-		cancel()
+		converged, absenceErr := daemon.store.RecordRecoveredPreSessionRunnerAbsence(daemon.cleanupCtx, run.ID, runnerID, current.Revision, resource.Revision, runnerIdentity, at)
 		if absenceErr == nil {
 			return converged, cause
 		}
@@ -1316,13 +1443,11 @@ func terminalExitEvent(record *runner.AttemptResultRecord) (TerminalEvent, error
 }
 
 // Recovery may replay an exact result consumed before a later cleanup edge failed.
-func (daemon *Daemon) consumeAttemptResult(result kernel.AttemptResult, recovered bool) (kernel.Run, error) {
+func (daemon *Daemon) consumeAttemptResult(ctx context.Context, result kernel.AttemptResult, recovered bool) (kernel.Run, error) {
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, result.RunID())
+		current, found, readErr := daemon.store.Run(ctx, result.RunID())
 		if readErr != nil || !found {
-			cancel()
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
@@ -1331,20 +1456,18 @@ func (daemon *Daemon) consumeAttemptResult(result kernel.AttemptResult, recovere
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		consumed, consumeErr := daemon.store.ConsumeAttemptResult(storeCtx, result, current.Revision, at)
+		consumed, consumeErr := daemon.store.ConsumeAttemptResult(ctx, result, current.Revision, at)
 		if errors.Is(consumeErr, kernel.ErrConflict) && recovered && current.Phase == kernel.RunFinalizing && current.Revision.Int64() > 1 {
 			previous, revisionErr := kernel.NewRevision(current.Revision.Int64() - 1)
 			if revisionErr == nil {
-				consumed, consumeErr = daemon.store.ConsumeAttemptResult(storeCtx, result, previous, at)
+				consumed, consumeErr = daemon.store.ConsumeAttemptResult(ctx, result, previous, at)
 			} else {
 				consumeErr = revisionErr
 			}
 		}
-		cancel()
 		if consumeErr == nil {
 			return consumed, nil
 		}
@@ -1353,22 +1476,19 @@ func (daemon *Daemon) consumeAttemptResult(result kernel.AttemptResult, recovere
 	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: consume attempt result: %w", lastErr))
 }
 
-func (daemon *Daemon) recordLiveRunnerExit(runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity, exit kernel.ProcessExit) (kernel.Run, error) {
+func (daemon *Daemon) recordLiveRunnerExit(ctx context.Context, runID kernel.RunID, resourceID kernel.ResourceID, identity kernel.ResourceIdentity, exit kernel.ProcessExit) (kernel.Run, error) {
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, runID)
+		current, found, readErr := daemon.store.Run(ctx, runID)
 		if readErr != nil || !found {
-			cancel()
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
 			}
 			continue
 		}
-		resource, resourceFound, resourceErr := daemon.store.Resource(storeCtx, resourceID)
+		resource, resourceFound, resourceErr := daemon.store.Resource(ctx, resourceID)
 		if resourceErr != nil || !resourceFound {
-			cancel()
 			lastErr = resourceErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
@@ -1377,12 +1497,10 @@ func (daemon *Daemon) recordLiveRunnerExit(runID kernel.RunID, resourceID kernel
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		recorded, _, recordErr := daemon.store.RecordLiveRunnerExitAndRelease(storeCtx, runID, resourceID, current.Revision, resource.Revision, identity, exit, at)
-		cancel()
+		recorded, _, recordErr := daemon.store.RecordLiveRunnerExitAndRelease(ctx, runID, resourceID, current.Revision, resource.Revision, identity, exit, at)
 		if recordErr == nil {
 			return recorded, nil
 		}
@@ -1391,22 +1509,19 @@ func (daemon *Daemon) recordLiveRunnerExit(runID kernel.RunID, resourceID kernel
 	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: record live runner exit: %w", lastErr))
 }
 
-func (daemon *Daemon) closeTerminalAfterRunner(result kernel.AttemptResult) (kernel.Run, error) {
+func (daemon *Daemon) closeTerminalAfterRunner(ctx context.Context, result kernel.AttemptResult) (kernel.Run, error) {
 	var lastErr error
 	for attempt := 0; attempt < supervisorReconcileAttempts; attempt++ {
-		storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-		current, found, readErr := daemon.store.Run(storeCtx, result.RunID())
+		current, found, readErr := daemon.store.Run(ctx, result.RunID())
 		if readErr != nil || !found {
-			cancel()
 			lastErr = readErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
 			}
 			continue
 		}
-		session, sessionFound, sessionErr := daemon.store.TerminalSessionForRun(storeCtx, result.RunID())
+		session, sessionFound, sessionErr := daemon.store.TerminalSessionForRun(ctx, result.RunID())
 		if sessionErr != nil || !sessionFound {
-			cancel()
 			lastErr = sessionErr
 			if lastErr == nil {
 				lastErr = kernel.ErrCorruptState
@@ -1415,12 +1530,10 @@ func (daemon *Daemon) closeTerminalAfterRunner(result kernel.AttemptResult) (ker
 		}
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
-			cancel()
 			lastErr = clockErr
 			continue
 		}
-		closedRun, _, closeErr := daemon.store.CloseTerminalAfterRunner(storeCtx, result, current.Revision, session.Revision, at)
-		cancel()
+		closedRun, _, closeErr := daemon.store.CloseTerminalAfterRunner(ctx, result, current.Revision, session.Revision, at)
 		if closeErr == nil {
 			return closedRun, nil
 		}
@@ -1429,10 +1542,8 @@ func (daemon *Daemon) closeTerminalAfterRunner(result kernel.AttemptResult) (ker
 	return kernel.Run{}, kernel.NewOutcomeUnknownError(fmt.Errorf("daemon: close terminal after runner: %w", lastErr))
 }
 
-func (daemon *Daemon) removeAttemptResult(runtimeDirectory *os.File, result kernel.AttemptResult, record *runner.AttemptResultRecord) error {
-	storeCtx, cancel := context.WithTimeout(context.Background(), liveAttemptStoreTimeout)
-	_, err := daemon.store.AuthorizeAttemptResultRemoval(storeCtx, result)
-	cancel()
+func (daemon *Daemon) removeAttemptResult(ctx context.Context, runtimeDirectory *os.File, result kernel.AttemptResult, record *runner.AttemptResultRecord) error {
+	_, err := daemon.store.AuthorizeAttemptResultRemoval(ctx, result)
 	if err != nil {
 		return err
 	}
@@ -1443,17 +1554,17 @@ func (daemon *Daemon) removeAttemptResult(runtimeDirectory *os.File, result kern
 }
 
 func (daemon *Daemon) unresolvedRuntime(run kernel.Run, resourceID kernel.ResourceID, cause error) (kernel.Run, error) {
-	resource, found, err := daemon.store.Resource(context.Background(), resourceID)
+	resource, found, err := daemon.store.Resource(daemon.cleanupCtx, resourceID)
 	if err == nil && found && resource.State != kernel.ResourceReleased && resource.State != kernel.ResourceUnresolved {
 		at, clockErr := daemon.timestamp()
 		if clockErr != nil {
 			err = clockErr
 		} else {
-			_, markErr := daemon.store.MarkResourceUnresolved(context.Background(), run.ID, resourceID, resource.Revision, resource.Identity, "runtime cleanup could not prove absence", at)
+			_, markErr := daemon.store.MarkResourceUnresolved(daemon.cleanupCtx, run.ID, resourceID, resource.Revision, resource.Identity, "runtime cleanup could not prove absence", at)
 			err = markErr
 		}
 	}
-	current, found, readErr := daemon.store.Run(context.Background(), run.ID)
+	current, found, readErr := daemon.store.Run(daemon.cleanupCtx, run.ID)
 	if readErr == nil && found {
 		run = current
 	}

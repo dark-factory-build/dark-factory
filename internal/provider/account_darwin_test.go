@@ -39,7 +39,7 @@ func TestAccountConfigDirectorySelectsTheProviderLogin(t *testing.T) {
 			root := t.TempDir()
 			withAccount, err := NewRuntimePaths(
 				root+"/home", root+"/tmp", "/private/tmp/df-account-test.sock", root+"/attempt.token",
-				"/usr/local/bin/factoryctl", root+"/changes", toolPath, accountHome, selected,
+				"/usr/local/bin/factoryctl", root+"/changes", toolPath, accountHome, selected, "",
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -78,7 +78,7 @@ func TestAccountConfigDirectorySelectsTheProviderLogin(t *testing.T) {
 	root := t.TempDir()
 	for _, bad := range []string{"relative", "/x/", string(filepath.Separator)} {
 		if _, err := NewRuntimePaths(root+"/home", root+"/tmp", "/private/tmp/df-account-test.sock", root+"/attempt.token",
-			"/usr/local/bin/factoryctl", root+"/changes", "/usr/bin:/bin", root+"/account", bad); err == nil {
+			"/usr/local/bin/factoryctl", root+"/changes", "/usr/bin:/bin", root+"/account", bad, ""); err == nil {
 			t.Fatalf("account config %q accepted", bad)
 		}
 	}
@@ -104,7 +104,7 @@ func TestDefaultClaudeAccountIsNeverNamedInTheEnvironment(t *testing.T) {
 	build := func(accountConfig string) RuntimePaths {
 		runtime, err := NewRuntimePaths(
 			root+"/home", root+"/tmp", "/private/tmp/df-default-account.sock", root+"/attempt.token",
-			"/usr/local/bin/factoryctl", root+"/changes", "/usr/bin:/bin", accountHome, accountConfig,
+			"/usr/local/bin/factoryctl", root+"/changes", "/usr/bin:/bin", accountHome, accountConfig, "",
 		)
 		if err != nil {
 			t.Fatal(err)

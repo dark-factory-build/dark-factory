@@ -130,6 +130,17 @@ type HumanRequestProjection struct {
 	CanReply      bool
 }
 
+type OperatorHumanRequest struct {
+	ID           HumanRequestID
+	RunID        RunID
+	TaskID       TaskID
+	AgentID      AgentID
+	Status       HumanRequestStatus
+	Revision     Revision
+	QuestionText string
+	Options      []string
+}
+
 type HumanRequestDetail struct {
 	ID             HumanRequestID
 	Revision       Revision
@@ -161,6 +172,7 @@ type NewHumanQuestion struct {
 	IdempotencyKey [IDBytes]byte
 	QuestionText   string
 	Options        []string
+	ReuseExisting  bool
 }
 
 type HumanDelivery struct {

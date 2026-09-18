@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +31,41 @@ func TestVersionRequiresNoHomeOrCredential(t *testing.T) {
 	exit := run(context.Background(), []string{"--version"}, func(string) string { return "private" }, &stdout, &stderr)
 	if exit != 0 || stdout.String() != "factoryctl development\n" || stderr.Len() != 0 {
 		t.Fatalf("version exit=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestTerminalObserveCursorIsNotResponseBudget(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	args := []string{"attempt", "terminal", "observe", "--project", id, "--task", id, "--run", id, "--cursor", "10000000", "--max-bytes", "1024"}
+	command, help, ok := parse(args)
+	if !ok || help || command.kind != commandTerminalObserve || command.offset != 10000000 || command.maxBytes != 1024 {
+		t.Fatalf("valid large cursor rejected: %+v help=%v ok=%v", command, help, ok)
+	}
+	args[len(args)-1] = "65537"
+	if _, _, ok := parse(args); ok {
+		t.Fatal("oversized response accepted")
+	}
+}
+
+func TestOperatorTerminalObserveUsesOperatorCommand(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	command, help, ok := parse([]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--max-bytes", "1024"})
+	if !ok || help || command.kind != commandOperatorTerminalObserve || command.maxBytes != 1024 {
+		t.Fatalf("operator terminal command = %+v help=%v ok=%v", command, help, ok)
+	}
+}
+
+func TestOperatorTerminalTextRejectsCursor(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	command, help, ok := parse([]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--text", "--max-bytes", "1024"})
+	if !ok || help || command.kind != commandOperatorTerminalObserve || !command.terminalText || command.maxBytes != 1024 {
+		t.Fatalf("operator terminal text command = %+v help=%v ok=%v", command, help, ok)
+	}
+	if _, _, ok := parse([]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--text", "--cursor", "1"}); ok {
+		t.Fatal("text projection accepted a raw cursor")
+	}
+	if _, _, ok := parse([]string{"attempt", "terminal", "observe", "--project", id, "--task", id, "--run", id, "--text"}); ok {
+		t.Fatal("attempt terminal exposed operator text projection")
 	}
 }
 
@@ -179,6 +215,7 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "attempt help", args: []string{"attempt", "-h"}, help: true},
 		{name: "verb help", args: []string{"attempt", "block", "--help"}, help: true},
 		{name: "task", args: []string{"attempt", "task"}, command: attemptCommand{kind: commandAttemptTask}},
+		{name: "source", args: []string{"attempt", "source", "--task", "0123456789abcdef0123456789abcdef"}, command: attemptCommand{kind: commandAttemptSource, id: "0123456789abcdef0123456789abcdef"}},
 		{name: "empty success", args: []string{"attempt", "succeed"}, command: attemptCommand{kind: commandSucceed}},
 		{name: "success", args: []string{"attempt", "succeed", "--result", "done"}, command: attemptCommand{kind: commandSucceed, text: "done"}},
 		{name: "block", args: []string{"attempt", "block", "--detail", "waiting"}, command: attemptCommand{kind: commandBlock, text: "waiting"}},
@@ -189,9 +226,10 @@ func TestParseExactAttemptCommands(t *testing.T) {
 		{name: "human request", args: []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "what now?"}, command: attemptCommand{kind: commandRequestHuman, idempotencyKey: "0123456789abcdef0123456789abcdef", text: "what now?"}},
 		{name: "peer status", args: []string{"attempt", "peer", "status"}, command: attemptCommand{kind: commandPeerStatus}},
 		{name: "peer status history page", args: []string{"attempt", "peer", "status", "--offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, head: 8}},
-		{name: "peer status target page", args: []string{"attempt", "peer", "status", "--target-offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, textOffset: 4, head: 8}},
-		{name: "peer status both pages", args: []string{"attempt", "peer", "status", "--offset", "4", "--target-offset", "8", "--head", "9"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9}},
-		{name: "peer status both pages reversed", args: []string{"attempt", "peer", "status", "--target-offset", "8", "--head", "9", "--offset", "4"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9}},
+		{name: "peer status targets", args: []string{"attempt", "peer", "status", "--targets"}, command: attemptCommand{kind: commandPeerStatus, includeTargets: true}},
+		{name: "peer status target page", args: []string{"attempt", "peer", "status", "--targets", "--target-offset", "4", "--head", "8"}, command: attemptCommand{kind: commandPeerStatus, textOffset: 4, head: 8, includeTargets: true}},
+		{name: "peer status both pages", args: []string{"attempt", "peer", "status", "--offset", "4", "--targets", "--target-offset", "8", "--head", "9"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9, includeTargets: true}},
+		{name: "peer status both pages reversed", args: []string{"attempt", "peer", "status", "--target-offset", "8", "--head", "9", "--targets", "--offset", "4"}, command: attemptCommand{kind: commandPeerStatus, offset: 4, textOffset: 8, head: 9, includeTargets: true}},
 		{name: "peer ask", args: []string{"attempt", "peer", "ask", "--task", "0123456789abcdef0123456789abcdef", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--question", "need context"}, command: attemptCommand{kind: commandPeerAsk, id: "0123456789abcdef0123456789abcdef", idempotencyKey: "fedcba9876543210fedcba9876543210", text: "need context"}},
 		{name: "peer answer", args: []string{"attempt", "peer", "answer", "--question", "0123456789abcdef0123456789abcdef", "--revision", "7", "--idempotency-key", "fedcba9876543210fedcba9876543210", "--answer", "context"}, command: attemptCommand{kind: commandPeerAnswer, id: "0123456789abcdef0123456789abcdef", expectedRevision: 7, idempotencyKey: "fedcba9876543210fedcba9876543210", text: "context"}},
 		{name: "send back", args: []string{"attempt", "send-back", "--task", "0123456789abcdef0123456789abcdef", "--note", "five findings"}, command: attemptCommand{kind: commandSendBack, id: "0123456789abcdef0123456789abcdef", text: "five findings"}},
@@ -205,6 +243,19 @@ func TestParseExactAttemptCommands(t *testing.T) {
 				t.Fatalf("parse = %+v, help=%t ok=%t", command, help, ok)
 			}
 		})
+	}
+}
+
+func TestParseCodexTurnCompleteNotification(t *testing.T) {
+	notification := `{"type":"agent-turn-complete","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`
+	command, help, ok := parse([]string{"attempt", "turn-complete", notification})
+	digest := sha256.Sum256([]byte("thread-1\x00turn-1\x00/private/runtime"))
+	if !ok || help || command.kind != commandTurnComplete || command.idempotencyKey != hex.EncodeToString(digest[:16]) || command.text == "" {
+		t.Fatalf("parse notification = %+v, help=%t ok=%t", command, help, ok)
+	}
+	invalid, help, ok := parse([]string{"attempt", "turn-complete", `{"type":"other","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`})
+	if ok || help || invalid.kind != 0 {
+		t.Fatalf("parse invalid notification = %+v, help=%t ok=%t", invalid, help, ok)
 	}
 }
 
@@ -229,6 +280,49 @@ func TestParseOverseerTaskUpdateKeepsPriority(t *testing.T) {
 	}
 }
 
+func TestParseOverseerTaskAddAcceptsAnyEligibleWorker(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	command, help, ok := parse([]string{"overseer", "task", "add", "--agent", "any", "--title", "shared"})
+	if !ok || help || command.kind != commandOverseerTaskAdd || command.agent != "any" || anyWorkerAgent(command.agent) != "" {
+		t.Fatalf("any-worker overseer task add = %+v, help=%t, ok=%t", command, help, ok)
+	}
+	if _, _, ok := parse([]string{"overseer", "task", "update", "--task", id, "--revision", "7", "--agent", "any"}); ok {
+		t.Fatal("reassignment to `any` accepted; a queued task is reassigned to one worker")
+	}
+}
+
+func TestOverseerTaskRetryCLIUsesAtomicAPIRequest(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
+	taskID, agentID := strings.Repeat("3", 32), strings.Repeat("4", 32)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		if call.Kind() != api.CallOverseerUpdateTask {
+			t.Errorf("call kind = %v", call.Kind())
+		}
+		input, ok := call.OverseerTaskUpdateInput()
+		if !ok || input.TaskID != taskID || input.ExpectedRevision != 7 || !input.Retry || input.AssignedAgentID == nil || *input.AssignedAgentID != agentID {
+			t.Errorf("retry input = %+v, ok=%v", input, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 18, Revision: 8})
+		if err != nil {
+			t.Errorf("new reply: %v", err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"overseer", "task", "update", "--task", taskID, "--revision", "7", "--agent", agentID, "--retry"}, func(name string) string {
+		if name == "DARK_FACTORY_SOCKET" {
+			return fixture.socket
+		}
+		return ""
+	}, &stdout, &stderr)
+	result := awaitServer(t, done)
+	if exit != 0 || result.err != nil || stderr.Len() != 0 {
+		t.Fatalf("retry CLI = exit %d, server %v, stderr %q", exit, result.err, stderr.String())
+	}
+}
+
 func TestParseOverseerStatusPaging(t *testing.T) {
 	id := "0123456789abcdef0123456789abcdef"
 	command, help, ok := parse([]string{"overseer", "status", "--task", id, "--offset", "4", "--text-offset", "4096", "--head", "7"})
@@ -249,6 +343,7 @@ func TestParsePeerStatusRejectsDuplicateOrMalformedPageFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"attempt", "peer", "status", "--offset", "4"},
 		{"attempt", "peer", "status", "--target-offset", "4"},
+		{"attempt", "peer", "status", "--targets", "--targets"},
 		{"attempt", "peer", "status", "--offset", "4", "--offset", "8"},
 		{"attempt", "peer", "status", "--target-offset", "4", "--target-offset", "8"},
 		{"attempt", "peer", "status", "--head", "8", "--head", "9"},
@@ -399,6 +494,7 @@ func TestHelpIsExactAndHasNoClientEffect(t *testing.T) {
 }
 
 func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
+	turnDigest := sha256.Sum256([]byte("thread-1\x00turn-1\x00/private/runtime"))
 	tests := []struct {
 		name string
 		args []string
@@ -413,6 +509,7 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 		{name: "fail detail", args: []string{"attempt", "fail", "--detail", "private-fail-sentinel"}, kind: api.CallFail, text: "private-fail-sentinel"},
 		{name: "send back", args: []string{"attempt", "send-back", "--task", "fedcba9876543210fedcba9876543210", "--note", "private-note-sentinel"}, kind: api.CallSendBack, key: "fedcba9876543210fedcba9876543210", text: "private-note-sentinel"},
 		{name: "human request", args: []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question-sentinel"}, kind: api.CallRequestHuman, key: "0123456789abcdef0123456789abcdef", text: "private-question-sentinel"},
+		{name: "Codex turn complete", args: []string{"attempt", "turn-complete", `{"type":"agent-turn-complete","thread-id":"thread-1","turn-id":"turn-1","cwd":"/private/runtime"}`}, kind: api.CallRequestHuman, key: hex.EncodeToString(turnDigest[:16]), text: "Codex turn completed without a durable attempt outcome; resume this session and record succeed, block, or fail."},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -455,7 +552,11 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 				}
 			case api.CallRequestHuman:
 				input, ok := result.call.HumanQuestionInput()
-				if !ok || !reflect.DeepEqual(input, api.HumanQuestionInput{IdempotencyKey: test.key, Question: test.text}) {
+				wantInput := api.HumanQuestionInput{IdempotencyKey: test.key, Question: test.text}
+				if strings.HasPrefix(test.name, "Codex") {
+					wantInput.ReuseExisting = true
+				}
+				if !ok || !reflect.DeepEqual(input, wantInput) {
 					t.Fatalf("human question = %+v, %t", input, ok)
 				}
 			case api.CallSendBack:
@@ -467,6 +568,9 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 			wantOutput := "attempt outcome request accepted: head=17 revision=9\n"
 			if test.kind == api.CallRequestHuman {
 				wantOutput = "human request accepted: head=17 revision=9\n"
+				if strings.HasPrefix(test.name, "Codex") {
+					wantOutput = ""
+				}
 			} else if test.kind == api.CallSendBack {
 				wantOutput = "task sent back: head=17 revision=9\n"
 			}
@@ -543,7 +647,7 @@ func TestAttemptTaskInvalidEnvironmentFailsNormally(t *testing.T) {
 				}
 				return ""
 			}, &stdout, &stderr)
-			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: attempt client configuration is invalid\n" {
+			if exit != exitFailure || stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), "factoryctl: attempt client configuration is invalid\n") || (test.socket == "") != strings.Contains(stderr.String(), "factory tool") {
 				t.Fatalf("invalid environment = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 			}
 		})
@@ -574,24 +678,27 @@ func TestAcceptedOutputDoesNotClaimTerminalState(t *testing.T) {
 func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 	key := "0123456789abcdef0123456789abcdef"
 	question := "private-human-question-sentinel"
-	tests := []api.RemoteErrorCode{
-		api.RemoteInvalidRequest,
-		api.RemoteUnauthorized,
-		api.RemoteForbidden,
-		api.RemoteNotFound,
-		api.RemoteConflict,
-		api.RemoteRevisionConflict,
-		api.RemoteTooLarge,
-		api.RemoteUnavailable,
-		api.RemoteInternal,
+	tests := []struct {
+		code    api.RemoteErrorCode
+		message string
+	}{
+		{api.RemoteInvalidRequest, "local API rejected the request"},
+		{api.RemoteUnauthorized, "local API credential is unauthorized"},
+		{api.RemoteForbidden, "local API request is forbidden"},
+		{api.RemoteNotFound, "local API entity was not found"},
+		{api.RemoteConflict, "local API request conflicts with durable state"},
+		{api.RemoteRevisionConflict, "local API revision is stale"},
+		{api.RemoteTooLarge, "local API request exceeds a bound"},
+		{api.RemoteUnavailable, "local API is unavailable"},
+		{api.RemoteInternal, "local API failed internally"},
 	}
-	for _, code := range tests {
-		t.Run(string(code), func(t *testing.T) {
+	for _, test := range tests {
+		t.Run(string(test.code), func(t *testing.T) {
 			fixture := newAPIFixture(t)
 			defer fixture.close(t)
 			t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", fixture.attemptPath)
 			done := serveOne(fixture.listener, func(api.Call) api.Reply {
-				reply, err := api.NewErrorReply(code)
+				reply, err := api.NewErrorReply(test.code)
 				if err != nil {
 					t.Errorf("new error reply: %v", err)
 				}
@@ -602,7 +709,7 @@ func TestRuntimeErrorsAreFixedAndPrivate(t *testing.T) {
 			if result := awaitServer(t, done); result.err != nil {
 				t.Fatal(result.err)
 			}
-			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: human request was not accepted\n" {
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: human request: "+test.message+"\n" {
 				t.Fatalf("error output = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 			}
 			for _, private := range []string{fixture.socket, fixture.attemptPath, string(fixture.bearer[:]), key, question} {
@@ -619,7 +726,7 @@ func TestMissingSocketOrAttemptTokenCannotFallBack(t *testing.T) {
 		t.Setenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE", "/private/missing-attempt-token")
 		var stdout, stderr bytes.Buffer
 		exit := run(context.Background(), []string{"attempt", "request-human", "--idempotency-key", "0123456789abcdef0123456789abcdef", "--question", "private-question"}, func(string) string { return "" }, &stdout, &stderr)
-		if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: attempt client configuration is invalid\n" {
+		if exit != exitFailure || stdout.Len() != 0 || !strings.HasPrefix(stderr.String(), "factoryctl: attempt client configuration is invalid\nfactoryctl: DARK_FACTORY_SOCKET is not set in this shell") {
 			t.Fatalf("missing socket = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 		}
 	})

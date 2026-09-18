@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -17,7 +18,7 @@ import (
 )
 
 func TestLegacyHomeMigratesAndKeepsEveryRow(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion, v17UserVersion, v18UserVersion, v19UserVersion} {
 		for _, persistWAL := range []bool{false, true} {
 			t.Run(fmt.Sprintf("v%d/wal=%v", version, persistWAL), func(t *testing.T) {
 				testLegacyHomeMigratesAndKeepsEveryRow(t, version, persistWAL)
@@ -128,6 +129,60 @@ func testLegacyHomeMigratesAndKeepsEveryRow(t *testing.T, version int, persistWA
 	}
 	if after := snapshotRows(t, ctx, again); !reflect.DeepEqual(before, after) {
 		t.Fatal("reopening a migrated home changed rows")
+	}
+}
+
+func TestV15LibraryMigrationPreservesDelegation(t *testing.T) {
+	path, _ := newLegacyDatabase(t, false, v15UserVersion)
+	store, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var prerequisite, conflict int
+	if err := store.readers.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM task_prerequisites WHERE task_id = ? AND upstream_task_id = ? AND upstream_work_revision = 1 AND consumed_run_id IS NULL),
+		(SELECT COUNT(*) FROM task_conflict_paths WHERE task_id = ? AND path = 'src/example.go')`, taskID(t, 210).Bytes(), taskID(t, 3).Bytes(), taskID(t, 210).Bytes()).Scan(&prerequisite, &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if prerequisite != 1 || conflict != 1 {
+		t.Fatalf("migration lost delegation: prerequisite=%d conflict=%d", prerequisite, conflict)
+	}
+	for _, table := range []string{"project_content_revisions", "project_content_evidence", "task_content_references"} {
+		var count int
+		if err := store.readers.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("new optional table %s: count=%d error=%v", table, count, err)
+		}
+	}
+}
+
+func TestV16OutcomeMigrationPreservesLibrary(t *testing.T) {
+	ctx := context.Background()
+	path, _ := newLegacyDatabase(t, false, v16UserVersion)
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first, firstBody, err := store.LegacyContent(ctx, contentID(t, 212), 1)
+	if err != nil || firstBody != "original definition" {
+		t.Fatalf("original revision: %+v %v", first, err)
+	}
+	second, secondBody, err := store.LegacyContent(ctx, contentID(t, 212), 2)
+	if err != nil || secondBody != "corrected definition" {
+		t.Fatalf("corrected revision: %+v %v", second, err)
+	}
+	evidence, err := store.ListContentEvidence(ctx, projectID(t, 1), contentID(t, 212), mustRevision(t, 1), 0, 4)
+	if err != nil || len(evidence.Items) != 1 || evidence.Items[0].Result != "passed" {
+		t.Fatalf("retained evidence: %+v %v", evidence, err)
+	}
+	refs, err := store.TaskContentReferences(ctx, projectID(t, 1), taskID(t, 210), mustRevision(t, 1))
+	if err != nil || len(refs) != 1 || refs[0].ContentRevision.Int64() != 1 {
+		t.Fatalf("retained attachment: %+v %v", refs, err)
+	}
+	var count int
+	if err := store.readers.QueryRow("SELECT COUNT(*) FROM project_outcome_revisions").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("optional outcome table: %d %v", count, err)
 	}
 }
 
@@ -264,6 +319,28 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		}
 	}
 	project := projectID(t, 1)
+	if version >= v15UserVersion {
+		_, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 210), ProjectID: project, AssignedAgentID: agentID(t, 2), IncarnationID: incarnationID(t, 211), Title: "dependent", Prerequisites: []TaskPrerequisite{{TaskID: taskID(t, 3), WorkRevision: mustRevision(t, 1)}}, ConflictPaths: []string{"src/example.go"}}, mustTime(t, 6))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if version >= v16UserVersion {
+		id := contentID(t, 212)
+		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, '', 'original definition', 'operator:local', '', 0, 9)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
+		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 2, ?, '', 'corrected definition', 'operator:local', '', 0, 10)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
+		content := ContentRevision{ID: id, ProjectID: project, Revision: mustRevision(t, 1)}
+		evidence, err := ContentEvidenceIDFromBytes(bytes.Repeat([]byte{213}, IDBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.CreateContentEvidence(ctx, NewContentEvidence{ID: evidence, ProjectID: project, ContentID: content.ID, ContentRevision: content.Revision, TestedSource: "retained-source", Result: "passed", Evaluator: "operator:local"}, mustTime(t, 11)); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AttachContentToTask(ctx, taskID(t, 210), project, content.ID, content.Revision, mustTime(t, 12)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, agent := range []struct {
 		seed     byte
 		provider Provider
@@ -330,6 +407,8 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		agentColumnsFor = v7AgentColumns
 	} else if version == v10UserVersion {
 		agentColumnsFor = v10AgentColumns
+	} else if version >= v11UserVersion {
+		agentColumnsFor = v11AgentColumns
 	}
 	if version != legacyUserVersion {
 		if err := rebuildTable(ctx, connection, legacy, "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
@@ -346,6 +425,15 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 	if err := rebuildTable(ctx, connection, legacy, "tasks", taskColumnsFor, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
 		t.Fatal(err)
 	}
+	// Every version before v14 bound a Git-free tree by its manifest facts,
+	// which a prepared, available or retained row had to carry.
+	if version < v14UserVersion {
+		if err := rebuildTable(ctx, connection, legacy, "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
+			"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	if version < priorUserVersion {
 		if err := rebuildTable(ctx, connection, legacy, "browser_pairing_challenges", previousPairingChallengeColumns, "", "", ""); err != nil {
 			t.Fatal(err)
@@ -365,7 +453,25 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	downgrade := []string{fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	if version >= v16UserVersion && version < v18UserVersion {
+		columns := "id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms"
+		if err := rebuildTable(ctx, connection, legacy, "project_content_revisions", columns, "project_content_revisions_project_kind", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	downgrade := []string{"DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	if version < v19UserVersion {
+		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
+	}
+	if version < v17UserVersion {
+		downgrade = append([]string{"DROP TABLE project_outcome_revisions"}, downgrade...)
+	}
+	if version < v16UserVersion {
+		downgrade = append([]string{"DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions"}, downgrade...)
+	}
+	if version < v15UserVersion {
+		downgrade = append([]string{"DROP TABLE task_conflict_paths", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites"}, downgrade...)
+	}
 	if version < v7UserVersion {
 		downgrade = append([]string{"DROP TABLE peer_questions"}, downgrade...)
 	}
@@ -444,10 +550,17 @@ const testAgentColumnsV4 = `id, project_id, name, role, provider, model, reasoni
 
 const v10AgentColumns = `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
 
+const v11AgentColumns = `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, archived, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
+
 // testTaskColumns is the v4 task row, before a send-back boundary was stored.
 const testTaskColumns = `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms`
 
 const testTaskColumnsV5 = `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms`
+
+// testChangeColumns is the Change row every version has had, spelled here so
+// the fixture and its comparison cannot lose a column with the migration's
+// list. The v13 tree fact columns are added by the fixture and dropped by v14.
+const testChangeColumns = `id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit, repository_dev, repository_inode, prepared_at_ms, available_at_ms, settled_run_id, revision, created_at_ms, updated_at_ms`
 
 // testInvalidationColumns is the invalidation row every version has had,
 // spelled here so the fixture cannot lose a column with the migration's list.
@@ -493,6 +606,9 @@ func snapshotSchemaRows(t *testing.T, ctx context.Context, connection *sql.Conn,
 		}
 		if name == "human_requests" {
 			columns = "id, run_id, idempotency_key, kind, reason_code, question_text, status, delivery_id, delivery_started_at_ms, resolution_kind, closed_at_ms, revision, created_at_ms, updated_at_ms"
+		}
+		if name == "changes" {
+			columns = testChangeColumns
 		}
 		rows, err := connection.QueryContext(ctx, "SELECT "+columns+" FROM "+name+" ORDER BY 1")
 		if err != nil {
@@ -556,7 +672,15 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
+		{"current", schemaStatements, "c6b2b517bc127ee3bad157cd51b0b072eed009403c319c7f4f10cd6fe1b65036"},
+		{"v19", v19SchemaStatements(), "d0334df36c119ed0311c1728656742999f4583366075dc78dc9a7b76dee4c35d"},
+		{"v18", v18SchemaStatements(), "a3af3c17a532d6b7b324507554a00080ec1c26d61831e3c51f1f1a6ac5279457"},
+		{"v17", v17SchemaStatements(), "8e566e2483f36de3f9b9d13722bbab6fb58293787b77f201ab16d98c7084ff54"},
+		{"v16", v16SchemaStatements(), "2547d01bcfd2878245cb3e6d27c0116cb6ebb9a032bf4816834b2138892d8705"},
+		{"v15", v15SchemaStatements(), "4657aab650b20fbf6ff2dac4e57d334d954321da14b5e14224aab200247cb4dc"},
+		{"v13", v13SchemaStatements(), "f38d4c5ac959eb2c3b23e3c0ace78faa1859201688cb12314c0c4fa721db56db"},
+		{"v12", v12SchemaStatements(), "78ff7808dc146c35383329f73c94559172e824e0b72484bc56db48291dbadefa"},
+		{"v11", v11SchemaStatements(), "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
 		{"v10", v10SchemaStatements(), "af5c61224274d2c62e8b78036e911239aa98d8b40154811cb9c4788ad224a603"},
 		{"v9", v9SchemaStatements(), "049dc8ff317e31a86157fd5366579954581a4468caaca63c5dd95ee2958ab4cb"},
 		{"v8", v8SchemaStatements(), "45606d5fa2b054c4ccee79c55f20b184f25ee0860ec5817099c0582174df676b"},
@@ -578,7 +702,7 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 // that reaches inside the migration transaction: the two above are rejected by
 // the preflight, on its disposable copy, before any pool exists.
 func TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion, v17UserVersion, v18UserVersion, v19UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t, version)
 		})

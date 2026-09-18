@@ -17,6 +17,20 @@ details live in [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md),
 [CONTRIBUTING.md](CONTRIBUTING.md), and
 [docs/development/WORKFLOW.md](docs/development/WORKFLOW.md).
 
+## Agent check loop
+
+During implementation, run `./scripts/go-check.sh` and focused tests for the
+changed risk. Process-sensitive Go tests use `-count=1` and must run through
+`./scripts/with-local-ci-lease.sh`; this keeps one heavy process run on the
+Mac without making source checks wait. Use `./scripts/local-ci.sh --ui`,
+`--runtime`, or `--release` when working across that component boundary.
+For CI changes, run the affected gate fixtures and source checks; use the
+explicit `./scripts/local-ci.sh` full gate when the risk needs broad local
+integration proof. Before review, record the exact head and checks run.
+An independent reviewer reproduces relevant risks. Do not repeat the full
+suite automatically for each edit, reviewer, or enqueue: the protected merge
+queue checks the actual combined tree, widening mixed or uncertain inputs.
+
 ## Writing code: the ponytail ladder
 
 Adopted 4 Sep 2026 by owner decision for all new work. What follows is the
@@ -60,4 +74,9 @@ Not lazy about: understanding the problem (read it fully and trace the real flow
 
 ## Factory-owned Change handoffs
 
-Factory-owned Changes are not Git worktrees: before settlement, remove generated dependencies, outputs, caches, and empty leftover directories while preserving source and refused evidence, then provide a nonempty durable result that records the checks run.
+A factory-owned Change is a linked Git worktree of this repository on its own
+`factory/<12 hex>` branch. Commit your work on that branch before settlement:
+the settled branch head is what the overseer publishes and the reviewer reads.
+Remove generated dependencies, outputs, caches, and empty leftover directories
+that `.gitignore` does not cover, then provide a nonempty durable result that
+records the checks run and the head you left.

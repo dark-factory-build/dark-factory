@@ -22,6 +22,22 @@ Shell and Codex are proven end to end. The Claude Code launch path is
 fixture-proven in the current source; a live run against its
 signed-in CLI remains required before it is included in a release.
 
+## Select an existing provider account
+
+Use `factoryctl account discover` or `factoryctl account list` to inspect existing
+provider logins and linked identities. Both return complete paged observations;
+linked accounts remain visible with an unavailable reason if their login files
+have disappeared. These commands do not start a login flow or export credentials.
+
+```sh
+factoryctl account link --provider codex --home /absolute/provider/home --label dogfood
+factoryctl agent select-account --agent AGENT_ID --revision REVISION --account ACCOUNT_ID
+```
+
+Selection requires an idle worker and its current revision. It changes future
+runs; it cannot switch credentials underneath an active run. Use the existing
+provider login flow first when the desired account is not discoverable.
+
 ## Create an agent
 
 Provider choice is explicit:
@@ -35,12 +51,45 @@ factoryctl agent create --project PROJECT_ID --name worker --provider codex --mo
 rejected for `shell`. Claude Code accepts `low`, `medium`, `high`, `xhigh`, or
 `max`; Codex additionally accepts `ultra`.
 
-`--role orchestrator` names an overseer. A worker's run materializes a Change
-of the project and works there; an orchestrator's run binds no Change and is
-given its private runtime home as its working directory, from which it reads
-what workers retained and publishes through the Maintainer App. Neither role
-is confined beyond that: both run as the operator with the authority the
-environment section below describes. A Claude Code orchestrator is launched
+An operator may set the model for an existing worker with its observed
+revision:
+
+```sh
+factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5.6-luna --reasoning-effort medium
+```
+
+The same provider validation applies. An admitted run retains its immutable
+model and effort, so the selection affects only future admissions.
+
+Overseers keep enduring acceptance criteria, prerequisites and owner-authority
+clarifications in the task's complete base instruction using
+`overseer task update --body` while it is queued, preserving its original
+acceptance criteria. A send-back replaces the previous feedback; use its note
+for the latest findings or pointers, not enduring requirements. See
+[the queued correction procedure](development/OVERSEER.md).
+
+`--role orchestrator` names an overseer. A worker's run makes a Change of
+the project, a linked Git worktree on the Change's branch, and works there;
+an orchestrator's run binds no Change and is given its private runtime home
+as its working directory. It requests a worker's settled Change explicitly
+with `factoryctl attempt source --task TASK_ID`. The daemon checks that target
+task in the authenticated attempt's same project, requires its current settled
+retained Change (including blocked, failed, or cancelled outcomes), verifies
+the worktree is still at the settled head, and returns the Change ID, base
+commit, `head_commit`, `branch`, target task ID, task work revision, current
+Change revision, the worktree as `source_path`, the Change's actual Git directory
+as `git_directory`, and whether the worktree holds uncommitted work. The
+directory is private for new Changes and may be canonical for retained legacy
+worktrees, which are not automatically converted. This changes ordinary Git
+state ownership, not provider permissions or arbitrary-path access. The
+branch head is the work: read it with `git --git-dir=$git_directory`. An
+accepted response without that receipt is unusable; never reconstruct a path
+or select a project-latest tree. A Codex orchestrator's local commands are
+granted the repository's Git directory read-only; they do not receive the
+daemon database, the Changes parent, or the daemon home. A later work
+revision or Change revision, or a branch that moved since settlement, is
+refused.
+overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
 with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
 the fixed tool path, as its one MCP server; a Claude Code worker is launched
 with `--strict-mcp-config` and no server, so nothing in its account
@@ -66,7 +115,8 @@ The managed daemon searches this fixed default tool path, never ambient
 ~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-An explicit `factoryd --tool-path` replaces the default. Search is
+An explicit `factoryd --tool-path` replaces the default; managed installations
+accept the same option through `factoryctl service install`. Search is
 ordered; an existing candidate that cannot be resolved and committed fails
 closed rather than falling through to another executable. A symlink is resolved
 once and the direct Mach-O target is committed and reverified before exec. The
@@ -77,7 +127,81 @@ The launch arguments are defined in `internal/provider/provider.go` and guarded
 by the exact-argv checks in `internal/provider/provider_darwin_test.go`. The
 configuration and capability boundaries are described below.
 
-Codex receives the daemon-authorized Change directory as an invocation-only
+### Native session persistence
+
+A worker's Claude Code launch adds `--session-id UUID` or `--resume UUID`
+right after `--dangerously-skip-permissions`. The CLI keys a conversation's
+own transcript by the exact launch directory under its effective
+configuration directory (`<config-home>/projects/<escaped-cwd>/<uuid>.jsonl`,
+where every byte of the directory outside `A-Za-z0-9` becomes `-`, so
+`~/.dark-factory/changes/ID` is `-Users-op--dark-factory-changes-ID`; the
+escape must match the CLI exactly, because a `--session-id` the CLI already
+knows is refused as already in use and the provider exits 1 before any
+attempt outcome):
+`HOME/.claude` by default, or a linked account's own directory when one is
+selected, exactly the directory the launch environment names
+`CLAUDE_CONFIG_DIR` (`claudeConfigHome` in `internal/provider/provider.go` is
+the one place this is computed, shared by the launch environment and by
+session discovery so they can never disagree); a worker's launch directory is
+its task incarnation's Change worktree, which a send-back retry reuses (see
+`internal/kernel/change.go`), so the same UUID keeps a correction in the same
+native conversation instead of a fresh one that only repeats the brief. The
+UUID is derived (UUID v5, RFC 4122) from provider, agent ID and
+task incarnation ID, so no extra state records which session belongs to which
+task, and `--resume` is chosen only when that exact transcript file already
+exists on disk; a first attempt, or a transcript past the shared rotation
+ceiling in `internal/provider/provider.go` (`nativeSessionRotateBytes`), gets
+a fresh `--session-id` instead. This does not apply to a Claude Code
+orchestrator launch: its working directory is a fresh runtime root on every
+run (see `internal/daemon/supervisor_darwin.go` and
+`internal/changeworker/worker_darwin.go`), so no chosen ID could ever be found
+again; giving the orchestrator role a stable per-agent working directory
+across runs is a separate, larger change, so a Claude orchestrator's launch
+argv is unaffected.
+
+Codex offers no way to choose or name a session's ID at creation (no
+`--session-id`/`--name` flag or config key on `codex`, `codex exec`, or any
+subcommand), so a Codex worker or orchestrator launch instead discovers an
+already-recorded session and resumes it with a leading `codex resume
+SESSION_ID` (all of it added before the same `-c` overrides the launch always
+carries; `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` accepts every one of
+them identically to bare `codex`, confirmed from its own `--help`). Every
+launch also carries the supported `tui.resume_cwd="current"` override. This
+binds an explicit resume to the current daemon-authorized attempt directory,
+so a session recorded by an earlier runtime cannot stop at Codex's interactive
+working-directory chooser. Codex's
+own rollout files live under `CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`,
+bucketed by wall-clock date rather than launch directory; each one's first
+JSON line records `payload.cwd` and `payload.id` (the resumable session id;
+for an ordinary, non-subagent Dark Factory launch this equals the filename's
+own trailing UUID and Codex's `session_id`, so a rollout's own filename is
+never trusted alone). `codexSessionSelection` walks day directories newest
+first, bounded to the newest 30 days (`maxCodexScanDays`), and within a day
+reads only each rollout's bounded first line looking for the newest one whose
+`cwd` matches; the newest match is resumed while under the same
+`nativeSessionRotateBytes` ceiling, otherwise the launch is a fresh one
+(unchanged argv), never falling back to an older, smaller match for the same
+cwd. A worker's launch cwd is its retained Change worktree (as for Claude),
+so a send-back retry finds its own rollout directly. An orchestrator's launch
+cwd is a fresh runtime root every run like Claude's, but `codex resume
+SESSION_ID` does not require the resuming launch's own cwd to match (cwd
+filtering is a convenience of the interactive picker and `--last`, which
+`resume --all` exists to disable; an explicit SESSION_ID resolves regardless
+of cwd), so Build instead searches by `previousWorkingDirectory`: the same
+agent's most recently terminal run's own working directory. That path is
+found from `kernel.Store.LatestTerminalRuntimeRoot`, a minimal read joining
+`runs` and `resources` for the newest terminal run's `runtime_root` resource
+path (retained in that row after release, so it stays readable long after the
+directory itself is reclaimed), joined with `changeworker.HomeName`
+(`.../home`, the exact directory Codex was launched in) and threaded through
+`changeworker.Config.PreviousWorkingDirectory` and
+`provider.Request.WithPreviousWorkingDirectory`. This is how an overseer's
+distinct standing tasks share one continuing Codex context despite each one's
+own fresh runtime root. A first-ever orchestrator run, or one whose prior
+Codex session cannot be found, launches unaffected, the same as a worker's
+first attempt.
+
+Codex receives the daemon-authorized Change worktree as an invocation-only
 project override with `trust_level="untrusted"`. This suppresses Codex's
 interactive directory-trust screen while explicitly refusing project-local
 configuration and hooks; the directory is never persisted in Codex config and
@@ -94,10 +218,32 @@ CODEX_HOME=<account-home>/.codex
 ```
 
 Codex local commands use a launch-derived permission profile: the Change,
-private runtime home and temp directory are writable; the exact provider
+private runtime home and temp directory are writable; current same-project
+retained Change trees selected at launch are individually readable; the exact provider
 executable, factoryctl, attempt token and socket are readable. Other file
 access is denied except Codex's minimal platform/runtime paths, including its
-temp exceptions. Command escalation is disabled. The profile name is derived from the private runtime home, avoiding shared
+temp exceptions. An optional startup `--toolchain-read-roots` path list adds
+read-only access to exact installed software directories (for example one
+Node installation including its Corepack libraries, or one Go `libexec`).
+This is not inferred from PATH and does not pin every child executable.
+With the default Darwin tool path, factoryd derives the pinned Node
+`v22.20.0` bin directory, Cargo's bin directory, a pinned Homebrew Go's
+canonical `libexec/bin` directory, and the selected account's Rustup metadata
+when those canonical directories exist. The Homebrew `opt`/`Cellar` symlink
+chain is outside the sandbox's read grant, so the tool path uses the
+resolved `libexec/bin` directly rather than the usual `/opt/homebrew/bin`
+entry point. An explicit `--tool-path` or `--toolchain-read-roots` remains
+authoritative.
+The paths must be canonical existing directories owned by the daemon user,
+or the exact root-owned `/Library/Developer/CommandLineTools` installation,
+not writable by other users,
+and cannot overlap Factory private paths or include account/credential roots.
+The managed service install accepts and records the same option; status and
+uninstall recover it from the receipt. Changing it requires reinstalling.
+Codex Go, Corepack, npm and XDG caches live inside the private runtime home;
+operator caches are not inherited. Tool versions and command-specific compiler
+or OpenSSL settings remain the task and installation owner's choices.
+Command escalation is disabled. The profile name is derived from the private runtime home, avoiding shared
 account profile names because Codex merges nested configuration tables. The argv
 policy remains bounded by the runner's existing 8 KiB per-argument limit.
 
@@ -194,22 +340,28 @@ ready, as a keystroke of its own once the CLI's output has been quiet for half
 a second (after a one-second floor, or at five seconds regardless), because a
 CLI reads text and newline arriving together as a paste, and a paste does not
 submit. The complete prepared input must fit 8 KiB; a partial or uncertain
-write of the text fails the attempt and is never replayed.
+write of the text fails the attempt and is never replayed. A daemon-delivered
+human reply or overseer message reaches Claude and Codex the same way: the
+text as one write, then the runner's own Enter once the output is quiet, so
+the CLI submits it instead of holding it in its input box.
 
 Codex starts from a fixed, non-secret positional instruction to run
 `factoryctl attempt task` first. That command authenticates with the attempt's
 private credential and returns the exact effective task as terminal-safe JSON;
-body wins, with title used only when a native task has no body. Codex task text
+body wins, with title
+used only when a native task has no body. Codex task text
 is absent from argv, environment, and Change-worker configuration, and is
 bounded to 8 KiB so the configured 32,768-token tool-result budget cannot
 truncate it even under worst-case control-character escaping. The attempt API
 serves it only while that exact run is `running`.
 
-Codex workers can exchange one durable, task-linked question and answer with
-another Codex worker using `factoryctl attempt peer status`, `peer ask`, and
-`peer answer`. Questions are asynchronous: a queued recipient reads it when
-its attempt starts, and neither command grants task or terminal control. A
-stale paged status must restart from the first page.
+Workers and overseers can exchange one durable, task-linked question and
+answer across providers using `factoryctl attempt peer status`, `peer ask`,
+and `peer answer`. Questions are asynchronous: a queued recipient reads it
+when its attempt starts, and neither command grants task or terminal control.
+Terminal notification is adapter-specific; when no live adapter is available,
+the durable inbox remains readable. A stale paged status must restart from the
+first page.
 
 Subsequent browser terminal input goes directly to the same PTY. The provider
 reports its durable outcome through the attempt-scoped `factoryctl` supplied by
@@ -220,3 +372,16 @@ checks that none remain in its Change.
 Provider changes must preserve admission-time selection, daemon-owned process
 lifecycle, exact task delivery, and deterministic failure when a required
 launch fact is unavailable.
+
+An operator can change an existing worker's model for future runs:
+
+```sh
+factoryctl agent select-model --agent AGENT_ID --revision REVISION --model gpt-5.6-luna --reasoning-effort medium
+```
+
+Use the current agent revision from `factoryctl status`. The update refuses a stale revision or unsupported provider controls. An already admitted run keeps its model and effort. Omitting effort clears the explicit override for future runs.
+
+Every provider's local commands get the same Git identity for commits on the
+Change branch, `Dark Factory Worker <worker@darkfactory.build>`, with no
+credential helper, SSH command, prompt or `gh` configuration: a worker can
+commit, and only the Maintainer App publishes.

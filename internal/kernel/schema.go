@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 11
+	userVersion   = 20
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -70,20 +70,20 @@ var schemaStatements = []string{
     idle_after_seconds INTEGER NOT NULL CHECK (idle_after_seconds BETWEEN 0 AND 604800),
     idle_instruction TEXT NOT NULL CHECK (length(CAST(idle_instruction AS BLOB)) <= 32768),
     idle_run_budget INTEGER NOT NULL CHECK (idle_run_budget BETWEEN 0 AND 1000000),
-    idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0 AND idle_runs_used <= idle_run_budget),
+    idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0),
     tool_budget_limit INTEGER NOT NULL CHECK (tool_budget_limit BETWEEN 1 AND 1000000000),
     tool_calls_used INTEGER NOT NULL CHECK (tool_calls_used >= 0 AND tool_calls_used <= tool_budget_limit),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
     CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL AND account_id IS NULL)),
-    CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> '' AND idle_run_budget >= 1))
+    CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> ''))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX agents_id_project_unique ON agents(id, project_id)`,
 	`CREATE TABLE tasks (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
-    assigned_agent_id BLOB NOT NULL CHECK (length(assigned_agent_id) = 16),
+    assigned_agent_id BLOB CHECK (assigned_agent_id IS NULL OR length(assigned_agent_id) = 16),
     incarnation_id BLOB NOT NULL CHECK (length(incarnation_id) = 16),
     work_revision INTEGER NOT NULL CHECK (work_revision >= 1),
     title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 1024),
@@ -104,11 +104,74 @@ var schemaStatements = []string{
         (status = 'succeeded' AND blocked_reason IS NULL AND completed_at_ms IS NOT NULL) OR
         (status IN ('failed', 'cancelled') AND blocked_reason IS NULL AND result IS NULL AND completed_at_ms IS NOT NULL)
     ),
-    CHECK (completed_at_ms IS NULL OR completed_at_ms = updated_at_ms)
+    CHECK (completed_at_ms IS NULL OR completed_at_ms = updated_at_ms),
+    CHECK (assigned_agent_id IS NOT NULL OR status IN ('queued', 'cancelled'))
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX tasks_id_project_incarnation_unique ON tasks(id, project_id, incarnation_id)`,
 	`CREATE UNIQUE INDEX tasks_incarnation_unique ON tasks(incarnation_id)`,
 	`CREATE INDEX tasks_canonical_queue ON tasks(status, priority DESC, created_at_ms ASC, id ASC)`,
+	`CREATE TABLE task_prerequisites (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), upstream_task_id BLOB NOT NULL CHECK (length(upstream_task_id) = 16) REFERENCES tasks(id), upstream_work_revision INTEGER NOT NULL CHECK (upstream_work_revision >= 1), consumed_run_id BLOB CHECK (consumed_run_id IS NULL OR length(consumed_run_id) = 16) REFERENCES runs(id), PRIMARY KEY (task_id, upstream_task_id), CHECK (task_id <> upstream_task_id)) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX task_prerequisites_upstream ON task_prerequisites(upstream_task_id, upstream_work_revision)`,
+	`CREATE TABLE task_conflict_paths (task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id), path TEXT NOT NULL CHECK (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) <> '/' AND instr(path, char(0)) = 0), PRIMARY KEY (task_id, path)) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE project_outcome_revisions (
+    id BLOB NOT NULL CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    document TEXT NOT NULL CHECK (length(CAST(document AS BLOB)) BETWEEN 1 AND 32768),
+    author TEXT NOT NULL CHECK (length(CAST(author AS BLOB)) BETWEEN 1 AND 256),
+    authority TEXT NOT NULL CHECK (length(CAST(authority AS BLOB)) BETWEEN 1 AND 64),
+    objective_hash BLOB NOT NULL CHECK (length(objective_hash) = 32),
+    objective_work_revision INTEGER NOT NULL CHECK (objective_work_revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (id, revision)
+) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX project_outcome_revisions_project ON project_outcome_revisions(project_id, id, revision DESC)`,
+	`CREATE TABLE project_content_revisions (
+    id BLOB NOT NULL CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    kind TEXT NOT NULL CHECK (length(CAST(kind AS BLOB)) BETWEEN 1 AND 64),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 1024),
+    description TEXT NOT NULL CHECK (length(CAST(description AS BLOB)) <= 4096),
+    body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 1048576),
+    author TEXT NOT NULL CHECK (length(CAST(author AS BLOB)) BETWEEN 1 AND 256),
+    source_references TEXT NOT NULL CHECK (length(CAST(source_references AS BLOB)) <= 32768),
+	object_format TEXT CHECK (object_format IS NULL OR object_format IN ('sha1', 'sha256')),
+	commit_oid TEXT CHECK (commit_oid IS NULL OR length(CAST(commit_oid AS BLOB)) BETWEEN 40 AND 64),
+	path TEXT CHECK (path IS NULL OR (length(CAST(path AS BLOB)) BETWEEN 1 AND 4096 AND substr(path, 1, 1) <> '/' AND instr(path, char(0)) = 0)),
+	repository_dev INTEGER CHECK (repository_dev IS NULL OR repository_dev >= 0),
+	repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
+	deprecated INTEGER NOT NULL CHECK (deprecated IN (0, 1)),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+	PRIMARY KEY (id, revision),
+	CHECK ((object_format IS NULL AND commit_oid IS NULL AND path IS NULL AND repository_dev IS NULL AND repository_inode IS NULL) OR (object_format IS NOT NULL AND commit_oid IS NOT NULL AND path IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL))
+) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX project_content_revisions_project_kind ON project_content_revisions(project_id, kind, id, revision DESC)`,
+	`CREATE TABLE project_content_evidence (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    content_id BLOB NOT NULL CHECK (length(content_id) = 16),
+    content_revision INTEGER NOT NULL CHECK (content_revision >= 1),
+    tested_source TEXT NOT NULL CHECK (length(CAST(tested_source AS BLOB)) BETWEEN 1 AND 4096),
+    environment TEXT NOT NULL CHECK (length(CAST(environment AS BLOB)) <= 4096),
+    result TEXT NOT NULL CHECK (result IN ('passed', 'failed', 'incomplete', 'not_run')),
+    location TEXT NOT NULL CHECK (length(CAST(location AS BLOB)) <= 4096),
+    evaluator TEXT NOT NULL CHECK (length(CAST(evaluator AS BLOB)) BETWEEN 1 AND 256),
+    judgment TEXT NOT NULL CHECK (length(CAST(judgment AS BLOB)) <= 8192),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    FOREIGN KEY (content_id, content_revision) REFERENCES project_content_revisions(id, revision)
+) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX project_content_evidence_content ON project_content_evidence(project_id, content_id, content_revision, id)`,
+	`CREATE TABLE task_content_references (
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    task_work_revision INTEGER NOT NULL CHECK (task_work_revision >= 1),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
+    content_id BLOB NOT NULL CHECK (length(content_id) = 16),
+    content_revision INTEGER NOT NULL CHECK (content_revision >= 1),
+    attached_at_ms INTEGER NOT NULL CHECK (attached_at_ms >= 0),
+    PRIMARY KEY (task_id, task_work_revision, content_id, content_revision),
+    FOREIGN KEY (content_id, content_revision) REFERENCES project_content_revisions(id, revision)
+) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE changes (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
@@ -119,12 +182,8 @@ var schemaStatements = []string{
 	base_commit BLOB,
 	repository_dev INTEGER CHECK (repository_dev IS NULL OR repository_dev >= 0),
 	repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
+	head_commit BLOB CHECK (head_commit IS NULL OR length(head_commit) = length(base_commit)),
     prepared_at_ms INTEGER CHECK (prepared_at_ms IS NULL OR prepared_at_ms >= 0),
-    tree_digest BLOB CHECK (tree_digest IS NULL OR length(tree_digest) = 32),
-    entry_count INTEGER CHECK (entry_count IS NULL OR entry_count BETWEEN 0 AND 10000),
-    total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes BETWEEN 0 AND 1073741824),
-	tree_dev INTEGER CHECK (tree_dev IS NULL OR tree_dev >= 0),
-	tree_inode INTEGER CHECK (tree_inode IS NULL OR tree_inode > 0),
     available_at_ms INTEGER CHECK (available_at_ms IS NULL OR available_at_ms >= 0),
 	settled_run_id BLOB CHECK (settled_run_id IS NULL OR length(settled_run_id) = 16),
     revision INTEGER NOT NULL CHECK (revision >= 1),
@@ -134,11 +193,11 @@ var schemaStatements = []string{
 	FOREIGN KEY (settled_run_id, id, project_id, task_id, task_incarnation_id) REFERENCES runs(id, change_id, project_id, task_id, task_incarnation_id),
 	CHECK ((object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL) OR (object_format = 'sha1' AND length(base_commit) = 20 AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL) OR (object_format = 'sha256' AND length(base_commit) = 32 AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL)),
 	CHECK (
-		(phase = 'reserved' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
-		(phase = 'prepared' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
-		(phase = 'available' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NULL) OR
-		(phase = 'retained' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NOT NULL) OR
-		(phase = 'abandoned' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NOT NULL)
+		(phase = 'reserved' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND head_commit IS NULL AND prepared_at_ms IS NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
+		(phase = 'prepared' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND head_commit IS NULL AND prepared_at_ms IS NOT NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
+		(phase = 'available' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NULL) OR
+		(phase = 'retained' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NOT NULL) OR
+		(phase = 'abandoned' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND head_commit IS NULL AND prepared_at_ms IS NULL AND available_at_ms IS NULL AND settled_run_id IS NOT NULL)
 	)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX changes_id_project_task_incarnation_unique ON changes(id, project_id, task_id, task_incarnation_id)`,
@@ -388,15 +447,45 @@ var schemaStatements = []string{
 	`CREATE UNIQUE INDEX peer_questions_recipient_delivery_unique ON peer_questions(recipient_delivery_id) WHERE recipient_delivery_id IS NOT NULL`,
 	`CREATE UNIQUE INDEX peer_questions_answer_delivery_unique ON peer_questions(answer_delivery_id) WHERE answer_delivery_id IS NOT NULL`,
 	`CREATE INDEX peer_questions_task_history ON peer_questions(project_id, source_task_id, target_task_id, created_at_ms, id)`,
+	`CREATE TABLE continuations (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
+    work_revision INTEGER NOT NULL CHECK (work_revision >= 1),
+    context_digest BLOB NOT NULL CHECK (length(context_digest) = 32),
+    condition_kind TEXT NOT NULL CHECK (condition_kind IN ('human_request', 'peer_question', 'handoff', 'dependency', 'invalidation')),
+    condition_id BLOB NOT NULL CHECK (length(condition_id) = 16 AND condition_id <> zeroblob(16)),
+    condition_revision INTEGER NOT NULL CHECK (condition_revision >= 1),
+    state TEXT NOT NULL CHECK (state IN ('waiting', 'queued', 'resolved', 'cancelled')),
+    resolution_detail TEXT CHECK (resolution_detail IS NULL OR length(CAST(resolution_detail AS BLOB)) BETWEEN 1 AND 8192),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    resolved_at_ms INTEGER CHECK (resolved_at_ms IS NULL OR resolved_at_ms = updated_at_ms),
+    FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
+    CHECK ((state = 'waiting' AND resolution_detail IS NULL AND resolved_at_ms IS NULL) OR
+           (state = 'queued' AND resolution_detail IS NOT NULL AND resolved_at_ms IS NOT NULL) OR
+           (state IN ('resolved', 'cancelled') AND resolution_detail IS NOT NULL AND resolved_at_ms IS NOT NULL))
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX continuations_one_waiting_per_condition ON continuations(task_id, task_incarnation_id, work_revision, condition_kind, condition_id) WHERE state = 'waiting'`,
+	`CREATE INDEX continuations_admission_queue ON continuations(state, updated_at_ms, id)`,
 	`CREATE TABLE invalidations (
     sequence INTEGER PRIMARY KEY CHECK (sequence >= 1),
     occurred_at_ms INTEGER NOT NULL CHECK (occurred_at_ms >= 0),
-    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('factory', 'project', 'agent', 'task', 'change', 'run', 'human_request', 'account', 'peer_question')),
+    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('factory', 'project', 'agent', 'task', 'change', 'run', 'human_request', 'account', 'peer_question', 'continuation')),
     entity_id BLOB NOT NULL CHECK (length(entity_id) = 16),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     deleted INTEGER NOT NULL CHECK (deleted IN (0, 1))
 ) STRICT`,
 	`CREATE UNIQUE INDEX invalidations_entity_revision_unique ON invalidations(entity_kind, entity_id, revision)`,
+	`CREATE TABLE terminal_diagnostics (
+    run_id BLOB PRIMARY KEY CHECK (length(run_id) = 16) REFERENCES runs(id),
+    floor INTEGER NOT NULL CHECK (floor >= 0),
+    head INTEGER NOT NULL CHECK (head >= floor),
+    payload BLOB NOT NULL CHECK (length(payload) <= 1048576 AND length(payload) <= head - floor),
+    captured_at_ms INTEGER NOT NULL CHECK (captured_at_ms >= 0)
+) STRICT, WITHOUT ROWID`,
 }
 
 type schemaObject struct {

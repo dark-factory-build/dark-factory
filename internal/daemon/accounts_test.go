@@ -1,12 +1,16 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 // discoveryDaemon is the smallest daemon discovery needs: a clock, because it
@@ -73,6 +77,47 @@ func TestDiscoverAccountsReadsLoginsAndNeverTokens(t *testing.T) {
 				t.Fatalf("discovery leaked %q in %+v", secret, account)
 			}
 		}
+	}
+}
+
+func TestListedAccountsRetainsLinkedLoginWhenDiscoveryBecomesUnavailable(t *testing.T) {
+	home := t.TempDir()
+	login := filepath.Join(home, ".codex-dogfood")
+	identity := filepath.Join(login, "auth.json")
+	writeFile(t, identity, `{"tokens":{"account_id":"acct-2"}}`)
+	id, err := kernel.AccountIDFromBytes(bytes.Repeat([]byte{9}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked := []kernel.Account{{ID: id, Provider: kernel.ProviderCodex, Home: login, Label: "dogfood"}}
+	if listed := discoveryDaemon().listedAccounts(home, linked); len(listed) != 1 || listed[0].LinkedID != id.String() || listed[0].UnavailableReason != "" {
+		t.Fatalf("available linked account = %+v", listed)
+	}
+	if err := os.Remove(identity); err != nil {
+		t.Fatal(err)
+	}
+	listed := discoveryDaemon().listedAccounts(home, linked)
+	if len(listed) != 1 || listed[0].Provider != "codex" || listed[0].Home != login || listed[0].Label != "dogfood" || listed[0].LinkedID != id.String() || listed[0].UnavailableReason != "login is no longer discoverable" {
+		t.Fatalf("unavailable linked account = %+v", listed)
+	}
+}
+
+func TestListedAccountsPreservesLinkedAndDiscoveredLoginsForPaging(t *testing.T) {
+	home := t.TempDir()
+	for index := 0; index < 4096; index++ {
+		writeFile(t, filepath.Join(home, fmt.Sprintf(".codex-%04d", index), "auth.json"), `{"tokens":{"account_id":"acct"}}`)
+	}
+	id, err := kernel.AccountIDFromBytes(bytes.Repeat([]byte{8}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked := kernel.Account{ID: id, Provider: kernel.ProviderCodex, Home: filepath.Join(home, ".codex-retained"), Label: "retained"}
+	accounts := discoveryDaemon().listedAccounts(home, []kernel.Account{linked})
+	if len(accounts) != 4097 {
+		t.Fatalf("listed %d accounts, want complete inventory %d", len(accounts), 4097)
+	}
+	if accounts[0].LinkedID != id.String() || accounts[0].Home != linked.Home || accounts[0].UnavailableReason != "login is no longer discoverable" {
+		t.Fatalf("linked account was clipped or misprojected: %+v", accounts[0])
 	}
 }
 

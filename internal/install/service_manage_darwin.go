@@ -143,7 +143,7 @@ func receiptMatchesInstallation(receipt serviceReceipt, home string, config Serv
 	if receipt.PlistPath != plistPath {
 		return fmt.Errorf("%w: receipt plist path", ErrServiceForeign)
 	}
-	_, digest, err := ServicePlist(home, config.Label, receipt.RelayOrigin, receipt.DevelopmentBrowserAddress)
+	_, digest, err := ServicePlist(home, config.Label, receipt.RelayOrigin, receipt.DevelopmentBrowserAddress, receipt.ToolPath, receipt.ToolchainReadRoots)
 	if err != nil {
 		return err
 	}
@@ -200,6 +200,9 @@ func serviceInstallAt(ctx context.Context, home, userHome string, config Service
 }
 
 func serviceInstallLockedAt(ctx context.Context, home, userHome string, config ServiceConfig, sourceDir string, launchctl launchctlRun, capability *serviceHomeCapability) (ServiceStatus, error) {
+	if err := CheckToolchainReadRoots(config.ToolchainReadRoots, userHome, home, ChangesPath(home)); err != nil {
+		return ServiceStatus{}, err
+	}
 	inspection, err := inspectServiceWithCapabilityAt(ctx, home, userHome, config, launchctl, capability)
 	status := inspection.status
 	if err == nil && (status.State == ServiceInstalled || status.State == ServiceRunning) {
@@ -207,6 +210,9 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 			// Repeating an install is recognized only when it would render the
 			// same plist. A changed relay origin needs the old job removed.
 			return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w %q; run factoryctl service uninstall first", ErrServiceRelayOrigin, inspection.relayOrigin)
+		}
+		if inspection.toolPath != config.ToolPath || inspection.toolchainReadRoots != config.ToolchainReadRoots {
+			return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: installed toolchain differs; run factoryctl service uninstall first", ErrServiceForeign)
 		}
 		if inspection.developmentBrowserAddress != config.DevelopmentBrowserAddress {
 			return ServiceStatus{State: ServiceAmbiguous}, fmt.Errorf("%w: installed development browser address differs; run factoryctl service uninstall first", ErrServiceForeign)
@@ -242,14 +248,14 @@ func serviceInstallLockedAt(ctx context.Context, home, userHome string, config S
 			programDigest = digest
 		}
 	}
-	plistBytes, plistDigest, err := ServicePlist(home, config.Label, config.RelayOrigin, config.DevelopmentBrowserAddress)
+	plistBytes, plistDigest, err := ServicePlist(home, config.Label, config.RelayOrigin, config.DevelopmentBrowserAddress, config.ToolPath, config.ToolchainReadRoots)
 	if err != nil {
 		return ServiceStatus{}, err
 	}
 	receipt := serviceReceipt{
 		Version: serviceReceiptVersion, Label: config.Label, PlistPath: plistPath,
 		PlistDigest: hex.EncodeToString(plistDigest[:]), ProgramDigest: programDigest,
-		RelayOrigin: config.RelayOrigin, DevelopmentBrowserAddress: config.DevelopmentBrowserAddress,
+		RelayOrigin: config.RelayOrigin, DevelopmentBrowserAddress: config.DevelopmentBrowserAddress, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots,
 	}
 	body, err := encodeServiceReceipt(receipt)
 	if err != nil {
@@ -406,7 +412,7 @@ func serviceUninstallLockedAt(ctx context.Context, home, userHome string, config
 			}
 		}
 	} else {
-		expectedPlist, _, err = ServicePlist(home, config.Label, "", "")
+		expectedPlist, _, err = ServicePlist(home, config.Label, "", "", "", "")
 		if err != nil {
 			return ServiceStatus{}, err
 		}

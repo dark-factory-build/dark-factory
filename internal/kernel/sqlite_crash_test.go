@@ -230,7 +230,7 @@ func TestConcreteStoreCrashBeforeAndAfterAdmissionCommit(t *testing.T) {
 		wantHead     int64
 		// A committed admission also publishes the project's incremented lifetime
 		// run count, so its project invalidation advances the durable head once.
-	}{{"before", "admit-before", 1, 3}, {"after", "admit-after", 2, 7}} {
+	}{{"before", "admit-before", 1, 3}, {"after", "admit-after", 1, 6}} {
 		t.Run(test.name, func(t *testing.T) {
 			store, path, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 			task, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 228), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 229), Title: "crash"}, mustTime(t, 5))
@@ -261,7 +261,7 @@ func TestConcreteStoreCrashBeforeAndAfterAdmissionCommit(t *testing.T) {
 			if taskErr != nil || !found {
 				t.Fatal(taskErr)
 			}
-			if test.wantRevision == 1 {
+			if test.mode == "admit-before" {
 				if reconcileErr != nil || admission.Admitted() || admission.Reason != NoAdmissionNotReconciled || freshTask.Status != TaskQueued {
 					t.Fatalf("pre-commit reconciliation = %+v err=%v task=%+v", admission, reconcileErr, freshTask)
 				}

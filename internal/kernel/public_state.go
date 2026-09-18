@@ -20,7 +20,7 @@ const publicTaskIDs = `WITH public_task_ids AS (
  UNION SELECT r.task_id FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE h.status IN ('open', 'delivering', 'delivery_unknown')
  UNION SELECT id FROM (
   SELECT id, ROW_NUMBER() OVER (PARTITION BY assigned_agent_id ORDER BY updated_at_ms DESC, id DESC) AS rank
-  FROM tasks WHERE status NOT IN ('queued', 'running')
+  FROM tasks WHERE status NOT IN ('queued', 'running') AND assigned_agent_id IS NOT NULL
  ) WHERE rank = 1
 ) `
 
@@ -197,7 +197,7 @@ func scanPublicTasks(rows *sql.Rows) ([]TaskSummary, error) {
 		}
 		id, idErr := TaskIDFromBytes(rawID)
 		projectID, projectErr := ProjectIDFromBytes(rawProjectID)
-		agentID, agentErr := AgentIDFromBytes(rawAgentID)
+		agentID, agentErr := optionalAgentID(rawAgentID)
 		status, statusErr := parseTaskStatus(rawStatus)
 		revision, revisionErr := NewRevision(rawRevision)
 		updatedAt, updatedAtErr := NewUnixMillis(rawUpdatedAt)
@@ -253,14 +253,14 @@ func readPublicHumanRequests(ctx context.Context, connection *sql.Conn) ([]Human
 // agentSummarySelect is the one derivation of the served agent summary.
 // Provider is included as a public fact; live activity is deliberately
 // absent (see AgentSummary).
-const agentSummarySelect = `SELECT a.id, a.project_id, a.name, a.role, a.provider, a.paused, a.archived, a.appearance, a.model, a.reasoning_effort, a.account_id, a.revision, a.idle_policy, a.idle_after_seconds, a.idle_instruction, a.idle_run_budget, a.idle_runs_used FROM agents a`
+const agentSummarySelect = `SELECT a.id, a.project_id, a.name, a.role, a.provider, a.paused, a.archived, a.appearance, a.model, a.reasoning_effort, a.account_id, a.revision, a.idle_policy, a.idle_after_seconds, a.idle_instruction, a.idle_run_budget, a.idle_runs_used, a.tool_budget_limit, a.tool_calls_used FROM agents a`
 
 func scanAgentSummary(scanner rowScanner) (AgentSummary, error) {
 	var rawID, rawProjectID, rawAccountID []byte
 	var name, rawRole, rawProvider, rawAppearance, rawIdlePolicy, idleInstruction string
 	var model, effort sql.NullString
-	var paused, archived, rawRevision, idleAfter, idleBudget, idleUsed int64
-	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &paused, &archived, &rawAppearance, &model, &effort, &rawAccountID, &rawRevision, &rawIdlePolicy, &idleAfter, &idleInstruction, &idleBudget, &idleUsed); err != nil {
+	var paused, archived, rawRevision, idleAfter, idleBudget, idleUsed, toolBudget, toolUsed int64
+	if err := scanner.Scan(&rawID, &rawProjectID, &name, &rawRole, &rawProvider, &paused, &archived, &rawAppearance, &model, &effort, &rawAccountID, &rawRevision, &rawIdlePolicy, &idleAfter, &idleInstruction, &idleBudget, &idleUsed, &toolBudget, &toolUsed); err != nil {
 		return AgentSummary{}, err
 	}
 	idle, idleErr := idleRuleFromRow(rawIdlePolicy, idleAfter, idleInstruction, idleBudget, idleUsed)
@@ -272,10 +272,10 @@ func scanAgentSummary(scanner rowScanner) (AgentSummary, error) {
 	revision, revisionErr := NewRevision(rawRevision)
 	appearance, appearanceErr := decodeAgentAppearance(rawAppearance)
 	if idErr != nil || projectErr != nil || roleErr != nil || providerErr != nil || revisionErr != nil || accountErr != nil || idleErr != nil ||
-		appearanceErr != nil ||
+		appearanceErr != nil || toolBudget < 1 || toolUsed < 0 || toolUsed > toolBudget ||
 		byteLen(name) < 1 || byteLen(name) > 128 || paused != 0 && paused != 1 || archived != 0 && archived != 1 ||
 		validateStoredProviderControls(provider, model.String, effort.String) != nil {
 		return AgentSummary{}, fmt.Errorf("%w: invalid agent summary", ErrCorruptState)
 	}
-	return AgentSummary{ID: id, ProjectID: projectID, Name: name, Role: role.String(), Provider: provider.String(), Paused: paused == 1, Archived: archived == 1, Appearance: appearance, Model: model.String, ReasoningEffort: effort.String, AccountID: accountID, Idle: idle, Revision: revision}, nil
+	return AgentSummary{ID: id, ProjectID: projectID, Name: name, Role: role.String(), Provider: provider.String(), Paused: paused == 1, Archived: archived == 1, Appearance: appearance, Model: model.String, ReasoningEffort: effort.String, AccountID: accountID, ToolBudgetLimit: uint64(toolBudget), ToolCallsUsed: uint64(toolUsed), Idle: idle, Revision: revision}, nil
 }

@@ -33,6 +33,14 @@ func TestRunLimitWatchdogTerminatesOwnedProvider(t *testing.T) {
 	if err := waitForWitness(fixture.witness, 10*time.Second); err != nil {
 		t.Fatal(err)
 	}
+	// Pausing future admissions must not disable the active-run watchdog.
+	state, err := fixture.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetDispatch(context.Background(), state.Revision, false, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(1100 * time.Millisecond)
 	if err := fixture.daemon.enforceRunLimits(context.Background()); err != nil {
 		t.Fatal(err)

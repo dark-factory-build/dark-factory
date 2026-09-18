@@ -55,9 +55,12 @@ instructions. Supply product priorities and explicit closure criteria.
 - A worker's success is input to review, not issue completion. Inspect its
   tree and receipts, run repository gates and independent exact-head review,
   and send findings back. Never author an ALLOW for your own work.
-- Allow at most two repair rounds for the same unresolved failure. Repeated
-  publication failures, missing authority, or unclear requirements become one
-  human decision. Do not spawn fresh tasks to evade admission limits.
+- Allow at most two repair rounds for the same unresolved failure. A review
+  finding returns to the original task/Change and must be independently
+  re-reviewed at its corrected head; do not create a retry duplicate.
+  Repeated publication failures, missing authority, or unclear requirements
+  become one human decision. Do not spawn fresh tasks to evade admission
+  limits.
 - Reuse the source issue when publishing. Observe stable operation IDs before
   retrying writes. Report merged separately from deployed; acceptance criteria
   that require deployment need a verified host deployment receipt.
@@ -94,18 +97,16 @@ lost responses. Only the daemon API writes factory state.
 Failed work is not recreated on every poll. Missing evidence and ambiguous
 outcomes remain visible. Stop intake to stop importing work; disable dispatch
 to stop future admissions. Existing runs require Stop or their duration limit.
-Intake never fast-forwards the project root. Every delegated worker uses a
-private clean worktree and fetches the current base before making changes.
-Before each intake pass, source refresh defers while any run is active; it
-does not pause work to wait for an idle factory. When idle, the host pauses
-dispatch at its exact factory revision, verifies there are still no active
-runs, then fast-forwards the clean configured project root from its HTTPS
-origin. It preserves untracked files and refuses tracked edits, a
-non-fast-forward, or an origin or branch mismatch. It restores only its own
-pause through the same revision guard; an operator change wins. Continuous
-activity can defer checkout refresh indefinitely; workers still fetch the
-current base in their private checkout. A failed refresh delays new source
-intake until the next successful pass.
+Intake never fast-forwards the project root. Every delegated worker works in
+its own linked worktree of the project on its Change branch, made at the
+current base. Fresh worker Changes fetch the configured project upstream
+through the runtime's owned Git process before selecting one exact commit.
+They do not wait for an idle factory or move the registered checkout. Failed
+fetches fail source preparation visibly, without using a stale tracking ref.
+Retained Changes are not refreshed or rebased; a correction continues on its
+exact branch, and integrating it with current main is a separate reviewed
+operation. Explicit
+local revision policies remain local. See README for `--base-revision`.
 If a source supervisor reaches its duration limit while a human decision is
 unanswered, intake records `needs_operator_recovery`.
 It does not repeat that task. Edit the source issue materially to create a new
@@ -117,35 +118,78 @@ from worker success, merge, a TCP socket, or an unchanged alias alone.
 
 ## Host scheduling and deployment
 
-`scripts/factory-autonomy.py CONFIG --once` runs source refresh and intake;
-optional `release_configs` paths run exact-default-head releases and enqueue
+`scripts/factory-autonomy.py CONFIG --once` runs intake and review.
+The separate `--release-only` pass uses `release_configs` paths for exact-default-head releases and enqueues
 one idempotent verified-delivery follow-up for the same project's overseer.
+After verification, the controller fast-forwards its own source checkout to the
+exact released commit so the next tick loads the released scripts. The checkout
+must be on the configured release branch, have no tracked edits, and use an
+`origin` matching the configured GitHub repository (HTTPS or SSH). Untracked
+files are preserved. Fetch or ancestry failures, operator edits, and a different
+branch are reported without resetting the checkout or changing the verified
+runtime receipt; resolve the reported checkout condition before the next pass.
 Use `--plist` to generate a launchd StartInterval job. The generated job uses
 absolute script/config paths and the host's tool PATH. Install it only after
 the one-shot preflight succeeds. Each config gets a separate launchd label. Controllers for the same factory
-serialize through a host lock, so their source-refresh and deployment hooks
-cannot overlap. Use the controller for scheduled work; direct maintenance
+serialize each lane through its own host lock. Intake/review can continue while
+a release waits for productive runs to drain. Use the controller for scheduled work; direct maintenance
 hooks are operator tools.
 Each tick writes a mode-0600 `.autonomy.json` health receipt beside the intake
-journal, containing only component names and finite status codes for bounded
+journal, containing component names, finite status codes, and fixed source-refresh refusal details for bounded
 automation health diagnostics.
 For private repositories, optionally set `review_mirror_root` to an existing
 bare mirror at `ROOT/OWNER/REPOSITORY` whose `origin` is the configured HTTPS
 GitHub repository. Create it with `git clone --bare https://github.com/OWNER/REPOSITORY ROOT/OWNER/REPOSITORY` so it retains base history. The host fetches only the base and `refs/pull/N/head` into
-that mirror after GitHub reports the exact head. It wakes Sol only for open PRs
-whose App footer has `Refs #N` or `Closes #N` for a tracked source issue. The
-Sol task receives the mirror and exact head to resume publication; it must not
-author its own independent review. No GitHub credential is stored in config or
-passed to a task.
+that mirror after GitHub reports the exact head. For open PRs whose footer has
+`Refs #N` or `Closes #N` for a tracked source issue, the existing controller runs
+one independent cold review per pass after intake and release checks. A tracked
+source is an intake-managed issue, or an overseer tracking issue the App created
+(its completed `create_issue` receipt) on a PR the App published (its completed
+publication receipt); a footer the pass cannot prove is skipped with the reason
+in the pass output, never reviewed. The existing
+autonomy job and lock stay occupied during that review (up to its 20-minute
+owned-group deadline); the next scheduled intake/release tick waits. This change
+removes nested-sandbox failures, not that existing serialization limit. The host
+needs the selected Codex/Claude installation and the owner-installed Maintainer
+bridge on PATH (or `DARK_FACTORY_MAINTAINER_BRIDGE`). These remain host
+capabilities; no bridge credentials or provider SDK permissions are granted to
+worker local commands.
+
+The existing `.reviews.json` journal pins the head/base and deterministic App
+operation before launching. The reviewer runs inside the existing owned process
+group deadline and records its own exact-head verdict through the App. A timeout,
+crash, or lost reply remains unresolved: later passes observe the same App
+operation instead of starting another model call. Completed allow/block results
+wake the configured overseer to enqueue or return findings to the original task.
+A blocked review is a completed review, not an infrastructure failure. The host
+must reconcile an unresolved launch before explicitly authorizing another; do
+not erase the attempted marker to retry an ambiguous submission.
+
+Bind the controller config to the actual `factory_home`, `project_id`,
+`overseer_agent_id`, external `journal`, and verified `review_mirror_root`; its
+PATH must select the matching installed factoryctl plus provider/bridge tools.
+Regenerate and replace the existing launchd job only after a one-shot preflight.
+An unloaded job or a config pointing at an older factory is not autonomous proof.
+No GitHub credential is stored in config or passed to a task.
 
 A release configuration pins `repository`, `base`, `journal`, `deploy_argv`,
 `verify_argv`, `review_verifier`, and `command_timeout` (5–1200 seconds).
 All command arrays are trusted operator configuration with absolute executable
 paths, never source or agent output. The controller appends the full merge SHA.
-The runtime installer can take up to 960 seconds (drain, reinstall, and
-probe), so its release configuration uses 1200 seconds.
+The runtime hook prepares before draining and waits for productive runs to finish.
+Deployment has no elapsed-time ceiling; `command_timeout` bounds verification and
+review commands. Preparation, installation, and runtime probes retain their own
+command bounds. Install a second launchd job generated with
+`factory-autonomy.py CONFIG --plist --release-only`; the ordinary job handles
+intake and review, while this independent job handles release and delivery.
+Their separate locks keep a draining release from suppressing intake or review.
+The existing release journal lock prevents duplicate deployment. An explicit
+operator control change still cancels the owned pause; a stuck run must be
+resolved through its existing recovery path, never killed to meet a release clock.
 For this repository use Python with `scripts/deploy-runtime.py` and
-`scripts/verify-live-runtime.py`; for the site use `/bin/sh` with
+`scripts/verify-live-runtime.py`. For a non-default factory, include
+`"--home", "/absolute/factory-home"` in both arrays before the appended SHA.
+For the site use `/bin/sh` with
 `scripts/deploy-site.sh` and Python with `scripts/verify-live-site.py`.
 `review_verifier` runs `/bin/sh` with `scripts/verify-adversarial-review.sh`.
 A probe emits the actually installed `sha` and boolean `healthy`; unavailable

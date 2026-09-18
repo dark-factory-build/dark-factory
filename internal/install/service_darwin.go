@@ -113,7 +113,8 @@ type serviceInspection struct {
 	relayOrigin string
 	// developmentBrowserAddress is the receipt-bound requested address, which
 	// may be port zero even though the live listener chose another port.
-	developmentBrowserAddress string
+	developmentBrowserAddress    string
+	toolPath, toolchainReadRoots string
 }
 
 func inspectServiceForAccount(ctx context.Context, home string, config ServiceConfig, launchctl launchctlRun) (status ServiceStatus, resultErr error) {
@@ -184,6 +185,8 @@ func inspectServiceWithCapabilityAt(ctx context.Context, home, userHome string, 
 	if receiptErr == nil && receiptPresent {
 		renderedOrigin = receipt.RelayOrigin
 		renderedDevelopmentBrowserAddress = receipt.DevelopmentBrowserAddress
+		config.ToolPath = receipt.ToolPath
+		config.ToolchainReadRoots = receipt.ToolchainReadRoots
 	}
 	plist, err := inspectServicePlist(userDirectory, home, config, renderedOrigin, renderedDevelopmentBrowserAddress)
 	if err != nil {
@@ -238,11 +241,11 @@ func inspectServiceWithCapabilityAt(ctx context.Context, home, userHome string, 
 	if err == nil && receiptPresent && plist.present {
 		if matchErr := receiptMatchesInstallation(receipt, home, config, plistPath); matchErr == nil {
 			if observation.present && observation.pid > 0 {
-				return serviceInspection{status: ServiceStatus{State: ServiceRunning, PID: observation.pid}, observation: observation, relayOrigin: renderedOrigin, developmentBrowserAddress: renderedDevelopmentBrowserAddress}, nil
+				return serviceInspection{status: ServiceStatus{State: ServiceRunning, PID: observation.pid}, observation: observation, relayOrigin: renderedOrigin, developmentBrowserAddress: renderedDevelopmentBrowserAddress, toolPath: config.ToolPath, toolchainReadRoots: config.ToolchainReadRoots}, nil
 			}
 			// A loaded-but-idle job and an unloaded plist are both restartable
 			// installations; neither grants process authority.
-			return serviceInspection{status: ServiceStatus{State: ServiceInstalled}, observation: observation, relayOrigin: renderedOrigin, developmentBrowserAddress: renderedDevelopmentBrowserAddress}, nil
+			return serviceInspection{status: ServiceStatus{State: ServiceInstalled}, observation: observation, relayOrigin: renderedOrigin, developmentBrowserAddress: renderedDevelopmentBrowserAddress, toolPath: config.ToolPath, toolchainReadRoots: config.ToolchainReadRoots}, nil
 		} else {
 			return serviceInspection{status: ServiceStatus{State: ServiceAmbiguous}}, errors.Join(ErrServiceAmbiguous, matchErr)
 		}
@@ -754,7 +757,7 @@ func openServiceDirectory(path string) (*serviceDirectory, error) {
 	if !validServicePath(path) || path == "/" {
 		return nil, errors.New("invalid service directory path")
 	}
-	rootFD, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	rootFD, err := unix.Open("/", ancestorOpenFlag|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -765,12 +768,17 @@ func openServiceDirectory(path string) (*serviceDirectory, error) {
 	}
 	directory := &serviceDirectory{files: []*os.File{root}, names: []string{""}}
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	for _, name := range parts {
+	for index, name := range parts {
 		if name == "" || name == "." || name == ".." || len(name) > maxNameSize {
 			_ = directory.close()
 			return nil, errors.New("invalid service directory component")
 		}
-		fd, openErr := unix.Openat(int(directory.files[len(directory.files)-1].Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		// Only the final directory needs data access; ancestors are identity pins.
+		flag := ancestorOpenFlag
+		if index == len(parts)-1 {
+			flag = unix.O_RDONLY
+		}
+		fd, openErr := unix.Openat(int(directory.files[len(directory.files)-1].Fd()), name, flag|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 		if openErr != nil {
 			_ = directory.close()
 			return nil, openErr
@@ -922,7 +930,7 @@ func inspectServicePlist(userHome *serviceDirectory, home string, config Service
 	if err := unix.Fstat(fd, &before); err != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Mode&0o7777 != 0o600 || before.Uid != uint32(os.Geteuid()) || before.Nlink != 1 || before.Size <= 0 || before.Size > launchctlOutputLimit {
 		return servicePlistObservation{}, fmt.Errorf("%w: plist metadata", ErrServicePlist)
 	}
-	expected, _, err := ServicePlist(home, config.Label, relayOrigin, developmentBrowserAddress)
+	expected, _, err := ServicePlist(home, config.Label, relayOrigin, developmentBrowserAddress, config.ToolPath, config.ToolchainReadRoots)
 	if err != nil || int64(len(expected)) != before.Size {
 		return servicePlistObservation{}, fmt.Errorf("%w: plist size", ErrServicePlist)
 	}

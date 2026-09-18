@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -38,12 +37,11 @@ const (
 	factoryctlSiblingName = "factoryctl"
 	maxHomeArgumentBytes  = 4096
 	maxAPIHandlers        = 32
-	apiHandlerTimeout     = 10 * time.Second
 	exitFailure           = 1
 	exitUsage             = 64
 
 	usage = `usage:
-  factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--base-revision REVISION]
+  factoryd --home ABSOLUTE [--git PATH] [--tool-path PATH] [--toolchain-read-roots PATH_LIST] [--base-revision REVISION]
            [--runner PATH] [--factoryctl PATH]
            [--relay-origin RELAY_ORIGIN]
            [--development-browser-address LOOPBACK]
@@ -60,6 +58,9 @@ var (
 	closeRuntimeParent       = func(value *daemon.RuntimeParent) error { return value.Close() }
 	selfExecutable           = os.Executable
 	recoveryLog              = io.Writer(os.Stderr)
+	continueUnsettledRun     = func(value *daemon.Daemon, ctx context.Context, parent *daemon.RuntimeParent, changeParent string, id kernel.RunID) error {
+		return value.ContinueUnsettledRun(ctx, parent, changeParent, id)
+	}
 )
 
 type config struct {
@@ -74,6 +75,7 @@ type config struct {
 	gitExecutable        string
 	toolPath             string
 	toolPathExplicit     bool
+	toolchainReadRoots   string
 	baseRevision         string
 	runnerExecutable     string
 	factoryctlExecutable string
@@ -112,6 +114,31 @@ type process struct {
 	schedulerDone  chan struct{}
 	schedulerErr   error
 	schedulerStart bool
+	cleanupWG      sync.WaitGroup
+	cleanupMu      sync.Mutex
+	cleanupRuns    map[kernel.RunID]struct{}
+}
+
+func (owner *process) startCleanupContinuation(ctx context.Context, id kernel.RunID) {
+	owner.cleanupMu.Lock()
+	if _, exists := owner.cleanupRuns[id]; exists {
+		owner.cleanupMu.Unlock()
+		return
+	}
+	owner.cleanupRuns[id] = struct{}{}
+	owner.cleanupMu.Unlock()
+	owner.cleanupWG.Add(1)
+	go func() {
+		defer owner.cleanupWG.Done()
+		defer func() {
+			owner.cleanupMu.Lock()
+			delete(owner.cleanupRuns, id)
+			owner.cleanupMu.Unlock()
+		}()
+		if continuationErr := continueUnsettledRun(owner.daemon, ctx, owner.runtimeParent, owner.supervisorSpec.ChangeParent, id); continuationErr != nil {
+			_, _ = fmt.Fprintf(recoveryLog, "factoryd: unsettled run %s stopped: %v\n", id.String(), continuationErr)
+		}
+	}()
 }
 
 func main() {
@@ -175,6 +202,11 @@ func parse(args []string) (config, bool, bool) {
 			}
 			result.toolPath = value
 			result.toolPathExplicit = true
+		case "--toolchain-read-roots":
+			if result.toolchainReadRoots != "" || value == "" || !install.ValidToolchainReadRoots(value) {
+				return config{}, false, false
+			}
+			result.toolchainReadRoots = value
 		case "--base-revision":
 			if result.baseRevision != "" || !validBaseRevision(value) {
 				return config{}, false, false
@@ -332,6 +364,10 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 		return nil, err
 	}
 	startupPhase("daemon")
+	// A leftover finalizing worker run with an available Change needs the
+	// Git executable to settle its worktree; publish it before the sweep
+	// runs rather than waiting for the first admitted attempt to remember it.
+	owner.daemon.RememberSupervisorAccount(owner.supervisorSpec.ChangeParent, owner.supervisorSpec.AccountHome, owner.supervisorSpec.GitExecutable)
 	// The sweep runs to a quiet state before any listener opens so no client
 	// can act on unrecovered durable state. A run the sweep leaves unresolved
 	// is durable fail-closed residue, reported but never a boot refusal.
@@ -339,12 +375,23 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
+	var recoveryContinuations []kernel.RunID
 	for _, disposition := range dispositions {
 		if disposition.Err != nil {
 			_, _ = fmt.Fprintf(recoveryLog, "factoryd: recovered run %s: %s: %v\n", disposition.RunID.String(), disposition.Action, disposition.Err)
+			if disposition.Action == daemon.RecoveredResultConsumed || disposition.Action == daemon.RecoveredResultConsumedUnsettled {
+				recoveryContinuations = append(recoveryContinuations, disposition.RunID)
+			}
 			continue
 		}
 		_, _ = fmt.Fprintf(recoveryLog, "factoryd: recovered run %s: %s\n", disposition.RunID.String(), disposition.Action)
+	}
+	// Like an unresolved run above, a refused mark (a clock that moved
+	// backwards) is reported residue, never a boot refusal.
+	if unknown, err := owner.daemon.RecoverHumanDeliveries(ownedContext); err != nil {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: human reply deliveries left by the previous daemon were not marked uncertain: %v\n", err)
+	} else if unknown != 0 {
+		_, _ = fmt.Fprintf(recoveryLog, "factoryd: %d human reply deliveries left uncertain by the previous daemon\n", unknown)
 	}
 	startupPhase("recovery sweep")
 	owner.apiAuthority, err = owner.home.OpenLocalAPI(ownedContext)
@@ -374,8 +421,13 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	}
 	owner.apiStart = true
 	go owner.accept(ownedContext, owner.listener)
+	owner.cleanupRuns = make(map[kernel.RunID]struct{})
 	owner.supervisorSpec.UnsettledCompletion = func(id kernel.RunID, err error) {
 		_, _ = fmt.Fprintf(recoveryLog, "factoryd: unsettled run %s: %v\n", id.String(), err)
+		owner.startCleanupContinuation(ownedContext, id)
+	}
+	for _, id := range recoveryContinuations {
+		owner.startCleanupContinuation(ownedContext, id)
 	}
 	owner.schedulerDone = make(chan struct{})
 	owner.schedulerStart = true
@@ -407,9 +459,7 @@ func (owner *process) accept(ctx context.Context, listener *api.Listener) {
 		go func() {
 			defer owner.handlers.Done()
 			defer func() { <-owner.slots }()
-			handlerContext, cancel := context.WithTimeout(ctx, apiHandlerTimeout)
-			defer cancel()
-			_ = owner.daemon.HandleConnection(handlerContext, connection)
+			_ = owner.daemon.HandleConnection(ctx, connection)
 		}()
 	}
 }
@@ -542,6 +592,7 @@ func (owner *process) shutdown() error {
 			result = errors.Join(result, owner.schedulerErr)
 		}
 	}
+	owner.cleanupWG.Wait()
 	// The daemon closes the relay before the listeners it is a client of, so
 	// shutdown here does not depend on this ordering.
 	if owner.daemon != nil {
@@ -632,6 +683,18 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 	if err != nil {
 		return daemon.SupervisorSpec{}, err
 	}
+	if !configuration.toolPathExplicit {
+		supportedPath, supportedRoots := install.SupportedToolchain(accountHome)
+		if supportedPath != "" {
+			configuration.toolPath = supportedPath + string(filepath.ListSeparator) + configuration.toolPath
+		}
+		if configuration.toolchainReadRoots == "" {
+			configuration.toolchainReadRoots = supportedRoots
+		}
+	}
+	if err := install.CheckToolchainReadRoots(configuration.toolchainReadRoots, accountHome, configuration.home, install.ChangesPath(configuration.home)); err != nil {
+		return daemon.SupervisorSpec{}, fmt.Errorf("factoryd: invalid toolchain read roots: %w", err)
+	}
 	toolPath := configuration.toolPath
 	if !configuration.toolPathExplicit {
 		toolPath = filepath.Join(accountHome, ".local", "bin") + string(filepath.ListSeparator) + toolPath
@@ -651,6 +714,7 @@ func deriveSupervisorSpec(configuration config, parent *daemon.RuntimeParent) (d
 		RunnerExecutable:     runnerExecutable,
 		FactoryctlExecutable: factoryctlExecutable,
 		ToolPath:             toolPath,
+		ToolchainReadRoots:   configuration.toolchainReadRoots,
 		AccountHome:          accountHome,
 	}, nil
 }

@@ -269,9 +269,8 @@ func TestDispatchCapacityRevisionGuards(t *testing.T) {
 	if !state.DispatchEnabled || state.Revision.Int64() != 2 || state.Head.Int64() != 1 {
 		t.Fatalf("dispatch state = %+v", state)
 	}
-	replay, err := store.SetDispatch(ctx, revision, true, mustTime(t, 2))
-	if err != nil || replay.Revision != state.Revision || replay.Head != state.Head {
-		t.Fatalf("dispatch replay = %+v, %v", replay, err)
+	if _, err := store.SetDispatch(ctx, revision, true, mustTime(t, 2)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("identical stale dispatch = %v", err)
 	}
 	if _, err := store.SetDispatch(ctx, revision, false, mustTime(t, 3)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("stale dispatch error = %v", err)
@@ -796,38 +795,30 @@ func TestChangeCommitmentSchemaUsesFrozenBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var entryColumns, legacyColumns int
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('changes') WHERE name = 'entry_count'`).Scan(&entryColumns); err != nil {
+	var legacyColumns int
+	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('changes') WHERE name IN ('entry_count', 'total_bytes', 'tree_digest', 'tree_dev', 'tree_inode', 'file_count')`).Scan(&legacyColumns); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.readers.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('changes') WHERE name = 'file_count'`).Scan(&legacyColumns); err != nil {
-		t.Fatal(err)
-	}
-	if entryColumns != 1 || legacyColumns != 0 {
-		t.Fatalf("change count columns entry=%d legacy=%d", entryColumns, legacyColumns)
+	if legacyColumns != 0 {
+		t.Fatalf("Git-free tree fact columns survived: %d", legacyColumns)
 	}
 	change := changeID(t, 5)
 	if _, err := store.writer.Exec(`INSERT INTO changes(
 	            id, project_id, task_id, task_incarnation_id, phase,
 	            object_format, base_commit, repository_dev, repository_inode, prepared_at_ms,
-	            tree_digest, entry_count, total_bytes, tree_dev, tree_inode, available_at_ms,
-	            revision, created_at_ms, updated_at_ms
-	        ) VALUES(?, ?, ?, ?, 'available', 'sha1', ?, 0, 1, 6, ?, ?, ?, 0, 2, 7, 3, 4, 7)`,
-		change.Bytes(), project.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x11}, 20), bytes.Repeat([]byte{0x22}, DigestBytes), MaxChangeTreeEntries, MaxChangeTreeBlobBytes); err != nil {
-		t.Fatalf("insert exact cap: %v", err)
+	            head_commit, available_at_ms, revision, created_at_ms, updated_at_ms
+	        ) VALUES(?, ?, ?, ?, 'available', 'sha1', ?, 0, 1, 6, ?, 7, 3, 4, 7)`,
+		change.Bytes(), project.ID.Bytes(), task.ID.Bytes(), task.IncarnationID.Bytes(), bytes.Repeat([]byte{0x11}, 20), bytes.Repeat([]byte{0x22}, 20)); err != nil {
+		t.Fatalf("insert available worktree Change: %v", err)
 	}
-	if _, err := store.writer.Exec(`UPDATE changes SET entry_count = ? WHERE id = ?`, MaxChangeTreeEntries+1, change.Bytes()); err == nil {
-		t.Fatal("entry cap plus one succeeded")
+	if _, err := store.writer.Exec(`UPDATE changes SET head_commit = ? WHERE id = ?`, bytes.Repeat([]byte{0x33}, 32), change.Bytes()); err == nil {
+		t.Fatal("head of another object format succeeded")
 	}
-	if _, err := store.writer.Exec(`UPDATE changes SET total_bytes = ? WHERE id = ?`, MaxChangeTreeBlobBytes+1, change.Bytes()); err == nil {
-		t.Fatal("aggregate byte cap plus one succeeded")
+	if _, err := store.writer.Exec(`UPDATE changes SET head_commit = NULL, phase = 'prepared', available_at_ms = NULL WHERE id = ?`, change.Bytes()); err != nil {
+		t.Fatalf("a prepared Change has no head: %v", err)
 	}
-	var entries, totalBytes int64
-	if err := store.readers.QueryRow(`SELECT entry_count, total_bytes FROM changes WHERE id = ?`, change.Bytes()).Scan(&entries, &totalBytes); err != nil {
-		t.Fatal(err)
-	}
-	if entries != MaxChangeTreeEntries || totalBytes != MaxChangeTreeBlobBytes {
-		t.Fatalf("failed cap mutations changed commitment: entries=%d bytes=%d", entries, totalBytes)
+	if _, err := store.writer.Exec(`UPDATE changes SET head_commit = ? WHERE id = ?`, bytes.Repeat([]byte{0x11}, 20), change.Bytes()); err == nil {
+		t.Fatal("head before the worktree exists succeeded")
 	}
 }
 
@@ -1023,4 +1014,44 @@ func invalidationsAfter(t *testing.T, store *Store, after EventSequence) []struc
 		t.Fatal(err)
 	}
 	return result
+}
+
+func TestExplicitFactoryControlInvalidatesEarlierPauseAuthority(t *testing.T) {
+	for _, duringPause := range []bool{false, true} {
+		t.Run(fmt.Sprint(duringPause), func(t *testing.T) {
+			ctx := context.Background()
+			store, _ := newTestStore(t)
+			defer store.Close()
+			enabled, err := store.SetDispatch(ctx, mustRevision(t, 1), true, mustTime(t, 2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			paused, err := store.SetDispatch(ctx, enabled.Revision, false, mustTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := enabled.Revision
+			if duringPause {
+				expected = paused.Revision
+				paused, err = store.SetDispatch(ctx, paused.Revision, false, mustTime(t, 4))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if paused.Revision.Int64() != expected.Int64()+1 {
+					t.Fatal("explicit stop did not record intent")
+				}
+			}
+			before := captureWriteFootprint(t, store)
+			if _, err := store.SetDispatch(ctx, expected, duringPause, mustTime(t, 5)); !errors.Is(err, ErrRevisionConflict) {
+				t.Fatalf("earlier pause authority accepted: %v", err)
+			}
+			if got := captureWriteFootprint(t, store); got != before {
+				t.Fatal("stale control mutated durable state")
+			}
+			sameCapacity, err := store.SetCapacity(ctx, paused.Revision, paused.Capacity, mustTime(t, 6))
+			if err != nil || sameCapacity.Revision.Int64() != paused.Revision.Int64()+1 {
+				t.Fatalf("same-value capacity intent: %+v %v", sameCapacity, err)
+			}
+		})
+	}
 }

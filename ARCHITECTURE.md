@@ -21,6 +21,8 @@ Run:  admitted -> running -> finalizing -> terminal
 
 Send-back: terminal result -> queued at the next work revision, the note replacing an earlier one
 
+Assignment: one agent, or none (any eligible worker) -> claimed by the admitting worker, kept through send-back unless reassigned
+
 Resource: declared -> active -> releasing -> released
                                       \----> unresolved
 ```
@@ -62,7 +64,13 @@ unsupported before a provider runs.
    eligible work in the other. Dispatch still gates all new admission.
 5. The Store selects the canonical eligible task and agent globally by priority
    descending, creation time ascending, and exact 16-byte task-ID BLOB bytes
-   ascending. It validates the selected Change and binds the task incarnation,
+   ascending. A queued task names one agent or none; an unassigned task is a
+   candidate for every unarchived, unpaused worker in its project. Each agent's
+   candidate is its replacement, then its own assigned work, then shared work,
+   and the global choice keeps the canonical order. Admission writes the chosen
+   agent into a shared task in the same transaction, so a claim is exclusive
+   and durable and survives send-back until an explicit reassignment.
+   It validates the selected Change and binds the task incarnation,
    revision, provider, and launch facts before external effects. Repository or
    provider availability becomes typed post-admission failure, never a stale
    scheduler filter.
@@ -97,7 +105,10 @@ The browser reads one bounded, transactionally pinned active-state snapshot
 and is told only that the durable head moved. A client holds one coherent
 snapshot or none; a change notification carries only a head. Tasks include
 queued/running work, unresolved request origins, and the most recent completion
-per agent so terminal settlement remains visible. The console groups queues
+per agent so terminal settlement remains visible. Every task item names its
+agent; queued work no worker has claimed yet is served in the additive
+`shared_tasks` member, which a console built before the shared queue ignores
+while a current console folds it into the same task view. The console groups queues
 by agent; within each queue, the priority/creation-time/ID ordering matches
 admission, including an explicit replacement ahead of that agent's queued
 work. These groups do not predict the global order of starts across agents.
@@ -216,6 +227,19 @@ If preparation or activation fails, the run enters `finalizing`; a provider
 must never execute first and become durable later. The runner is a
 provider-blind effect host, not a second lifecycle owner.
 
+A released runner publishes a private takeover endpoint in its own runtime
+directory: a one-shot bearer in `takeover.json` and `takeover.sock`. On
+shutdown the daemon asks its released, terminal-ready runner to quiesce that
+control connection, makes no durable mutation, and leaves the run `running`
+with every resource active and the outer child reparented. The next daemon's
+recovery sweep finds that busy runtime, presents the on-disk grant, and adopts
+the runner as an ordinary live attempt; the endpoint rotates its bearer on
+every accepted takeover, so one grant admits one replacement. Unclaimed, the
+runner converges the provider itself after a bounded grace. A compatible
+upgrade therefore adopts running runners instead of draining them; a runner
+with no endpoint is drained exactly as before, and a killed runner's endpoint
+files are ordinary runtime residue the recovery sweep removes.
+
 A successful attempt outcome commits `finalizing` together with one in-memory
 response fence. The daemon sends a fresh random receipt after the outcome
 response; the attempt client validates the reply, echoes that receipt on the
@@ -269,29 +293,56 @@ Provider output is opaque and never lifecycle authority.
 
 `factoryd` is the only product creator and administrator of Changes. Admission
 reserves one daemon-derived path for one task incarnation. A registered wrapper
-materializes one exact committed tree before the provider can execute. The
-provider sees a plain writable directory with no Git administrative locator.
-An orchestrator run binds no Change: it works in its private runtime home, and
-publication of a worker's retained Change is the Maintainer App's, reached
-through the one MCP server an orchestrator's Claude session is given.
-Factoryd exposes no repository status, commit, push, pull-request, or
-publication operation.
+makes that path an ordinary linked Git worktree of the project repository,
+checked out at one exact selected commit on the Change's own branch,
+`factory/<first 12 hex of the Change ID>`, before the provider can execute.
+The provider works in that worktree: it edits, tests and commits there with
+the factory's fixed Git identity. Each new worker has self-contained private
+Git administration under `.git/dark-factory-changes/<Change ID>/.git`, using
+native bare Git initialization, an exact-base fetch, and a linked worktree.
+Ordinary Git commands in that worktree update its private refs, objects and
+index, not the project's shared administration. Provider permissions are
+unchanged; this prevents accidental shared-Git interference, not arbitrary
+filesystem writes. Orchestrators read project Git administration.
+The provider environment carries no Git credential helper, SSH command or
+prompt. An orchestrator run binds no Change: it
+works in its private runtime home, and publication of a worker's retained
+Change is the Maintainer App's, reached through the one MCP server an
+orchestrator's session is given, from the Change's branch and head. Factoryd
+exposes no repository status, commit, push, pull-request, or publication
+operation of its own.
 
-Managed Change removal requires the exact typed ID, current revision, durable
-inode identity, and no live lease; replacement or ambiguity remains visibly
-pending and is never touched. Retries reuse a retained Change only after the
-preceding run is terminal.
+The durable record of a Change is its base commit, the repository identity
+and, once the worktree exists, its branch head: the base when the worktree is
+made, the branch tip the daemon reads at settlement afterwards. That head is
+the exact head an overseer or reviewer is handed and the mutation fence a
+retry and a source request check before reopening or reading the worktree.
+Retries reuse a retained Change only after the preceding run is terminal, and
+reopen the same worktree with the worker's commits and uncommitted edits as
+it left them. A worktree the worker destroyed cannot be retained: that run
+fails visibly, the Change is abandoned, and the task's retry makes a fresh
+worktree on the same branch.
 
 Fresh selection pins the exact repository root, Git administration directory,
 bounded local config, object-directory root, and trusted Git executable around
-each metadata process. It does not enumerate unrelated historical objects.
-Trusted Git resolves the revision once, the tree query names that exact commit,
-and the manifest binds every path, mode, size, and blob object ID. Materializing
-each selected blob requires the expected object ID, type, and size and
-independently hashes its bytes before the `.git`-free tree is published.
-Concurrent garbage collection, repacking, or unrelated object creation may
-therefore preserve the exact selection or make its read fail; it cannot select
-a different moving revision.
+each metadata process. Fresh selection refreshes a configured remote upstream
+without moving the checkout; a fetch failure cannot reuse cached source. Local
+revision policies and retained Changes do not fetch. Trusted Git resolves the
+revision once, and `git worktree add` checks out that exact commit. A
+concurrent attempt in the same repository contends only for Git's own locks.
+
+Retained linked worktrees keep their existing administration, including on
+retry: no automatic conversion rewrites their Gitfiles, indexes or refs.
+Legacy canonical worktrees therefore do not have independent Git state.
+Settlement and source receipts report the actual Git directory for either
+layout; publication fetches that exact head without a canonical-ref import.
+
+Changes made before managed worktrees are Git-free copies of their base with
+the worker's edits in them. They stay readable, reviewable and resumable: the
+first reopen or source request after the upgrade adopts such a tree into a
+worktree at its recorded base, with every file untouched, so the edits become
+the branch's uncommitted work and the head is recorded as a fact of the same
+Change revision. No Change is reset and no history is rewritten.
 
 ## Verification and storage
 

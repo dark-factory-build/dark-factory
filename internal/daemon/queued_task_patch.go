@@ -37,6 +37,9 @@ func prepareQueuedTaskPatch(ctx context.Context, store *kernel.Store, id kernel.
 	if patch.AssignedAgentID != nil {
 		task.AssignedAgentID = *patch.AssignedAgentID
 	}
+	if task.AssignedAgentID == (kernel.AgentID{}) {
+		return prepareSharedTaskText(task.Title, task.Body)
+	}
 	agent, found, err := store.Agent(ctx, task.AssignedAgentID)
 	if err != nil {
 		return err
@@ -47,11 +50,54 @@ func prepareQueuedTaskPatch(ctx context.Context, store *kernel.Store, id kernel.
 	return prepareTaskText(agent.Provider, task.Title, task.Body)
 }
 
+// prepareSharedTaskText bounds work any eligible worker may claim: the text
+// must fit every native provider, since the claimant is not known yet.
+// ponytail: fit-all bound; a per-provider eligibility predicate in admission
+// is the upgrade if a project needs shared work only some providers can hold.
+func prepareSharedTaskText(title, body string) error {
+	for _, kind := range []kernel.Provider{kernel.ProviderClaudeCode, kernel.ProviderCodex} {
+		if err := prepareTaskText(kind, title, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// prepareTaskRetry applies the provider-fit check used by ordinary queue
+// edits, while leaving terminal-state and authority decisions to the atomic
+// kernel mutation.
+func prepareTaskRetry(ctx context.Context, store *kernel.Store, id kernel.TaskID, expected kernel.Revision, assigned kernel.AgentID) error {
+	task, found, err := store.Task(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return kernel.ErrNotFound
+	}
+	if task.Revision != expected {
+		return kernel.ErrRevisionConflict
+	}
+	if assigned == (kernel.AgentID{}) {
+		assigned = task.AssignedAgentID
+	}
+	agent, found, err := store.Agent(ctx, assigned)
+	if err != nil {
+		return err
+	}
+	if !found || agent.ProjectID != task.ProjectID || agent.Role != kernel.RoleWorker {
+		return kernel.ErrUnauthorized
+	}
+	return prepareTaskText(agent.Provider, task.Title, task.Body)
+}
+
 // Existing IDs and unauthorized targets go straight to the kernel's canonical
 // replay and authority checks. Provider preparation applies only to new work.
 func prepareTaskEnqueue(ctx context.Context, store *kernel.Store, task kernel.NewTask, workerOnly bool) error {
 	if _, found, err := store.Task(ctx, task.ID); err != nil || found {
 		return err
+	}
+	if task.AssignedAgentID == (kernel.AgentID{}) {
+		return prepareSharedTaskText(task.Title, task.Body)
 	}
 	agent, found, err := store.Agent(ctx, task.AssignedAgentID)
 	if err != nil {

@@ -16,6 +16,39 @@ import (
 // It never returns with an unjoined goroutine: the outer attempt runner owns
 // the PTY, child group, two capability sockets and every terminal cursor.
 func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte) (bool, error) {
+	return runReleasedProviderWithHandover(child, daemon, worker, reads, stagePTY, retained, startup, nil)
+}
+
+// HandoverTransport belongs to the runner loop. The endpoint sends only
+// already-authenticated, fenced duplex connections through Replacements.
+// After the loop returns, Current receives the final result notice and is
+// closed by the caller after finalization.
+type HandoverTransport struct {
+	Replacements <-chan *os.File
+	Current      *os.File
+	Stop         func()
+}
+
+// handoverDetachedGrace bounds how long the owner loop waits, unattended, for
+// a replacement control connection after quiescing or losing its daemon.
+// Past it, the runner gives up and converges the provider itself, the same
+// outcome protocol-1's daemonLost reaches immediately on daemon EOF.
+const handoverDetachedGrace = 10 * time.Minute
+
+// testHandoverDetachedGrace overrides handoverDetachedGrace in package tests
+// only; production leaves it zero and uses the real ceiling.
+var testHandoverDetachedGrace time.Duration
+
+func handoverGrace() time.Duration {
+	if testHandoverDetachedGrace > 0 {
+		return testHandoverDetachedGrace
+	}
+	return handoverDetachedGrace
+}
+
+// The endpoint admits only a fenced replacement and passes its still-open
+// duplex connection here. A nil channel retains protocol-1 close-and-drain.
+func runReleasedProviderWithHandover(child *OwnedChild, daemon, worker *os.File, reads *attemptReadSet, stagePTY *ptyStageSink, retained *terminalByteRing, startup []byte, handover *HandoverTransport) (bool, error) {
 	if child == nil || daemon == nil || worker == nil || reads == nil || child.ptyMaster == nil || retained == nil {
 		return false, ErrState
 	}
@@ -23,7 +56,10 @@ func runReleasedProvider(child *OwnedChild, daemon, worker *os.File, reads *atte
 	// worker output is already retained in exact order. The stage sink and this
 	// loop share that one ring by pointer: any copy here would silently drop
 	// every byte the worker writes between adoption and provider exec.
-	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained}
+	loop := terminalOwner{child: child, daemon: daemon, worker: worker, reads: reads, daemonOpen: true, workerOpen: true, ring: retained, handover: handover}
+	if handover != nil {
+		handover.Current = daemon
+	}
 	if err := loop.awaitProviderExec(stagePTY); err != nil {
 		return loop.daemonOpen, err
 	}
@@ -103,6 +139,9 @@ type terminalOwner struct {
 	sent             uint64
 	observerAttached bool
 	replay           []terminalReplay
+	handover         *HandoverTransport
+	detached         bool
+	detachedAt       time.Time
 
 	// enterAfter and enterBy bound the one pending CR owed to the provider;
 	// lastOutput is when the provider last wrote, so the CR follows a quiet
@@ -234,7 +273,7 @@ func (o *terminalOwner) awaitProviderExec(stagePTY *ptyStageSink) error {
 			if err != nil {
 				return err
 			}
-			if frame.Version == 1 && frame.Kind == "provider-exec-error" && noLegacyFields(frame) && noTerminalFields(frame) && len(frame.Payload) > 0 && len(frame.Payload) <= maxProviderErrorBytes {
+			if validProviderErrorFrame(frame) {
 				return fmt.Errorf("runner: provider exec: %s", frame.Payload)
 			}
 			if !validCurrentExecCheck(frame) {
@@ -269,11 +308,26 @@ func (o *terminalOwner) serve() (bool, error) {
 		}
 		switch ev.source {
 		case sourceTick:
+			if stopped, err := o.handoverStep(); stopped || err != nil {
+				return o.daemonOpen, err
+			}
+			if o.detached {
+				continue
+			}
 			if err := o.submitPending(); err != nil {
 				return o.daemonOpen, err
 			}
 		case sourceChild:
 			if err := o.rejectHumanReply(); err != nil {
+				return o.daemonOpen, err
+			}
+			if o.handover != nil && o.handover.Stop != nil {
+				o.handover.Stop()
+			}
+			// A takeover may already be authenticated and queued while the
+			// provider exits. Consume it before finalization; there may be no
+			// later PTY read or idle tick on which to fence and attach it.
+			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
 			}
 			// First converge the exact process group and perform the sole Wait;
@@ -285,19 +339,30 @@ func (o *terminalOwner) serve() (bool, error) {
 			if err := o.drainPTY(); err != nil {
 				return o.daemonOpen, err
 			}
+			if stopped, err := o.handoverStep(); stopped || err != nil {
+				return o.daemonOpen, err
+			}
 			return o.daemonOpen, nil
 		case sourcePTY:
 			o.lastOutput = time.Now()
 			if err := o.consumePTY(ev.bytes, ev.err); err != nil {
 				return o.daemonOpen, err
 			}
-			if err := o.submitPending(); err != nil {
+			if stopped, err := o.handoverStep(); stopped || err != nil {
 				return o.daemonOpen, err
+			}
+			if !o.detached {
+				if err := o.submitPending(); err != nil {
+					return o.daemonOpen, err
+				}
 			}
 		case sourceDaemon:
 			if errors.Is(ev.err, io.EOF) {
 				if err := o.daemonLost(); err != nil {
 					return false, err
+				}
+				if o.detached {
+					continue
 				}
 				return false, errors.New("runner: daemon control closed")
 			}
@@ -312,12 +377,36 @@ func (o *terminalOwner) serve() (bool, error) {
 				if err := o.command(frame); err != nil {
 					return o.daemonOpen, err
 				}
+				if o.detached {
+					break // no command on the old stream can follow quiescence
+				}
 				if o.stopRequested {
 					return o.daemonOpen, nil
 				}
 			}
 		}
 	}
+}
+
+// handoverStep takes a buffered replacement and enforces the detached grace.
+// A buffered replacement is taken while attached too: the endpoint has
+// already consumed its grant, so the old owner is over either way and must
+// be fenced now, not whenever it happens to quiesce or die. The step runs on
+// the idle tick and after every PTY read: the tick exists only when nothing
+// is readable, and a provider that never stops writing (a TUI redrawing)
+// keeps the PTY readable for as long as it runs, so a step that lived on the
+// tick alone was never reached under exactly the output a live worker makes.
+func (o *terminalOwner) handoverStep() (stopped bool, err error) {
+	if o.handover == nil {
+		return false, nil
+	}
+	if err := o.adoptReplacement(); err != nil {
+		return false, err
+	}
+	if o.detached && time.Since(o.detachedAt) >= handoverGrace() {
+		return true, o.stop()
+	}
+	return false, nil
 }
 
 type terminalReady struct {
@@ -337,7 +426,7 @@ func (o *terminalOwner) nextEvent() (terminalReady, error) {
 		// While a startup CR is owed the wait is bounded, so the quiet prompt
 		// is noticed without any event arriving.
 		var timeout *unix.Timespec
-		if !o.enterBy.IsZero() {
+		if !o.enterBy.IsZero() || o.handover != nil {
 			tick := unix.NsecToTimespec(int64(startupEnterTick))
 			timeout = &tick
 		}
@@ -395,8 +484,14 @@ func (o *terminalOwner) nextEvent() (terminalReady, error) {
 }
 
 func (o *terminalOwner) command(raw attemptFrame) error {
+	if o.detached {
+		return ErrState
+	}
 	if raw.Version == 1 && raw.Kind == "terminate" && validBareAttemptFrame(raw) {
 		return o.stop()
+	}
+	if raw.Version == 2 && raw.Kind == "handover-quiesce" && noLegacyFields(raw) && noTerminalFields(raw) && len(raw.Payload) == 0 {
+		return o.quiesce()
 	}
 	command, err := terminalCommandFromFrame(raw)
 	if err != nil {
@@ -424,6 +519,101 @@ func (o *terminalOwner) command(raw attemptFrame) error {
 	default:
 		return ErrState
 	}
+}
+
+func validHandoverCursorFrame(frame attemptFrame) bool {
+	return frame.Version == 2 && frame.Stage == "" && frame.Identity == (Identity{}) && len(frame.Payload) == 0 && frame.FileIdentity == nil && frame.Digest == "" && frame.Floor <= frame.Head && frame.Correlation == 0 && frame.Generation == 0 && frame.Sequence == 0 && frame.Start == 0 && frame.End == 0 && frame.Count == 0 && frame.Rows == 0 && frame.Cols == 0 && frame.Credit == 0 && !frame.Submit && frame.Status == ""
+}
+
+// quiesce runs on the sole terminal owner loop, after every earlier command
+// in the old stream. It leaves the child and PTY untouched. The old daemon is
+// fenced at the runner before a replacement connection can be adopted.
+func (o *terminalOwner) quiesce() error {
+	if o == nil || o.detached || o.daemon == nil || o.daemonDecoder == nil {
+		return ErrState
+	}
+	if o.handover == nil || o.humanReplyCorrelation != 0 || !o.enterBy.IsZero() || o.daemonDecoder.headerRead != 0 || len(o.daemonDecoder.body) != 0 {
+		return o.writeDaemonFrame(attemptFrame{Version: 2, Kind: string(AttemptHandoverRejected), Floor: o.ring.Floor(), Head: o.ring.Head()})
+	}
+	if err := retireReadableFilter(o.reads.removeDaemon); err != nil {
+		return err
+	}
+	_ = o.writeDaemonFrame(attemptFrame{Version: 2, Kind: string(AttemptHandoverQuiesced), Floor: o.ring.Floor(), Head: o.ring.Head()})
+	o.fenceDaemon()
+	return nil
+}
+
+// fenceDaemon ends the current owner capability on this loop. Its stream is
+// closed and every piece of per-owner state is dropped, so no command it sent
+// can still run, no pending CR is owed to its successor, and no correlation,
+// credit, observer or replay is inherited. The caller retires the read filter
+// first, and nothing but this loop ever calls it.
+func (o *terminalOwner) fenceDaemon() {
+	if o.daemon != nil {
+		_ = o.daemon.Close()
+		o.daemon = nil
+	}
+	o.daemonOpen, o.detached, o.detachedAt = false, true, time.Now()
+	o.enterAfter, o.enterBy = time.Time{}, time.Time{}
+	o.humanReplyCorrelation, o.humanReplyCount = 0, 0
+	o.inputActive, o.credit, o.observerAttached = false, 0, false
+	o.replay = nil
+	if o.handover != nil {
+		o.handover.Current = nil
+	}
+}
+
+// adoptReplacement takes one already-authenticated replacement from the
+// takeover endpoint. Fencing the old owner and answering the new one are one
+// step on this loop, in that order, so a replacement is never told it owns the
+// run while the stream it replaces can still issue a command: the endpoint
+// consumed the grant but never answered it. A replacement that cannot be
+// committed or registered is closed unanswered, which its client reads as a
+// refusal and falls back to leaving the run to its live holder.
+func (o *terminalOwner) adoptReplacement() error {
+	if o == nil || o.handover == nil {
+		return ErrState
+	}
+	var file *os.File
+	select {
+	case candidate, ok := <-o.handover.Replacements:
+		if !ok || candidate == nil {
+			return nil
+		}
+		file = candidate
+	default:
+		return nil
+	}
+	if !o.detached {
+		if err := retireReadableFilter(o.reads.removeDaemon); err != nil {
+			_ = file.Close()
+			return err
+		}
+		_ = o.writeDaemonFrame(attemptFrame{Version: 2, Kind: string(AttemptHandoverQuiesced), Floor: o.ring.Floor(), Head: o.ring.Head()})
+		o.fenceDaemon()
+	}
+	if _, err := commitControl(file); err != nil {
+		_ = file.Close()
+		return nil
+	}
+	o.reads.daemonFD = int(file.Fd())
+	if err := o.reads.registerDaemon(); err != nil {
+		_ = file.Close()
+		return nil
+	}
+	o.daemon = file
+	o.daemonOpen = true
+	o.handover.Current = file
+	o.daemonDecoder, _ = newAttemptFrameDecoder(maxFrameBytes)
+	if err := writeTakeoverResponse(file, true, ""); err != nil {
+		return o.poisonDaemon(nil) // a fresh grant can retry
+	}
+	if err := o.writeDaemonFrame(attemptFrame{Version: 2, Kind: "handover-attached", Floor: o.ring.Floor(), Head: o.ring.Head()}); err != nil {
+		return nil // poisonDaemon closed this candidate; a fresh grant can retry
+	}
+	o.detached = false
+	o.detachedAt = time.Time{}
+	return nil
 }
 
 // stop is the typed owner transition used by daemon cancellation/finalizing.
@@ -571,7 +761,20 @@ func (o *terminalOwner) attach(c TerminalCommand) error {
 	if len(o.replay) >= terminalReplayRequestCapacity {
 		return errors.Join(ErrUnresolved, errors.New("runner: terminal replay request queue is full"))
 	}
-	if err := o.send(TerminalFrame{Kind: TerminalAttached, Correlation: c.Correlation, Sequence: c.Sequence, Floor: o.ring.Floor(), Head: head, Status: TerminalResultOK}); err != nil {
+	contextStart := o.ring.Floor()
+	var contextBytes []byte
+	if c.Sequence > o.ring.Floor() {
+		if c.Sequence-o.ring.Floor() > maxTerminalLookbehind {
+			contextStart = c.Sequence - maxTerminalLookbehind
+		}
+		var readErr error
+		contextBytes, _, readErr = o.ring.Read(contextStart)
+		if readErr != nil {
+			return readErr
+		}
+		contextBytes = contextBytes[:int(c.Sequence-contextStart)]
+	}
+	if err := o.send(TerminalFrame{Kind: TerminalAttached, Correlation: c.Correlation, Sequence: c.Sequence, Floor: o.ring.Floor(), Head: head, Status: TerminalResultOK, ContextStart: contextStart, Context: contextBytes}); err != nil {
 		return err
 	}
 	// The first observer owns the live cursor. Its historical bytes are routed
@@ -777,6 +980,9 @@ func (o *terminalOwner) poisonDaemon(cause error) error {
 		return cause
 	}
 	o.daemonOpen = false
+	if o.handover != nil {
+		o.handover.Current = nil
+	}
 	var cleanupErr error
 	if o.reads != nil {
 		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removeDaemon))
@@ -811,14 +1017,22 @@ func (o *terminalOwner) daemonLost() error {
 	var cleanupErr error
 	if o.reads != nil {
 		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removeDaemon))
-		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removeWorker))
-		cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removePTY))
+		if o.handover == nil {
+			cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removeWorker))
+			cleanupErr = errors.Join(cleanupErr, retireReadableFilter(o.reads.removePTY))
+		}
 	}
 	if o.daemon != nil {
 		cleanupErr = errors.Join(cleanupErr, o.daemon.Close())
 		o.daemon = nil
 	}
 	o.inputActive = false
+	if o.handover != nil && cleanupErr == nil {
+		// A deferred submit may already have written text. No new owner may
+		// blindly send its CR or reuse its correlation after an EOF.
+		o.fenceDaemon()
+		return nil
+	}
 	if o.child != nil && o.child.state == stateActivated {
 		return errors.Join(cleanupErr, o.terminateDrainingPTY())
 	}

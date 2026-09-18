@@ -140,12 +140,18 @@ func TestBrowserTaskDetailPagesMaximumResultPastTheFormerCursorLimit(t *testing.
 
 func completeAdapterRun(t *testing.T, store *kernel.Store, run kernel.Run, resultText string) kernel.Run {
 	t.Helper()
-	ctx := context.Background()
 	proposal, err := kernel.NewSuccessProposal(resultText)
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, adapterTime(t, 400))
+	return completeAdapterRunWithProposal(t, store, run, proposal)
+}
+
+func completeAdapterRunWithProposal(t *testing.T, store *kernel.Store, run kernel.Run, proposal kernel.Proposal) kernel.Run {
+	t.Helper()
+	ctx := context.Background()
+	at := max(int64(400), run.UpdatedAt.Int64()+1)
+	current, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, adapterTime(t, at+0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +178,7 @@ func completeAdapterRun(t *testing.T, store *kernel.Store, run kernel.Run, resul
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err = store.ConsumeAttemptResult(ctx, attemptResult, current.Revision, adapterTime(t, 401))
+	current, err = store.ConsumeAttemptResult(ctx, attemptResult, current.Revision, adapterTime(t, at+1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,26 +194,26 @@ func completeAdapterRun(t *testing.T, store *kernel.Store, run kernel.Run, resul
 			runner = resource
 		}
 	}
-	runnerExit, err := kernel.NewProcessExitCode(1, 0, adapterTime(t, 402))
+	runnerExit, err := kernel.NewProcessExitCode(1, 0, adapterTime(t, at+2))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, _, err = store.RecordLiveRunnerExitAndRelease(ctx, run.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, runnerExit, adapterTime(t, 403))
+	current, _, err = store.RecordLiveRunnerExitAndRelease(ctx, run.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, runnerExit, adapterTime(t, at+3))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, adapterTime(t, 404)); err != nil {
+	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, adapterTime(t, at+4)); err != nil {
 		t.Fatal(err)
 	}
 	session, found, err := store.TerminalSessionForRun(ctx, run.ID)
 	if err != nil || !found {
 		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
 	}
-	current, _, err = store.CloseTerminalAfterRunner(ctx, attemptResult, current.Revision, session.Revision, adapterTime(t, 405))
+	current, _, err = store.CloseTerminalAfterRunner(ctx, attemptResult, current.Revision, session.Revision, adapterTime(t, at+5))
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal, err := store.FinalizeRun(ctx, run.ID, current.Revision, adapterTime(t, 406))
+	terminal, err := store.FinalizeRun(ctx, run.ID, current.Revision, adapterTime(t, at+6))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,5 +268,36 @@ func TestBrowserTaskListRequiresPrivateCapabilityAndPagesCompletedWork(t *testin
 		} else if err != nil || result.AgentID != run.AgentID.String() || len(result.Tasks) != 0 || result.Total != 0 {
 			t.Fatalf("active task leaked to completed list = %+v %v", result, err)
 		}
+	}
+}
+
+// Activity is invalidated by event head; the control revision remains usable
+// across admission and settlement, while each snapshot has the current count.
+func TestBrowserActivityRefreshDoesNotConsumeFactoryControlRevision(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	connection := fixture.pair(t)
+	before, _ := adapterSnapshot(t, fixture, connection, "before")
+	run := adapterRunningRun(t, fixture.store, 170)
+	active, _ := adapterSnapshot(t, fixture, connection, "active")
+	if active.Factory.Revision != before.Factory.Revision || active.Factory.ActiveRuns != 1 || active.Head <= before.Head {
+		t.Fatalf("admission snapshot: before=%+v active=%+v", before, active)
+	}
+	completeAdapterRun(t, fixture.store, run, "finished")
+	watch, err := browserprotocol.EncodeStateWatch("activity-watch", browserprotocol.StateWatch{AfterHead: active.Head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, connection, watch)
+	frame := adapterRead(t, connection)
+	if frame.Type != browserprotocol.TypeStateChanged {
+		t.Fatalf("activity invalidation = %+v", frame)
+	}
+	settled, _ := adapterSnapshot(t, fixture, connection, "settled")
+	if settled.Factory.Revision != before.Factory.Revision || settled.Factory.ActiveRuns != 0 || settled.Head <= active.Head {
+		t.Fatalf("settlement snapshot: active=%+v settled=%+v", active, settled)
+	}
+	revision, _ := kernel.NewRevision(int64(before.Factory.Revision))
+	if _, err := fixture.store.SetDispatch(context.Background(), revision, false, adapterTime(t, 500)); err != nil {
+		t.Fatalf("activity invalidated control authority: %v", err)
 	}
 }
