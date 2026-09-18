@@ -74,6 +74,24 @@ func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
 	}
 }
 
+func TestTerminalWindowRedactsEscapedJSONQuotesAcrossCursor(t *testing.T) {
+	for _, line := range [][]byte{
+		[]byte(`{"token":"prefix\"escaped-secret-suffix"}` + "\n"),
+		[]byte(`{"cwd":"/Users/operator/quo\"ted/private"}` + "\n"),
+	} {
+		got, _ := redactTerminalWindow(line, 0)
+		if bytes.Contains(got, []byte("escaped-secret-suffix")) || bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte("ted/private")) {
+			t.Fatalf("escaped JSON leaked: %q", got)
+		}
+		for cursor := 1; cursor < len(line); cursor++ {
+			got, _ := redactTerminalWindow(line[cursor:], 0, terminalLookbehind{start: 0, bytes: line[:cursor]})
+			if bytes.Contains(got, []byte("escaped-secret-suffix")) || bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte("ted/private")) {
+				t.Fatalf("cursor=%d escaped JSON leaked: %q", cursor, got)
+			}
+		}
+	}
+}
+
 func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttemptInProject(t, fixture, 11, testID(11), "worker")
