@@ -1368,7 +1368,7 @@ func TestCodexToolchainSandbox(t *testing.T) {
 	if out, err := run("/bin/sh", "-c", script, "proof", software, secret); err != nil {
 		t.Fatalf("sandbox isolation: %v\n%s", err, out)
 	}
-	gitDirectory := filepath.Join(root, "repository.git")
+	gitDirectory := filepath.Join(root, "repository", ".git")
 	leaseDirectory := filepath.Join(gitDirectory, "dark-factory-local-ci")
 	if err := os.MkdirAll(leaseDirectory, 0700); err != nil {
 		t.Fatal(err)
@@ -1475,6 +1475,30 @@ printf '#include <stdio.h>\nint main(void) { puts("sdk-ok"); return 0; }\n' > sd
  `
 	if out, err := run("/bin/sh", "-c", readerScript, "proof", gitDirectory); err != nil {
 		t.Fatalf("orchestrator Git directory grant: %v\n%s", err, out)
+	}
+	producer := filepath.Join(root, "producer-change")
+	if err := os.Mkdir(producer, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(producer, "review.txt"), []byte("producer\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	canonicalReview, err := runtime.WithGitCommonDirectory(gitDirectory, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalReview, err = canonicalReview.WithRetainedSourceReview(producer, gitDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.runtime = canonicalReview
+	canonicalReviewScript := `set -eu
+/bin/cat "$1/review.txt" >/dev/null
+/bin/cat "$2/refs/factory-branch" >/dev/null
+if printf forbidden > "$2/refs/injected" 2>/dev/null; then exit 41; fi
+`
+	if out, err := run("/bin/sh", "-c", canonicalReviewScript, "proof", producer, gitDirectory); err != nil {
+		t.Fatalf("generated canonical retained-source review profile: %v\n%s", err, out)
 	}
 	request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable = "", false
 	if fixture := os.Getenv("DARK_FACTORY_TEST_FIXTURE_BINARY"); fixture != "" {
@@ -1590,6 +1614,9 @@ func TestCodexLaunchGrantsOnlyAuthenticatedRetainedReviewPathsReadOnly(t *testin
 			t.Fatalf("retained review path %q writable: %q", path, policy)
 		}
 	}
+	if !strings.Contains(policy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
+		t.Fatalf("reviewer's distinct Git directory lost its write grant: %q", policy)
+	}
 	for _, path := range []string{"/private/producer-repo", "/private/dark-factory/changes"} {
 		if strings.Contains(policy, tomlBasicString(path)+`="`) {
 			t.Fatalf("retained review grant widened to %q: %q", path, policy)
@@ -1602,8 +1629,19 @@ func TestCodexLaunchGrantsOnlyAuthenticatedRetainedReviewPathsReadOnly(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Build(requestFor(t, kernel.ProviderCodex, installation, shared, "", "")); err != nil {
+	sharedLaunch, err := Build(requestFor(t, kernel.ProviderCodex, installation, shared, "", ""))
+	if err != nil {
 		t.Fatalf("shared canonical Git directory rejected: %v", err)
+	}
+	sharedPolicy := ""
+	for _, argument := range sharedLaunch.Argv() {
+		if strings.HasPrefix(argument, "permissions."+codexPermissionName(shared)+"=") {
+			sharedPolicy = argument
+			break
+		}
+	}
+	if !strings.Contains(sharedPolicy, tomlBasicString("/private/reviewer/.git")+`="read"`) || strings.Contains(sharedPolicy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
+		t.Fatalf("canonical shared Git grant is not read-only: %q", sharedPolicy)
 	}
 }
 
