@@ -245,6 +245,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
     const box = (target.querySelector("rect") ?? target).getBoundingClientRect();
     setTooltip({ text: target.getAttribute("data-tooltip")!, x: Math.max(8, Math.min(box.left, window.innerWidth - 272)), y: Math.max(8, Math.min(box.bottom, window.innerHeight - 112)) });
   };
+  const retainFocusedTooltip = () => showTooltip(typeof document !== "undefined" && document.activeElement?.matches("[data-tooltip]") ? document.activeElement : null);
   const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => {
     const element = event.target as Element;
     if (!element.closest('[role="tooltip"]')) showTooltip(element.closest("[data-tooltip]"));
@@ -267,7 +268,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
   return (
     <>
-    <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => setTooltip(undefined)} onBlur={() => setTooltip(undefined)} onScroll={() => showTooltip(typeof document !== "undefined" && document.activeElement?.matches("[data-tooltip]:focus-visible") ? document.activeElement : null)} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
+    <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
       viewBox={`0 0 ${layout.width} ${sceneHeight}`}
       role="group"
@@ -332,7 +333,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
             <g data-work-footprint={task === undefined ? undefined : room.id} data-room-operating={operating}
               data-workbench-task-id={task?.id}
               data-tooltip={task === undefined ? "No current work" : `${connected ? "Working" : "Disconnected · last observed work"} · ${task.title}${footprint.length > 1 ? `\n${footprint.length - 1} more tasks in this area` : ""}`}
-              aria-label={task === undefined ? "No current work" : `Working: ${task.title}`}
+              aria-label={task === undefined ? "No current work" : `${connected ? "Working" : "Disconnected · last observed work"}: ${task.title}`}
               {...sceneAction(task === undefined || onSelectTask === undefined ? undefined : () => onSelectTask(task.id))}>
               <rect x={room.x + room.width - 32} y={room.y + 12} width="24" height="24" fill="transparent" />
               <path d={`M${room.x + room.width - 26} ${room.y + 18}h14v10h-14Z`} fill="#303e40" stroke="#53605b" />

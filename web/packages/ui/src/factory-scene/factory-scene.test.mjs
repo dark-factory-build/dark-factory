@@ -656,7 +656,9 @@ test("stationary tasks expose affected areas and link the existing queue and que
   assert.doesNotMatch(markup, /<script>/);
   assert.doesNotMatch(markup, /stroke-dasharray|CHANGES WITHIN|CHANGED|>task-0</);
   assert.equal((markup.match(/data-room-operating="true"/g) ?? []).length, 2);
-  assert.doesNotMatch(render({ tasks, connected: false }), /data-room-operating="true"/);
+  const disconnected = render({ tasks, connected: false });
+  assert.doesNotMatch(disconnected, /data-room-operating="true"|aria-label="Working:/);
+  assert.match(disconnected, /aria-label="Disconnected · last observed work:/);
   assert.doesNotMatch(render({ tasks: tasks.map((task) => ({ ...task, status: "succeeded" })) }), /data-room-operating="true"/);
   const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
   assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
@@ -718,10 +720,12 @@ test("compact tooltips open on hover, focus and tap and dismiss without a detail
     await act(async () => map.props.onFocus(event));
     await act(async () => map.props.onScroll());
     assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 0);
-    globalThis.document = { activeElement: { ...event.target.closest("[data-tooltip]"), matches: () => true } };
+    globalThis.document = { activeElement: { ...event.target.closest("[data-tooltip]"), matches: (selector) => selector === "[data-tooltip]" } };
     await act(async () => map.props.onFocus(event));
     await act(async () => map.props.onScroll());
-    assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 1, "keyboard autoscroll retains the focused tooltip");
+    assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 1, "autoscroll retains focus even after pointer interaction");
+    await act(async () => map.props.onPointerLeave());
+    assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 1, "pointer departure retains focused tooltip");
     assert.equal(renderer.root.findAllByType("select").length, 0);
     assert.equal(renderer.root.findAllByType("table").length, 0);
   } finally {
