@@ -397,8 +397,22 @@ def legacy_migration_input(home, config_path):
     configuration = {'priority_default': config.get('priority_default', 0), 'priority_by_label': config.get('priority_by_label', {}), 'repository': config['repository'], 'overseer_agent_id': config['overseer_agent_id'], 'label': config['label'], 'policy': 'trusted_authors' if humans else 'manual', 'trusted_authors': humans, 'poll_seconds': int(config.get('poll_seconds', 120)), 'admission_limit': int(config.get('max_issues', 25))}
     digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     source_id = hashlib.sha256(('legacy-intake\0' + str(home) + '\0' + str(config_path)).encode()).hexdigest()[:32]
-    request = {'action': 'legacy_preview', 'source_id': source_id, 'project_id': config['project_id'], 'configuration': configuration, 'legacy': {'manual_app_authors': manual_apps, 'config_hash': digest(config), 'journal_hash': digest(history), 'history': history}}
+    request = {'action': 'legacy_preview', 'source_id': source_id, 'project_id': config['project_id'], 'configuration': configuration, 'legacy': {'review_companion': 'review_mirror_root' in config, 'manual_app_authors': manual_apps, 'config_hash': digest(config), 'journal_hash': digest(history), 'history': history}}
     return request, config, raw_config.decode(), raw_journal.decode()
+
+
+def legacy_review_ready(config, publication):
+    if 'review_mirror_root' not in config:
+        return
+    if not isinstance(publication, str) or not publication:
+        raise ValueError('review publication repository is unbound; legacy schedule remains untouched')
+    spec = importlib.util.spec_from_file_location('legacy_review_preflight', Path(__file__).with_name('factory-review-intake.py'))
+    reviewer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reviewer)
+    try:
+        reviewer.mirror(dict(config, repository=publication))
+    except (reviewer.ReviewError, reviewer.intake.IntakeError, OSError) as error:
+        raise ValueError('prepare the configured Git review mirror for the publication repository before cutover; legacy schedule remains untouched') from error
 
 
 def legacy_migration_job(config_path):
@@ -590,6 +604,8 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
             job = legacy_migration_job(config_path)
             refuse_legacy_intake_service(home, Path(job['path']))
         reply = managed_api(factoryctl, home, ['legacy_preview'], request)
+        if reply.get('state') == 'legacy_preview':
+            legacy_review_ready(config, reply.get('legacy', {}).get('publication_repository'))
         reply['configuration'] = dict(request['configuration'], target_repository_id=reply.get('legacy', {}).get('target_repository_id', request['configuration'].get('target_repository_id', '')))
         reply['companions'] = {key: config[key] for key in ('review_mirror_root','review_provider','base','release_configs','command_timeout') if key in config}
         reply['source_id'] = request['source_id']
@@ -621,6 +637,7 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
                 if reply.get('state') != 'legacy_preview' or reply.get('legacy', {}).get('plan_hash') != plan_hash:
                     return reply
                 receipt['plan_hash'] = plan_hash
+                legacy_review_ready(config, reply['legacy'].get('publication_repository'))
                 request['legacy']['plan_hash'] = plan_hash
                 request['configuration']['target_repository_id'] = reply['legacy']['target_repository_id']
                 atomic_json(receipt_path, receipt)
@@ -632,6 +649,7 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
             reply = managed_api(factoryctl, home, ['legacy_preview'], request)
             if reply.get('state') != 'legacy_preview' or reply.get('legacy', {}).get('plan_hash') != plan_hash:
                 return reply if reply.get('state') != 'legacy_preview' else dict(reply, state='stale')
+            legacy_review_ready(config, reply['legacy'].get('publication_repository'))
             request['legacy']['plan_hash'] = plan_hash
             request['legacy']['acknowledge_policy_narrowing'] = bool(request['legacy']['manual_app_authors']) and acknowledge_policy_narrowing
             request['configuration']['target_repository_id'] = reply['legacy']['target_repository_id']

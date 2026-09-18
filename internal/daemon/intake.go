@@ -42,6 +42,9 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 	if err != nil {
 		return intakeFailure(err)
 	}
+	if input.Action == "review" {
+		return daemon.intakeReview(ctx, input)
+	}
 	if input.Action == "legacy_lineage" {
 		return daemon.legacyIntakeLineage(ctx, input)
 	}

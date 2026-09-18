@@ -25,6 +25,8 @@ PUBLICATION_SPEC = importlib.util.spec_from_file_location("factory_publication",
 publication = importlib.util.module_from_spec(PUBLICATION_SPEC)
 PUBLICATION_SPEC.loader.exec_module(publication)
 SHA = re.compile(r"^[0-9a-f]{40}$")
+# ponytail: the existing controller owns one sequential review pass per home.
+CUSTOMER_REVIEW = None
 
 
 class ReviewError(Exception):
@@ -114,21 +116,27 @@ def linked_issue(config, pr, journal, existing=None, managed=None):
         raise ReviewError("pull request body is invalid")
     footer = publication.terminal_footer(body)
     numbers = {int(value) for repository, value in publication.FOOTER.findall(body)
-               if not repository or repository.casefold() == config["repository"].casefold()}
+               if not repository or repository.casefold() == source_config(config)["repository"].casefold()}
     known = {record.get("number") for record in journal["issues"].values() if isinstance(record, dict) and record.get("managed")}
     matched = numbers & known
     if len(matched) > 1:
         raise ReviewError("pull request links multiple tracked source issues")
     if footer is None:
         return None
-    if footer.group(2) and footer.group(2).casefold() != config["repository"].casefold():
+    if footer.group(2) and footer.group(2).casefold() != source_config(config)["repository"].casefold():
         return None  # Another source controller owns this fully qualified backlog.
     issue = int(footer.group(3))
     if issue in known:
+        if managed is not None:
+            controller, receipt, factoryctl = managed
+            request = dict(receipt['request'], action='legacy_lineage', issue_number=issue)
+            reply = controller.managed_api(factoryctl, Path(config['factory_home']), ['legacy_lineage'], request)
+            if reply.get('state') not in {'imported', 'not_found'}:
+                raise Unproven('retained source lineage is unavailable for footer #' + str(issue))
         return issue
     if matched:
         raise Unproven("terminal footer #" + str(issue) + " is not the tracked source #" + str(min(matched)) + " the body also links")
-    if managed is None and existing is not None and existing.get("source_marker") == intake.source_marker(config, {"number": issue}):
+    if managed is None and existing is not None and existing.get("source_marker") == intake.source_marker(source_config(config), {"number": issue}):
         return issue
     # New managed work needs both imported acceptance lineage and a completed
     # PR publication receipt. The legacy App-created tracking-issue fallback
@@ -143,6 +151,8 @@ def linked_issue(config, pr, journal, existing=None, managed=None):
             return issue
         if reply.get('state') != 'not_found':
             raise Unproven('managed source lineage is unavailable for footer #' + str(issue))
+        if CUSTOMER_REVIEW is not None:
+            raise Unproven('source has no imported acceptance; review and accept it before publication')
     try:
         source = intake.exact_issue(config, issue)
     except intake.IssueBodyTooLarge as exc:
@@ -154,7 +164,7 @@ def linked_issue(config, pr, journal, existing=None, managed=None):
 
 def discovery_batch_size(config):
     # GitHub's REST pull-request endpoint caps per_page at 100.
-    return min(int(config.get("max_issues", 25)), 100)
+    return 2 if CUSTOMER_REVIEW is not None else min(int(config.get("max_issues", 25)), 100)
 
 
 def next_discovery_page(config, page, discovered):
@@ -162,6 +172,16 @@ def next_discovery_page(config, page, discovered):
 
 
 def list_prs(config, page=1):
+    if CUSTOMER_REVIEW is not None:
+        value = bridge_call("list_pull_requests", {"page": page}).get("structuredContent")
+        if not isinstance(value, dict) or not isinstance(value.get("pulls"), list) or len(value["pulls"]) > 2:
+            raise ReviewError("customer pull request page is invalid")
+        normalized = []
+        for item in value['pulls']:
+            if not isinstance(item, dict) or type(item.get('number')) is not int or item['number'] < 1 or not isinstance(item.get('body'), str) or not isinstance(item.get('head_sha'), str) or not SHA.fullmatch(item['head_sha']) or not isinstance(item.get('base_sha'), str) or not SHA.fullmatch(item['base_sha']) or not isinstance(item.get('base_ref'), str):
+                raise ReviewError('customer pull request is invalid')
+            normalized.append({'number': item['number'], 'body': item['body'], 'headRefOid': item['head_sha'], 'baseRefName': item['base_ref'], 'baseRefOid': item['base_sha']})
+        return normalized
     batch = discovery_batch_size(config)
     if type(page) is not int or page < 1:
         raise ReviewError("pull request discovery page is invalid")
@@ -189,17 +209,21 @@ def list_prs(config, page=1):
 
 
 def ready(config, path, pr, issue):
-    base = config.get("base", "main")
-    if not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,240}", base):
+    base = pr.get("baseRefName") if CUSTOMER_REVIEW is not None else config.get("base", "main")
+    if CUSTOMER_REVIEW is not None:
+        if not isinstance(base, str) or not base or len(base.encode()) > 4096:
+            raise ReviewError('base must be an explicit branch name')
+        intake.command(['git', 'check-ref-format', 'refs/heads/' + base])
+    elif not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,240}", base):
         raise ReviewError("base must be an explicit branch name")
     intake.command(["git", "-C", str(path), "fetch", "--no-tags", "origin", "+refs/heads/" + base + ":refs/remotes/origin/" + base, "+refs/pull/" + str(pr["number"]) + "/head:refs/pull/" + str(pr["number"]) + "/head"], timeout=120)
     head = intake.command(["git", "-C", str(path), "rev-parse", "refs/pull/" + str(pr["number"]) + "/head"]).strip()
     observed_base = intake.command(["git", "-C", str(path), "rev-parse", "refs/remotes/origin/" + base]).strip()
-    if head != pr["headRefOid"] or not SHA.fullmatch(observed_base):
+    if head != pr["headRefOid"] or not SHA.fullmatch(observed_base) or (CUSTOMER_REVIEW is not None and observed_base != pr["baseRefOid"]):
         raise ReviewError("mirror did not prove the App-reported exact head and base")
-    marker = intake.source_marker(config, {"number": issue})
+    marker = intake.source_marker(source_config(config), {"number": issue})
     return {"pr": pr["number"], "head": head, "base": observed_base, "source_marker": marker,
-            "priority": int(config.get("priority_default", 0))}
+            "priority": int(config.get("priority_default", 0)), "enqueue_base": base}
 
 
 
@@ -214,7 +238,33 @@ def verify_existing(path, pr, operation):
     intake.command(["git", "-C", str(path), "cat-file", "-e", base + "^{commit}"])
 
 
+def customer_review(name, arguments):
+    config, managed = CUSTOMER_REVIEW
+    controller, receipt, factoryctl = managed
+    arguments = dict(arguments)
+    arguments.pop('repository', None)
+    request = dict(receipt['request'], action='review', review=dict(arguments, tool=name))
+    if name in {'submit_pull_request_review', 'enqueue_pull_request'}:
+        request['issue_number'] = config.get('_review_issue', 0)
+    reply = controller.managed_api(factoryctl, Path(config['factory_home']), ['review'], request)
+    if reply.get('state') != 'ok' or not isinstance(reply.get('review'), dict):
+        raise ReviewError('Customer review access unavailable (' + str(reply.get('state', 'unavailable')) + '); connect or refresh GitHub and bind the publication repository. Legacy credentials are never used.')
+    return reply['review']
+
+
+def source_config(config):
+    return dict(config, repository=config.get('source_repository', config['repository']))
+
+
 def bridge_call(name, arguments):
+    if CUSTOMER_REVIEW is not None:
+        try:
+            reply = json.loads(customer_review(name, arguments).get("response", ""))
+        except (TypeError, ValueError) as exc:
+            raise ReviewError(name + " reply invalid") from exc
+        if not isinstance(reply, dict) or not isinstance(reply.get("result"), dict):
+            raise ReviewError(name + " unavailable")
+        return reply["result"]
     bridge = os.environ.get("DARK_FACTORY_MAINTAINER_BRIDGE") or shutil.which("dark-factory-maintainer-mcp-bridge")
     if not bridge or not os.path.isabs(bridge):
         raise ReviewError("maintainer bridge is unavailable")
@@ -271,8 +321,11 @@ def correction_review_is_explicit(config, operation, result):
     if type(review_id) is not int or review_id < 1:
         return False
     try:
-        raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls/" + str(operation["pr"]) + "/reviews", "--paginate"], timeout=int(config.get("command_timeout", 30)))
-        reviews = json.loads(raw)
+        if CUSTOMER_REVIEW is not None:
+            reviews = [bridge_call("observe_pull_request_review", {"pull_number": operation["pr"], "review_id": review_id}).get("structuredContent")]
+        else:
+            raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls/" + str(operation["pr"]) + "/reviews", "--paginate"], timeout=int(config.get("command_timeout", 30)))
+            reviews = json.loads(raw)
     except (intake.IntakeError, json.JSONDecodeError, TypeError, ValueError):
         return False
     if not isinstance(reviews, list):
@@ -404,6 +457,20 @@ def launch_review(config, path, pr, operation):
     else:
         env.pop("DARK_FACTORY_REVIEW_CORRECTS_OPERATION_ID", None)
     env.pop("DARK_FACTORY_REVIEW_EVIDENCE_FILE", None)
+    env.pop("DARK_FACTORY_REVIEW_ADAPTER_CONTEXT", None)
+    if CUSTOMER_REVIEW is not None:
+        _, receipt, factoryctl = CUSTOMER_REVIEW[1]
+        request = dict(receipt["request"], action="review", issue_number=config["_review_issue"],
+                       review={"tool": "submit_pull_request_review", "pull_number": operation["pr"], "head_sha": operation["head"], "operation_id": operation["review_operation"]})
+        if operation.get("prior_review_operation"):
+            request["review"]["corrects_review_operation_id"] = operation["prior_review_operation"]
+        context = directory / "adapter.json"
+        intake.atomic_json(context, {"home": config["factory_home"], "repository": config["repository"], "request": request})
+        os.chmod(context, 0o600)
+        env["DARK_FACTORY_MAINTAINER_BRIDGE"] = str(factoryctl)
+        env["DARK_FACTORY_REVIEW_ADAPTER_CONTEXT"] = str(context)
+        for key in ("DARK_FACTORY_OPERATOR_TOKEN_FILE", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_SOCKET", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+            env.pop(key, None)
     with (directory / "launch.log").open("w") as output:
         return subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-process-owner",
                                str(HERE / "go-gate-environment.sh"), "1200", str(HERE / "cold-review.sh"),
@@ -417,10 +484,16 @@ def review_body_path(config, pr, operation):
 
 def verify_review_body(config, pr, operation):
     try:
-        raw = intake.command(["gh", "pr", "view", str(pr["number"]), "--repo", config["repository"], "--json", "body,headRefOid"], timeout=int(config.get("command_timeout", 30)))
-        current = json.loads(raw)
-        body = current["body"]
-        head = current["headRefOid"]
+        if CUSTOMER_REVIEW is not None:
+            pulls = bridge_call("list_pull_requests", {"page": 1, "pull_number": pr["number"]}).get("structuredContent", {}).get("pulls")
+            if not isinstance(pulls, list) or len(pulls) != 1 or pulls[0].get("number") != pr["number"]:
+                raise ReviewError("exact customer pull request is unavailable")
+            body, head = pulls[0]["body"], pulls[0]["head_sha"]
+        else:
+            raw = intake.command(["gh", "pr", "view", str(pr["number"]), "--repo", config["repository"], "--json", "body,headRefOid"], timeout=int(config.get("command_timeout", 30)))
+            current = json.loads(raw)
+            body = current["body"]
+            head = current["headRefOid"]
         reviewed = review_body_path(config, pr, operation).read_text()
     except (intake.IntakeError, OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ReviewError("live pull request body is unavailable") from exc
@@ -456,11 +529,13 @@ def review_followup(config, operation, state):
 
 
 def config_fingerprint(config):
+    config = source_config(config)
     value = {key: config.get(key) for key in ("repository", "project_id", "overseer_agent_id", "review_mirror_root", "review_provider")}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def legacy_config_fingerprint(config):
+    config = source_config(config)
     # Pre-review_provider version-2 receipts were fingerprinted without that
     # field. Recognize their existing digest so upgrading this script does
     # not invalidate every journal already on disk; a receipt only earns the
@@ -470,6 +545,9 @@ def legacy_config_fingerprint(config):
 
 
 def require_legacy_home(config):
+    if CUSTOMER_REVIEW is not None:
+        customer_review("configuration", {})
+        return
     home = Path(config['factory_home'])
     if not home.is_dir() or home.stat().st_uid != os.geteuid():
         raise ReviewError('legacy review factory home is unavailable')
@@ -505,14 +583,29 @@ def review_ownership(config, inherited):
 
 
 def run_once(config, managed=None, controller_lock_fd=None):
-    config = intake.validate_config(config)
+    global CUSTOMER_REVIEW
+    config = dict(intake.validate_config(config))
+    previous = CUSTOMER_REVIEW
+    if managed is not None:
+        CUSTOMER_REVIEW = config, managed
+    try:
+        return run_owned(config, managed, controller_lock_fd)
+    finally:
+        CUSTOMER_REVIEW = previous
+
+
+def run_owned(config, managed, controller_lock_fd):
     with review_ownership(config, controller_lock_fd):
         require_legacy_home(config)
+        if CUSTOMER_REVIEW is not None:
+            route = customer_review("configuration", {})
+            config["source_repository"] = config["repository"]
+            config["repository"] = route["repository"]
         path = mirror(config)
         journal_path = Path(config["journal"] + ".reviews.json")
         lock_path = Path(str(journal_path) + ".lock")
         journal = intake.load_journal(Path(config["journal"]))
-        intake.bind_journal(config, journal)
+        intake.bind_journal(source_config(config), journal)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+") as lock:
             try:
@@ -559,6 +652,8 @@ def run_locked(config, path, journal, journal_path, managed=None):
     launched = False
     for pr in discovered:
         key = str(pr["number"]) + ":" + pr["headRefOid"]
+        if config.get("source_repository", config["repository"]).casefold() != config["repository"].casefold():
+            key = config["repository"].casefold() + ":" + key
         existing = receipts["pulls"].get(key)
         try:
             issue = linked_issue(config, pr, journal, existing, managed)
@@ -567,6 +662,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
             continue
         if issue is None:
             continue
+        config["_review_issue"] = issue
         if existing is None:
             operation = ready(config, path, pr, issue)
             operation["provider"] = provider

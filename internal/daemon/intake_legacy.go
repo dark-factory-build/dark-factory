@@ -91,6 +91,30 @@ func (daemon *Daemon) legacyIntakeWithStatus(ctx context.Context, input api.Inta
 		return intakeFailure(kernel.ErrInvalidValue)
 	}
 	plan := api.LegacyIntakePlan{TargetRepositoryID: target.String(), RequiresPolicyAcknowledgement: len(input.Legacy.ManualAppAuthors) > 0, GitHubRepositoryID: remoteID, Issues: []api.LegacyIntakeIssue{}, Blockers: []string{}, PolicyChanges: []string{"existing backlog is suppressed until explicit review", "comments, labels and activity timestamps no longer create work", "content edits require fresh acceptance"}}
+	if input.Legacy.ReviewCompanion {
+		proof, verified, proofErr := daemon.store.RepositorySourceIdentity(ctx, target)
+		if proofErr != nil {
+			return intakeFailure(proofErr)
+		}
+		publicationID, pinned, proofErr := daemon.store.RepositoryGitHubID(ctx, target)
+		if proofErr != nil {
+			return intakeFailure(proofErr)
+		}
+		if !verified || !pinned || proof.PublicationRepository == "" {
+			plan.Blockers = append(plan.Blockers, "review_publication_unbound: bind the destination repository GitHub identity before cutover")
+		} else {
+			plan.PublicationRepository = proof.PublicationRepository
+			delegated := false
+			for _, grant := range status.Repositories {
+				if uint64(grant.RepositoryID) == publicationID && strings.EqualFold(grant.Repository, proof.PublicationRepository) {
+					delegated = true
+				}
+			}
+			if !delegated {
+				plan.Blockers = append(plan.Blockers, "review_publication_not_delegated: connect and delegate the frozen publication repository before cutover")
+			}
+		}
+	}
 	if plan.RequiresPolicyAcknowledgement {
 		plan.PolicyChanges = append(plan.PolicyChanges, "App/bot authorship is not human approval: already imported work and receipts are preserved; future bot-authored issues require explicit manual acceptance")
 	}
@@ -228,7 +252,7 @@ func (daemon *Daemon) legacyIntakeWithStatus(ctx context.Context, input api.Inta
 	encoded, err := json.Marshal(struct {
 		Input api.IntakeInput
 		Plan  api.LegacyIntakePlan
-	}{Input: api.IntakeInput{Action: "legacy_preview", SourceID: input.SourceID, ProjectID: input.ProjectID, Configuration: &config, Legacy: &api.LegacyIntakeInput{ManualAppAuthors: input.Legacy.ManualAppAuthors, AcknowledgePolicyNarrowing: plan.RequiresPolicyAcknowledgement, ConfigHash: input.Legacy.ConfigHash, JournalHash: input.Legacy.JournalHash, History: input.Legacy.History}}, Plan: plan})
+	}{Input: api.IntakeInput{Action: "legacy_preview", SourceID: input.SourceID, ProjectID: input.ProjectID, Configuration: &config, Legacy: &api.LegacyIntakeInput{ReviewCompanion: input.Legacy.ReviewCompanion, ManualAppAuthors: input.Legacy.ManualAppAuthors, AcknowledgePolicyNarrowing: plan.RequiresPolicyAcknowledgement, ConfigHash: input.Legacy.ConfigHash, JournalHash: input.Legacy.JournalHash, History: input.Legacy.History}}, Plan: plan})
 	if err != nil {
 		return intakeFailure(err)
 	}

@@ -16,6 +16,7 @@ type LegacyIntakeHistory struct {
 }
 
 type LegacyIntakeInput struct {
+	ReviewCompanion            bool                  `json:"review_companion,omitempty"`
 	ManualAppAuthors           []string              `json:"manual_app_authors,omitempty"`
 	AcknowledgePolicyNarrowing bool                  `json:"acknowledge_policy_narrowing,omitempty"`
 	ConfigHash                 string                `json:"config_hash"`
@@ -37,6 +38,7 @@ type LegacyIntakeIssue struct {
 }
 
 type LegacyIntakePlan struct {
+	PublicationRepository         string              `json:"publication_repository,omitempty"`
 	TargetRepositoryID            string              `json:"target_repository_id,omitempty"`
 	RequiresPolicyAcknowledgement bool                `json:"requires_policy_acknowledgement,omitempty"`
 	PlanHash                      string              `json:"plan_hash"`

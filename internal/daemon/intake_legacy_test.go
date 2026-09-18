@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -82,6 +83,11 @@ func TestLegacyCutoverLivePlanHistorySuppressionAndPriority(t *testing.T) {
 	if first.State != "legacy_preview" || first.Legacy.Issues[0].TaskID != old.ID.String() || first.Legacy.TargetRepositoryID != target.String() {
 		t.Fatalf("terminal preview: %+v", first)
 	}
+	input.Legacy.ReviewCompanion = true
+	if result := preview(); result.State != "legacy_blocked" || len(result.Legacy.Blockers) == 0 || !strings.Contains(result.Legacy.Blockers[0], "review_publication_unbound") {
+		t.Fatalf("unready companion cutover: %+v", result)
+	}
+	input.Legacy.ReviewCompanion = false
 	primary, _, err := fixture.store.ProjectRepository(ctx, kernel.RepositoryID(project))
 	if err != nil {
 		t.Fatal(err)

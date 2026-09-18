@@ -16,6 +16,8 @@ SPEC = importlib.util.spec_from_file_location('review_intake', Path(__file__).wi
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)
 SHA = 'a' * 40
+CUSTOMER_BRIDGE = review.bridge_call
+CUSTOMER_OBSERVE = review.observe_review
 
 
 class ReviewIntakeTest(unittest.TestCase):
@@ -56,6 +58,63 @@ class ReviewIntakeTest(unittest.TestCase):
         path.unlink()
         with patch.object(review,'mirror',return_value=Path('/mirror')), patch.object(review,'list_prs',return_value=[]):
             self.assertEqual([],review.run_once(self.config))
+
+    def test_customer_companion_reviews_and_enqueues_exact_target_without_legacy_auth(self):
+        (Path(self.config['factory_home'])/'maintainer.json').write_text('{"id":"fixture"}')
+        request = {'source_id':'a'*32,'project_id':self.config['project_id'],
+                   'configuration':{'repository':'o/r','target_repository_id':'b'*32},
+                   'legacy':{'plan_hash':'c'*64,'config_hash':'d'*64,'journal_hash':'e'*64}}
+        controller = Mock()
+        managed = controller, {'request':request}, Path('/installed/factoryctl')
+        operations, calls, enqueued = {}, [], set()
+        pull = {'number':9,'body':'Reviewed publication '+SHA+'\n\nRefs o/r#7','head_sha':SHA,'base_sha':'b'*40,'base_ref':'release+candidate'}
+        def api(_binary, _home, _args, value):
+            if value['action']=='legacy_lineage':
+                return {'state':'not_found'}  # Verified pre-cutover historical work.
+            self.assertEqual('b'*32,value['configuration']['target_repository_id'])
+            item=value['review']; tool=item['tool']; calls.append(tool)
+            if tool=='configuration':
+                return {'state':'ok','review':{'repository':'delivery/target','repository_id':42}}
+            if tool=='list_pull_requests': result={'pulls':[pull],'repository_id':42,'next_page':None}
+            elif tool=='observe_operation': result=operations.get(item['operation_id'],{'operation_id':item['operation_id'],'state':'missing'})
+            elif tool=='submit_pull_request_review':
+                self.assertEqual(7,value['issue_number'])
+                result={'url':'https://github.com/delivery/target/pull/9#pullrequestreview-71','head_sha':SHA,'verdict':'allow','review_id':71}
+                operations[item['operation_id']]={'operation_id':item['operation_id'],'state':'completed','kind':tool,'result':result}
+            elif tool=='enqueue_pull_request':
+                self.assertEqual('release+candidate',item['base'])
+                self.assertEqual(7,value['issue_number'])
+                result={'pull_number':9,'head_sha':SHA}
+                operation={'enqueue_operation':item['operation_id'],'pr':9,'head':SHA,'enqueue_base':item['base'],'reviewed_body_digest':item['reviewed_body_digest']}
+                operations[item['operation_id']]={'operation_id':item['operation_id'],'state':'completed','kind':tool,'result':result,'request_digest':review.enqueue_request_digest({'repository':'delivery/target'},operation)}
+            elif tool=='observe_pull_request_merge': result={'pull_number':9,'head_sha':SHA,'base':'release+candidate','state':'MERGED_AFTER_ENQUEUE_ATTEMPT','pull_state':'closed'}
+            else: self.fail('unexpected customer tool '+tool)
+            return {'state':'ok','review':{'repository':'delivery/target','repository_id':42,'response':json.dumps({'jsonrpc':'2.0','id':1,'result':{'structuredContent':result,'isError':False}})}}
+        controller.managed_api.side_effect=api
+        def git(argv, **_kwargs):
+            self.assertEqual('git',argv[0])  # No gh or legacy credential bridge.
+            if 'rev-parse' in argv:
+                return SHA if argv[-1].startswith('refs/pull/') else 'b'*40
+            return ''
+        def launch(config,_path,pr,operation):
+            body=review.review_body_path(config,pr,operation);body.parent.mkdir(parents=True,exist_ok=True);body.write_text(pr['body'])
+            review.bridge_call('submit_pull_request_review',{'repository':config['repository'],'operation_id':operation['review_operation'],'pull_number':9,'head_sha':SHA,'event':'ALLOW','body':'Independent review'})
+            return 0
+        with patch.object(review,'bridge_call',side_effect=CUSTOMER_BRIDGE), patch.object(review,'observe_review',side_effect=CUSTOMER_OBSERVE), patch.object(review,'mirror',return_value=Path('/mirror')) as mirror, patch.object(review.intake,'command',side_effect=git), patch.object(review,'launch_review',side_effect=launch) as launched, patch.object(review.intake,'task_state',side_effect=lambda _c,task:'queued' if task['task_id'] in enqueued else None), patch.object(review.intake,'enqueue',side_effect=lambda _c,task:enqueued.add(task['task_id'])):
+            review.run_once(self.config,managed)
+            review.run_once(self.config,managed)
+            self.assertEqual('delivery/target',mirror.call_args.args[0]['repository'])
+            self.assertEqual(1,launched.call_count)
+        self.assertEqual(1,calls.count('enqueue_pull_request'))
+        self.assertEqual(1,len(enqueued))
+        self.assertEqual('o/r',self.config['repository'])
+        self.assertIsNone(review.CUSTOMER_REVIEW)
+        for state in ('denied','unavailable'):
+            controller.managed_api.return_value={'state':state}; controller.managed_api.side_effect=None
+            with patch.object(review.intake,'command') as command, patch.object(review,'mirror') as mirror:
+                with self.assertRaisesRegex(review.ReviewError,'Customer review access unavailable'):
+                    review.run_once(self.config,managed)
+                command.assert_not_called();mirror.assert_not_called()
 
     def test_review_child_retains_same_lock_after_parent_scope_exits(self):
         child = None
