@@ -482,6 +482,7 @@ func (config FactoryConfig) normalized() (FactoryConfig, error) {
 }
 
 type NewProject struct {
+	SourceIdentity     *RepositorySourceIdentity
 	ID                 ProjectID
 	Name               string
 	Root               string

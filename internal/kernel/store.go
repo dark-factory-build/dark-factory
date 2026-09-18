@@ -37,6 +37,15 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 	}
 	if found {
 		if projectMatchesCreation(existing, spec) {
+			if spec.SourceIdentity != nil {
+				if err := bindRepositorySource(ctx, tx.connection, RepositoryID(spec.ID), *spec.SourceIdentity); err != nil {
+					return Project{}, tx.Rollback(err)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return Project{}, err
+				}
+				return existing, nil
+			}
 			if err := tx.Rollback(nil); err != nil {
 				return Project{}, err
 			}
@@ -62,6 +71,14 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 	}
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 1, 1, 1, ?, ?)`, spec.ID.Bytes(), spec.ID.Bytes(), spec.Name, spec.Root, base, at.Int64(), at.Int64()); err != nil {
 		return Project{}, tx.Rollback(err)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO repository_source_identities(repository_id) VALUES(?)`, spec.ID.Bytes()); err != nil {
+		return Project{}, tx.Rollback(err)
+	}
+	if spec.SourceIdentity != nil {
+		if err := bindRepositorySource(ctx, tx.connection, RepositoryID(spec.ID), *spec.SourceIdentity); err != nil {
+			return Project{}, tx.Rollback(err)
+		}
 	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityProject, id: spec.ID.Bytes(), revision: 1}}); err != nil {
 		return Project{}, tx.Rollback(err)
