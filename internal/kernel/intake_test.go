@@ -232,6 +232,11 @@ func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testi
 	if terminal.Status != TaskCancelled {
 		t.Fatalf("terminal task = %s", terminal.Status)
 	}
+	newest := edited
+	newest.Body = "later accepted instructions"
+	if _, err := store.AcceptIntakeSnapshot(ctx, first.ID, newest, mustTime(t, 14)); err != nil {
+		t.Fatal(err)
+	}
 	replayTerminal, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 15))
 	if err != nil || replayTerminal.Status != TaskCancelled || replayTerminal.Revision != terminal.Revision {
 		t.Fatalf("terminal acceptance replay = %+v, %v", replayTerminal, err)
@@ -279,8 +284,17 @@ func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *
 	if err != nil || len(pending) != 1 || pending[0].ID != newer.ID {
 		t.Fatalf("pending newest receipt = %+v, %v", pending, err)
 	}
+	if _, err := store.ImportIntakeAcceptance(ctx, first.ID, mustTime(t, 6), source); !errors.Is(err, ErrConflict) {
+		t.Fatalf("superseded pending receipt imported: %v", err)
+	}
 	if _, err := store.WithdrawIntakeAcceptance(ctx, newer.ID, mustTime(t, 6)); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := store.ImportIntakeAcceptance(ctx, first.ID, mustTime(t, 6)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("withdrawing latest revived older import: %v", err)
+	}
+	if _, found, err := store.Task(ctx, first.TaskID); err != nil || found {
+		t.Fatalf("superseded receipt created a task: found=%v err=%v", found, err)
 	}
 	pending, err = store.PendingIntakeAcceptances(ctx, source.ID, 25)
 	if err != nil || len(pending) != 0 {

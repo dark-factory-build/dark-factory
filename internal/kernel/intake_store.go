@@ -339,7 +339,11 @@ func (store *Store) LatestIntakeAcceptance(ctx context.Context, repositoryID, nu
 		return IntakeAcceptance{}, false, err
 	}
 	defer read.Close()
-	return scanIntakeAcceptance(read.connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE github_repository_id = ? AND issue_number = ? AND issue_node_id = ? AND project_id = ? AND repository_id = ? ORDER BY created_at_ms DESC, id DESC LIMIT 1`, int64(repositoryID), int64(number), nodeID, projectID.Bytes(), targetRepositoryID.Bytes()))
+	return latestIntakeAcceptance(ctx, read.connection, repositoryID, number, nodeID, projectID, targetRepositoryID)
+}
+
+func latestIntakeAcceptance(ctx context.Context, connection *sql.Conn, repositoryID, number uint64, nodeID string, projectID ProjectID, targetRepositoryID RepositoryID) (IntakeAcceptance, bool, error) {
+	return scanIntakeAcceptance(connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE github_repository_id = ? AND issue_number = ? AND issue_node_id = ? AND project_id = ? AND repository_id = ? ORDER BY created_at_ms DESC, id DESC LIMIT 1`, int64(repositoryID), int64(number), nodeID, projectID.Bytes(), targetRepositoryID.Bytes()))
 }
 
 // PendingIntakeAcceptances returns receipts that still need their first task
@@ -535,6 +539,13 @@ func (store *Store) ImportIntakeAcceptance(ctx context.Context, id IntakeAccepta
 			return Task{}, err
 		}
 		return existing, nil
+	}
+	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot.GitHubRepositoryID, accepted.Snapshot.IssueNumber, accepted.Snapshot.NodeID, accepted.ProjectID, accepted.RepositoryID)
+	if err != nil || !found || latest.ID != accepted.ID {
+		if err == nil {
+			err = ErrConflict
+		}
+		return Task{}, tx.Rollback(err)
 	}
 	value, err := insertTaskOnConnection(ctx, tx.connection, spec, at)
 	if err != nil {
