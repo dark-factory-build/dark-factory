@@ -7,7 +7,23 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
+
+func TestSameDescriptorIdentityIgnoresSocketQueueAccounting(t *testing.T) {
+	a := unix.Stat_t{Dev: 1, Ino: 2, Uid: 3, Gid: 4, Mode: unix.S_IFSOCK | 0o600, Size: 0}
+	b := a
+	b.Size = 123 // Socket queue accounting changes while a handover frame arrives.
+	b.Mtim.Nsec, b.Ctim.Nsec = 5, 6
+	if !sameDescriptorIdentity(a, b) {
+		t.Fatal("socket queue accounting changed descriptor identity")
+	}
+	b.Ino++
+	if sameDescriptorIdentity(a, b) {
+		t.Fatal("changed descriptor inode retained identity")
+	}
+}
 
 func TestPrepareCommittedExecSpecReusesExactCommitmentAndBindsArgvZero(t *testing.T) {
 	executable, err := CommitExecutableLocator("/bin/sh")

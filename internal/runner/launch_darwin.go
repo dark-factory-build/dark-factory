@@ -117,10 +117,16 @@ func commitControl(f *os.File) (descriptorCommitment, error) {
 	if err := unix.Fstat(int(f.Fd()), &b); err != nil {
 		return descriptorCommitment{}, err
 	}
-	if statKey(a) != statKey(b) {
+	if !sameDescriptorIdentity(a, b) {
 		return descriptorCommitment{}, ErrIdentity
 	}
 	return descriptorCommitment{FileIdentity: FileIdentity{Device: uint64(a.Dev), Inode: a.Ino}, UID: a.Uid, GID: a.Gid, Mode: uint32(a.Mode)}, nil
+}
+
+// sameDescriptorIdentity excludes mutable socket accounting such as Size and
+// timestamps. A live control stream can receive a frame while it is checked.
+func sameDescriptorIdentity(a, b unix.Stat_t) bool {
+	return a.Dev == b.Dev && a.Ino == b.Ino && a.Uid == b.Uid && a.Gid == b.Gid && a.Mode == b.Mode
 }
 
 func verifyControl(f *os.File, want descriptorCommitment) error {
