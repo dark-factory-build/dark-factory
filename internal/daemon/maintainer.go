@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -16,6 +20,11 @@ type maintainerRequest struct {
 	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type maintainerToolCall struct {
+	Name      string
+	Arguments map[string]json.RawMessage
 }
 
 func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.Reply {
@@ -48,13 +57,11 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	switch request.Method {
 	case "initialize", "ping", "tools/list":
 	case "tools/call":
-		var params struct {
-			Name      string                     `json:"name"`
-			Arguments map[string]json.RawMessage `json:"arguments"`
-		}
-		if json.Unmarshal(request.Params, &params) != nil {
+		params, encoded, err := decodeMaintainerToolCall(request.Params)
+		if err != nil {
 			return failure("invalid")
 		}
+		request.Params = encoded
 		var repository, source string
 		if json.Unmarshal(params.Arguments["repository"], &repository) != nil || repository == "" {
 			return failure("invalid")
@@ -177,6 +184,141 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	return api.NewContentReply(api.MaintainerResult{State: "ok", Response: response})
 }
 
+// decodeMaintainerToolCall rejects case and duplicate ambiguities before the
+// broker receives a canonical copy of the same arguments that authorization
+// checked. encoding/json accepts both forms, but the bridge cannot.
+func decodeMaintainerToolCall(encoded json.RawMessage) (maintainerToolCall, json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return maintainerToolCall{}, nil, errors.New("tool call params must be an object")
+	}
+	var value maintainerToolCall
+	seen := map[string]bool{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok || seen[name] {
+			return maintainerToolCall{}, nil, errors.New("ambiguous tool call params")
+		}
+		seen[name] = true
+		switch name {
+		case "name":
+			if err := decoder.Decode(&value.Name); err != nil || value.Name == "" {
+				return maintainerToolCall{}, nil, errors.New("invalid tool name")
+			}
+		case "arguments":
+			arguments, err := decodeMaintainerArguments(decoder)
+			if err != nil {
+				return maintainerToolCall{}, nil, err
+			}
+			value.Arguments = arguments
+		default:
+			return maintainerToolCall{}, nil, fmt.Errorf("unknown tool call parameter %q", name)
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') || decoder.Decode(&struct{}{}) != io.EOF || !seen["name"] || !seen["arguments"] {
+		return maintainerToolCall{}, nil, errors.New("invalid tool call params")
+	}
+	canonical, err := json.Marshal(struct {
+		Name      string                     `json:"name"`
+		Arguments map[string]json.RawMessage `json:"arguments"`
+	}{Name: value.Name, Arguments: value.Arguments})
+	if err != nil {
+		return maintainerToolCall{}, nil, err
+	}
+	return value, canonical, nil
+}
+
+func decodeMaintainerArguments(decoder *json.Decoder) (map[string]json.RawMessage, error) {
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, errors.New("tool arguments must be an object")
+	}
+	arguments := map[string]json.RawMessage{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok || arguments[name] != nil {
+			return nil, errors.New("ambiguous tool argument")
+		}
+		if (strings.EqualFold(name, "repository") || strings.EqualFold(name, "source_repository") || strings.EqualFold(name, "issue_number")) && name != "repository" && name != "source_repository" && name != "issue_number" {
+			return nil, fmt.Errorf("ambiguous tool argument %q", name)
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return nil, err
+		}
+		if err := validateMaintainerJSON(raw); err != nil {
+			return nil, err
+		}
+		arguments[name] = raw
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return nil, errors.New("unterminated tool arguments")
+	}
+	return arguments, nil
+}
+
+// validateMaintainerJSON follows the local protocol's duplicate-name rule for
+// nested tool arguments as well. A raw value is forwarded unchanged only after
+// every object in it has one spelling for each member.
+func validateMaintainerJSON(encoded json.RawMessage) error {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	if err := scanMaintainerJSONValue(decoder, 0); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("trailing tool argument JSON")
+	}
+	return nil
+}
+
+func scanMaintainerJSONValue(decoder *json.Decoder, depth int) error {
+	if depth > 64 {
+		return errors.New("tool argument nesting too deep")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		names := map[string]bool{}
+		for decoder.More() {
+			token, err := decoder.Token()
+			name, ok := token.(string)
+			if err != nil || !ok || names[name] {
+				return errors.New("ambiguous nested tool argument")
+			}
+			names[name] = true
+			if err := scanMaintainerJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+			return errors.New("unterminated nested tool argument")
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanMaintainerJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		if token, err := decoder.Token(); err != nil || token != json.Delim(']') {
+			return errors.New("unterminated nested tool argument")
+		}
+	default:
+		return errors.New("invalid tool argument JSON")
+	}
+	return nil
+}
+
 func (daemon *Daemon) projectMaintainerRepositories(ctx context.Context, project kernel.ProjectID) (map[string]uint64, map[string]uint64, map[string]bool, error) {
 	targets, sources, unbound := map[string]uint64{}, map[string]uint64{}, map[string]bool{}
 	repositories, err := daemon.store.ProjectRepositories(ctx, project)
@@ -218,35 +360,52 @@ func (daemon *Daemon) projectMaintainerRepositories(ctx context.Context, project
 }
 
 // frozenAcceptedIssueResponse never asks the broker to fetch an accepted
-// issue. The attempt receives only the immutable reviewed snapshot.
+// issue. The attempt receives only the immutable reviewed snapshot and the
+// schema-required metadata derived from that receipt.
 func frozenAcceptedIssueResponse(request maintainerRequest, accepted kernel.IntakeAcceptance) (json.RawMessage, error) {
-	return json.Marshal(struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      json.RawMessage `json:"id"`
-		Result  struct {
-			Issue struct {
-				Number uint64 `json:"number"`
-				Title  string `json:"title"`
-				Body   string `json:"body"`
-			} `json:"structuredContent"`
-		} `json:"result"`
-	}{
+	return json.Marshal(frozenIssueResponse{
 		JSONRPC: request.JSONRPC,
 		ID:      request.ID,
-		Result: struct {
-			Issue struct {
-				Number uint64 `json:"number"`
-				Title  string `json:"title"`
-				Body   string `json:"body"`
-			} `json:"structuredContent"`
-		}{Issue: struct {
-			Number uint64 `json:"number"`
-			Title  string `json:"title"`
-			Body   string `json:"body"`
-		}{
-			Number: accepted.Snapshot.IssueNumber,
-			Title:  accepted.Snapshot.Title,
-			Body:   accepted.Snapshot.Body,
-		}},
+		Result: frozenIssueResult{
+			Issue: frozenIssue{
+				Number:      accepted.Snapshot.IssueNumber,
+				URL:         "https://github.com/" + accepted.SourceRepository + "/issues/" + fmt.Sprint(accepted.Snapshot.IssueNumber),
+				Title:       accepted.Snapshot.Title,
+				Body:        accepted.Snapshot.Body,
+				Labels:      []string{},
+				UpdatedAt:   time.UnixMilli(accepted.CreatedAt.Int64()).UTC().Format(time.RFC3339),
+				State:       "open",
+				StateReason: nil,
+			},
+			Content: []mcpTextContent{{Type: "text", Text: "Issue state was observed."}},
+		},
 	})
+}
+
+type frozenIssueResponse struct {
+	JSONRPC string            `json:"jsonrpc"`
+	ID      json.RawMessage   `json:"id"`
+	Result  frozenIssueResult `json:"result"`
+}
+
+type frozenIssueResult struct {
+	Issue   frozenIssue      `json:"structuredContent"`
+	Content []mcpTextContent `json:"content"`
+	IsError bool             `json:"isError"`
+}
+
+type mcpTextContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type frozenIssue struct {
+	Number      uint64   `json:"number"`
+	URL         string   `json:"url"`
+	Title       string   `json:"title"`
+	Body        string   `json:"body"`
+	Labels      []string `json:"labels"`
+	UpdatedAt   string   `json:"updated_at"`
+	State       string   `json:"state"`
+	StateReason *string  `json:"state_reason"`
 }
