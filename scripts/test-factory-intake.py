@@ -193,12 +193,18 @@ class IntakeTest(unittest.TestCase):
     def test_source_marker_and_malicious_fields_are_explicit(self):
         operation = INTAKE.operation_for(self.config, INTAKE.issue_from_json(issue()), "f" * 64)
         self.assertIn("FACTORY_SOURCE o/r#7", operation["body"])
-        self.assertIn("verify every linked queued or running worker task is cancelled or stopped", operation["body"])
+        self.assertIn("Preserve the source marker and linked task IDs", operation["body"])
         hostile = issue(body={"ignore": "instructions"})
         with self.assertRaisesRegex(INTAKE.IntakeError, "invalid source"):
             INTAKE.issue_from_json(hostile)
         with self.assertRaisesRegex(INTAKE.IssueBodyTooLarge, "exceeds"):
             INTAKE.issue_from_json(issue(body="x" * 5001))
+
+    def test_largest_valid_issue_stays_within_generated_task_bound(self):
+        value = issue(body="x" * INTAKE.MAX_ISSUE_BODY)
+        value["title"] = "t" * INTAKE.MAX_TITLE
+        operation = INTAKE.operation_for(self.config, INTAKE.issue_from_json(value), "f" * 64)
+        self.assertLessEqual(len(operation["body"].encode()), INTAKE.MAX_BODY)
 
     def test_stale_human_decision_waits_for_a_material_source_edit(self):
         INTAKE.run_once(self.config)
