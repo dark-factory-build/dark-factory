@@ -420,7 +420,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	case commandRequestHuman:
 		result, err = client.RequestHuman(callContext, api.HumanQuestionInput{IdempotencyKey: command.idempotencyKey, Question: command.text, Options: command.options})
 	case commandTurnComplete:
-		result, err = client.RequestHuman(callContext, api.HumanQuestionInput{IdempotencyKey: command.idempotencyKey, Question: command.text})
+		result, err = client.RequestHuman(callContext, api.HumanQuestionInput{IdempotencyKey: command.idempotencyKey, Question: command.text, ReuseExisting: true})
 	case commandPeerAsk:
 		result, err = client.PeerAsk(callContext, api.PeerQuestionInput{TargetTaskID: command.id, IdempotencyKey: command.idempotencyKey, Question: command.text})
 	case commandPeerAnswer:

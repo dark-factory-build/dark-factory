@@ -530,7 +530,11 @@ func TestAttemptCommandsUseExactTypedCalls(t *testing.T) {
 				}
 			case api.CallRequestHuman:
 				input, ok := result.call.HumanQuestionInput()
-				if !ok || !reflect.DeepEqual(input, api.HumanQuestionInput{IdempotencyKey: test.key, Question: test.text}) {
+				wantInput := api.HumanQuestionInput{IdempotencyKey: test.key, Question: test.text}
+				if strings.HasPrefix(test.name, "Codex") {
+					wantInput.ReuseExisting = true
+				}
+				if !ok || !reflect.DeepEqual(input, wantInput) {
 					t.Fatalf("human question = %+v, %t", input, ok)
 				}
 			case api.CallSendBack:

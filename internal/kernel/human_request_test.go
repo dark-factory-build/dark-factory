@@ -376,6 +376,30 @@ func TestHumanQuestionBoundAndRunUniquenessAreTransactional(t *testing.T) {
 	}
 }
 
+func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	first, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(40), QuestionText: "already waiting"}, mustTime(t, 400))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(41), QuestionText: "turn completed", ReuseExisting: true}, mustTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.ID != first.ID || reused.QuestionText != first.QuestionText {
+		t.Fatalf("reused request = %+v, first = %+v", reused, first)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.HumanRequests) != 1 {
+		t.Fatalf("snapshot requests = %d, want 1", len(snapshot.HumanRequests))
+	}
+}
+
 func TestHumanQuestionInvalidationFailureRollsBackRequestAndRun(t *testing.T) {
 	ctx := context.Background()
 	store, run, keys := runningOrchestratorRun(t)

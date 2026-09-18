@@ -169,6 +169,19 @@ func (store *Store) createHumanQuestionForAttempt(ctx context.Context, digest At
 		}
 		return existing, nil
 	}
+	if input.ReuseExisting {
+		var existingOpen HumanRequest
+		existingOpen, existingFound, err = scanHumanRequest(tx.connection.QueryRowContext(ctx, `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id = ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY id LIMIT 1`, run.ID.Bytes()))
+		if err != nil {
+			return HumanRequest{}, tx.Rollback(err)
+		}
+		if existingFound {
+			if err := tx.Rollback(nil); err != nil {
+				return HumanRequest{}, err
+			}
+			return existingOpen, nil
+		}
+	}
 	var open int64
 	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM human_requests WHERE status IN ('open', 'delivering', 'delivery_unknown')`).Scan(&open); err != nil {
 		return HumanRequest{}, tx.Rollback(err)
