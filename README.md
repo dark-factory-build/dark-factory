@@ -6,7 +6,7 @@ results, and step in when decisions need you.
 
 <picture>
   <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
-  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory demo floor with sample workers, two workshops and a Needs You decision">
+  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory demo floor showing sample workers, a workshop and a Needs You decision">
 </picture>
 
 *Demo data in the actual console: sample workers on the floor and a synthetic
@@ -18,7 +18,7 @@ leave reviewable results, the Maintainer publishes approved work through the
 configured GitHub route, and the paired browser and `factoryctl` steer the
 same factory.
 
-[Website](https://www.darkfactory.build) · [Console](https://app.darkfactory.build) ·
+[Website](https://www.darkfactory.build) · [Console (paired factory)](https://app.darkfactory.build) ·
 [Backlog](https://github.com/dark-factory-build/dark-factory/issues) ·
 [Install](docs/install.md) · [Providers](docs/providers.md) ·
 [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md)
