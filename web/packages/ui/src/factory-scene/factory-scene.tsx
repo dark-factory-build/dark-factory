@@ -50,7 +50,12 @@ const FRAME = spriteAtlas.frame;
 
 function shortLabel(label: string, limit = 18) {
   const glyphs = [...label];
-  return glyphs.length > limit ? `${glyphs.slice(0, limit - 1).join("")}…` : label;
+  // Reserve two columns for non-Latin glyphs and the ellipsis; font fallback
+  // can render them full-width even inside a monospace label.
+  const columns = (glyph: string) => glyph.codePointAt(0)! > 255 ? 2 : 1;
+  if (glyphs.reduce((width, glyph) => width + columns(glyph), 0) <= limit) return label;
+  let width = 0;
+  return `${glyphs.filter((glyph) => (width += columns(glyph)) <= limit - 2).join("")}…`;
 }
 
 /** One 16px frame of the sheet, sized and placed in scene coordinates. */

@@ -676,6 +676,17 @@ test("queue selection picks the exact task sharing a representative workstation"
 });
 
 
+test("narrow bays truncate full-width titles while retaining their accessible name", () => {
+  for (const glyph of ["界", "😀"]) {
+    const label = glyph.repeat(15);
+    const nodes = ["a", "b"].map((id) => ({ ...inventoryTopology.nodes[0], id, path: ".", label }));
+    const markup = render({ topology: { digest: "wide-titles", nodes }, workers: [] });
+    assert.match(markup, new RegExp(`>${glyph.repeat(6)}…</text>`));
+    assert.match(markup, new RegExp(`aria-label="${label}`), "full title remains accessible");
+    assert.doesNotMatch(markup, new RegExp(`>${label}</text>`));
+  }
+});
+
 test("pictured contents and occupied surface slots leave door routes clear in every footprint", () => {
   for (const count of [1, 4, 11]) {
     const nodes = Array.from({ length: count }, (_, index) => ({ ...inventoryTopology.nodes[0], id: `room-${index}`, path: `room-${index}` }));
