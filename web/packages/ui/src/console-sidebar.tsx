@@ -623,7 +623,11 @@ function RepositoriesSection({ state, repositories, pending, errors, onLoad, onM
   onCreateProject?: (request: { name: string; root: string }) => void;
 }) {
   const projects = state === undefined ? [] : [...state.projects.values()];
-  useEffect(() => { projects.forEach((project) => onLoad?.(project.id)); }, [projects.map((project) => project.id).join(" "), onLoad]);
+  const load = useRef(onLoad);
+  load.current = onLoad;
+  const projectIds = projects.map((project) => project.id).join(" ");
+  const canLoad = onLoad !== undefined;
+  useEffect(() => { if (canLoad && projectIds) projectIds.split(" ").forEach((id) => load.current?.(id)); }, [projectIds, canLoad]);
   return <details className="dfConsoleSidebar__section" aria-label="Repositories">
     <summary>Repositories</summary>
     <p className="dfConsoleSidebar__inherit">Private checkout routing. It is never shown on the factory floor.</p>

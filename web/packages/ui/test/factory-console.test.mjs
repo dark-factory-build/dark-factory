@@ -2160,3 +2160,22 @@ test("same-path wrappers retain navigation without overlapping displayed physica
   assert.equal(prepared.roomByID.get(id(child)).parentId, id(module));
   assert.equal(prepared.roomByID.get(id(root)).inventoryScope, "subtree", "selection does not mutate prepared source facts");
 });
+
+ test("repository response renders do not reload private settings", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const props = () => ({ status: "ready", state: baseState(), settingsOpen: true,
+    onToggleSettings: () => {}, onLoadRepositories: (id) => calls.push(id) });
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
+    const initial = [...calls];
+    assert.equal(initial.length, fixtureState.projects.size);
+    await act(async () => { renderer.update(createElement(FactoryConsole, props())); });
+    assert.deepEqual(calls, initial);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});

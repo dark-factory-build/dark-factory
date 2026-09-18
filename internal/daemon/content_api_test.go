@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -87,6 +88,21 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 		t.Fatalf("explicit body read = %+v", body)
 	}
 
+	// Retained content remains in its original repository even when the new
+	// default checkout is unavailable.
+	project, _ := parseProjectID(projectID)
+	otherID, _ := kernel.RepositoryIDFromBytes([]byte(strings.Repeat("r", 16)))
+	otherRoot := contentRepositoryFixture(t)
+	other, err := fixture.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: otherID, ProjectID: project, Name: "other", Root: otherRoot, BaseRef: "HEAD"}, supervisorTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.SetProjectRepositoryDefault(ctx, other.ID, other.Revision, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(otherRoot); err != nil {
+		t.Fatal(err)
+	}
 	done = fixture.serve(t)
 	revised, err := client.ContentRevise(ctx, api.ContentInput{ID: contentID, ProjectID: projectID, Kind: "custom", Title: "revised", Body: longBody + "v2", ExpectedRevision: 1})
 	if err != nil {
@@ -142,6 +158,15 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 	waitDispatch(t, done)
 	if len(evidencePage.Items) != 1 || evidencePage.Items[0].ID != evidenceID {
 		t.Fatalf("evidence page = %+v", evidencePage)
+	}
+	contentBytes, _ := hex.DecodeString(contentID)
+	retainedID, _ := kernel.ContentIDFromBytes(contentBytes)
+	original, found, err := fixture.store.ContentRepository(ctx, retainedID, mustRevision(t, 1))
+	if err != nil || !found {
+		t.Fatalf("original binding: %v %v", found, err)
+	}
+	if _, err := fixture.store.SetProjectRepositoryDefault(ctx, original.ID, original.Revision, supervisorTime()); err != nil {
+		t.Fatal(err)
 	}
 	for i := 240; i < 240+api.MaxContentPageItems+1; i++ {
 		done = fixture.serve(t)

@@ -660,3 +660,29 @@ func TestHumanCommandsUseOperatorClient(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryEnableDisableUseEnabledOperatorAction(t *testing.T) {
+	for _, action := range []string{"enable", "disable"} {
+		t.Run(action, func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			id := strings.Repeat("ab", 16)
+			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+				input, ok := call.ProjectRepositoryInput()
+				if !ok || input.Action != "enabled" || input.ID != id || input.ExpectedRevision != 3 || input.Enabled == nil || *input.Enabled != (action == "enable") {
+					t.Errorf("repository mutation: %+v", input)
+				}
+				return api.NewContentReply(api.ProjectRepository{ID: id, Revision: 4})
+			})
+			var stdout, stderr bytes.Buffer
+			exit := run(context.Background(), []string{"project", "repository", action, "--id", id, "--revision", "3"}, webEnvironment(fixture), &stdout, &stderr)
+			result := awaitServer(t, done)
+			if result.err != nil {
+				t.Errorf("server: %v", result.err)
+			}
+			if exit != 0 {
+				t.Fatalf("exit %d: %s", exit, stderr.String())
+			}
+		})
+	}
+}
