@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -46,6 +47,7 @@ const (
   factoryctl attempt block --detail TEXT
   factoryctl attempt fail [--detail TEXT]
   factoryctl attempt request-human --idempotency-key HEX32 --question TEXT [--option TEXT ...]
+  factoryctl attempt turn-complete NOTIFICATION_JSON
   factoryctl attempt peer status [--targets [--target-offset N]] [--offset N] [--head HEAD]
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
@@ -119,6 +121,7 @@ const (
 	commandBlock
 	commandFail
 	commandRequestHuman
+	commandTurnComplete
 	commandPeerStatus
 	commandPeerAsk
 	commandPeerAnswer
@@ -338,6 +341,12 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	}
 	client, err := api.NewAttemptClientFromEnvironment(socket)
 	if err != nil {
+		if command.kind == commandTurnComplete {
+			var remote *api.RemoteError
+			if errors.As(err, &remote) && remote.Code() == api.RemoteConflict {
+				return 0
+			}
+		}
 		writeFailure(stderr, command.kind, err)
 		return exitFailure
 	}
@@ -410,6 +419,8 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		result, err = client.Fail(callContext, command.text)
 	case commandRequestHuman:
 		result, err = client.RequestHuman(callContext, api.HumanQuestionInput{IdempotencyKey: command.idempotencyKey, Question: command.text, Options: command.options})
+	case commandTurnComplete:
+		result, err = client.RequestHuman(callContext, api.HumanQuestionInput{IdempotencyKey: command.idempotencyKey, Question: command.text})
 	case commandPeerAsk:
 		result, err = client.PeerAsk(callContext, api.PeerQuestionInput{TargetTaskID: command.id, IdempotencyKey: command.idempotencyKey, Question: command.text})
 	case commandPeerAnswer:
@@ -420,10 +431,18 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		err = api.ErrInvalidInput
 	}
 	if err != nil {
+		if command.kind == commandTurnComplete {
+			var remote *api.RemoteError
+			if errors.As(err, &remote) && remote.Code() == api.RemoteConflict {
+				return 0
+			}
+		}
 		writeFailure(stderr, command.kind, err)
 		return exitFailure
 	}
-	if command.kind == commandRequestHuman {
+	if command.kind == commandTurnComplete {
+		return 0
+	} else if command.kind == commandRequestHuman {
 		_, _ = fmt.Fprintf(stdout, "human request accepted: head=%d revision=%d\n", result.Head, result.Revision)
 	} else if command.kind == commandSendBack {
 		_, _ = fmt.Fprintf(stdout, "task sent back: head=%d revision=%d\n", result.Head, result.Revision)
@@ -572,7 +591,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) == 3 && helpFlag(args[2]) {
 		switch args[1] {
-		case "task", "source", "succeed", "block", "fail", "request-human", "send-back", "peer":
+		case "task", "source", "succeed", "block", "fail", "request-human", "turn-complete", "send-back", "peer":
 			return attemptCommand{}, true, true
 		case "status", "list-clients", "revoke":
 			if args[0] == "web" {
@@ -632,6 +651,19 @@ func parse(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			return attemptCommand{kind: commandRequestHuman, idempotencyKey: args[3], text: args[5], options: options}, false, true
+		}
+	case "turn-complete":
+		if len(args) == 3 {
+			var notification struct {
+				Type     string `json:"type"`
+				ThreadID string `json:"thread-id"`
+				TurnID   string `json:"turn-id"`
+				CWD      string `json:"cwd"`
+			}
+			if json.Unmarshal([]byte(args[2]), &notification) == nil && notification.Type == "agent-turn-complete" && validOperatorText(notification.ThreadID, 1, 256) && validOperatorText(notification.TurnID, 1, 256) && validOperatorText(notification.CWD, 1, 4096) {
+				digest := sha256.Sum256([]byte(notification.ThreadID + "\x00" + notification.TurnID + "\x00" + notification.CWD))
+				return attemptCommand{kind: commandTurnComplete, idempotencyKey: hex.EncodeToString(digest[:16]), text: "Codex turn completed without a durable attempt outcome; resume this session and record succeed, block, or fail."}, false, true
+			}
 		}
 	case "peer":
 		if len(args) >= 3 && args[2] == "status" {

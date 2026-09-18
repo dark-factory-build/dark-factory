@@ -307,7 +307,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, codexBootstrapPrompt},
+			wantArgv: []string{"/usr/bin/true", "-c", `notify=["<factoryctl>", "attempt", "turn-complete"]`, "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, codexBootstrapPrompt},
 		},
 	}
 	for _, test := range tests {
@@ -328,6 +328,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				wantArgv = slices.Insert(slices.Clone(wantArgv), 2, wantClaudeWorkerSessionFlag(t, request)...)
 			}
 			if test.kind == kernel.ProviderCodex {
+				wantArgv[2] = "notify=[" + tomlBasicString(runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
 				permissions, err := codexPermissions(request)
 				if err != nil {
 					t.Fatal(err)
