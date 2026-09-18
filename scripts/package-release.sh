@@ -131,12 +131,21 @@ package_target() {
         verify-adversarial-review.sh \
         supervision.md
     do
-        controller_source="$repository_root/scripts/$controller_asset"
-        [ -f "$controller_source" ] && [ ! -L "$controller_source" ] || {
-            echo "release controller asset is missing or symbolic: $controller_asset" >&2
+        controller_tree_entry=$(git -C "$repository_root" ls-tree "$source_sha" -- "scripts/$controller_asset")
+        controller_mode=${controller_tree_entry%% *}
+        case "$controller_mode" in
+            100644 | 100755) ;;
+            *)
+                echo "release controller asset is missing or unsupported in source: $controller_asset" >&2
+                exit 1
+                ;;
+        esac
+        controller_tree_path=$(printf '%s\n' "$controller_tree_entry" | cut -f2-)
+        [ "$controller_tree_path" = "scripts/$controller_asset" ] || {
+            echo "release controller asset path is ambiguous in source: $controller_asset" >&2
             exit 1
         }
-        cp "$controller_source" "$controller_payload/$controller_asset"
+        git -C "$repository_root" show "$source_sha:scripts/$controller_asset" >"$controller_payload/$controller_asset"
         case "$controller_asset" in
             supervision.md) chmod 0644 "$controller_payload/$controller_asset" ;;
             *) chmod 0755 "$controller_payload/$controller_asset" ;;

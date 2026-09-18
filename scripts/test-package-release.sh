@@ -23,7 +23,7 @@ interrupt() {
 trap 'interrupt 1' HUP
 trap 'interrupt 2' INT
 trap 'interrupt 15' TERM
-source_sha=1234567890abcdef1234567890abcdef12345678
+source_sha=$(git -C "$repository_root" rev-parse HEAD)
 
 fail() {
     echo "package-release test failed: $*" >&2
