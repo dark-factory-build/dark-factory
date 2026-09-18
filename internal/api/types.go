@@ -990,7 +990,7 @@ func validAgentIdlePolicyInput(input AgentIdlePolicyInput) bool {
 	if !validID(input.AgentID) || input.ExpectedRevision == 0 || input.AfterSeconds > kernel.MaxIdleAfterSeconds || input.RunBudget > uint64(kernel.MaxIdleRunBudget) || !validText(input.Instruction, 0, 32768) {
 		return false
 	}
-	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != ""
+	return input.Policy == "wait" && input.AfterSeconds == 0 && input.Instruction == "" && input.RunBudget == 0 || input.Policy == "standing_instruction" && input.AfterSeconds > 0 && input.Instruction != "" && input.RunBudget > 0
 }
 
 type OverseerRunStopInput struct {

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 const (
@@ -27,6 +29,16 @@ func validateIdleRule(rule IdleRule) error {
 	}
 	if rule.Policy == IdleStandingInstruction && (rule.AfterSeconds < 1 || strings.Trim(rule.Instruction, " \t\r\n") == "") {
 		return fmt.Errorf("%w: a standing instruction needs a wait and text", ErrInvalidValue)
+	}
+	return nil
+}
+
+func validateIdleRuleForProvider(provider Provider, rule IdleRule) error {
+	if err := validateIdleRule(rule); err != nil {
+		return err
+	}
+	if rule.Policy == IdleStandingInstruction && provider == ProviderCodex && byteLen(rule.Instruction) > runner.MaxCodexTaskBytes {
+		return fmt.Errorf("%w: Codex standing instruction exceeds provider delivery bound", ErrInvalidValue)
 	}
 	return nil
 }

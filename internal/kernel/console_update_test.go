@@ -3,7 +3,10 @@ package kernel
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
 
 // Pausing an agent through the console must actually stop dispatch: the
@@ -366,6 +369,34 @@ func TestOperatorIdlePolicyReplacesRuleAndRejectsStaleOrInvalid(t *testing.T) {
 	emptyInstruction := ""
 	if _, err := store.UpdateAgent(ctx, worker.ID, updated.Revision, AgentPatch{IdleInstruction: &emptyInstruction}, mustTime(t, 8)); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("empty standing instruction = %v", err)
+	}
+}
+
+func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
+	store, _, project, worker := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	ctx := context.Background()
+	policy, after, budget := IdleStandingInstruction, uint32(60), uint32(3)
+	over := strings.Repeat("x", runner.MaxCodexTaskBytes+1)
+	if _, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &over, IdleRunBudget: &budget}, mustTime(t, 6)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("oversized Codex instruction = %v", err)
+	}
+	unchanged, found, err := store.Agent(ctx, worker.ID)
+	if err != nil || !found || unchanged.Revision != worker.Revision || unchanged.Idle != worker.Idle {
+		t.Fatalf("oversized edit changed stored rule = %+v, found=%v, err=%v", unchanged, found, err)
+	}
+	boundary := strings.Repeat("x", runner.MaxCodexTaskBytes)
+	updated, err := store.UpdateAgent(ctx, worker.ID, worker.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &boundary, IdleRunBudget: &budget}, mustTime(t, 7))
+	if err != nil || updated.Idle.Instruction != boundary {
+		t.Fatalf("Codex boundary instruction = %+v, %v", updated.Idle, err)
+	}
+	shell, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 8), ProjectID: project.ID, Name: "shell", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 5}, mustTime(t, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide := strings.Repeat("x", maxIdleInstruction)
+	if _, err := store.UpdateAgent(ctx, shell.ID, shell.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &wide, IdleRunBudget: &budget}, mustTime(t, 9)); err != nil {
+		t.Fatalf("non-Codex idle instruction fallback = %v", err)
 	}
 }
 

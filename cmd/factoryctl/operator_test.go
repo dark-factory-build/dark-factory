@@ -24,7 +24,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "project limits", args: []string{"project", "limits", "--project", id, "--revision", "7", "--run-budget", "20", "--max-run-seconds", "900"}},
 		{name: "agent create shell default role", args: []string{"agent", "create", "--project", id, "--name", "Builder One", "--provider", "shell", "--tool-budget", "100"}},
 		{name: "agent create codex controls", args: []string{"agent", "create", "--project", id, "--name", "Foreman", "--provider", "codex", "--model", "gpt-5.6-luna", "--reasoning-effort", "medium", "--tool-budget", "100", "--role", "orchestrator"}},
-		{name: "agent idle policy", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes"}},
+		{name: "agent idle policy", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes", "--run-budget", "3"}},
 		{name: "agent idle wait", args: []string{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait"}},
 		{name: "account discover", args: []string{"account", "discover"}},
 		{name: "account list", args: []string{"account", "list"}},
@@ -90,6 +90,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--after-seconds", "60", "--instruction", "x", "--run-budget", "1"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "0", "--instruction", "x", "--run-budget", "1"},
 		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "wait", "--run-budget", "1"},
+		{"agent", "idle-policy", "--agent", id, "--revision", "7", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "x"},
 		{"account", "link", "--provider", "shell", "--home", "/Users/operator/.shell", "--label", "shell"},
 		{"account", "link", "--provider", "codex", "--home", "relative", "--label", "codex"},
 		{"agent", "select-account", "--agent", id, "--revision", "0", "--account", id},
@@ -306,9 +307,9 @@ func TestAgentIdlePolicyUsesTheOperatorAPI(t *testing.T) {
 		return reply
 	})
 	var stdout, stderr bytes.Buffer
-	exit := run(context.Background(), []string{"agent", "idle-policy", "--agent", agentID, "--revision", "2", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes"}, webEnvironment(fixture), &stdout, &stderr)
+	exit := run(context.Background(), []string{"agent", "idle-policy", "--agent", agentID, "--revision", "2", "--policy", "standing_instruction", "--after-seconds", "60", "--instruction", "review retained changes", "--run-budget", "3"}, webEnvironment(fixture), &stdout, &stderr)
 	awaitServer(t, done)
-	if exit != 0 || stderr.Len() != 0 || received != (api.AgentIdlePolicyInput{AgentID: agentID, ExpectedRevision: 2, Policy: "standing_instruction", AfterSeconds: 60, Instruction: "review retained changes"}) || !strings.Contains(stdout.String(), `"revision":3`) {
+	if exit != 0 || stderr.Len() != 0 || received != (api.AgentIdlePolicyInput{AgentID: agentID, ExpectedRevision: 2, Policy: "standing_instruction", AfterSeconds: 60, Instruction: "review retained changes", RunBudget: 3}) || !strings.Contains(stdout.String(), `"revision":3`) {
 		t.Fatalf("idle policy = exit %d input=%+v stdout=%q stderr=%q", exit, received, stdout.String(), stderr.String())
 	}
 }
