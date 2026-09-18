@@ -106,7 +106,11 @@ def linked_issue(config, pr, journal, existing=None):
     # issue's marker is the completed create_issue receipt for that number.
     if not app_receipt(body, {"create_pull_request", "update_pull_request_body"}, pr["number"], config["repository"], "pull"):
         raise Unproven("footer #" + str(issue) + " is not an intake-managed source and PR #" + str(pr["number"]) + " has no completed App publication receipt")
-    if not app_receipt(intake.exact_issue(config, issue)["body"], {"create_issue"}, issue, config["repository"], "issues"):
+    try:
+        source = intake.exact_issue(config, issue)
+    except intake.IssueBodyTooLarge as exc:
+        raise Unproven("footer #" + str(issue) + " points to an App-created source whose body exceeds the intake limit") from exc
+    if not app_receipt(source["body"], {"create_issue"}, issue, config["repository"], "issues"):
         raise Unproven("footer #" + str(issue) + " is neither an intake-managed source nor an App-created tracking issue (no completed create_issue receipt)")
     return issue
 
