@@ -569,6 +569,21 @@ type TaskRecoveryInput struct {
 	IncarnationID string `json:"incarnation_id"`
 }
 
+type TaskReadInput struct {
+	TaskID           string `json:"task_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Offset           uint64 `json:"offset,omitempty"`
+}
+
+type TaskText struct {
+	TaskID      string  `json:"task_id"`
+	Revision    uint64  `json:"revision"`
+	Instruction string  `json:"instruction"`
+	Feedback    string  `json:"feedback"`
+	Outcome     *string `json:"outcome,omitempty"`
+	NextOffset  *uint64 `json:"next_offset,omitempty"`
+}
+
 type TaskRecovery struct {
 	Result                string   `json:"result"`
 	ResultTruncated       bool     `json:"result_truncated"`

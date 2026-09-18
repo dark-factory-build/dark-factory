@@ -138,6 +138,14 @@ func TestParseOperatorTaskAndAgentControls(t *testing.T) {
 	}
 }
 
+func TestParseOperatorTaskRead(t *testing.T) {
+	id := strings.Repeat("2", 32)
+	command, help, ok := parse([]string{"task", "read", "--task", id, "--revision", "7", "--offset", "2048"})
+	if !ok || help || command.kind != commandTaskRead || command.id != id || command.expectedRevision != 7 || command.offset != 2048 {
+		t.Fatalf("task read = %+v, help=%t ok=%t", command, help, ok)
+	}
+}
+
 func TestOperatorCommandsRequireExactEnvironmentBeforeDialing(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"dispatch", "on"}, func(string) string { return "" }, &stdout, &stderr)

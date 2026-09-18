@@ -46,6 +46,19 @@ func TestOperatorControlsUseOperatorDomainWithoutAttemptAuthority(t *testing.T) 
 	}
 }
 
+func TestTaskReadIsOperatorOnlyAndRevisionBound(t *testing.T) {
+	var bearer credential
+	request := []byte(`{"method":"task_read","params":{"task_id":"11111111111111111111111111111111","expected_revision":2,"offset":2048}}`)
+	call, code := decodeCall(operatorDomain, bearer, request)
+	input, ok := call.TaskReadInput()
+	if code != "" || !ok || input.ExpectedRevision != 2 || input.Offset != 2048 {
+		t.Fatalf("task read = %+v, ok=%t code=%v", input, ok, code)
+	}
+	if _, code := decodeCall(attemptDomain, bearer, request); code != RemoteForbidden {
+		t.Fatalf("attempt task read = %v", code)
+	}
+}
+
 func TestMutationReplyValidatesOverseerHumanReplyState(t *testing.T) {
 	valid := MutationResult{Head: 3, Revision: 2, HumanReply: &OverseerHumanReplyResult{RequestID: "11111111111111111111111111111111", State: "delivery_unknown"}}
 	if _, err := NewMutationReply(valid); err != nil {

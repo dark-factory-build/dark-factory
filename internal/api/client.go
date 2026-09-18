@@ -300,6 +300,20 @@ func (client *OperatorClient) TaskRecovery(ctx context.Context, input TaskRecove
 	return result, nil
 }
 
+func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput) (TaskText, error) {
+	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Offset > uint64(^uint64(0)>>1) {
+		return TaskText{}, ErrInvalidInput
+	}
+	var result TaskText
+	if err := client.client.call(ctx, "task_read", input, &result); err != nil {
+		return TaskText{}, err
+	}
+	if result.TaskID != input.TaskID || result.Revision != input.ExpectedRevision || !validText(result.Instruction, 0, 8192) || !validText(result.Feedback, 0, 8192) || result.Outcome != nil && !validText(*result.Outcome, 0, 8192) || result.NextOffset != nil && *result.NextOffset != input.Offset+2048 {
+		return TaskText{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
 	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
 		return MutationResult{}, ErrInvalidInput

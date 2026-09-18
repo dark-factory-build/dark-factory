@@ -84,6 +84,7 @@ const (
   factoryctl task send-back --task ID --note TEXT
   factoryctl task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
   factoryctl task recovery --task ID --incarnation ID
+  factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
     Worker slots only; the separate overseer lane remains available.
@@ -157,6 +158,7 @@ const (
 	commandTaskAdd
 	commandTaskSendBack
 	commandTaskRecovery
+	commandTaskRead
 	commandDispatch
 	commandCapacity
 	commandStatus
@@ -324,7 +326,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -1380,6 +1382,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandTaskSendBack
 	case "task recovery":
 		command.kind = commandTaskRecovery
+	case "task read":
+		command.kind = commandTaskRead
 	default:
 		return attemptCommand{}, false, false
 	}
@@ -1482,6 +1486,20 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.id = value
 		case name == "--task" && command.kind == commandTaskRecovery && validHumanRequestKey(value):
 			command.id = value
+		case name == "--task" && command.kind == commandTaskRead && validHumanRequestKey(value):
+			command.id = value
+		case name == "--revision" && command.kind == commandTaskRead:
+			revision, ok := parseRevision(value)
+			if !ok {
+				return attemptCommand{}, false, false
+			}
+			command.expectedRevision = revision
+		case name == "--offset" && command.kind == commandTaskRead:
+			offset, err := strconv.ParseUint(value, 10, 64)
+			if err != nil || value != strconv.FormatUint(offset, 10) || offset > uint64(^uint64(0)>>1) {
+				return attemptCommand{}, false, false
+			}
+			command.offset = offset
 		case name == "--incarnation" && command.kind == commandTaskRecovery && validHumanRequestKey(value):
 			command.run = value
 		case name == "--note" && command.kind == commandTaskSendBack && validQuestion(value):
@@ -1541,6 +1559,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandTaskRecovery:
 		if command.id == "" || command.run == "" {
+			return attemptCommand{}, false, false
+		}
+	case commandTaskRead:
+		if command.id == "" || command.expectedRevision == 0 {
 			return attemptCommand{}, false, false
 		}
 	}
@@ -2119,6 +2141,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "task recovery", callErr)
 		}
 		return writeJSON(stdout, recovery)
+	case commandTaskRead:
+		result, callErr := client.ReadTask(callContext, api.TaskReadInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Offset: command.offset})
+		if callErr != nil {
+			return writeWebFailure(stderr, "task read", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandOverseerTaskUpdate:
 		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry}
 		if command.title != "" {

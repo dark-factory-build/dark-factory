@@ -204,6 +204,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.enqueueTask(ctx, call)
 	case api.CallTaskRecovery:
 		return daemon.taskRecovery(ctx, call)
+	case api.CallTaskRead:
+		return daemon.taskRead(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
 	case api.CallSetCapacity:
@@ -345,6 +347,51 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 		run = runID.String()
 	}
 	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, Paths: paths})
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
+}
+
+func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.TaskReadInput()
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseTaskID(input.TaskID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	task, found, err := daemon.store.Task(ctx, id)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	if task.Revision != expected {
+		return newErrorReply(api.RemoteRevisionConflict)
+	}
+	instruction, instructionMore := taskDetailTextChunk(kernel.TaskInstruction(task), input.Offset)
+	feedback, feedbackMore := taskDetailTextChunk(kernel.TaskFeedback(task), input.Offset)
+	outcomeText := task.Result
+	if outcomeText == "" {
+		outcomeText = task.BlockedReason
+	}
+	outcome, outcomeMore := taskDetailTextChunk(outcomeText, input.Offset)
+	result := api.TaskText{TaskID: task.ID.String(), Revision: uint64(task.Revision.Int64()), Instruction: instruction, Feedback: feedback}
+	if outcomeText != "" {
+		result.Outcome = &outcome
+	}
+	if instructionMore || feedbackMore || outcomeMore {
+		next := input.Offset + 2048
+		result.NextOffset = &next
+	}
+	reply, err := api.NewTaskTextReply(result)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

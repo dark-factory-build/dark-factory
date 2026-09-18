@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
@@ -1044,6 +1045,56 @@ func TestDaemonOperatorTaskRetryAndAgentPauseUseExactRevisions(t *testing.T) {
 	waitDispatch(t, done)
 	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
 		t.Fatalf("queued retry = %v", err)
+	}
+}
+
+func TestDaemonOperatorTaskReadBindsRevisionAndPagesUTF8(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	call := func(invoke func() error) {
+		done := fixture.serve(t)
+		if err := invoke(); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	projectID, agentID, taskID, incarnationID := testID(220), testID(221), testID(222), testID(223)
+	call(func() error {
+		_, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "read", Root: filepath.Join(filepath.Dir(fixture.socket), "read-root")})
+		return err
+	})
+	call(func() error {
+		_, err := client.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "reader", Role: "worker", Provider: "shell", ToolBudgetLimit: 1})
+		return err
+	})
+	body := strings.Repeat("🙂", 2050)
+	var created api.MutationResult
+	call(func() error {
+		created, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "paged", Body: body, Priority: 1})
+		return err
+	})
+	read := func(offset uint64, revision uint64) (api.TaskText, error) {
+		done := fixture.serve(t)
+		value, err := client.ReadTask(ctx, api.TaskReadInput{TaskID: taskID, ExpectedRevision: revision, Offset: offset})
+		waitDispatch(t, done)
+		return value, err
+	}
+	first, err := read(0, created.Revision)
+	if err != nil || utf8.RuneCountInString(first.Instruction) != 2048 || first.NextOffset == nil || *first.NextOffset != 2048 {
+		t.Fatalf("first page = %+v, %v", first, err)
+	}
+	second, err := read(*first.NextOffset, created.Revision)
+	if err != nil || second.Instruction != strings.Repeat("🙂", 2) || second.NextOffset != nil {
+		t.Fatalf("second page = %+v, %v", second, err)
+	}
+	_, err = read(0, created.Revision+1)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteRevisionConflict {
+		t.Fatalf("stale read = %v", err)
 	}
 }
 
