@@ -791,6 +791,10 @@ type Run struct {
 	FinalizingAt             *UnixMillis
 	TerminalAt               *UnixMillis
 	UpdatedAt                UnixMillis
+	// ContinuationContexts is admission-scoped causal input for a fresh run.
+	// It is deliberately not persisted on runs: the durable continuation row
+	// remains the source of truth and this projection is consumed at launch.
+	ContinuationContexts []ContinuationContext
 }
 
 func (run Run) ResultProofDigest() ResultProofDigest { return run.resultProofDigest }
@@ -1006,6 +1010,7 @@ type AttemptAuthority struct {
 	AdmittedChangeRevision   *Revision
 	CurrentChangeRevision    *Revision
 	BaseCommit               []byte
+	ContinuationContexts     []ContinuationContext
 	task                     string
 }
 

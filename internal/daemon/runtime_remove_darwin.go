@@ -387,7 +387,7 @@ func validRuntimeOrdinaryDirectory(stat unix.Stat_t, device uint64, exactMode bo
 // for good (a name confers nothing when unlinked, so this keeps evidence, not
 // safety); unlink those too if a provider ever leaves one.
 func validRuntimeOrdinaryName(stat unix.Stat_t, device uint64) bool {
-	return uint64(stat.Dev) == device && stat.Uid == uint32(os.Geteuid()) && stat.Mode&(unix.S_ISUID|unix.S_ISGID|unix.S_ISVTX) == 0
+	return uint64(stat.Dev) == device && stat.Uid == uint32(os.Geteuid()) && stat.Mode&0o7000 == 0
 }
 
 // validRuntimeOrdinaryFile is the bound on one of the runtime's own files at

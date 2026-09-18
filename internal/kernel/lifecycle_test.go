@@ -56,6 +56,31 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 	_ = running
 }
 
+func TestExactBearerRefusedProposalsDoNotPersistOutcome(t *testing.T) {
+	store, run, keys := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+
+	// A stale timestamp reaches the kernel's refusal edge while leaving the
+	// running footprint valid, so validation cannot mask the outcome fence.
+	first, _ := NewSuccessProposal("first refused")
+	second, _ := NewFailureProposal(FailureInternal, "second refused")
+	for _, proposal := range []Proposal{first, second} {
+		_, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 29))
+		var refusal *OutcomeRefusal
+		if !errors.As(err, &refusal) || (!errors.Is(err, ErrConflict) && !errors.Is(err, ErrRevisionConflict)) {
+			t.Fatalf("proposal %q error = %v, want exact refusal", proposal.Detail(), err)
+		}
+	}
+	current, found, err := store.Run(ctx, run.ID)
+	if err != nil || !found {
+		t.Fatalf("refused run read = %+v, found=%v, err=%v", current, found, err)
+	}
+	if current.Phase != RunRunning || current.Proposal != nil || current.CredentialRevokedAt != nil {
+		t.Fatalf("refused proposals changed durable outcome = %+v", current)
+	}
+}
+
 func TestAttemptAuthorityUsesExactEffectiveTask(t *testing.T) {
 	for _, test := range []struct {
 		name     string

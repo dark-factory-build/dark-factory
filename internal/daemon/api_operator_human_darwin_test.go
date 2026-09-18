@@ -23,6 +23,116 @@ type operatorAPITestFixture struct {
 	daemon   *Daemon
 }
 
+func TestOperatorHumanReplyResolvesYieldedContinuation(t *testing.T) {
+	adapter := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+	run := adapterRunningRun(t, adapter.store, 40)
+	ctx := context.Background()
+	var priorKey [kernel.IDBytes]byte
+	copy(priorKey[:], adapterID(t, 63))
+	prior, err := adapter.store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: priorKey, QuestionText: "prior decision"}, adapterTime(t, 450))
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorOperation, _ := kernel.HumanRequestDeliveryIDFromBytes(adapterID(t, 62))
+	delivery, err := adapter.store.BeginHumanReplyForOperator(ctx, prior.ID, prior.Revision, priorOperation, "answered", adapterTime(t, 451))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.store.AcknowledgeHumanReply(ctx, prior.ID, priorOperation, delivery.Revision, adapterTime(t, 452)); err != nil {
+		t.Fatal(err)
+	}
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 60))
+	request, err := adapter.store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "continue?"}, adapterTime(t, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var condition kernel.ContinuationConditionID
+	copy(condition[:], request.ID.Bytes())
+	if _, err := adapter.store.YieldContinuationForAttempt(context.Background(), run.CredentialDigest, kernel.ConditionHumanRequest, condition, request.Revision, adapterTime(t, 500)); err != nil {
+		t.Fatal(err)
+	}
+	completeYieldedOperatorRun(t, adapter.store, run)
+	before, err := adapter.store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.store.ResolveHumanContinuationForOperator(ctx, request.ID, request.Revision, priorOperation, "collision", adapterTime(t, 506)); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("cross-request operation collision = %v", err)
+	}
+	after, err := adapter.store.Snapshot(ctx)
+	if err != nil || after.Head != before.Head {
+		t.Fatalf("collision mutated durable state: %v -> %v, %v", before.Head, after.Head, err)
+	}
+	operator := newOperatorAPITestFixture(t, adapter.daemon)
+	done := operator.serve(t)
+	result, err := operator.client.HumanReply(context.Background(), api.OverseerHumanReplyInput{OperationID: hex.EncodeToString(adapterID(t, 61)), RequestID: request.ID.String(), ExpectedRevision: uint64(request.Revision.Int64()), Reply: "continue"})
+	if err != nil || result.HumanReply == nil || result.HumanReply.State != "resolved" {
+		t.Fatalf("yielded operator reply = %+v, %v", result, err)
+	}
+	waitOperatorAPI(t, done)
+	resolved, err := adapter.store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, _ := kernel.HumanRequestDeliveryIDFromBytes(adapterID(t, 61))
+	if _, err := adapter.store.ResolveHumanContinuationForOperator(ctx, request.ID, request.Revision, operation, "continue", adapterTime(t, 507)); !errors.Is(err, kernel.ErrRevisionConflict) {
+		t.Fatalf("stale resolved-request replay = %v", err)
+	}
+	replayed, err := adapter.store.Snapshot(ctx)
+	if err != nil || replayed.Head != resolved.Head {
+		t.Fatalf("replay promoted again: %v -> %v, %v", resolved.Head, replayed.Head, err)
+	}
+}
+
+func completeYieldedOperatorRun(t *testing.T, store *kernel.Store, run kernel.Run) {
+	t.Helper()
+	ctx := context.Background()
+	current, _, _ := store.Run(ctx, run.ID)
+	resources, _ := store.Resources(ctx, run.ID)
+	var runtimeRoot, providerProcess, runnerProcess kernel.Resource
+	for _, resource := range resources {
+		switch resource.Kind {
+		case kernel.ResourceRuntimeRoot:
+			runtimeRoot = resource
+		case kernel.ResourceProviderProcess:
+			providerProcess = resource
+		case kernel.ResourceRunnerProcess:
+			runnerProcess = resource
+		}
+	}
+	providerExit, _ := kernel.NewAttemptResultExitCode(0)
+	result, err := kernel.NewInnerConvergedAttemptResult(run.ID, run.CredentialDigest, run.ResultProofDigest(), runtimeRoot.Identity, providerProcess.Identity, providerExit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current, err = store.ConsumeAttemptResult(ctx, result, current.Revision, adapterTime(t, 501)); err != nil {
+		t.Fatal(err)
+	}
+	resources, _ = store.Resources(ctx, run.ID)
+	for _, resource := range resources {
+		if resource.Kind == kernel.ResourceRuntimeRoot {
+			runtimeRoot = resource
+		} else if resource.Kind == kernel.ResourceRunnerProcess {
+			runnerProcess = resource
+		}
+	}
+	runnerExit, _ := kernel.NewProcessExitCode(1, 0, adapterTime(t, 502))
+	if current, _, err = store.RecordLiveRunnerExitAndRelease(ctx, run.ID, runnerProcess.ID, current.Revision, runnerProcess.Revision, runnerProcess.Identity, runnerExit, adapterTime(t, 502)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReleaseResource(ctx, run.ID, runtimeRoot.ID, runtimeRoot.Revision, runtimeRoot.Identity, adapterTime(t, 503)); err != nil {
+		t.Fatal(err)
+	}
+	session, _, _ := store.TerminalSessionForRun(ctx, run.ID)
+	if current, _, err = store.CloseTerminalAfterRunner(ctx, result, current.Revision, session.Revision, adapterTime(t, 504)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeRun(ctx, run.ID, current.Revision, adapterTime(t, 505)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newOperatorAPITestFixture(t *testing.T, daemon *Daemon) *operatorAPITestFixture {
 	t.Helper()
 	authRoot := runtimeTempDir(t)

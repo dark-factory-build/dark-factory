@@ -43,6 +43,7 @@ const (
 	v16UserVersion      = 16
 	v17UserVersion      = 17
 	v18UserVersion      = 18
+	v19UserVersion      = 19
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -475,13 +476,34 @@ func v17SchemaStatements() []string {
 	return statements
 }
 
-// v18 predates retained terminal diagnostics. No existing table is changed.
+// v18 predates retained terminal diagnostics and yielded continuations.
 func v18SchemaStatements() []string {
-	statements := make([]string, 0, len(schemaStatements)-1)
+	statements := make([]string, 0, len(schemaStatements)-4)
 	for _, statement := range schemaStatements {
-		if _, name := schemaObjectIdentity(statement); name != "terminal_diagnostics" {
-			statements = append(statements, statement)
+		_, name := schemaObjectIdentity(statement)
+		if name == "terminal_diagnostics" || name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
+			continue
 		}
+		if name == "invalidations" {
+			statement = strings.Replace(statement, ", 'continuation'", "", 1)
+		}
+		statements = append(statements, statement)
+	}
+	return statements
+}
+
+// v19 has retained terminal diagnostics but predates yielded continuations.
+func v19SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-3)
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
+			continue
+		}
+		if name == "invalidations" {
+			statement = strings.Replace(statement, ", 'continuation'", "", 1)
+		}
+		statements = append(statements, statement)
 	}
 	return statements
 }
@@ -596,6 +618,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v17SchemaStatements(), true
 	case v18UserVersion:
 		return v18SchemaStatements(), true
+	case v19UserVersion:
+		return v19SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -621,7 +645,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -660,6 +684,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[16:]
 	case v18UserVersion:
 		steps = all[17:]
+	case v19UserVersion:
+		steps = all[18:]
 	default:
 		return connection.Close()
 	}
@@ -1022,10 +1048,10 @@ func migrateV18Transaction(ctx context.Context, connection *sql.Conn) error {
 	if _, err := connection.ExecContext(ctx, expectedSchemaOf(schemaStatements)["terminal_diagnostics"].sql); err != nil {
 		return fmt.Errorf("create terminal diagnostics: %w", err)
 	}
-	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v19UserVersion)); err != nil {
 		return err
 	}
-	return validateExactSchema(ctx, connection)
+	return validateSchemaVersion(ctx, connection, v19UserVersion, v19SchemaStatements())
 }
 
 // rebuildTable replaces one table with its target definition, preserving every
@@ -1082,4 +1108,25 @@ func setForeignKeys(ctx context.Context, connection *sql.Conn, enforced bool) er
 		return fmt.Errorf("%w: sqlite foreign key enforcement is %d, want %d", ErrCorruptState, got, want)
 	}
 	return nil
+}
+
+func migrateV19Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v19UserVersion, v19SchemaStatements()); err != nil {
+		return err
+	}
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "invalidations", "sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted", "invalidations_entity_revision_unique", "", ""); err != nil {
+		return err
+	}
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
+		return err
+	}
+	return validateExactSchema(ctx, connection)
 }
