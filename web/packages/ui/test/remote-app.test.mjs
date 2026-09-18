@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { StrictMode, createElement } from "react";
 import { act, create } from "react-test-renderer";
+import { renderToString } from "react-dom/server";
 import { MemoryRemoteStore, ProtocolError, RemoteDaemonMismatchError, SessionError } from "@dark-factory/client";
 import { RemoteApp } from "../dist/src/index.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
@@ -742,6 +743,25 @@ test("a name typed for one factory never renames the next one selected", async (
     assert.equal(renderer.root.findByProps({ id: "dfRemoteName" }).props.value, "South Shop");
     assert.equal(button(renderer, "dfRemote__renameAction").props.disabled, true);
   });
+});
+
+test("the first render never reads the browser, so a server and an offline iPhone hydrate alike", async () => {
+  const agent = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { userAgent: "iPhone", onLine: false } });
+  globalThis.matchMedia = () => ({ matches: false });
+  globalThis.addEventListener = globalThis.removeEventListener = () => {};
+  try {
+    const { navigator: _browser, ...bare } = props(fakeManager([]));
+    const first = renderToString(createElement(RemoteApp, bare));
+    assert.doesNotMatch(first, /INSTALL THE APP|DEVICE OFFLINE/);
+    // Once mounted, the same browser is believed.
+    await withApp(bare, (renderer) => assert.match(textOf(renderer), /DEVICE OFFLINE.*INSTALL THE APP/s));
+  } finally {
+    delete globalThis.matchMedia;
+    delete globalThis.addEventListener;
+    delete globalThis.removeEventListener;
+    if (agent === undefined) delete globalThis.navigator; else Object.defineProperty(globalThis, "navigator", agent);
+  }
 });
 
 test("forgetting a factory or the device takes a second, inline confirmation", async () => {

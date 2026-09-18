@@ -118,11 +118,14 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   const [confirm, setConfirm] = useState<Confirm | undefined>(undefined);
   const [cancelPhrase, setCancelPhrase] = useState<string | undefined>(undefined);
   const [alerts, setAlerts] = useState<{ phase: "idle" | "working" | "failed"; copy?: string }>({ phase: "idle" });
-  const [online, setOnline] = useState(() => (props.navigator ?? globalThis.navigator)?.onLine !== false);
+  // Like the install hint, the browser's own answer is read after mount.
+  const [online, setOnline] = useState(props.navigator?.onLine !== false);
   const manager = useRef<RemoteManager | undefined>(undefined);
   // Read and cleared once per mount, not once per effect run.
   const arrival = useRef<{ attempted: boolean; link: string; invitation: RemoteInvitation | null } | undefined>(undefined);
-  const [install] = useState<InstallHint>(() => "install" in props ? props.install : browserInstallHint());
+  // Read after mount: a server render knows no browser, and the first client
+  // render must match it.
+  const [install, setInstall] = useState<InstallHint>(props.install);
   // An invitation that arrives in an iOS tab is held, not spent: pairing the
   // tab would leave the Home Screen app, which shares none of its storage, unpaired.
   const [held, setHeld] = useState<{ link: string; invitation: RemoteInvitation; copied: boolean } | undefined>(undefined);
@@ -186,13 +189,15 @@ export function RemoteApp(props: RemoteAppProps = {}) {
     // about to be thrown away.
     if (arrival.current === undefined) arrival.current = { attempted: invitationArrived(where.hash), link: `${where.origin}${where.pathname}${where.hash}`, invitation: consumeInvitation(where, past) };
     const { attempted, link: arrived, invitation } = arrival.current;
+    const hint = "install" in props ? props.install : browserInstallHint();
+    setInstall(hint);
     void (async () => {
       try { await built.start(); } catch { /* an unreadable store is an empty device, not a crash */ }
       // Identity, never a shared flag: only the run that still owns the manager
       // may act on it.
       if (manager.current !== built) return;
       bump();
-      if (invitation !== null && install !== undefined) setHeld({ link: arrived, invitation, copied: false });
+      if (invitation !== null && hint !== undefined) setHeld({ link: arrived, invitation, copied: false });
       else if (invitation !== null) await pairWith(built, invitation);
       else if (attempted) setPairing({ phase: "failed", copy: INVITATION_SPENT });
     })();
