@@ -590,10 +590,48 @@ class ManagedIntakeTest(unittest.TestCase):
             self.assertEqual({'keep':'cutoff'},json.loads(journal.read_text()))
             self.assertFalse(jobs)
 
+    def test_install_refuses_same_home_legacy_schedule_without_touching_it(self):
+        self.plists.mkdir()
+        config = self.root / 'legacy.json'
+        config.write_text(json.dumps({'factory_home': str(self.home), 'journal': str(self.root / 'legacy-journal.json')}))
+        config.chmod(0o600)
+        # The operator may save the generated plist under a custom filename.
+        plist = self.plists / 'custom-intake.plist'
+        job = {'Label': 'build.darkfactory.autonomy.fixture', 'ProgramArguments': ['/usr/bin/python3', '/old/release/factory-autonomy.py', str(config), '--once']}
+        plist.write_bytes(autonomy.plistlib.dumps(job))
+        plist.chmod(0o600)
+        original = plist.read_bytes()
+        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')) as launchctl:
+            with self.assertRaisesRegex(ValueError, 'legacy intake already schedules'):
+                autonomy.managed_service(self.home, self.factoryctl, 'install')
+            self.assertEqual([('list',)], [call.args for call in launchctl.call_args_list])
+        self.assertEqual(original, plist.read_bytes())
+        self.assertFalse(Path(str(self.home)+'.intake/service.json').exists())
+        # Release-only work and another factory retain their existing jobs.
+        job['ProgramArguments'].append('--release-only')
+        plist.write_bytes(autonomy.plistlib.dumps(job))
+        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            autonomy.refuse_legacy_intake_service(self.home)
+            job['ProgramArguments'].pop()
+            plist.write_bytes(autonomy.plistlib.dumps(job))
+            config.write_text(json.dumps({'factory_home': str(self.root / 'another-home')}))
+            autonomy.refuse_legacy_intake_service(self.home)
+
+    def test_install_refuses_uninspectable_loaded_legacy_job_and_overflow(self):
+        label = 'build.darkfactory.autonomy.fixture'
+        replies = [subprocess.CompletedProcess([], 0, '-\t0\t'+label+'\n', ''), subprocess.CompletedProcess([], 0, 'path = '+str(self.root/'missing.plist')+'\n', '')]
+        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', side_effect=replies), self.assertRaisesRegex(ValueError, 'arguments unavailable'):
+            autonomy.refuse_legacy_intake_service(self.home)
+        self.plists.mkdir()
+        for index in range(201):
+            (self.plists / (str(index)+'.plist')).touch()
+        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')), self.assertRaisesRegex(ValueError, 'exceeds 200'):
+            autonomy.refuse_legacy_intake_service(self.home)
+
     def test_foreign_plist_is_never_stopped_and_missing_owned_plist_can_uninstall(self):
         absent = subprocess.CompletedProcess([],113,'','')
         success = subprocess.CompletedProcess([],0,'','')
-        with patch.object(autonomy,'__file__',str(self.script)), patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',side_effect=[absent,success]):
+        with patch.object(autonomy,'__file__',str(self.script)), patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',side_effect=[success,absent,success]):
             autonomy.managed_service(self.home,self.factoryctl,'install')
         plist = next(self.plists.iterdir())
         plist.write_text('foreign')
