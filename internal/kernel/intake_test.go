@@ -243,3 +243,76 @@ func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testi
 		t.Fatalf("old content preview = %q", got)
 	}
 }
+
+func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	defer store.Close()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 240), Name: "pending-intake", Root: "/pending-intake"}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{241}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: sourceID, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	older := intakeSnapshotForTest()
+	first, err := store.AcceptIntakeSnapshot(ctx, source.ID, older, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerSnapshot := older
+	newerSnapshot.Body = "newer reviewed body"
+	newer, err := store.AcceptIntakeSnapshot(ctx, source.ID, newerSnapshot, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingIntakeAcceptances(ctx, source.ID, 25)
+	if err != nil || len(pending) != 1 || pending[0].ID != newer.ID {
+		t.Fatalf("pending newest receipt = %+v, %v", pending, err)
+	}
+	if _, err := store.WithdrawIntakeAcceptance(ctx, newer.ID, mustTime(t, 6)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = store.PendingIntakeAcceptances(ctx, source.ID, 25)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("withdrawn latest revived older receipt = %+v, %v", pending, err)
+	}
+	other := older
+	other.IssueNumber = 8
+	other.NodeID = "I_kwDOOther"
+	accepted, err := store.AcceptIntakeSnapshot(ctx, source.ID, other, mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, false, mustTime(t, 8))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err = store.PendingIntakeAcceptances(ctx, source.ID, 25)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("paused source pending receipt = %+v, %v", pending, err)
+	}
+	source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 10)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = store.PendingIntakeAcceptances(ctx, source.ID, 25)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("imported receipt remained pending = %+v, %v", pending, err)
+	}
+	if first.ID == newer.ID {
+		t.Fatal("content edit did not create a distinct receipt")
+	}
+}
