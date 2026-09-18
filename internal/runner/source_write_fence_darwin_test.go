@@ -115,6 +115,44 @@ func checkSourceWriteFence(t *testing.T, nested bool) {
 	if err := os.Remove(filepath.Join(source, "protected-hardlink")); err != nil {
 		t.Fatal(err)
 	}
+	sourceOwned := filepath.Join(source, "source-owned")
+	if err := os.WriteFile(sourceOwned, []byte("source\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sourceOutside := filepath.Join(root, "source-outside-hardlink")
+	if err := os.Link(sourceOwned, sourceOutside); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.ProtectSourceWrites(repository, changes, gitDirectory, lease); err == nil {
+		t.Fatal("pre-existing hardlink from writable source was accepted")
+	}
+	if err := os.Remove(sourceOutside); err != nil {
+		t.Fatal(err)
+	}
+	adminOutside := filepath.Join(root, "admin-outside-hardlink")
+	if err := os.Link(filepath.Join(gitDirectory, "refs", "heads", "main"), adminOutside); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.ProtectSourceWrites(repository, changes, gitDirectory, lease); err == nil {
+		t.Fatal("pre-existing hardlink from private Git administration was accepted")
+	}
+	if err := os.Remove(adminOutside); err != nil {
+		t.Fatal(err)
+	}
+	leaseOwned := filepath.Join(lease, "lease-owned")
+	if err := os.WriteFile(leaseOwned, []byte("lease\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	leaseOutside := filepath.Join(root, "lease-outside-hardlink")
+	if err := os.Link(leaseOwned, leaseOutside); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.ProtectSourceWrites(repository, changes, gitDirectory, lease); err == nil {
+		t.Fatal("pre-existing hardlink from CI lease was accepted")
+	}
+	if err := os.Remove(leaseOutside); err != nil {
+		t.Fatal(err)
+	}
 	outsideAlias := filepath.Join(root, "outside-hardlink")
 	if err := os.Link(filepath.Join(canonGit, "refs", "heads", "main"), outsideAlias); err != nil {
 		t.Fatal(err)
