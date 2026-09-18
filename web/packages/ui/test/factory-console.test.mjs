@@ -2389,7 +2389,7 @@ test("editing an intake filter preserves migrated priority rules", async () => {
   const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n, priority_default: 2, priority_by_label: { urgent: 10 } };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("h4").some((heading) => heading.props.children === "EDIT ISSUE SOURCE"));
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "SAVE PAUSED SOURCE"));
     await act(async () => form.findAllByType("input").find((input) => input.props.value === "bug").props.onChange({ currentTarget: { value: "enhancement" } }));
     await act(async () => form.props.onSubmit({ preventDefault() {} }));
     assert.equal(calls.length, 1);
@@ -2436,7 +2436,7 @@ test("refreshing a changed source replaces stale configuration drafts", async ()
     await act(async () => { renderer = create(createElement(FactoryConsole, props(source))); });
     const changed = { ...source, revision: 4n, target_repository_id: "90".repeat(16), label: "enhancement", policy: "trusted_authors", trusted_authors: ["reviewer"] };
     await act(async () => renderer.update(createElement(FactoryConsole, props(changed))));
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("h4").some((heading) => heading.props.children === "EDIT ISSUE SOURCE"));
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "SAVE PAUSED SOURCE"));
     await act(async () => form.props.onSubmit({ preventDefault() {} }));
     assert.equal(calls.length, 1);
     assert.equal(calls[0].expected_revision, 4n);
