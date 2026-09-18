@@ -68,10 +68,11 @@ type ProjectRepository struct {
 }
 
 type NewProjectRepository struct {
-	ID            RepositoryID
-	ProjectID     ProjectID
-	Name          string
-	Root, BaseRef string
+	ID             RepositoryID
+	ProjectID      ProjectID
+	Name           string
+	Root, BaseRef  string
+	SourceIdentity *RepositorySourceIdentity
 }
 
 func scanProjectRepository(scanner rowScanner) (ProjectRepository, bool, error) {
@@ -89,7 +90,7 @@ func scanProjectRepository(scanner rowScanner) (ProjectRepository, bool, error) 
 	rev, revErr := NewRevision(revision)
 	createdAt, createdErr := NewUnixMillis(created)
 	updatedAt, updatedErr := NewUnixMillis(updated)
-	if idErr != nil || projectErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || base != inheritedRepositoryBase && !validRepositoryBase(base) || (enabled != 0 && enabled != 1) || (defaultValue != 0 && defaultValue != 1) || updated < created {
+	if idErr != nil || projectErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || (base != inheritedRepositoryBase && !validRepositoryBase(base)) || (enabled != 0 && enabled != 1) || (defaultValue != 0 && defaultValue != 1) || updated < created {
 		return ProjectRepository{}, false, fmt.Errorf("%w: invalid project repository", ErrCorruptState)
 	}
 	return ProjectRepository{ID: id, ProjectID: projectID, Name: name, Root: root, BaseRef: base, Enabled: enabled == 1, Default: defaultValue == 1, Revision: rev, CreatedAt: createdAt, UpdatedAt: updatedAt}, true, nil
@@ -116,7 +117,7 @@ func (store *Store) TaskRepository(ctx context.Context, taskID TaskID) (ProjectR
 		return ProjectRepository{}, false, err
 	}
 	defer read.Close()
-	return scanProjectRepository(read.connection.QueryRowContext(ctx, `SELECT r.id, r.project_id, r.name, r.root, b.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms FROM project_repositories AS r JOIN task_repository_bindings AS b ON b.repository_id = r.id WHERE b.task_id = ?`, taskID.Bytes()))
+	return scanProjectRepository(read.connection.QueryRowContext(ctx, `SELECT r.id, r.project_id, r.name, r.root, b.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms FROM project_repositories AS r JOIN task_repository_bindings AS b ON b.repository_id = r.id JOIN tasks AS t ON t.id = b.task_id AND t.project_id = r.project_id WHERE b.task_id = ?`, taskID.Bytes()))
 }
 
 func (store *Store) ContentRepository(ctx context.Context, id ContentID, revision Revision) (ProjectRepository, bool, error) {
@@ -125,7 +126,7 @@ func (store *Store) ContentRepository(ctx context.Context, id ContentID, revisio
 		return ProjectRepository{}, false, err
 	}
 	defer read.Close()
-	return scanProjectRepository(read.connection.QueryRowContext(ctx, `SELECT `+qualifiedProjectRepositoryColumns+` FROM project_repositories AS r JOIN content_repository_bindings AS b ON b.repository_id = r.id WHERE b.content_id = ? AND b.content_revision = ?`, id.Bytes(), revision.Int64()))
+	return scanProjectRepository(read.connection.QueryRowContext(ctx, `SELECT `+qualifiedProjectRepositoryColumns+` FROM project_repositories AS r JOIN content_repository_bindings AS b ON b.repository_id = r.id JOIN project_content_revisions AS c ON c.id = b.content_id AND c.revision = b.content_revision AND c.project_id = r.project_id WHERE b.content_id = ? AND b.content_revision = ?`, id.Bytes(), revision.Int64()))
 }
 
 func resolveTaskRepository(ctx context.Context, connection *sql.Conn, projectID ProjectID, requested RepositoryID) (ProjectRepository, error) {
@@ -199,6 +200,15 @@ func (store *Store) AddProjectRepository(ctx context.Context, spec NewProjectRep
 		return ProjectRepository{}, tx.Rollback(err)
 	} else if found {
 		if existing.ProjectID == spec.ProjectID && existing.Name == spec.Name && existing.Root == spec.Root && existing.BaseRef == spec.BaseRef {
+			if spec.SourceIdentity != nil {
+				if err := bindRepositorySource(ctx, tx.connection, spec.ID, *spec.SourceIdentity); err != nil {
+					return ProjectRepository{}, tx.Rollback(err)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return ProjectRepository{}, err
+				}
+				return existing, nil
+			}
 			if err := tx.Rollback(nil); err != nil {
 				return ProjectRepository{}, err
 			}
@@ -208,6 +218,14 @@ func (store *Store) AddProjectRepository(ctx context.Context, spec NewProjectRep
 	}
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 1, 0, 1, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.Name, spec.Root, spec.BaseRef, at.Int64(), at.Int64()); err != nil {
 		return ProjectRepository{}, tx.Rollback(err)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO repository_source_identities(repository_id) VALUES(?)`, spec.ID.Bytes()); err != nil {
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	if spec.SourceIdentity != nil {
+		if err := bindRepositorySource(ctx, tx.connection, spec.ID, *spec.SourceIdentity); err != nil {
+			return ProjectRepository{}, tx.Rollback(err)
+		}
 	}
 	value, found, err := repositoryByID(ctx, tx.connection, spec.ID)
 	if err != nil || !found {
@@ -391,4 +409,13 @@ func (store *Store) RemoveProjectRepository(ctx context.Context, id RepositoryID
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
+}
+
+func (store *Store) ProjectRepository(ctx context.Context, id RepositoryID) (ProjectRepository, bool, error) {
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return ProjectRepository{}, false, err
+	}
+	defer read.Close()
+	return repositoryByID(ctx, read.connection, id)
 }

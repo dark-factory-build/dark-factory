@@ -125,7 +125,7 @@ func TestLegacyRepositoryBasePinsOnceAcrossMigrationAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reproduce the exact v20 schema, which had no repository/base setting.
-	for _, statement := range []string{"DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "PRAGMA user_version = 20"} {
+	for _, statement := range []string{"DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "PRAGMA user_version = 20"} {
 		if _, err := store.writer.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
@@ -214,3 +214,9 @@ func TestRepositoryBaseInitializationPreservesBootArgumentBounds(t *testing.T) {
 		t.Fatalf("boot base did not fit durable binding: %+v %v %v", repository, found, err)
 	}
 }
+
+// Raw population fixtures need the same routes that public writers create.
+const fixtureProjectRepositorySQL = `INSERT INTO project_repositories(id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) SELECT p.id, p.id, p.name, p.root, ':factoryd-base-revision', 1, 1, 1, p.created_at_ms, p.updated_at_ms FROM projects p WHERE NOT EXISTS(SELECT 1 FROM project_repositories r WHERE r.project_id = p.id)`
+const fixtureTaskRepositorySQL = `INSERT INTO task_repository_bindings(task_id, repository_id, base_ref) SELECT t.id, r.id, r.base_ref FROM tasks t JOIN project_repositories r ON r.project_id = t.project_id AND r.is_default = 1 WHERE NOT EXISTS(SELECT 1 FROM task_repository_bindings b WHERE b.task_id = t.id)`
+
+const fixtureRepositoryIdentitySQL = `INSERT INTO repository_source_identities(repository_id) SELECT r.id FROM project_repositories r WHERE NOT EXISTS(SELECT 1 FROM repository_source_identities i WHERE i.repository_id = r.id)`

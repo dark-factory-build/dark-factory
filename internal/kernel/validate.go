@@ -26,6 +26,9 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validateProjects(ctx, connection); err != nil {
 		return FactoryState{}, fmt.Errorf("validate projects: %w", err)
 	}
+	if err := validateRepositoryBindings(ctx, connection); err != nil {
+		return FactoryState{}, err
+	}
 	if err := validateAgents(ctx, connection); err != nil {
 		return FactoryState{}, fmt.Errorf("validate agents: %w", err)
 	}

@@ -158,6 +158,12 @@ func TestPublicSnapshotCountBoundIncludesEveryDynamicKind(t *testing.T) {
 	if _, err := store.writer.Exec(`INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(?, 'overflow', '/public/overflow', 'none', 1, 401, 401)`, overflow.Bytes()); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.writer.Exec(fixtureProjectRepositorySQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(fixtureRepositoryIdentitySQL); err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := store.ReadPublicSnapshot(ctx)
 	if !errors.Is(err, ErrSnapshotTooLarge) || len(snapshot.Projects) != 0 {
 		t.Fatalf("distributed overflow snapshot = %+v, %v", snapshot, err)
@@ -384,6 +390,12 @@ func insertPublicProjects(t *testing.T, store *Store, count int) {
 	}
 	if err := statement.Close(); err != nil {
 		tx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(fixtureProjectRepositorySQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(fixtureRepositoryIdentitySQL); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {

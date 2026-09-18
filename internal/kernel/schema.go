@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 22
+	userVersion   = 23
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -58,6 +58,16 @@ var schemaStatements = []string{
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX project_repositories_root_unique ON project_repositories(root)`,
 	`CREATE UNIQUE INDEX project_repositories_one_default ON project_repositories(project_id) WHERE is_default = 1`,
+	`CREATE TABLE repository_source_identities (
+    repository_id BLOB PRIMARY KEY CHECK (length(repository_id) = 16) REFERENCES project_repositories(id) ON DELETE CASCADE,
+    root_dev INTEGER CHECK (root_dev >= 0),
+    root_inode INTEGER CHECK (root_inode > 0),
+    git_dev INTEGER CHECK (git_dev >= 0),
+    git_inode INTEGER CHECK (git_inode > 0),
+    origin_digest BLOB CHECK (length(origin_digest) = 32),
+    publication_repository TEXT CHECK (length(CAST(publication_repository AS BLOB)) <= 140),
+    CHECK ((root_dev IS NULL AND root_inode IS NULL AND git_dev IS NULL AND git_inode IS NULL AND origin_digest IS NULL AND publication_repository IS NULL) OR (root_dev IS NOT NULL AND root_inode IS NOT NULL AND git_dev IS NOT NULL AND git_inode IS NOT NULL AND origin_digest IS NOT NULL AND publication_repository IS NOT NULL))
+) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE accounts (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex')),

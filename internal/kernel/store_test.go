@@ -477,6 +477,12 @@ func TestSnapshotRejectsCapPlusOne(t *testing.T) {
 		}
 	}
 	statement.Close()
+	if _, err := tx.Exec(fixtureProjectRepositorySQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(fixtureRepositoryIdentitySQL); err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
