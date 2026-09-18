@@ -332,14 +332,34 @@ mod cloudflare {
     pub(crate) async fn receive(
         State(state): State<BrokerState>,
         method: HttpMethod,
-        uri: Uri,
+        mut uri: Uri,
         headers: HeaderMap,
         body: Bytes,
     ) -> HttpResponse {
         let Some(env) = state.connection_env.as_ref() else {
             return axum::http::StatusCode::NOT_FOUND.into_response();
         };
-        match forward(env, method, uri, headers, body).await {
+        // Keep this administrative route outside the customer OAuth prefix,
+        // so its existing Access policy still supplies a verified assertion.
+        let legacy_prefix = "/v1/github/maintainer/connections/";
+        let legacy_migration = uri.path().starts_with(legacy_prefix);
+        if legacy_migration {
+            let Some(mcp) = state.mcp.as_ref() else {
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            };
+            if !mcp.authorize_legacy_migration(&headers).await {
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+            if uri.query().is_some() {
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            }
+            let path = uri.path().strip_prefix(legacy_prefix).unwrap_or("");
+            let Ok(internal) = format!("{PREFIX}/{path}").parse::<Uri>() else {
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            };
+            uri = internal;
+        }
+        match forward(env, method, uri, headers, body, legacy_migration).await {
             Ok(response) => response.into(),
             Err(_) => (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -355,6 +375,7 @@ mod cloudflare {
         uri: Uri,
         headers: HeaderMap,
         body: Bytes,
+        legacy_migration: bool,
     ) -> worker::Result<Response> {
         let oauth = OAuth::load(env).map_err(|_| worker::Error::RustError("inactive".into()))?;
         let path = uri.path();
@@ -403,6 +424,11 @@ mod cloudflare {
         }
         if is_start {
             forwarded.set("x-connection-id", &id)?;
+        }
+        // This marker is created only after Access verification; arbitrary
+        // incoming headers are never forwarded to this internal authority.
+        if legacy_migration {
+            forwarded.set("x-legacy-receipt-migration", "verified")?;
         }
         init.with_headers(forwarded);
         let request =
@@ -594,6 +620,73 @@ mod cloudflare {
             .as_ref()
             .ok_or_else(|| worker::Error::RustError("unauthorized".into()))?
             .access_token;
+        if path == format!("{base}/legacy-receipt") && request.method() == Method::Post {
+            if request
+                .headers()
+                .get("x-legacy-receipt-migration")?
+                .as_deref()
+                != Some("verified")
+            {
+                return denied();
+            }
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Proof {
+                kind: String,
+                arguments: Value,
+            }
+            let Ok(proof) = request.json::<Proof>().await else {
+                return reply(json!({"error":"invalid_request"}), 400);
+            };
+            let source = proof
+                .arguments
+                .get("source_repository")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let Ok((operation, repository)) =
+                crate::github_app::legacy_receipt_request(&proof.kind, proof.arguments)
+            else {
+                return reply(json!({"error":"invalid_request"}), 400);
+            };
+            let Some(delegated) = connection
+                .repositories
+                .iter()
+                .find(|d| d.repository.eq_ignore_ascii_case(&repository))
+            else {
+                return denied();
+            };
+            if let Err(error) = authorize(token, oauth.app_id, delegated, true).await {
+                return github_failure(error);
+            }
+            if let Some(source) = source {
+                let Some(source) = connection
+                    .repositories
+                    .iter()
+                    .find(|d| d.repository.eq_ignore_ascii_case(&source))
+                else {
+                    return denied();
+                };
+                if let Err(error) = authorize(token, oauth.app_id, source, false).await {
+                    return github_failure(error);
+                }
+            }
+            let state = BrokerState::from_worker_env(env)
+                .map_err(|_| worker::Error::RustError("inactive".into()))?;
+            let Some(mcp) = state.mcp else {
+                return denied();
+            };
+            return match mcp
+                .transfer_legacy_receipt(&connection.id, delegated.repository_id, &operation)
+                .await
+            {
+                Ok(true) => reply(
+                    json!({"transferred":true,"operation_id":operation.operation_id}),
+                    200,
+                ),
+                Ok(false) => reply(json!({"error":"receipt_proof_conflict"}), 409),
+                Err(_) => reply(json!({"error":"journal_unavailable"}), 503),
+            };
+        }
         if path == base && request.method() == Method::Get {
             // Status contains private delegation metadata, so access loss is
             // checked here too, not only before repository operations.

@@ -400,3 +400,33 @@ native installation/request-approval form even when the user has no visible
 installation yet. It grants no local repository delegation; selected repositories
 still require live user permission checks before use. Pending organisation
 approval remains a GitHub state, and an empty list is not proof of approval.
+
+### Move legacy operation receipts to a connection
+
+The administrative `POST /v1/github/maintainer/connections/{id}/legacy-receipt` route
+requires **both** the existing verified Cloudflare Access operator/service
+identity and the destination connection's bearer. Keep this administrative
+route under the existing Access policy, outside the customer OAuth exception. It is not an MCP tool and a
+customer connection alone cannot use it. Stop the old controller before
+transferring its receipts; the new controller uses its connection thereafter.
+
+The JSON body is `{"kind":"create_issue","arguments":{...}}`, with the
+complete original typed operation request in `arguments`. The broker validates
+and serializes that request exactly as the operation does, compares its digest
+with the retained receipt, and verifies the connection's live write access to
+its numeric repository. Success returns `transferred: true` and the unchanged
+operation ID. Repeat the same transfer safely after a lost response. Referenced
+receipts (such as the review required for merge) must be transferred too.
+
+The transfer changes only the existing authority row. It preserves UUID, kind,
+request digest, state, result and timestamps; it creates no remote operation.
+The old Access-only path no longer owns a transferred receipt. A different
+customer or repository cannot reclaim it, and subsequent reads/replays still
+require the connection's live grants. Disconnect or access loss blocks them.
+
+A missing original request, mismatched digest or already-owned receipt returns
+`receipt_proof_conflict`; retain the journal and recover the exact request
+before retrying. An email, repository name, GitHub URL or guessed UUID is never
+sufficient proof. Do not put either credential in a report, task, command-line
+argument or log. This one-time operator migration is not a customer setup
+requirement and does not provide runtime fallback to the legacy identity.

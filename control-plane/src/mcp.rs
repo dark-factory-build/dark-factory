@@ -67,6 +67,24 @@ impl McpState {
         self.app.installation_url().await
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn authorize_legacy_migration(&self, headers: &HeaderMap) -> bool {
+        self.access.authorize(headers).await.is_ok()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn transfer_legacy_receipt(
+        &self,
+        owner: &str,
+        repository_id: i64,
+        operation: &crate::journal::Operation,
+    ) -> Result<bool, crate::journal::Error> {
+        self.journal
+            .for_connection(owner, &format!("github:{repository_id}"))?
+            .transfer_legacy_receipt(operation)
+            .await
+    }
+
     pub(crate) const fn headless(&self) -> bool {
         self.access.headless()
     }

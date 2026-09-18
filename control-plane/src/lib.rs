@@ -290,6 +290,11 @@ pub fn app(state: BrokerState) -> Router {
                     .layer(DefaultBodyLimit::max(65536)),
             )
             .route(
+                "/v1/github/maintainer/connections/{id}/legacy-receipt",
+                axum::routing::post(connection::receive)
+                    .layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES)),
+            )
+            .route(
                 "/v1/github/connections/{id}/mcp",
                 axum::routing::post(connection::receive)
                     .layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES)),
