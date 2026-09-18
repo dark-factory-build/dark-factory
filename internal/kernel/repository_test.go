@@ -53,6 +53,40 @@ func TestTaskRepositoryBindingSnapshotsDefaultAndScopesConflict(t *testing.T) {
 	}
 }
 
+func TestRepositoryDisableAndRemovalRespectBindings(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 110), Name: "routes", Root: filepath.Join(t.TempDir(), "first")}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 111), ProjectID: project.ID, Root: filepath.Join(t.TempDir(), "second"), BaseRef: "HEAD"}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveProjectRepository(ctx, second.ID, second.Revision); err != nil {
+		t.Fatalf("unreferenced remove: %v", err)
+	}
+	second, err = store.AddProjectRepository(ctx, NewProjectRepository{ID: second.ID, ProjectID: project.ID, Root: second.Root, BaseRef: "HEAD"}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetProjectRepositoryDefault(ctx, second.ID, second.Revision, mustTime(t, 4)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetProjectRepositoryEnabled(ctx, RepositoryID(project.ID), Revision{value: 1}, false, mustTime(t, 5)); err != nil {
+		t.Fatalf("disable nondefault = %v", err)
+	}
+	repositories, err := store.ProjectRepositories(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetProjectRepositoryEnabled(ctx, second.ID, repositories[1].Revision, false, mustTime(t, 5)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("disable default = %v", err)
+	}
+}
+
 func repositoryID(t *testing.T, value byte) RepositoryID {
 	t.Helper()
 	raw := [IDBytes]byte{}
