@@ -1199,7 +1199,7 @@ func migrateV20Transaction(ctx context.Context, connection *sql.Conn) error {
 	if _, err := connection.ExecContext(ctx, `INSERT INTO task_repository_bindings(task_id, repository_id, base_ref) SELECT id, project_id, ? FROM tasks`, inheritedRepositoryBase); err != nil {
 		return err
 	}
-	if _, err := connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) SELECT id, revision, project_id FROM project_content_revisions WHERE commit_oid IS NOT NULL`); err != nil {
+	if _, err := connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) SELECT id, revision, project_id FROM project_content_revisions`); err != nil {
 		return err
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v21UserVersion)); err != nil {

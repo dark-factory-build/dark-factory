@@ -260,6 +260,11 @@ func (daemon *Daemon) content(ctx context.Context, call api.Call) api.Reply {
 				if existing.ProjectID != spec.ProjectID || existing.LatestRevision.Int64() != 1 {
 					return newErrorReply(api.RemoteRevisionConflict)
 				}
+				repository, found, readErr := daemon.store.ContentRepository(ctx, existing.ID, existing.Revision)
+				if readErr != nil || !found {
+					return newErrorReply(api.RemoteInternal)
+				}
+				spec.RepositoryID = repository.ID
 				spec.RepositoryDevice, spec.RepositoryInode = existing.RepositoryDevice, existing.RepositoryInode
 			} else if existingErr != kernel.ErrNotFound {
 				return newErrorReply(remoteErrorCode(existingErr))

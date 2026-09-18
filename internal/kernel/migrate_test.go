@@ -172,6 +172,12 @@ func TestV16OutcomeMigrationPreservesLibrary(t *testing.T) {
 	if err != nil || secondBody != "corrected definition" {
 		t.Fatalf("corrected revision: %+v %v", second, err)
 	}
+	for _, revision := range []int64{1, 2} {
+		repository, found, err := store.ContentRepository(ctx, contentID(t, 212), mustRevision(t, revision))
+		if err != nil || !found || repository.ID != RepositoryID(projectID(t, 1)) {
+			t.Fatalf("legacy revision %d has no retained repository: %v %v", revision, found, err)
+		}
+	}
 	evidence, err := store.ListContentEvidence(ctx, projectID(t, 1), contentID(t, 212), mustRevision(t, 1), 0, 4)
 	if err != nil || len(evidence.Items) != 1 || evidence.Items[0].Result != "passed" {
 		t.Fatalf("retained evidence: %+v %v", evidence, err)
@@ -329,6 +335,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		id := contentID(t, 212)
 		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, '', 'original definition', 'operator:local', '', 0, 9)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
 		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 2, ?, '', 'corrected definition', 'operator:local', '', 0, 10)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
+		corruptSQL(t, store, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, 1, ?), (?, 2, ?)`, id.Bytes(), project.Bytes(), id.Bytes(), project.Bytes())
 		content := ContentRevision{ID: id, ProjectID: project, Revision: mustRevision(t, 1)}
 		evidence, err := ContentEvidenceIDFromBytes(bytes.Repeat([]byte{213}, IDBytes))
 		if err != nil {

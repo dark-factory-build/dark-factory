@@ -104,6 +104,15 @@ func TestOperatorContentMetadataAndBodyUseExplicitReadPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	done = fixture.serve(t)
+	retried, err := client.ContentCreate(ctx, api.ContentInput{ID: contentID, ProjectID: projectID, Kind: "custom", Title: "procedure", Body: longBody, SourceReferences: "source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	if retried.Commit != created.Commit || retried.Revision != created.Revision {
+		t.Fatal("create retry lost retained source")
+	}
+	done = fixture.serve(t)
 	revised, err := client.ContentRevise(ctx, api.ContentInput{ID: contentID, ProjectID: projectID, Kind: "custom", Title: "revised", Body: longBody + "v2", ExpectedRevision: 1})
 	if err != nil {
 		t.Fatal(err)
