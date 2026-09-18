@@ -73,4 +73,3 @@ test("home ordering puts active work first and finished work last", () => {
   const ordered = orderTasksForHome(fixtureState).map((item) => item.status);
   assert.deepEqual(ordered, ["running", "queued", "succeeded", "failed"]);
 });
-
