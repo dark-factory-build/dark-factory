@@ -105,3 +105,77 @@ func TestAcceptedIssueObservationDoesNotReplaceReviewedInstructions(t *testing.T
 		}
 	}
 }
+
+func TestAcceptedAttemptContextAndRestrictionsSurviveSourceSettingsChanges(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(180))
+	var source kernel.IntakeSource
+	var accepted kernel.IntakeAcceptance
+	active := prepareActiveAttemptInProject(t, fixture, 180, project.String(), "orchestrator", func() {
+		id, err := kernel.IntakeSourceIDFromBytes(bytes.Repeat([]byte{200}, kernel.IDBytes))
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent, err := parseAgentID(testID(181))
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err = fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: id, ProjectID: project, TargetRepositoryID: kernel.RepositoryID(project), OverseerAgentID: agent, GitHubRepositoryID: 42, GitHubRepositoryName: "feed/original", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustKernelTime(t, 1000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, err = fixture.store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustKernelTime(t, 1000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted, err = fixture.store.AcceptIntakeSnapshot(ctx, source.ID, kernel.IntakeIssueSnapshot{GitHubRepositoryID: 42, IssueNumber: 9, NodeID: "I_original", Title: "reviewed", Body: "exact accepted body", AuthorLogin: "reporter", AuthorType: kernel.GitHubAuthorUser}, mustKernelTime(t, 1000))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.store.ImportIntakeAcceptance(ctx, accepted.ID, mustKernelTime(t, 1000)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if _, err := fixture.store.UpdateIntakeSource(ctx, source.ID, source.Revision, kernel.NewIntakeSource{ID: source.ID, ProjectID: project, TargetRepositoryID: source.TargetRepositoryID, GitHubRepositoryID: 99, GitHubRepositoryName: "feed/changed", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, false, mustKernelTime(t, 1001)); err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	assignment, err := active.client.Task(ctx)
+	waitDispatch(t, done)
+	if err != nil || assignment.Task != accepted.Snapshot.Body || assignment.Intake == nil || assignment.Intake.AcceptanceID != accepted.ID.String() || assignment.Intake.Repository != "feed/original" || assignment.Intake.RepositoryID != 42 || assignment.Intake.IssueNumber != 9 || assignment.Intake.TargetRepositoryID != accepted.RepositoryID.String() {
+		t.Fatalf("frozen accepted assignment: %+v %v", assignment, err)
+	}
+	// An offline customer connection exercises local rejection without any
+	// remote request or private credential in the fixture.
+	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.github, err = maintainer.OpenHost(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	owner.agentID = active.run.AgentID
+	owner.attemptDigest = active.run.CredentialDigest
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	request := api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_issues","arguments":{"repository":"feed/original"}}}`)}
+	for _, want := range []string{"accepted_snapshot_required", "denied"} {
+		done := fixture.serve(t)
+		result, err := active.client.Maintainer(ctx, request)
+		waitDispatch(t, done)
+		if err != nil || result.State != want || len(result.Response) != 0 {
+			t.Fatalf("accepted attempt response: %+v %v; want %s", result, err, want)
+		}
+		if _, err := fixture.store.WithdrawIntakeAcceptance(ctx, accepted.ID, mustKernelTime(t, 1002)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

@@ -27,6 +27,7 @@ import (
 )
 
 type dispatchFixture struct {
+	home         *install.OperationalHome
 	databasePath string
 	daemon       *Daemon
 	store        *kernel.Store
@@ -106,7 +107,7 @@ func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 		_ = home.Close()
 	})
 	socket := install.LocalAPISocketPath(authHomePath)
-	return &dispatchFixture{databasePath: databasePath, daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
+	return &dispatchFixture{home: home, databasePath: databasePath, daemon: daemon, store: store, listener: listener, socket: socket, operator: operatorToken}
 }
 
 func (fixture *dispatchFixture) serve(t *testing.T) <-chan error {
@@ -738,7 +739,7 @@ func prepareActiveAttempt(t *testing.T, fixture *dispatchFixture, seed byte) act
 	return prepareActiveAttemptInProject(t, fixture, seed, testID(seed), "orchestrator")
 }
 
-func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role string) activeAttempt {
+func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed byte, projectID, role string, enqueue ...func()) activeAttempt {
 	t.Helper()
 	ctx := context.Background()
 	agentID, taskID, incarnationID := testID(seed+1), testID(seed+2), testID(seed+3)
@@ -771,10 +772,14 @@ func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed 
 		_, err := operator.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "agent", Role: role, Provider: "shell", ToolBudgetLimit: 10})
 		return err
 	})
-	call(func() error {
-		_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "task", Body: "private", Priority: 1})
-		return err
-	})
+	if len(enqueue) == 1 {
+		enqueue[0]()
+	} else {
+		call(func() error {
+			_, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "task", Body: "private", Priority: 1})
+			return err
+		})
+	}
 	factory, err := fixture.store.Factory(ctx)
 	if err != nil {
 		t.Fatal(err)
