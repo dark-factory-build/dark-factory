@@ -12,7 +12,7 @@ import (
 )
 
 func TestIntakeControllerCommandsUseOperatorTransport(t *testing.T) {
-	for _, args := range [][]string{{"intake", "config"}, {"intake", "tick", "--source", strings.Repeat("ab", 16), "--page", "1"}} {
+	for _, args := range [][]string{{"intake", "config"}, {"intake", "tick", "--source", strings.Repeat("ab", 16), "--page", "1", "--acceptance-cursor", strings.Repeat("cd", 16)}} {
 		t.Run(args[1], func(t *testing.T) {
 			fixture := newAPIFixture(t)
 			defer fixture.close(t)

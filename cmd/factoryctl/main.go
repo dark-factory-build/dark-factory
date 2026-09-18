@@ -52,7 +52,7 @@ const (
 	factoryctl intake enable|pause --source ID --revision N [--reviewed-revision N]
 	factoryctl intake accept --source ID --revision N --issue N --hash HEX64
 	factoryctl intake withdraw|import --acceptance ID
-	factoryctl intake tick --source ID --page N
+	factoryctl intake tick --source ID --page N [--acceptance-cursor ID]
   factoryctl github manage --installation ID [--open]
   factoryctl attempt task
   factoryctl attempt source --task ID
@@ -1413,6 +1413,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				input.IssueNumber = n
 			case "--hash":
 				input.ContentHash = value
+			case "--acceptance-cursor":
+				input.AcceptanceCursor = value
 			case "--acceptance":
 				input.AcceptanceID = value
 			case "--configuration":

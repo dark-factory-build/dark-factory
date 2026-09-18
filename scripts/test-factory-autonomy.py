@@ -545,6 +545,21 @@ class ManagedIntakeTest(unittest.TestCase):
         self.assertEqual(1,journal['sources']['1'*32]['next_page'])
         self.assertNotIn('task_id',journal['sources']['1'*32])
 
+    def test_acceptance_cursor_survives_restart_and_lost_response_then_wraps(self):
+        self.sources = self.sources[:1]
+        for at, reply, cursor in [(100, {'state':'ok','acceptance_cursor':'b'*32}, ''),
+                                  (105, {'state':'unavailable'}, 'b'*32),
+                                  (165, {'state':'ok'}, 'b'*32),
+                                  (225, {'state':'ok'}, '')]:
+            with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},reply]) as api, patch.object(autonomy.time, 'time', return_value=at):
+                autonomy.managed_tick(self.home,self.factoryctl)
+                expected = ['tick','--source','1'*32,'--page','1']
+                if cursor:
+                    expected += ['--acceptance-cursor',cursor]
+                self.assertEqual(expected,api.call_args.args[2])
+        journal = json.loads(Path(str(self.home)+'.intake/journal.json').read_text())
+        self.assertEqual('',journal['sources']['1'*32]['acceptance_cursor'])
+
     def test_overflow_and_factory_replacement_fail_closed(self):
         with patch.object(autonomy,'managed_api',return_value={'state':'ok','sources':self.sources*101}):
             result = autonomy.managed_tick(self.home,self.factoryctl)

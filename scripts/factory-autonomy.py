@@ -235,7 +235,7 @@ def managed_tick(home, factoryctl):
                 if not isinstance(record, dict) or type(record.get('next_due')) is not int:
                     raise ValueError('managed intake journal schedule is invalid')
                 if record.get('revision') != revision:
-                    record.update(next_page=1, next_due=0, revision=revision)
+                    record.update(next_page=1, acceptance_cursor="", next_due=0, revision=revision)
                 if record['next_due'] > now:
                     if record.get('error'):
                         error = record['error']
@@ -243,16 +243,25 @@ def managed_tick(home, factoryctl):
                 page = record['next_page']
                 if type(page) is not int or not 1 <= page <= 1000:
                     raise ValueError('managed intake journal cursor is invalid')
+                cursor = record.get('acceptance_cursor', '')
+                if not isinstance(cursor, str) or (cursor and (len(cursor) != 32 or any(c not in '0123456789abcdef' for c in cursor))):
+                    raise ValueError('managed intake acceptance cursor is invalid')
                 record.update(last_attempt_at=now, imported_tasks=0)
-                reply = managed_api(factoryctl, home, ['tick', '--source', identifier, '--page', str(page)])
+                arguments = ['tick', '--source', identifier, '--page', str(page)]
+                if cursor:
+                    arguments += ['--acceptance-cursor', cursor]
+                reply = managed_api(factoryctl, home, arguments)
                 status = reply.get('state', 'unavailable')
                 if status not in ('ok', 'paused', 'denied', 'unavailable', 'invalid', 'stale', 'conflict'):
                     status = 'unavailable'
                 next_page, tasks = reply.get('next_page'), reply.get('imported_tasks', [])
+                next_cursor = reply.get('acceptance_cursor', '')
+                if not isinstance(next_cursor, str) or (next_cursor and (len(next_cursor) != 32 or any(c not in '0123456789abcdef' for c in next_cursor))):
+                    status = 'invalid'
                 if status in ('ok', 'paused') and ((next_page is not None and (type(next_page) is not int or not page < next_page <= 1000)) or not isinstance(tasks, list) or len(tasks) > 200 or any(not isinstance(task, str) or len(task) != 32 or any(c not in '0123456789abcdef' for c in task) for task in tasks)):
                     status = 'invalid'
                 if status in ('ok', 'paused'):
-                    record.update(next_page=next_page or 1, next_due=now + (5 if next_page else interval), last_success_at=now, error='', state=status, imported_tasks=len(tasks))
+                    record.update(next_page=next_page or 1, acceptance_cursor=next_cursor, next_due=now + (5 if next_page or next_cursor else interval), last_success_at=now, error='', state=status, imported_tasks=len(tasks))
                     imported += len(tasks)
                     did_sync = True
                 else:
