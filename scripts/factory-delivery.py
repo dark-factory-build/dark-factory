@@ -34,6 +34,12 @@ def deliver(intake_config, release_config, receipt):
     for source in sources:
         if not isinstance(source, dict) or type(source.get('pr')) is not int or source['pr'] < 1 or type(source.get('issue')) is not int or source['issue'] < 1 or not isinstance(source.get('merge_sha'), str) or re.fullmatch('[0-9a-f]{40}', source['merge_sha']) is None or source.get('reference') not in {'refs', 'closes'}:
             raise ValueError('deployment receipt has an invalid source mapping')
+        source_repository = source.get('repository', config['repository'])
+        if not isinstance(source_repository, str) or re.fullmatch(r'[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}', source_repository) is None:
+            raise ValueError('deployment receipt has an invalid source repository')
+        if source_repository.casefold() != config['repository'].casefold():
+            # Shared backlogs are not closed by one destination deployment.
+            continue
         task_id = intake.sha_id('delivery', config['project_id'], config['repository'], str(source['pr']), str(source['issue']), receipt['sha'])
         operation = {'task_id': task_id, 'incarnation_id': intake.sha_id('incarnation', task_id), 'priority': config.get('priority_default', 0),
                      'title': 'Verify delivery completion for PR #' + str(source['pr']) + ' and issue #' + str(source['issue']),

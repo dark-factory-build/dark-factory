@@ -101,6 +101,7 @@ ${version_stanza}  sha256 "$manifest_sha"
   license "MIT"
 
   depends_on :macos
+  depends_on "python"
 
   resource "binaries" do
     on_arm do
@@ -116,21 +117,24 @@ ${version_stanza}  sha256 "$manifest_sha"
   def install
     resource("binaries").stage do
       bin.install "factoryd", "factory-runner", "factoryctl"
+      libexec.install "libexec/dark-factory"
     end
   end
 
   def caveats
     <<~EOS
-      Homebrew installs the three Dark Factory commands; it does not own the
-      running factory. Run \`factoryctl init --home ABSOLUTE\` to create a fresh
-      home. This formula does not install or remove a launchd job; do not use
+      Homebrew installs the three Dark Factory commands and optional host
+      controller assets under libexec/dark-factory; it does not own the running
+      factory. Run \`factoryctl init --home ABSOLUTE\` to create a fresh home.
+      This formula does not install or remove a launchd job; do not use
       \`brew services\` for Dark Factory.
 
       \`brew upgrade\` replaces these commands but never mutates a running home.
       There is no in-runtime updater or rollback-version store.
 
-      \`brew uninstall dark-factory\` removes only the commands. Stop any daemon
-      started outside Homebrew before removing a retained factory home.
+      \`brew uninstall dark-factory\` removes commands and optional controller
+      assets. Stop or unload any daemon or controller job first; retained factory
+      data is untouched.
     EOS
   end
 
