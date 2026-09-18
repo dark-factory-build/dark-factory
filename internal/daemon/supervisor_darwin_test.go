@@ -139,6 +139,17 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
+	var condition kernel.ContinuationConditionID
+	copy(condition[:], supervisorIDBytes(240))
+	revision, _ := kernel.NewRevision(1)
+	task := bytes.Repeat([]byte{'x'}, runner.MaxCodexTaskBytes)
+	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}})
+	if err != nil || len(framed) <= len(task) || !bytes.Equal(framed[:len(task)], task) || !bytes.Contains(framed, []byte("resolution=continue")) {
+		t.Fatalf("maximum Codex continuation framing: bytes=%d err=%v", len(framed), err)
+	}
+}
+
 // codexFixtureSessionID stands in for the id the real Codex CLI would assign
 // itself at creation. provider.canonicalUUID requires an exact 36-character
 // lowercase 8-4-4-4-12 hex UUID, so this is one, with this exact fixture

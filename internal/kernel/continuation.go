@@ -494,7 +494,7 @@ func (store *Store) ResolveHumanContinuationForAttempt(ctx context.Context, dige
 	if continuation.State != ContinuationWaiting && continuation.State != ContinuationQueued {
 		return false, tx.Rollback(ErrRevisionConflict)
 	}
-	if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, reply, at); err != nil {
+	if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, HumanRequestDeliveryID{}, reply, at); err != nil {
 		return false, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -554,7 +554,7 @@ func (store *Store) ResolveHumanContinuationForBrowser(ctx context.Context, clie
 	if continuation.State != ContinuationWaiting && continuation.State != ContinuationQueued {
 		return false, tx.Rollback(ErrRevisionConflict)
 	}
-	if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, reply, at); err != nil {
+	if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, HumanRequestDeliveryID{}, reply, at); err != nil {
 		return false, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -563,8 +563,67 @@ func (store *Store) ResolveHumanContinuationForBrowser(ctx context.Context, clie
 	return true, nil
 }
 
-func resolveHumanContinuationOnConnection(ctx context.Context, tx *writeTx, request HumanRequest, continuation Continuation, reply string, at UnixMillis) error {
-	updated, err := tx.connection.ExecContext(ctx, `UPDATE human_requests SET status='resolved', delivery_id=?, delivery_started_at_ms=?, resolution_kind='reply', closed_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND status='open' AND revision=?`, continuation.ID.Bytes(), at.Int64(), at.Int64(), at.Int64(), request.ID.Bytes(), request.Revision.Int64())
+// ResolveHumanContinuationForOperator consumes an operator-authorized reply
+// without reviving or delivering to the yielded attempt.
+func (store *Store) ResolveHumanContinuationForOperator(ctx context.Context, requestID HumanRequestID, expected Revision, deliveryID HumanRequestDeliveryID, reply string, at UnixMillis) (bool, error) {
+	if requestID.zero() || deliveryID.zero() || expected.Int64() < 1 || byteLen(reply) < 1 || byteLen(reply) > MaxHumanRequestReplyBytes {
+		return false, fmt.Errorf("%w: invalid operator human continuation reply", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Close()
+	request, found, err := humanRequestByID(ctx, tx.connection, requestID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return false, tx.Rollback(err)
+	}
+	if request.Revision != expected || request.Status != HumanRequestOpen {
+		return false, tx.Rollback(ErrRevisionConflict)
+	}
+	target, found, err := runByID(ctx, tx.connection, request.RunID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return false, tx.Rollback(err)
+	}
+	if target.Phase != RunTerminal {
+		return false, tx.Rollback(ErrConflict)
+	}
+	var conditionID ContinuationConditionID
+	copy(conditionID[:], request.ID.Bytes())
+	continuation, found, err := continuationByCondition(ctx, tx.connection, target.TaskID, target.TaskIncarnationID, target.AdmittedTaskWorkRevision, ConditionHumanRequest, conditionID)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return false, tx.Rollback(err)
+	}
+	if continuation.State != ContinuationWaiting && continuation.State != ContinuationQueued {
+		return false, tx.Rollback(ErrRevisionConflict)
+	}
+	if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, deliveryID, reply, at); err != nil {
+		return false, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func resolveHumanContinuationOnConnection(ctx context.Context, tx *writeTx, request HumanRequest, continuation Continuation, deliveryID HumanRequestDeliveryID, reply string, at UnixMillis) error {
+	if deliveryID.zero() {
+		var err error
+		deliveryID, err = HumanRequestDeliveryIDFromBytes(continuation.ID.Bytes())
+		if err != nil {
+			return err
+		}
+	}
+	updated, err := tx.connection.ExecContext(ctx, `UPDATE human_requests SET status='resolved', delivery_id=?, delivery_started_at_ms=?, resolution_kind='reply', closed_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND status='open' AND revision=?`, deliveryID.Bytes(), at.Int64(), at.Int64(), at.Int64(), request.ID.Bytes(), request.Revision.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return err
 	}

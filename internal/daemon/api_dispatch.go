@@ -440,6 +440,16 @@ func (daemon *Daemon) humanReplyOperator(ctx context.Context, call api.Call) api
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
+	if handled, continuationErr := daemon.store.ResolveHumanContinuationForOperator(ctx, requestID, expected, deliveryID, input.Reply, at); continuationErr == nil && handled {
+		daemon.notifyScheduler()
+		projection, _, readErr := daemon.store.HumanRequest(ctx, requestID)
+		if readErr != nil {
+			return newErrorReply(remoteErrorCode(readErr))
+		}
+		return daemon.overseerHumanReplyMutation(projection)
+	} else if continuationErr != nil && !errors.Is(continuationErr, kernel.ErrNotFound) && !errors.Is(continuationErr, kernel.ErrConflict) {
+		return newErrorReply(remoteErrorCode(continuationErr))
+	}
 	delivery, err := daemon.store.BeginHumanReplyForOperator(ctx, requestID, expected, deliveryID, input.Reply, at)
 	if err != nil {
 		if terminalStoreOutcomeUnknown(err) {
@@ -476,7 +486,11 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	assignment := api.AttemptTask{Task: authority.Task()}
+	task, err := providerTaskWithContinuationContext(authority.Provider, []byte(authority.Task()), authority.ContinuationContexts)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	assignment := api.AttemptTask{Task: string(task)}
 	if authority.Role == kernel.RoleWorker {
 		if authority.ChangeID == nil || authority.AdmittedChangeRevision == nil || authority.CurrentChangeRevision == nil || len(authority.BaseCommit) == 0 {
 			return newErrorReply(api.RemoteInternal)

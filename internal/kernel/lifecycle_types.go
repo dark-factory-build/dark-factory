@@ -1010,6 +1010,7 @@ type AttemptAuthority struct {
 	AdmittedChangeRevision   *Revision
 	CurrentChangeRevision    *Revision
 	BaseCommit               []byte
+	ContinuationContexts     []ContinuationContext
 	task                     string
 }
 
