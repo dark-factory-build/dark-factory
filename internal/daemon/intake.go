@@ -27,8 +27,8 @@ func intakeFailure(err error) api.IntakeResult {
 	return api.IntakeResult{State: state}
 }
 func intakeSourceView(source kernel.IntakeSource) api.IntakeSource {
-	return api.IntakeSource{ID: source.ID.String(), ProjectID: source.ProjectID.String(), GitHubRepositoryID: source.GitHubRepositoryID, Enabled: source.Enabled, Revision: uint64(source.Revision.Int64()), IntakeConfiguration: api.IntakeConfiguration{
-		Repository: source.GitHubRepositoryName, TargetRepositoryID: source.TargetRepositoryID.String(), OverseerAgentID: source.OverseerAgentID.String(), Label: source.LabelFilter, Policy: string(source.Policy), TrustedAuthors: source.TrustedGitHubLogins, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}}
+	return api.IntakeSource{ID: source.ID.String(), ProjectID: source.ProjectID.String(), GitHubRepositoryID: source.GitHubRepositoryID, Enabled: source.Enabled, Revision: uint64(source.Revision.Int64()),
+		Repository: source.GitHubRepositoryName, TargetRepositoryID: source.TargetRepositoryID.String(), OverseerAgentID: source.OverseerAgentID.String(), Label: source.LabelFilter, Policy: string(source.Policy), TrustedAuthors: source.TrustedGitHubLogins, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}
 }
 
 // Intake is the one authenticated operator path. Remote content and identity

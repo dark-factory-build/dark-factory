@@ -41,12 +41,20 @@ type IntakeSync struct {
 }
 type IntakeSource struct {
 	Sync *IntakeSync `json:"sync,omitempty"`
-	IntakeConfiguration
-	ID                 string `json:"id"`
-	ProjectID          string `json:"project_id"`
-	GitHubRepositoryID uint64 `json:"github_repository_id"`
-	Enabled            bool   `json:"enabled"`
-	Revision           uint64 `json:"revision"`
+
+	Repository         string   `json:"repository"`
+	TargetRepositoryID string   `json:"target_repository_id"`
+	OverseerAgentID    string   `json:"overseer_agent_id"`
+	Label              string   `json:"label"`
+	Policy             string   `json:"policy"`
+	TrustedAuthors     []string `json:"trusted_authors"`
+	PollSeconds        uint32   `json:"poll_seconds"`
+	AdmissionLimit     uint16   `json:"admission_limit"`
+	ID                 string   `json:"id"`
+	ProjectID          string   `json:"project_id"`
+	GitHubRepositoryID uint64   `json:"github_repository_id"`
+	Enabled            bool     `json:"enabled"`
+	Revision           uint64   `json:"revision"`
 }
 type IntakeCandidate struct {
 	Number       uint64   `json:"number"`

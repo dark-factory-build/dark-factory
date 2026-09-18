@@ -4,6 +4,8 @@ package api
 
 import (
 	"encoding/json"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -44,5 +46,36 @@ func TestIntakeOperatorBoundaryAndExactActionFields(t *testing.T) {
 		if ValidIntakeInput(input) {
 			t.Fatalf("invalid action accepted: %+v", input)
 		}
+	}
+}
+
+// Exercise the real framed operator server and exact client decoder. JSON
+// marshaling alone misses anonymous-field flattening at this boundary.
+func TestIntakeSourceCrossesPrivateOperatorSocket(t *testing.T) {
+	listener, socket := newAPITestListener(t, testCredential('I'))
+	defer closeAPITestListener(t, listener)
+	expected := IntakeResult{State: "ok", Sources: []IntakeSource{{
+		ID: strings.Repeat("ab", 16), ProjectID: strings.Repeat("bc", 16),
+		GitHubRepositoryID: 17, Repository: "fixture/repository", TargetRepositoryID: strings.Repeat("cd", 16),
+		OverseerAgentID: strings.Repeat("de", 16), Label: "ready", Policy: "manual", TrustedAuthors: []string{},
+		PollSeconds: 30, AdmissionLimit: 1, Enabled: true, Revision: 2,
+	}}}
+	done := startServerReceive(t, listener, func(call Call) Reply {
+		input, ok := call.IntakeInput()
+		if !ok || input.Action != "list" {
+			return NewContentReply(IntakeResult{State: "invalid"})
+		}
+		return NewContentReply(expected)
+	})
+	client, err := NewOperatorClient(socket, filepath.Join(filepath.Dir(filepath.Dir(socket)), "operator.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.Intake(t.Context(), IntakeInput{Action: "list"})
+	if err != nil || !reflect.DeepEqual(result, expected) {
+		t.Fatalf("intake socket result = %+v, %v", result, err)
+	}
+	if served := <-done; served.err != nil {
+		t.Fatal(served.err)
 	}
 }
