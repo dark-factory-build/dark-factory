@@ -382,6 +382,13 @@ func latestIntakeAcceptance(ctx context.Context, connection *sql.Conn, repositor
 // the newer receipt was withdrawn: importing an old review after later review
 // activity would evade the controller's exact-content check.
 func (store *Store) PendingIntakeAcceptances(ctx context.Context, sourceID IntakeSourceID, limit uint16) ([]IntakeAcceptance, error) {
+	return store.PendingIntakeAcceptancesAfter(ctx, sourceID, limit, IntakeAcceptanceID{})
+}
+
+// PendingIntakeAcceptancesAfter scans a bounded receipt-ID page. A zero cursor
+// starts a new sweep; callers retain the last inspected receipt and wrap after
+// exhaustion so stale content cannot starve later reviewed work.
+func (store *Store) PendingIntakeAcceptancesAfter(ctx context.Context, sourceID IntakeSourceID, limit uint16, after IntakeAcceptanceID) ([]IntakeAcceptance, error) {
 	if sourceID.zero() || limit < 1 || limit > 200 {
 		return nil, ErrInvalidValue
 	}
@@ -404,7 +411,7 @@ func (store *Store) PendingIntakeAcceptances(ctx context.Context, sourceID Intak
 	rows, err := read.connection.QueryContext(ctx, `SELECT `+columns+` FROM intake_acceptances accepted
 		LEFT JOIN tasks task ON task.id = accepted.task_id
 		WHERE accepted.github_repository_id = ? AND accepted.project_id = ? AND accepted.repository_id = ?
-			AND accepted.withdrawn_at_ms IS NULL AND task.id IS NULL
+			AND accepted.withdrawn_at_ms IS NULL AND task.id IS NULL AND accepted.id > ?
 			AND NOT EXISTS (
 				SELECT 1 FROM intake_acceptances newer
 				WHERE newer.github_repository_id = accepted.github_repository_id
@@ -414,7 +421,7 @@ func (store *Store) PendingIntakeAcceptances(ctx context.Context, sourceID Intak
 					AND newer.repository_id = accepted.repository_id
 					AND (newer.created_at_ms > accepted.created_at_ms OR newer.created_at_ms = accepted.created_at_ms AND newer.id > accepted.id)
 			)
-		ORDER BY accepted.created_at_ms, accepted.id LIMIT ?`, int64(source.GitHubRepositoryID), source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), int64(limit))
+		ORDER BY accepted.id LIMIT ?`, int64(source.GitHubRepositoryID), source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), after.Bytes(), int64(limit))
 	if err != nil {
 		return nil, err
 	}

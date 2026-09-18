@@ -345,6 +345,14 @@ func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *
 	if err != nil || len(pending) != 1 || pending[0].ID != newer.ID {
 		t.Fatalf("pending newest receipt = %+v, %v", pending, err)
 	}
+	after, err := store.PendingIntakeAcceptancesAfter(ctx, source.ID, 1, newer.ID)
+	if err != nil || len(after) != 0 {
+		t.Fatalf("cursor repeated inspected receipt: %+v, %v", after, err)
+	}
+	wrapped, err := store.PendingIntakeAcceptancesAfter(ctx, source.ID, 1, IntakeAcceptanceID{})
+	if err != nil || len(wrapped) != 1 || wrapped[0].ID != newer.ID {
+		t.Fatalf("new sweep lost pending receipt: %+v, %v", wrapped, err)
+	}
 	if _, err := store.ImportIntakeAcceptance(ctx, first.ID, mustTime(t, 6), source); !errors.Is(err, ErrConflict) {
 		t.Fatalf("superseded pending receipt imported: %v", err)
 	}
