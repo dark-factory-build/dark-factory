@@ -145,14 +145,14 @@ test("blocked floor-appearance storage leaves the console renderable", () => {
 test("one screen keeps Factory and the operator panels together", () => {
   const markup = render();
   assert.match(markup, /<main class="dfFactoryConsole" aria-label="Factory operator console">/);
-  for (const label of ["Factory floor", "Selected detail", "NEEDS YOU", "Left view", "Right panel"]) {
+  for (const label of ["Factory floor", "Selected detail", "Needs you", "Left view", "Right panel"]) {
     assert.match(markup, new RegExp(`aria-label="${label}"`));
   }
   assert.doesNotMatch(markup, /ACTIVE RUNS|OPERATOR VIEW/);
   assert.equal(markup.includes("<dt>QUEUED</dt>"), false);
   assert.equal(markup.includes("<dt>NEEDS YOU</dt>"), false);
   assert.match(markup, /Needs you <span>1<\/span>/);
-  assert.match(markup, />Tasks<\/button>/);
+  assert.match(markup, />Queue<\/button>/);
   assert.match(markup, /Builder One asks/);
   assert.match(markup, /Review the state projection/);
   assert.match(markup, /North Workshop · Review the state projection/);
@@ -618,8 +618,8 @@ test("unknown and inherited error codes use a finite fallback", () => {
 
 test("Needs You and Queue keep every served item reachable", () => {
   const emptyState = baseState({ projects: new Map(), agents: new Map(), tasks: new Map(), humanRequests: new Map() });
-  assert.match(render({ state: emptyState }), /all quiet — nothing needs you/);
-  assert.match(render({ state: emptyState, detail: "queue" }), /NO QUEUED TASKS/);
+  assert.match(render({ state: emptyState }), /Nothing needs your attention/);
+  assert.match(render({ state: emptyState, detail: "queue" }), /No queued tasks/);
   assert.match(render({ state: emptyState, view: "agents" }), /no agents/);
 
   const agents = new Map();
@@ -640,7 +640,7 @@ test("Needs You and Queue keep every served item reachable", () => {
   const queue = render({ state: bounded, detail: "queue" });
   assert.equal((queue.match(/<li class="dfConsoleItem"/g) ?? []).length, 9);
   assert.equal((markup.match(/\+1 more/g) ?? []).length, 0);
-  assert.match(markup, />9 ITEMS</);
+  assert.match(markup, />9 items</);
   assert.match(queue, /Task 8/);
   assert.equal((render({ state: bounded, view: "agents" }).match(/dfAgentList__row/g) ?? []).length, 0, "no handler, no button");
   assert.equal((render({ state: bounded, view: "agents", onSelectAgent: () => {} }).match(/dfAgentList__row/g) ?? []).length, 9);
@@ -678,10 +678,10 @@ test("the production console exposes no speculative or unsupported surface", () 
 
 test("an unavailable snapshot is explicit and does not invent runtime state", () => {
   const markup = render({ state: undefined, status: "syncing" });
-  assert.match(markup, /WAITING FOR SNAPSHOT/);
-  assert.match(markup, /WAITING FOR SNAPSHOT/);
+  assert.match(markup, /Waiting for the latest state…/);
+  assert.match(markup, /Waiting for the latest state…/);
   assert.match(markup, /Connection status: SYNCING/);
-  assert.match(markup, />Tasks<\/button>/);
+  assert.match(markup, />Queue<\/button>/);
   assert.equal(markup.includes("NO QUEUED TASKS"), false);
   assert.equal(markup.includes("all quiet"), false);
   assert.match(render({ state: undefined, status: "syncing", view: "agents" }), /waiting for the factory/);
@@ -768,9 +768,9 @@ test("opening a selected question restores that agent's terminal panel", async (
   try {
     let renderer;
     await act(async () => { renderer = create(createElement(ConsoleHarness)); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "CONFIG").props.onClick(); });
+    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Settings" && typeof button.props.onClick === "function").props.onClick(); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ").props.onClick(); });
-    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "OPEN TERMINAL").props.onClick(); });
+    await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
     const terminal = renderer.root.findByProps({ "aria-label": "Terminal" });
     const config = renderer.root.findByProps({ "aria-label": "Agent configuration" });
     assert.equal(terminal.props.hidden, false);
@@ -792,8 +792,8 @@ test("selecting an agent exposes terminal and configuration controls", () => {
   assert.match(markup, /aria-label="Agent Builder One"/);
   assert.match(markup, /Builder One[\s\S]*?claude_code · claude-opus-5/);
   assert.match(markup, /aria-label="Agent controls"/);
-  assert.match(markup, />TERMINAL</);
-  assert.match(markup, />CONFIG</);
+  assert.match(markup, />Terminal</);
+  assert.match(markup, />Settings</);
   assert.match(markup, /aria-label="Agent configuration"/);
   assert.match(markup, /value="claude-opus-5"/);
   assert.match(markup, /value="high"/);
@@ -804,7 +804,7 @@ test("selecting an agent exposes terminal and configuration controls", () => {
   // Without handlers the sidebar is a readout, never a dead form.
   const readOnly = render({ selectedAgent: agentSelection() });
   assert.equal(readOnly.includes("<input"), false);
-  assert.equal(readOnly.includes("OPEN TERMINAL"), false);
+  assert.equal(readOnly.includes("Open terminal"), false);
 });
 
 test("a paused agent with queued work says the queue is paused", () => {
@@ -917,7 +917,7 @@ test("the queued task row keeps served order and changes its exact priority", as
     await act(async () => { renderer.root.findAllByType("input").find((input) => input.props.id === `df-title-${queued.id}`).props.onChange({ currentTarget: { value: "Keep this draft" } }); });
     await act(async () => { renderer.root.findAllByType("textarea").find((input) => input.props.id === `df-instruction-${queued.id}`).props.onChange({ currentTarget: { value: "Keep this instruction" } }); });
     assert.equal(titleValue(), "Keep this draft");
-    await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "OLDER CONVERSATION").props.onClick(); });
+    await act(async () => { await renderer.root.findAllByType("button").find((button) => button.props.children === "Older conversation").props.onClick(); });
     assert.equal(titleValue(), "Keep this draft");
     assert.equal(instructionValue(), "Keep this instruction");
     assert.ok(renderer.root.findAllByProps({ role: "alert" }).some((item) => String(item.props.children).includes("SAVE OR DISCARD YOUR DRAFT")));
@@ -1092,11 +1092,11 @@ test("a rejected edit says plainly that the durable value did not change", () =>
     onSaveAgentConfig: () => {},
     edit: { target: ids.agent, pending: false, error: new SessionError("stale") },
   });
-  assert.match(markup, /SOMEONE ELSE CHANGED THIS — REOPEN IT AND TRY AGAIN/);
+  assert.match(markup, /Someone else changed this\. Reopen it and try again\./);
   assert.match(markup, /role="alert"/);
   assert.equal((markup.match(/role="alert"/g) ?? []).length, 1, "a config refusal has one shared alert");
   const unknown = render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { target: ids.agent, pending: false, error: { code: "internal" } } });
-  assert.match(unknown, /THE EDIT DID NOT COMPLETE/);
+  assert.match(unknown, /The edit did not complete\./);
   assert.match(render({ selectedAgent: agentSelection(), onSaveAgentConfig: () => {}, edit: { pending: true } }), />SAVING</);
 });
 
@@ -1110,7 +1110,7 @@ test("a queued edit refusal remains visible after its task leaves the queue", ()
   ];
   for (const state of states) {
     const markup = render({ state, detail: "needs-you", edit: rejected });
-    assert.match(markup, /SOMEONE ELSE CHANGED THIS — REOPEN IT AND TRY AGAIN/);
+    assert.match(markup, /Someone else changed this\. Reopen it and try again\./);
     assert.equal((markup.match(/role="alert"/g) ?? []).length, 1);
   }
 });
@@ -1142,7 +1142,7 @@ test("the settings modal keeps actionable settings compact", () => {
 
 test("settings edits project limits as future runs with an explicit unlimited choice", () => {
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, onSaveProjectLimits: () => {} });
-  assert.match(markup, /aria-label="PROJECT LIMITS"/);
+  assert.match(markup, /aria-label="Project limits"/);
   assert.match(markup, /value="7"/);
   assert.match(markup, /REMAINING RUN ALLOWANCE/);
   assert.match(markup, /UNLIMITED RUNS/);
@@ -1259,7 +1259,7 @@ test("a refused appearance edit keeps the editor and its draft", async () => {
     await act(async () => { dialog.findAllByType("select")[0].props.onChange({ target: { value: "3" } }); });
     await act(async () => { await dialog.findByType("form").props.onSubmit({ preventDefault() {} }); });
     assert.equal(closes, 0);
-    assert.equal(dialog.findByProps({ role: "alert" }).children.join(""), "SOMEONE ELSE CHANGED THIS — REOPEN IT AND TRY AGAIN");
+    assert.equal(dialog.findByProps({ role: "alert" }).children.join(""), "Someone else changed this. Reopen it and try again.");
     assert.equal(dialog.findAllByType("select")[0].props.value, 3);
     await act(async () => { renderer.unmount(); });
   } finally { globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct; }
@@ -1280,7 +1280,7 @@ test("FactoryApp server-renders without reading browser globals", () => {
   const markup = renderToStaticMarkup(createElement(FactoryApp));
   assert.match(markup, /Factory operator console/);
   assert.match(markup, />IDLE</);
-  assert.match(markup, /WAITING FOR SNAPSHOT/);
+  assert.match(markup, /Waiting for the latest state…/);
 });
 
 test("selected hostile private detail is escaped and actions remain semantic", () => {
@@ -1352,7 +1352,7 @@ test("agent and question terminal actions expose only current public intent", as
   })); });
   const row = renderer.root.findAllByType("button").find((element) => typeof element.props.className === "string" && element.props.className.includes("dfAgentList__row"));
   await act(async () => { row.props.onClick(); });
-  await act(async () => { renderer.root.findAllByType("button").filter((element) => element.props.children === "OPEN TERMINAL").at(-1).props.onClick(); });
+  await act(async () => { renderer.root.findAllByType("button").filter((element) => element.props.children === "Open terminal").at(-1).props.onClick(); });
   assert.equal(calls[0][0], "agent");
   assert.equal(calls[0][1].id, agent.id);
   assert.equal(calls[0][1].revision, agent.revision);
@@ -1792,7 +1792,7 @@ test("floor objects select the exact existing task detail and question route", a
   assert.equal(loaded[0], task);
   assert.deepEqual(queueSelections, [task.id]);
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title);
-  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "BACK").props.onClick(); });
+  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Back").props.onClick(); });
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title, "navigation retains the existing detail selection");
   await act(async () => { tree.root.findByProps({ "data-enter-room-id": kernelID }).props.onClick(); });
   await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Back to tasks").props.onClick(); });

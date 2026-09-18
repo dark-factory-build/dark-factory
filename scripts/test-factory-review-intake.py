@@ -456,6 +456,10 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual(1, enqueue.call_count)
         self.assertIn('NOT_QUEUED', enqueue.call_args.args[1]['body'])
         self.assertIn('44444444-4444-4444-8444-444444444444', enqueue.call_args.args[1]['body'])
+        self.assertIn(self.operation['source_marker'], enqueue.call_args.args[1]['body'])
+        self.assertIn('ordinary source correction', enqueue.call_args.args[1]['body'])
+        self.assertNotIn('human request', enqueue.call_args.args[1]['body'])
+        self.assertNotIn('alter source/PR state', enqueue.call_args.args[1]['body'])
 
     def test_merge_observation_reuses_reviewed_digest_after_body_edit(self):
         operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',

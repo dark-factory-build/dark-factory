@@ -8,14 +8,14 @@ import {
   parseInvitation,
   type HumanRequestItem,
   type PushSubscribeBody,
-  type RemoteFactoryView,
   type RemoteInvitation,
   type RemoteManager,
   type RemoteManagerOptions,
   type RemoteStore,
   type StateView,
+  type TaskItem,
 } from "@dark-factory/client";
-import { AgentStrip, QueueScreen, StageMeter } from "../console-screens.js";
+import { AgentStrip, StageMeter } from "../console-screens.js";
 import { AnswerControls } from "../console-interactions.js";
 import { HumanRequestFlow, type HumanRequestFlowSelection } from "../human-request-flow.js";
 import {
@@ -27,7 +27,6 @@ import {
   remoteActionable,
   remoteDeliveryNotice,
   remoteFactoryBanner,
-  remoteOpenRequests,
   remotePairFailure,
   remoteProjectGroups,
   shortRemoteID,
@@ -43,7 +42,25 @@ export type RemoteAppProps = {
   navigator?: Pick<Navigator, "onLine">;
   /** Turns this device's push subscription on; the browser implementation when the host supplies none. */
   subscribePush?: () => Promise<PushSubscribeBody>;
+  /** Which iOS browser this is when the page is not yet on the Home Screen; read from the browser when the host supplies none. */
+  install?: InstallHint;
 };
+
+type InstallHint = "safari" | "other" | undefined;
+
+/**
+ * Only iOS needs telling: it has no install prompt, its Home Screen app keeps
+ * storage apart from every browser tab, and alerts work nowhere else.
+ */
+function browserInstallHint(): InstallHint {
+  const scope = globalThis as { matchMedia?: (query: string) => { matches: boolean }; navigator?: { userAgent?: string; standalone?: boolean; platform?: string; maxTouchPoints?: number } };
+  const agent = scope.navigator?.userAgent ?? "";
+  // An iPad calls itself a Mac; only a Mac with a touch screen is one.
+  const ios = /iPhone|iPad|iPod/.test(agent) || (scope.navigator?.platform === "MacIntel" && (scope.navigator.maxTouchPoints ?? 0) > 1);
+  if (scope.matchMedia === undefined || !ios) return undefined;
+  if (scope.navigator?.standalone === true || scope.matchMedia("(display-mode: standalone)").matches) return undefined;
+  return /CriOS|FxiOS|EdgiOS/.test(agent) ? "other" : "safari";
+}
 
 const ALERTS_NEED_INSTALL = "On iPhone, add this page to the Home Screen first: Share, then Add to Home Screen, and open Dark Factory from there.";
 const ALERTS_REFUSED = "ALERTS WERE REFUSED BY THIS BROWSER. ALLOW NOTIFICATIONS FOR THIS SITE TO TURN THEM ON.";
@@ -96,14 +113,22 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   const [pairing, setPairing] = useState<Pairing>(IDLE);
   const [pasting, setPasting] = useState(false);
   const [link, setLink] = useState("");
+  const [name, setName] = useState<string | undefined>(undefined);
   const [detail, setDetailState] = useState<Detail | undefined>(undefined);
   const [confirm, setConfirm] = useState<Confirm | undefined>(undefined);
   const [cancelPhrase, setCancelPhrase] = useState<string | undefined>(undefined);
   const [alerts, setAlerts] = useState<{ phase: "idle" | "working" | "failed"; copy?: string }>({ phase: "idle" });
-  const [online, setOnline] = useState(() => (props.navigator ?? globalThis.navigator)?.onLine !== false);
+  // Like the install hint, the browser's own answer is read after mount.
+  const [online, setOnline] = useState(props.navigator?.onLine !== false);
   const manager = useRef<RemoteManager | undefined>(undefined);
   // Read and cleared once per mount, not once per effect run.
-  const arrival = useRef<{ attempted: boolean; invitation: RemoteInvitation | null } | undefined>(undefined);
+  const arrival = useRef<{ attempted: boolean; link: string; invitation: RemoteInvitation | null } | undefined>(undefined);
+  // Read after mount: a server render knows no browser, and the first client
+  // render must match it.
+  const [install, setInstall] = useState<InstallHint>(props.install);
+  // An invitation that arrives in an iOS tab is held, not spent: pairing the
+  // tab would leave the Home Screen app, which shares none of its storage, unpaired.
+  const [held, setHeld] = useState<{ link: string; invitation: RemoteInvitation; copied: boolean } | undefined>(undefined);
   const bump = () => { if (manager.current !== undefined) setVersion((value) => value + 1); };
   const onlineRef = useRef(online);
   onlineRef.current = online;
@@ -162,15 +187,18 @@ export function RemoteApp(props: RemoteAppProps = {}) {
     // survive in the address bar for a reload to replay. StrictMode runs this
     // effect twice, so the fragment is spent by the mount, not by a run that is
     // about to be thrown away.
-    if (arrival.current === undefined) arrival.current = { attempted: invitationArrived(where.hash), invitation: consumeInvitation(where, past) };
-    const { attempted, invitation } = arrival.current;
+    if (arrival.current === undefined) arrival.current = { attempted: invitationArrived(where.hash), link: `${where.origin}${where.pathname}${where.hash}`, invitation: consumeInvitation(where, past) };
+    const { attempted, link: arrived, invitation } = arrival.current;
+    const hint = "install" in props ? props.install : browserInstallHint();
+    setInstall(hint);
     void (async () => {
       try { await built.start(); } catch { /* an unreadable store is an empty device, not a crash */ }
       // Identity, never a shared flag: only the run that still owns the manager
       // may act on it.
       if (manager.current !== built) return;
       bump();
-      if (invitation !== null) await pairWith(built, invitation);
+      if (invitation !== null && hint !== undefined) setHeld({ link: arrived, invitation, copied: false });
+      else if (invitation !== null) await pairWith(built, invitation);
       else if (attempted) setPairing({ phase: "failed", copy: INVITATION_SPENT });
     })();
     return () => {
@@ -217,6 +245,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   };
 
   const select = (nodeId: string) => {
+    setName(undefined);
     try { manager.current?.select(nodeId); } catch { /* a binding can be forgotten between render and tap */ }
     bump();
   };
@@ -236,6 +265,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
 
   const forget = (nodeId: string) => {
     setConfirm(undefined);
+    setName(undefined);
     if (detail?.scope.nodeId === nodeId) human.current?.clear(true);
     void (async () => {
       try { await manager.current?.forget(nodeId); } catch { /* the binding is gone either way */ }
@@ -270,25 +300,54 @@ export function RemoteApp(props: RemoteAppProps = {}) {
     })();
   };
 
-  return (
-    <div className="dfConsoleShell dfRemote">
-      <main className="dfFactoryConsole dfRemote__main" aria-label="Factory remote console">
-        <header className="dfFactoryConsole__header">
-          <div>
-            <p className="dfFactoryConsole__eyebrow">REMOTE</p>
-            <h1>FACTORIES</h1>
-          </div>
-        </header>
-
-        {online ? null : (
-          <p className="dfRemote__banner dfRemote__banner--device" role="status">DEVICE OFFLINE</p>
+  const installCard = install === undefined ? null : (
+    <section className="dfFactoryConsole__section dfRemote__install" aria-label="Install the app">
+      <div className="dfFactoryConsole__sectionHeading"><h2>INSTALL THE APP</h2></div>
+      <p className="dfRemote__prose">
+        {install === "safari"
+          ? "Tap Share in the toolbar, then Add to Home Screen."
+          : "Tap Share at the end of the address bar, then Add to Home Screen."}
+        {" "}Open Dark Factory from the Home Screen: alerts only work there, and the app keeps its own pairing, apart from this tab.
+      </p>
+      {held === undefined ? null : (
+        <p className="dfRemote__prose">
+          Your invitation is waiting and lasts five minutes. Copy it first, install, then paste it under SETUP in the app.
+        </p>
+      )}
+      <div className="dfRemote__actions">
+        {held === undefined ? null : (
+          <button
+            type="button"
+            className="dfRemote__copyInvitation"
+            onClick={() => { void globalThis.navigator.clipboard.writeText(held.link).then(() => setHeld((current) => current === undefined ? current : { ...current, copied: true }), () => { /* a refused clipboard leaves PAIR IN THIS TAB */ }); }}
+          >
+            {held.copied ? "COPIED" : "COPY INVITATION"}
+          </button>
         )}
+        {install === "safari" ? null : <a className="dfRemote__openSafari" href="x-safari-https://app.darkfactory.build/remote">OPEN IN SAFARI</a>}
+        {held === undefined ? null : (
+          <button
+            type="button"
+            className="dfRemote__pairHere"
+            disabled={!online || pairing.phase === "pairing"}
+            onClick={() => {
+              const target = manager.current;
+              setHeld(undefined);
+              if (held.invitation.expires <= Date.now() / 1000) setPairing({ phase: "failed", copy: INVITATION_SPENT });
+              else if (target !== undefined) void pairWith(target, held.invitation);
+            }}
+          >
+            PAIR IN THIS TAB
+          </button>
+        )}
+      </div>
+    </section>
+  );
 
+  const setup = (
+    <div id="dfRemoteSetup" className="dfRemote__setup">
         <section className="dfFactoryConsole__section dfRemote__pair" aria-label="Pair a factory">
-          <div className="dfFactoryConsole__sectionHeading">
-            <h2>PAIR A FACTORY</h2>
-            <span>{factories.length} PAIRED</span>
-          </div>
+          <div className="dfFactoryConsole__sectionHeading"><h2>PAIR A FACTORY</h2></div>
           {pairing.phase === "pairing" ? (
             <p className="dfRemote__pairing" role="status">PAIRING FACTORY…</p>
           ) : null}
@@ -336,7 +395,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           )}
         </section>
 
-        {factories.length === 0 ? (
+{factories.length === 0 ? (
           <section className="dfFactoryConsole__section dfRemote__none" aria-label="No factories">
             <div className="dfFactoryConsole__sectionHeading"><h2>NO FACTORY ON THIS DEVICE</h2></div>
             <p className="dfRemote__prose">
@@ -348,7 +407,9 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               opens it.
             </p>
           </section>
-        ) : (
+        ) : null}
+        {held !== undefined || factories.length === 0 ? null : installCard}
+        {factories.length < 2 ? null : (
           <nav className="dfRemote__switcher" aria-label="Factories on this device">
             <ul className="dfRemote__factories">
               {factories.map((factory) => {
@@ -395,12 +456,76 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           </section>
         )}
 
+        {selected === undefined ? null : (
+          <div className="dfFactoryConsole__section dfRemote__rename">
+            <label htmlFor="dfRemoteName">FACTORY NAME ON THIS DEVICE</label>
+            <input id="dfRemoteName" className="dfRemote__nameText" value={name ?? selected.label} maxLength={32} onChange={(event) => setName(event.currentTarget.value)} />
+            <button
+              type="button"
+              className="dfRemote__renameAction"
+              disabled={name === undefined || name.trim().length === 0}
+              onClick={() => { void manager.current?.rename(selected.nodeId, name ?? "").then(() => setName(undefined), () => { /* the old name stands */ }); }}
+            >
+              RENAME
+            </button>
+          </div>
+        )}
+
+        {selected === undefined ? null : (
+          <ConfirmAction
+            className="dfRemote__forgetFactory"
+            label="FORGET THIS FACTORY"
+            confirmLabel={`FORGET ${selected.label}`}
+            open={confirm?.kind === "factory" && confirm.nodeId === selected.nodeId}
+            disabled={false}
+            onOpen={() => setConfirm({ kind: "factory", nodeId: selected.nodeId })}
+            onKeep={() => setConfirm(undefined)}
+            onConfirm={() => forget(selected.nodeId)}
+          />
+        )}
+        {factories.length === 0 ? null : (
+          <ConfirmAction
+            className="dfRemote__forgetDevice"
+            label="FORGET THIS DEVICE"
+            confirmLabel="FORGET EVERYTHING"
+            open={confirm?.kind === "device"}
+            disabled={false}
+            onOpen={() => setConfirm({ kind: "device" })}
+            onKeep={() => setConfirm(undefined)}
+            onConfirm={forgetDevice}
+          />
+        )}
+    </div>
+  );
+
+  const banner = selected === undefined ? undefined : remoteFactoryBanner(selected.status);
+
+  return (
+    <div className="dfConsoleShell dfRemote">
+      <main id="dfRemoteTop" className="dfFactoryConsole dfRemote__main" aria-label="Factory remote console">
+        <div inert={detail !== undefined}>
+        <nav className="dfRemote__bar" aria-label="Remote console">
+          <a className="dfRemote__barName" href="#dfRemoteTop">
+            <span aria-hidden="true">{selected === undefined ? "·" : REMOTE_STATUS_GLYPH[selected.status]}</span> {selected?.label ?? "DARK FACTORY"}
+          </a>
+          {needsYou.length === 0 ? null : <a className="dfRemote__barAlert" href="#dfRemoteTop">! {needsYou.length} NEEDS YOU</a>}
+          <a href="#dfRemoteWork">WORK</a>
+          <a href="#dfRemoteSetup">SETUP</a>
+        </nav>
+        {online ? null : (
+          <p className="dfRemote__banner dfRemote__banner--device" role="status">DEVICE OFFLINE</p>
+        )}
+        {banner === undefined || selected === undefined ? null : (
+          <p className={`dfRemote__banner dfRemote__banner--${selected.status === "offline" || selected.status === "connecting" ? "offline" : selected.status}`} role="status">
+            {banner}
+          </p>
+        )}
+
+        {held !== undefined || factories.length === 0 ? installCard : null}
+        {factories.length === 0 ? setup : null}
+
         {factories.length === 0 ? null : (
           <section className="dfFactoryConsole__section dfRemote__needsYou" aria-label="NEEDS YOU">
-            <div className="dfFactoryConsole__sectionHeading">
-              <h2>NEEDS YOU</h2>
-              <span>{needsYou.length} {needsYou.length === 1 ? "QUESTION" : "QUESTIONS"}</span>
-            </div>
             {needsYou.length === 0 ? (
               <p className="dfFactoryConsole__empty">all quiet — nothing needs you</p>
             ) : (
@@ -421,7 +546,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                       disabled={!actionable(item.nodeId) || working}
                       onClick={() => open(item.nodeId, item.label, item.request)}
                     >
-                      ANSWER
+                      {item.request.can_reply ? "ANSWER" : "VIEW"}
                     </button>
                   </li>
                 ))}
@@ -430,8 +555,27 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           </section>
         )}
 
+        {selected === undefined ? null : (
+          <>
+            <AgentStrip state={selected.state} />
+            <ProjectsSection state={selected.state} />
+          </>
+        )}
+
+        {factories.length === 0 ? null : setup}
+        </div>
+
         {detail === undefined ? null : (
-          <article className="dfFactoryConsole__section dfRemote__detail" aria-label="Selected question" aria-live="polite">
+          <article className="dfFactoryConsole__section dfRemote__detail" role="dialog" aria-modal="true" aria-label="Selected question" aria-live="polite">
+            <button
+              type="button"
+              className="dfRemote__close"
+              autoFocus
+              disabled={busy(detail)}
+              onClick={() => { setCancelPhrase(undefined); human.current?.clear(true); }}
+            >
+              CLOSE
+            </button>
             <div className="dfFactoryConsole__sectionHeading">
               <h2>{detail.scope.label}</h2>
               <span>{detail.phase === "replying" ? "REPLYING" : detail.phase === "cancelling" ? "CANCELLING" : detail.phase.toUpperCase()}</span>
@@ -486,44 +630,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
                 )}
               </>
             )}
-            <button
-              type="button"
-              className="dfRemote__close"
-              disabled={busy(detail)}
-              onClick={() => { setCancelPhrase(undefined); human.current?.clear(true); }}
-            >
-              CLOSE
-            </button>
           </article>
-        )}
-
-        {selected === undefined ? null : (
-          <FactoryPanel
-            factory={selected}
-            online={online}
-            working={working}
-            selectedRequestId={detail !== undefined && detail.scope.nodeId === selected.nodeId ? detail.request.id : undefined}
-            confirming={confirm?.kind === "factory" && confirm.nodeId === selected.nodeId}
-            onOpenRequest={(request) => open(selected.nodeId, selected.label, request)}
-            onConfirmForget={() => setConfirm({ kind: "factory", nodeId: selected.nodeId })}
-            onKeepFactory={() => setConfirm(undefined)}
-            onForget={() => forget(selected.nodeId)}
-          />
-        )}
-
-        {factories.length === 0 ? null : (
-          <footer className="dfRemote__factoryFooter">
-            <ConfirmAction
-              className="dfRemote__forgetDevice"
-              label="FORGET THIS DEVICE"
-              confirmLabel="FORGET EVERYTHING"
-              open={confirm?.kind === "device"}
-              disabled={false}
-              onOpen={() => setConfirm({ kind: "device" })}
-              onKeep={() => setConfirm(undefined)}
-              onConfirm={forgetDevice}
-            />
-          </footer>
         )}
       </main>
     </div>
@@ -542,144 +649,49 @@ function busy(detail: Detail): boolean {
   return detail.phase === "loading" || detail.phase === "replying" || detail.phase === "cancelling";
 }
 
-/** One factory's whole public picture: projects, agents, queue, questions. */
-function FactoryPanel({
-  factory,
-  online,
-  working,
-  selectedRequestId,
-  confirming,
-  onOpenRequest,
-  onConfirmForget,
-  onKeepFactory,
-  onForget,
-}: {
-  factory: RemoteFactoryView;
-  online: boolean;
-  working: boolean;
-  selectedRequestId: string | undefined;
-  confirming: boolean;
-  onOpenRequest: (request: HumanRequestItem) => void;
-  onConfirmForget: () => void;
-  onKeepFactory: () => void;
-  onForget: () => void;
-}) {
-  const banner = remoteFactoryBanner(factory.status);
-  const ready = remoteActionable(factory.status, online);
-  const open = remoteOpenRequests(factory.state);
-  return (
-    <div className="dfRemote__panel">
-      {banner === undefined ? null : (
-        <p className={`dfRemote__banner dfRemote__banner--${factory.status === "offline" || factory.status === "connecting" ? "offline" : factory.status}`} role="status">
-          {banner}
-        </p>
-      )}
-
-      <AgentStrip state={factory.state} ready={ready} />
-
-      <div className="dfFactoryConsole__columns">
-        <ProjectsSection state={factory.state} />
-        <QueueScreen state={factory.state} />
-      </div>
-
-      <section className="dfFactoryConsole__section dfRemote__factoryQuestions" aria-label="Questions from this factory">
-        <div className="dfFactoryConsole__sectionHeading">
-          <h2>OPEN QUESTIONS</h2>
-          <span>{factory.state === undefined ? "—" : open.length} OPEN</span>
-        </div>
-        {factory.state === undefined ? (
-          <p className="dfFactoryConsole__empty">waiting for the factory</p>
-        ) : open.length === 0 ? (
-          <p className="dfFactoryConsole__empty">nothing open here</p>
-        ) : (
-          <ul className="dfFactoryConsole__list">
-            {open.map((request) => (
-              <li className="dfFactoryConsole__card" key={request.id}>
-                <div className="dfFactoryConsole__cardTitle">
-                  <strong>{entityName(factory.state?.agents, request.agent_id, "AGENT")} asks</strong>
-                  <span className="dfRemote__tag">{entityName(factory.state?.projects, request.project_id, "project")}</span>
-                </div>
-                <p>TASK {shortRemoteID(request.task_id)}</p>
-                <button
-                  type="button"
-                  className="dfRemote__answer"
-                  aria-pressed={selectedRequestId === request.id}
-                  disabled={!ready || working}
-                  onClick={() => onOpenRequest(request)}
-                >
-                  ANSWER
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <div className="dfRemote__factoryFooter">
-        <ConfirmAction
-          className="dfRemote__forgetFactory"
-          label="FORGET THIS FACTORY"
-          confirmLabel={`FORGET ${factory.label}`}
-          open={confirming}
-          disabled={false}
-          onOpen={onConfirmForget}
-          onKeep={onKeepFactory}
-          onConfirm={onForget}
-        />
-      </div>
-    </div>
-  );
-}
-
-/** Work grouped by the project that owns it, with the console's stage meter. */
+/** Live work first; what has finished folds away so it never buries it. */
 function ProjectsSection({ state }: { state: StateView | undefined }) {
-  if (state === undefined) {
-    return (
-      <section className="dfFactoryConsole__section dfRemote__projects" aria-label="Projects">
-        <div className="dfFactoryConsole__sectionHeading"><h2>PROJECTS</h2><span>—</span></div>
-        <p className="dfFactoryConsole__empty">waiting for the factory</p>
-      </section>
-    );
-  }
-  const groups = remoteProjectGroups(state);
-  return (
-    <section className="dfFactoryConsole__section dfRemote__projects" aria-label="Projects">
-      <div className="dfFactoryConsole__sectionHeading">
-        <h2>PROJECTS</h2>
-        <span>{groups.length} {groups.length === 1 ? "PROJECT" : "PROJECTS"}</span>
+  const groups = state === undefined ? [] : remoteProjectGroups(state);
+  const row = (task: TaskItem) => (
+    <li key={task.id}>
+      <div className="dfConsoleRow">
+        <span className="dfConsoleRow__title">{task.title}</span>
+        <span className="dfConsoleRow__agent">{task.assigned_agent_id === "" ? "any eligible worker" : entityName(state?.agents, task.assigned_agent_id, "agent")}</span>
+        <StageMeter stage={task.status} />
       </div>
-      {groups.length === 0 ? <p className="dfFactoryConsole__empty">no projects yet</p> : (
+    </li>
+  );
+  return (
+    <section id="dfRemoteWork" className="dfFactoryConsole__section dfRemote__projects" aria-label="Work">
+      {state === undefined ? <p className="dfFactoryConsole__empty">waiting for the factory</p>
+        : groups.length === 0 ? <p className="dfFactoryConsole__empty">no projects yet</p> : (
         <ul className="dfRemote__projectList">
-          {groups.map((group) => (
-            <li key={group.id} className="dfRemote__project">
-              <div className="dfRemote__projectHeading">
-                <strong>{group.name}</strong>
-                <span>{group.tasks.length} {group.tasks.length === 1 ? "task" : "tasks"}</span>
-              </div>
-              {group.tasks.length === 0 ? (
-                <p className="dfFactoryConsole__empty">no tasks yet</p>
-              ) : (
-                <ul className="dfConsoleRows">
-                  {group.tasks.map((task) => {
-                    return (
-                      <li key={task.id}>
-                        <div className="dfConsoleRow">
-                          <span className="dfConsoleRow__title">{task.title}</span>
-                          <span className="dfConsoleRow__agent">{task.assigned_agent_id === "" ? "any eligible worker" : entityName(state.agents, task.assigned_agent_id, "agent")}</span>
-                          <StageMeter stage={task.status} />
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </li>
-          ))}
+          {groups.map((group) => {
+            const live = group.tasks.filter((task) => LIVE.has(task.status));
+            const finished = group.tasks.filter((task) => !LIVE.has(task.status));
+            return (
+              <li key={group.id} className="dfRemote__project">
+                <div className="dfRemote__projectHeading">
+                  <strong>{group.name}</strong>
+                  <span>{live.length} live</span>
+                </div>
+                {live.length === 0 ? <p className="dfFactoryConsole__empty">nothing in flight</p> : <ul className="dfConsoleRows">{live.map(row)}</ul>}
+                {finished.length === 0 ? null : (
+                  <details className="dfRemote__finished">
+                    <summary>{finished.length} finished</summary>
+                    <ul className="dfConsoleRows">{finished.map(row)}</ul>
+                  </details>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>
   );
 }
+
+const LIVE: ReadonlySet<string> = new Set(["running", "queued", "blocked"]);
 
 /** Destructive actions are two taps and never a browser dialog. */
 function ConfirmAction({

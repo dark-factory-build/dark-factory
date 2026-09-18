@@ -202,7 +202,7 @@ export function FactoryConsole({
         {onDetail === undefined ? null : <nav className="dfMobileNav dfConsoleViewToggle" aria-label="Console views">
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
-          <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
+          <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Queue</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
         </nav>}
         <div className="dfConsoleLayout">
@@ -231,7 +231,7 @@ export function FactoryConsole({
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
             <div className="dfConsoleViewToggle" role="group" aria-label="Right panel">
               <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <span>{counters.needsYou ?? "—"}</span></button>
-              <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</button>
+              <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Queue</button>
               <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</button>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
@@ -327,13 +327,13 @@ function NeedsYouColumn({
   const requests = state === undefined ? undefined : [...state.humanRequests.values()];
   const busy = selectedHumanRequest?.phase === "replying" || selectedHumanRequest?.phase === "cancelling";
   return (
-    <section className="dfConsoleSidebar__panel" aria-label="NEEDS YOU">
+    <section className="dfConsoleSidebar__panel" aria-label="Needs you">
       <div className="dfFactoryConsole__sectionHeading">
-        <h2>NEEDS YOU</h2>
-        <span>{requests?.length ?? "—"} {requests?.length === 1 ? "ITEM" : "ITEMS"}</span>
+        <h2>Needs you</h2>
+        <span>{requests?.length ?? "—"} {requests?.length === 1 ? "item" : "items"}</span>
       </div>
-      {requests === undefined ? <p className="dfFactoryConsole__empty">WAITING FOR SNAPSHOT</p>
-        : requests.length === 0 ? <p className="dfFactoryConsole__empty">all quiet — nothing needs you</p> : (
+      {requests === undefined ? <p className="dfFactoryConsole__empty">Waiting for the latest state…</p>
+        : requests.length === 0 ? <p className="dfFactoryConsole__empty">Nothing needs your attention</p> : (
           <ul className="dfConsoleItems">
             {requests.map((request) => {
               const selected = selectedHumanRequest?.request.id === request.id;

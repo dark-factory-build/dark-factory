@@ -418,6 +418,55 @@ func TestIdlePolicyWriteUsesProviderDeliveryBound(t *testing.T) {
 	}
 }
 
+func TestClaudeIdlePolicyWriteUsesEncodedDeliveryBound(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	ctx := context.Background()
+	claude, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 10), ProjectID: project.ID, Name: "claude", Role: RoleWorker, Provider: ProviderClaudeCode, ToolBudgetLimit: 5}, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, after, budget := IdleStandingInstruction, uint32(60), uint32(3)
+	if _, err := runner.PrepareClaudeTask([]byte(strings.Repeat("x", 8000))); err == nil {
+		t.Fatal("8000-byte ASCII Claude instruction unexpectedly fits")
+	}
+	escaped := strings.Repeat("\x1f", 2000)
+	if _, err := runner.PrepareClaudeTask([]byte(escaped)); err == nil {
+		t.Fatal("escaping-heavy Claude instruction unexpectedly fits")
+	}
+	for _, instruction := range []string{strings.Repeat("x", 8000), escaped} {
+		if _, err := store.UpdateAgent(ctx, claude.ID, claude.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget}, mustTime(t, 11)); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("oversized Claude instruction = %v", err)
+		}
+		unchanged, found, err := store.Agent(ctx, claude.ID)
+		if err != nil || !found || unchanged.Revision != claude.Revision || unchanged.Idle != claude.Idle {
+			t.Fatalf("oversized Claude edit changed stored rule = %+v, found=%v, err=%v", unchanged, found, err)
+		}
+	}
+	max := runner.MaxClaudePrompt - len(runner.ClaudeTaskLead) - 3
+	boundary := strings.Repeat("x", max)
+	for len(boundary) > 0 {
+		if _, err := runner.PrepareClaudeTask([]byte(boundary)); err == nil {
+			break
+		}
+		boundary = boundary[:len(boundary)-1]
+	}
+	if boundary == "" {
+		t.Fatal("could not find legal Claude delivery boundary")
+	}
+	updated, err := store.UpdateAgent(ctx, claude.ID, claude.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &boundary, IdleRunBudget: &budget}, mustTime(t, 12))
+	if err != nil || updated.Idle.Instruction != boundary {
+		t.Fatalf("Claude legal boundary = %+v, %v", updated.Idle, err)
+	}
+	if _, err := store.UpdateAgent(ctx, claude.ID, updated.Revision, AgentPatch{IdleInstruction: &escaped}, mustTime(t, 13)); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("escaping-heavy Claude replacement = %v", err)
+	}
+	unchanged, found, err := store.Agent(ctx, claude.ID)
+	if err != nil || !found || unchanged.Revision != updated.Revision || unchanged.Idle.Instruction != boundary {
+		t.Fatalf("rejected Claude replacement changed stored rule = %+v, found=%v, err=%v", unchanged, found, err)
+	}
+}
+
 // A task re-queued after a terminal run is the second shape cancellation can
 // reach: work revision 2, with a run history stopping one revision behind it.
 // The run-topology invariant admitted only a queued task there.

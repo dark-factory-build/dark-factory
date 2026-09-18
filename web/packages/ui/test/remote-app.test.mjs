@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { StrictMode, createElement } from "react";
 import { act, create } from "react-test-renderer";
+import { renderToString } from "react-dom/server";
 import { MemoryRemoteStore, ProtocolError, RemoteDaemonMismatchError, SessionError } from "@dark-factory/client";
 import { RemoteApp } from "../dist/src/index.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
@@ -129,6 +130,7 @@ function fakeManager(factories = [], sessions = new Map()) {
       manager.selectedId = undefined;
       manager.onChange();
     },
+    async rename(node, label) { manager.list = manager.list.map((factory) => factory.nodeId === node ? { ...factory, label } : factory); manager.onChange(); },
     close() { calls.close += 1; },
   };
   return manager;
@@ -253,12 +255,12 @@ test("NEEDS YOU aggregates both factories and tags each item with its label", as
   const manager = fakeManager([northFactory(), southFactory()]);
   await withApp(props(manager), (renderer) => {
     const aggregate = sectionText(renderer, "dfRemote__needsYou");
-    assert.match(aggregate, /2 QUESTIONS/);
     assert.match(aggregate, /Builder One asks/);
     assert.match(aggregate, /North Shop/);
     assert.match(aggregate, /Harbour One asks/);
     assert.match(aggregate, /South Shop/);
-    assert.equal(buttons(renderer, "dfRemote__answer").length, 3, "two aggregate rows plus the selected factory's own row");
+    assert.equal(buttons(renderer, "dfRemote__answer").length, 2, "each question is listed once");
+    assert.match(sectionText(renderer, "dfRemote__bar"), /! 2 NEEDS YOU/);
   });
 });
 
@@ -571,13 +573,13 @@ test("ANSWER opens one question at a time", async () => {
   const session = fakeSession({ detail: () => held.then(() => detailFor(northRequest)) });
   const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
   await withApp(props(manager), async (renderer) => {
-    assert.equal(buttons(renderer, "dfRemote__answer").length, 2, "the aggregate row and the factory's own row");
+    assert.equal(buttons(renderer, "dfRemote__answer").length, 1, "each question is listed once");
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
 
     // The daemon allows one human operation per request at a time, so both
     // controls are inert while the first read is in flight.
     for (const control of buttons(renderer, "dfRemote__answer")) assert.equal(control.props.disabled, true);
-    await act(async () => { buttons(renderer, "dfRemote__answer")[1].props.onClick(); });
+    await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
     assert.equal(session.calls.detail.length, 1, "a second tap never races the first read");
 
     await act(async () => { release(); await held; });
@@ -704,6 +706,64 @@ test("an invitation in the address bar pairs once and never survives the read", 
   });
 });
 
+test("an invitation that lands in an iOS tab is held for the Home Screen app, or paired on request", async () => {
+  const manager = fakeManager([]);
+  const appProps = props(manager, { location: { hash: invitationFragment(invitationMembers({ node: NORTH })) }, install: "other" });
+  await withApp(appProps, async (renderer) => {
+    assert.equal(appProps.location.hash, "", "held or not, the fragment never survives the read");
+    assert.deepEqual(manager.calls.pair, []);
+    const card = sectionText(renderer, "dfRemote__install");
+    assert.match(card, /Add to Home Screen/);
+    assert.match(card, /COPY INVITATION/);
+    assert.equal(findNode(renderer.toJSON(), "dfRemote__openSafari").props.href, "x-safari-https://app.darkfactory.build/remote");
+    assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /challenge=|ticket=/, "a held invitation is never rendered");
+    await act(async () => { button(renderer, "dfRemote__pairHere").props.onClick(); });
+    await settle();
+    assert.equal(manager.calls.pair.length, 1);
+    assert.equal(buttons(renderer, "dfRemote__pairHere").length, 0);
+  });
+});
+
+test("a factory is renamed on this device and the bar carries the new name", async () => {
+  const manager = fakeManager([northFactory()]);
+  await withApp(props(manager), async (renderer) => {
+    assert.equal(button(renderer, "dfRemote__renameAction").props.disabled, true, "nothing typed, nothing to rename");
+    await act(async () => { renderer.root.findByProps({ id: "dfRemoteName" }).props.onChange({ currentTarget: { value: "Garage" } }); });
+    await act(async () => { button(renderer, "dfRemote__renameAction").props.onClick(); });
+    await settle();
+    assert.match(sectionText(renderer, "dfRemote__bar"), /Garage/);
+  });
+});
+
+test("a name typed for one factory never renames the next one selected", async () => {
+  const manager = fakeManager([northFactory(), southFactory()]);
+  await withApp(props(manager), async (renderer) => {
+    await act(async () => { renderer.root.findByProps({ id: "dfRemoteName" }).props.onChange({ currentTarget: { value: "Garage" } }); });
+    await act(async () => { buttons(renderer, "dfRemote__factory")[1].props.onClick(); });
+    assert.equal(renderer.root.findByProps({ id: "dfRemoteName" }).props.value, "South Shop");
+    assert.equal(button(renderer, "dfRemote__renameAction").props.disabled, true);
+  });
+});
+
+test("the first render never reads the browser, so a server and an offline iPhone hydrate alike", async () => {
+  const agent = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { userAgent: "iPhone", onLine: false } });
+  globalThis.matchMedia = () => ({ matches: false });
+  globalThis.addEventListener = globalThis.removeEventListener = () => {};
+  try {
+    const { navigator: _browser, ...bare } = props(fakeManager([]));
+    const first = renderToString(createElement(RemoteApp, bare));
+    assert.doesNotMatch(first, /INSTALL THE APP|DEVICE OFFLINE/);
+    // Once mounted, the same browser is believed.
+    await withApp(bare, (renderer) => assert.match(textOf(renderer), /DEVICE OFFLINE.*INSTALL THE APP/s));
+  } finally {
+    delete globalThis.matchMedia;
+    delete globalThis.addEventListener;
+    delete globalThis.removeEventListener;
+    if (agent === undefined) delete globalThis.navigator; else Object.defineProperty(globalThis, "navigator", agent);
+  }
+});
+
 test("forgetting a factory or the device takes a second, inline confirmation", async () => {
   const manager = fakeManager([northFactory(), southFactory()]);
   await withApp(props(manager), async (renderer) => {
@@ -714,7 +774,8 @@ test("forgetting a factory or the device takes a second, inline confirmation", a
     await act(async () => { confirm.props.onClick(); });
     await settle();
     assert.deepEqual(manager.calls.forget, [NORTH]);
-    assert.equal(buttons(renderer, "dfRemote__factory").length, 1);
+    assert.equal(buttons(renderer, "dfRemote__factory").length, 0, "one factory needs no switcher");
+    assert.match(sectionText(renderer, "dfRemote__bar"), /South Shop/);
 
     await act(async () => { button(renderer, "dfRemote__forgetDevice").props.onClick(); });
     assert.equal(manager.calls.forgetDevice, 0);

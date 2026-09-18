@@ -37,8 +37,17 @@ func validateIdleRuleForProvider(provider Provider, rule IdleRule) error {
 	if err := validateIdleRule(rule); err != nil {
 		return err
 	}
-	if rule.Policy == IdleStandingInstruction && provider == ProviderCodex && byteLen(rule.Instruction) > runner.MaxCodexTaskBytes {
-		return fmt.Errorf("%w: Codex standing instruction exceeds provider delivery bound", ErrInvalidValue)
+	if rule.Policy == IdleStandingInstruction {
+		switch provider {
+		case ProviderCodex:
+			if byteLen(rule.Instruction) > runner.MaxCodexTaskBytes {
+				return fmt.Errorf("%w: Codex standing instruction exceeds provider delivery bound", ErrInvalidValue)
+			}
+		case ProviderClaudeCode:
+			if _, err := runner.PrepareClaudeTask([]byte(rule.Instruction)); err != nil {
+				return fmt.Errorf("%w: Claude standing instruction exceeds provider delivery bound", ErrInvalidValue)
+			}
+		}
 	}
 	return nil
 }

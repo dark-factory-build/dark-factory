@@ -339,7 +339,7 @@ def merge_failure_followup(config, operation):
             "body": ("The completed App enqueue operation " + operation["enqueue_operation"] + " for " + config["repository"] + " PR #" + str(operation["pr"]) +
                      " at exact head " + operation["head"] + " was observed at " + str(operation["merge_observed_at"]) +
                      " as NOT_QUEUED while the pull request remained open. The queue run may have failed or dropped the entry. Route this causal notification to the original source owner/task " +
-                     operation["source_marker"] + " and raise the required human request. Do not enqueue again, replay the review, or alter source/PR state." )}
+                     operation["source_marker"] + ". Inspect the exact queue/CI failure in that existing task and apply any ordinary source correction there. Do not create a replacement task, enqueue again, or replay the review. If App observation or authority is unresolved, escalate that capability failure with this receipt." )}
 
 
 def enqueue_allowed(config, operation, journal_path, receipts):

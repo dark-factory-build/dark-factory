@@ -4,8 +4,6 @@ import {
   agentStatus,
   agentActivity,
   agentCurrentTask,
-  agentGlyph,
-  factoryCounters,
   prepareFloor,
   selectFloor,
   projectFloor,
@@ -18,25 +16,10 @@ function shortID(value: string): string {
   return value.slice(0, 8);
 }
 
-function projectLabel(state: StateView | undefined, projectID: string): string {
-  return state?.projects.get(projectID)?.name ?? `project ${shortID(projectID)}`;
-}
-
-/** The load-bearing cross-screen status bar: agents plus served counters. */
-export function AgentStrip({
-  state,
-  selectedAgentId,
-  ready,
-  onSelectAgent,
-}: {
-  state: StateView | undefined;
-  selectedAgentId?: string;
-  ready: boolean;
-  onSelectAgent?: (agent: AgentItem) => void;
-}) {
-  const counters = factoryCounters(state);
+/** The phone's floor: every agent as its own sprite, with what it is doing. */
+export function AgentStrip({ state }: { state: StateView | undefined }) {
   return (
-    <nav className="dfConsoleStrip" aria-label="Agents and factory counters">
+    <nav className="dfConsoleStrip" aria-label="Agents">
       <ul className="dfConsoleStrip__agents">
         {state === undefined ? (
           <li className="dfConsoleStrip__empty">waiting for snapshot</li>
@@ -44,56 +27,18 @@ export function AgentStrip({
           <li className="dfConsoleStrip__empty">no agents</li>
         ) : (
           [...state.agents.values()].filter((agent) => !agent.archived).map((agent) => {
-            const activity = agentStatus(agent, state);
-            const phase = activity;
-            const cell = (
-              <>
-                <span className="dfConsoleStrip__glyph" aria-hidden="true">
-                  {agentGlyph(agent)}
-                </span>
-                <span className="dfConsoleStrip__agentName">{agent.name}</span>
-                <span className="dfConsoleStrip__agentPhase">
-                  {activity === "needs-you" ? "! needs you" : phase}
-                </span>
-              </>
-            );
-            const className = `dfConsoleStrip__agent dfConsoleStrip__agent--${activity}`;
+            const status = agentStatus(agent, state);
             return (
-              <li key={agent.id}>
-                {onSelectAgent === undefined ? (
-                  <span className={className} aria-label={`${agent.name}: ${phase}`}>
-                    {cell}
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    className={className}
-                    aria-pressed={selectedAgentId === agent.id}
-                    aria-label={`${agent.name}: ${phase}`}
-                    disabled={!ready}
-                    onClick={() => onSelectAgent(agent)}
-                  >
-                    {cell}
-                  </button>
-                )}
+              <li key={agent.id} className={`dfConsoleStrip__agent dfConsoleStrip__agent--${status}`}>
+                <AgentSprite agent={agent} activity={agentActivity(agent, state)} />
+                <span className="dfConsoleStrip__agentName">{agent.name}</span>
+                <span className="dfConsoleStrip__agentPhase">{status === "needs-you" ? "! needs you" : status}</span>
               </li>
             );
           })
         )}
       </ul>
-      <div className="dfConsoleStrip__counters">
-        <Counter glyph="▒" label={`${counters.queued ?? "—"} queued`} />
-        <Counter glyph="!" label={`${counters.needsYou ?? "—"} NEEDS YOU`} alert={(counters.needsYou ?? 0) > 0} />
-      </div>
     </nav>
-  );
-}
-
-function Counter({ glyph, label, alert }: { glyph: string; label: string; alert?: boolean }) {
-  return (
-    <span className={`dfConsoleStrip__counter${alert === true ? " dfConsoleStrip__counter--alert" : ""}`}>
-      <span aria-hidden="true">{glyph}</span> {label}
-    </span>
   );
 }
 
@@ -154,7 +99,7 @@ export function FactoryFloor({
         {index === 0 ? null : <span aria-hidden="true"> / </span>}
         <button type="button" aria-current={index === scene.navigation.breadcrumbs.length - 1 ? "page" : undefined} disabled={index === scene.navigation.breadcrumbs.length - 1} onClick={() => setScopeId(crumb.id)}>{crumb.label}</button>
       </span>)}
-      {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>BACK</button>}
+      {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>Back</button>}
       <span className="dfFactoryFloor__spaceCount" aria-live="polite">{scene.topology.nodes.length} {scene.topology.nodes.length === 1 ? "space" : "spaces"}</span>
     </nav>
     {inventoryOmitted === 0 ? null : <p role="status">{inventoryOmitted} room inventories omitted from the served projects; those rooms show inventory unavailable.</p>}
@@ -287,43 +232,5 @@ function AgentRow({
     >
       {cells}
     </button>
-  );
-}
-
-/** Queue: the durable queued tasks, with no invented mutation controls. */
-export function QueueScreen({ state }: { state: StateView | undefined }) {
-  const queued =
-    state === undefined
-      ? undefined
-      : [...state.tasks.values()].filter((task) => task.status === "queued");
-  return (
-    <section className="dfFactoryConsole__section" aria-label="Queue">
-      <div className="dfFactoryConsole__sectionHeading">
-        <h2>QUEUE</h2>
-        <span>{queued === undefined ? "— queued" : `${queued.length} queued`}</span>
-      </div>
-      {queued === undefined ? (
-        <p className="dfFactoryConsole__empty">waiting for snapshot</p>
-      ) : queued.length === 0 ? (
-        <p className="dfFactoryConsole__empty">the queue is empty</p>
-      ) : (
-        <ul className="dfConsoleRows">
-          {queued.map((task) => (
-            <li key={task.id}>
-              <div className="dfConsoleRow">
-                <span className="dfConsoleRow__glyph" aria-hidden="true">
-                  ▒
-                </span>
-                <span className="dfConsoleRow__title">{task.title}</span>
-                <span className="dfConsoleRow__agent">
-                  priority {task.priority} · {projectLabel(state, task.project_id)}
-                </span>
-                <StageMeter stage="queued" />
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
   );
 }
