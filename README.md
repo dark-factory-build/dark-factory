@@ -12,11 +12,12 @@ results, and step in when decisions need you.
 *Demo data in the actual console: sample workers on the floor and a synthetic
 Needs You decision. No daemon is connected.*
 
-Keep work moving across projects: queue and prioritize tasks, let an overseer
-follow up, inspect results, and decide when work needs your judgment. Workers
-leave reviewable results, the Maintainer publishes approved work through the
-configured GitHub route, and the paired browser and `factoryctl` steer the
-same factory.
+Put parallel coding work in one place. An overseer follows up across workers,
+and the floor shows what each agent is doing, so you do not have to track
+separate sessions by hand. Queue and prioritize work, inspect results, and
+decide when it needs your judgment. Workers leave reviewable results, the
+Maintainer publishes approved work through the configured GitHub route, and
+the paired browser and `factoryctl` steer the same factory.
 
 [Website](https://www.darkfactory.build) · [Console (paired factory)](https://app.darkfactory.build) ·
 [Backlog](https://github.com/dark-factory-build/dark-factory/issues) ·
