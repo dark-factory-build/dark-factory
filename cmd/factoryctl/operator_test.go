@@ -126,6 +126,40 @@ func TestParseExactOperatorCommands(t *testing.T) {
 	}
 }
 
+func TestParseOperatorTaskAndAgentControls(t *testing.T) {
+	id := strings.Repeat("1", 32)
+	task, help, ok := parse([]string{"task", "update", "--task", id, "--revision", "7", "--retry"})
+	if !ok || help || !task.operatorControl || task.kind != commandOverseerTaskUpdate || !task.retry {
+		t.Fatalf("task control = %+v, help=%t ok=%t", task, help, ok)
+	}
+	agent, help, ok := parse([]string{"agent", "pause", "--agent", id, "--revision", "8"})
+	if !ok || help || !agent.operatorControl || agent.kind != commandOverseerAgentUpdate || !agent.paused {
+		t.Fatalf("agent control = %+v, help=%t ok=%t", agent, help, ok)
+	}
+}
+
+func TestParseOperatorTaskRead(t *testing.T) {
+	id := strings.Repeat("2", 32)
+	command, help, ok := parse([]string{"task", "read", "--task", id, "--revision", "7", "--offset", "2048"})
+	if !ok || help || command.kind != commandTaskRead || command.id != id || command.expectedRevision != 7 || command.offset != 2048 {
+		t.Fatalf("task read = %+v, help=%t ok=%t", command, help, ok)
+	}
+}
+
+func TestOperatorObservationCommandsUseOperatorAuthority(t *testing.T) {
+	id := strings.Repeat("1", 32)
+	for _, args := range [][]string{
+		{"agent", "paths", "--agent", id},
+		{"terminal", "observe", "--project", id, "--task", id, "--run", id},
+	} {
+		var stdout, stderr bytes.Buffer
+		exit := run(context.Background(), args, func(string) string { return "" }, &stdout, &stderr)
+		if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "operator client configuration is invalid") {
+			t.Fatalf("%v routed incorrectly: exit %d stdout %q stderr %q", args, exit, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestOperatorCommandsRequireExactEnvironmentBeforeDialing(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"dispatch", "on"}, func(string) string { return "" }, &stdout, &stderr)
@@ -518,7 +552,7 @@ func TestTaskRecoveryUsesOperatorClient(t *testing.T) {
 		if !ok || input.TaskID != taskID || input.IncarnationID != incarnationID {
 			t.Errorf("unexpected recovery call: %+v", call)
 		}
-		reply, err := api.NewTaskRecoveryReply(api.TaskRecovery{State: "found", TaskID: taskID, IncarnationID: incarnationID, ProjectID: taskID, AssignedAgentID: taskID, WorkRevision: 1, Revision: 1, Status: "blocked", BlockedReason: "tool unavailable", ArtifactPaths: []string{}})
+		reply, err := api.NewTaskRecoveryReply(api.TaskRecovery{State: "found", TaskID: taskID, IncarnationID: incarnationID, ProjectID: taskID, AssignedAgentID: taskID, WorkRevision: 1, Revision: 1, Status: "blocked", BlockedReason: "tool unavailable", ArtifactPaths: []string{}, Disposition: "none", OverseerNotification: "none"})
 		if err != nil {
 			t.Error(err)
 		}

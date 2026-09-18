@@ -43,7 +43,7 @@ def snapshot():
             "headRefOid": HEAD,
         },
         SHA,
-        [{"commit_id": HEAD, "state": "APPROVED", "user": {"id": 319516570},
+        [{"commit_id": HEAD, "state": "APPROVED", "user": {"id": 101},
           "body": f"Dark-Factory-Review: allow {HEAD}"}],
         [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
     )
@@ -73,6 +73,50 @@ class ReleaseFixtures(unittest.TestCase):
         with self.assertRaises(release.ReleaseError):
             release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
 
+    def test_any_positive_numeric_publisher_can_allow_exact_head(self):
+        pr, default, reviews, checks = snapshot()
+        for author in (101, "202", 987654321):
+            reviews[0]["user"]["id"] = author
+            self.assertEqual(
+                release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA),
+                HEAD,
+            )
+
+    def test_invalid_publishers_and_stale_reviews_do_not_allow(self):
+        pr, default, reviews, checks = snapshot()
+        for author in (0, -1, "0", "-1", "202.0", True, None):
+            reviews[0]["user"]["id"] = author
+            with self.assertRaises(release.ReleaseError):
+                release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+        reviews[0]["user"]["id"] = 1
+        reviews[0]["state"] = "PENDING"
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+        reviews[0]["state"] = "DISMISSED"
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+
+    def test_block_precedes_allow_and_exact_correction_clears_it(self):
+        pr, default, reviews, checks = snapshot()
+        operation = "11111111-1111-4111-8111-111111111111"
+        reviews[:] = [
+            {"commit_id": HEAD, "state": "COMMENTED", "user": {"id": 1},
+             "body": f"Dark-Factory-Review: block {HEAD} <!-- dark-factory-operation:{operation}:old -->"},
+            {"commit_id": HEAD, "state": "COMMENTED", "user": {"id": 1},
+             "body": f"Dark-Factory-Review: allow {HEAD} Dark-Factory-Review-Correction: {operation} <!-- dark-factory-operation:22222222-2222-4222-8222-222222222222:new -->"},
+        ]
+        self.assertEqual(
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA),
+            HEAD,
+        )
+        reviews[1]["user"]["id"] = 2
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+        reviews[1]["user"]["id"] = 1
+        reviews[1]["body"] = f"Dark-Factory-Review: allow {HEAD}"
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+
     def test_failed_check_is_rejected(self):
         pr, default, reviews, checks = snapshot()
         checks[0]["conclusion"] = "FAILURE"
@@ -83,11 +127,12 @@ class ReleaseFixtures(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             cfg = config(Path(directory) / "release.json")
             with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
-                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "review_gate") as verifier, \
                  mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
                  mock.patch.object(release, "run") as command:
                 result = release.once(cfg, 633)
             self.assertEqual(result["state"], "verified")
+            verifier.assert_called_once_with(cfg, HEAD, snapshot()[2])
             command.assert_not_called()
 
     def test_reconcile_records_verified_receipt_without_deploy_hook(self):
@@ -96,7 +141,7 @@ class ReleaseFixtures(unittest.TestCase):
             cfg = config(journal)
             release.atomic_json(journal, {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}})
             with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
-                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "review_gate") as verifier, \
                  mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
                  mock.patch.object(release, "range_sources", return_value=([{"pr": 633, "merge_sha": SHA, "issue": 602, "reference": "refs"}], "range")), \
                  mock.patch.object(release, "run", return_value=json.dumps({"status": "ahead", "merge_base_commit": {"sha": SHA}})) as command:
@@ -104,7 +149,111 @@ class ReleaseFixtures(unittest.TestCase):
             self.assertEqual(result["state"], "verified")
             self.assertEqual(release.load(journal)["live_tip"]["sha"], SHA)
             self.assertEqual(result["reconciliation"], {"mode": "operator_observed", "observed_sha": SHA})
+            verifier.assert_called_once_with(cfg, HEAD, snapshot()[2])
             command.assert_called_once()
+
+    def test_reconcile_supersedes_multiple_historical_blocked_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            old_sha, older_sha = OLD, "e" * 40
+            old = {"pr": 631, "sha": old_sha, "state": "blocked", "error": "old failure",
+                   "config_fingerprint": "f" * 64, "history": ["kept"]}
+            older = {"pr": 632, "sha": older_sha, "state": "blocked", "error": "older failure",
+                     "config_fingerprint": "e" * 64}
+            release.atomic_json(journal, {"version": 1, "live_tip": {"sha": OLD, "healthy": True},
+                                          "releases": {"631": old, "632": older}})
+            current = snapshot()
+            old_snapshot = tuple([dict(current[0], mergeCommitSha=old_sha), old_sha, [], current[3]])
+            older_snapshot = tuple([dict(current[0], mergeCommitSha=older_sha), older_sha, [], current[3]])
+            def compare(argv, *args, **kwargs):
+                target = next(part for part in argv if "..." in part).split("/")[-1].split("...")[0]
+                return json.dumps({"status": "ahead", "merge_base_commit": {"sha": target}})
+            with mock.patch.object(release, "gh_snapshot", side_effect=[current, old_snapshot, older_snapshot]), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "run", side_effect=compare):
+                result = release.reconcile(cfg, 633, SHA, [631, 632], baseline_current=True)
+            saved = release.load(journal)
+            self.assertEqual(result["delivery_mode"], "baseline_current")
+            self.assertEqual(saved["releases"]["631"]["error"], "old failure")
+            self.assertEqual(saved["releases"]["631"]["superseded_by"], {"pr": 633, "sha": SHA,
+                                                                     "source_pr": 631, "source_sha": old_sha})
+            self.assertEqual(saved["releases"]["632"]["config_fingerprint"], "e" * 64)
+            self.assertEqual(saved["releases"]["633"]["reconciliation"]["baseline_sha"], OLD)
+            for named in ([631, 632], []):
+                with mock.patch.object(release, "gh_snapshot", side_effect=[current, old_snapshot, older_snapshot]), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                     mock.patch.object(release, "run", side_effect=compare):
+                    release.reconcile(cfg, 633, SHA, named, baseline_current=bool(named))
+            for number, original in ((631, old), (632, older)):
+                preserved = dict(release.load(journal)["releases"][str(number)])
+                preserved.pop("superseded_by")
+                self.assertEqual(preserved, original)
+            with mock.patch.object(release, "gh_snapshot", return_value=current), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "run") as command:
+                self.assertEqual(release.once(cfg, 633)["state"], "verified")
+            command.assert_not_called()
+            repeated = release.load(journal)["releases"]["633"]["reconciliation"]
+            self.assertEqual(repeated["superseded_prs"], [{"pr": 631, "sha": old_sha}, {"pr": 632, "sha": older_sha}])
+            self.assertEqual(repeated["baseline_live_tip"]["sha"], OLD)
+            self.assertTrue(repeated["baseline_live_tip"]["healthy"])
+
+    def test_supersede_rejects_active_or_malformed_or_diverged_receipt_without_write(self):
+        for old_state, old_sha, comparison in (("running", OLD, "ahead"), ("blocked", "bad", "ahead"), ("blocked", OLD, "diverged")):
+            with self.subTest(old_state=old_state, old_sha=old_sha, comparison=comparison), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory) / "release.json"
+                cfg = config(journal)
+                before = {"version": 1, "releases": {"631": {"pr": 631, "sha": old_sha,
+                    "state": old_state, "error": "keep", "config_fingerprint": "f" * 64}}}
+                release.atomic_json(journal, before)
+                current = snapshot()
+                old_snapshot = tuple([dict(current[0], mergeCommitSha=OLD), OLD, [], current[3]])
+                def compare(argv, *args, **kwargs):
+                    base = argv[2].split("/")[-1].split("...")[0]
+                    return json.dumps({"status": comparison if base == OLD else "identical",
+                                       "merge_base_commit": {"sha": base}})
+                with mock.patch.object(release, "gh_snapshot", side_effect=[current, old_snapshot]), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                     mock.patch.object(release, "run", side_effect=compare):
+                    with self.assertRaises(release.ReleaseError):
+                        release.reconcile(cfg, 633, SHA, [631], baseline_current=True)
+                self.assertEqual(release.load(journal), before)
+
+    def test_superseded_receipt_is_only_ignored_with_verified_reconciliation_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            old = {"pr": 631, "sha": OLD, "state": "blocked", "config_fingerprint": "f" * 64,
+                   "superseded_by": {"pr": 633, "sha": SHA, "source_sha": OLD}}
+            target = {"pr": 633, "sha": SHA, "state": "verified",
+                      "verification": {"sha": SHA, "healthy": True},
+                      "reconciliation": {"mode": "operator_observed", "observed_sha": SHA,
+                                          "superseded_prs": [{"pr": 631, "sha": OLD}]}}
+            old["superseded_by"]["source_pr"] = 631
+            release.atomic_json(journal, {"version": 1, "releases": {"631": old, "633": target}})
+            newer = tuple([dict(snapshot()[0], mergeCommitSha=SECOND), SECOND, snapshot()[2], snapshot()[3]])
+            with mock.patch.object(release, "gh_snapshot", return_value=newer), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SECOND, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([], "range")), \
+                 mock.patch.object(release, "run") as command:
+                result = release.once(cfg, 634)
+            self.assertEqual(result["state"], "verified")
+            command.assert_not_called()
+            for invalid in (None, {}, [], [None]):
+                target["reconciliation"]["superseded_prs"] = invalid
+                release.atomic_json(journal, {"version": 1, "releases": {"631": old, "633": target}})
+                with mock.patch.object(release, "gh_snapshot") as github, \
+                     mock.patch.object(release, "run") as command:
+                    with self.assertRaises(release.ReleaseError):
+                        release.once(cfg, 634)
+                github.assert_not_called()
+                command.assert_not_called()
 
     def test_reconcile_accepts_reviewed_ancestor_when_default_advanced(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -142,7 +291,8 @@ class ReleaseFixtures(unittest.TestCase):
             before = {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}}
             release.atomic_json(journal, before)
             current = (dict(snapshot()[0], mergeCommitSha=SHA), SECOND, snapshot()[2], snapshot()[3])
-            with mock.patch.object(release, "gh_snapshot", return_value=current), mock.patch.object(release, "run") as command:
+            with mock.patch.object(release, "gh_snapshot", return_value=current), \
+                 mock.patch.object(release, "review_gate"), mock.patch.object(release, "run") as command:
                 with self.assertRaisesRegex(release.ReleaseError, "not at the merged SHA"):
                     release.once(cfg, 633)
             self.assertEqual(release.load(journal), before)
@@ -201,6 +351,7 @@ class ReleaseFixtures(unittest.TestCase):
             before = {"version": 1, "live_tip": {"sha": OLD, "healthy": True}, "releases": {}}
             release.atomic_json(journal, before)
             with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
                  mock.patch.object(release, "run") as command:
                 with self.assertRaisesRegex(release.ReleaseError, "does not match"):
                     release.reconcile(cfg, 633, OLD)
@@ -474,7 +625,7 @@ class ReleaseFixtures(unittest.TestCase):
         release.review_gate(config(Path("/tmp/release.json")), HEAD, [{
             "commit_id": HEAD,
             "state": "APPROVED",
-            "user": {"id": 319516570},
+            "user": {"id": 101},
             "body": f"findings\nDark-Factory-Review:\tallow {HEAD}\nfinal",
         }])
 
@@ -483,7 +634,7 @@ class ReleaseFixtures(unittest.TestCase):
             release.review_gate(config(Path("/tmp/release.json")), HEAD, [{
                 "commit_id": HEAD,
                 "state": "CHANGES_REQUESTED",
-                "user": {"id": 319516570},
+                "user": {"id": 202},
                 "body": f"findings\nDark-Factory-Review: block {HEAD}",
             }])
 
@@ -522,7 +673,12 @@ class ReleaseFixtures(unittest.TestCase):
         with mock.patch.object(release, "run", side_effect=gh):
             self.assertEqual(release.range_sources(cfg, OLD, SHA)[0][0]["issue"], 602)
 
-    def test_range_rejects_missing_source_footer(self):
+    def test_release_rejects_malformed_source_reference(self):
+        for body in ("Refs #602 extra", "Refs #0", "Refs #602foo", "Closes #unknown"):
+            with self.subTest(body=body), self.assertRaises(release.ReleaseError):
+                release.release_source_footer(body)
+
+    def test_range_skips_source_less_pull_request(self):
         cfg = config(Path("/tmp/release.json"))
         def gh(argv, *unused):
             command = " ".join(argv)
@@ -531,8 +687,36 @@ class ReleaseFixtures(unittest.TestCase):
             if "/pulls" in command:
                 return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
             return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA}, "body": "No source"})
-        with mock.patch.object(release, "run", side_effect=gh), self.assertRaisesRegex(release.ReleaseError, "exactly one"):
-            release.range_sources(cfg, OLD, SHA)
+        with mock.patch.object(release, "run", side_effect=gh):
+            self.assertEqual(release.range_sources(cfg, OLD, SHA), ([], "range"))
+
+    def test_range_accepts_unique_footer_with_generator_trailer_and_deduplicates(self):
+        cfg = config(Path("/tmp/release.json"))
+        def gh(argv, *unused):
+            command = " ".join(argv)
+            if "/compare/" in command:
+                return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
+            if "/pulls" in command:
+                return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA},
+                               "body": "Refs #602\n\nRefs #602\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"})
+        with mock.patch.object(release, "run", side_effect=gh):
+            self.assertEqual(release.range_sources(cfg, OLD, SHA)[0],
+                             [{"pr": 10, "merge_sha": SHA, "issue": 602, "reference": "refs"}])
+
+    def test_range_uses_existing_terminal_footer_precedence(self):
+        cfg = config(Path("/tmp/release.json"))
+        def gh(argv, *unused):
+            command = " ".join(argv)
+            if "/compare/" in command:
+                return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
+            if "/pulls" in command:
+                return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA},
+                               "body": "Refs #602\n\nCloses #603\n"})
+        with mock.patch.object(release, "run", side_effect=gh):
+            self.assertEqual(release.range_sources(cfg, OLD, SHA)[0],
+                             [{"pr": 10, "merge_sha": SHA, "issue": 603, "reference": "closes"}])
 
     def test_range_rejects_source_reference_that_is_not_a_footer(self):
         cfg = config(Path("/tmp/release.json"))

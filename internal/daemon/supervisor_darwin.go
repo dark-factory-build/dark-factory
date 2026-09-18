@@ -7,14 +7,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -291,7 +288,12 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if run.Provider != kernel.ProviderShell && len(rawProviderTask) == 0 {
 		rawProviderTask = []byte(task.Title)
 	}
-	rawProviderTask = providerTaskWithContinuationContext(run.Provider, rawProviderTask, run.ContinuationContexts)
+	if run.Provider != kernel.ProviderCodex {
+		rawProviderTask, err = providerTaskWithContinuationContext(run.Provider, rawProviderTask, run.ContinuationContexts)
+		if err != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
+		}
+	}
 	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
@@ -594,11 +596,12 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
-		// The daemon reads the worktree itself: it must be a linked worktree of
-		// the project repository on the Change's branch, at the base for a fresh
-		// or adopted Change and at the settled head for a reopened one.
+		// The daemon reads the worktree itself: fresh Changes use private Git
+		// administration; retained worktrees keep their layout. Verify the branch
+		// at the base for a fresh or adopted Change and at the settled head for
+		// a reopened one.
 		facts, err := change.InspectWorktree(ctx, spec.GitExecutable, project.Root, repositoryIdentity, filepath.Join(spec.ChangeParent, finalName))
-		if err != nil || facts.Branch() != change.BranchName(finalName) {
+		if err != nil || facts.Branch() != change.BranchName(finalName) || retained == nil && facts.GitDirectory() != change.GitDirectoryForChange(project.Root, filepath.Join(spec.ChangeParent, finalName)) {
 			return daemon.failRun(run, kernel.FailureSource, errors.Join(err, errInvalidContract))
 		}
 		head, err := kernelCommit(facts.Head())
@@ -819,6 +822,11 @@ func (daemon *Daemon) attemptResultTail(
 	run, err = daemon.consumeAttemptResult(daemon.cleanupCtx, result, false)
 	if err != nil {
 		return kernel.Run{}, err
+	}
+	if floor, head, payload := live.diagnosticSnapshot(); len(payload) > 0 {
+		if capturedAt, timestampErr := daemon.timestamp(); timestampErr == nil {
+			_ = daemon.store.SaveTerminalDiagnostics(daemon.cleanupCtx, kernel.TerminalDiagnostics{RunID: run.ID, Floor: floor, Head: head, Payload: payload, CapturedAt: capturedAt})
+		}
 	}
 	exitEvent, err := terminalExitEvent(record)
 	if err != nil {
@@ -1344,65 +1352,6 @@ func attemptResultPresent(dir *os.File) (bool, error) {
 // runner record into the kernel value. The result-proof digest comes only
 // from the record itself, so the Store's digest equality cannot be bypassed
 // by daemon code handing the kernel a digest the record did not produce.
-func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, contexts []kernel.ContinuationContext) []byte {
-	if len(contexts) == 0 {
-		return task
-	}
-	limit := runner.MaxProviderTaskBytes
-	if kind == kernel.ProviderCodex {
-		limit = runner.MaxCodexTaskBytes
-	}
-	var builder strings.Builder
-	builder.Grow(len(task) + len(contexts)*128)
-	builder.Write(task)
-	if kind == kernel.ProviderShell {
-		builder.WriteString("\n\n# Factory continuation context:\n")
-	} else {
-		builder.WriteString("\n\nFactory continuation context:\n")
-	}
-	for _, continuation := range contexts {
-		prefix := ""
-		if kind == kernel.ProviderShell {
-			prefix = "# "
-		}
-		builder.WriteString(prefix)
-		builder.WriteString("condition=")
-		builder.WriteString(string(continuation.ConditionKind))
-		builder.WriteString(" condition_id=")
-		builder.WriteString(hex.EncodeToString(continuation.ConditionID.Bytes()))
-		builder.WriteString(" condition_revision=")
-		builder.WriteString(strconv.FormatInt(continuation.ConditionRevision.Int64(), 10))
-		builder.WriteString(" context_digest=")
-		builder.WriteString(hex.EncodeToString(continuation.ContextDigest[:]))
-		builder.WriteString(" resolution=")
-		resolution := continuation.ResolutionDetail
-		if builder.Len()+len(resolution)+1 > limit {
-			remaining := limit - builder.Len() - 1
-			if remaining < 0 {
-				remaining = 0
-			}
-			resolution = truncateUTF8(resolution, remaining)
-		}
-		builder.WriteString(resolution)
-		builder.WriteByte('\n')
-		if builder.Len() >= limit {
-			break
-		}
-	}
-	return []byte(builder.String())
-}
-
-func truncateUTF8(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	value = value[:limit]
-	for len(value) > 0 && !utf8.ValidString(value) {
-		value = value[:len(value)-1]
-	}
-	return value
-}
-
 func kernelAttemptResult(record *runner.AttemptResultRecord, runID kernel.RunID, attemptDigest kernel.AttemptDigest, runtimeIdentity kernel.ResourceIdentity) (kernel.AttemptResult, error) {
 	if record == nil {
 		return kernel.AttemptResult{}, errInvalidContract

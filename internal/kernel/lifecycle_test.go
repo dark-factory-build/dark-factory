@@ -36,6 +36,9 @@ func TestCredentialAuthorityExistsOnlyWhileExactRunIsRunning(t *testing.T) {
 	if err != nil || finalizing.Phase != RunFinalizing || finalizing.Proposal == nil || !finalizing.Proposal.equal(proposal) {
 		t.Fatalf("proposal = %+v, %v", finalizing, err)
 	}
+	if _, err := store.CreateHumanQuestionForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{IdempotencyKey: humanKey(250), QuestionText: "late completion notification", ReuseExisting: true}, mustTime(t, 41)); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("human request after durable outcome = %v", err)
+	}
 	if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("finalizing credential = %v", err)
 	}

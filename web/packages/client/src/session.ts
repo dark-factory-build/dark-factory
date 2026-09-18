@@ -1,3 +1,4 @@
+import { projectContentOperation, type ProjectContentOperation, type ProjectContentInput, type ProjectContentOutput } from "./project-content.js";
 import {
   decodeServerControl,
   encodeAuthProve,
@@ -181,7 +182,7 @@ export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: rea
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
-type AccountPending = { kind: "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT"; accountId?: string; expectedRevision?: bigint; resolve: (value: never) => void; reject: (error: unknown) => void };
+type AccountPending = { operation?: ProjectContentOperation; kind: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT"; accountId?: string; expectedRevision?: bigint; resolve: (value: never) => void; reject: (error: unknown) => void };
 
 /** One identity the factory has granted and not revoked. */
 export type BrowserClientView = Readonly<{ clientId: string; capabilities: CapabilityMask; revision: bigint; createdAtMs: bigint }>;
@@ -404,6 +405,15 @@ export class BrowserSession {
   }
 
   /** Private, cursor-paged completed work for one agent. */
+  /** Explicit optional library access; it does not subscribe or prefetch. */
+  projectContent(operation: ProjectContentOperation, input: ProjectContentInput): Promise<ProjectContentOutput> {
+    try { projectContentOperation(operation); } catch (error) { return Promise.reject(error); }
+    const write = operation === "create" || operation === "revise" || operation === "deprecate" || operation === "evidence" || operation === "attach" || operation === "outcome_write";
+    const capability = CAPABILITIES.private_human_request_detail | (write ? CAPABILITIES.human_actions : 0);
+    if ((this.#capabilities & capability) !== capability) return Promise.reject(new SessionError("unauthorized"));
+    return this.#accountRequest("PROJECT_CONTENT_RESULT", capability, "project-content", (id) => encodeClientControl({ type: "PROJECT_CONTENT", id, body: { operation, input } }), { operation });
+  }
+
   getTaskList(agentId: string, cursor: { beforeUpdatedAtMs?: bigint; beforeTaskId?: string } = {}): Promise<TaskListView> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated || (this.#capabilities & CAPABILITIES.private_human_request_detail) === 0) return Promise.reject(new SessionError("unauthorized"));
@@ -786,7 +796,7 @@ export class BrowserSession {
       pending.resolve();
       return;
     }
-    if (frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT") {
+    if (frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT") {
       this.#accountResult(frame);
       return;
     }
@@ -869,7 +879,9 @@ export class BrowserSession {
       const target = this.#targetPending.get(id);
       if (target !== undefined) {
         this.#targetPending.delete(id);
-        target.reject(new SessionError(frame.body.code, frame.body.retryable));
+        const error = new SessionError(frame.body.code, frame.body.retryable);
+        target.reject(error);
+        if (error.retryable) this.#fail(error);
         return;
       }
       const task = this.#taskPending.get(id);
@@ -914,7 +926,9 @@ export class BrowserSession {
       const pending = this.#humanPending.get(id);
       if (pending !== undefined) {
         this.#humanPending.delete(id);
-        pending.reject(new SessionError(frame.body.code, frame.body.retryable));
+        const error = new SessionError(frame.body.code, frame.body.retryable);
+        pending.reject(error);
+        if (pending.kind === "detail" && error.retryable) this.#fail(error);
         return;
       }
     }
@@ -1146,7 +1160,7 @@ export class BrowserSession {
 
 
   /** One shape for account requests; updates also correlate the returned revision. */
-  #accountRequest<T>(kind: AccountPending["kind"], capability: number, prefix: string, encode: (id: string) => string, correlation?: Pick<AccountPending, "accountId" | "expectedRevision">): Promise<T> {
+  #accountRequest<T>(kind: AccountPending["kind"], capability: number, prefix: string, encode: (id: string) => string, correlation?: Pick<AccountPending, "accountId" | "expectedRevision" | "operation">): Promise<T> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
@@ -1159,9 +1173,15 @@ export class BrowserSession {
     return result;
   }
 
-  #accountResult(frame: Extract<ServerControlFrame, { type: "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" }>): void {
+  #accountResult(frame: Extract<ServerControlFrame, { type: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" }>): void {
     const pending = this.#accountPending.get(frame.id);
     if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
+    if (frame.type === "PROJECT_CONTENT_RESULT") {
+      if (pending.operation !== frame.body.operation) throw new ProtocolError("malformed");
+      this.#accountPending.delete(frame.id);
+      pending.resolve(Object.freeze(frame.body.output) as never);
+      return;
+    }
     if (frame.type === "BROWSER_CLIENTS") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze({ clients: Object.freeze(frame.body.clients.map((client) => Object.freeze({ clientId: client.client_id, capabilities: client.capabilities, revision: client.revision, createdAtMs: client.created_at_ms }))), more: frame.body.more }) as never); return; }
     if (frame.type === "BROWSER_CLIENT_REVOKE_RESULT") {
       if (pending.accountId !== frame.body.client_id || pending.expectedRevision === undefined || frame.body.revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");

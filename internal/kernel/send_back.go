@@ -163,12 +163,21 @@ func (store *Store) SendBackTaskForAttempt(ctx context.Context, digest AttemptDi
 	return updated, nil
 }
 
-// RetryTaskForOverseer atomically reassigns a settled blocked/failed worker
-// task and returns that same task identity to the queue. Keeping the
-// assignment change and retry transition in one validated write prevents the
-// old worker from being admitted between two operator calls.
+// RetryTaskForOverseer atomically returns a settled blocked/failed worker
+// task to the queue under the same task identity, reassigned when a
+// replacement worker is named and otherwise kept with its current worker.
+// Keeping the assignment change and retry transition in one validated write
+// prevents the old worker from being admitted between two operator calls.
 func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
-	if id.zero() || expected.Int64() < 1 || assigned.zero() {
+	return store.retryTask(ctx, &digest, id, expected, assigned, at)
+}
+
+func (store *Store) RetryTaskForOperator(ctx context.Context, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
+	return store.retryTask(ctx, nil, id, expected, assigned, at)
+}
+
+func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id TaskID, expected Revision, assigned AgentID, at UnixMillis) (Task, error) {
+	if id.zero() || expected.Int64() < 1 {
 		return Task{}, fmt.Errorf("%w: invalid task retry", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -176,9 +185,13 @@ func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDige
 		return Task{}, err
 	}
 	defer tx.Close()
-	run, err := overseerRun(ctx, tx.connection, digest)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
+	var project ProjectID
+	if digest != nil {
+		run, err := overseerRun(ctx, tx.connection, *digest)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		project = run.ProjectID
 	}
 	task, found, err := taskByID(ctx, tx.connection, id)
 	if err != nil {
@@ -187,9 +200,10 @@ func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDige
 	if !found {
 		return Task{}, tx.Rollback(ErrNotFound)
 	}
-	if task.ProjectID != run.ProjectID {
+	if digest != nil && task.ProjectID != project {
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
+	project = task.ProjectID
 	if task.Revision != expected {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -198,6 +212,9 @@ func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDige
 	}
 	if at.Int64() < task.UpdatedAt.Int64() {
 		return Task{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if assigned.zero() {
+		assigned = task.AssignedAgentID
 	}
 	original, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
 	if err != nil {
@@ -220,7 +237,7 @@ func (store *Store) RetryTaskForOverseer(ctx context.Context, digest AttemptDige
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
-	if !found || agent.ProjectID != run.ProjectID || agent.Role != RoleWorker {
+	if !found || agent.ProjectID != project || agent.Role != RoleWorker {
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
 	if agent.Archived {

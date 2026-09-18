@@ -69,6 +69,8 @@ type attemptFrame struct {
 	Credit       uint32        `json:"credit,omitempty"`
 	Submit       bool          `json:"submit,omitempty"`
 	Status       string        `json:"status,omitempty"`
+	ContextStart uint64        `json:"context_start,omitempty"`
+	Context      []byte        `json:"context,omitempty"`
 }
 
 func terminalCommandFrame(command TerminalCommand) attemptFrame {
@@ -109,7 +111,7 @@ func terminalEventFromFrame(frame attemptFrame) (TerminalFrame, error) {
 		Generation: frame.Generation, Sequence: frame.Sequence,
 		Start: frame.Start, End: frame.End, Floor: frame.Floor, Head: frame.Head,
 		Count: frame.Count, Rows: frame.Rows, Cols: frame.Cols,
-		Status: TerminalResultStatus(frame.Status), Payload: append([]byte(nil), frame.Payload...),
+		Status: TerminalResultStatus(frame.Status), Payload: append([]byte(nil), frame.Payload...), ContextStart: frame.ContextStart, Context: append([]byte(nil), frame.Context...),
 	}
 	if err := event.validate(); err != nil {
 		return TerminalFrame{}, err
@@ -123,7 +125,7 @@ func terminalEventFrame(event TerminalFrame) attemptFrame {
 		Generation: event.Generation, Sequence: event.Sequence, Start: event.Start,
 		End: event.End, Floor: event.Floor, Head: event.Head, Count: event.Count,
 		Rows: event.Rows, Cols: event.Cols, Status: string(event.Status),
-		Payload: append([]byte(nil), event.Payload...),
+		Payload: append([]byte(nil), event.Payload...), ContextStart: event.ContextStart, Context: append([]byte(nil), event.Context...),
 	}
 }
 
@@ -131,7 +133,7 @@ func noTerminalFields(frame attemptFrame) bool {
 	return frame.Correlation == 0 && frame.Generation == 0 && frame.Sequence == 0 &&
 		frame.Start == 0 && frame.End == 0 && frame.Floor == 0 && frame.Head == 0 &&
 		frame.Count == 0 && frame.Rows == 0 && frame.Cols == 0 && frame.Credit == 0 &&
-		!frame.Submit && frame.Status == ""
+		!frame.Submit && frame.Status == "" && frame.ContextStart == 0 && len(frame.Context) == 0
 }
 
 func noLegacyFields(frame attemptFrame) bool {

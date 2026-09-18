@@ -30,3 +30,15 @@ func DescendsFrom(context.Context, string, string, RepositoryIdentity, string, O
 func AdoptWorktree(context.Context, string, string, RepositoryIdentity, string, string, ObjectID) (WorktreeFacts, error) {
 	return WorktreeFacts{}, &UnsupportedError{Platform: runtime.GOOS}
 }
+
+func PinContentSource(context.Context, string, string, RepositoryIdentity, string, string, string) (ContentSource, error) {
+	return ContentSource{}, &UnsupportedError{Platform: runtime.GOOS}
+}
+
+func ReadContentSource(context.Context, string, string, RepositoryIdentity, ContentSource) (string, error) {
+	return "", &UnsupportedError{Platform: runtime.GOOS}
+}
+
+func WriteContentSource(context.Context, string, string, RepositoryIdentity, *ContentSource, string, string, string) (ContentSource, error) {
+	return ContentSource{}, &UnsupportedError{Platform: runtime.GOOS}
+}

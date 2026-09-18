@@ -8,6 +8,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
+	"strings"
+	"unicode/utf8"
 )
 
 // ObjectFormat is one closed Git object-format value.
@@ -62,6 +65,21 @@ type ObjectID struct {
 	raw    [sha256.Size]byte
 }
 
+// ContentSource identifies one ordinary repository file at an immutable commit.
+// The durable ref created by PinContentSource keeps that commit reachable after
+// the originating branch or Change worktree disappears.
+type ContentSource struct {
+	Commit ObjectID
+	Path   string
+}
+
+func validateContentPath(value string) error {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 || path.IsAbs(value) || path.Clean(value) != value || value == "." || strings.HasPrefix(value, "../") {
+		return &ValidationError{Reason: "content path must be a clean repository-relative path"}
+	}
+	return nil
+}
+
 // NewObjectID validates and copies one raw Git object ID.
 func NewObjectID(format ObjectFormat, raw []byte) (ObjectID, error) {
 	if !format.valid() || len(raw) != format.OIDLength() {
@@ -71,6 +89,18 @@ func NewObjectID(format ObjectFormat, raw []byte) (ObjectID, error) {
 	id.format = format
 	copy(id.raw[:], raw)
 	return id, nil
+}
+
+func NewObjectIDFromHex(format string, encoded string) (ObjectID, error) {
+	f, err := NewObjectFormat(format)
+	if err != nil {
+		return ObjectID{}, err
+	}
+	raw, err := hex.DecodeString(encoded)
+	if err != nil {
+		return ObjectID{}, &ValidationError{Reason: "object ID is not hexadecimal"}
+	}
+	return NewObjectID(f, raw)
 }
 
 // Format returns the ID's object format.
@@ -97,9 +127,10 @@ func BranchName(changeID string) string { return "factory/" + changeID[:min(12, 
 // its HEAD names, the branch HEAD is on (empty when detached), and whether
 // the work tree or index differs from that commit.
 type WorktreeFacts struct {
-	head   ObjectID
-	branch string
-	dirty  bool
+	head         ObjectID
+	branch       string
+	dirty        bool
+	gitDirectory string
 }
 
 // Head returns the commit the worktree's HEAD names.
@@ -110,6 +141,9 @@ func (f WorktreeFacts) Branch() string { return f.branch }
 
 // Dirty reports uncommitted or untracked work in the worktree.
 func (f WorktreeFacts) Dirty() bool { return f.dirty }
+
+// GitDirectory returns the administration used by this worktree.
+func (f WorktreeFacts) GitDirectory() string { return f.gitDirectory }
 
 // TrustedGitExecutable is the only Git installation whose complete path is
 // rooted in system-owned directories on macOS. Xcode applications live below

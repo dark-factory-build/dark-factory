@@ -153,6 +153,8 @@ grep -q -- '--ignore-rules' "$args" || fail "Codex review loads rules from the c
 grep -q -- '--skip-git-repo-check' "$args" || fail "Codex review refuses the isolated review directory"
 grep -q '^gpt-5.6-sol$' "$args" || fail "Codex review does not default to sol"
 grep -q 'mcp_servers.dark_factory_maintainer.command' "$args" || fail "Codex review does not configure the Maintainer server"
+grep -Fxq 'mcp_servers.dark_factory_maintainer.startup_timeout_sec=120' "$args" || fail "Codex review does not allow bounded Maintainer startup"
+grep -Fxq 'mcp_servers.dark_factory_maintainer.tool_timeout_sec=120' "$args" || fail "Codex review does not allow bounded Maintainer operations"
 enabled_tools='mcp_servers.dark_factory_maintainer.enabled_tools=["maintainer_status","observe_operation","submit_pull_request_review"]'
 [ "$(grep -Fc 'mcp_servers.dark_factory_maintainer.enabled_tools=' "$args")" -eq 1 ] || fail "Codex review has more than one Maintainer tool allowlist"
 grep -Fxq "$enabled_tools" "$args" || fail "Codex review enables an unrelated Maintainer tool"

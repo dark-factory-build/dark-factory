@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
@@ -284,6 +285,31 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	task, found, err := fixture.store.Task(ctx, mustTaskID(t, testID(3)))
 	if err != nil || !found || task.Body != "private task body sentinel" {
 		t.Fatalf("durable task = %+v, found=%v, err=%v", task, found, err)
+	}
+}
+
+func TestDaemonDispatchesContentCreateWithoutScheduling(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	done := fixture.serve(t)
+	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: testID(240), Name: "content", Root: contentRepositoryFixture(t)}); err != nil {
+		t.Fatal(err)
+	}
+	waitDispatch(t, done)
+	done = fixture.serve(t)
+	content, err := client.ContentCreate(ctx, api.ContentInput{ID: testID(241), ProjectID: testID(240), Kind: "procedure", Title: "procedure", Body: "steps"})
+	if err != nil || content.Revision != 1 || content.Body != "" {
+		t.Fatalf("content create = %+v, %v", content, err)
+	}
+	waitDispatch(t, done)
+	assertNoSchedulerWake(t, fixture.daemon)
+	snapshot, err := fixture.store.Snapshot(ctx)
+	if err != nil || len(snapshot.Tasks) != 0 {
+		t.Fatalf("content changed task admission: %+v, %v", snapshot, err)
 	}
 }
 
@@ -969,6 +995,142 @@ func TestDaemonOverseerTaskRetryRejectsOrchestratorTask(t *testing.T) {
 	afterHistory, err := fixture.store.TaskInterventions(ctx, target.ProjectID, target.ID)
 	if err != nil || len(afterHistory) != len(beforeHistory) {
 		t.Fatalf("orchestrator retry changed history: before=%d after=%d err=%v", len(beforeHistory), len(afterHistory), err)
+	}
+}
+
+func TestDaemonOperatorTaskRetryAndAgentPauseUseExactRevisions(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 212, testID(212), "worker")
+	ctx := context.Background()
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agent, found, err := fixture.store.Agent(ctx, active.run.AgentID)
+	if err != nil || !found {
+		t.Fatalf("agent = %+v, found=%v, err=%v", agent, found, err)
+	}
+	paused := true
+	done := fixture.serve(t)
+	pause, err := operator.UpdateAgent(ctx, api.OverseerAgentUpdateInput{AgentID: agent.ID.String(), ExpectedRevision: uint64(agent.Revision.Int64()), Paused: &paused})
+	waitDispatch(t, done)
+	if err != nil || pause.Revision != uint64(agent.Revision.Int64()+1) {
+		t.Fatalf("pause = %+v, %v", pause, err)
+	}
+	done = fixture.serve(t)
+	_, err = operator.UpdateAgent(ctx, api.OverseerAgentUpdateInput{AgentID: agent.ID.String(), ExpectedRevision: uint64(agent.Revision.Int64()), Paused: &paused})
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteRevisionConflict {
+		t.Fatalf("stale pause = %v", err)
+	}
+
+	taskID, incarnationID := testID(250), testID(251)
+	done = fixture.serve(t)
+	created, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: active.run.ProjectID.String(), AssignedAgentID: agent.ID.String(), IncarnationID: incarnationID, Title: "queued", Body: "work", Priority: 1})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priority := int64(9)
+	done = fixture.serve(t)
+	updated, err := operator.UpdateTask(ctx, api.OverseerTaskUpdateInput{TaskID: taskID, ExpectedRevision: created.Revision, Priority: &priority})
+	waitDispatch(t, done)
+	if err != nil || updated.Revision != created.Revision+1 {
+		t.Fatalf("update = %+v, %v", updated, err)
+	}
+	done = fixture.serve(t)
+	_, err = operator.UpdateTask(ctx, api.OverseerTaskUpdateInput{TaskID: taskID, ExpectedRevision: updated.Revision, Retry: true})
+	waitDispatch(t, done)
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("queued retry = %v", err)
+	}
+}
+
+func TestDaemonOperatorTaskReadBindsRevisionAndPagesUTF8(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	client, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	call := func(invoke func() error) {
+		done := fixture.serve(t)
+		if err := invoke(); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	projectID, agentID, taskID, incarnationID := testID(220), testID(221), testID(222), testID(223)
+	call(func() error {
+		_, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "read", Root: filepath.Join(filepath.Dir(fixture.socket), "read-root")})
+		return err
+	})
+	call(func() error {
+		_, err := client.CreateAgent(ctx, api.CreateAgentInput{ID: agentID, ProjectID: projectID, Name: "reader", Role: "worker", Provider: "shell", ToolBudgetLimit: 1})
+		return err
+	})
+	body := strings.Repeat("🙂", 2050)
+	var created api.MutationResult
+	call(func() error {
+		created, err = client.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: "paged", Body: body, Priority: 1})
+		return err
+	})
+	read := func(offset uint64, revision uint64) (api.TaskText, error) {
+		done := fixture.serve(t)
+		value, err := client.ReadTask(ctx, api.TaskReadInput{TaskID: taskID, ExpectedRevision: revision, Offset: offset})
+		waitDispatch(t, done)
+		return value, err
+	}
+	first, err := read(0, created.Revision)
+	if err != nil || utf8.RuneCountInString(first.Instruction) != 2048 || first.NextOffset == nil || *first.NextOffset != 2048 {
+		t.Fatalf("first page = %+v, %v", first, err)
+	}
+	second, err := read(*first.NextOffset, created.Revision)
+	if err != nil || second.Instruction != strings.Repeat("🙂", 2) || second.NextOffset != nil {
+		t.Fatalf("second page = %+v, %v", second, err)
+	}
+	_, err = read(0, created.Revision+1)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteRevisionConflict {
+		t.Fatalf("stale read = %v", err)
+	}
+}
+
+func TestDaemonOperatorAgentPathsReturnsNoChangeOverseerRuntime(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 236)
+	ctx := context.Background()
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	owner.agentID = active.run.AgentID
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	resources, err := fixture.store.Resources(ctx, active.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRuntime := ""
+	for _, resource := range resources {
+		if resource.Kind == kernel.ResourceRuntimeRoot {
+			wantRuntime = resource.Path
+		}
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	paths, err := operator.AgentPaths(ctx, api.AgentPathsInput{AgentID: active.run.AgentID.String()})
+	waitDispatch(t, done)
+	if err != nil || paths.RunID != active.run.ID.String() || paths.SourcePath != "" || paths.RuntimePath != wantRuntime || paths.Paths == nil {
+		t.Fatalf("operator overseer paths = %+v, %v; want runtime %q", paths, err, wantRuntime)
 	}
 }
 

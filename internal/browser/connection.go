@@ -382,7 +382,10 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 	case browserprotocol.StateGet:
 		snapshot, snapshotErr := current.server.backend.StateSnapshot(ctx, current.principal.ClientID)
 		if ctx.Err() != nil {
-			err = ctx.Err()
+			// A read that outran its call budget is retryable busyness the
+			// client reconnects on, as the backend already classifies it; the
+			// raw context error would read as a permanent internal fault.
+			err = ErrRateLimited
 			break
 		}
 		if snapshotErr != nil {
@@ -407,7 +410,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 	case browserprotocol.HumanRequestDetailGet:
 		detail, backendErr := current.server.backend.HumanRequestDetail(ctx, current.principal.ClientID, body)
 		if ctx.Err() != nil {
-			err = ctx.Err()
+			err = ErrRateLimited
 			break
 		}
 		if backendErr != nil {
@@ -422,7 +425,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 	case browserprotocol.TerminalTargetGet:
 		target, backendErr := current.server.backend.TerminalTarget(ctx, current.principal.ClientID, body)
 		if ctx.Err() != nil {
-			err = ctx.Err()
+			err = ErrRateLimited
 			break
 		}
 		if backendErr != nil {
@@ -486,6 +489,25 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeTaskDetail(frame.ID, result)
+	case browserprotocol.ProjectContent:
+		backend, ok := current.server.backend.(ContentBackend)
+		if !ok {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := backend.ProjectContent(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.Operation != body.Operation {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeProjectContentResult(frame.ID, result)
+		if errors.Is(err, browserprotocol.ErrOversized) {
+			err = ErrTooLarge
+		}
 	case browserprotocol.TaskEnqueue:
 		if current.server.taskBackend == nil {
 			err = ErrUnauthorized
@@ -753,7 +775,7 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 		}
 		subscription, backendErr := current.server.backend.WatchState(ctx, current.principal.ClientID, body.AfterHead)
 		if ctx.Err() != nil {
-			err = current.discardSubscription(subscription, ctx.Err())
+			err = current.discardSubscription(subscription, ErrRateLimited)
 			break
 		}
 		if backendErr != nil {

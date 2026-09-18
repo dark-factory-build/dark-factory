@@ -36,7 +36,8 @@ replayed to a fresh provider.
 The scheduler admits normal queued work across projects. It does not reserve
 a global waiting overseer slot; project A's open question is a durable await,
 not an active orchestration run, so project B remains eligible. Standing
-overseer wakeups are event-driven and no longer gate on the historical
+overseer wakeups consume worker events and periodically reconcile unfinished
+work after the configured quiet interval. They no longer gate on the historical
 `tool_calls_used` allowance.
 
 ## Provider boundary

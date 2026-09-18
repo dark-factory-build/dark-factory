@@ -62,6 +62,8 @@ type TaskInterventionID struct{ identifier }
 type PeerQuestionID struct{ identifier }
 type PeerDeliveryID struct{ identifier }
 type ContinuationID struct{ identifier }
+type ContentID struct{ identifier }
+type ContentEvidenceID struct{ identifier }
 
 func ProjectIDFromBytes(value []byte) (ProjectID, error) {
 	id, err := identifierFromBytes(value)
@@ -143,6 +145,14 @@ func PeerDeliveryIDFromBytes(value []byte) (PeerDeliveryID, error) {
 	id, err := identifierFromBytes(value)
 	return PeerDeliveryID{id}, err
 }
+func ContentIDFromBytes(value []byte) (ContentID, error) {
+	id, err := identifierFromBytes(value)
+	return ContentID{id}, err
+}
+func ContentEvidenceIDFromBytes(value []byte) (ContentEvidenceID, error) {
+	id, err := identifierFromBytes(value)
+	return ContentEvidenceID{id}, err
+}
 
 func (id ProjectID) MarshalText() ([]byte, error)              { return []byte(id.String()), nil }
 func (id AgentID) MarshalText() ([]byte, error)                { return []byte(id.String()), nil }
@@ -160,6 +170,8 @@ func (id HumanRequestDeliveryID) MarshalText() ([]byte, error) { return []byte(i
 func (id TaskInterventionID) MarshalText() ([]byte, error)     { return []byte(id.String()), nil }
 func (id PeerQuestionID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
 func (id PeerDeliveryID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
+func (id ContentID) MarshalText() ([]byte, error)              { return []byte(id.String()), nil }
+func (id ContentEvidenceID) MarshalText() ([]byte, error)      { return []byte(id.String()), nil }
 
 type digest struct {
 	b [DigestBytes]byte
@@ -510,6 +522,15 @@ type NewTask struct {
 	Title           string
 	Body            string
 	Priority        int64
+	Prerequisites   []TaskPrerequisite
+	ConflictPaths   []string
+}
+
+// TaskPrerequisite pins a consumer to the producer's particular corrected
+// work revision. A later send-back cannot silently satisfy this edge.
+type TaskPrerequisite struct {
+	TaskID       TaskID
+	WorkRevision Revision
 }
 
 type FactoryState struct {
@@ -636,9 +657,11 @@ type AgentSummary struct {
 	ReasoningEffort string
 	// AccountID is the linked provider login this agent launches with; the
 	// zero identity means the provider default.
-	AccountID AccountID
-	Idle      IdleRule
-	Revision  Revision
+	AccountID       AccountID
+	ToolBudgetLimit uint64 `json:"-"`
+	ToolCallsUsed   uint64 `json:"-"`
+	Idle            IdleRule
+	Revision        Revision
 }
 
 // AccountSummary is the served account fact: which login it is and where its

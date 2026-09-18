@@ -1197,6 +1197,55 @@ func validateTasks(ctx context.Context, connection *sql.Conn) error {
 			return err
 		}
 	}
+	if err := validateTaskScheduling(ctx, connection); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateTaskScheduling keeps dependency receipts inside the same project
+// and binds every consumed receipt to the exact successful producer version.
+// The admission query is the normal writer; this pass also protects recovery
+// and every other mutation from accepting a damaged scheduling graph.
+func validateTaskScheduling(ctx context.Context, connection *sql.Conn) error {
+	var invalid int
+	err := connection.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1
+		FROM task_prerequisites AS prerequisite
+		JOIN tasks AS consumer ON consumer.id = prerequisite.task_id
+		LEFT JOIN tasks AS producer ON producer.id = prerequisite.upstream_task_id
+		LEFT JOIN runs AS consumed ON consumed.id = prerequisite.consumed_run_id
+		WHERE producer.id IS NULL
+		   OR consumer.project_id <> producer.project_id
+		   OR producer.id = consumer.id
+		   OR prerequisite.upstream_work_revision < 1
+		   OR prerequisite.consumed_run_id IS NOT NULL AND (
+				consumed.id IS NULL
+				OR consumed.project_id <> consumer.project_id
+				OR consumed.task_id <> producer.id
+				OR consumed.task_incarnation_id <> producer.incarnation_id
+				OR consumed.admitted_task_work_revision <> prerequisite.upstream_work_revision
+				OR consumed.phase <> 'terminal'
+				OR consumed.terminal_kind <> 'succeeded'
+			)
+	)`).Scan(&invalid)
+	if err != nil {
+		return err
+	}
+	if invalid != 0 {
+		return fmt.Errorf("%w: invalid task prerequisite receipt", ErrCorruptState)
+	}
+	err = connection.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM task_conflict_paths
+		WHERE path IS NULL OR length(path) < 1 OR length(path) > 4096
+		   OR substr(path, 1, 1) = '/' OR instr(path, char(0)) > 0
+	)`).Scan(&invalid)
+	if err != nil {
+		return err
+	}
+	if invalid != 0 {
+		return fmt.Errorf("%w: invalid task conflict path", ErrCorruptState)
+	}
 	return nil
 }
 

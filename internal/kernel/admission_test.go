@@ -69,6 +69,191 @@ func TestAdmitNextSelectsGlobalPriorityWithoutCallerNomination(t *testing.T) {
 	}
 }
 
+func TestAdmissionSerializesOnlyDeclaredConflictPaths(t *testing.T) {
+	ctx := context.Background()
+	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	secondAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 201), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 202), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 203), Title: "first", Priority: 2, ConflictPaths: []string{"internal/kernel/admission.go"}}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 204, nil), mustTime(t, 6)); err != nil || !admitted.Admitted() || admitted.Run.TaskID != first.ID {
+		t.Fatalf("first = %+v, %v", admitted, err)
+	}
+	blocked, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 205), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 206), Title: "same file", Priority: 3, ConflictPaths: []string{"internal/kernel/admission.go"}}, mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 207, nil), mustTime(t, 8)); err != nil || admitted.Admitted() || admitted.Reason != NoAdmissionNoEligibleWork {
+		t.Fatalf("overlap admission = %+v, %v", admitted, err)
+	}
+	if fresh, found, err := store.Task(ctx, blocked.ID); err != nil || !found || fresh.Status != TaskQueued {
+		t.Fatalf("blocked task = %+v, %t, %v", fresh, found, err)
+	}
+}
+
+func TestAdmissionWaitsForExactProducerWorkRevision(t *testing.T) {
+	ctx := context.Background()
+	store, _, project, producerAgent := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 215), ProjectID: project.ID, Name: "consumer", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 216), ProjectID: project.ID, AssignedAgentID: producerAgent.ID, IncarnationID: incarnationID(t, 217), Title: "producer"}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 218), ProjectID: project.ID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 219), Title: "consumer", Priority: 9, Prerequisites: []TaskPrerequisite{{TaskID: producer.ID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 220, nil), mustTime(t, 7)); err != nil || !admitted.Admitted() || admitted.Run.TaskID != producer.ID {
+		t.Fatalf("producer admission = %+v, %v", admitted, err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 221, nil), mustTime(t, 8)); err != nil || admitted.Admitted() || admitted.Reason != NoAdmissionNoEligibleWork {
+		t.Fatalf("consumer admitted without result = %+v, %v", admitted, err)
+	}
+	if task, found, err := store.Task(ctx, consumer.ID); err != nil || !found || task.Status != TaskQueued {
+		t.Fatalf("consumer state = %+v, %t, %v", task, found, err)
+	}
+}
+
+func TestAdmissionConsumesExactSuccessfulProducerRevision(t *testing.T) {
+	ctx := context.Background()
+	proposal, _ := NewSuccessProposal("producer result")
+	store, finalizing := finalizingReleasedRun(t, RoleOrchestrator, VerificationNone, proposal)
+	defer store.Close()
+	producer, err := finalizeTestRun(t, store, finalizing, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 225), ProjectID: producer.ProjectID, Name: "consumer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 61))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 229), ProjectID: producer.ProjectID, AssignedAgentID: consumerAgent.ID, IncarnationID: incarnationID(t, 230), Title: "consumer", Priority: 10, Prerequisites: []TaskPrerequisite{{TaskID: producer.TaskID, WorkRevision: mustRevision(t, 1)}}}, mustTime(t, 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerKeys := admissionKeys(t, 231, nil)
+	result, err := store.AdmitNext(ctx, consumerKeys, mustTime(t, 63))
+	if err != nil || !result.Admitted() || result.Run.TaskID != consumer.ID {
+		t.Fatalf("consumer admission = %+v, %v", result, err)
+	}
+	var consumed []byte
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if err := connection.QueryRowContext(ctx, `SELECT consumed_run_id FROM task_prerequisites WHERE task_id = ?`, consumer.ID.Bytes()).Scan(&consumed); err != nil {
+		t.Fatal(err)
+	}
+	if string(consumed) != string(producer.ID.Bytes()) {
+		t.Fatalf("consumed run = %x, want %x", consumed, producer.ID.Bytes())
+	}
+	producerTask, found, err := store.Task(ctx, producer.TaskID)
+	if err != nil || !found {
+		t.Fatalf("producer task after success: %+v, %v", producerTask, err)
+	}
+	if _, err := store.SendBackTask(ctx, producer.TaskID, producerTask.Revision, "correct producer", mustTime(t, 64)); err != nil {
+		t.Fatal(err)
+	}
+	connection.Close()
+	connection, err = store.readerConnection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDurableControls(ctx, connection); err != nil {
+		t.Fatalf("receipt invalid after producer send-back: %v", err)
+	}
+	connection.Close()
+	corruptSQL(t, store, `UPDATE task_prerequisites SET consumed_run_id = ? WHERE task_id = ?`, result.Run.ID.Bytes(), consumer.ID.Bytes())
+	connection, err = store.readerConnection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDurableControls(ctx, connection); err == nil {
+		t.Fatal("mismatched consumed receipt accepted")
+	}
+	connection.Close()
+	corruptSQL(t, store, `UPDATE task_prerequisites SET consumed_run_id = ? WHERE task_id = ?`, producer.ID.Bytes(), consumer.ID.Bytes())
+
+	// Complete the consumer through the supported lifecycle, then send it back.
+	// Its prerequisite still points at the immutable successful producer receipt
+	// even though the producer has already advanced to work revision 2.
+	running := activateAllResourcesUnique(t, store, *result.Run, 70, 700)
+	session := terminalSessionForRunTest(t, store, result.Run.ID)
+	running, err = store.ActivateRun(ctx, result.Run.ID, session.ID, running.Revision, session.Revision, mustTime(t, 80))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerProposal, err := NewSuccessProposal("consumer result")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing, err = store.ProposeAttemptOutcome(ctx, consumerKeys.AttemptDigest, consumerProposal, mustTime(t, 90))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalizing = observeMissingProcessExits(t, store, running.ID, 91)
+	for index, resource := range resourcesForRunTest(t, store, running.ID) {
+		if resource.State == ResourceReleased {
+			continue
+		}
+		if _, err := store.ReleaseResource(ctx, running.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(100+index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeTerminalSessionAtCurrent(t, store, running.ID, 104)
+	current, found, err := store.Run(ctx, running.ID)
+	if err != nil || !found {
+		t.Fatalf("read consumer for finalization: %+v, found=%v, err=%v", current, found, err)
+	}
+	if _, err := finalizeTestRun(t, store, current, 105); err != nil {
+		t.Fatal(err)
+	}
+	consumerTask, found, err := store.Task(ctx, consumer.ID)
+	if err != nil || !found {
+		t.Fatalf("consumer task after success: %+v, found=%v, err=%v", consumerTask, found, err)
+	}
+	if _, err := store.SendBackTask(ctx, consumer.ID, consumerTask.Revision, "correct consumer", mustTime(t, 106)); err != nil {
+		t.Fatal(err)
+	}
+	corrected, err := store.AdmitNext(ctx, admissionKeys(t, 240, nil), mustTime(t, 107))
+	if err != nil || !corrected.Admitted() || corrected.Run.TaskID != consumer.ID {
+		t.Fatalf("corrected consumer admission = %+v, %v", corrected, err)
+	}
+}
+
+func TestAdmissionAllowsIndependentConflictPathsInParallel(t *testing.T) {
+	ctx := context.Background()
+	store, _, project, firstAgent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	secondAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 208), ProjectID: project.ID, Name: "second", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 5}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 209), ProjectID: project.ID, AssignedAgentID: firstAgent.ID, IncarnationID: incarnationID(t, 210), Title: "first", ConflictPaths: []string{"a.go"}}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdmitNext(ctx, admissionKeys(t, 211, nil), mustTime(t, 6)); err != nil {
+		t.Fatal(err)
+	}
+	independent, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 212), ProjectID: project.ID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 213), Title: "second", ConflictPaths: []string{"b.go"}}, mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admitted, err := store.AdmitNext(ctx, admissionKeys(t, 220, nil), mustTime(t, 8)); err != nil || !admitted.Admitted() || admitted.Run.TaskID != independent.ID {
+		t.Fatalf("independent admission = %+v, %v", admitted, err)
+	}
+}
+
 func TestAdmitNextUsesSeparateWorkerAndOverseerSlots(t *testing.T) {
 	ctx := context.Background()
 	store, _, project, worker := newAdmissionStore(t, RoleWorker, 1)

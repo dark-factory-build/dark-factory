@@ -454,3 +454,61 @@ func TestEnqueuePollValidatesBeforeTaskAndCursorWrites(t *testing.T) {
 		}
 	}
 }
+
+func TestOverseerReconsidersUnchangedUnfinishedWork(t *testing.T) {
+	blocked, _ := NewBlockedProposal("external prerequisite")
+	failed, _ := NewFailureProposal(FailureInternal, "provider exited")
+	for _, proposal := range []Proposal{blocked, failed} {
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+		func() {
+			defer store.Close()
+			ctx := context.Background()
+			terminal, err := finalizeTestRun(t, store, finalizing, 70)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _, err := store.Task(ctx, terminal.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 151), ProjectID: terminal.ProjectID, Name: "supervisor", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 71))
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, after, instruction := IdleStandingInstruction, uint32(1), "Reconcile unfinished work without blind retries."
+			if _, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 72)); err != nil {
+				t.Fatal(err)
+			}
+			first, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 1072))
+			if err != nil || len(first) != 1 {
+				t.Fatalf("initial wake: %+v, %v", first, err)
+			}
+			if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 2072)); err != nil || len(tasks) != 0 {
+				t.Fatalf("stacked wake: %+v, %v", tasks, err)
+			}
+			if _, err := store.UpdateTask(ctx, first[0].ID, first[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 2073)); err != nil {
+				t.Fatal(err)
+			}
+			// Consume the cancellation without a worker event, then repeat at the
+			// same head. Reconciliation must commit even when the cursor is current.
+			second, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 2074))
+			if err != nil || len(second) != 1 || !strings.Contains(second[0].Body, "mode=full") {
+				t.Fatalf("unchanged backlog wake: %+v, %v", second, err)
+			}
+			if _, err := store.UpdateTask(ctx, second[0].ID, second[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 2075)); err != nil {
+				t.Fatal(err)
+			}
+			if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 3073)); err != nil || len(tasks) != 0 {
+				t.Fatalf("ignored quiet interval: %+v, %v", tasks, err)
+			}
+			third, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 3074))
+			if err != nil || len(third) != 1 {
+				t.Fatalf("periodic backlog wake: %+v, %v", third, err)
+			}
+			afterTask, _, err := store.Task(ctx, terminal.TaskID)
+			if err != nil || afterTask.Status != before.Status || afterTask.WorkRevision != before.WorkRevision || afterTask.Revision != before.Revision {
+				t.Fatalf("reconsideration mutated worker: %+v, %v", afterTask, err)
+			}
+		}()
+	}
+}

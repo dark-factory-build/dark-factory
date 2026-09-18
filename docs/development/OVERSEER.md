@@ -14,6 +14,20 @@ send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
 admission limits. A configured `max_run_seconds: 0` disables the run deadline;
 intake honors that operator choice and does not require a finite duration.
+
+Supervision wakes on worker events and, while unfinished tasks remain, after its
+configured idle interval even if no new event arrives. An idle reconciliation
+rechecks blocked and failed tasks against current prerequisites and delivery
+proof. Preserve historical outcomes; reconsidering a task is not permission to
+blindly retry it or duplicate another owner's implementation. Read the previous
+supervision result first and distinguish delivered history from actionable work.
+
+Workers should use `./scripts/go-check.sh` plus focused tests while implementing
+and record the exact head and checks before review. Process-sensitive checks use
+`./scripts/with-local-ci-lease.sh`; reviewers reproduce relevant risks instead
+of rerunning the full suite by default. The protected merge queue selects the
+appropriate fixed gates from its complete combined-tree diff and remains the
+authoritative pre-merge full check.
 The overseer lane is not an extra worker slot. Do not infer
 capacity from the number of visible terminals or raise limits to clear a queue.
 
@@ -24,7 +38,22 @@ Return actionable findings to the responsible worker and review its resulting
 head again. Record the next action and its existing task, Change, PR or operation
 identity in the retained result so a later pass can continue without duplication.
 An unavailable authority or exhausted repair allowance needs a precise escalation,
-not a claim that delegation completed the objective.
+not a claim that delegation completed the objective. A worker run that ended
+`failed` with `provider exited before an attempt outcome` proves nothing about
+effects: a provider can act and then exit before reporting. Read the settled
+run's evidence first: `overseer status --task` gives the failed task's exact
+run detail with its provider exit and how long it ran after activation, its
+retained handoff gives the Change head to compare against the head the worker
+was handed, and its task names any operation receipts. Only a refusal before
+execution is a retry candidate (an exit within seconds of activation, an
+unchanged head, no receipts): retry it once through the same task (`overseer
+task update --retry`, which keeps its worker, or a send-back). Anything else
+is reconciled from its receipts, never replayed, and escalated when uncertain.
+A retry that fails the same way, or an uncertain effect, becomes a human
+request raised in that same pass naming the task, the run and its exit, then
+other work continues. Deferring it to a later wake records no disposition:
+`factoryctl task recovery` shows the task as notification scheduled,
+disposition none, and the operator has no Needs You to answer.
 
 After a verified merge, include housekeeping in that same pass. Pause an obsolete
 worker only after checking that it has neither active nor queued work and is not
@@ -180,7 +209,7 @@ Then explicitly run `factoryctl attempt source --task TASK_ID`; its response
 must contain exactly one usable receipt naming the Change ID, base commit,
 `head_commit`, `branch` (`factory/<first 12 hex of change_id>`), target task
 ID, task work revision, current retained Change revision, the worktree as
-`source_path`, the repository's Git directory as `git_directory`, and `dirty`.
+`source_path`, the Change's actual Git directory as `git_directory`, and `dirty`.
 Match every identity value to the requested task and status. The work is the
 branch head: read it with `git --git-dir="$git_directory"` and the commit
 named by `head_commit`, never by constructing a `$home/changes/...` path,
@@ -423,7 +452,8 @@ human request, not a retry.
 - Production-line delta: added minus deleted outside tests, docs and fixtures,
   from the numstat, with the largest files named.
 - How it was verified: what the worker's result text says it ran, and that
-  the merge queue runs `scripts/local-ci.sh`. Claim nothing you did not see.
+  the merge queue runs the selected `scripts/local-ci.sh` mode on the combined
+  tree. Claim nothing you did not see.
 - Never an email, an org name, an account id, or a `/Users/<name>` path.
 - End with the repository's generated-with line and nothing after it. You
   have no session link; never invent one.
@@ -433,14 +463,17 @@ Write that body to a file; the review needs it.
 ## 5. Get the cold review, then merge
 
 The existing host `factory-review-intake.py` controller handles independent
-review for published PRs linked to tracked source issues. It pins the observed
+review for published PRs linked to tracked source issues, including the tracking
+issues you create through the App. It pins the observed
 PR head and base in its review journal, runs at most one fresh
 `cold-review.sh` per pass, and sends an idempotent task containing the exact
 Maintainer operation and its result. Intake and release checks run first.
 The reviewer is a separate read-only session, never the author or overseer.
 
-Observe the operation named in that task before acting. Only a completed App
-`submit_pull_request_review` result for the exact head is a verdict. A retained
+Observe the operation named in that task before acting. For this App-managed
+intake, only a completed `submit_pull_request_review` result for the exact head
+settles the operation. Other publishers can record independent reviews through
+the host path in [WORKFLOW.md](WORKFLOW.md); those do not settle an App operation. A retained
 Change review is useful source evidence, not a published-head approval. The
 controller preserves uncertainty after an interrupted launch and observes the
 same operation on later passes; it does not replay the launch automatically.
@@ -584,6 +617,16 @@ Known credentials and private paths are redacted; partial boundary lines are
 omitted so an arbitrary cursor cannot reveal a fragment of a redacted line.
 `omitted` counts skipped raw bytes. This is a bounded observation of available
 output, not a complete transcript or a guarantee that output is secret-free.
+
+When a worker run reaches terminal, the overseer may continue the same command
+against the retained bounded diagnostic window. The daemon stores at most 1 MiB
+of uncorrelated runner output, with raw-byte floor and head cursors. A cursor
+below floor returns an explicit gap and rebases to that floor; missing history
+returns not found, never invented output. Only an authorized project overseer
+may read this settled window, and the same credential/path redaction and
+complete-line boundaries apply after restart. Saving the window occurs only
+after the authenticated runner result is durably consumed, so a diagnostic-write
+failure cannot turn an accepted outcome into an ambiguous settlement.
 
 Operator supervision can use `factoryctl task recovery --task TASK_ID --incarnation INCARNATION_ID` for current result and blocker text without
 opening runtime files. `result_truncated` explicitly marks a UTF-8-safe 65536-byte

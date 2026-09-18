@@ -52,3 +52,27 @@ func TestProjectOverseerSnapshotCarriesHandoffIdentitiesWithoutLocations(t *test
 		t.Fatalf("Git-free handoff projected = %+v, %v", projected, err)
 	}
 }
+
+func TestAgentProjectionCarriesLaunchAndIdleControlsToBothOperatorViews(t *testing.T) {
+	projectID, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{1}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID, err := kernel.AgentIDFromBytes(bytes.Repeat([]byte{2}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := kernel.NewRevision(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := kernel.AgentSummary{ID: agentID, ProjectID: projectID, Name: "worker", Role: "worker", Provider: "codex", Model: "gpt-6-astra", ReasoningEffort: "high", ToolBudgetLimit: 8, ToolCallsUsed: 3, Idle: kernel.IdleRule{Policy: kernel.IdleStandingInstruction, AfterSeconds: 12, Instruction: "inspect", RunBudget: 4, RunsUsed: 2}, Revision: revision}
+	dashboard := projectSnapshot(kernel.DashboardSnapshot{Agents: []kernel.AgentSummary{agent}})
+	if len(dashboard.Agents) != 1 || dashboard.Agents[0].ToolBudgetLimit != 8 || dashboard.Agents[0].ToolCallsUsed != 3 || dashboard.Agents[0].Model != agent.Model || dashboard.Agents[0].ReasoningEffort != agent.ReasoningEffort || dashboard.Agents[0].IdlePolicy != string(agent.Idle.Policy) || dashboard.Agents[0].IdleAfterSeconds != agent.Idle.AfterSeconds || dashboard.Agents[0].IdleInstruction != agent.Idle.Instruction || dashboard.Agents[0].IdleRunBudget != agent.Idle.RunBudget || dashboard.Agents[0].IdleRunsUsed != agent.Idle.RunsUsed {
+		t.Fatalf("dashboard agent = %+v", dashboard.Agents)
+	}
+	overseer, err := projectOverseerSnapshot(kernel.OverseerSnapshot{ProjectID: projectID, Agents: []kernel.AgentSummary{agent}})
+	if err != nil || len(overseer.Agents) != 1 || overseer.Agents[0] != dashboard.Agents[0] {
+		t.Fatalf("overseer agent = %+v, err=%v", overseer.Agents, err)
+	}
+}

@@ -110,6 +110,20 @@ func (client *OperatorClient) WebStatus(ctx context.Context) (WebStatus, error) 
 	return result, nil
 }
 
+func (client *OperatorClient) TerminalObserve(ctx context.Context, input TerminalObserveInput) (TerminalObservation, error) {
+	if !validTerminalObservationInput(input) {
+		return TerminalObservation{}, ErrInvalidInput
+	}
+	var result TerminalObservation
+	if err := client.client.call(ctx, "operator_terminal_observe", input, &result); err != nil {
+		return TerminalObservation{}, err
+	}
+	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
+		return TerminalObservation{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) WebListClients(ctx context.Context, after string) (WebClientPage, error) {
 	if after != "" && !validID(after) {
 		return WebClientPage{}, ErrInvalidInput
@@ -163,6 +177,20 @@ func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, 
 	}
 	if !validSnapshot(result) {
 		return DashboardSnapshot{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) AgentPaths(ctx context.Context, input AgentPathsInput) (AgentPaths, error) {
+	if !validAgentPathsInput(input) {
+		return AgentPaths{}, ErrInvalidInput
+	}
+	var result AgentPaths
+	if err := client.client.call(ctx, "agent_paths", input, &result); err != nil {
+		return AgentPaths{}, err
+	}
+	if !validAgentPaths(result) {
+		return AgentPaths{}, ErrProtocol
 	}
 	return result, nil
 }
@@ -272,11 +300,39 @@ func (client *OperatorClient) TaskRecovery(ctx context.Context, input TaskRecove
 	return result, nil
 }
 
+func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput) (TaskText, error) {
+	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Offset > uint64(^uint64(0)>>1) {
+		return TaskText{}, ErrInvalidInput
+	}
+	var result TaskText
+	if err := client.client.call(ctx, "task_read", input, &result); err != nil {
+		return TaskText{}, err
+	}
+	if result.TaskID != input.TaskID || result.Revision != input.ExpectedRevision || !validText(result.Instruction, 0, 8192) || !validText(result.Feedback, 0, 8192) || result.Outcome != nil && !validText(*result.Outcome, 0, 8192) || result.NextOffset != nil && *result.NextOffset != input.Offset+2048 {
+		return TaskText{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
 	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "enqueue_task", input)
+}
+
+func (client *OperatorClient) UpdateTask(ctx context.Context, input OverseerTaskUpdateInput) (MutationResult, error) {
+	if !validOverseerTaskUpdateInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_update_task", input)
+}
+
+func (client *OperatorClient) UpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_update_agent", input)
 }
 
 func (client *OperatorClient) SetDispatch(ctx context.Context, expectedRevision uint64, enabled bool) (MutationResult, error) {
@@ -411,7 +467,8 @@ func (client *AttemptClient) TerminalObserve(ctx context.Context, input Terminal
 	if err := client.client.call(ctx, "terminal_observe", input, &result); err != nil {
 		return TerminalObservation{}, err
 	}
-	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
+	futureCursorReset := result.Gap && input.Cursor > result.Head && result.Cursor == result.Head
+	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor && !futureCursorReset || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
 		return TerminalObservation{}, ErrProtocol
 	}
 	return result, nil
@@ -987,7 +1044,7 @@ func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
 	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel && !input.Retry {
 		return false
 	}
-	if input.Retry && (input.Title != nil || input.Body != nil || input.Priority != nil || input.AssignedAgentID == nil || input.Cancel) {
+	if input.Retry && (input.Title != nil || input.Body != nil || input.Priority != nil || input.Cancel) {
 		return false
 	}
 	if input.Title != nil && !validText(*input.Title, 1, 1024) || input.Body != nil && !validText(*input.Body, 0, 131072) {
