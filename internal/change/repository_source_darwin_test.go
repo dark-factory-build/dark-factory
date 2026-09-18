@@ -90,3 +90,17 @@ func TestRegisteredSourcePinsEffectiveGitURLRewrites(t *testing.T) {
 		t.Fatalf("operator transport rewrite: publication=%q err=%v", source.PublicationRepository, err)
 	}
 }
+
+func TestRegisteredSourcePinsOtherUpstreamRemotes(t *testing.T) {
+	ctx := context.Background()
+	fixture := newLocalGitFixture(t, "sha1")
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "add", "upstream", "https://github.com/team/upstream.git")
+	source, err := InspectRepositorySource(ctx, fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, fixture.repository, "remote", "set-url", "upstream", "https://github.com/other/repo.git")
+	if _, err := SelectRegisteredGit(ctx, fixture.git, fixture.repository, "HEAD", source); err == nil {
+		t.Fatal("changed upstream remote selected")
+	}
+}

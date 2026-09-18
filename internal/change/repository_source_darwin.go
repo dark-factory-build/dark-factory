@@ -4,6 +4,7 @@ package change
 
 import (
 	"context"
+	"crypto/sha256"
 	"strings"
 )
 
@@ -42,47 +43,48 @@ func InspectRepositorySource(ctx context.Context, gitExecutable, root, base stri
 }
 
 func (authority *gitAuthority) sourceIdentity(ctx context.Context) (RepositorySourceIdentity, error) {
-	values := make([]string, 2)
-	for i, key := range []string{"remote.origin.url", "remote.origin.pushurl"} {
-		result, err := authority.run(ctx, maxGitSelectionOutput, "-C", authority.repositoryRoot, "config", "--local", "--null", "--get-all", key)
-		if err != nil {
-			return RepositorySourceIdentity{}, err
-		}
-		if result.exitCode == 1 && len(result.output) == 0 {
-			continue
-		}
-		value := string(result.output)
-		if result.exitCode != 0 || !strings.HasSuffix(value, "\x00") || strings.Count(value, "\x00") != 1 {
-			return RepositorySourceIdentity{}, &ValidationError{Reason: "origin must have one fetch and publication target"}
-		}
-		values[i] = strings.TrimSuffix(value, "\x00")
+	// Every configured remote can be a branch's upstream. Pin all effective
+	// destinations, including Git URL rewrites, without retaining credentials.
+	output, err := authority.succeed(ctx, maxGitSelectionOutput, "-C", authority.repositoryRoot, "remote")
+	if err != nil {
+		return RepositorySourceIdentity{}, err
 	}
-	// Git expands insteadOf/pushInsteadOf before transport. Bind the effective
-	// destinations, so a later local rewrite cannot silently retarget work.
-	if values[0] != "" {
+	remoteNames := strings.Fields(string(output))
+	if len(remoteNames) > 0 && strings.Join(remoteNames, "\n")+"\n" != string(output) {
+		return RepositorySourceIdentity{}, &ValidationError{Reason: "invalid registered remote names"}
+	}
+	digest := sha256.New()
+	publication := ""
+	for _, remote := range remoteNames {
+		values := make([]string, 2)
 		for i := range values {
 			arguments := []string{"-C", authority.repositoryRoot, "remote", "get-url", "--all"}
 			if i == 1 {
 				arguments = append(arguments, "--push")
 			}
-			output, err := authority.succeed(ctx, maxGitSelectionOutput, append(arguments, "origin")...)
+			output, err := authority.succeed(ctx, maxGitSelectionOutput, append(arguments, "--", remote)...)
 			if err != nil {
 				return RepositorySourceIdentity{}, err
 			}
 			value := string(output)
 			if !strings.HasSuffix(value, "\n") || strings.Count(value, "\n") != 1 || strings.ContainsAny(value, "\x00\r") {
-				return RepositorySourceIdentity{}, &ValidationError{Reason: "origin must have one effective fetch and publication target"}
+				return RepositorySourceIdentity{}, &ValidationError{Reason: "each remote must have one effective fetch and publication target"}
 			}
 			values[i] = strings.TrimSuffix(value, "\n")
 		}
+		digest.Write([]byte(remote + "\x00" + values[0] + "\x00" + values[1] + "\x00"))
+		if remote == "origin" {
+			_, publication, err = remoteSourceDigest(values[0], values[1])
+			if err != nil {
+				return RepositorySourceIdentity{}, err
+			}
+		}
 	}
-	digest, publication, err := remoteSourceDigest(values[0], values[1])
-	if err != nil {
-		return RepositorySourceIdentity{}, err
-	}
+	var originDigest [32]byte
+	copy(originDigest[:], digest.Sum(nil))
 	git, err := NewRepositoryIdentity(authority.repository.git.device, authority.repository.git.inode)
 	if err != nil {
 		return RepositorySourceIdentity{}, err
 	}
-	return RepositorySourceIdentity{Root: authority.repository.root, Git: git, OriginDigest: digest, PublicationRepository: publication}, nil
+	return RepositorySourceIdentity{Root: authority.repository.root, Git: git, OriginDigest: originDigest, PublicationRepository: publication}, nil
 }
