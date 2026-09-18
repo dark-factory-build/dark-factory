@@ -40,3 +40,22 @@ func TestGitHubCLIUsesOperatorConnection(t *testing.T) {
 		t.Fatal("CLI failed scoped connect flow")
 	}
 }
+
+func TestGitHubAttemptCannotBorrowOperatorCredentials(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	operatorEnvironment := webEnvironment(fixture)
+	var out, diagnostic bytes.Buffer
+	exit := runWithOpener(context.Background(), []string{"github", "disconnect"}, func(name string) string {
+		if name == "DARK_FACTORY_ATTEMPT_TOKEN_FILE" {
+			return "/private/worker/attempt.token"
+		}
+		if operatorEnvironment(name) != "" {
+			t.Fatal("attempt session read operator credential configuration")
+		}
+		return operatorEnvironment(name)
+	}, &out, &diagnostic, nil)
+	if exit != exitFailure || out.Len() != 0 || !strings.Contains(diagnostic.String(), "operator session") {
+		t.Fatal("attempt session reached operator GitHub settings")
+	}
+}
