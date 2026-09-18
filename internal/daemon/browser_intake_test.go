@@ -58,11 +58,7 @@ func TestBrowserIntakePreviewAllowsStateAndRevocationDuringRemoteRead(t *testing
 	if _, err := f.backend.StateSnapshot(readCtx, rawBrowserClient(f.client.ID)); err != nil {
 		t.Fatalf("state stalled behind remote preview: %v", err)
 	}
-	current, found, err := f.store.BrowserClient(readCtx, f.client.ID)
-	if err != nil || !found {
-		t.Fatalf("paired client disappeared: %v", err)
-	}
-	if _, err := f.store.RevokeBrowserClient(readCtx, current.ID, current.Revision, adapterTime(t, 2_100)); err != nil {
+	if _, err := f.daemon.RevokeBrowserClient(readCtx, f.client.ID, f.client.Revision); err != nil {
 		t.Fatalf("revocation stalled behind remote preview: %v", err)
 	}
 	close(release)
