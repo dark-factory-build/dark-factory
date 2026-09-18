@@ -260,6 +260,8 @@ func TestConfigRejectsRawAuthorityAndInputCorruption(t *testing.T) {
 			v.Role, v.FinalName, v.PreviousWorkingDirectory = kernel.RoleOrchestrator, "", "relative"
 		},
 		func(v *Config) { v.RepositoryRoot = "relative" },
+		func(v *Config) { v.RepositoryGitIdentity = change.RepositoryIdentity{} },
+		func(v *Config) { v.RepositoryOriginDigest = [32]byte{} },
 		func(v *Config) { v.FactoryctlExecutable = "" },
 		func(v *Config) { v.FactoryctlExecutable = "relative/factoryctl" },
 		func(v *Config) { v.FactoryctlExecutable = "/private/../factoryctl" },
@@ -305,7 +307,7 @@ func configFixture(t testing.TB) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, AgentID: "agent-fixture", TaskIncarnationID: "incarnation-fixture", RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", ToolchainReadRoots: "/opt/software/node:/opt/software/go", LocalCILeaseDir: "/private/repository/.git/dark-factory-local-ci", AccountHome: "/private/account", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, GitCommonDir: "/private/repository/.git", Revision: "main", ChangeParent: "/private/changes", FinalName: "change", AttemptSocket: "/private/api.sock", ProviderTask: []byte("printf exact")}
+	return Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, AgentID: "agent-fixture", TaskIncarnationID: "incarnation-fixture", RuntimePath: "/private/runtime", RuntimeIdentity: runner.FileIdentity{Device: 1, Inode: 2}, GitExecutable: "/Library/Developer/CommandLineTools/usr/bin/git", FactoryctlExecutable: "/private/release/factoryctl", ToolPath: "/opt/homebrew/bin:/usr/bin:/bin", ToolchainReadRoots: "/opt/software/node:/opt/software/go", LocalCILeaseDir: "/private/repository/.git/dark-factory-local-ci", AccountHome: "/private/account", RepositoryRoot: "/private/repository", RepositoryIdentity: repository, RepositoryGitIdentity: repository, RepositoryOriginDigest: [32]byte{1}, GitCommonDir: "/private/repository/.git", Revision: "main", ChangeParent: "/private/changes", FinalName: "change", AttemptSocket: "/private/api.sock", ProviderTask: []byte("printf exact")}
 }
 
 func resultFixture(t testing.TB) Result {

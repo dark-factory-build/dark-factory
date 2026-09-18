@@ -382,7 +382,7 @@ func (a *runtimeAuthority) sealProviderTask(kind kernel.Provider, task []byte) (
 }
 
 func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, config Config) (change.WorktreeFacts, error) {
-	selection, err := change.SelectGit(ctx, config.GitExecutable, config.RepositoryRoot, config.Revision, config.RepositoryIdentity)
+	selection, err := change.SelectRegisteredGit(ctx, config.GitExecutable, config.RepositoryRoot, config.Revision, change.RepositorySourceIdentity{Root: config.RepositoryIdentity, Git: config.RepositoryGitIdentity, OriginDigest: config.RepositoryOriginDigest})
 	if err != nil {
 		return change.WorktreeFacts{}, err
 	}

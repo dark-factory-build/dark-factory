@@ -94,7 +94,7 @@ func TestOperatorEnqueueAnyWorkerTaskIsUnclaimed(t *testing.T) {
 		waitDispatch(t, done)
 	}
 	call("create project", func() error {
-		_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: testID(1), Name: "project", Root: "/private/tmp/shared-project"})
+		_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: testID(1), Name: "project", Root: contentRepositoryFixture(t)})
 		return err
 	})
 	call("create worker", func() error {

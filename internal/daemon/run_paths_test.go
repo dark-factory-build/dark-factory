@@ -268,7 +268,19 @@ func adapterPublishChange(t *testing.T, store *kernel.Store, run kernel.Run) ker
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository, err := kernel.NewFileIdentity(7, 8)
+	route, found, err := store.TaskRepository(ctx, run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("repository route: found=%v err=%v", found, err)
+	}
+	source, verified, err := store.RepositorySourceIdentity(ctx, route.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, inode := uint64(7), uint64(8)
+	if verified {
+		device, inode = source.RootDevice, source.RootInode
+	}
+	repository, err := kernel.NewFileIdentity(int64(device), int64(inode))
 	if err != nil {
 		t.Fatal(err)
 	}

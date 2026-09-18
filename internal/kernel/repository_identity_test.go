@@ -96,3 +96,23 @@ func TestV22MigrationKeepsExplicitUnverifiedSourceUntilHostProof(t *testing.T) {
 		t.Fatalf("missing proof placeholder = %v", err)
 	}
 }
+
+func TestRegisteredContentSourceMismatchRollsBack(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	defer store.Close()
+	identity := RepositorySourceIdentity{RootDevice: 1, RootInode: 2, GitDevice: 1, GitInode: 3, OriginDigest: [32]byte{1}}
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 205), Name: "source", Root: "/source", SourceIdentity: &identity}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := contentSpec(t, project.ID, 206, "body")
+	spec.RepositoryDevice, spec.RepositoryInode = 1, 99
+	if _, err := store.CreateContent(ctx, spec, mustTime(t, 3)); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("foreign source = %v", err)
+	}
+	spec.RepositoryInode = 2
+	if _, err := store.CreateContent(ctx, spec, mustTime(t, 3)); err != nil {
+		t.Fatalf("correct source after refusal = %v", err)
+	}
+}

@@ -137,6 +137,9 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 	if err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
+	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return ContentRevision{}, err
 	}
@@ -207,6 +210,9 @@ func reviseContentTx(ctx context.Context, tx *writeTx, expected Revision, spec N
 	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, next)
 	if err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
+	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -351,6 +357,9 @@ func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, rev
 		return tx.Rollback(err)
 	}
 	if _, err := tx.connection.ExecContext(ctx, `INSERT OR IGNORE INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, ?, ?)`, id.Bytes(), revision, repositoryID.Bytes()); err != nil {
+		return tx.Rollback(err)
+	}
+	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)

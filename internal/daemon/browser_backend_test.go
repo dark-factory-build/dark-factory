@@ -44,6 +44,9 @@ func newAdapterFixture(t *testing.T, capabilities kernel.BrowserCapabilityMask) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.InitializeRepositoryBase(context.Background(), "HEAD"); err != nil {
+		t.Fatal(err)
+	}
 	daemon, err := newDaemon(store, func() time.Time { return clock })
 	if err != nil {
 		_ = store.Close()
