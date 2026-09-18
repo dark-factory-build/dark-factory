@@ -60,6 +60,9 @@ function harness(overrides = {}) {
     inviteRemote: overrides.inviteRemote ?? (async () => remoteInvite),
     listBrowserClients: overrides.listBrowserClients ?? (async () => ({ clients: [], more: false })),
     revokeBrowserClient: overrides.revokeBrowserClient ?? (async () => { throw new SessionError("not_found"); }),
+    getRepositories: overrides.getRepositories ?? (async () => []),
+    mutateRepository: overrides.mutateRepository ?? (async () => undefined),
+    createProject: overrides.createProject ?? (async () => undefined),
     clientId: overrides.clientId ?? "60".repeat(16),
     capabilities: overrides.capabilities ?? 15,
   };
@@ -1034,4 +1037,26 @@ test("paired devices are listed on request, revoked once, then reread", async ()
   failing.emitStatus("ready");
   await failing.controller.revokeDevice({ clientId: phone.clientId, expectedRevision: 1n });
   assert.equal(failing.latest().devicesError, "stale");
+});
+
+
+test("repository mutation refusal survives its successful readback", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  let refuse = true;
+  const context = harness({
+    mutateRepository: async () => { if (refuse) throw new SessionError("stale"); },
+    getRepositories: async () => [],
+  });
+  const request = { action: "enabled", id: "61".repeat(16), projectId, expectedRevision: 1n, enabled: false };
+  context.controller.start();
+  context.emitStatus("ready");
+  await context.controller.mutateRepository(request);
+  assert.equal(context.latest().repositoryErrors.get(projectId), "stale");
+
+  await context.controller.loadRepositories(projectId);
+  assert.equal(context.latest().repositoryErrors.get(projectId), "stale");
+
+  refuse = false;
+  await context.controller.mutateRepository(request);
+  assert.equal(context.latest().repositoryErrors.has(projectId), false);
 });

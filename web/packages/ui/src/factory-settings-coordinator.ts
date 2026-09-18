@@ -104,7 +104,6 @@ export class FactorySettingsCoordinator {
       const repositories = await session.getRepositories(projectId);
       if (!this.#owner.current(generation)) return;
       this.#repositories.set(projectId, repositories);
-      this.#repositoryErrors.delete(projectId);
     } catch (error) {
       if (!this.#owner.current(generation)) return;
       this.#repositoryErrors.set(projectId, this.#owner.errorCode(error));
