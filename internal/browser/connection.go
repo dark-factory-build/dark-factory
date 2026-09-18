@@ -553,6 +553,28 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeProjectLimitsResult(frame.ID, result)
+	case browserprotocol.RepositoriesGet:
+		if current.server.consoleBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.consoleBackend.Repositories(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeRepositories(frame.ID, result)
+	case browserprotocol.RepositoryMutate:
+		if current.server.consoleBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.consoleBackend.MutateRepository(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeRepositoryMutateResult(frame.ID, result)
 	case browserprotocol.TaskUpdate:
 		if current.server.consoleBackend == nil {
 			err = ErrUnauthorized
