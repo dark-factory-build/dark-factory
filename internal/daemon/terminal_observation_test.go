@@ -240,6 +240,15 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 
 }
 
+func TestTerminalObservationSettledCursorUsesRetainedLookbehind(t *testing.T) {
+	retained := []byte("{\"token\":\n\"hunter2\"}\nnext\n")
+	floor, offset := uint64(100), uint64(1)
+	got, _ := redactTerminalWindow(retained[offset:], floor+offset, terminalLookbehind{start: floor, bytes: retained[:offset]})
+	if bytes.Contains(got, []byte("hunter2")) || !bytes.Contains(got, []byte("next")) {
+		t.Fatalf("settled cursor redaction = %q", got)
+	}
+}
+
 func TestTerminalObservationTargetAuthorizationMatrix(t *testing.T) {
 	project := mustProjectID(t, testID(1))
 	foreignProject := mustProjectID(t, testID(2))
