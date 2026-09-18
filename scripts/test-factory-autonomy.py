@@ -768,6 +768,21 @@ class LegacyCutoverTest(unittest.TestCase):
         self.assertEqual(0,self.commits)
         self.review_ready.assert_called_once_with(self.config,'fixture/publication')
 
+    def test_release_companion_refuses_cutover_before_schedule_or_baseline_changes(self):
+        self.fixture()
+        self.config['release_configs'] = [str(self.root / 'release.json')]
+        autonomy.atomic_json(self.root / 'release.json', {'journal': str(self.root / 'release-journal.json')})
+        autonomy.atomic_json(self.config_path, self.config)
+        legacy = module('factory-intake')
+        autonomy.atomic_json(Path(self.config['journal']), {'version': 2, 'config_fingerprint': legacy.config_fingerprint(self.config), 'issues': {}})
+        original = self.legacy_plist.read_bytes()
+        for plan in (None, self.plan):
+            with self.assertRaisesRegex(ValueError, 'customer-scoped release path'):
+                autonomy.managed_migrate(self.home, self.factoryctl, self.config_path, plan)
+        self.assertEqual(original, self.legacy_plist.read_bytes())
+        self.assertFalse(any(call[0] == 'bootout' for call in self.calls))
+        self.assertEqual(0, self.commits)
+
     def test_processed_history_hash_is_proven_only_by_the_retained_matching_snapshot(self):
         self.fixture()
         legacy = module('factory-intake')

@@ -592,6 +592,8 @@ def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_p
     if receipt and (receipt.get('version') != 1 or receipt.get('home_identity') != identity or receipt.get('config_path') != str(config_path)):
         raise ValueError('migration receipt belongs to another factory or configuration')
     request, config, raw_config, raw_journal = legacy_migration_input(home, config_path)
+    if config.get('release_configs'):
+        raise ValueError('legacy release companion uses host GitHub authority; customer migration requires a customer-scoped release path, so the legacy schedules remain untouched')
     if receipt and receipt['phase'] == 'completed':
         if plan_hash is not None and plan_hash != receipt['plan_hash']:
             raise ValueError('migration already completed under a different plan')
