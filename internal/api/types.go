@@ -506,15 +506,22 @@ type ProjectSummary struct {
 }
 
 type AgentSummary struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"project_id"`
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	Provider  string `json:"provider"`
-	AccountID string `json:"account_id"`
-	Paused    bool   `json:"paused"`
-	Archived  bool   `json:"archived"`
-	Revision  uint64 `json:"revision"`
+	ID               string `json:"id"`
+	ProjectID        string `json:"project_id"`
+	Name             string `json:"name"`
+	Role             string `json:"role"`
+	Provider         string `json:"provider"`
+	AccountID        string `json:"account_id"`
+	Paused           bool   `json:"paused"`
+	Archived         bool   `json:"archived"`
+	Model            string `json:"model"`
+	ReasoningEffort  string `json:"reasoning_effort"`
+	IdlePolicy       string `json:"idle_policy"`
+	IdleAfterSeconds uint32 `json:"idle_after_seconds"`
+	IdleInstruction  string `json:"idle_instruction"`
+	IdleRunBudget    uint32 `json:"idle_run_budget"`
+	IdleRunsUsed     uint32 `json:"idle_runs_used"`
+	Revision         uint64 `json:"revision"`
 }
 
 type TaskSummary struct {

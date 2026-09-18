@@ -29,14 +29,7 @@ func projectSnapshot(snapshot kernel.DashboardSnapshot) api.DashboardSnapshot {
 		})
 	}
 	for _, agent := range snapshot.Agents {
-		item := api.AgentSummary{
-			ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
-			Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64()),
-		}
-		if agent.AccountID != (kernel.AccountID{}) {
-			item.AccountID = agent.AccountID.String()
-		}
-		result.Agents = append(result.Agents, item)
+		result.Agents = append(result.Agents, projectAgentSummary(agent))
 	}
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.TaskSummary{
@@ -55,11 +48,7 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) (api.OverseerSnap
 		Agents: []api.AgentSummary{}, Tasks: []api.OverseerTask{}, Runs: []api.OverseerRun{}, Questions: []api.OverseerQuestion{}, PeerQuestions: []api.PeerQuestion{}, History: []api.OverseerIntervention{}, Handoffs: []api.RetainedChangeHandoff{},
 	}
 	for _, agent := range snapshot.Agents {
-		item := api.AgentSummary{ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name, Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived, Revision: uint64(agent.Revision.Int64())}
-		if agent.AccountID != (kernel.AccountID{}) {
-			item.AccountID = agent.AccountID.String()
-		}
-		result.Agents = append(result.Agents, item)
+		result.Agents = append(result.Agents, projectAgentSummary(agent))
 	}
 	for _, task := range snapshot.Tasks {
 		result.Tasks = append(result.Tasks, api.OverseerTask{ID: task.ID.String(), ProjectID: task.ProjectID.String(), AssignedAgentID: optionalAgentText(task.AssignedAgentID), Title: task.Title, Objective: task.Objective, ObjectiveTruncated: task.ObjectiveTruncated, Status: task.Status.String(), Priority: task.Priority, BlockedReason: task.BlockedReason, Result: task.Result, ResultTruncated: task.ResultTruncated, Revision: uint64(task.Revision.Int64())})
@@ -92,6 +81,24 @@ func projectOverseerSnapshot(snapshot kernel.OverseerSnapshot) (api.OverseerSnap
 		result.History = append(result.History, api.OverseerIntervention{OperationID: item.OperationID.String(), TaskID: item.TaskID.String(), RunID: item.RunID.String(), SuccessorTaskID: successor, Kind: item.Kind.String(), Actor: item.Actor.String(), Payload: payload, PayloadTruncated: truncated, State: item.State.String(), Detail: detail, CreatedAtMs: uint64(item.CreatedAt.Int64())})
 	}
 	return result, nil
+}
+
+func projectAgentSummary(agent kernel.AgentSummary) api.AgentSummary {
+	return api.AgentSummary{
+		ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
+		Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived,
+		Model: agent.Model, ReasoningEffort: agent.ReasoningEffort,
+		IdlePolicy: string(agent.Idle.Policy), IdleAfterSeconds: agent.Idle.AfterSeconds,
+		IdleInstruction: agent.Idle.Instruction, IdleRunBudget: agent.Idle.RunBudget, IdleRunsUsed: agent.Idle.RunsUsed,
+		AccountID: optionalAccountText(agent.AccountID), Revision: uint64(agent.Revision.Int64()),
+	}
+}
+
+func optionalAccountText(account kernel.AccountID) string {
+	if account == (kernel.AccountID{}) {
+		return ""
+	}
+	return account.String()
 }
 
 // projectHandoffIdentity projects the durable identities of one settled
