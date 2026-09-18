@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Small, offline fixtures for the exact-merge release controller."""
 import importlib.util
+import io
 import json
 import os
+import runpy
 import sys
 import tempfile
 import time
@@ -54,10 +56,28 @@ def snapshot():
 
 class ReleaseFixtures(unittest.TestCase):
     def test_site_probe_requires_exact_ready_production_deployment(self):
-        deployment = {"readyState": "READY", "target": "production"}
-        self.assertTrue(site.deployment_healthy(deployment, SHA, SHA, True, True))
-        self.assertFalse(site.deployment_healthy(deployment, HEAD, SHA, True, True))
-        self.assertFalse(site.deployment_healthy(deployment, SHA, SHA, True, False))
+        deployment = {"id": "same", "readyState": "READY", "target": "production", "meta": {"gitCommitSha": SHA}}
+        self.assertTrue(site.deployment_healthy(deployment, deployment, SHA, True, True))
+        self.assertFalse(site.deployment_healthy(deployment, {**deployment, "id": "moved"}, SHA, True, True))
+        self.assertFalse(site.deployment_healthy(deployment, deployment, HEAD, True, True))
+
+    def test_site_probe_command_exits_nonzero_for_the_wrong_deployment(self):
+        deployment = {"id": "same", "readyState": "READY", "target": "production", "meta": {"gitCommitSha": HEAD}}
+        calls = [
+            mock.Mock(stdout=json.dumps(deployment)),
+            mock.Mock(returncode=0, stdout='{"healthy":true}'),
+            mock.Mock(stdout=json.dumps(deployment)),
+        ]
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 200
+        script = MODULE.with_name("verify-live-site.py")
+        with mock.patch.object(sys, "argv", [str(script), SHA]), \
+             mock.patch("subprocess.run", side_effect=calls), \
+             mock.patch("urllib.request.urlopen", return_value=response), \
+             mock.patch("sys.stdout", new=io.StringIO()), \
+             self.assertRaises(SystemExit) as raised:
+            runpy.run_path(script, run_name="__main__")
+        self.assertEqual(raised.exception.code, 1)
 
     def test_shared_atomic_writer_preserves_receipt_on_replace_failure(self):
         self.assertIs(release.atomic_json, release.intake.atomic_json)

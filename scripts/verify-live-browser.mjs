@@ -36,5 +36,10 @@ try {
   process.stderr.write(`live browser verification failed at ${stage}\n`);
   process.exitCode = 1;
 } finally {
-  await context?.close();
+  try {
+    await context?.close();
+  } catch {
+    process.stderr.write('live browser verification failed at cleanup\n');
+    process.exitCode = 1;
+  }
 }
