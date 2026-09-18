@@ -42,6 +42,8 @@ import {
   type TaskUpdateBody,
   type TerminalTargetDescriptor,
   type TopologyBody,
+  type GitHubConnectionBody,
+  type GitHubConnectionResultBody,
 } from "./control.js";
 import { ProtocolError, type ProtocolErrorCode } from "./errors.js";
 import { CAPABILITIES, MAX_AGENT_MODEL_BYTES, MAX_AGENT_NAME_BYTES,
@@ -183,6 +185,7 @@ export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigi
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
 type AccountPending = { operation?: ProjectContentOperation; kind: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT"; accountId?: string; expectedRevision?: bigint; resolve: (value: never) => void; reject: (error: unknown) => void };
+type GitHubPending = { resolve: (value: GitHubConnectionResult) => void; reject: (error: unknown) => void };
 
 /** One identity the factory has granted and not revoked. */
 export type BrowserClientView = Readonly<{ clientId: string; capabilities: CapabilityMask; revision: bigint; createdAtMs: bigint }>;
@@ -192,6 +195,7 @@ export type BrowserClientsView = Readonly<{ clients: readonly BrowserClientView[
 export type DiscoveredAccountView = AccountsBody["accounts"][number];
 export type AccountLinkResult = Readonly<{ accountId: string; revision: bigint }>;
 export type AccountUpdateResult = Readonly<{ accountId: string; revision: bigint }>;
+export type GitHubConnectionResult = Readonly<GitHubConnectionResultBody>;
 
 /** One minted remote pairing invitation and the code that carries it. */
 export type RemoteInvite = Readonly<{ link: string; expiresAtMs: bigint; svg: string }>;
@@ -272,6 +276,7 @@ export class BrowserSession {
   #invitePending = new Map<string, InvitePending>();
   #pushPending = new Map<string, PushPending>();
   #accountPending = new Map<string, AccountPending>();
+  #githubPending = new Map<string, GitHubPending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
   #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId: string }>();
   #generationToken: object = {};
@@ -800,6 +805,7 @@ export class BrowserSession {
       this.#accountResult(frame);
       return;
     }
+    if (frame.type === "GITHUB_CONNECTION_RESULT") { this.#githubResult(frame.body, frame.id); return; }
     if (terminalControlFrame(frame)) {
       if (frame.type === "TERMINAL_EOF") { if (!this.#anyTerminal((handle) => handle.receiveEOF(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
       if (frame.type === "TERMINAL_EXIT") { if (!this.#anyTerminal((handle) => handle.receiveExit(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
@@ -1109,10 +1115,29 @@ export class BrowserSession {
 
   /** Every request still waiting on a result learns the session is gone, once. */
   #closePending(error: SessionError | ProtocolError): void {
-    for (const pending of [this.#targetPending, this.#taskPending, this.#agentControlPending, this.#consolePending, this.#invitePending, this.#pushPending, this.#accountPending, this.#humanPending]) {
+    for (const pending of [this.#targetPending, this.#taskPending, this.#agentControlPending, this.#consolePending, this.#invitePending, this.#pushPending, this.#accountPending, this.#githubPending, this.#humanPending]) {
       for (const entry of pending.values()) entry.reject(error);
       pending.clear();
     }
+  }
+
+  /** Private GitHub settings through the paired operator administration grant. */
+  githubConnection(request: GitHubConnectionBody): Promise<GitHubConnectionResult> {
+    if (!this.#authenticated || (this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
+    if (this.#githubPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    const id = this.#nextID("github");
+    let payload: string;
+    try { payload = encodeClientControl({ type: "GITHUB_CONNECTION", id, body: request }); } catch (error) { return Promise.reject(error); }
+    const result = new Promise<GitHubConnectionResult>((resolve, reject) => this.#githubPending.set(id, { resolve, reject }));
+    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
+    return result;
+  }
+
+  #githubResult(body: GitHubConnectionResultBody, id: string): void {
+    const pending = this.#githubPending.get(id);
+    if (pending === undefined) throw new ProtocolError("malformed");
+    this.#githubPending.delete(id);
+    pending.resolve(Object.freeze(body));
   }
   /** One shape for the console request/result pairs. */
   #consoleRequest<T>(kind: ConsolePending["kind"], entityId: string, expectedRevision: bigint, prefix: string, encode: (id: string) => string): Promise<T> {

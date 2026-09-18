@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { DiscoveredAccount, AccountItem, AgentItem, ProjectItem, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView } from "@dark-factory/client";
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
+import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
+import type { GitHubConnectionBody } from "@dark-factory/client";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
@@ -50,6 +52,7 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onLoadAccounts?: () => void;
   onLinkAccount?: (login: DiscoveredAccount, label: string) => void;
   onUpdateAccount?: (account: AccountItem, change: { label?: string; remove?: boolean }) => void;
+  onGitHub?: (request: GitHubConnectionBody) => void;
   /** The loopback address this console is served from. */
   address?: string;
   /** Overrides the pairing surface the settings modal mounts by default. */
@@ -140,9 +143,11 @@ export function FactoryConsole({
   accounts,
   accountsPending,
   accountsError,
+  github,
   onLoadAccounts,
   onLinkAccount,
   onUpdateAccount,
+  onGitHub,
   address = BROWSER_HOST,
   pairing,
   terminalContent,
@@ -303,6 +308,8 @@ export function FactoryConsole({
           onLoadAccounts={onLoadAccounts}
           onLinkAccount={onLinkAccount}
           onUpdateAccount={onUpdateAccount}
+          github={github}
+          onGitHub={onGitHub}
           edit={edit}
           onSaveProjectLimits={onSaveProjectLimits}
           pairing={pairing ?? (!remoteInviteAllowed ? undefined : (

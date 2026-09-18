@@ -141,6 +141,7 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onLoadAccounts={() => { void owner.current?.loadAccounts(); }}
       onLinkAccount={(login, label) => { void owner.current?.linkAccount({ provider: login.provider, home: login.home, label }); }}
       onUpdateAccount={(account, change) => { void owner.current?.updateAccount({ accountId: account.id, expectedRevision: account.revision, ...change }); }}
+      onGitHub={(request) => { void owner.current?.githubConnection(request); }}
       onInviteRemote={() => { void owner.current?.inviteRemote(); }}
       onLoadDevices={() => { void owner.current?.loadDevices(); }}
       onRevokeDevice={(device) => { void owner.current?.revokeDevice(device); }}

@@ -31,7 +31,7 @@ import {
   type TopologyView,
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
-import { FactorySettingsCoordinator, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
+import { FactorySettingsCoordinator, type FactoryRemoteInvite, type FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
@@ -142,6 +142,7 @@ export type FactoryAppSnapshot = Readonly<{
   accounts?: readonly DiscoveredAccountView[];
   accountsPending?: boolean;
   accountsError?: string;
+  github?: FactoryGitHubView;
 }>;
 
 export type FactoryAppStatus =
@@ -151,7 +152,7 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -777,6 +778,8 @@ export class FactoryAppController {
 
   loadDevices(): Promise<void> { return this.#settings.loadDevices(); }
 
+  githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> { return this.#settings.githubConnection(request); }
+
   revokeDevice(request: { clientId: string; expectedRevision: bigint }): Promise<void> { return this.#settings.revokeDevice(request); }
 
   /** The mint is never retried: a failure is reported and the operator asks again. */
@@ -1400,6 +1403,7 @@ export class FactoryAppController {
       accounts: this.#settings.accounts,
       accountsPending: this.#settings.accountsPending,
       accountsError: this.#settings.accountsError,
+      github: this.#settings.github,
       selectedAgent: this.#selectedAgent === undefined ? undefined : {
         id: this.#selectedAgent.agent.id,
         name: this.#selectedAgent.agent.name,

@@ -3,6 +3,7 @@ import {
   type BrowserClientsView,
   type BrowserSession,
   type DiscoveredAccountView,
+  type GitHubConnectionResult,
 } from "@dark-factory/client";
 
 const LOOPBACK_GRANT = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
@@ -13,7 +14,9 @@ export type FactoryRemoteInvite = Readonly<{
   expiresAtMs: bigint;
 }>;
 
-type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "capabilities" | "clientId">;
+type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "capabilities" | "clientId">;
+
+export type FactoryGitHubView = Readonly<{ result?: GitHubConnectionResult; pending: boolean; error?: string }>;
 
 type SettingsOwner = Readonly<{
   session(): SettingsSession | undefined;
@@ -36,6 +39,9 @@ export class FactorySettingsCoordinator {
   #devices: BrowserClientsView | undefined;
   #devicesPending = false;
   #devicesError: string | undefined;
+  #github: GitHubConnectionResult | undefined;
+  #githubPending = false;
+  #githubError: string | undefined;
 
   constructor(owner: SettingsOwner) {
     this.#owner = owner;
@@ -53,10 +59,31 @@ export class FactorySettingsCoordinator {
   get devices(): BrowserClientsView | undefined { return this.#devices; }
   get devicesError(): string | undefined { return this.#devicesError; }
   get ownClientId(): string | undefined { return this.#owner.session()?.clientId; }
+  get github(): FactoryGitHubView { return { result: this.#github, pending: this.#githubPending, error: this.#githubError }; }
 
   clearRemoteInvite(): void {
     this.#remoteInvite = undefined;
     this.#remoteInviteError = undefined;
+  }
+
+  async githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> {
+    const session = this.#owner.session();
+    if (!this.#owner.ready() || session === undefined || this.#githubPending) return;
+    const generation = this.#owner.generation();
+    this.#githubPending = true;
+    this.#owner.publish();
+    try {
+      const result = await session.githubConnection(request);
+      if (!this.#owner.current(generation)) return;
+      this.#github = result;
+      this.#githubError = undefined;
+    } catch (error) {
+      if (!this.#owner.current(generation)) return;
+      this.#githubError = this.#owner.errorCode(error);
+    } finally {
+      if (this.#owner.current(generation)) this.#githubPending = false;
+    }
+    this.#owner.publish();
   }
 
   async loadAccounts(): Promise<void> {
