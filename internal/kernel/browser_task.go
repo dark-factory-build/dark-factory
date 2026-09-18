@@ -72,11 +72,7 @@ func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context
 	if agent.Revision != expectedAgentRevision || agent.Archived || agent.Paused && !queue {
 		return BrowserTaskEnqueue{}, tx.Rollback(ErrRevisionConflict)
 	}
-	repository, err := resolveTaskRepository(ctx, tx.connection, agent.ProjectID, repositoryID)
-	if err != nil {
-		return BrowserTaskEnqueue{}, tx.Rollback(err)
-	}
-	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, RepositoryID: repository.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Direct instruction", Body: instruction, Priority: 0}
+	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, RepositoryID: repositoryID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Direct instruction", Body: instruction, Priority: 0}
 	if mode == BrowserEnqueueAnyWorker {
 		spec.AssignedAgentID = AgentID{}
 	}

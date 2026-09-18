@@ -333,3 +333,55 @@ func TestBrowserQueueAcceptsBusyPausedAgentWithoutChangingCurrentWork(t *testing
 		t.Fatalf("now bypassed queue/paused agent: %v", err)
 	}
 }
+
+func TestBrowserTaskReplayRetainsRepositoryAfterSettingsChange(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		name := "default"
+		if explicit {
+			name = "explicit"
+		}
+		t.Run(name, func(t *testing.T) {
+			store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+			defer store.Close()
+			ctx := context.Background()
+			client := terminalTargetClient(t, store, browserTestID(t, 180), BrowserCapabilityObserve|BrowserCapabilityHumanActions)
+			selected := RepositoryID{}
+			if explicit {
+				selected = RepositoryID(project.ID)
+			}
+			task, incarnation := taskID(t, 181), incarnationID(t, 182)
+			created, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, selected, "keep this work", BrowserEnqueueQueue, mustTime(t, 102))
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 183), ProjectID: project.ID, Name: "second", Root: t.TempDir(), BaseRef: "release"}, mustTime(t, 103))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.SetProjectRepositoryDefault(ctx, second.ID, second.Revision, mustTime(t, 104)); err != nil {
+				t.Fatal(err)
+			}
+			original, found, err := store.TaskRepository(ctx, task)
+			if err != nil || !found {
+				t.Fatalf("original binding: %v", err)
+			}
+			if _, err := store.SetProjectRepositoryEnabled(ctx, original.ID, original.Revision, false, mustTime(t, 105)); err != nil {
+				t.Fatal(err)
+			}
+			replay, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, selected, "keep this work", BrowserEnqueueQueue, mustTime(t, 106))
+			if err != nil || replay.Task != created.Task {
+				t.Fatalf("retained replay: %+v, %v", replay, err)
+			}
+			binding, found, err := store.TaskRepository(ctx, task)
+			if err != nil || !found || binding.ID != original.ID || binding.BaseRef != original.BaseRef {
+				t.Fatalf("replay redirected repository: %+v, %v", binding, err)
+			}
+			if _, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, task, incarnation, agent.ID, agent.Revision, second.ID, "keep this work", BrowserEnqueueQueue, mustTime(t, 107)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("changed explicit route: %v", err)
+			}
+			if _, err := store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, client.ID, taskID(t, 184), incarnationID(t, 185), agent.ID, agent.Revision, original.ID, "new work", BrowserEnqueueQueue, mustTime(t, 108)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("new use of disabled repository: %v", err)
+			}
+		})
+	}
+}
