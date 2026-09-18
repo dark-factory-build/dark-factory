@@ -17,7 +17,7 @@ import (
 )
 
 func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
-	data := []byte("compile x.go\nAuthorization: Bearer private-value\nconfig /Users/operator/.codex/auth.json\n{\"token\":\n\"json-secret\"}\n{\"path\":\"/Users/operator/\n.secret\"}\n{\"message\":\n\"visible\"}\nfinished\npartial secret=value")
+	data := []byte("compile x.go\nAuthorization: Bearer private-value\nconfig /Users/example/.codex/auth.json\n{\"token\":\n\"json-secret\"}\n{\"path\":\"/Users/example/\n.secret\"}\n{\"message\":\n\"visible\"}\nfinished\npartial secret=value")
 	for cursor := 0; cursor < len(data); cursor++ {
 		for size := 1; size <= len(data)-cursor; size++ {
 			got, omitted := redactTerminalWindow(data[cursor:cursor+size], uint64(cursor))
@@ -33,7 +33,7 @@ func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
 	if got, _ := redactTerminalWindow([]byte("{\"token\":\n\"split-secret\"}\n{\"message\":\n\"visible\"}\n"), 0); bytes.Contains(got, []byte("split-secret")) || !bytes.Contains(got, []byte("visible")) {
 		t.Fatalf("split JSON redaction or benign JSON handling = %q", got)
 	}
-	if got, _ := redactTerminalWindow([]byte("{\"path\":\"/Users/operator/\n.secret\"}\n"), 0); bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte(".secret")) {
+	if got, _ := redactTerminalWindow([]byte("{\"path\":\"/Users/example/\n.secret\"}\n"), 0); bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte(".secret")) {
 		t.Fatalf("split JSON path leaked: %q", got)
 	}
 	for _, secretKey := range []string{"token", "secret", "password"} {
@@ -78,7 +78,7 @@ func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
 func TestTerminalWindowRedactsEscapedJSONQuotesAcrossCursor(t *testing.T) {
 	for _, line := range [][]byte{
 		[]byte(`{"token":"prefix\"escaped-secret-suffix"}` + "\n"),
-		[]byte(`{"cwd":"/Users/operator/quo\"ted/private"}` + "\n"),
+		[]byte(`{"cwd":"/Users/example/quo\"ted/private"}` + "\n"),
 	} {
 		got, _ := redactTerminalWindow(line, 0)
 		if bytes.Contains(got, []byte("escaped-secret-suffix")) || bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte("ted/private")) {
