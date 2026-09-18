@@ -338,15 +338,26 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	} else if !found {
 		return newErrorReply(api.RemoteNotFound)
 	}
-	runID, paths, err := daemon.RunPaths(ctx, agentID)
+	runID, sourcePath, runtimePath, err := daemon.liveRunLocations(ctx, agentID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	run := ""
+	paths := []string{}
 	if runID != (kernel.RunID{}) {
 		run = runID.String()
+		pathsRunID, observedPaths, pathErr := daemon.RunPaths(ctx, agentID)
+		if pathErr != nil {
+			return newErrorReply(remoteErrorCode(pathErr))
+		}
+		if pathsRunID != (kernel.RunID{}) && pathsRunID != runID {
+			return newErrorReply(api.RemoteUnavailable)
+		}
+		if pathsRunID == runID {
+			paths = observedPaths
+		}
 	}
-	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, Paths: paths})
+	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, SourcePath: sourcePath, RuntimePath: runtimePath, Paths: paths})
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

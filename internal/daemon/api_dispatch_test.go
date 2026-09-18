@@ -1098,6 +1098,42 @@ func TestDaemonOperatorTaskReadBindsRevisionAndPagesUTF8(t *testing.T) {
 	}
 }
 
+func TestDaemonOperatorAgentPathsReturnsNoChangeOverseerRuntime(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttempt(t, fixture, 236)
+	ctx := context.Background()
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	owner.agentID = active.run.AgentID
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	resources, err := fixture.store.Resources(ctx, active.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRuntime := ""
+	for _, resource := range resources {
+		if resource.Kind == kernel.ResourceRuntimeRoot {
+			wantRuntime = resource.Path
+		}
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	paths, err := operator.AgentPaths(ctx, api.AgentPathsInput{AgentID: active.run.AgentID.String()})
+	waitDispatch(t, done)
+	if err != nil || paths.RunID != active.run.ID.String() || paths.SourcePath != "" || paths.RuntimePath != wantRuntime || paths.Paths == nil {
+		t.Fatalf("operator overseer paths = %+v, %v; want runtime %q", paths, err, wantRuntime)
+	}
+}
+
 func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 	for _, test := range []struct {
 		name string

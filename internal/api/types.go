@@ -83,9 +83,11 @@ type HealthStatus struct {
 // relative to the run's change directory; they are not the worker's current
 // working directory.
 type AgentPaths struct {
-	AgentID string   `json:"agent_id"`
-	RunID   string   `json:"run_id,omitempty"`
-	Paths   []string `json:"paths"`
+	AgentID     string   `json:"agent_id"`
+	RunID       string   `json:"run_id,omitempty"`
+	SourcePath  string   `json:"source_path,omitempty"`
+	RuntimePath string   `json:"runtime_path,omitempty"`
+	Paths       []string `json:"paths"`
 }
 
 type AgentPathsInput struct {
@@ -94,7 +96,10 @@ type AgentPathsInput struct {
 
 func validAgentPathsInput(value AgentPathsInput) bool { return validID(value.AgentID) }
 func validAgentPaths(value AgentPaths) bool {
-	if !validID(value.AgentID) || value.RunID != "" && !validID(value.RunID) || value.Paths == nil || len(value.Paths) > 16 {
+	if !validID(value.AgentID) || value.RunID != "" && !validID(value.RunID) || value.Paths == nil || len(value.Paths) > 16 || value.RunID == "" && (value.SourcePath != "" || value.RuntimePath != "") {
+		return false
+	}
+	if value.SourcePath != "" && !validCanonicalPath(value.SourcePath, 4096) || value.RuntimePath != "" && !validCanonicalPath(value.RuntimePath, 4096) {
 		return false
 	}
 	for _, path := range value.Paths {
