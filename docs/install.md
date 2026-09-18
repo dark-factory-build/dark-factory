@@ -18,17 +18,12 @@ verify its entry in that release's `SHA256SUMS`, and put `factoryd`,
 release's Homebrew formula installs the same commands if it has been added to a
 tap.
 
-The archive also contains optional host controller assets under
-`libexec/dark-factory/`. Run `factory-autonomy.py` with an operator-owned JSON
-configuration to schedule intake and review; schedule its separate
-`--release-only` pass when delivery is wanted. The companion scripts and
-`supervision.md` stay together there so the controller works after the archive
-is moved away from the source checkout. Homebrew installs the same directory
-under its formula `libexec` path. The controller scripts require Python 3 on
-`PATH`; they do not require a Dark Factory source checkout.
-If review scheduling is enabled with `review_mirror_root`, the host also needs
-`git`, the selected Codex or Claude provider, and the operator-installed
-Maintainer bridge on `PATH`; those host tools and credentials are not bundled.
+The archive includes the intake controller under `libexec/dark-factory/`.
+Keep that directory with the release binaries, or use Homebrew's installed
+commands. After setting up your home and intake sources, run `factoryctl intake
+service install --home "$HOME/.dark-factory"` to schedule intake. Python 3.9 or
+newer is required; Homebrew installs it. No operator JSON, handwritten launchd
+file, or source checkout is needed. See the managed intake instructions below.
 
 Create and install one managed home. Those two commands are the whole terminal
 side of setup: an install that starts a fresh service loads the launchd job,
