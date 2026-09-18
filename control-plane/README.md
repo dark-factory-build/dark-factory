@@ -424,8 +424,9 @@ The old Access-only path no longer owns a transferred receipt. A different
 customer or repository cannot reclaim it, and subsequent reads/replays still
 require the connection's live grants. Disconnect or access loss blocks them.
 
-A missing original request, mismatched digest or already-owned receipt returns
-`receipt_proof_conflict`; retain the journal and recover the exact request
+A malformed or incomplete typed request returns `400 invalid_request`. A
+mismatched digest, missing receipt or already-owned receipt returns
+`409 receipt_proof_conflict`; retain the journal and recover the exact request
 before retrying. An email, repository name, GitHub URL or guessed UUID is never
 sufficient proof. Do not put either credential in a report, task, command-line
 argument or log. This one-time operator migration is not a customer setup
