@@ -281,6 +281,7 @@ type TerminalObserveInput struct {
 	RunID     string `json:"run_id"`
 	Cursor    uint64 `json:"cursor"`
 	MaxBytes  uint32 `json:"max_bytes"`
+	Text      bool   `json:"text,omitempty"`
 }
 
 type TerminalObservation struct {
@@ -295,6 +296,8 @@ type TerminalObservation struct {
 	Gap        bool   `json:"gap"`
 	Omitted    uint64 `json:"omitted"`
 	Payload    []byte `json:"payload"`
+	TextMode   bool   `json:"text_mode,omitempty"`
+	Text       string `json:"text,omitempty"`
 }
 
 // MarshalDisplayJSON renders readable, terminal-safe text for CLI/MCP without
@@ -312,11 +315,26 @@ func (value TerminalObservation) MarshalDisplayJSON() ([]byte, error) {
 }
 
 func validTerminalObservationInput(input TerminalObserveInput) bool {
-	return validID(input.ProjectID) && validID(input.TaskID) && validID(input.RunID) && input.MaxBytes > 0 && input.MaxBytes <= 65536
+	return validID(input.ProjectID) && validID(input.TaskID) && validID(input.RunID) && input.MaxBytes > 0 && input.MaxBytes <= 65536 && (!input.Text || input.Cursor == 0)
 }
 
 func validTerminalObservation(value TerminalObservation) bool {
-	return validID(value.ProjectID) && validID(value.TaskID) && validID(value.RunID) && value.NextCursor >= value.Cursor && value.Floor <= value.Head && value.NextCursor <= value.Head && (value.Source == "stored" || value.Source == "live" || value.Source == "none") && len(value.Payload) <= 65536 && value.Omitted <= value.NextCursor-value.Cursor && uint64(len(value.Payload)) == value.NextCursor-value.Cursor-value.Omitted
+	base := validID(value.ProjectID) && validID(value.TaskID) && validID(value.RunID) && value.NextCursor >= value.Cursor && value.Floor <= value.Head && value.NextCursor <= value.Head && (value.Source == "stored" || value.Source == "live" || value.Source == "none") && len(value.Payload) <= 65536 && len(value.Text) <= 65536 && utf8.ValidString(value.Text) && value.Omitted <= value.NextCursor-value.Cursor && uint64(len(value.Payload)) == value.NextCursor-value.Cursor-value.Omitted
+	if !base {
+		return false
+	}
+	if value.TextMode {
+		if value.Cursor != 0 || value.NextCursor != 0 || value.Gap || value.Omitted != 0 || len(value.Payload) != 0 || value.Source == "none" {
+			return false
+		}
+		for _, ch := range value.Text {
+			if ch < 0x20 || ch >= 0x7f && ch <= 0x9f {
+				return false
+			}
+		}
+		return true
+	}
+	return value.Text == ""
 }
 
 // Project content is deliberately a small wire DTO. Bodies are never placed

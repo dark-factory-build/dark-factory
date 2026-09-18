@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"regexp"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -28,6 +30,119 @@ var terminalJSONOrphanPath = regexp.MustCompile(`(?im)^[[:space:]]*(?:\.|/Users/
 type terminalLookbehind struct {
 	start uint64
 	bytes []byte
+}
+
+func redactTerminalText(payload []byte) []byte {
+	redact := func(match []byte) []byte { return bytes.Repeat([]byte("*"), len(match)) }
+	result := terminalJSONSecret.ReplaceAllFunc(payload, redact)
+	result = terminalJSONPrivatePath.ReplaceAllFunc(result, redact)
+	return terminalPrivateText.ReplaceAllFunc(result, redact)
+}
+
+// terminalTextProjection turns one complete retained diagnostic snapshot into
+// inert text. Escape controls are removed before redaction, never interpreted
+// as record boundaries: a credential split by a cursor movement remains one
+// credential to the redactor.
+func terminalTextProjection(payload []byte, droppedPrefix bool, limit int) string {
+	if droppedPrefix {
+		// The retained floor may be inside a multi-line credential or private
+		// path. No later terminal control or line end proves that record ended.
+		return ""
+	}
+	text := make([]byte, 0, len(payload))
+	space := func() {
+		if len(text) != 0 && text[len(text)-1] != ' ' {
+			text = append(text, ' ')
+		}
+	}
+	for index := 0; index < len(payload); {
+		if payload[index] == 0x1b {
+			index = terminalEscapeEnd(payload, index)
+			continue
+		}
+		value, width := utf8.DecodeRune(payload[index:])
+		if value == utf8.RuneError && width == 1 {
+			// Native terminals may emit standalone 8-bit C1 controls. A
+			// continuation byte inside valid UTF-8 is never a control.
+			value = rune(payload[index])
+			if value < 0x80 || value > 0x9f {
+				index++
+				continue
+			}
+		}
+		if value == 0x9b {
+			index = terminalCSIEnd(payload, index+width)
+			continue
+		}
+		if value == 0x90 || value == 0x98 || value == 0x9d || value == 0x9e || value == 0x9f {
+			index = terminalStringEnd(payload, index+width, value == 0x9d)
+			continue
+		}
+		if value < 0x20 || value >= 0x7f && value <= 0x9f {
+			index += width
+			if value == '\r' || value == '\n' || value == '\t' {
+				space()
+			}
+			continue
+		}
+		text = append(text, payload[index:index+width]...)
+		index += width
+	}
+	text = bytes.TrimSpace(redactTerminalText(text))
+	if len(text) > limit {
+		text = text[len(text)-limit:]
+		for len(text) != 0 && !utf8.Valid(text) {
+			text = text[1:]
+		}
+	}
+	return string(text)
+}
+
+func terminalEscapeEnd(payload []byte, start int) int {
+	if start+1 >= len(payload) {
+		return len(payload)
+	}
+	next := payload[start+1]
+	if next == '[' { // CSI: parameters/intermediates followed by one final byte.
+		return terminalCSIEnd(payload, start+2)
+	}
+	if strings.ContainsRune("]PX^_", rune(next)) { // OSC or a string terminated by ST.
+		return terminalStringEnd(payload, start+2, next == ']')
+	}
+	index := start + 1
+	for index < len(payload) && payload[index] >= 0x20 && payload[index] <= 0x2f {
+		index++
+	}
+	if index < len(payload) {
+		index++
+	}
+	return index
+}
+
+func terminalCSIEnd(payload []byte, start int) int {
+	for index := start; index < len(payload); index++ {
+		if payload[index] >= 0x40 && payload[index] <= 0x7e {
+			return index + 1
+		}
+	}
+	return len(payload)
+}
+
+func terminalStringEnd(payload []byte, start int, bellTerminated bool) int {
+	for index := start; index < len(payload); {
+		value, width := utf8.DecodeRune(payload[index:])
+		if value == utf8.RuneError && width == 1 {
+			value = rune(payload[index])
+		}
+		if bellTerminated && value == 0x07 || value == 0x9c {
+			return index + width
+		}
+		if value == 0x1b && index+1 < len(payload) && payload[index+1] == '\\' {
+			return index + 2
+		}
+		index += width
+	}
+	return len(payload)
 }
 
 func redactTerminalWindow(payload []byte, start uint64, lookbehind ...terminalLookbehind) ([]byte, uint64) {
@@ -182,6 +297,9 @@ func (daemon *Daemon) operatorTerminalObserve(ctx context.Context, call api.Call
 	if !found || run.ProjectID != project || run.TaskID != task {
 		return newErrorReply(api.RemoteForbidden)
 	}
+	if input.Text {
+		return daemon.readTerminalTextObservation(ctx, input, run)
+	}
 	if run.Phase == kernel.RunTerminal {
 		return daemon.readStoredTerminalObservation(ctx, input, run.ID)
 	}
@@ -189,6 +307,43 @@ func (daemon *Daemon) operatorTerminalObserve(ctx context.Context, call api.Call
 		return newErrorReply(api.RemoteConflict)
 	}
 	return daemon.readTerminalObservation(ctx, input, run)
+}
+
+func (daemon *Daemon) readTerminalTextObservation(ctx context.Context, input api.TerminalObserveInput, run kernel.Run) api.Reply {
+	var floor, head uint64
+	var payload []byte
+	source := "live"
+	if run.Phase == kernel.RunTerminal {
+		diagnostics, present, err := daemon.store.TerminalDiagnostics(ctx, run.ID)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		if !present {
+			return newErrorReply(api.RemoteNotFound)
+		}
+		floor, head, payload, source = diagnostics.Floor, diagnostics.Head, diagnostics.Payload, "stored"
+	} else if run.Phase == kernel.RunRunning {
+		session, found, err := daemon.store.TerminalSessionForRun(ctx, run.ID)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		if !found {
+			return newErrorReply(api.RemoteNotFound)
+		}
+		attempt, err := daemon.liveTerminalAttempt(run.ID, session.ID)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		floor, head, payload = attempt.diagnosticSnapshot()
+	} else {
+		return newErrorReply(api.RemoteConflict)
+	}
+	result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Floor: floor, Head: head, Source: source, TextMode: true, Text: terminalTextProjection(payload, floor != 0, int(input.MaxBytes))}
+	reply, err := api.NewTerminalObservationReply(result)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
 }
 
 func (daemon *Daemon) readStoredTerminalObservation(ctx context.Context, input api.TerminalObserveInput, runID kernel.RunID) api.Reply {
