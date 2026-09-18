@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -89,6 +90,40 @@ func TestTerminalWindowRedactsEscapedJSONQuotesAcrossCursor(t *testing.T) {
 				t.Fatalf("cursor=%d escaped JSON leaked: %q", cursor, got)
 			}
 		}
+	}
+}
+
+func TestTerminalTextProjectionNormalizesControlsBeforeRedaction(t *testing.T) {
+	payload := []byte("\x1b[?25l\x1b[2J\x1b[HWaiting for operator approval\x1b[10;1H" +
+		`{"token":"prefix\"esc` + "\x1b[3C" + `aped-secret` + "\r\n" +
+		`{"cwd":"/Users/operator/quo\"ted/private` + "\x1b[2K" +
+		"\x1b]0;/Users/operator/title\a")
+	got := terminalTextProjection(payload, false, 65536)
+	if !strings.Contains(got, "Waiting for operator approval") || strings.Contains(got, "aped-secret") || strings.Contains(got, "/Users/") {
+		t.Fatalf("projection leaked or lost state: %q", got)
+	}
+	for _, value := range []byte(got) {
+		if value < 0x20 || value == 0x7f || value == 0x1b {
+			t.Fatalf("projection retained terminal control %#x in %q", value, got)
+		}
+	}
+	if got := terminalTextProjection([]byte("cret-fragment\x1b[2Ccontinued\nvisible state\x1b["), true, 65536); got != "" {
+		t.Fatalf("dropped prefix or incomplete escape projection = %q", got)
+	}
+	if got := terminalTextProjection([]byte("cret-fragment\x1b[2Ccontinued"), true, 65536); got != "" {
+		t.Fatalf("unterminated dropped record exposed = %q", got)
+	}
+	for _, secret := range [][]byte{
+		[]byte(`{"token":` + "\r\n\x1b[4C" + `"incomplete-secret`),
+		[]byte(`{"cwd":"/Users/oper` + "\x1b[2C" + `ator/private`),
+	} {
+		if got := terminalTextProjection(secret, false, 65536); strings.Contains(got, "incomplete-secret") || strings.Contains(got, "/Users/") || strings.Contains(got, "ator/private") {
+			t.Fatalf("incomplete sensitive projection leaked: %q", got)
+		}
+	}
+	bounded := terminalTextProjection([]byte("old state\x1b[Hcurrent state"), false, 7)
+	if bounded != "t state" || !utf8.ValidString(bounded) {
+		t.Fatalf("bounded projection = %q", bounded)
 	}
 }
 
@@ -403,5 +438,58 @@ func TestOperatorTerminalObservationReadsSettledDiagnostics(t *testing.T) {
 	waitDispatch(t, done)
 	if err != nil || observed.Source != "stored" || !bytes.Contains(observed.Payload, []byte("finished output")) || bytes.Contains(observed.Payload, []byte("private-value")) {
 		t.Fatalf("settled observation = %+v, %v", observed, err)
+	}
+	done = fixture.serve(t)
+	observed, err = operator.TerminalObserve(ctx, api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 1024, Text: true})
+	waitDispatch(t, done)
+	if err != nil || !observed.TextMode || observed.Source != "stored" || !strings.Contains(observed.Text, "finished output") || strings.Contains(observed.Text, "private-value") {
+		t.Fatalf("settled text observation = %+v, %v", observed, err)
+	}
+}
+
+func TestOperatorTerminalTextReadsLiveRetainedSnapshotWithoutTerminalEffect(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 51, testID(11), "worker")
+	session, found, err := fixture.store.TerminalSessionForRun(context.Background(), active.run.ID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	controller, peer := readyTerminalEffectController(t)
+	live := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
+	output := []byte("\x1b[2J\x1b[HWaiting for operator input\x1b[3Ctoken=private-value")
+	live.retainDiagnosticOutput(0, uint64(len(output)), output)
+	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		fixture.daemon.unregisterLiveAttempt(active.run.ID, live)
+		_ = controller.Close()
+		_ = peer.Close()
+	})
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 1024, Text: true}
+	done := fixture.serve(t)
+	observed, err := operator.TerminalObserve(context.Background(), input)
+	waitDispatch(t, done)
+	if err != nil || !observed.TextMode || observed.Source != "live" || !strings.Contains(observed.Text, "Waiting for operator input") || strings.Contains(observed.Text, "private-value") || len(observed.Payload) != 0 || observed.NextCursor != 0 {
+		t.Fatalf("live text observation = %+v, %v", observed, err)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var effect [1]byte
+	if _, err := peer.Read(effect[:]); err == nil {
+		t.Fatal("text observation emitted a terminal effect")
+	}
+	input.TaskID = testID(90)
+	done = fixture.serve(t)
+	_, err = operator.TerminalObserve(context.Background(), input)
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteForbidden {
+		t.Fatalf("text observation identity mismatch = %v", err)
 	}
 }

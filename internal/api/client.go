@@ -118,7 +118,7 @@ func (client *OperatorClient) TerminalObserve(ctx context.Context, input Termina
 	if err := client.client.call(ctx, "operator_terminal_observe", input, &result); err != nil {
 		return TerminalObservation{}, err
 	}
-	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
+	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor || len(result.Payload) > int(input.MaxBytes) || len(result.Text) > int(input.MaxBytes) || input.Text != result.TextMode || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
 		return TerminalObservation{}, ErrProtocol
 	}
 	return result, nil
@@ -460,7 +460,7 @@ func (client *AttemptClient) PeerAnswer(ctx context.Context, input PeerAnswerInp
 }
 
 func (client *AttemptClient) TerminalObserve(ctx context.Context, input TerminalObserveInput) (TerminalObservation, error) {
-	if !validTerminalObservationInput(input) {
+	if !validTerminalObservationInput(input) || input.Text {
 		return TerminalObservation{}, ErrInvalidInput
 	}
 	var result TerminalObservation

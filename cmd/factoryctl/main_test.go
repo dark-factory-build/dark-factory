@@ -55,6 +55,20 @@ func TestOperatorTerminalObserveUsesOperatorCommand(t *testing.T) {
 	}
 }
 
+func TestOperatorTerminalTextRejectsCursor(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	command, help, ok := parse([]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--text", "--max-bytes", "1024"})
+	if !ok || help || command.kind != commandOperatorTerminalObserve || !command.terminalText || command.maxBytes != 1024 {
+		t.Fatalf("operator terminal text command = %+v help=%v ok=%v", command, help, ok)
+	}
+	if _, _, ok := parse([]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--text", "--cursor", "1"}); ok {
+		t.Fatal("text projection accepted a raw cursor")
+	}
+	if _, _, ok := parse([]string{"attempt", "terminal", "observe", "--project", id, "--task", id, "--run", id, "--text"}); ok {
+		t.Fatal("attempt terminal exposed operator text projection")
+	}
+}
+
 func TestBuildIdentityRequiresNoHomeOrCredential(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"--build-identity"}, func(string) string { return "private" }, &stdout, &stderr)
