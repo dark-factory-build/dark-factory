@@ -272,3 +272,49 @@ func TestRetainedChangeHandoffsInspectCurrentSettledOutcomes(t *testing.T) {
 		})
 	}
 }
+
+func TestOverseerSnapshotFirstPageShowsYieldedTerminalQuestionAndRefusesOrphan(t *testing.T) {
+	ctx := context.Background()
+	store, worker, overseer, _ := runningWorkerAndOverseer(t)
+	defer store.Close()
+	request, err := store.CreateHumanQuestionAndYieldForAttempt(ctx, worker.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(230), QuestionText: "which target"}, mustTime(t, 60))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observeMissingProcessExits(t, store, worker.ID, 61)
+	for index, resource := range resourcesForRunTest(t, store, worker.ID) {
+		if resource.State == ResourceReleased {
+			continue
+		}
+		if _, err := store.ReleaseResource(ctx, worker.ID, resource.ID, resource.Revision, resource.Identity, mustTime(t, int64(70+index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeTerminalSessionAtCurrent(t, store, worker.ID, 78)
+	finalizing, _, err := store.Run(ctx, worker.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if terminal, err := finalizeTestRun(t, store, finalizing, 80); err != nil || terminal.Phase != RunTerminal {
+		t.Fatalf("yielded run terminal = %+v, %v", terminal, err)
+	}
+	// The lone question lives only on page 0: every list shares one offset.
+	first, err := store.OverseerSnapshotForAttempt(ctx, overseer.CredentialDigest, OverseerSnapshotRequest{})
+	if err != nil || len(first.Questions) != 1 || first.Questions[0].ID != request.ID || first.Questions[0].TaskID != worker.TaskID {
+		t.Fatalf("first page = %+v, %v", first, err)
+	}
+	for page := first; page.NextOffset != nil; {
+		if page, err = store.OverseerSnapshotForAttempt(ctx, overseer.CredentialDigest, OverseerSnapshotRequest{Offset: *page.NextOffset, ExpectedHead: first.Head}); err != nil {
+			t.Fatalf("traversal: %v", err)
+		}
+	}
+	selected := worker.TaskID
+	if detail, err := store.OverseerSnapshotForAttempt(ctx, overseer.CredentialDigest, OverseerSnapshotRequest{TaskID: &selected}); err != nil || len(detail.Questions) != 1 {
+		t.Fatalf("selected yielded task = %+v, %v", detail, err)
+	}
+	// Without its waiting continuation a terminal run's open question is corrupt.
+	corruptSQL(t, store, `UPDATE continuations SET state = 'cancelled' WHERE condition_kind = 'human_request' AND condition_id = ?`, request.ID.Bytes())
+	if _, err := store.OverseerSnapshotForAttempt(ctx, overseer.CredentialDigest, OverseerSnapshotRequest{}); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("orphaned terminal question = %v", err)
+	}
+}
