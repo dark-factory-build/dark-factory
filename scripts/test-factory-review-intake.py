@@ -41,7 +41,7 @@ class ReviewIntakeTest(unittest.TestCase):
         self.observe.return_value = 'allow'
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
              patch.object(review, 'ready', return_value=self.operation), patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), \
-             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review, 'verify_existing'):
+             patch.object(review.intake, 'enqueue') as enqueue, patch.object(review, 'verify_existing'), patch.object(review, 'verify_review_body'):
             with self.assertRaisesRegex(review.ReviewError, 'bridge is unavailable'):
                 review.run_once(self.config)
         enqueue.assert_not_called()
@@ -170,6 +170,32 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual(1, enqueue.call_count)
         self.assertIn('state block', enqueue.call_args.args[1]['body'])
 
+    def test_verified_body_update_starts_one_independent_correction(self):
+        old_body = 'stale body\nRefs #7\n'
+        new_body = '111+ / 3- production delta\n' + ('x' * 80) + '\nRefs #7\n'
+        operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
+        receipt = {'version': 2, 'config_fingerprint': review.config_fingerprint(self.config),
+                   'pulls': {'9:' + SHA: operation}}
+        Path(self.config['journal'] + '.reviews.json').write_text(json.dumps(receipt))
+        snapshot = Path(self.config['journal']).parent / ('review-9-' + SHA)
+        snapshot.mkdir()
+        (snapshot / 'body.md').write_text(old_body)
+        self.observe.side_effect = ['block', 'missing', 'block', 'missing']
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': new_body}]), \
+             patch.object(review, 'verify_existing'), patch.object(review, 'app_receipt', return_value=True), \
+             patch.object(review, 'launch_review', return_value=1) as launch, \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            review.run_once(self.config)
+            review.run_once(self.config)
+        self.assertEqual(1, launch.call_count)
+        corrected = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertEqual(operation['review_operation'], corrected['prior_review_operation'])
+        self.assertEqual('block', corrected['prior_review_state'])
+        self.assertNotEqual(operation['review_operation'], corrected['review_operation'])
+        self.assertTrue(corrected['review_attempted'])
+        self.assertEqual(new_body, (snapshot / 'body.md').read_text())
+
     def test_launch_uses_host_boundary_exact_receipt_and_owned_group(self):
         operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
         with patch.object(review.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
@@ -202,6 +228,26 @@ class ReviewIntakeTest(unittest.TestCase):
             value['result']['head_sha'] = 'c' * 40
             run.return_value.stdout = json.dumps({'id': 1, 'result': {'structuredContent': value}})
             with self.assertRaisesRegex(real.ReviewError, 'exact head'):
+                real.observe_review(self.config, operation)
+
+    def test_correction_allow_must_name_prior_block_in_app_rendered_review(self):
+        spec = importlib.util.spec_from_file_location('real_review', Path(review.__file__))
+        real = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(real)
+        operation = dict(self.operation, review_operation='22222222-2222-4222-8222-222222222222',
+                         prior_review_operation='11111111-1111-4111-8111-111111111111')
+        value = {'operation_id': operation['review_operation'], 'state': 'completed', 'kind': 'submit_pull_request_review',
+                 'result': {'review_id': 77, 'head_sha': SHA, 'verdict': 'allow', 'url': 'https://github.com/o/r/pull/9#pullrequestreview-77'}}
+        body = ('findings\n\nDark-Factory-Review: allow ' + SHA + '\n' +
+                'Dark-Factory-Review-Correction: ' + operation['prior_review_operation'] + '\n' +
+                '<!-- dark-factory-operation:' + operation['review_operation'] + ':digest -->')
+        with patch.object(real, 'bridge_call', return_value={'structuredContent': value, 'isError': False}), \
+             patch.object(real.intake, 'command', return_value=json.dumps([{'id': 77, 'commit_id': SHA, 'body': body}])):
+            self.assertEqual('allow', real.observe_review(self.config, operation))
+        bad = body.replace(operation['prior_review_operation'], '33333333-3333-4333-8333-333333333333')
+        with patch.object(real, 'bridge_call', return_value={'structuredContent': value, 'isError': False}), \
+             patch.object(real.intake, 'command', return_value=json.dumps([{'id': 77, 'commit_id': SHA, 'body': bad}])):
+            with self.assertRaisesRegex(real.ReviewError, 'does not explicitly correct'):
                 real.observe_review(self.config, operation)
 
     def test_review_for_another_pr_sharing_the_head_is_refused(self):
@@ -248,12 +294,14 @@ class ReviewIntakeTest(unittest.TestCase):
     def enqueue_bridge(self, observe_states, write=None):
         """Fake bridge: observe_operation answers the given states in order, enqueue_pull_request answers write."""
         writes, states = [], list(observe_states)
+        reviewed_body_digest = self.operation.get('reviewed_body_digest')
         def bridge_call(name, arguments):
+            nonlocal reviewed_body_digest
             if name == 'observe_operation':
                 state = states.pop(0)
                 value = {'operation_id': arguments['operation_id'], 'state': state, 'kind': None, 'result': None, 'request_digest': None}
                 if state == 'completed':
-                    digest = review.enqueue_request_digest(self.config, {'enqueue_operation': arguments['operation_id'], 'pr': 9, 'head': SHA, 'enqueue_base': 'main'})
+                    digest = review.enqueue_request_digest(self.config, {'enqueue_operation': arguments['operation_id'], 'pr': 9, 'head': SHA, 'enqueue_base': 'main', 'reviewed_body_digest': arguments.get('reviewed_body_digest') or reviewed_body_digest})
                     value.update(kind='enqueue_pull_request', request_digest=digest,
                                  result={'pull_number': 9, 'head_sha': SHA, 'entry_id': 'e', 'state_when_recorded': 'QUEUED'})
                 return {'structuredContent': value, 'isError': False}
@@ -263,6 +311,7 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertEqual(arguments['operation_id'], receipt['enqueue_operation'])
             self.assertTrue(receipt['enqueue_attempted'])
             writes.append(arguments)
+            reviewed_body_digest = arguments.get('reviewed_body_digest')
             if isinstance(write, Exception):
                 raise write
             return write
@@ -272,17 +321,84 @@ class ReviewIntakeTest(unittest.TestCase):
         self.observe.return_value = 'allow'
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
              patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), patch.object(review, 'bridge_call', side_effect=bridge_call), \
-             patch.object(review.intake, 'task_state', side_effect=task_state or [None, {'status': 'queued'}]), patch.object(review.intake, 'enqueue') as enqueue:
+             patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, operation: operation.update(reviewed_body_digest='sha256:' + ('0' * 64))), patch.object(review, 'observe_merge', return_value={'state': 'ACTIVE_QUEUE', 'pull_state': 'open'}), patch.object(review.intake, 'task_state', side_effect=task_state or [None, {'status': 'queued'}]), patch.object(review.intake, 'enqueue') as enqueue:
             first = review.run_once(self.config)
             second = review.run_once(self.config)
         return first, second, enqueue, json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+
+    def test_changed_body_between_allow_and_enqueue_fails_closed(self):
+        reviewed = 'Refs #7'
+        live_body = [reviewed]
+        self.observe.return_value = 'allow'
+        writes = []
+        def bridge_call(name, arguments):
+            if name == 'observe_operation':
+                return {'structuredContent': {'operation_id': arguments['operation_id'], 'state': 'missing'}, 'isError': False}
+            self.assertEqual('enqueue_pull_request', name)
+            if live_body[0] != reviewed:
+                return {'content': [{'type': 'text', 'text': 'conflict: pull request body changed after review'}], 'isError': True}
+            writes.append(arguments)
+            return {'structuredContent': {'pull_number': 9, 'head_sha': SHA, 'entry_id': 'e', 'state_when_recorded': 'QUEUED'}, 'isError': False}
+        def verify(_config, _pr, operation):
+            operation['reviewed_body_digest'] = 'sha256:' + ('0' * 64)
+            live_body[0] = 'changed body\nRefs #7'
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': reviewed}]), \
+             patch.object(review, 'ready', return_value=dict(self.operation)), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'verify_review_body', side_effect=verify), patch.object(review, 'bridge_call', side_effect=bridge_call), \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            review.run_once(self.config)
+        self.assertEqual([], writes)
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertEqual('refused', receipt['enqueue_state'])
+        self.assertIn('body changed after review', receipt['enqueue_refusal'])
+
+    def test_not_queued_merge_observation_wakes_one_causal_failure_task(self):
+        self.observe.return_value = 'allow'
+        queued_operation = dict(self.operation)
+        def mark_queued(_config, operation, _journal_path, _receipts):
+            operation['enqueue_operation'] = '44444444-4444-4444-8444-444444444444'
+            operation['enqueue_base'] = 'main'
+            operation['enqueue_state'] = 'queued'
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
+             patch.object(review, 'ready', return_value=queued_operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, operation: operation.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
+             patch.object(review, 'enqueue_allowed', side_effect=mark_queued), patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}, {'status': 'queued'}, {'status': 'queued'}]), \
+             patch.object(review.intake, 'enqueue') as enqueue:
+            first = review.run_once(self.config)
+            second = review.run_once(self.config)
+        self.assertEqual(['woke PR #9 queue failure'], first)
+        self.assertEqual([], second)
+        self.assertEqual(1, enqueue.call_count)
+        self.assertIn('NOT_QUEUED', enqueue.call_args.args[1]['body'])
+        self.assertIn('44444444-4444-4444-8444-444444444444', enqueue.call_args.args[1]['body'])
+
+    def test_closed_not_queued_merge_observation_stays_quiet(self):
+        self.observe.return_value = 'allow'
+        queued_operation = dict(self.operation)
+        def mark_queued(_config, operation, _journal_path, _receipts):
+            operation['enqueue_operation'] = '44444444-4444-4444-8444-444444444444'
+            operation['enqueue_base'] = 'main'
+            operation['enqueue_state'] = 'queued'
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
+             patch.object(review, 'ready', return_value=queued_operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, operation: operation.update(reviewed_body_digest='sha256:' + ('0' * 64))), \
+             patch.object(review, 'enqueue_allowed', side_effect=mark_queued), patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'closed'}), \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}), patch.object(review.intake, 'enqueue') as enqueue:
+            self.assertEqual([], review.run_once(self.config))
+        self.assertEqual(0, enqueue.call_count)
+        receipt = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']['9:' + SHA]
+        self.assertEqual(('NOT_QUEUED', 'closed'), (receipt['merge_state'], receipt['merge_pull_state']))
 
     def test_allow_enqueues_exact_head_once_and_rerun_observes_without_second_write(self):
         queued = {'structuredContent': {'pull_number': 9, 'head_sha': SHA, 'entry_id': 'e', 'state_when_recorded': 'QUEUED'}, 'isError': False}
         bridge_call, writes = self.enqueue_bridge(['missing', 'completed'], queued)
         first, second, task, receipt = self.run_allow(bridge_call)
         expected = str(review.uuid.uuid5(review.uuid.NAMESPACE_URL, 'dark-factory:host-enqueue:o/r:9:' + SHA))
-        self.assertEqual([{'repository': 'o/r', 'operation_id': expected, 'pull_number': 9, 'head_sha': SHA, 'base': 'main'}], writes)
+        self.assertEqual([{'repository': 'o/r', 'operation_id': expected, 'pull_number': 9, 'head_sha': SHA, 'base': 'main', 'reviewed_body_digest': 'sha256:' + ('0' * 64)}], writes)
         self.assertEqual(('queued', expected, 'main', 'allow'), (receipt['enqueue_state'], receipt['enqueue_operation'], receipt['enqueue_base'], receipt['review_state']))
         self.assertEqual((['woke PR #9 review allow'], [], 1), (first, second, task.call_count))
         body = task.call_args.args[1]['body']
@@ -352,8 +468,9 @@ class ReviewIntakeTest(unittest.TestCase):
             with self.assertRaisesRegex(review.ReviewError, 'exact head'):
                 review.observe_enqueue(self.config, operation)
         # An operator-recorded enqueue id is preserved, never replaced by a derived one.
-        bridge_call, writes = self.enqueue_bridge(['completed', 'completed'])
         self.operation['enqueue_operation'] = operation['enqueue_operation']
+        self.operation['reviewed_body_digest'] = 'sha256:' + ('0' * 64)
+        bridge_call, writes = self.enqueue_bridge(['completed', 'completed'])
         _first, _second, _task, receipt = self.run_allow(bridge_call)
         self.assertEqual((operation['enqueue_operation'], 'queued', []), (receipt['enqueue_operation'], receipt['enqueue_state'], writes))
 
@@ -420,7 +537,7 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': body}]), \
              patch.object(review, 'ready', side_effect=ready), patch.object(review, 'verify_existing'), patch.object(review, 'bridge_call', side_effect=bridge_call), \
              patch.object(review.intake, 'exact_issue', return_value={'number': 20, 'body': issue_body}) as exact, \
-             patch.object(review, 'launch_review', return_value=0) as launch, \
+             patch.object(review, 'launch_review', return_value=0) as launch, patch.object(review, 'verify_review_body', side_effect=lambda _config, _pr, operation: operation.update(reviewed_body_digest='sha256:' + ('0' * 64))), patch.object(review, 'observe_merge', return_value={'state': 'ACTIVE_QUEUE', 'pull_state': 'open'}), \
              patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), patch.object(review.intake, 'enqueue') as task:
             self.assertEqual(['woke PR #9 review allow'], review.run_once(self.config))
             self.assertEqual([], review.run_once(self.config))

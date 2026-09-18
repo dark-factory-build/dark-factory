@@ -628,6 +628,10 @@ pub(crate) struct EnqueuePullRequest {
     /// different branch than the caller believes would be enqueued onto that
     /// branch's queue instead.
     pub(crate) base: String,
+    /// Digest of the exact rendered PR body that was independently reviewed.
+    /// The enqueue authority re-reads the body before claiming the queue write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reviewed_body_digest: Option<String>,
 }
 
 /// Merge one pull request directly, but only after proving every repository,
@@ -2291,6 +2295,10 @@ impl AppAuthority {
         mut request: EnqueuePullRequest,
     ) -> Result<EnqueueResult, OperationError> {
         request.validate()?;
+        let reviewed_body_digest = request
+            .reviewed_body_digest
+            .as_deref()
+            .ok_or(OperationError::InvalidInput)?;
         let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("enqueue_pull_request")?;
         let state = journal
@@ -2357,6 +2365,15 @@ impl AppAuthority {
             .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
             .await?;
         if pull.base.name != request.base {
+            return Err(OperationError::Conflict);
+        }
+        if pull
+            .body
+            .as_deref()
+            .map(text_digest)
+            .as_deref()
+            != Some(reviewed_body_digest)
+        {
             return Err(OperationError::Conflict);
         }
         match journal
@@ -2764,12 +2781,39 @@ impl AppAuthority {
     ) -> Result<PullRequestMergeResult, OperationError> {
         request.validate()?;
         let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("contents", "read"),
+                    ("merge_queues", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
+            .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        if request.base != repository.default_branch {
+            return Err(OperationError::Conflict);
+        }
+        let pull = self
+            .0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await?;
+        if pull.base.name != request.base {
+            return Err(OperationError::Conflict);
+        }
+        if !matches!(pull.state.as_str(), "open" | "closed") {
+            return Err(OperationError::Unavailable);
+        }
         let mut enqueue_request = EnqueuePullRequest {
             repository: request.repository.clone(),
             operation_id: request.enqueue_operation_id.clone(),
             pull_number: request.pull_number,
             head_sha: request.head_sha.clone(),
             base: request.base.clone(),
+            reviewed_body_digest: Some(text_digest(pull.body.as_deref().unwrap_or(""))),
         };
         enqueue_request.validate()?;
         let enqueue_operation = enqueue_request.operation("enqueue_pull_request")?;
@@ -2796,32 +2840,6 @@ impl AppAuthority {
             || !valid_queue_state(&enqueue.state_when_recorded)
             || valid_text(&enqueue.entry_id, 1, 256, true).is_err()
         {
-            return Err(OperationError::Unavailable);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("contents", "read"),
-                    ("merge_queues", "read"),
-                    ("metadata", "read"),
-                    ("pull_requests", "read"),
-                ]),
-            )
-            .await?;
-        let repository = self.0.repository_metadata(&token).await?;
-        if request.base != repository.default_branch {
-            return Err(OperationError::Conflict);
-        }
-        let pull = self
-            .0
-            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
-            .await?;
-        if pull.base.name != request.base {
-            return Err(OperationError::Conflict);
-        }
-        if !matches!(pull.state.as_str(), "open" | "closed") {
             return Err(OperationError::Unavailable);
         }
         if pull.merged {
@@ -3151,7 +3169,11 @@ impl EnqueuePullRequest {
         canonical_operation_id(&mut self.operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
-        valid_ref(&self.base)
+        valid_ref(&self.base)?;
+        if let Some(digest) = self.reviewed_body_digest.as_deref() {
+            valid_digest(digest).map_err(|_| OperationError::InvalidInput)?;
+        }
+        Ok(())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3671,6 +3693,11 @@ fn valid_sha(value: &str) -> Result<(), OperationError> {
         && value == value.to_ascii_lowercase())
     .then_some(())
     .ok_or(OperationError::InvalidInput)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn text_digest(value: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(value.as_bytes())))
 }
 
 fn valid_exact_integer(value: i64) -> Result<(), OperationError> {
@@ -8795,6 +8822,7 @@ mod tests {
             pull_number: 329,
             head_sha: head.clone(),
             base: "main".into(),
+            reviewed_body_digest: None,
         };
         assert!(request.validate().is_ok());
 
