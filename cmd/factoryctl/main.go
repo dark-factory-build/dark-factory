@@ -45,6 +45,14 @@ const (
   factoryctl github installations [--page N]
   factoryctl github repositories --installation ID [--page N]
   factoryctl github delegate --repositories FILE
+	factoryctl intake list [--project ID]
+	factoryctl intake config [--project ID]
+	factoryctl intake create|update --source ID --project ID --configuration JSON [--revision N]
+	factoryctl intake preview|refresh --source ID --page N
+	factoryctl intake enable|pause --source ID --revision N [--reviewed-revision N]
+	factoryctl intake accept --source ID --revision N --issue N --hash HEX64
+	factoryctl intake withdraw|import --acceptance ID
+	factoryctl intake tick --source ID --page N [--acceptance-cursor ID]
   factoryctl github manage --installation ID [--open]
   factoryctl attempt task
   factoryctl attempt source --task ID
@@ -167,6 +175,7 @@ const (
 	commandProjectCreate
 	commandProjectLimits
 	commandProjectRepository
+	commandIntake
 	commandAgentCreate
 	commandAgentIdlePolicy
 	commandAccountsDiscover
@@ -263,6 +272,7 @@ type attemptCommand struct {
 	retry            bool
 	bodyFile         string
 	contentKind      string
+	intake           api.IntakeInput
 	contentID        string
 	contentRevision  uint64
 	description      string
@@ -297,6 +307,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 type browserOpener func(context.Context, string) error
 
 func runWithOpener(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
+	if len(args) >= 2 && args[0] == "intake" && args[1] == "service" {
+		return runIntakeService(ctx, args[2:], getenv, stdout, stderr)
+	}
 	return runWithDependencies(ctx, args, getenv, stdout, stderr, opener, install.InspectService)
 }
 
@@ -361,7 +374,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -612,7 +625,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		command.operatorControl = ok
 		return command, help, ok
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -1359,6 +1372,66 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 }
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
+	if len(args) >= 2 && args[0] == "intake" {
+		input := api.IntakeInput{Action: args[1]}
+		if input.Action == "config" {
+			input.Action = "list"
+		}
+		if (len(args)-2)%2 != 0 {
+			return attemptCommand{}, false, false
+		}
+		for i := 2; i < len(args); i += 2 {
+			key, value := args[i], args[i+1]
+			switch key {
+			case "--source":
+				input.SourceID = value
+			case "--project":
+				input.ProjectID = value
+			case "--revision":
+				n, ok := parseRevision(value)
+				if !ok {
+					return attemptCommand{}, false, false
+				}
+				input.ExpectedRevision = n
+			case "--reviewed-revision":
+				n, ok := parseRevision(value)
+				if !ok {
+					return attemptCommand{}, false, false
+				}
+				input.ReviewedRevision = n
+			case "--page":
+				n, ok := parseRevision(value)
+				if !ok || n > 1000 {
+					return attemptCommand{}, false, false
+				}
+				input.Page = uint32(n)
+			case "--issue":
+				n, ok := parseRevision(value)
+				if !ok {
+					return attemptCommand{}, false, false
+				}
+				input.IssueNumber = n
+			case "--hash":
+				input.ContentHash = value
+			case "--acceptance-cursor":
+				input.AcceptanceCursor = value
+			case "--acceptance":
+				input.AcceptanceID = value
+			case "--configuration":
+				var config api.IntakeConfiguration
+				if json.Unmarshal([]byte(value), &config) != nil {
+					return attemptCommand{}, false, false
+				}
+				input.Configuration = &config
+			default:
+				return attemptCommand{}, false, false
+			}
+		}
+		if !api.ValidIntakeInput(input) {
+			return attemptCommand{}, false, false
+		}
+		return attemptCommand{kind: commandIntake, intake: input}, false, true
+	}
 	if len(args) >= 3 && args[0] == "project" && args[1] == "repository" {
 		action := args[2]
 		if action != "list" && action != "add" && action != "name" && action != "base" && action != "default" && action != "enable" && action != "disable" && action != "remove" && action != "fetch" && action != "github" {
@@ -2075,7 +2148,11 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
 	}
-	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
+	timeout := attemptRequestTimeout
+	if command.kind == commandIntake {
+		timeout = 120 * time.Second
+	}
+	callContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments {
 		return runContent(callContext, client, command, stdout, stderr)
@@ -2084,6 +2161,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		return runOutcome(callContext, client, command, stdout, stderr)
 	}
 	switch command.kind {
+	case commandIntake:
+		result, callErr := client.Intake(callContext, command.intake)
+		if callErr != nil {
+			return writeWebFailure(stderr, "intake", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandStatus:
 		snapshot, callErr := client.Snapshot(callContext)
 		if callErr != nil {

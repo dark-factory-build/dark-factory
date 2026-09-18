@@ -496,6 +496,208 @@ class DeployStageEvidence(unittest.TestCase):
         self.assertIn('first line\n', result.stderr)
         self.assertTrue(result.stderr.endswith('last line\n\nstage: sh reinstall-service.sh --home factory --prepare exit=3\n'), result.stderr[-120:])
 
+class ManagedIntakeTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.home = self.root / 'factory'
+        self.home.mkdir(mode=0o700)
+        self.factoryctl = self.root / 'release/factoryctl'
+        self.factoryctl.parent.mkdir()
+        self.factoryctl.write_text('fixture')
+        self.factoryctl.chmod(0o755)
+        self.script = self.factoryctl.parent / 'libexec/dark-factory/factory-autonomy.py'
+        self.script.parent.mkdir(parents=True)
+        self.script.write_text('fixture')
+        self.script.chmod(0o755)
+        self.plists = self.root / 'plists'
+        self.sources = [{'id': '1'*32, 'enabled': True, 'revision': 1, 'poll_seconds': 60},
+                        {'id': '2'*32, 'enabled': True, 'revision': 1, 'poll_seconds': 60}]
+
+    def test_per_source_errors_persist_and_paused_sources_reconcile(self):
+        replies = [{'state':'ok', 'sources': self.sources}, {'state':'ok','imported_tasks':['a'*32]}, {'state':'unavailable'}]
+        with patch.object(autonomy, 'managed_api', side_effect=replies) as api, patch.object(autonomy.time, 'time', return_value=100):
+            result = autonomy.managed_tick(self.home, self.factoryctl)
+        self.assertEqual('ok', result['sources']['1'*32]['state'])
+        self.assertEqual(100, result['sources']['1'*32]['last_success_at'])
+        self.assertEqual('unavailable', result['sources']['2'*32]['error'])
+        with patch.object(autonomy, 'managed_api', return_value={'state':'ok','sources':self.sources}) as api, patch.object(autonomy.time, 'time', return_value=105):
+            result = autonomy.managed_tick(self.home, self.factoryctl)
+        self.assertEqual(1, api.call_count)
+        self.assertEqual('unavailable', result['sources']['2'*32]['error'])
+        self.assertEqual(100, result['sources']['1'*32]['last_success_at'])
+        self.sources[1].update(enabled=False, revision=2)
+        with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},{'state':'paused'}]) as api, patch.object(autonomy.time, 'time', return_value=106):
+            result = autonomy.managed_tick(self.home, self.factoryctl)
+        self.assertEqual(['tick','--source','2'*32,'--page','1'],api.call_args.args[2])
+        self.assertEqual('paused', result['sources']['2'*32]['state'])
+        self.assertEqual(106, result['sources']['2'*32]['last_success_at'])
+
+    def test_cursor_survives_restart_and_ambiguous_import(self):
+        self.sources = self.sources[:1]
+        for at, next_page, expected in [(100,2,'1'),(105,'failure','2'),(165,None,'2')]:
+            reply = {'state':'unavailable'} if next_page == 'failure' else {'state':'ok','next_page':next_page,'imported_tasks':['a'*32]}
+            with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},reply]) as api, patch.object(autonomy.time, 'time', return_value=at):
+                autonomy.managed_tick(self.home,self.factoryctl)
+                self.assertEqual(expected,api.call_args.args[2][-1])
+        journal = json.loads(Path(str(self.home)+'.intake/journal.json').read_text())
+        self.assertEqual(1,journal['sources']['1'*32]['next_page'])
+        self.assertNotIn('task_id',journal['sources']['1'*32])
+
+    def test_acceptance_cursor_survives_restart_and_lost_response_then_wraps(self):
+        self.sources = self.sources[:1]
+        for at, reply, cursor in [(100, {'state':'ok','acceptance_cursor':'b'*32}, ''),
+                                  (105, {'state':'unavailable'}, 'b'*32),
+                                  (165, {'state':'ok'}, 'b'*32),
+                                  (225, {'state':'ok'}, '')]:
+            with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},reply]) as api, patch.object(autonomy.time, 'time', return_value=at):
+                autonomy.managed_tick(self.home,self.factoryctl)
+                expected = ['tick','--source','1'*32,'--page','1']
+                if cursor:
+                    expected += ['--acceptance-cursor',cursor]
+                self.assertEqual(expected,api.call_args.args[2])
+        journal = json.loads(Path(str(self.home)+'.intake/journal.json').read_text())
+        self.assertEqual('',journal['sources']['1'*32]['acceptance_cursor'])
+
+    def test_partial_receipt_progress_keeps_error_then_wraps_without_success(self):
+        self.sources = self.sources[:1]
+        for at, reply, expected in [(100, {'state':'unavailable','acceptance_progress':True,'acceptance_cursor':'b'*32}, ''),
+                                    (105, {'state':'unavailable'}, 'b'*32),
+                                    (165, {'state':'unavailable','acceptance_progress':True}, 'b'*32),
+                                    (170, {'state':'ok'}, '')]:
+            with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},reply]) as api, patch.object(autonomy.time, 'time', return_value=at):
+                autonomy.managed_tick(self.home,self.factoryctl)
+                arguments = api.call_args.args[2]
+                self.assertEqual(expected, arguments[-1] if '--acceptance-cursor' in arguments else '')
+            journal = json.loads(Path(str(self.home)+'.intake/journal.json').read_text())
+            record = journal['sources']['1'*32]
+            if reply['state'] != 'ok':
+                self.assertEqual('unavailable',record['error'])
+                self.assertEqual(0,record.get('last_success_at',0))
+        self.assertEqual(170,record['last_success_at'])
+        self.assertEqual('',record['error'])
+
+    def test_overflow_and_factory_replacement_fail_closed(self):
+        with patch.object(autonomy,'managed_api',return_value={'state':'ok','sources':self.sources*101}):
+            result = autonomy.managed_tick(self.home,self.factoryctl)
+        self.assertEqual('overflow',result['error'])
+        old = self.home.with_name('old')
+        self.home.rename(old)
+        self.home.mkdir(mode=0o700)
+        with patch.object(autonomy,'managed_api') as api, self.assertRaisesRegex(ValueError,'different factory'):
+            autonomy.managed_tick(self.home,self.factoryctl)
+        api.assert_not_called()
+
+    def test_api_child_receives_only_local_operator_environment(self):
+        response = subprocess.CompletedProcess([],0,'{"state":"ok"}','')
+        with patch.object(autonomy.subprocess,'run',return_value=response) as run:
+            autonomy.managed_api(self.factoryctl,self.home,['config'])
+        self.assertEqual({'PATH','DARK_FACTORY_SOCKET','DARK_FACTORY_OPERATOR_TOKEN_FILE'},set(run.call_args.kwargs['env']))
+        self.assertEqual([str(self.factoryctl),'intake','config'],run.call_args.args[0])
+
+    def test_service_install_upgrade_status_uninstall_retains_journal(self):
+        jobs, calls = {}, []
+        def launchctl(*args):
+            calls.append(args)
+            if args[0] == 'print':
+                path = jobs.get(args[1])
+                return subprocess.CompletedProcess(args,0 if path else 113,'path = '+str(path)+'\n' if path else '','')
+            if args[0] == 'bootstrap':
+                value = autonomy.plistlib.loads(Path(args[2]).read_bytes())
+                jobs[args[1]+'/'+value['Label']] = args[2]
+            elif args[0] == 'bootout':
+                del jobs[args[1]]
+            return subprocess.CompletedProcess(args,0,'','')
+        with patch.object(autonomy,'__file__',str(self.script)), patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',side_effect=launchctl):
+            self.assertEqual('scheduled',autonomy.managed_service(self.home,self.factoryctl,'install')['state'])
+            self.assertEqual('scheduled',autonomy.managed_service(self.home,self.factoryctl,'install')['state'])
+            self.assertEqual(1,sum(call[0]=='bootstrap' for call in calls))
+            self.assertEqual('scheduled',autonomy.managed_service(self.home,self.factoryctl,'status')['state'])
+            journal = Path(str(self.home)+'.intake/journal.json')
+            autonomy.atomic_json(journal,{'keep':'cutoff'})
+            self.script.write_text('upgraded fixture')
+            autonomy.managed_service(self.home,self.factoryctl,'install')
+            self.assertEqual(2,sum(call[0]=='bootstrap' for call in calls))
+            autonomy.managed_service(self.home,self.factoryctl,'uninstall')
+            self.assertEqual({'keep':'cutoff'},json.loads(journal.read_text()))
+            self.assertFalse(jobs)
+
+    def test_install_refuses_same_home_legacy_schedule_without_touching_it(self):
+        self.plists.mkdir()
+        config = self.root / 'legacy.json'
+        config.write_text(json.dumps({'factory_home': str(self.home), 'journal': str(self.root / 'legacy-journal.json')}))
+        config.chmod(0o600)
+        # The operator may save the generated plist under a custom filename.
+        plist = self.plists / 'custom-intake.plist'
+        job = {'Label': 'build.darkfactory.autonomy.fixture', 'ProgramArguments': ['/usr/bin/python3', '/old/release/factory-autonomy.py', str(config), '--once']}
+        plist.write_bytes(autonomy.plistlib.dumps(job))
+        plist.chmod(0o600)
+        original = plist.read_bytes()
+        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')) as launchctl:
+            with self.assertRaisesRegex(ValueError, 'legacy intake already schedules'):
+                autonomy.managed_service(self.home, self.factoryctl, 'install')
+            self.assertEqual([('list',)], [call.args for call in launchctl.call_args_list])
+        self.assertEqual(original, plist.read_bytes())
+        self.assertFalse(Path(str(self.home)+'.intake/service.json').exists())
+        # Release-only work and another factory retain their existing jobs.
+        job['ProgramArguments'].append('--release-only')
+        plist.write_bytes(autonomy.plistlib.dumps(job))
+        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            autonomy.refuse_legacy_intake_service(self.home)
+            job['ProgramArguments'].pop()
+            plist.write_bytes(autonomy.plistlib.dumps(job))
+            config.write_text(json.dumps({'factory_home': str(self.root / 'another-home')}))
+            autonomy.refuse_legacy_intake_service(self.home)
+
+    def test_install_refuses_uninspectable_loaded_legacy_job_and_overflow(self):
+        label = 'build.darkfactory.autonomy.fixture'
+        replies = [subprocess.CompletedProcess([], 0, '-\t0\t'+label+'\n', ''), subprocess.CompletedProcess([], 0, 'path = '+str(self.root/'missing.plist')+'\n', '')]
+        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', side_effect=replies), self.assertRaisesRegex(ValueError, 'arguments unavailable'):
+            autonomy.refuse_legacy_intake_service(self.home)
+        self.plists.mkdir()
+        for index in range(201):
+            (self.plists / (str(index)+'.plist')).touch()
+        with patch.object(autonomy, 'managed_plist_root', return_value=self.plists), patch.object(autonomy, 'managed_launchctl', return_value=subprocess.CompletedProcess([], 0, '', '')), self.assertRaisesRegex(ValueError, 'exceeds 200'):
+            autonomy.refuse_legacy_intake_service(self.home)
+
+    def test_foreign_plist_is_never_stopped_and_missing_owned_plist_can_uninstall(self):
+        absent = subprocess.CompletedProcess([],113,'','')
+        success = subprocess.CompletedProcess([],0,'','')
+        with patch.object(autonomy,'__file__',str(self.script)), patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',side_effect=[success,absent,success]):
+            autonomy.managed_service(self.home,self.factoryctl,'install')
+        plist = next(self.plists.iterdir())
+        plist.write_text('foreign')
+        with patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl') as launchctl, self.assertRaisesRegex(ValueError,'foreign'):
+            autonomy.managed_service(self.home,self.factoryctl,'uninstall')
+        launchctl.assert_not_called()
+        plist.unlink()
+        with patch.object(autonomy,'managed_plist_root',return_value=self.plists), patch.object(autonomy,'managed_launchctl',return_value=absent):
+            self.assertEqual('absent',autonomy.managed_service(self.home,self.factoryctl,'uninstall')['state'])
+
+    @unittest.skipUnless(autonomy.os.environ.get('DARK_FACTORY_INTAKE_SERVICE_E2E') == '1', 'disposable launchd gate only')
+    def test_real_disposable_service_lifecycle(self):
+        self.script.write_bytes(Path(autonomy.__file__).read_bytes())
+        self.factoryctl.write_text('#!/bin/sh\nprintf \'{"state":"ok","sources":[]}\\n\'\n')
+        label = 'com.dark-factory.intake.' + autonomy.hashlib.sha256(str(self.home).encode()).hexdigest()[:12]
+        target = 'gui/' + str(autonomy.os.geteuid()) + '/' + label
+        status = Path(str(self.home) + '.intake/status.json')
+        with patch.object(autonomy, '__file__', str(self.script)), patch.object(autonomy, 'managed_plist_root', return_value=self.plists):
+            try:
+                self.assertEqual('scheduled', autonomy.managed_service(self.home, self.factoryctl, 'install')['state'])
+                deadline = time.monotonic() + 20
+                while not status.exists() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                self.assertEqual('ok', autonomy.managed_read(status)['state'])
+                self.assertEqual('scheduled', autonomy.managed_service(self.home, self.factoryctl, 'status')['state'])
+                self.assertEqual('scheduled', autonomy.managed_service(self.home, self.factoryctl, 'install')['state'])
+                self.assertEqual('absent', autonomy.managed_service(self.home, self.factoryctl, 'uninstall')['state'])
+                self.assertEqual(113, autonomy.managed_launchctl('print', target).returncode)
+                self.assertTrue(status.exists())
+                self.assertFalse(list(self.plists.iterdir()))
+            finally:
+                autonomy.managed_launchctl('bootout', target)
+
 
 if __name__ == '__main__':
     unittest.main()
