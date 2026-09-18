@@ -15,6 +15,13 @@ Delegate independent work to available qualified workers within the actual
 admission limits. A configured `max_run_seconds: 0` disables the run deadline;
 intake honors that operator choice and does not require a finite duration.
 
+Supervision wakes on worker events and, while unfinished tasks remain, after its
+configured idle interval even if no new event arrives. An idle reconciliation
+rechecks blocked and failed tasks against current prerequisites and delivery
+proof. Preserve historical outcomes; reconsidering a task is not permission to
+blindly retry it or duplicate another owner's implementation. Read the previous
+supervision result first and distinguish delivered history from actionable work.
+
 Workers should use `./scripts/go-check.sh` plus focused tests while implementing
 and record the exact head and checks before review. Process-sensitive checks use
 `./scripts/with-local-ci-lease.sh`; reviewers reproduce relevant risks instead
