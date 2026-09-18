@@ -1718,6 +1718,24 @@ test("settings asks the daemon for logins on open and links the one the operator
   }
 });
 
+test("settings rereads private GitHub state when the browser reconnects", async () => {
+  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    const calls = [];
+    const props = { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => calls.push(request) };
+    let renderer;
+    await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
+    assert.deepEqual(calls, [{ action: "status" }]);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "connecting" })); });
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
+    assert.deepEqual(calls, [{ action: "status" }, { action: "status" }]);
+    renderer.unmount();
+  } finally {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
+  }
+});
+
 test("settings keeps an unavailable linked account visible with recovery guidance", () => {
   const account = [...baseState().accounts.values()][0];
   const markup = render({ settingsOpen: true, accounts: [{

@@ -98,3 +98,12 @@ test("a connected refresh drops discovery pages before reloading installations",
   assert.equal(coordinator.github.result.installations.installations.length, 0);
   assert.equal(coordinator.github.result.repositories, undefined);
 });
+
+test("clearing GitHub state drops private observations before a replacement session", async () => {
+  const owner = { session: () => ({ capabilities: 1, clientId: "client", async githubConnection() { return { state: "ok", status: { connection_id: "new", state: "connected", repositories: [] } }; } }), ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "status" });
+  assert.equal(coordinator.github.result.status.connection_id, "new");
+  coordinator.clearGitHub();
+  assert.equal(coordinator.github.result, undefined);
+});

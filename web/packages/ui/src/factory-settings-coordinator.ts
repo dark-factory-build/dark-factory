@@ -78,6 +78,11 @@ export class FactorySettingsCoordinator {
     this.#owner.publish();
   }
 
+  clearRemoteInvite(): void {
+    this.#remoteInvite = undefined;
+    this.#remoteInviteError = undefined;
+  }
+
   async githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> {
     const session = this.#owner.session();
     if (!this.#owner.ready() || session === undefined || this.#githubPending) return;
