@@ -109,7 +109,7 @@ def linked_issue(config, pr, journal, existing=None):
     try:
         source = intake.exact_issue(config, issue)
     except intake.IssueBodyTooLarge as exc:
-        raise Unproven("footer #" + str(issue) + " points to an App-created source whose body exceeds the intake limit") from exc
+        raise Unproven("footer #" + str(issue) + " points to a source whose body exceeds the intake limit") from exc
     if not app_receipt(source["body"], {"create_issue"}, issue, config["repository"], "issues"):
         raise Unproven("footer #" + str(issue) + " is neither an intake-managed source nor an App-created tracking issue (no completed create_issue receipt)")
     return issue
