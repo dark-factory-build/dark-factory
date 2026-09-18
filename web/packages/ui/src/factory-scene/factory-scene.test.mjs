@@ -665,10 +665,11 @@ test("stationary tasks expose affected areas and link the existing queue and que
 
 
 test("workbench labels use the bounded task title instead of an opaque ID", () => {
-  const task = { id: "deadbeef01234567", agentId: "worker-b", projectId: "project", title: "Describe the operator settings", status: "running", roomIds: ["src"], representativeRoomId: "src", humanRequestIds: [] };
+  const task = { id: "deadbeef01234567", agentId: "worker-b", projectId: "project", title: "Fix parser cache 🐢 behavior", status: "running", roomIds: ["src"], representativeRoomId: "src", humanRequestIds: [] };
   const markup = render({ tasks: [task] });
   const workbench = markup.slice(markup.indexOf(`data-workbench-task-id="${task.id}"`), markup.indexOf("</g>", markup.indexOf(`data-workbench-task-id="${task.id}"`)));
-  assert.match(workbench, new RegExp(`>${task.title.slice(0, 18)}</text>`));
+  assert.match(workbench, new RegExp(`>${[...task.title].slice(0, 18).join("")}</text>`));
+  assert.doesNotMatch(workbench, /�/);
   assert.doesNotMatch(workbench, new RegExp(`>${task.id.slice(0, 8)}</text>`));
 });
 

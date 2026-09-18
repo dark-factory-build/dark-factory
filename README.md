@@ -60,9 +60,8 @@ factoryctl web status
 factoryctl web open
 ```
 
-The released v0.3.5 setup creates its built-in shell worker. `project create`
-prints a JSON `id`; use it as `PROJECT_ID`. `agent create` prints another JSON
-`id`; use it as `AGENT_ID`—the released CLI requires a named agent, not `any`.
+`project create` prints a JSON `id`; use it as `PROJECT_ID`. `agent create`
+creates a shell worker and prints another JSON `id`; use it as `AGENT_ID`.
 
 ```sh
 factoryctl project create --name "My project" --root "$PWD"
