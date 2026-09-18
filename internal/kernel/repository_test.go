@@ -86,7 +86,11 @@ func TestRepositoryDisableAndRemovalRespectBindings(t *testing.T) {
 	if _, err := store.SetProjectRepositoryDefault(ctx, second.ID, second.Revision, mustTime(t, 4)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SetProjectRepositoryEnabled(ctx, RepositoryID(project.ID), Revision{value: 1}, false, mustTime(t, 5)); err != nil {
+	first, found, err := store.ProjectRepository(ctx, RepositoryID(project.ID))
+	if err != nil || !found {
+		t.Fatalf("primary repository: %v, found=%v", err, found)
+	}
+	if _, err := store.SetProjectRepositoryEnabled(ctx, first.ID, first.Revision, false, mustTime(t, 5)); err != nil {
 		t.Fatalf("disable nondefault = %v", err)
 	}
 	repositories, err := store.ProjectRepositories(ctx, project.ID)
