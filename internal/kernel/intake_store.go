@@ -341,6 +341,62 @@ func (store *Store) LatestIntakeAcceptance(ctx context.Context, repositoryID, nu
 	return scanIntakeAcceptance(read.connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE github_repository_id = ? AND issue_number = ? AND issue_node_id = ? AND project_id = ? AND repository_id = ? ORDER BY created_at_ms DESC, id DESC LIMIT 1`, int64(repositoryID), int64(number), nodeID, projectID.Bytes(), targetRepositoryID.Bytes()))
 }
 
+// PendingIntakeAcceptances returns receipts that still need their first task
+// insert. A newer receipt for the same issue suppresses an older one, even if
+// the newer receipt was withdrawn: importing an old review after later review
+// activity would evade the controller's exact-content check.
+func (store *Store) PendingIntakeAcceptances(ctx context.Context, sourceID IntakeSourceID, limit uint16) ([]IntakeAcceptance, error) {
+	if sourceID.zero() || limit < 1 || limit > 200 {
+		return nil, ErrInvalidValue
+	}
+	read, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer read.Close()
+	source, found, err := intakeSourceByID(ctx, read.connection, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, ErrNotFound
+	}
+	if !source.Enabled {
+		return []IntakeAcceptance{}, nil
+	}
+	columns := "accepted." + strings.ReplaceAll(intakeAcceptanceColumns, ", ", ", accepted.")
+	rows, err := read.connection.QueryContext(ctx, `SELECT `+columns+` FROM intake_acceptances accepted
+		LEFT JOIN tasks task ON task.id = accepted.task_id
+		WHERE accepted.github_repository_id = ? AND accepted.project_id = ? AND accepted.repository_id = ?
+			AND accepted.withdrawn_at_ms IS NULL AND task.id IS NULL
+			AND NOT EXISTS (
+				SELECT 1 FROM intake_acceptances newer
+				WHERE newer.github_repository_id = accepted.github_repository_id
+					AND newer.issue_number = accepted.issue_number
+					AND newer.issue_node_id = accepted.issue_node_id
+					AND newer.project_id = accepted.project_id
+					AND newer.repository_id = accepted.repository_id
+					AND (newer.created_at_ms > accepted.created_at_ms OR newer.created_at_ms = accepted.created_at_ms AND newer.id > accepted.id)
+			)
+		ORDER BY accepted.created_at_ms, accepted.id LIMIT ?`, int64(source.GitHubRepositoryID), source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), int64(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []IntakeAcceptance{}
+	for rows.Next() {
+		accepted, found, err := scanIntakeAcceptance(rows)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return nil, err
+		}
+		result = append(result, accepted)
+	}
+	return result, rows.Err()
+}
+
 // AcceptIntakeSnapshot records the exact bytes the operator reviewed. It does
 // not enqueue; ImportIntakeAcceptance performs the acceptance-aware atomic task
 // insert after the controller has persisted its reconciliation marker.
