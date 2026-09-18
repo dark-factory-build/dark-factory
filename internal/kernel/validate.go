@@ -59,10 +59,58 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validateContinuations(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
+	if err := validateIntake(ctx, connection); err != nil {
+		return FactoryState{}, err
+	}
 	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
 	return state, nil
+}
+
+func validateIntake(ctx context.Context, connection *sql.Conn) error {
+	rows, err := connection.QueryContext(ctx, `SELECT `+intakeSourceColumns+` FROM intake_sources ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		source, found, err := scanIntakeSource(rows)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return err
+		}
+		loaded, found, err := intakeSourceByID(ctx, connection, source.ID)
+		if err != nil || !found || loaded.ID != source.ID {
+			return ErrCorruptState
+		}
+		if repository, found, err := repositoryByID(ctx, connection, source.TargetRepositoryID); err != nil || !found || repository.ProjectID != source.ProjectID {
+			return ErrCorruptState
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	acceptances, err := connection.QueryContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer acceptances.Close()
+	for acceptances.Next() {
+		accepted, found, err := scanIntakeAcceptance(acceptances)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return err
+		}
+		if repository, found, err := repositoryByID(ctx, connection, accepted.RepositoryID); err != nil || !found || repository.ProjectID != accepted.ProjectID {
+			return ErrCorruptState
+		}
+	}
+	return acceptances.Err()
 }
 
 func validateContinuations(ctx context.Context, connection *sql.Conn) error {

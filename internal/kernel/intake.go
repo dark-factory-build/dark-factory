@@ -46,6 +46,20 @@ type IntakeSource struct {
 	CreatedAt, UpdatedAt UnixMillis
 }
 
+type NewIntakeSource struct {
+	ID                   IntakeSourceID
+	GitHubRepositoryID   uint64
+	GitHubRepositoryName string
+	ProjectID            ProjectID
+	TargetRepositoryID   RepositoryID
+	OverseerAgentID      AgentID
+	LabelFilter          string
+	Policy               IntakePolicy
+	TrustedGitHubLogins  []string
+	PollSeconds          uint32
+	AdmissionLimit       uint16
+}
+
 // IntakeIssueSnapshot is the only mutable GitHub issue material that intake
 // considers. Metadata such as labels, comments, reactions, and updated_at is
 // intentionally absent: none can silently create new work.
@@ -95,6 +109,7 @@ const (
 	IntakeEligibleTrusted       IntakeEligibility = "eligible_trusted_author"
 	IntakeNeedsManualAcceptance IntakeEligibility = "needs_manual_acceptance"
 	IntakeAlreadyAccepted       IntakeEligibility = "already_accepted"
+	IntakeWithdrawn             IntakeEligibility = "withdrawn"
 	IntakeSourceDisabled        IntakeEligibility = "source_disabled"
 	IntakeUntrustedAuthor       IntakeEligibility = "untrusted_author"
 	IntakeContentChanged        IntakeEligibility = "content_changed"
@@ -121,6 +136,9 @@ func PreviewIntake(source IntakeSource, snapshot IntakeIssueSnapshot, accepted *
 		}
 		if accepted.Snapshot.Title != snapshot.Title || accepted.BodyHash != snapshot.BodyHash() {
 			return IntakeContentChanged
+		}
+		if accepted.WithdrawnAt != nil {
+			return IntakeWithdrawn
 		}
 		return IntakeAlreadyAccepted
 	}
@@ -155,7 +173,7 @@ func validIntakeIssueSnapshot(value IntakeIssueSnapshot) bool {
 }
 
 func intakeAcceptanceIDs(snapshot IntakeIssueSnapshot, projectID ProjectID, repositoryID RepositoryID) (IntakeAcceptanceID, TaskID, IncarnationID, error) {
-	if !validIntakeIssueSnapshot(snapshot) || projectID.zero() || repositoryID.zero() {
+	if snapshot.GitHubRepositoryID == 0 || snapshot.GitHubRepositoryID > math.MaxInt64 || snapshot.IssueNumber == 0 || snapshot.IssueNumber > math.MaxInt64 || !validBoundedIntakeText(snapshot.NodeID, 1, maxGitHubNodeIDBytes) || !validBoundedIntakeText(snapshot.Title, 1, maxIntakeTitleBytes) || !validBoundedIntakeText(snapshot.Body, 0, maxIntakeBodyBytes) || projectID.zero() || repositoryID.zero() {
 		return IntakeAcceptanceID{}, TaskID{}, IncarnationID{}, ErrInvalidValue
 	}
 	identity := fmt.Sprintf("github-intake-v1\x00%d\x00%d\x00%s\x00%s\x00%s\x00%x", snapshot.GitHubRepositoryID, snapshot.IssueNumber, snapshot.NodeID, projectID.String(), repositoryID.String(), snapshot.ContentHash())

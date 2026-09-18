@@ -47,6 +47,7 @@ const (
 	v20UserVersion      = 20
 	v21UserVersion      = 21
 	v22UserVersion      = 22
+	v23UserVersion      = 23
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -520,7 +521,7 @@ func v20SchemaStatements() []string {
 	for _, statement := range schemaStatements {
 		_, name := schemaObjectIdentity(statement)
 		switch name {
-		case "repository_source_identities", "project_repositories", "project_repositories_root_unique", "project_repositories_one_default", "task_repository_bindings", "content_repository_bindings":
+		case "repository_source_identities", "project_repositories", "project_repositories_root_unique", "project_repositories_one_default", "task_repository_bindings", "content_repository_bindings", "intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances":
 			continue
 		}
 		statements = append(statements, statement)
@@ -541,9 +542,22 @@ func v21SchemaStatements() []string {
 func v22SchemaStatements() []string {
 	statements := make([]string, 0, len(schemaStatements)-1)
 	for _, statement := range schemaStatements {
-		if _, name := schemaObjectIdentity(statement); name != "repository_source_identities" {
+		if _, name := schemaObjectIdentity(statement); name != "repository_source_identities" && name != "intake_sources" && name != "intake_sources_repository_destination" && name != "intake_source_trusted_logins" && name != "intake_acceptances" {
 			statements = append(statements, statement)
 		}
+	}
+	return statements
+}
+
+func v23SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-4)
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		switch name {
+		case "intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances":
+			continue
+		}
+		statements = append(statements, statement)
 	}
 	return statements
 }
@@ -666,6 +680,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v21SchemaStatements(), true
 	case v22UserVersion:
 		return v22SchemaStatements(), true
+	case v23UserVersion:
+		return v23SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -691,7 +707,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -738,6 +754,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[20:]
 	case v22UserVersion:
 		steps = all[21:]
+	case v23UserVersion:
+		steps = all[22:]
 	default:
 		return connection.Close()
 	}
@@ -1249,6 +1267,22 @@ func migrateV22Transaction(ctx context.Context, connection *sql.Conn) error {
 	}
 	if _, err := connection.ExecContext(ctx, `INSERT INTO repository_source_identities(repository_id) SELECT id FROM project_repositories`); err != nil {
 		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v23UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v23UserVersion, v23SchemaStatements())
+}
+
+func migrateV23Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v23UserVersion, v23SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	for _, name := range []string{"intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances"} {
+		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
+			return fmt.Errorf("create %s: %w", name, err)
+		}
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err
