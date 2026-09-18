@@ -278,7 +278,7 @@ def release_source_footer(body):
             break
         body = "\n".join(lines[:-1])
     footer = footer or publication.terminal_footer(body)
-    if footer is None and publication.FOOTER.search(body):
+    if footer is None and re.search(r"(?mi)^(?:Refs|Closes)[ \t]+#", body):
         raise ReleaseError("merged pull request has an invalid source-footer trailer")
     if footer is None:
         return None

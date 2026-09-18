@@ -673,6 +673,11 @@ class ReleaseFixtures(unittest.TestCase):
         with mock.patch.object(release, "run", side_effect=gh):
             self.assertEqual(release.range_sources(cfg, OLD, SHA)[0][0]["issue"], 602)
 
+    def test_release_rejects_malformed_source_reference(self):
+        for body in ("Refs #602 extra", "Refs #0", "Refs #602foo", "Closes #unknown"):
+            with self.subTest(body=body), self.assertRaises(release.ReleaseError):
+                release.release_source_footer(body)
+
     def test_range_skips_source_less_pull_request(self):
         cfg = config(Path("/tmp/release.json"))
         def gh(argv, *unused):
