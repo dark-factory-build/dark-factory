@@ -22,8 +22,11 @@ The production path is one request and one response:
 
 `TestTargetedOverseerSnapshotSerializationOmitsRosterEnvelope` exercises the
 request decoder, real reply constructor, JSON parser/validator, preserved
-next-action text, and omitted roster identity. Its deterministic serialized
-measurements are:
+next-action text, and omitted roster identity. The kernel regression
+`TestOverseerSnapshotIsProjectScopedAndTaskSelected` also invokes the real
+Store targeted and full snapshots and serializes those returned values before
+checking that the targeted response is smaller. The API contract test's
+deterministic serialized measurements are:
 
 | exchange | calls | response bytes |
 | --- | ---: | ---: |
@@ -45,14 +48,14 @@ full-terminal after measurement was available in this checkout.
 | receipt recovery | no new delivery path; saved/delivered/unknown receipts and idempotent replay remain the existing Store paths | `internal/kernel/task_intervention_test.go`, `internal/kernel/human_request_test.go`, `internal/kernel/peer_question_test.go` |
 | retained source handoff | current Change, task work revision and Change revision remain together; stale/superseded evidence is not launch authority | `internal/kernel/overseer_test.go`, `internal/daemon/supervisor_darwin_test.go` |
 
-The focused kernel tests cover two assigned agents, cross-project refusal,
-zero-match assignment fallback, exact-head paging, text chunking, and invalid
-continuations. The schema deliberately declares `tasks.assigned_agent_id`
-`NOT NULL` with a project-scoped foreign key, and admission requires a valid
-agent; a true SQL `NULL` pooled row is therefore rejected by the durable
-contract. The zero-match corruption case is the runnable equivalent and keeps
-the roster available for recovery. Unusual roles remain refused by the
-existing API validator rather than being silently treated as an assignment.
+The focused kernel tests cover two assigned agents, a genuine SQL `NULL`
+queued pooled task, cross-project refusal, zero-match assignment fallback,
+exact-head paging, text chunking, and invalid continuations. The current
+schema permits `assigned_agent_id` to be NULL only for queued or cancelled
+tasks; its project-scoped foreign key still protects non-NULL assignments.
+Admission claims a queued pooled task for an eligible worker before it runs.
+Unusual roles remain refused by the existing API validator rather than being
+silently treated as an assignment.
 
 ## Maintainer ownership boundary
 
