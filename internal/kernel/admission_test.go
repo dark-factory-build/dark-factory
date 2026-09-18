@@ -577,11 +577,6 @@ func TestAdmissionGatesHaveZeroFootprint(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, want: NoAdmissionNoEligibleWork},
-		{name: "budget", mutate: func(t *testing.T, store *Store, agent Agent) {
-			if _, err := store.writer.Exec(`UPDATE agents SET tool_calls_used = tool_budget_limit, revision = revision + 1 WHERE id = ?`, agent.ID.Bytes()); err != nil {
-				t.Fatal(err)
-			}
-		}, want: NoAdmissionNoEligibleWork},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -606,6 +601,21 @@ func TestAdmissionGatesHaveZeroFootprint(t *testing.T) {
 				t.Fatalf("task = %+v", fresh)
 			}
 		})
+	}
+}
+
+func TestAdmissionDoesNotGateOrchestratorOnLegacyToolBudget(t *testing.T) {
+	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	if _, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 63), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 64), Title: "supervise"}, mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`UPDATE agents SET tool_calls_used = tool_budget_limit, revision = revision + 1 WHERE id = ?`, agent.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.AdmitNext(context.Background(), admissionKeys(t, 65, nil), mustTime(t, 20))
+	if err != nil || !result.Admitted() || result.Run.Role != RoleOrchestrator {
+		t.Fatalf("overseer admission = %+v, %v", result, err)
 	}
 }
 
@@ -907,6 +917,40 @@ func admissionFootprint(t *testing.T, store *Store) admissionCounts {
 		}
 	}
 	return result
+}
+
+func TestOverseerAdmissionCapacityIsProjectScoped(t *testing.T) {
+	ctx := context.Background()
+	store, _, firstProject, firstOverseer := newAdmissionStore(t, RoleOrchestrator, 1)
+	defer store.Close()
+	secondProject, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 31), Name: "other", Root: "/other"}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondOverseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 31), ProjectID: secondProject.ID, Name: "other overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct {
+		project Project
+		agent   Agent
+		task    byte
+	}{
+		{firstProject, firstOverseer, 32},
+		{secondProject, secondOverseer, 34},
+	} {
+		if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, item.task), ProjectID: item.project.ID, AssignedAgentID: item.agent.ID, IncarnationID: incarnationID(t, item.task+1), Title: "supervise", Priority: 1}, mustTime(t, int64(item.task))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := store.AdmitNext(ctx, admissionKeys(t, 150, nil), mustTime(t, 40))
+	if err != nil || !first.Admitted() || first.Run.ProjectID != firstProject.ID {
+		t.Fatalf("first project overseer = %+v, %v", first, err)
+	}
+	second, err := store.AdmitNext(ctx, admissionKeys(t, 160, nil), mustTime(t, 41))
+	if err != nil || !second.Admitted() || second.Run.ProjectID != secondProject.ID {
+		t.Fatalf("other project blocked by overseer slot: %+v, %v", second, err)
+	}
 }
 
 func newAdmissionStore(t *testing.T, role AgentRole, capacity uint16) (*Store, string, Project, Agent) {

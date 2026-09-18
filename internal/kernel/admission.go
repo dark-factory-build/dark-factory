@@ -62,14 +62,14 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			LEFT JOIN delivered_successors AS d ON d.successor_task_id = t.id
 			WHERE t.status = 'queued'
 			  AND a.paused = 0 AND a.archived = 0
-			  AND a.tool_calls_used < a.tool_budget_limit
+			  AND (a.role = 'orchestrator' OR a.tool_calls_used < a.tool_budget_limit)
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
 			  AND NOT EXISTS (SELECT 1 FROM task_prerequisites AS prerequisite WHERE prerequisite.task_id = t.id AND prerequisite.consumed_run_id IS NULL AND NOT EXISTS (SELECT 1 FROM tasks AS upstream JOIN runs AS source_run ON source_run.task_id = upstream.id AND source_run.project_id = upstream.project_id AND source_run.task_incarnation_id = upstream.incarnation_id AND source_run.admitted_task_work_revision = prerequisite.upstream_work_revision AND source_run.phase = 'terminal' AND source_run.terminal_kind = 'succeeded' WHERE upstream.id = prerequisite.upstream_task_id AND upstream.status = 'succeeded' AND upstream.work_revision = prerequisite.upstream_work_revision))
 			  AND NOT EXISTS (SELECT 1 FROM task_conflict_paths AS candidate_path JOIN task_conflict_paths AS active_path ON active_path.path = candidate_path.path JOIN tasks AS active ON active.id = active_path.task_id WHERE candidate_path.task_id = t.id AND active.project_id = t.project_id AND active.status = 'running')
 			  AND NOT (t.body LIKE 'review handoff %' AND (a.provider <> 'codex' OR a.role <> 'worker'))
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') < ?)
-			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND phase <> 'terminal') < 1))
+			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') < 1))
 		), next_for_worker AS (
 			SELECT *, ROW_NUMBER() OVER (
 				PARTITION BY agent_id
@@ -108,11 +108,12 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(
 			SELECT 1 FROM tasks AS t
 			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker')
-			WHERE t.status = 'queued' AND a.paused = 0 AND a.archived = 0 AND a.tool_calls_used < a.tool_budget_limit
+			WHERE t.status = 'queued' AND a.paused = 0 AND a.archived = 0
+			  AND (a.role = 'orchestrator' OR a.tool_calls_used < a.tool_budget_limit)
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))
 			  AND NOT EXISTS (SELECT 1 FROM runs AS r WHERE r.agent_id = a.id AND r.phase <> 'terminal')
 			  AND ((a.role = 'worker' AND (SELECT COUNT(*) FROM runs WHERE role = 'worker' AND phase <> 'terminal') >= ?)
-			    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND phase <> 'terminal') >= 1))
+		    OR (a.role = 'orchestrator' AND (SELECT COUNT(*) FROM runs WHERE role = 'orchestrator' AND project_id = t.project_id AND phase <> 'terminal') >= 1))
 		)`, factory.Capacity).Scan(&capacityBlocked); err != nil {
 			return AdmissionResult{}, tx.Rollback(err)
 		}
@@ -260,6 +261,10 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 		if err == nil {
 			err = ErrCorruptState
 		}
+		return AdmissionResult{}, tx.Rollback(err)
+	}
+	run.ContinuationContexts, err = resolvedContinuationContextsForTask(ctx, tx.connection, task)
+	if err != nil {
 		return AdmissionResult{}, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
