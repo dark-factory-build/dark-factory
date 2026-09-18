@@ -79,6 +79,32 @@ type HealthStatus struct {
 	Ready bool `json:"ready"`
 }
 
+// AgentPaths is the live worker's sampled modified-directory view. Paths are
+// relative to the run's change directory; they are not the worker's current
+// working directory.
+type AgentPaths struct {
+	AgentID string   `json:"agent_id"`
+	RunID   string   `json:"run_id,omitempty"`
+	Paths   []string `json:"paths"`
+}
+
+type AgentPathsInput struct {
+	AgentID string `json:"agent_id"`
+}
+
+func validAgentPathsInput(value AgentPathsInput) bool { return validID(value.AgentID) }
+func validAgentPaths(value AgentPaths) bool {
+	if !validID(value.AgentID) || value.RunID != "" && !validID(value.RunID) || value.Paths == nil || len(value.Paths) > 16 {
+		return false
+	}
+	for _, path := range value.Paths {
+		if !validText(path, 0, 4096) || strings.HasPrefix(path, "/") {
+			return false
+		}
+	}
+	return true
+}
+
 // WebStatus is the bounded, non-secret operator view of the loopback browser
 // adapter. It intentionally contains no challenge, key, token or client
 // identity data.

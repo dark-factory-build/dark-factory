@@ -33,6 +33,7 @@ const (
 	CallAccountLink
 	CallAgentSelectAccount
 	CallAgentSelectModel
+	CallAgentPaths
 	CallAttemptTask
 	CallAttemptSource
 	CallSucceed
@@ -101,6 +102,7 @@ type Call struct {
 	projectLimits       ProjectLimitsInput
 	agent               CreateAgentInput
 	agentIdlePolicy     AgentIdlePolicyInput
+	agentPaths          AgentPathsInput
 	task                EnqueueTaskInput
 	humanQuestion       HumanQuestionInput
 	peerQuestion        PeerQuestionInput
@@ -222,6 +224,10 @@ func (call Call) AgentIdlePolicyInput() (AgentIdlePolicyInput, bool) {
 	return call.agentIdlePolicy, call.kind == CallAgentIdlePolicy
 }
 
+func (call Call) AgentPathsInput() (AgentPathsInput, bool) {
+	return call.agentPaths, call.kind == CallAgentPaths
+}
+
 func (call Call) EnqueueTaskInput() (EnqueueTaskInput, bool) {
 	return call.task, call.kind == CallEnqueueTask
 }
@@ -322,6 +328,7 @@ type replyKind uint8
 const (
 	replyHealth replyKind = iota + 1
 	replySnapshot
+	replyAgentPaths
 	replyMutation
 	replyAttemptTask
 	replyAttemptSource
@@ -345,6 +352,7 @@ type Reply struct {
 	kind                replyKind
 	health              HealthStatus
 	snapshot            DashboardSnapshot
+	agentPaths          AgentPaths
 	mutation            MutationResult
 	attemptTask         AttemptTask
 	attemptSource       RetainedChangeHandoff
@@ -382,6 +390,14 @@ func NewSnapshotReply(snapshot DashboardSnapshot) (Reply, error) {
 	copy(tasks, snapshot.Tasks)
 	snapshot.Tasks = tasks
 	return Reply{kind: replySnapshot, snapshot: snapshot}, nil
+}
+
+func NewAgentPathsReply(paths AgentPaths) (Reply, error) {
+	if !validAgentPaths(paths) {
+		return Reply{}, ErrInvalidInput
+	}
+	paths.Paths = append([]string{}, paths.Paths...)
+	return Reply{kind: replyAgentPaths, agentPaths: paths}, nil
 }
 
 func NewOverseerSnapshotReply(snapshot OverseerSnapshot) (Reply, error) {
@@ -771,6 +787,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.agentIdlePolicy); err != nil || !validAgentIdlePolicyInput(call.agentIdlePolicy) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallAgentPaths:
+		if err := decodeExact(request.Params, &call.agentPaths); err != nil || !validAgentPathsInput(call.agentPaths) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallEnqueueTask:
 		if err := decodeExact(request.Params, &call.task); err != nil || !validID(call.task.ID) || !validID(call.task.ProjectID) || !validOptionalID(call.task.AssignedAgentID) || !validID(call.task.IncarnationID) || !validText(call.task.Title, 1, 1024) || !validText(call.task.Body, 0, 131072) || call.task.Priority < -1_000_000 || call.task.Priority > 1_000_000 {
 			return Call{}, RemoteInvalidRequest
@@ -987,6 +1007,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallCreateAgent, operatorDomain
 	case "agent_idle_policy":
 		return CallAgentIdlePolicy, operatorDomain
+	case "agent_paths":
+		return CallAgentPaths, operatorDomain
 	case "enqueue_task":
 		return CallEnqueueTask, operatorDomain
 	case "set_dispatch":
@@ -1177,6 +1199,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyHumanRequests
 	case CallSnapshot:
 		return reply == replySnapshot
+	case CallAgentPaths:
+		return reply == replyAgentPaths
 	case CallAccountsDiscover:
 		return reply == replyAccounts
 	case CallAttemptTask:
@@ -1231,6 +1255,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.health)
 	case replySnapshot:
 		data, err = json.Marshal(reply.snapshot)
+	case replyAgentPaths:
+		data, err = json.Marshal(reply.agentPaths)
 	case replyMutation:
 		data, err = json.Marshal(reply.mutation)
 	case replyAttemptTask:

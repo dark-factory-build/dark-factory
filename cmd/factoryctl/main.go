@@ -75,7 +75,8 @@ const (
   factoryctl account list
   factoryctl account link --provider claude_code|codex --home ABSOLUTE --label TEXT
   factoryctl agent select-account --agent ID --revision REVISION --account ID
-  factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
+	factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
+	factoryctl agent paths --agent ID
   factoryctl task add --project ID --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
   factoryctl status
@@ -150,6 +151,7 @@ const (
 	commandAccountLink
 	commandAgentSelectAccount
 	commandAgentSelectModel
+	commandAgentPaths
 	commandTaskAdd
 	commandTaskSendBack
 	commandTaskRecovery
@@ -1308,7 +1310,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 3 && helpFlag(args[2]) {
 		switch args[0] + " " + args[1] {
-		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-account", "agent select-model", "account link", "task add", "task send-back", "task recovery":
+		case "project create", "project limits", "agent create", "agent idle-policy", "agent select-account", "agent select-model", "agent paths", "account link", "task add", "task send-back", "task recovery":
 			return attemptCommand{}, true, true
 		}
 	}
@@ -1357,6 +1359,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		command.kind = commandAgentSelectAccount
 	case "agent select-model":
 		command.kind = commandAgentSelectModel
+	case "agent paths":
+		command.kind = commandAgentPaths
 	case "account link":
 		command.kind = commandAccountLink
 	case "task add":
@@ -1403,7 +1407,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.maxRunSeconds = uint32(seconds)
-		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
+		case name == "--agent" && (command.kind == commandTaskAdd || command.kind == commandAgentIdlePolicy || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandAgentPaths) && (validHumanRequestKey(value) || command.kind == commandTaskAdd && value == "any"):
 			command.agent = value
 		case name == "--revision" && (command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel):
 			revision, ok := parseRevision(value)
@@ -1506,6 +1510,10 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	case commandAgentSelectModel:
 		if command.agent == "" || command.model == "" || command.expectedRevision == 0 || !validReasoningEffort(command.reasoningEffort) {
+			return attemptCommand{}, false, false
+		}
+	case commandAgentPaths:
+		if command.agent == "" {
 			return attemptCommand{}, false, false
 		}
 	case commandAccountLink:
@@ -2009,6 +2017,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.SelectAgentModel(callContext, api.AgentModelSelectInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision, Model: command.model, ReasoningEffort: command.reasoningEffort})
 		if callErr != nil {
 			return writeWebFailure(stderr, "agent select-model", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandAgentPaths:
+		result, callErr := client.AgentPaths(callContext, api.AgentPathsInput{AgentID: command.agent})
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent paths", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandProjectCreate:

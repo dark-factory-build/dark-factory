@@ -220,6 +220,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.selectAgentAccount(ctx, call)
 	case api.CallAgentSelectModel:
 		return daemon.selectAgentModel(ctx, call)
+	case api.CallAgentPaths:
+		return daemon.agentPaths(ctx, call)
 	case api.CallAttemptTask:
 		return daemon.attemptTask(ctx, call)
 	case api.CallAttemptSource:
@@ -314,6 +316,30 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	default:
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+}
+
+func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AgentPathsInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agentID, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	runID, paths, err := daemon.RunPaths(ctx, agentID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	run := ""
+	if runID != (kernel.RunID{}) {
+		run = runID.String()
+	}
+	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, Paths: paths})
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
 }
 
 func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply {

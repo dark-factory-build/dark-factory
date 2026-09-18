@@ -181,6 +181,20 @@ func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, 
 	return result, nil
 }
 
+func (client *OperatorClient) AgentPaths(ctx context.Context, input AgentPathsInput) (AgentPaths, error) {
+	if !validAgentPathsInput(input) {
+		return AgentPaths{}, ErrInvalidInput
+	}
+	var result AgentPaths
+	if err := client.client.call(ctx, "agent_paths", input, &result); err != nil {
+		return AgentPaths{}, err
+	}
+	if !validAgentPaths(result) {
+		return AgentPaths{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) HumanRequests(ctx context.Context) (HumanRequestList, error) {
 	var result HumanRequestList
 	if err := client.client.call(ctx, "human_requests", struct{}{}, &result); err != nil {
