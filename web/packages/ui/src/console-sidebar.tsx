@@ -708,6 +708,7 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
   const [code, setCode] = useState("");
   const [installationID, setInstallationID] = useState<number>();
   const [selected, setSelected] = useState<Record<string, GitHubDelegationBody>>({});
+  const [installationSeen, setInstallationSeen] = useState(false);
   const [installationPage, setInstallationPage] = useState(1);
   const [repositoryPage, setRepositoryPage] = useState(1);
   const [loadedRepositories, setLoadedRepositories] = useState<{ installationID: number; value: NonNullable<NonNullable<FactoryGitHubView["result"]>["repositories"]> }>();
@@ -730,15 +731,20 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
       setInstallationID(undefined);
       setInstallationPage(1);
       setRepositoryPage(1);
+      setInstallationSeen(false);
     }
     if (!connected || connectionID === "") {
       setSelected({});
       setInstallationID(undefined);
       setRepositoryPage(1);
+      setInstallationSeen(false);
       return;
     }
     setSelected(Object.fromEntries((result?.status?.repositories ?? []).map((item) => [`${item.installation_id}:${item.repository_id}`, item])));
   }, [connected, connectionID, result?.status?.repositories]);
+  useEffect(() => {
+    if (installations?.installations.length !== 0) setInstallationSeen(true);
+  }, [installations]);
   useEffect(() => {
     if (repositories === repositorySource.current) return;
     repositorySource.current = repositories;
@@ -754,10 +760,10 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
     {canConnect ? <button type="button" disabled={busy || onGitHub === undefined} onClick={() => load({ action: recoveryAction })}>{status === "disconnected" && connectionID === "" ? "CONNECT GITHUB" : status === "disconnect_pending" ? "RETRY DISCONNECT" : status === "pending" || status === "awaiting_confirmation" || status === "denied" || status === "disconnected" ? "RESET GITHUB ACCESS" : "RETRY GITHUB ACCESS"}</button> : null}
     {result?.authorization?.authorization_url === undefined ? null : <p><a href={result.authorization.authorization_url} target="_blank" rel="noreferrer">AUTHORIZE ON GITHUB</a></p>}
     {result?.authorization !== undefined ? <form onSubmit={(event) => { event.preventDefault(); if (/^[0-9A-F]{10}$/.test(code)) load({ action: "confirm", code }); }}><label htmlFor="df-github-code">CALLBACK CODE</label><input id="df-github-code" value={code} maxLength={10} inputMode="text" onChange={(event) => setCode(event.currentTarget.value.toUpperCase())} /><button type="submit" disabled={busy || code.length !== 10}>CONFIRM</button></form> : null}
-    {connected ? <div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => { setInstallationPage(1); load({ action: "refresh" }); }}>REFRESH ACCESS</button><button type="button" disabled={busy} onClick={() => load({ action: "disconnect" })}>DISCONNECT</button></div> : null}
+    {connected ? <div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => { setInstallationPage(1); setInstallationSeen(false); load({ action: "refresh" }); }}>REFRESH ACCESS</button><button type="button" disabled={busy} onClick={() => load({ action: "disconnect" })}>DISCONNECT</button></div> : null}
     {!connected ? null : <>
       <h4>INSTALLATIONS</h4>
-      {installations === undefined ? <p className="dfFactoryConsole__empty">REFRESH TO LIST INSTALLATIONS</p> : installations.installations.length === 0 ? <><p className="dfFactoryConsole__empty">NO INSTALLATIONS AVAILABLE · AN ORGANIZATION OWNER MAY NEED TO APPROVE THE DARK FACTORY APP IN GITHUB SETTINGS.</p>{installations.next_page === undefined && nativeInstallURL(installations.installation_url) !== undefined ? <p><a href={nativeInstallURL(installations.installation_url)} target="_blank" rel="noreferrer">INSTALL OR REQUEST GITHUB APP ACCESS</a></p> : null}</> : <ul className="dfFactoryConsole__list">{installations.installations.map((item) => { const manage = nativeManageURL(item.html_url); return <li key={item.id} className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.account.login} · {item.eligibility || "available"}</p>{item.suspended_at !== null ? <p className="dfConsoleSidebar__inherit">SUSPENDED · ASK GITHUB TO RESTORE THIS INSTALLATION.</p> : null}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy || item.suspended_at !== null} onClick={() => { setInstallationID(item.id); setLoadedRepositories(undefined); setRepositoryPage(1); load({ action: "repositories", installation_id: item.id, page: 1 }); }}>CHOOSE REPOSITORIES</button>{manage === undefined ? null : <a href={manage} target="_blank" rel="noreferrer">MANAGE ON GITHUB</a>}</div></li>; })}</ul>}
+      {installations === undefined ? <p className="dfFactoryConsole__empty">REFRESH TO LIST INSTALLATIONS</p> : installations.installations.length === 0 ? <><p className="dfFactoryConsole__empty">NO INSTALLATIONS AVAILABLE · AN ORGANIZATION OWNER MAY NEED TO APPROVE THE DARK FACTORY APP IN GITHUB SETTINGS.</p>{!installationSeen && installations.next_page === undefined && nativeInstallURL(installations.installation_url) !== undefined ? <p><a href={nativeInstallURL(installations.installation_url)} target="_blank" rel="noreferrer">INSTALL OR REQUEST GITHUB APP ACCESS</a></p> : null}</> : <ul className="dfFactoryConsole__list">{installations.installations.map((item) => { const manage = nativeManageURL(item.html_url); return <li key={item.id} className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.account.login} · {item.eligibility || "available"}</p>{item.suspended_at !== null ? <p className="dfConsoleSidebar__inherit">SUSPENDED · ASK GITHUB TO RESTORE THIS INSTALLATION.</p> : null}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy || item.suspended_at !== null} onClick={() => { setInstallationID(item.id); setLoadedRepositories(undefined); setRepositoryPage(1); load({ action: "repositories", installation_id: item.id, page: 1 }); }}>CHOOSE REPOSITORIES</button>{manage === undefined ? null : <a href={manage} target="_blank" rel="noreferrer">MANAGE ON GITHUB</a>}</div></li>; })}</ul>}
       <div className="dfConsoleSidebar__taskActions">{installationPage > 1 ? <button type="button" disabled={busy} onClick={() => { const page = installationPage - 1; setInstallationPage(page); load({ action: "installations", page }); }}>PREVIOUS INSTALLATIONS</button> : null}{installations?.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = installations.next_page!; setInstallationPage(page); load({ action: "installations", page }); }}>MORE INSTALLATIONS</button>}</div>
       {installationID === undefined || visibleRepositories === undefined ? null : <><h4>REPOSITORIES · PAGE {repositoryPage}</h4>{visibleRepositories.repositories.length === 0 ? <p className="dfFactoryConsole__empty">NO REPOSITORIES AVAILABLE</p> : <ul className="dfConsoleSidebar__list">{visibleRepositories.repositories.map((item) => { const key = `${installationID}:${item.id}`; const chosen = selected[key]; return <li key={item.id}><label><input type="checkbox" checked={chosen !== undefined} disabled={busy || selectedItems.length >= 100 && chosen === undefined} onChange={(event) => setSelected((current) => { const next = { ...current }; if (event.currentTarget.checked) next[key] = { installation_id: installationID, repository_id: item.id, repository: item.full_name }; else delete next[key]; return next; })} /> {item.full_name}{item.permissions.push ? "" : " · READ ONLY"}</label></li>; })}</ul>}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => load({ action: "delegate", repositories: selectedItems })}>DELEGATE SELECTED ({selectedItems.length}/100)</button>{visibleRepositories.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = visibleRepositories.next_page!; setRepositoryPage(page); load({ action: "repositories", installation_id: installationID, page }); }}>MORE REPOSITORIES</button>}</div></>}
     </>}
