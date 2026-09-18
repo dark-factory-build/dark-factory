@@ -480,6 +480,23 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertIn('no completed App publication receipt', messages[0])
             ready.assert_not_called()
 
+    def test_oversized_app_source_is_skipped_and_following_pr_is_processed(self):
+        body = 'Refs #20' + self.MARK % (self.PR_OP, 'a' * 64)
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': body},
+               {'number': 10, 'headRefOid': 'b' * 40, 'body': body.replace('9', '10')}]
+        operation = dict(self.operation, pr=10, head='b' * 40, source_marker='FACTORY_SOURCE o/r#20')
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'app_receipt', side_effect=[True, True, True]), \
+             patch.object(review.intake, 'exact_issue', side_effect=[review.intake.IssueBodyTooLarge('too large'), {'number': 20, 'body': 'tracked'}]), \
+             patch.object(review, 'ready', return_value=operation) as ready, patch.object(review, 'verify_existing'), \
+             patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
+            messages = review.run_once(self.config)
+        self.assertEqual(1, len(messages))
+        self.assertIn('skipped PR #9', messages[0])
+        self.assertIn('body exceeds the intake limit', messages[0])
+        self.assertEqual(1, ready.call_count)
+        self.assertEqual(10, ready.call_args.args[2]['number'])
+
 
 if __name__ == '__main__':
     unittest.main()
