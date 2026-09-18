@@ -77,8 +77,11 @@ task in the authenticated attempt's same project, requires its current settled
 retained Change (including blocked, failed, or cancelled outcomes), verifies
 the worktree is still at the settled head, and returns the Change ID, base
 commit, `head_commit`, `branch`, target task ID, task work revision, current
-Change revision, the worktree as `source_path`, the repository's Git directory
+Change revision, the worktree as `source_path`, the Change's actual Git directory
 as `git_directory`, and whether the worktree holds uncommitted work. The
+directory is private for new Changes and may be canonical for retained legacy
+worktrees, which are not automatically converted. This changes ordinary Git
+state ownership, not provider permissions or arbitrary-path access. The
 branch head is the work: read it with `git --git-dir=$git_directory`. An
 accepted response without that receipt is unusable; never reconstruct a path
 or select a project-latest tree. A Codex orchestrator's local commands are

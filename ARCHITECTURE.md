@@ -297,11 +297,15 @@ makes that path an ordinary linked Git worktree of the project repository,
 checked out at one exact selected commit on the Change's own branch,
 `factory/<first 12 hex of the Change ID>`, before the provider can execute.
 The provider works in that worktree: it edits, tests and commits there with
-the factory's fixed Git identity, and its local commands are granted the
-repository's Git directory for that (written by a worker, read by an
-orchestrator) and nothing else of the repository. The provider environment
-carries no Git credential helper, SSH command or prompt; a worktree isolates
-changes, it is not a security sandbox. An orchestrator run binds no Change: it
+the factory's fixed Git identity. Each new worker has self-contained private
+Git administration under `.git/dark-factory-changes/<Change ID>/.git`, using
+native bare Git initialization, an exact-base fetch, and a linked worktree.
+Ordinary Git commands in that worktree update its private refs, objects and
+index, not the project's shared administration. Provider permissions are
+unchanged; this prevents accidental shared-Git interference, not arbitrary
+filesystem writes. Orchestrators read project Git administration.
+The provider environment carries no Git credential helper, SSH command or
+prompt. An orchestrator run binds no Change: it
 works in its private runtime home, and publication of a worker's retained
 Change is the Maintainer App's, reached through the one MCP server an
 orchestrator's session is given, from the Change's branch and head. Factoryd
@@ -326,6 +330,12 @@ without moving the checkout; a fetch failure cannot reuse cached source. Local
 revision policies and retained Changes do not fetch. Trusted Git resolves the
 revision once, and `git worktree add` checks out that exact commit. A
 concurrent attempt in the same repository contends only for Git's own locks.
+
+Retained linked worktrees keep their existing administration, including on
+retry: no automatic conversion rewrites their Gitfiles, indexes or refs.
+Legacy canonical worktrees therefore do not have independent Git state.
+Settlement and source receipts report the actual Git directory for either
+layout; publication fetches that exact head without a canonical-ref import.
 
 Changes made before managed worktrees are Git-free copies of their base with
 the worker's edits in them. They stay readable, reviewable and resumable: the
