@@ -44,9 +44,6 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 	if daemon.liveAttemptForDigest(kDigest) == nil {
 		return failure("denied")
 	}
-	if daemon.github == nil || !daemon.github.CustomerMode() {
-		return failure("unavailable")
-	}
 	input, ok := call.MaintainerInput()
 	var request maintainerRequest
 	if !ok || json.Unmarshal(input.Request, &request) != nil || request.JSONRPC != "2.0" || len(request.ID) == 0 {
@@ -86,7 +83,10 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			if params.Name == "list_issues" {
 				return failure("accepted_snapshot_required")
 			}
-			if params.Name == "observe_issue" && strings.EqualFold(repository, accepted.SourceRepository) {
+			if params.Name == "observe_issue" {
+				if !strings.EqualFold(repository, accepted.SourceRepository) {
+					return failure("denied")
+				}
 				var number uint64
 				if json.Unmarshal(params.Arguments["issue_number"], &number) != nil || number != accepted.Snapshot.IssueNumber {
 					return failure("denied")
@@ -155,6 +155,9 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		}
 	default:
 		return failure("invalid")
+	}
+	if daemon.github == nil || !daemon.github.CustomerMode() {
+		return failure("unavailable")
 	}
 	// Re-encode the parsed envelope; never forward a second hidden method/ID.
 	encoded, err := json.Marshal(request)
