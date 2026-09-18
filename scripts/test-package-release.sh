@@ -376,6 +376,8 @@ grep -Fq 'resource("binaries").stage' "$formula" \
     || fail "formula does not install its selected resource"
 grep -Fq 'libexec.install "libexec/dark-factory"' "$formula" \
     || fail "formula does not install controller assets"
+grep -Fq 'depends_on "python"' "$formula" \
+    || fail "formula does not declare its Python 3 controller prerequisite"
 grep -Fq 'assert_equal "#{name} #{version}", shell_output("#{bin}/#{name} --version").strip' \
     "$formula" || fail "formula does not test the exact binary version"
 grep -Fq "SOURCE_SHA = \"$source_sha\"" "$formula" || fail "formula omitted the exact source"

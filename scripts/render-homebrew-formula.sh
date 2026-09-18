@@ -101,6 +101,7 @@ ${version_stanza}  sha256 "$manifest_sha"
   license "MIT"
 
   depends_on :macos
+  depends_on "python"
 
   resource "binaries" do
     on_arm do
