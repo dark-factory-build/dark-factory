@@ -303,7 +303,11 @@ administrative transfer with their original request proof before the customer
 connection can observe them; their UUIDs and stored outcomes remain unchanged.
 Initial customer connection waits until an existing controller/review pass
 releases its ownership lock; finish or stop that pass and retry Connect.
-The separate release-only schedule and its journal remain in place.
+A legacy configuration with `release_configs` cannot enter customer cutover yet:
+its release pass still uses the host's `gh` identity. Preview and apply refuse
+before stopping either schedule or changing the journal. Keep the existing
+release-only pass under its explicit operator configuration until a
+customer-scoped release path is available.
 
 Legacy `app/…` and `…[bot]` author entries are listed as a policy narrowing in
 preview. Already imported work and receipts are preserved. Future bot-authored
