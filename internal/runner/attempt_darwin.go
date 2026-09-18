@@ -1732,6 +1732,13 @@ func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, r
 		filterErr = reads.processOnly()
 	}
 	cause = errors.Join(cause, filterErr)
+	if child != nil && child.state == stateActivated && child.ptyMaster != nil {
+		// Pre-exec refusals need the same controlling-terminal drain as a
+		// running provider's stop: Darwin can otherwise hold exit behind the
+		// unread PTY tail, so neither signalling nor NOTE_EXIT can converge.
+		owner := terminalOwner{child: child, daemon: daemon, reads: reads, daemonOpen: daemonOpen, ptyOpen: true, ring: &terminalByteRing{}}
+		cause = errors.Join(cause, owner.terminateDrainingPTY())
+	}
 	exit, cleanupErr := waitForAttemptChild(child)
 	if cleanupErr != nil {
 		return errors.Join(cause, fmt.Errorf("runner: converge inner: %w", cleanupErr))
