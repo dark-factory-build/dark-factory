@@ -302,8 +302,10 @@ func TestBackendSuccessAfterOperationDeadlineIsDiscarded(t *testing.T) {
 	authenticate(t, connection)
 	request, _ := browserprotocol.EncodeStateGet("late-state", browserprotocol.StateGet{})
 	writeClientFrame(t, connection, request)
-	frame := readServerFrame(t, connection)
-	assertError(t, frame, browserprotocol.ErrorInternal)
+	// The late result is still discarded, but a budget the store outran is
+	// busyness the client reconnects on, never an internal fault that strands
+	// it (the production symptom behind a daemon replacement).
+	assertRetryableError(t, readServerFrame(t, connection), "late-state")
 }
 
 func TestLateSubscriptionIsCancelledAndNeverInstalled(t *testing.T) {
@@ -314,7 +316,7 @@ func TestLateSubscriptionIsCancelledAndNeverInstalled(t *testing.T) {
 	authenticate(t, connection)
 	request, _ := browserprotocol.EncodeStateWatch("late-sub", browserprotocol.StateWatch{})
 	writeClientFrame(t, connection, request)
-	assertError(t, readServerFrame(t, connection), browserprotocol.ErrorInternal)
+	assertRetryableError(t, readServerFrame(t, connection), "late-sub")
 	if backend.sub.closed.Load() != 1 {
 		t.Fatalf("late subscription cleanup count=%d", backend.sub.closed.Load())
 	}
@@ -496,5 +498,13 @@ func TestUnexpectedServeFailureIsObservable(t *testing.T) {
 	}
 	if err := server.Close(); !errors.Is(err, sentinel) {
 		t.Fatalf("Close error=%v", err)
+	}
+}
+
+func assertRetryableError(t *testing.T, frame browserprotocol.ControlFrame, id string) {
+	t.Helper()
+	assertError(t, frame, browserprotocol.ErrorRateLimited)
+	if value := frame.Body.(browserprotocol.Error); frame.ID != id || !bool(value.Retryable) {
+		t.Fatalf("frame id=%q retryable=%v, want %q retryable", frame.ID, value.Retryable, id)
 	}
 }

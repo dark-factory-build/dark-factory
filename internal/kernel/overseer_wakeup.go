@@ -12,7 +12,8 @@ import (
 // EnqueueOverseerWakeups consumes worker activity from the durable
 // invalidation journal. A cursor is deliberately left behind a queued or
 // running overseer, so activity while it works causes one follow-up after it
-// exits. Journal pruning is conservative: a cursor behind the floor wakes once.
+// exits. Unfinished work is reconsidered after the configured quiet interval
+// even without new events; a failed coordination run cannot strand the backlog.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
 	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
@@ -24,7 +25,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 		return nil, tx.Rollback(err)
 	}
 	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents
-		WHERE role = 'orchestrator' AND idle_policy = 'standing_instruction' AND paused = 0
+		WHERE role = 'orchestrator' AND idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0
 		  AND tool_calls_used < tool_budget_limit
 		  AND MAX(updated_at_ms, COALESCE((SELECT MAX(terminal_at_ms) FROM runs WHERE agent_id = agents.id), 0)) + idle_after_seconds * 1000 <= ?
 		ORDER BY id`, at.Int64())
@@ -67,8 +68,8 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			continue
 		}
 		// A missing cursor is the one initial inspection for a newly enabled
-		// rule. Thereafter only worker activity (or conservative prune recovery)
-		// can start the instruction again.
+		// rule. Worker events retain targeted context; an unchanged unfinished
+		// backlog gets a full reconciliation after the same quiet interval.
 		fullReconciliation := !found || cursor < factory.Floor.Int64()-1
 		var targets []TaskID
 		if !fullReconciliation {
@@ -76,6 +77,13 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			if err != nil {
 				return nil, tx.Rollback(err)
 			}
+		}
+		if !fullReconciliation && len(targets) == 0 {
+			var unfinished bool
+			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = ? AND status IN ('queued', 'running', 'blocked', 'failed'))`, agent.ProjectID.Bytes()).Scan(&unfinished); err != nil {
+				return nil, tx.Rollback(err)
+			}
+			fullReconciliation = unfinished
 		}
 		// Validate once, before the first task or cursor write; an unchanged
 		// poll rolls back without scanning unrelated retained history.
@@ -109,6 +117,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 				return nil, tx.Rollback(err)
 			}
 			tasks = append(tasks, task)
+			changed = true
 		}
 		if cursor != factory.Head.Int64() || !found {
 			if err := setOverseerWakeCursor(ctx, tx.connection, agent, factory.Head.Int64()); err != nil {

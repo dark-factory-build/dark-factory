@@ -15,6 +15,13 @@ Delegate independent work to available qualified workers within the actual
 admission limits. A configured `max_run_seconds: 0` disables the run deadline;
 intake honors that operator choice and does not require a finite duration.
 
+Supervision wakes on worker events and, while unfinished tasks remain, after its
+configured idle interval even if no new event arrives. An idle reconciliation
+rechecks blocked and failed tasks against current prerequisites and delivery
+proof. Preserve historical outcomes; reconsidering a task is not permission to
+blindly retry it or duplicate another owner's implementation. Read the previous
+supervision result first and distinguish delivered history from actionable work.
+
 Workers should use `./scripts/go-check.sh` plus focused tests while implementing
 and record the exact head and checks before review. Process-sensitive checks use
 `./scripts/with-local-ci-lease.sh`; reviewers reproduce relevant risks instead
@@ -202,7 +209,7 @@ Then explicitly run `factoryctl attempt source --task TASK_ID`; its response
 must contain exactly one usable receipt naming the Change ID, base commit,
 `head_commit`, `branch` (`factory/<first 12 hex of change_id>`), target task
 ID, task work revision, current retained Change revision, the worktree as
-`source_path`, the repository's Git directory as `git_directory`, and `dirty`.
+`source_path`, the Change's actual Git directory as `git_directory`, and `dirty`.
 Match every identity value to the requested task and status. The work is the
 branch head: read it with `git --git-dir="$git_directory"` and the commit
 named by `head_commit`, never by constructing a `$home/changes/...` path,

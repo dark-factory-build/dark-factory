@@ -375,7 +375,7 @@ func openGitAdminDirectory(parentFD int, name string) (int, gitAdminIdentity, er
 }
 
 func readGitAdminFile(parentFD int, name string, maximum int64) (gitAdminIdentity, []byte, error) {
-	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return gitAdminIdentity{}, nil, err
 	}
@@ -1061,6 +1061,9 @@ func (a *gitAuthority) run(ctx context.Context, maximum int, arguments ...string
 }
 
 func (a *gitAuthority) runWithEnvironment(ctx context.Context, maximum int, environment []string, arguments ...string) (gitCapture, error) {
+	if err := verifyGitAuthority(a.repositoryRoot, a.repository, a.gitExecutable, a.gitIdentity); err != nil {
+		return gitCapture{}, err
+	}
 	spec := gitCommandSpec{program: a.gitExecutable, repository: a.repositoryRoot, home: a.home, hook: a.hook, arguments: arguments, environment: environment}
 	result, err := runGitCapture(ctx, spec, maximum)
 	if err != nil {
@@ -1109,6 +1112,204 @@ func (a *gitAuthority) rewriteConfig(ctx context.Context, maximum int, arguments
 // is refused, never replaced.
 func AddWorktree(ctx context.Context, selection Selection, path, branch string) (WorktreeFacts, error) {
 	return addWorktree(ctx, selection, path, branch, nil, true)
+}
+
+// GitDirectoryForChange returns the deterministic private administration for
+// a Change worktree. It lives below the project's Git directory, not below
+// the worker-readable worktree parent.
+func GitDirectoryForChange(repositoryRoot, path string) string {
+	return filepath.Join(repositoryRoot, ".git", "dark-factory-changes", filepath.Base(path), ".git")
+}
+
+func preparePrivateGitParent(repositoryRoot, path string) error {
+	parent := filepath.Dir(GitDirectoryForChange(repositoryRoot, path))
+	for _, directory := range []string{filepath.Dir(parent), parent} {
+		if err := os.Mkdir(directory, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		fd, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return &ValidationError{Reason: "private Git parent is not local"}
+		}
+		stat, statErr := fstatGit(fd)
+		_ = unix.Close(fd)
+		if statErr != nil || stat.Uid != uint32(os.Geteuid()) || !safeGitMode(stat.Mode, gitModeDirectory) {
+			return &ValidationError{Reason: "private Git parent is unsafe"}
+		}
+	}
+	return nil
+}
+
+func validatePrivateGitAdmin(path string) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path {
+		return &ValidationError{Reason: "private Change Git administration contains a symlink"}
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return &ValidationError{Reason: "private Change Git administration is unavailable"}
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(unix.Geteuid()) || !safeGitMode(uint16(stat.Mode), gitModeDirectory) {
+		return &ValidationError{Reason: "private Change Git administration is unsafe"}
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &ValidationError{Reason: "private Change Git administration is unavailable"}
+	}
+	defer unix.Close(fd)
+	_, config, readErr := readGitAdminFile(fd, "config", maxGitConfigBytes)
+	if readErr != nil || !validLocalGitConfig(config) {
+		return &ValidationError{Reason: "private Change Git config is unsafe"}
+	}
+	// A worker can edit its config. Daemon reads must never execute its
+	// filters, monitors, helpers, hooks, or storage extensions.
+	section := ""
+	for _, raw := range strings.Split(strings.ToLower(string(config)), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			continue
+		}
+		key, _, _ := strings.Cut(line, "=")
+		switch section + "." + strings.TrimSpace(key) {
+		case "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode", "core.symlinks", "core.quotepath", "core.autocrlf", "core.eol", "core.safecrlf", "extensions.objectformat", "user.name", "user.email":
+		default:
+			return &ValidationError{Reason: "private Change Git config grants unsupported authority"}
+		}
+	}
+	if err := rejectDirectGitAdminEntry(fd, "commondir"); err != nil {
+		return err
+	}
+	if err := rejectDirectGitAdminEntry(fd, "config.worktree"); err != nil {
+		return err
+	}
+	objectsFD, _, err := openGitAdminDirectory(fd, "objects")
+	if err != nil {
+		return &ValidationError{Reason: "private Change Git objects are unavailable"}
+	}
+	defer unix.Close(objectsFD)
+	for _, name := range []string{"alternates", "http-alternates"} {
+		if err := rejectGitAdminEntry(objectsFD, "info", name); err != nil {
+			return err
+		}
+	}
+	if err := rejectGitAdminEntry(fd, "info", "grafts"); err != nil {
+		return err
+	}
+	if err := rejectGitAdminEntry(fd, "refs", "replace"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func privateGitfileTarget(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", &ValidationError{Reason: "private Change Gitfile is not regular"}
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", newGitError(gitFailurePrivateIO)
+	}
+	file := os.NewFile(uintptr(fd), "")
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil || len(data) > 4096 {
+		return "", newGitError(gitFailurePrivateIO)
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, "gitdir: ") || strings.ContainsAny(line, "\r\n") {
+		return "", &ValidationError{Reason: "private Change Gitfile syntax is invalid"}
+	}
+	target := strings.TrimPrefix(line, "gitdir: ")
+	if !filepath.IsAbs(target) || filepath.Clean(target) != target {
+		return "", &ValidationError{Reason: "private Change Gitfile target is not canonical"}
+	}
+	return target, nil
+}
+
+// AddPrivateWorktree creates a linked worktree backed by a private bare Git
+// administration without changing the project's refs or worktree registry.
+func AddPrivateWorktree(ctx context.Context, selection Selection, path, branch string) (WorktreeFacts, error) {
+	if !selection.valid() || !validWorktreeBranch(branch) {
+		return WorktreeFacts{}, &ValidationError{Reason: "worktree selection or branch is invalid"}
+	}
+	if err := validateWorktreePath(path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	authority, err := openGitAuthority(selection.gitExecutable, selection.repositoryRoot, selection.repository.root, nil, true)
+	if err != nil {
+		return WorktreeFacts{}, err
+	}
+	defer authority.close()
+	if _, err := os.Lstat(path); err == nil {
+		facts, inspectErr := authority.inspectWorktree(ctx, path)
+		if inspectErr == nil && facts.GitDirectory() == GitDirectoryForChange(selection.repositoryRoot, path) && facts.Branch() == branch && facts.Head().equal(selection.base) && !facts.Dirty() {
+			return facts, nil
+		}
+		return WorktreeFacts{}, &ValidationError{Reason: "private Change path is already taken"}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	admin := GitDirectoryForChange(selection.repositoryRoot, path)
+	if filepath.Base(path) == "." || filepath.Base(path) == ".." {
+		return WorktreeFacts{}, &ValidationError{Reason: "private Change path has no stable identity"}
+	}
+	if info, err := os.Lstat(admin); err == nil && !info.IsDir() {
+		return WorktreeFacts{}, &ValidationError{Reason: "private Change Git administration is not a directory"}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if err := preparePrivateGitParent(selection.repositoryRoot, path); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if _, err := os.Stat(filepath.Join(admin, "config")); err == nil {
+		if err := validatePrivateGitAdmin(admin); err != nil {
+			return WorktreeFacts{}, err
+		}
+		if err := authority.removeUnusedPrivateWorktree(ctx, admin, path, branch, selection.base); err != nil {
+			return WorktreeFacts{}, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return WorktreeFacts{}, newGitError(gitFailurePrivateIO)
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "init", "--bare", "--object-format="+selection.format.Name(), admin); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if err := validatePrivateGitAdmin(admin); err != nil {
+		return WorktreeFacts{}, err
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "--git-dir", admin, "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", selection.repositoryRoot, selection.base.Hex()); err != nil {
+		return WorktreeFacts{}, newGitError(gitFailureProcess)
+	}
+	if err := validatePrivateGitAdmin(admin); err != nil {
+		return WorktreeFacts{}, err
+	}
+	worktreeArgs := []string{"-c", "core.hooksPath=/dev/null", "--git-dir", admin, "worktree", "add", "--quiet"}
+	branchTip, branchErr := authority.run(ctx, maxGitSelectionOutput, "-c", "core.hooksPath=/dev/null", "--git-dir", admin, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch+"^{commit}")
+	if branchErr != nil {
+		return WorktreeFacts{}, branchErr
+	}
+	if branchTip.exitCode == 0 {
+		tip, parseErr := parseGitOID(selection.format, bytes.TrimSpace(branchTip.output))
+		if parseErr != nil || !tip.equal(selection.base) {
+			return WorktreeFacts{}, &ValidationError{Reason: "private Change branch already exists at another commit"}
+		}
+		worktreeArgs = append(worktreeArgs, path, branch)
+	} else {
+		worktreeArgs = append(worktreeArgs, "-b", branch, path, selection.base.Hex())
+	}
+	if _, err := authority.succeed(ctx, maxGitSelectionOutput, worktreeArgs...); err != nil {
+		return WorktreeFacts{}, newGitError(gitFailureProcess)
+	}
+	return inspectWorktree(ctx, selection.gitExecutable, selection.repositoryRoot, selection.repository.root, path, nil, true)
 }
 
 func addWorktree(ctx context.Context, selection Selection, path, branch string, hook gitProcessHook, trusted bool) (WorktreeFacts, error) {
@@ -1169,6 +1370,9 @@ func DescendsFrom(ctx context.Context, gitExecutable, repositoryRoot string, exp
 		return false, err
 	}
 	defer authority.close()
+	if _, err := authority.inspectWorktree(ctx, path); err != nil {
+		return false, err
+	}
 	result, err := authority.run(ctx, maxGitSelectionOutput, "-C", path, "merge-base", "--is-ancestor", base.Hex(), "HEAD")
 	if err != nil {
 		return false, err
@@ -1333,6 +1537,181 @@ func (a *gitAuthority) removeUnusedWorktree(ctx context.Context, path, branch st
 	return nil
 }
 
+// removeUnusedPrivateWorktree removes only the private registration left by a
+// deleted pre-provider worktree. Its index must still equal HEAD, so staged
+// work is never discarded; all refs and objects remain in the private admin.
+func (a *gitAuthority) removeUnusedPrivateWorktree(ctx context.Context, admin, path, branch string, base ObjectID) error {
+	// Git permits registration names that are unrelated to the worktree
+	// basename. Only the deterministic name made by AddPrivateWorktree is
+	// eligible for recovery; an alternate registration is left untouched and
+	// the subsequent native add fails closed.
+	registration := filepath.Join(admin, "worktrees", filepath.Base(path))
+	if info, err := os.Lstat(registration); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil || !info.IsDir() {
+		return &ValidationError{Reason: "private Change registration is unavailable"}
+	}
+	if err := validatePrivateWorktreeRegistration(registration, path, admin, &base); err != nil {
+		return err
+	}
+	registrations, err := a.privateWorktrees(ctx, admin)
+	if err != nil {
+		return err
+	}
+	registered, ok := registrations[path]
+	for candidatePath, candidate := range registrations {
+		if candidate.branch == "refs/heads/"+branch && candidatePath != path {
+			return &ValidationError{Reason: "private Change branch is registered to another worktree"}
+		}
+	}
+	if !ok {
+		return &ValidationError{Reason: "private Change registration is not recognized by Git"}
+	}
+	if registered.branch != "refs/heads/"+branch || registered.head != base.Hex() {
+		return &ValidationError{Reason: "private Change registration is not its unused one"}
+	}
+	if registered.path != path {
+		return &ValidationError{Reason: "private Change registration path is not exact"}
+	}
+	index, err := a.run(ctx, maxGitSelectionOutput, "--git-dir", registration, "diff", "--cached", "--quiet", "--no-ext-diff", "--no-textconv", base.Hex(), "--")
+	if err != nil {
+		return err
+	}
+	if index.exitCode == 1 {
+		return &ValidationError{Reason: "private Change registration has staged work"}
+	}
+	if index.exitCode != 0 {
+		return newGitError(gitFailureProcess)
+	}
+	// Do not remove a path that appeared after the initial admission check.
+	if _, err := os.Lstat(path); err == nil {
+		return &ValidationError{Reason: "private Change path was recreated during recovery"}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return newGitError(gitFailurePrivateIO)
+	}
+	if _, err := a.succeed(ctx, maxGitSelectionOutput, "--git-dir", admin, "worktree", "remove", "--force", path); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validatePrivateWorktreeRegistration proves the exact worker-editable
+// registration before Git is allowed to interpret it. Unknown entries are
+// refused because Git operation state in this directory must not be silently
+// discarded by worktree remove --force.
+func validatePrivateWorktreeRegistration(registration, path, admin string, expectedBase *ObjectID) error {
+	adminFD, err := unix.Open(admin, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &ValidationError{Reason: "private Change Git administration is unavailable"}
+	}
+	defer unix.Close(adminFD)
+	worktreesFD, _, err := openGitAdminDirectory(adminFD, "worktrees")
+	if err != nil {
+		return &ValidationError{Reason: "private Change registrations are unavailable"}
+	}
+	defer unix.Close(worktreesFD)
+	regFD, err := unix.Openat(worktreesFD, filepath.Base(registration), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &ValidationError{Reason: "private Change registration is unavailable"}
+	}
+	regFile := os.NewFile(uintptr(regFD), "")
+	defer regFile.Close()
+	regStat, err := fstatGit(regFD)
+	if err != nil || regStat.Uid != uint32(unix.Geteuid()) || !safeGitMode(regStat.Mode, gitModeDirectory) {
+		return &ValidationError{Reason: "private Change registration is unsafe"}
+	}
+	if _, _, err := readGitAdminFile(regFD, "HEAD", maxGitSelectionOutput); err != nil {
+		return &ValidationError{Reason: "private Change registration HEAD is unsafe"}
+	}
+	_, gitdir, err := readGitAdminFile(regFD, "gitdir", maxGitSelectionOutput)
+	if err != nil || strings.TrimSpace(string(gitdir)) != filepath.Join(path, ".git") {
+		return &ValidationError{Reason: "private Change registration points elsewhere"}
+	}
+	relativeAdmin, relErr := filepath.Rel(registration, admin)
+	if relErr != nil {
+		return &ValidationError{Reason: "private Change common directory redirects"}
+	}
+	_, commondir, err := readGitAdminFile(regFD, "commondir", maxGitSelectionOutput)
+	if err != nil || strings.TrimSpace(string(commondir)) != relativeAdmin {
+		return &ValidationError{Reason: "private Change common directory redirects"}
+	}
+	// Reading the index with O_NOFOLLOW both rejects a missing index and
+	// prevents a worker-created alias from becoming Git input.
+	if _, _, err := readGitAdminFile(regFD, "index", maxGitListOutput); err != nil {
+		return &ValidationError{Reason: "private Change registration index is unsafe"}
+	}
+	if err := rejectDirectGitAdminEntry(regFD, "config.worktree"); err != nil {
+		return err
+	}
+	if expectedBase == nil {
+		return nil // Inspection preserves split-index and in-progress operation state.
+	}
+	entries, err := regFile.Readdirnames(-1)
+	if err != nil {
+		return &ValidationError{Reason: "private Change registration cannot be inspected"}
+	}
+	for _, name := range entries {
+		switch name {
+		case "HEAD", "commondir", "gitdir", "index", "logs":
+		case "ORIG_HEAD":
+			_, data, err := readGitAdminFile(regFD, name, maxGitSelectionOutput)
+			if err != nil || strings.TrimSpace(string(data)) != expectedBase.Hex() {
+				return &ValidationError{Reason: "private Change registration retains another original head"}
+			}
+		case "refs":
+			refsFD, _, err := openGitAdminDirectory(regFD, name)
+			if err != nil {
+				return err
+			}
+			refs := os.NewFile(uintptr(refsFD), "")
+			names, readErr := refs.Readdirnames(-1)
+			closeErr := refs.Close()
+			if readErr != nil || closeErr != nil || len(names) != 0 {
+				return &ValidationError{Reason: "private Change registration retains worktree refs"}
+			}
+		default:
+			return &ValidationError{Reason: "private Change registration contains unknown state"}
+		}
+	}
+	logsFD, _, logsErr := openGitAdminDirectory(regFD, "logs")
+	if errors.Is(logsErr, unix.ENOENT) {
+		return nil
+	}
+	if logsErr != nil {
+		return &ValidationError{Reason: "private Change registration logs are unsafe"}
+	}
+	logs := os.NewFile(uintptr(logsFD), "")
+	defer logs.Close()
+	logEntries, err := logs.Readdirnames(-1)
+	if err != nil {
+		return &ValidationError{Reason: "private Change registration logs cannot be inspected"}
+	}
+	for _, name := range logEntries {
+		if name != "HEAD" {
+			return &ValidationError{Reason: "private Change registration contains unknown log state"}
+		}
+		_, logData, err := readGitAdminFile(logsFD, name, maxGitListOutput)
+		if err != nil || expectedBase != nil && !validPrivateWorktreeReflog(logData, *expectedBase) {
+			return &ValidationError{Reason: "private Change registration log is unsafe"}
+		}
+	}
+	return nil
+}
+
+func validPrivateWorktreeReflog(data []byte, base ObjectID) bool {
+	zero := strings.Repeat("0", len(base.Hex()))
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || (fields[0] != zero && fields[0] != base.Hex()) || (fields[1] != zero && fields[1] != base.Hex()) {
+			return false
+		}
+	}
+	return true
+}
+
 type worktreeRegistration struct {
 	path, head, branch string
 }
@@ -1343,6 +1722,18 @@ func (a *gitAuthority) worktrees(ctx context.Context) (map[string]worktreeRegist
 	if err != nil {
 		return nil, err
 	}
+	return parseWorktrees(output), nil
+}
+
+func (a *gitAuthority) privateWorktrees(ctx context.Context, admin string) (map[string]worktreeRegistration, error) {
+	output, err := a.succeed(ctx, maxGitListOutput, "--git-dir", admin, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktrees(output), nil
+}
+
+func parseWorktrees(output []byte) map[string]worktreeRegistration {
 	result := make(map[string]worktreeRegistration)
 	var current worktreeRegistration
 	for _, line := range strings.Split(string(output), "\n") {
@@ -1360,7 +1751,7 @@ func (a *gitAuthority) worktrees(ctx context.Context) (map[string]worktreeRegist
 			current = worktreeRegistration{}
 		}
 	}
-	return result, nil
+	return result
 }
 
 func (a *gitAuthority) branchTip(ctx context.Context, format ObjectFormat, branch string) (ObjectID, bool, error) {
@@ -1408,16 +1799,87 @@ func (a *gitAuthority) refresh() error {
 // inspectWorktree proves path is a linked worktree of this repository, then
 // reads its head, branch and cleanliness.
 func (a *gitAuthority) inspectWorktree(ctx context.Context, path string) (WorktreeFacts, error) {
-	if info, err := os.Lstat(filepath.Join(path, ".git")); err != nil || !info.Mode().IsRegular() {
-		return WorktreeFacts{}, &ValidationError{Reason: "the Change path is not a linked worktree"}
+	gitEntry, err := os.Lstat(filepath.Join(path, ".git"))
+	if err != nil || !gitEntry.Mode().IsRegular() {
+		return WorktreeFacts{}, &ValidationError{Reason: "the Change path is not a Git worktree"}
+	}
+	gitfileTarget := ""
+	if gitEntry.Mode().IsRegular() {
+		gitfileTarget, err = privateGitfileTarget(filepath.Join(path, ".git"))
+		if err != nil {
+			return WorktreeFacts{}, err
+		}
+		private := GitDirectoryForChange(a.repositoryRoot, path)
+		canonical := filepath.Join(a.repositoryRoot, ".git")
+		canonicalWorktree := filepath.Join(canonical, "worktrees")
+		privateWorktree := filepath.Join(private, "worktrees")
+		if filepath.Dir(gitfileTarget) != canonicalWorktree && filepath.Dir(gitfileTarget) != privateWorktree {
+			return WorktreeFacts{}, &ValidationError{Reason: "the Change Gitfile target is not authorized"}
+		}
+		if filepath.Dir(gitfileTarget) == privateWorktree {
+			if err := validatePrivateGitAdmin(private); err != nil {
+				return WorktreeFacts{}, err
+			}
+		}
+		resolvedTarget, targetErr := filepath.EvalSymlinks(gitfileTarget)
+		if targetErr != nil || resolvedTarget != gitfileTarget {
+			return WorktreeFacts{}, &ValidationError{Reason: "the Change Gitfile registration is not local"}
+		}
+		if filepath.Dir(gitfileTarget) == privateWorktree {
+			if err := validatePrivateWorktreeRegistration(gitfileTarget, path, private, nil); err != nil {
+				return WorktreeFacts{}, err
+			}
+		} else {
+			registrationFD, openErr := unix.Open(gitfileTarget, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
+			if openErr != nil {
+				return WorktreeFacts{}, &ValidationError{Reason: "the Change Gitfile registration is unsafe"}
+			}
+			defer unix.Close(registrationFD)
+			_, data, readErr := readGitAdminFile(registrationFD, "gitdir", 4096)
+			if readErr != nil || strings.TrimSpace(string(data)) != filepath.Join(path, ".git") {
+				return WorktreeFacts{}, &ValidationError{Reason: "the Change Gitfile registration points elsewhere"}
+			}
+			if err := rejectDirectGitAdminEntry(registrationFD, "config.worktree"); err != nil {
+				return WorktreeFacts{}, err
+			}
+			if _, commonData, commonErr := readGitAdminFile(registrationFD, "commondir", maxGitSelectionOutput); commonErr == nil {
+				commonPath := strings.TrimSpace(string(commonData))
+				resolvedCommon, resolveErr := filepath.EvalSymlinks(filepath.Clean(filepath.Join(gitfileTarget, commonPath)))
+				if resolveErr != nil || resolvedCommon != canonical {
+					return WorktreeFacts{}, &ValidationError{Reason: "the Change Git common directory redirects"}
+				}
+			} else {
+				return WorktreeFacts{}, &ValidationError{Reason: "the Change Git common directory is unsafe"}
+			}
+		}
 	}
 	layout, err := a.succeed(ctx, maxGitSelectionOutput, "-C", path, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--show-object-format")
 	if err != nil {
 		return WorktreeFacts{}, err
 	}
 	lines := strings.Split(strings.TrimSuffix(string(layout), "\n"), "\n")
-	if len(lines) != 3 || lines[0] != path || lines[1] != filepath.Join(a.repositoryRoot, ".git") {
+	if len(lines) != 3 || lines[0] != path {
 		return WorktreeFacts{}, &ValidationError{Reason: "the Change path is not a worktree of the project repository"}
+	}
+	common := filepath.Clean(lines[1])
+	canonical := filepath.Join(a.repositoryRoot, ".git")
+	private := GitDirectoryForChange(a.repositoryRoot, path)
+	if common != canonical && common != private {
+		return WorktreeFacts{}, &ValidationError{Reason: "the Change Git directory is not private"}
+	}
+	if common == private {
+		if !gitEntry.Mode().IsRegular() || filepath.Dir(gitfileTarget) != filepath.Join(private, "worktrees") {
+			return WorktreeFacts{}, &ValidationError{Reason: "the private Change must be a linked worktree"}
+		}
+		info, statErr := os.Lstat(common)
+		statOK := false
+		var stat *syscall.Stat_t
+		if statErr == nil {
+			stat, statOK = info.Sys().(*syscall.Stat_t)
+		}
+		if statErr != nil || !info.IsDir() || !statOK || stat.Uid != uint32(unix.Geteuid()) || info.Mode().Perm()&0o022 != 0 {
+			return WorktreeFacts{}, &ValidationError{Reason: "the private Change Git directory is unsafe"}
+		}
 	}
 	format, err := NewObjectFormat(lines[2])
 	if err != nil {
@@ -1459,7 +1921,7 @@ func (a *gitAuthority) inspectWorktree(ctx context.Context, path string) (Worktr
 	if err != nil {
 		return WorktreeFacts{}, err
 	}
-	return WorktreeFacts{head: head, branch: branch, dirty: dirty}, nil
+	return WorktreeFacts{head: head, branch: branch, dirty: dirty, gitDirectory: common}, nil
 }
 
 func validateWorktreePath(path string) error {
