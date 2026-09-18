@@ -260,7 +260,7 @@ func (store *Store) SetProjectRepositoryDefault(ctx context.Context, id Reposito
 	if value.Revision != expected || !value.Enabled {
 		return ProjectRepository{}, tx.Rollback(ErrRevisionConflict)
 	}
-	if _, err := tx.connection.ExecContext(ctx, `UPDATE project_repositories SET is_default = 0 WHERE project_id = ? AND is_default = 1`, value.ProjectID.Bytes()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE project_repositories SET is_default = 0, revision = revision + 1, updated_at_ms = ? WHERE project_id = ? AND is_default = 1 AND id <> ?`, at.Int64(), value.ProjectID.Bytes(), id.Bytes()); err != nil {
 		return ProjectRepository{}, tx.Rollback(err)
 	}
 	if _, err := tx.connection.ExecContext(ctx, `UPDATE project_repositories SET is_default = 1, revision = revision + 1, updated_at_ms = ? WHERE id = ?`, at.Int64(), id.Bytes()); err != nil {
