@@ -201,6 +201,8 @@ case "$provider" in
             -c "mcp_servers.dark_factory_maintainer.command=\"$bridge\"" \
             -c 'mcp_servers.dark_factory_maintainer.enabled=true' \
             -c 'mcp_servers.dark_factory_maintainer.required=true' \
+            -c 'mcp_servers.dark_factory_maintainer.startup_timeout_sec=120' \
+            -c 'mcp_servers.dark_factory_maintainer.tool_timeout_sec=120' \
             -c 'mcp_servers.dark_factory_maintainer.enabled_tools=["maintainer_status","observe_operation","submit_pull_request_review"]' \
             --output-last-message "$out" "$prompt" > "$events" 2>&1 || true
         ;;
