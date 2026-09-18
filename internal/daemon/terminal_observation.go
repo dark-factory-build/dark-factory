@@ -13,8 +13,11 @@ import (
 // its first line, and a partial final line is omitted, so a caller cannot
 // bypass credential labels by requesting a cursor inside their value.
 var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:blank:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^[:space:]]+`)
-var terminalJSONSecret = regexp.MustCompile(`(?is)"(?:api[_-]?key|password|token|secret)"[[:space:]]*:[[:space:]]*"[^"]{0,512}"`)
-var terminalJSONPrivatePath = regexp.MustCompile(`(?is)"[^"]{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^"]{0,512}"`)
+
+const terminalJSONStringAtom = `(?:\\.|[^"\\])`
+
+var terminalJSONSecret = regexp.MustCompile(`(?is)"(?:api[_-]?key|password|token|secret)"[[:space:]]*:[[:space:]]*"` + terminalJSONStringAtom + `{0,512}"`)
+var terminalJSONPrivatePath = regexp.MustCompile(`(?is)"` + terminalJSONStringAtom + `{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)` + terminalJSONStringAtom + `{0,512}"`)
 var terminalJSONSecretKey = regexp.MustCompile(`(?i)^[[:space:]\{"']*(?:api[_-]?key|password|assword|ssword|sword|secret|ecret|cret|token|oken|ken|en|n)["']?[[:space:]]*:`)
 var terminalJSONAmbiguousSecretKey = regexp.MustCompile(`(?i)^[[:space:]\{"']*n["']?[[:space:]]*:`)
 var terminalJSONPathStart = regexp.MustCompile(`(?i)"[^"]{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)`)
