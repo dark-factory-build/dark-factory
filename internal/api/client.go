@@ -328,6 +328,20 @@ func (client *OperatorClient) TaskRecovery(ctx context.Context, input TaskRecove
 	return result, nil
 }
 
+func (client *OperatorClient) WorkerOperation(ctx context.Context, operationID string) (WorkerOperation, error) {
+	if !validID(operationID) {
+		return WorkerOperation{}, ErrInvalidInput
+	}
+	var result WorkerOperation
+	if err := client.client.call(ctx, "operator_worker_operation", WorkerOperationInput{OperationID: operationID}, &result); err != nil {
+		return WorkerOperation{}, err
+	}
+	if !validWorkerOperation(result) || result.OperationID != operationID {
+		return WorkerOperation{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput) (TaskText, error) {
 	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Offset > uint64(^uint64(0)>>1) {
 		return TaskText{}, ErrInvalidInput

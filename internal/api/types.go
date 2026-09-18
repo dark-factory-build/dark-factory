@@ -259,6 +259,22 @@ type OverseerInterventionResult struct {
 	Detail      string `json:"detail"`
 }
 
+type WorkerOperationInput struct {
+	OperationID string `json:"operation_id"`
+}
+
+type WorkerOperation struct {
+	OperationID string `json:"operation_id"`
+	TaskID      string `json:"task_id"`
+	RunID       string `json:"run_id"`
+	State       string `json:"state"`
+	Detail      string `json:"detail,omitempty"`
+}
+
+func validWorkerOperation(value WorkerOperation) bool {
+	return validID(value.OperationID) && validID(value.TaskID) && validID(value.RunID) && (value.State == "pending" || value.State == "delivered" || value.State == "unknown" || value.State == "rejected") && validText(value.Detail, 0, 4096)
+}
+
 // AttemptTask is the exact private task text visible only to the authenticated
 // live attempt that owns it.
 type AttemptTask struct {

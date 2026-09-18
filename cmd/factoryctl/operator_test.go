@@ -45,6 +45,7 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "worker replace", args: []string{"worker", "replace", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3", "--successor-task", strings.Repeat("cd", 16), "--successor-incarnation", strings.Repeat("ef", 16), "--instruction", "continue"}},
 		{name: "worker message", args: []string{"worker", "message", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3", "--message", "continue"}},
 		{name: "worker interrupt", args: []string{"worker", "interrupt", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3"}},
+		{name: "worker operation", args: []string{"worker", "operation", "--operation-id", id}},
 	}
 	for _, test := range valid {
 		t.Run(test.name, func(t *testing.T) {
@@ -150,6 +151,29 @@ func TestWorkerStopUsesOperatorClient(t *testing.T) {
 	awaitServer(t, done)
 	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"state":"delivered"`) {
 		t.Fatalf("worker stop = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestWorkerOperationUsesReadOnlyOperatorCall(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	id := strings.Repeat("ab", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.WorkerOperationInput()
+		if !ok || call.Kind() != api.CallOperatorWorkerOperation || input.OperationID != id {
+			t.Errorf("operator receipt call = kind %v input %+v ok=%v", call.Kind(), input, ok)
+		}
+		reply, err := api.NewWorkerOperationReply(api.WorkerOperation{OperationID: id, TaskID: strings.Repeat("cd", 16), RunID: strings.Repeat("ef", 16), State: "unknown", Detail: "delivery uncertain"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"worker", "operation", "--operation-id", id}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"state":"unknown"`) || !strings.Contains(stdout.String(), `"detail":"delivery uncertain"`) {
+		t.Fatalf("worker operation = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
 

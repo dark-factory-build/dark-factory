@@ -59,6 +59,22 @@ func TestOperatorControlsUseOperatorDomainWithoutAttemptAuthority(t *testing.T) 
 	}
 }
 
+func TestWorkerOperationLookupIsOperatorOnly(t *testing.T) {
+	var bearer credential
+	request := []byte(`{"method":"operator_worker_operation","params":{"operation_id":"11111111111111111111111111111111"}}`)
+	call, code := decodeCall(operatorDomain, bearer, request)
+	input, ok := call.WorkerOperationInput()
+	if code != "" || !ok || call.Kind() != CallOperatorWorkerOperation || input.OperationID != "11111111111111111111111111111111" {
+		t.Fatalf("operator lookup = kind %v input %+v ok=%v code=%v", call.Kind(), input, ok, code)
+	}
+	if _, ok := call.AttemptDigest(); ok {
+		t.Fatal("operator lookup acquired attempt authority")
+	}
+	if _, code := decodeCall(attemptDomain, bearer, request); code != RemoteForbidden {
+		t.Fatalf("attempt domain accepted operator lookup: %v", code)
+	}
+}
+
 func TestTaskReadIsOperatorOnlyAndRevisionBound(t *testing.T) {
 	var bearer credential
 	request := []byte(`{"method":"task_read","params":{"task_id":"11111111111111111111111111111111","expected_revision":2,"offset":2048}}`)

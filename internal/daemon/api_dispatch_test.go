@@ -1081,6 +1081,18 @@ func TestDaemonOperatorStopUsesOperatorAuthorityAndExactRevisions(t *testing.T) 
 	if err != nil || !reflect.DeepEqual(replay.Intervention, result.Intervention) {
 		t.Fatalf("operator stop replay = %+v, %v", replay, err)
 	}
+	done = fixture.serve(t)
+	observed, err := client.WorkerOperation(context.Background(), input.OperationID)
+	waitDispatch(t, done)
+	if err != nil || observed.OperationID != input.OperationID || observed.TaskID != input.TaskID || observed.RunID != input.RunID || observed.State != "delivered" || observed.Detail != "" {
+		t.Fatalf("operator receipt lookup = %+v, %v", observed, err)
+	}
+	done = fixture.serve(t)
+	_, err = client.WorkerOperation(context.Background(), testID(215))
+	waitDispatch(t, done)
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteNotFound {
+		t.Fatalf("missing operator receipt = %v", err)
+	}
 }
 
 func TestDaemonOperatorTaskReadBindsRevisionAndPagesUTF8(t *testing.T) {
