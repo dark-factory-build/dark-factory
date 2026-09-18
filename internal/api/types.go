@@ -277,15 +277,24 @@ func validWorkerOperation(value WorkerOperation) bool {
 
 // AttemptTask is the exact private task text visible only to the authenticated
 // live attempt that owns it.
+type IntakeTaskSource struct {
+	AcceptanceID       string `json:"acceptance_id"`
+	Repository         string `json:"repository"`
+	RepositoryID       uint64 `json:"repository_id"`
+	IssueNumber        uint64 `json:"issue_number"`
+	TargetRepositoryID string `json:"target_repository_id"`
+	ContentHash        string `json:"content_hash"`
+}
 type AttemptTask struct {
-	Task                   string `json:"task"`
-	TaskID                 string `json:"task_id,omitempty"`
-	IncarnationID          string `json:"incarnation_id,omitempty"`
-	WorkRevision           uint64 `json:"work_revision,omitempty"`
-	ChangeID               string `json:"change_id,omitempty"`
-	AdmittedChangeRevision uint64 `json:"admitted_change_revision,omitempty"`
-	ChangeRevision         uint64 `json:"change_revision,omitempty"`
-	BaseCommit             string `json:"base_commit,omitempty"`
+	Intake                 *IntakeTaskSource `json:"intake,omitempty"`
+	Task                   string            `json:"task"`
+	TaskID                 string            `json:"task_id,omitempty"`
+	IncarnationID          string            `json:"incarnation_id,omitempty"`
+	WorkRevision           uint64            `json:"work_revision,omitempty"`
+	ChangeID               string            `json:"change_id,omitempty"`
+	AdmittedChangeRevision uint64            `json:"admitted_change_revision,omitempty"`
+	ChangeRevision         uint64            `json:"change_revision,omitempty"`
+	BaseCommit             string            `json:"base_commit,omitempty"`
 }
 
 // TerminalObserveInput identifies one exact attempt terminal. The API derives
@@ -537,6 +546,9 @@ func terminalSafeJSON(dst, encoded []byte) []byte {
 }
 
 func validAttemptTask(task AttemptTask) bool {
+	if task.Intake != nil && (!validID(task.Intake.AcceptanceID) || !validID(task.Intake.TargetRepositoryID) || task.Intake.RepositoryID == 0 || task.Intake.IssueNumber == 0 || len(task.Intake.Repository) > 140 || len(task.Intake.ContentHash) != 64) {
+		return false
+	}
 	if !validText(task.Task, 0, kernel.MaxContinuationTaskBytes) {
 		return false
 	}

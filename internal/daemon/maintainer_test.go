@@ -88,3 +88,20 @@ func TestConnectRefusesLegacyOverseerBeforeCredentialActivation(t *testing.T) {
 		t.Fatalf("legacy transition = %+v", result)
 	}
 }
+
+func TestAcceptedIssueObservationDoesNotReplaceReviewedInstructions(t *testing.T) {
+	accepted := kernel.IntakeAcceptance{Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "reviewed", Body: "safe snapshot"}}
+	for _, tc := range []struct {
+		response string
+		want     bool
+	}{
+		{`{"result":{"structuredContent":{"number":9,"title":"reviewed","body":"safe snapshot"}}}`, true},
+		{`{"result":{"structuredContent":{"number":9,"title":"reviewed","body":"edited instructions"},"content":[{"type":"text","text":"edited instructions"}]}}`, false},
+		{`{"result":{"structuredContent":{"number":8,"title":"reviewed","body":"safe snapshot"}}}`, false},
+		{`{"result":{"isError":true}}`, false},
+	} {
+		if got := observedAcceptedContent([]byte(tc.response), accepted); got != tc.want {
+			t.Fatalf("observation allowed=%v want=%v", got, tc.want)
+		}
+	}
+}

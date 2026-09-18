@@ -641,6 +641,15 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 		return newErrorReply(api.RemoteInternal)
 	}
 	assignment := api.AttemptTask{Task: string(task)}
+	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if found {
+		hash := accepted.Snapshot.ContentHash()
+		assignment.Intake = &api.IntakeTaskSource{AcceptanceID: accepted.ID.String(), Repository: accepted.SourceRepository, RepositoryID: accepted.Snapshot.GitHubRepositoryID, IssueNumber: accepted.Snapshot.IssueNumber, TargetRepositoryID: accepted.RepositoryID.String(), ContentHash: hex.EncodeToString(hash[:])}
+	}
+
 	if authority.Role == kernel.RoleWorker {
 		if authority.ChangeID == nil || authority.AdmittedChangeRevision == nil || authority.CurrentChangeRevision == nil || len(authority.BaseCommit) == 0 {
 			return newErrorReply(api.RemoteInternal)
