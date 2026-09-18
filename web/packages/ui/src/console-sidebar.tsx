@@ -737,6 +737,7 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
   }, [repositories, installationID]);
 =======
   const canConnect = status === "disconnected" || status === "denied" || status === "unavailable" || status === "invalid" || status === "already_connected" || github?.error !== undefined;
+  const recoveryAction = status === "disconnected" ? "connect" : "refresh";
   useEffect(() => {
     if (connectionID !== previousConnectionID.current) {
       previousConnectionID.current = connectionID;

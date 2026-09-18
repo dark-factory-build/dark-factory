@@ -59,6 +59,7 @@ test("canonical control fixtures decode by sender role and re-encode exactly", (
 test("GitHub settings frames keep the paired admin bridge bounded", () => {
   const request = JSON.stringify({ type: "GITHUB_CONNECTION", id: "github-1", body: { action: "delegate", repositories: [{ installation_id: 7, repository_id: 9, repository: "factory-org/worker" }] } });
   assert.deepEqual(decodeClientControl(request).body.repositories[0], { installation_id: 7, repository_id: 9, repository: "factory-org/worker" });
+  assert.equal(decodeClientControl(request.replace("factory-org/worker", "factory-org/.github")).body.repositories[0].repository, "factory-org/.github");
   expectMalformed(() => decodeClientControl(request.replace("factory-org/worker", "factory-org/worker%0A")));
   expectMalformed(() => decodeClientControl(request.replace('"action":"delegate"', '"action":"delegate","page":2')));
   expectMalformed(() => decodeClientControl(request.replace('"action":"delegate"', '"action":"confirm","code":"abcdef1234"')));

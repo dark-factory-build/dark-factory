@@ -497,7 +497,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "GITHUB_CONNECTION": {
       requireKeys(body, ["action"], wire, ["code", "page", "installation_id", "repositories"]);
       if (!("connect status refresh disconnect confirm installations repositories delegate".split(" ").includes(body.action as string)) || body.action === "confirm" && (typeof body.code !== "string" || !/^[0-9A-F]{10}$/.test(body.code)) || body.action !== "confirm" && present(body, "code") || present(body, "page") && (!Number.isSafeInteger(body.page) || (body.page as number) < 1 || (body.page as number) > 1000) || present(body, "installation_id") && (!Number.isSafeInteger(body.installation_id) || (body.installation_id as number) < 1) || body.action === "repositories" && (!present(body, "installation_id") || !present(body, "page")) || body.action !== "repositories" && present(body, "installation_id") || body.action !== "installations" && body.action !== "repositories" && present(body, "page") || body.action !== "delegate" && present(body, "repositories")) malformed();
-      if (present(body, "repositories")) { if (!Array.isArray(body.repositories) || body.repositories.length > 100) malformed(); for (const item of body.repositories) { if (!isObject(item)) malformed(); requireKeys(item, ["installation_id", "repository_id", "repository"], wire); integer(item.installation_id, 1, Number.MAX_SAFE_INTEGER); integer(item.repository_id, 1, Number.MAX_SAFE_INTEGER); const repository = boundedText(item.repository, 3, 140); if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})?$/.test(repository)) malformed(); } }
+      if (present(body, "repositories")) { if (!Array.isArray(body.repositories) || body.repositories.length > 100) malformed(); for (const item of body.repositories) { if (!isObject(item)) malformed(); requireKeys(item, ["installation_id", "repository_id", "repository"], wire); integer(item.installation_id, 1, Number.MAX_SAFE_INTEGER); integer(item.repository_id, 1, Number.MAX_SAFE_INTEGER); const repository = boundedText(item.repository, 3, 140); if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9_.-]{1,100}$/.test(repository)) malformed(); } }
       return { action: body.action, ...(present(body, "code") ? { code: body.code } : {}), ...(present(body, "page") ? { page: body.page } : {}), ...(present(body, "installation_id") ? { installation_id: body.installation_id } : {}), ...(present(body, "repositories") ? { repositories: body.repositories } : {}) } as GitHubConnectionBody;
     }
     case "GITHUB_CONNECTION_RESULT": return githubConnectionResult(body, wire);
@@ -575,7 +575,7 @@ function githubDelegations(value: unknown, wire: boolean, maximum: number): GitH
     if (!isObject(item)) malformed();
     requireKeys(item, ["installation_id", "repository_id", "repository"], wire);
     const repository = boundedText(item.repository, 3, 140);
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})?$/.test(repository)) malformed();
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9_.-]{1,100}$/.test(repository)) malformed();
     return { installation_id: integer(item.installation_id, 1, Number.MAX_SAFE_INTEGER), repository_id: integer(item.repository_id, 1, Number.MAX_SAFE_INTEGER), repository };
   });
 }
@@ -599,7 +599,7 @@ function githubRepository(value: unknown, wire: boolean): GitHubRepositoryBody {
   if (![value.permissions.pull, value.permissions.push, value.permissions.maintain, value.permissions.admin].every((item) => typeof item === "boolean")) malformed();
   const permissions = { pull: value.permissions.pull as boolean, push: value.permissions.push as boolean, maintain: value.permissions.maintain as boolean, admin: value.permissions.admin as boolean };
   const full_name = boundedText(value.full_name, 3, 140);
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})?$/.test(full_name)) malformed();
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9_.-]{1,100}$/.test(full_name)) malformed();
   return { id: integer(value.id, 1, Number.MAX_SAFE_INTEGER), full_name, permissions };
 }
 

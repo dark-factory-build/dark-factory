@@ -13,6 +13,7 @@ test("GitHub settings pages stay scoped to the current connection", async () => 
     async githubConnection(request) {
       calls.push(request);
       if (request.action === "connect") return { state: "ok", authorization };
+      if (request.action === "confirm") return { state: "ok" };
       if (request.action === "refresh") return { state: "ok", status: { connection_id: "new", state: "connected", repositories: [] } };
       if (request.action === "installations") return { state: "ok", installations: { installations: [installation], next_page: null } };
       throw new Error(`unexpected ${request.action}`);
@@ -22,8 +23,8 @@ test("GitHub settings pages stay scoped to the current connection", async () => 
   const coordinator = new FactorySettingsCoordinator(owner);
   await coordinator.githubConnection({ action: "connect" });
   assert.equal(coordinator.github.result.installations, undefined);
-  await coordinator.githubConnection({ action: "refresh" });
-  assert.deepEqual(calls.map(({ action }) => action), ["connect", "refresh", "installations"]);
+  await coordinator.githubConnection({ action: "confirm", code: "0123456789" });
+  assert.deepEqual(calls.map(({ action }) => action), ["connect", "confirm", "refresh", "installations"]);
   assert.equal(coordinator.github.result.status.connection_id, "new");
   assert.equal(coordinator.github.result.installations.installations[0].id, 7);
   await coordinator.githubConnection({ action: "connect" });
