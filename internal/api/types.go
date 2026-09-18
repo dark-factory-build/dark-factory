@@ -340,7 +340,7 @@ func validTerminalObservation(value TerminalObservation) bool {
 		return false
 	}
 	if value.TextMode {
-		if value.Cursor != 0 || value.NextCursor != 0 || value.Gap || value.Omitted != 0 || len(value.Payload) != 0 || value.Source == "none" {
+		if value.Cursor != 0 || value.NextCursor != 0 || value.Gap != (value.Floor != 0) || value.Omitted != 0 || len(value.Payload) != 0 || value.Source == "none" {
 			return false
 		}
 		for _, ch := range value.Text {

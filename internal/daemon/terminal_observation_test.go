@@ -107,7 +107,7 @@ func TestTerminalTextProjectionNormalizesControlsBeforeRedaction(t *testing.T) {
 			t.Fatalf("projection retained terminal control %#x in %q", value, got)
 		}
 	}
-	if got := terminalTextProjection([]byte("cret-fragment\x1b[2Ccontinued\nvisible state\x1b["), true, 65536); got != "" {
+	if got := terminalTextProjection([]byte("cret\": \"frag\x1b[2Cment\ncontinued-value\",\nvisible state\x1b["), true, 65536); got != "***************** visible state" {
 		t.Fatalf("dropped prefix or incomplete escape projection = %q", got)
 	}
 	if got := terminalTextProjection([]byte("cret-fragment\x1b[2Ccontinued"), true, 65536); got != "" {
@@ -438,8 +438,9 @@ func TestOperatorTerminalObservationReadsSettledDiagnostics(t *testing.T) {
 	active := prepareActiveAttemptInProject(t, fixture, 41, testID(11), "orchestrator")
 	completeAdapterRun(t, fixture.store, active.run, "finished")
 	ctx := context.Background()
-	payload := []byte("finished output\nAuthorization: Bearer private-value\n")
-	if err := fixture.store.SaveTerminalDiagnostics(ctx, kernel.TerminalDiagnostics{RunID: active.run.ID, Head: uint64(len(payload)), Payload: payload, CapturedAt: mustKernelTime(t, 2000)}); err != nil {
+	// A wrapped ring: the floor cut the first line, which neither reader shows.
+	payload := []byte("cut line\nfinished output\nAuthorization: Bearer private-value\n")
+	if err := fixture.store.SaveTerminalDiagnostics(ctx, kernel.TerminalDiagnostics{RunID: active.run.ID, Floor: 9, Head: 9 + uint64(len(payload)), Payload: payload, CapturedAt: mustKernelTime(t, 2000)}); err != nil {
 		t.Fatal(err)
 	}
 	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
@@ -447,7 +448,7 @@ func TestOperatorTerminalObservationReadsSettledDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := fixture.serve(t)
-	observed, err := operator.TerminalObserve(ctx, api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 1024})
+	observed, err := operator.TerminalObserve(ctx, api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), Cursor: 9, MaxBytes: 1024})
 	waitDispatch(t, done)
 	if err != nil || observed.Source != "stored" || !bytes.Contains(observed.Payload, []byte("finished output")) || bytes.Contains(observed.Payload, []byte("private-value")) {
 		t.Fatalf("settled observation = %+v, %v", observed, err)
@@ -455,7 +456,7 @@ func TestOperatorTerminalObservationReadsSettledDiagnostics(t *testing.T) {
 	done = fixture.serve(t)
 	observed, err = operator.TerminalObserve(ctx, api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 1024, Text: true})
 	waitDispatch(t, done)
-	if err != nil || !observed.TextMode || observed.Source != "stored" || !strings.Contains(observed.Text, "finished output") || strings.Contains(observed.Text, "private-value") {
+	if err != nil || !observed.TextMode || !observed.Gap || observed.Source != "stored" || !strings.Contains(observed.Text, "finished output") || strings.Contains(observed.Text, "cut line") || strings.Contains(observed.Text, "private-value") {
 		t.Fatalf("settled text observation = %+v, %v", observed, err)
 	}
 }

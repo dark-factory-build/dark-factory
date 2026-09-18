@@ -45,9 +45,11 @@ func redactTerminalText(payload []byte) []byte {
 // credential to the redactor.
 func terminalTextProjection(payload []byte, droppedPrefix bool, limit int) string {
 	if droppedPrefix {
-		// The retained floor may be inside a multi-line credential or private
-		// path. No later terminal control or line end proves that record ended.
-		return ""
+		// The retained floor may be inside a credential or private path. Apply
+		// the raw cursor reader's rule, so text never shows more than raw: drop
+		// the partial first line and hide orphaned values. The appended line
+		// end keeps the newest partial line, which the pass below redacts.
+		payload, _ = redactTerminalWindow(append(payload[:len(payload):len(payload)], '\n'), 1)
 	}
 	text := make([]byte, 0, len(payload))
 	space := func() {
@@ -338,7 +340,7 @@ func (daemon *Daemon) readTerminalTextObservation(ctx context.Context, input api
 	} else {
 		return newErrorReply(api.RemoteConflict)
 	}
-	result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Floor: floor, Head: head, Source: source, TextMode: true, Text: terminalTextProjection(payload, floor != 0, int(input.MaxBytes))}
+	result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Floor: floor, Head: head, Source: source, Gap: floor != 0, TextMode: true, Text: terminalTextProjection(payload, floor != 0, int(input.MaxBytes))}
 	reply, err := api.NewTerminalObservationReply(result)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
