@@ -141,15 +141,15 @@ in zeroizing memory and are never returned or journalled. The permanent App may
 have additional installed capabilities; unused App-level authority is never
 copied into an operation token.
 
-The Actions-write, Administration-write, checks-read, contents-write,
-issues-write, merge-queues-write, metadata-read, and pull-requests-write minimum
-is enforced when a token is minted, not at readiness. Administration write is
-downscoped only into direct merge's fixed ruleset reads. The installation check
-is deliberately all-or-nothing so status cannot advertise a partial v4
-surface. Readiness names no repository, so it has no installation to audit; an
-installation that is suspended, is not selected-repository, or lacks one of
-those grants is refused at the operation that needs it, and the refusal names
-the field that failed.
+Each operation's requested Actions, Administration, checks, contents, issues,
+merge-queues, metadata, and pull-requests permission is checked when its
+repository token is minted, not at readiness. Administration write is
+downscoped only into direct merge's fixed ruleset reads. Readiness names no
+repository, so it has no installation to audit; an installation that is
+suspended, is not selected-repository, or lacks the operation's requested grant
+is refused with the field that failed. A repository that cannot merge or deploy
+can still use issue reads and reviewed PR publication when it has those narrower
+grants.
 
 [SQLite storage API]: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 [Durable Object rules]: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
