@@ -52,11 +52,11 @@ func TestRunPathsForAgentWithoutRunIsEmpty(t *testing.T) {
 
 func TestLiveRunLocationsExposeWorkerAndOverseerRoots(t *testing.T) {
 	ctx := context.Background()
-	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
-	fixture.pair(t)
-	changeParent := t.TempDir()
-	fixture.daemon.RememberSupervisorAccount(changeParent, "", change.TrustedGitExecutable)
 	for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
+		fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+		fixture.pair(t)
+		changeParent := t.TempDir()
+		fixture.daemon.RememberSupervisorAccount(changeParent, "", change.TrustedGitExecutable)
 		run := adapterRunningRoleRun(t, fixture.store, byte(0x90)+byte(role), role)
 		session, found, err := fixture.store.TerminalSessionForRun(ctx, run.ID)
 		if err != nil || !found {
