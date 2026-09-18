@@ -149,9 +149,32 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 		return exitFailure
 	}
 	if installApp {
-		if result.Installations == nil || len(result.Installations.Items) != 0 {
-			_, _ = io.WriteString(stderr, "GitHub App installation is already visible; use factoryctl github installations to choose it\n")
-			return exitFailure
+		for {
+			if result.Installations == nil {
+				_, _ = io.WriteString(stderr, "Native GitHub App installation settings are unavailable; refresh your connection\n")
+				return exitFailure
+			}
+			if len(result.Installations.Items) != 0 {
+				_, _ = io.WriteString(stderr, "GitHub App installation is already visible; use factoryctl github installations to choose it\n")
+				return exitFailure
+			}
+			if result.Installations.NextPage == nil {
+				break
+			}
+			next := *result.Installations.NextPage
+			if next <= input.Page || next > 1000 {
+				_, _ = io.WriteString(stderr, "GitHub installation pages are invalid; refresh your connection\n")
+				return exitFailure
+			}
+			input.Page = next
+			result, err = client.GitHubConnection(requestContext, input)
+			if err != nil {
+				return writeWebFailure(stderr, "GitHub installation settings", err)
+			}
+			if result.State != "ok" {
+				_, _ = io.WriteString(stderr, "GitHub installation access unavailable; refresh your connection\n")
+				return exitFailure
+			}
 		}
 		link, ok := nativeGitHubInstallURL(result.Installations.InstallationURL)
 		if !ok {
