@@ -547,6 +547,7 @@ pub(crate) struct ObservePullRequestMerge {
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) base: String,
+    pub(crate) reviewed_body_digest: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2813,7 +2814,7 @@ impl AppAuthority {
             pull_number: request.pull_number,
             head_sha: request.head_sha.clone(),
             base: request.base.clone(),
-            reviewed_body_digest: Some(text_digest(pull.body.as_deref().unwrap_or(""))),
+            reviewed_body_digest: Some(request.reviewed_body_digest.clone()),
         };
         enqueue_request.validate()?;
         let enqueue_operation = enqueue_request.operation("enqueue_pull_request")?;
@@ -3427,7 +3428,8 @@ impl ObservePullRequestMerge {
         canonical_operation_id(&mut self.enqueue_operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
-        valid_ref(&self.base)
+        valid_ref(&self.base)?;
+        valid_digest(&self.reviewed_body_digest)
     }
 }
 
@@ -9748,6 +9750,7 @@ mod tests {
             pull_number: 390,
             head_sha: "d".repeat(40),
             base: "main".into(),
+            reviewed_body_digest: "sha256:".to_owned() + &"d".repeat(64),
         };
         assert!(merge.validate().is_ok());
         assert!(

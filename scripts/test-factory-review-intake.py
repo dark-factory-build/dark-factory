@@ -430,6 +430,52 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertIn('NOT_QUEUED', enqueue.call_args.args[1]['body'])
         self.assertIn('44444444-4444-4444-8444-444444444444', enqueue.call_args.args[1]['body'])
 
+    def test_merge_observation_reuses_reviewed_digest_after_body_edit(self):
+        operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
+                         enqueue_base='main', reviewed_body_digest='sha256:' + ('0' * 64))
+        observed = {'structuredContent': {'pull_number': 9, 'head_sha': SHA, 'base': 'main',
+                     'pull_state': 'open', 'state': 'ACTIVE_QUEUE'}, 'isError': False}
+        with patch.object(review, 'bridge_call', return_value=observed) as bridge:
+            self.assertEqual({'state': 'ACTIVE_QUEUE', 'pull_state': 'open'}, review.observe_merge(self.config, operation))
+        self.assertEqual('sha256:' + ('0' * 64), bridge.call_args.args[1]['reviewed_body_digest'])
+
+    def test_queued_replay_observes_after_body_edit_without_revalidation(self):
+        self.observe.return_value = 'allow'
+        operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
+                         enqueue_base='main', enqueue_state='queued', enqueue_attempted=True,
+                         reviewed_body_digest='sha256:' + ('0' * 64), review_state='allow')
+        with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'edited after enqueue\nRefs #7'}]), \
+             patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'verify_review_body') as verify, patch.object(review, 'enqueue_allowed'), \
+             patch.object(review, 'observe_merge', return_value={'state': 'NOT_QUEUED', 'pull_state': 'open'}), \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), patch.object(review.intake, 'enqueue') as enqueue:
+            self.assertEqual(['woke PR #9 queue failure'], review.run_once(self.config))
+        verify.assert_not_called()
+        self.assertEqual(1, enqueue.call_count)
+
+    def test_queued_replay_stays_quiet_for_closed_active_and_merged(self):
+        for observation in (
+            {'state': 'NOT_QUEUED', 'pull_state': 'closed'},
+            {'state': 'ACTIVE_QUEUE', 'pull_state': 'open'},
+            {'state': 'MERGED_AFTER_ENQUEUE_ATTEMPT', 'pull_state': 'closed'},
+        ):
+            with self.subTest(observation=observation):
+                operation = dict(self.operation, enqueue_operation='44444444-4444-4444-8444-444444444444',
+                                 enqueue_base='main', enqueue_state='queued', enqueue_attempted=True,
+                                 reviewed_body_digest='sha256:' + ('0' * 64), review_state='allow')
+                observed = dict(observation)
+                with patch.object(review, 'mirror', return_value=Path('/mirror')), \
+                     patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'edited after enqueue\nRefs #7'}]), \
+                     patch.object(review, 'ready', return_value=operation), patch.object(review, 'verify_existing'), \
+                     patch.object(review, 'verify_review_body') as verify, patch.object(review, 'enqueue_allowed'), \
+                     patch.object(review, 'observe_merge', return_value=observed), \
+                     patch.object(review.intake, 'task_state', return_value={'status': 'queued'}), patch.object(review.intake, 'enqueue') as enqueue:
+                    self.observe.return_value = 'allow'
+                    self.assertEqual([], review.run_once(self.config))
+                verify.assert_not_called()
+                enqueue.assert_not_called()
+
     def test_closed_not_queued_merge_observation_stays_quiet(self):
         self.observe.return_value = 'allow'
         queued_operation = dict(self.operation)

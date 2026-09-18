@@ -733,9 +733,10 @@ fn tools() -> Value {
                 "enqueue_operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base": {"type": "string", "minLength": 1, "maxLength": 240}
+                "base": {"type": "string", "minLength": 1, "maxLength": 240},
+                "reviewed_body_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
             },
-            "required": ["repository", "enqueue_operation_id", "pull_number", "head_sha", "base"],
+            "required": ["repository", "enqueue_operation_id", "pull_number", "head_sha", "base", "reviewed_body_digest"],
             "additionalProperties": false
         },
         "outputSchema": {
