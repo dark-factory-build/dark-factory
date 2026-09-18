@@ -28,10 +28,11 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	github       *maintainer.Host
-	maintainerMu sync.Mutex
-	store        *kernel.Store
-	now          func() time.Time
+	github               *maintainer.Host
+	intakeControllerHome string
+	maintainerMu         sync.Mutex
+	store                *kernel.Store
+	now                  func() time.Time
 
 	// Cleanup survives caller cancellation but remains interruptible by daemon shutdown.
 	cleanupCtx    context.Context
@@ -314,6 +315,12 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return reply
 	case api.CallMaintainer:
 		return daemon.attemptMaintainer(ctx, call)
+	case api.CallIntake:
+		input, ok := call.IntakeInput()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		return api.NewContentReply(daemon.Intake(ctx, input))
 	case api.CallGitHubConnection:
 		input, ok := call.GitHubConnectionInput()
 		if !ok {
@@ -641,6 +648,15 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 		return newErrorReply(api.RemoteInternal)
 	}
 	assignment := api.AttemptTask{Task: string(task)}
+	accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if found {
+		hash := accepted.Snapshot.ContentHash()
+		assignment.Intake = &api.IntakeTaskSource{AcceptanceID: accepted.ID.String(), Repository: accepted.SourceRepository, RepositoryID: accepted.Snapshot.GitHubRepositoryID, IssueNumber: accepted.Snapshot.IssueNumber, TargetRepositoryID: accepted.RepositoryID.String(), ContentHash: hex.EncodeToString(hash[:])}
+	}
+
 	if authority.Role == kernel.RoleWorker {
 		if authority.ChangeID == nil || authority.AdmittedChangeRevision == nil || authority.CurrentChangeRevision == nil || len(authority.BaseCommit) == 0 {
 			return newErrorReply(api.RemoteInternal)
@@ -1102,6 +1118,19 @@ func (daemon *Daemon) projectRepository(ctx context.Context, call api.Call) api.
 			result.Repositories = append(result.Repositories, repositoryDTO(value))
 		}
 		return api.NewContentReply(result)
+	case "github":
+		id, valid := parseRepo()
+		if !valid {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		if err := daemon.BindProjectRepositoryGitHub(ctx, id); err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		value, found, err := daemon.store.ProjectRepository(ctx, id)
+		if err != nil || !found {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return api.NewContentReply(repositoryDTO(value))
 	case "add":
 		id, valid := parseRepo()
 		project, projectValid := parseProject()

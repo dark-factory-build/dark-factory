@@ -44,6 +44,8 @@ func runMaintainerMCP(ctx context.Context, input io.Reader, output io.Writer, ge
 				message = "Maintainer access denied for this attempt or project repository; refresh GitHub access"
 			case "invalid":
 				message = "Invalid Maintainer request"
+			case "accepted_snapshot_required":
+				message = "Use the frozen accepted issue snapshot in attempt task context; revised issue content requires new operator acceptance"
 			case "repository_unbound":
 				message = "Repository GitHub identity is unbound; ask the operator to connect GitHub and bind the registered repository"
 			}

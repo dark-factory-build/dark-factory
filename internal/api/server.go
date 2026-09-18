@@ -86,6 +86,7 @@ const (
 	CallOutcomeRead
 	CallOutcomeList
 	CallGitHubConnection
+	CallIntake
 	CallMaintainer
 )
 
@@ -106,6 +107,7 @@ func digestAttemptCredential(bearer credential) AttemptDigest {
 type Call struct {
 	maintainer          MaintainerInput
 	githubConnection    GitHubConnectionInput
+	intake              IntakeInput
 	attempt             bool
 	terminalObserve     TerminalObserveInput
 	peerIncludeTargets  bool
@@ -161,6 +163,8 @@ type Call struct {
 	text                string
 	sourceTaskID        string
 }
+
+func (call Call) IntakeInput() (IntakeInput, bool) { return call.intake, call.kind == CallIntake }
 
 func (call Call) GitHubConnectionInput() (GitHubConnectionInput, bool) {
 	return call.githubConnection, call.kind == CallGitHubConnection
@@ -804,6 +808,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.maintainer); err != nil || len(call.maintainer.Request) == 0 || len(call.maintainer.Request) > 512<<10 || !json.Valid(call.maintainer.Request) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallIntake:
+		if err := decodeExact(request.Params, &call.intake); err != nil || !ValidIntakeInput(call.intake) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallGitHubConnection:
 		if err := decodeExact(request.Params, &call.githubConnection); err != nil || !ValidGitHubConnectionInput(call.githubConnection) {
 			return Call{}, RemoteInvalidRequest
@@ -1136,6 +1144,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallWebRevokeClient, operatorDomain
 	case "attempt_maintainer":
 		return CallMaintainer, attemptDomain
+	case "intake":
+		return CallIntake, operatorDomain
 	case "github_connection":
 		return CallGitHubConnection, operatorDomain
 	case "remote_status":
