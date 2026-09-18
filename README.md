@@ -1,10 +1,8 @@
 # Dark Factory
 
-**Turn a repository backlog into supervised coding work on your own Mac.** Dark
-Factory gives a programme a durable queue, local coding providers, and a shared
-view of work in progress. It coordinates several agents on real repositories,
-keeps decisions visible, and carries completed work through independent review
-and publication.
+**An autonomous software factory you can see and steer.** Give your coding
+agents work. Let an overseer coordinate them. Watch the live floor, inspect
+results, and step in when decisions need you.
 
 <picture>
   <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
@@ -13,40 +11,47 @@ and publication.
 
 *Demo: a live codebase topology rendered with sample workers and a synthetic Needs You request; no daemon is connected.*
 
-The daemon, queue, worktrees, and providers stay on your machine. A paired
-console and `factoryctl` direct the same local factory. The Maintainer handles
-publication: it can publish the independently reviewed completed change to a
-GitHub branch and pull request, leaving a durable record of what happened.
+Dark Factory keeps the programme's work in a durable queue and starts the local
+provider you configured for each task. An overseer can direct follow-up work,
+workers leave reviewable results, and the Maintainer publishes approved work
+through the configured GitHub route. The paired browser and `factoryctl` steer
+the same factory without becoming its single point of failure.
 
-[Website](https://darkfactory.build) · [Console](https://app.darkfactory.build) ·
+[Website](https://www.darkfactory.build) · [Console](https://app.darkfactory.build) ·
 [Backlog](https://github.com/dark-factory-build/dark-factory/issues) ·
-[Install](docs/install.md) · [Provider support](docs/providers.md) ·
+[Install](docs/install.md) · [Providers](docs/providers.md) ·
 [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md)
 
-## Why use it
+## What you get
 
-- Keep a durable, visible queue while several agents work in separate Git worktrees.
-- Run local Codex, Claude Code, or shell providers against repositories you choose.
-- See active work, questions that need a human decision, and finished outcomes in one floor view.
-- Pause, redirect, stop, or send work back with the reason recorded beside it.
-- Keep repository checkout, task history, and provider processes on your Mac.
-- Publish reviewed completed work through the Maintainer rather than losing the path from task to pull request.
+- Close the browser and the factory keeps its queue and running work alive.
+- Give a task to a named worker or let the next available worker take it.
+- Let an overseer turn a goal into follow-up work and coordinate the workers.
+- Open a live terminal, read a Needs You request, and decide when to step in.
+- Inspect a completed result, send it back with feedback, or take it forward for review.
+- Pair a phone to watch and direct the same factory away from the Mac.
 
-## A typical workflow
+## How work moves
 
-Choose a repository and define the work you want done. Add workers with the
-provider accounts already available on the machine, then put tasks in the
-queue. Dark Factory makes an isolated worktree for each accepted task and
-starts the chosen provider. Watch the floor, answer a Needs You request when
-judgement is required, and inspect the completed result. The Maintainer then
-publishes the reviewed change as a GitHub branch and pull request.
+Choose a checkout and describe the outcome. Add workers with provider accounts
+already present on the machine, then put work into the queue. Dark Factory
+creates an isolated worktree for accepted work and starts its selected provider.
+The floor shows the workers and their current tasks. When the factory needs a
+human decision, it asks in Needs You; otherwise the overseer can continue the
+programme. Review the finished change, send it back if needed, or let the
+Maintainer publish the approved result.
 
-## Quick start
+## Requirements and quick start
 
-Dark Factory **v0.3.5** runs on macOS. You need Git plus a provider CLI that is
-installed and signed in, such as `codex` or `claude`. Install the current
-binaries with the [installation guide](docs/install.md), initialise a private
-home, and set the operator environment used by `factoryctl`:
+Dark Factory **v0.3.5** runs on macOS and needs Git plus a signed-in provider
+account. Shell and Codex are proven end to end. Claude Code's launch path is
+fixture-proven, and a live Claude provider run is still unproven. Providers may
+receive source and task material needed to perform the work; read the
+[provider support](docs/providers.md) before connecting an account.
+
+Install the current binaries with the [installation guide](docs/install.md),
+then initialise a private home and set the operator environment used by
+`factoryctl`:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"
@@ -55,8 +60,8 @@ export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
 export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 ```
 
-Register the checkout you want to supervise. `factoryctl project create` prints
-the project ID; use it to add a worker and task.
+Create a project from the checkout you want to supervise. The command prints a
+project ID; use it to add a worker and its first task.
 
 ```sh
 factoryctl project create --name "My project" --root "$PWD"
@@ -67,10 +72,8 @@ factoryctl task add --project PROJECT_ID --agent any --title "Describe the next 
 
 The installation starts `factoryd` and opens the local pairing page at
 <http://127.0.0.1:43123/pair>. Pair the console to observe and direct the
-factory; keep the CLI for setup and repeatable operations.
-
-Repository routing, issue intake, and Maintainer publication are coordinated
-for the next release; they are not part of the v0.3.5 quick start. More
-technical detail is in the [development workflow](docs/development/WORKFLOW.md).
+factory; keep the CLI for setup and repeatable operations. Issue intake and its
+managed setup are coordinated for the next release. More technical detail is in
+the [development workflow](docs/development/WORKFLOW.md).
 
 Dark Factory is MIT licensed.
