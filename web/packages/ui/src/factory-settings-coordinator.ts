@@ -104,17 +104,18 @@ export class FactorySettingsCoordinator {
           repositories: request.action === "refresh" ? result.repositories : sameConnection ? result.repositories ?? this.#github.repositories : result.repositories,
         };
 =======
+=======
+        this.#github = result;
       } else if (result.state === "ok" && this.#github !== undefined) {
+        const sameConnection = result.status === undefined || this.#github.status?.connection_id === result.status.connection_id;
         this.#github = {
           ...this.#github,
           ...result,
-          authorization: result.authorization ?? this.#github.authorization,
+          authorization: request.action === "confirm" ? result.authorization ?? this.#github.authorization : result.authorization,
           status: result.status ?? this.#github.status,
-          installations: result.installations ?? this.#github.installations,
-          repositories: result.repositories ?? this.#github.repositories,
+          installations: sameConnection ? result.installations ?? this.#github.installations : result.installations,
+          repositories: sameConnection ? result.repositories ?? this.#github.repositories : result.repositories,
         };
-      } else {
-        this.#github = result;
       }
       this.#githubError = undefined;
     } catch (error) {

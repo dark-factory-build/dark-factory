@@ -738,6 +738,12 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
 =======
   const canConnect = status === "disconnected" || status === "denied" || status === "unavailable" || status === "invalid" || status === "already_connected" || github?.error !== undefined;
   useEffect(() => {
+    if (connectionID !== previousConnectionID.current) {
+      previousConnectionID.current = connectionID;
+      setInstallationID(undefined);
+      setInstallationPage(1);
+      setRepositoryPage(1);
+    }
     if (!connected || connectionID === "") {
       setSelected({});
       setInstallationID(undefined);
