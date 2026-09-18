@@ -150,7 +150,8 @@ func completeAdapterRun(t *testing.T, store *kernel.Store, run kernel.Run, resul
 func completeAdapterRunWithProposal(t *testing.T, store *kernel.Store, run kernel.Run, proposal kernel.Proposal) kernel.Run {
 	t.Helper()
 	ctx := context.Background()
-	current, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, adapterTime(t, 400))
+	at := max(int64(400), run.UpdatedAt.Int64()+1)
+	current, err := store.ProposeAttemptOutcome(ctx, run.CredentialDigest, proposal, adapterTime(t, at+0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +178,7 @@ func completeAdapterRunWithProposal(t *testing.T, store *kernel.Store, run kerne
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err = store.ConsumeAttemptResult(ctx, attemptResult, current.Revision, adapterTime(t, 401))
+	current, err = store.ConsumeAttemptResult(ctx, attemptResult, current.Revision, adapterTime(t, at+1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,26 +194,26 @@ func completeAdapterRunWithProposal(t *testing.T, store *kernel.Store, run kerne
 			runner = resource
 		}
 	}
-	runnerExit, err := kernel.NewProcessExitCode(1, 0, adapterTime(t, 402))
+	runnerExit, err := kernel.NewProcessExitCode(1, 0, adapterTime(t, at+2))
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, _, err = store.RecordLiveRunnerExitAndRelease(ctx, run.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, runnerExit, adapterTime(t, 403))
+	current, _, err = store.RecordLiveRunnerExitAndRelease(ctx, run.ID, runner.ID, current.Revision, runner.Revision, runner.Identity, runnerExit, adapterTime(t, at+3))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, adapterTime(t, 404)); err != nil {
+	if _, err := store.ReleaseResource(ctx, run.ID, runtime.ID, runtime.Revision, runtime.Identity, adapterTime(t, at+4)); err != nil {
 		t.Fatal(err)
 	}
 	session, found, err := store.TerminalSessionForRun(ctx, run.ID)
 	if err != nil || !found {
 		t.Fatalf("terminal session = %+v, found=%v, err=%v", session, found, err)
 	}
-	current, _, err = store.CloseTerminalAfterRunner(ctx, attemptResult, current.Revision, session.Revision, adapterTime(t, 405))
+	current, _, err = store.CloseTerminalAfterRunner(ctx, attemptResult, current.Revision, session.Revision, adapterTime(t, at+5))
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal, err := store.FinalizeRun(ctx, run.ID, current.Revision, adapterTime(t, 406))
+	terminal, err := store.FinalizeRun(ctx, run.ID, current.Revision, adapterTime(t, at+6))
 	if err != nil {
 		t.Fatal(err)
 	}

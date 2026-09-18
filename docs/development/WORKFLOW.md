@@ -106,6 +106,23 @@ ID. Inspect the returned `human_reply.state`; `delivery_unknown` means input
 may have been delivered and must not be replayed. Operator credentials are
 required; a worker attempt token does not grant this authority.
 
+For CLI supervision, `factoryctl status` includes agent model, reasoning,
+standing-instruction policy and counters, and tool-budget counters. Read a
+revision-bound task with `factoryctl task read --task ID --revision REVISION
+[--offset N]`; follow `next_offset` to page instruction, feedback and outcome.
+`factoryctl agent paths --agent ID` returns sampled modified paths relative to
+the current Change, not a process working directory. Task recovery below names
+the exact Change and retained run artifacts.
+
+`factoryctl terminal observe --project ID --task ID --run ID` reads a bounded,
+redacted terminal window for a worker or overseer through operator authority,
+including retained diagnostics after settlement. Use its cursor and byte-budget options for subsequent windows.
+`factoryctl task update --task ID --revision REVISION` supports edits, cancel,
+or retry; retry may include reassignment but cannot be combined with text edits.
+`factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION`
+uses the existing lifecycle guards; restoring an archived worker leaves it paused.
+These operator commands require the socket and token-file environment above.
+
 For one unresolved worker failure, `factoryctl task recovery --task ID
 --incarnation ID` answers from durable state alone: `overseer_notification`
 is `pending` while the task's newest event is still ahead of the standing

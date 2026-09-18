@@ -657,9 +657,11 @@ type AgentSummary struct {
 	ReasoningEffort string
 	// AccountID is the linked provider login this agent launches with; the
 	// zero identity means the provider default.
-	AccountID AccountID
-	Idle      IdleRule
-	Revision  Revision
+	AccountID       AccountID
+	ToolBudgetLimit uint64 `json:"-"`
+	ToolCallsUsed   uint64 `json:"-"`
+	Idle            IdleRule
+	Revision        Revision
 }
 
 // AccountSummary is the served account fact: which login it is and where its

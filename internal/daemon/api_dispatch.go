@@ -204,6 +204,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.enqueueTask(ctx, call)
 	case api.CallTaskRecovery:
 		return daemon.taskRecovery(ctx, call)
+	case api.CallTaskRead:
+		return daemon.taskRead(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
 	case api.CallSetCapacity:
@@ -220,6 +222,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.selectAgentAccount(ctx, call)
 	case api.CallAgentSelectModel:
 		return daemon.selectAgentModel(ctx, call)
+	case api.CallAgentPaths:
+		return daemon.agentPaths(ctx, call)
 	case api.CallAttemptTask:
 		return daemon.attemptTask(ctx, call)
 	case api.CallAttemptSource:
@@ -234,6 +238,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.peerAnswer(ctx, call)
 	case api.CallTerminalObserve:
 		return daemon.terminalObserve(ctx, call)
+	case api.CallOperatorTerminalObserve:
+		return daemon.operatorTerminalObserve(ctx, call)
 	case api.CallSendBack, api.CallSendBackTask:
 		return daemon.sendBack(ctx, call)
 	case api.CallOverseerSnapshot:
@@ -252,6 +258,10 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.overseerMessageWorker(ctx, call)
 	case api.CallOverseerInterruptWorker:
 		return daemon.overseerInterruptWorker(ctx, call)
+	case api.CallOperatorUpdateTask:
+		return daemon.operatorUpdateTask(ctx, call)
+	case api.CallOperatorUpdateAgent:
+		return daemon.operatorUpdateAgent(ctx, call)
 	case api.CallOverseerReplyHuman:
 		return daemon.overseerReplyHuman(ctx, call)
 	case api.CallContentCreate, api.CallContentRevise, api.CallContentDeprecate, api.CallContentList, api.CallContentRead, api.CallContentBody, api.CallContentEvidence, api.CallContentAttach, api.CallContentEvidenceList, api.CallContentAttachments:
@@ -312,6 +322,91 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 	default:
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+}
+
+func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.AgentPathsInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	agentID, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	if _, found, err := daemon.store.Agent(ctx, agentID); err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	} else if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	runID, sourcePath, runtimePath, err := daemon.liveRunLocations(ctx, agentID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	run := ""
+	paths := []string{}
+	if runID != (kernel.RunID{}) {
+		run = runID.String()
+		pathsRunID, observedPaths, pathErr := daemon.RunPaths(ctx, agentID)
+		if pathErr != nil {
+			return newErrorReply(remoteErrorCode(pathErr))
+		}
+		if pathsRunID != (kernel.RunID{}) && pathsRunID != runID {
+			return newErrorReply(api.RemoteUnavailable)
+		}
+		if pathsRunID == runID {
+			paths = observedPaths
+		}
+	}
+	reply, err := api.NewAgentPathsReply(api.AgentPaths{AgentID: input.AgentID, RunID: run, SourcePath: sourcePath, RuntimePath: runtimePath, Paths: paths})
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
+}
+
+func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.TaskReadInput()
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseTaskID(input.TaskID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	task, found, err := daemon.store.Task(ctx, id)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	if task.Revision != expected {
+		return newErrorReply(api.RemoteRevisionConflict)
+	}
+	instruction, instructionMore := taskDetailTextChunk(kernel.TaskInstruction(task), input.Offset)
+	feedback, feedbackMore := taskDetailTextChunk(kernel.TaskFeedback(task), input.Offset)
+	outcomeText := task.Result
+	if outcomeText == "" {
+		outcomeText = task.BlockedReason
+	}
+	outcome, outcomeMore := taskDetailTextChunk(outcomeText, input.Offset)
+	result := api.TaskText{TaskID: task.ID.String(), Revision: uint64(task.Revision.Int64()), Instruction: instruction, Feedback: feedback}
+	if outcomeText != "" {
+		result.Outcome = &outcome
+	}
+	if instructionMore || feedbackMore || outcomeMore {
+		next := input.Offset + 2048
+		result.NextOffset = &next
+	}
+	reply, err := api.NewTaskTextReply(result)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
 }
 
 func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply {
@@ -1536,6 +1631,87 @@ func (daemon *Daemon) overseerUpdateAgent(ctx context.Context, call api.Call) ap
 		return newErrorReply(api.RemoteInternal)
 	}
 	agent, err := daemon.store.UpdateAgentForOverseer(ctx, digest, id, expected, kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	daemon.notifyScheduler()
+	return daemon.mutation(ctx, agent.Revision)
+}
+
+func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.OverseerTaskUpdateInput()
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseTaskID(input.TaskID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	var assigned *kernel.AgentID
+	if input.AssignedAgentID != nil {
+		value, err := parseAgentID(*input.AssignedAgentID)
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		assigned = &value
+	}
+	if input.Retry {
+		var value kernel.AgentID
+		if assigned != nil {
+			value = *assigned
+		}
+		if err := prepareTaskRetry(ctx, daemon.store, id, expected, value); err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		at, err := daemon.timestamp()
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		task, err := daemon.store.RetryTaskForOperator(ctx, id, expected, value, at)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		daemon.notifyScheduler()
+		return daemon.mutation(ctx, task.Revision)
+	}
+	patch := kernel.TaskPatch{Title: input.Title, Body: input.Body, Priority: input.Priority, AssignedAgentID: assigned, Cancel: input.Cancel}
+	if err := prepareQueuedTaskPatch(ctx, daemon.store, id, expected, patch); err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	task, err := daemon.store.UpdateTaskForOperator(ctx, id, expected, patch, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	daemon.notifyScheduler()
+	return daemon.mutation(ctx, task.Revision)
+}
+
+func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.OverseerAgentUpdateInput()
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) || input.Paused == nil && input.Archived == nil || input.Paused != nil && input.Archived != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	agent, err := daemon.store.UpdateAgentForOperator(ctx, id, expected, kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}

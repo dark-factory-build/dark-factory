@@ -47,6 +47,14 @@ func TestTerminalObserveCursorIsNotResponseBudget(t *testing.T) {
 	}
 }
 
+func TestOperatorTerminalObserveUsesOperatorCommand(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	command, help, ok := parse([]string{"terminal", "observe", "--project", id, "--task", id, "--run", id, "--max-bytes", "1024"})
+	if !ok || help || command.kind != commandOperatorTerminalObserve || command.maxBytes != 1024 {
+		t.Fatalf("operator terminal command = %+v help=%v ok=%v", command, help, ok)
+	}
+}
+
 func TestBuildIdentityRequiresNoHomeOrCredential(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"--build-identity"}, func(string) string { return "private" }, &stdout, &stderr)

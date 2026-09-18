@@ -79,6 +79,37 @@ type HealthStatus struct {
 	Ready bool `json:"ready"`
 }
 
+// AgentPaths is the live worker's sampled modified-directory view. Paths are
+// relative to the run's change directory; they are not the worker's current
+// working directory.
+type AgentPaths struct {
+	AgentID     string   `json:"agent_id"`
+	RunID       string   `json:"run_id,omitempty"`
+	SourcePath  string   `json:"source_path,omitempty"`
+	RuntimePath string   `json:"runtime_path,omitempty"`
+	Paths       []string `json:"paths"`
+}
+
+type AgentPathsInput struct {
+	AgentID string `json:"agent_id"`
+}
+
+func validAgentPathsInput(value AgentPathsInput) bool { return validID(value.AgentID) }
+func validAgentPaths(value AgentPaths) bool {
+	if !validID(value.AgentID) || value.RunID != "" && !validID(value.RunID) || value.Paths == nil || len(value.Paths) > 16 || value.RunID == "" && (value.SourcePath != "" || value.RuntimePath != "") {
+		return false
+	}
+	if value.SourcePath != "" && !validCanonicalPath(value.SourcePath, 4096) || value.RuntimePath != "" && !validCanonicalPath(value.RuntimePath, 4096) {
+		return false
+	}
+	for _, path := range value.Paths {
+		if !validText(path, 0, 4096) || strings.HasPrefix(path, "/") {
+			return false
+		}
+	}
+	return true
+}
+
 // WebStatus is the bounded, non-secret operator view of the loopback browser
 // adapter. It intentionally contains no challenge, key, token or client
 // identity data.
@@ -506,15 +537,24 @@ type ProjectSummary struct {
 }
 
 type AgentSummary struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"project_id"`
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	Provider  string `json:"provider"`
-	AccountID string `json:"account_id"`
-	Paused    bool   `json:"paused"`
-	Archived  bool   `json:"archived"`
-	Revision  uint64 `json:"revision"`
+	ToolBudgetLimit  uint64 `json:"tool_budget_limit"`
+	ToolCallsUsed    uint64 `json:"tool_calls_used"`
+	ID               string `json:"id"`
+	ProjectID        string `json:"project_id"`
+	Name             string `json:"name"`
+	Role             string `json:"role"`
+	Provider         string `json:"provider"`
+	AccountID        string `json:"account_id"`
+	Paused           bool   `json:"paused"`
+	Archived         bool   `json:"archived"`
+	Model            string `json:"model"`
+	ReasoningEffort  string `json:"reasoning_effort"`
+	IdlePolicy       string `json:"idle_policy"`
+	IdleAfterSeconds uint32 `json:"idle_after_seconds"`
+	IdleInstruction  string `json:"idle_instruction"`
+	IdleRunBudget    uint32 `json:"idle_run_budget"`
+	IdleRunsUsed     uint32 `json:"idle_runs_used"`
+	Revision         uint64 `json:"revision"`
 }
 
 type TaskSummary struct {
@@ -532,6 +572,21 @@ type TaskSummary struct {
 type TaskRecoveryInput struct {
 	TaskID        string `json:"task_id"`
 	IncarnationID string `json:"incarnation_id"`
+}
+
+type TaskReadInput struct {
+	TaskID           string `json:"task_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Offset           uint64 `json:"offset,omitempty"`
+}
+
+type TaskText struct {
+	TaskID      string  `json:"task_id"`
+	Revision    uint64  `json:"revision"`
+	Instruction string  `json:"instruction"`
+	Feedback    string  `json:"feedback"`
+	Outcome     *string `json:"outcome,omitempty"`
+	NextOffset  *uint64 `json:"next_offset,omitempty"`
 }
 
 type TaskRecovery struct {

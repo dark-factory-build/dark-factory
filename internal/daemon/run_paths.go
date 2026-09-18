@@ -30,6 +30,67 @@ type runPathsResult struct {
 	paths []string
 }
 
+func (daemon *Daemon) liveAttemptForAgent(agentID kernel.AgentID) (*liveAttempt, error) {
+	daemon.attemptMu.Lock()
+	defer daemon.attemptMu.Unlock()
+	var owner *liveAttempt
+	for _, candidate := range daemon.attempts {
+		if candidate.agentID != agentID {
+			continue
+		}
+		select {
+		case <-candidate.done:
+			continue
+		default:
+		}
+		if owner != nil {
+			return nil, fmt.Errorf("%w: multiple live agent owners", kernel.ErrCorruptState)
+		}
+		owner = candidate
+	}
+	return owner, nil
+}
+
+// liveRunLocations returns daemon-owned absolute locations for one live run.
+// The operator projection uses these facts only; it never derives them from
+// private database rows or an attempt source request.
+func (daemon *Daemon) liveRunLocations(ctx context.Context, agentID kernel.AgentID) (kernel.RunID, string, string, error) {
+	owner, err := daemon.liveAttemptForAgent(agentID)
+	if err != nil {
+		return kernel.RunID{}, "", "", err
+	}
+	if owner == nil {
+		return kernel.RunID{}, "", "", nil
+	}
+	runID, changeID := owner.runID, owner.changeID
+
+	var sourcePath string
+	if changeID != (kernel.ChangeID{}) {
+		if parent := daemon.changeParent.Load(); parent != nil && *parent != "" {
+			sourcePath = filepath.Join(*parent, changeID.String())
+		}
+	}
+	var runtimePath string
+	resources, err := daemon.store.Resources(ctx, runID)
+	if err != nil {
+		return kernel.RunID{}, "", "", err
+	}
+	for _, resource := range resources {
+		if resource.Kind == kernel.ResourceRuntimeRoot {
+			runtimePath = resource.Path
+			break
+		}
+	}
+	current, err := daemon.liveAttemptForAgent(agentID)
+	if err != nil {
+		return kernel.RunID{}, "", "", err
+	}
+	if current != owner {
+		return kernel.RunID{}, "", "", fmt.Errorf("%w: live agent owner changed", kernel.ErrConflict)
+	}
+	return runID, sourcePath, runtimePath, nil
+}
+
 // RunPaths reports the directories one agent's live run has touched since its
 // change directory was published, as paths relative to that directory. An
 // agent without a registered live source owner has no run identity or paths.
@@ -39,34 +100,25 @@ func (daemon *Daemon) RunPaths(ctx context.Context, agentID kernel.AgentID) (ker
 	}
 	// Observation follows the existing owner, never the recovery graph. Before
 	// registration or after owner exit the location is honestly unknown.
-	daemon.attemptMu.Lock()
-	var owner *liveAttempt
-	for _, candidate := range daemon.attempts {
-		if candidate.agentID != agentID || candidate.changeID == (kernel.ChangeID{}) {
-			continue
-		}
-		select {
-		case <-candidate.done:
-			continue
-		default:
-		}
-		if owner != nil {
-			daemon.attemptMu.Unlock()
-			return kernel.RunID{}, nil, fmt.Errorf("%w: multiple live agent owners", kernel.ErrCorruptState)
-		}
-		owner = candidate
+	owner, err := daemon.liveAttemptForAgent(agentID)
+	if err != nil {
+		return kernel.RunID{}, nil, err
 	}
-	daemon.attemptMu.Unlock()
 	if owner == nil {
+		return kernel.RunID{}, []string{}, nil
+	}
+	if owner.changeID == (kernel.ChangeID{}) {
 		return kernel.RunID{}, []string{}, nil
 	}
 	paths, err := daemon.cachedRunPaths(ctx, owner.runID, owner.changeID.String(), owner.pathsSince)
 	if err != nil {
 		return kernel.RunID{}, nil, err
 	}
-	daemon.attemptMu.Lock()
-	current := daemon.attempts[owner.runID] == owner
-	daemon.attemptMu.Unlock()
+	currentOwner, err := daemon.liveAttemptForAgent(agentID)
+	if err != nil {
+		return kernel.RunID{}, nil, err
+	}
+	current := currentOwner == owner
 	select {
 	case <-owner.done:
 		current = false
