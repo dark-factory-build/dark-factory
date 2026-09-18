@@ -157,6 +157,15 @@ func (request TaskInterventionRequest) valid() error {
 const taskInterventionColumns = `operation_id, project_id, task_id, run_id, expected_task_revision, expected_run_revision,
 	actor_kind, actor_run_id, actor_browser_client_id, kind, payload, payload_digest, successor_task_id, state, result_detail, created_at_ms, updated_at_ms, terminal_at_ms`
 
+func (store *Store) TaskIntervention(ctx context.Context, id TaskInterventionID) (TaskIntervention, bool, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return TaskIntervention{}, false, err
+	}
+	defer connection.Close()
+	return taskInterventionByID(ctx, connection, id)
+}
+
 func scanTaskIntervention(scanner rowScanner) (TaskIntervention, bool, error) {
 	var rawOperation, rawProject, rawTask, rawRun []byte
 	var expectedTask, expectedRun int64

@@ -76,6 +76,7 @@ const (
   factoryctl worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
   factoryctl worker message --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --message TEXT
   factoryctl worker interrupt --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
+  factoryctl worker operation --operation-id ID
 
   factoryctl account discover
   factoryctl account list
@@ -179,6 +180,7 @@ const (
 	commandOverseerReplyHuman
 	commandHumanList
 	commandHumanReply
+	commandWorkerOperation
 	commandContentCreate
 	commandContentRevise
 	commandContentDeprecate
@@ -332,7 +334,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -1331,6 +1333,9 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 1 && args[0] == "worker" {
+		if len(args) == 4 && args[1] == "operation" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) {
+			return attemptCommand{kind: commandWorkerOperation, operationID: args[3]}, false, true
+		}
 		command, help, ok := parseOverseer(append([]string{"overseer"}, args...))
 		command.operatorControl = true
 		return command, help, ok
@@ -2009,6 +2014,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.HumanRequests(callContext)
 		if callErr != nil {
 			return writeWebFailure(stderr, "human requests", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandWorkerOperation:
+		result, callErr := client.WorkerOperation(callContext, command.operationID)
+		if callErr != nil {
+			return writeWebFailure(stderr, "worker operation", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandHumanReply:

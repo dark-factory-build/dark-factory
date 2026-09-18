@@ -206,6 +206,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.taskRecovery(ctx, call)
 	case api.CallTaskRead:
 		return daemon.taskRead(ctx, call)
+	case api.CallOperatorWorkerOperation:
+		return daemon.workerOperation(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
 	case api.CallSetCapacity:
@@ -499,6 +501,33 @@ func (daemon *Daemon) taskRecovery(ctx context.Context, call api.Call) api.Reply
 		}
 	}
 	reply, err := api.NewTaskRecoveryReply(value)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
+}
+
+func (daemon *Daemon) workerOperation(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.WorkerOperationInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseTaskInterventionID(input.OperationID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	receipt, found, err := daemon.store.TaskIntervention(ctx, id)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	detail := ""
+	if receipt.ResultDetail != nil {
+		detail = *receipt.ResultDetail
+	}
+	reply, err := api.NewWorkerOperationReply(api.WorkerOperation{OperationID: receipt.OperationID.String(), TaskID: receipt.TaskID.String(), RunID: receipt.RunID.String(), State: receipt.State.String(), Detail: detail})
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

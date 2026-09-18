@@ -17,7 +17,7 @@ func TestTerminalDiagnosticsSurviveRestartAndRemainBounded(t *testing.T) {
 	if _, err := store.ProposeAttemptOutcome(ctx, keys.AttemptDigest, proposal, mustTime(t, 40)); err != nil {
 		t.Fatal(err)
 	}
-	payload := []byte("first\nprivate /Users/operator/.secret\nlast\n")
+	payload := []byte("first\nprivate /Users/example/.secret\nlast\n")
 	if err := store.SaveTerminalDiagnostics(ctx, TerminalDiagnostics{RunID: run.ID, Floor: 4, Head: 4 + uint64(len(payload)), Payload: payload, CapturedAt: mustTime(t, 41)}); err != nil {
 		t.Fatal(err)
 	}

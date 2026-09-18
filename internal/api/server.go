@@ -68,6 +68,7 @@ const (
 	CallOperatorReplaceRun
 	CallOperatorMessageWorker
 	CallOperatorInterruptWorker
+	CallOperatorWorkerOperation
 	CallHumanRequests
 	CallHumanReply
 	CallContentCreate
@@ -128,6 +129,7 @@ type Call struct {
 	overseerReplace     OverseerRunReplaceInput
 	overseerMessage     OverseerWorkerMessageInput
 	overseerInterrupt   OverseerWorkerInterruptInput
+	workerOperation     WorkerOperationInput
 	overseerReply       OverseerHumanReplyInput
 	humanReply          OverseerHumanReplyInput
 	content             ContentInput
@@ -206,6 +208,10 @@ func (call Call) OverseerWorkerMessageInput() (OverseerWorkerMessageInput, bool)
 
 func (call Call) OverseerWorkerInterruptInput() (OverseerWorkerInterruptInput, bool) {
 	return call.overseerInterrupt, call.kind == CallOverseerInterruptWorker || call.kind == CallOperatorInterruptWorker
+}
+
+func (call Call) WorkerOperationInput() (WorkerOperationInput, bool) {
+	return call.workerOperation, call.kind == CallOperatorWorkerOperation
 }
 
 func (call Call) OverseerHumanReplyInput() (OverseerHumanReplyInput, bool) {
@@ -355,6 +361,7 @@ const (
 	replyAccounts
 	replyTaskRecovery
 	replyTaskText
+	replyWorkerOperation
 	replyHumanRequests
 	replyError
 )
@@ -379,6 +386,7 @@ type Reply struct {
 	accounts            Accounts
 	taskRecovery        TaskRecovery
 	taskText            TaskText
+	workerOperation     WorkerOperation
 	humanRequests       HumanRequestList
 	code                RemoteErrorCode
 }
@@ -468,6 +476,13 @@ func NewTaskTextReply(value TaskText) (Reply, error) {
 		return Reply{}, ErrInvalidInput
 	}
 	return Reply{kind: replyTaskText, taskText: value}, nil
+}
+
+func NewWorkerOperationReply(value WorkerOperation) (Reply, error) {
+	if !validWorkerOperation(value) {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyWorkerOperation, workerOperation: value}, nil
 }
 
 func NewPeerStatusReply(status PeerStatus) (Reply, error) {
@@ -936,6 +951,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.overseerInterrupt); err != nil || !validOverseerWorkerInterruptInput(call.overseerInterrupt) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallOperatorWorkerOperation:
+		if err := decodeExact(request.Params, &call.workerOperation); err != nil || !validID(call.workerOperation.OperationID) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallOverseerReplyHuman:
 		if err := decodeExact(request.Params, &call.overseerReply); err != nil || !validID(call.overseerReply.OperationID) || !validID(call.overseerReply.RequestID) || call.overseerReply.ExpectedRevision == 0 || !validText(call.overseerReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
@@ -1172,6 +1191,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOperatorMessageWorker, operatorDomain
 	case "operator_interrupt_worker":
 		return CallOperatorInterruptWorker, operatorDomain
+	case "operator_worker_operation":
+		return CallOperatorWorkerOperation, operatorDomain
 	default:
 		return 0, 0
 	}
@@ -1248,6 +1269,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyAttemptSource
 	case CallTaskRecovery:
 		return reply == replyTaskRecovery
+	case CallOperatorWorkerOperation:
+		return reply == replyWorkerOperation
 	case CallTaskRead:
 		return reply == replyTaskText
 	case CallTerminalObserve:
@@ -1308,6 +1331,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.taskRecovery)
 	case replyTaskText:
 		data, err = json.Marshal(reply.taskText)
+	case replyWorkerOperation:
+		data, err = json.Marshal(reply.workerOperation)
 	case replyWebStatus:
 		data, err = json.Marshal(reply.webStatus)
 	case replyWebClients:
