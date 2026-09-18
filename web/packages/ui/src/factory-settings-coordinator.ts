@@ -41,6 +41,7 @@ export class FactorySettingsCoordinator {
   #repositories = new Map<string, readonly RepositoryView[]>();
   #repositoryPending = new Set<string>();
   #repositoryErrors = new Map<string, string>();
+  #repositoryMutationErrors = new Set<string>();
 
   constructor(owner: SettingsOwner) {
     this.#owner = owner;
@@ -104,6 +105,7 @@ export class FactorySettingsCoordinator {
       const repositories = await session.getRepositories(projectId);
       if (!this.#owner.current(generation)) return;
       this.#repositories.set(projectId, repositories);
+      if (!this.#repositoryMutationErrors.has(projectId)) this.#repositoryErrors.delete(projectId);
     } catch (error) {
       if (!this.#owner.current(generation)) return;
       this.#repositoryErrors.set(projectId, this.#owner.errorCode(error));
@@ -122,9 +124,11 @@ export class FactorySettingsCoordinator {
     try {
       await session.mutateRepository(request);
       if (!this.#owner.current(generation)) return;
+      this.#repositoryMutationErrors.delete(request.projectId);
       this.#repositoryErrors.delete(request.projectId);
     } catch (error) {
       if (!this.#owner.current(generation)) return;
+      this.#repositoryMutationErrors.add(request.projectId);
       this.#repositoryErrors.set(request.projectId, this.#owner.errorCode(error));
     } finally {
       this.#repositoryPending.delete(request.projectId);

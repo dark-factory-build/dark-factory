@@ -1060,3 +1060,17 @@ test("repository mutation refusal survives its successful readback", async () =>
   await context.controller.mutateRepository(request);
   assert.equal(context.latest().repositoryErrors.has(projectId), false);
 });
+
+
+test("a successful repository retry clears only its own read error", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  let refuseRead = true;
+  const context = harness({ getRepositories: async () => { if (refuseRead) throw new SessionError("not_found"); return []; } });
+  context.controller.start();
+  context.emitStatus("ready");
+  await context.controller.loadRepositories(projectId);
+  assert.equal(context.latest().repositoryErrors.get(projectId), "not_found");
+  refuseRead = false;
+  await context.controller.loadRepositories(projectId);
+  assert.equal(context.latest().repositoryErrors.has(projectId), false);
+});
