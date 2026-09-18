@@ -100,6 +100,7 @@ func bindRepositorySource(ctx context.Context, connection *sql.Conn, id Reposito
 func validateRepositoryBindings(ctx context.Context, connection *sql.Conn) error {
 	var broken bool
 	err := connection.QueryRowContext(ctx, `SELECT
+ EXISTS(SELECT 1 FROM repository_source_identities WHERE github_repository_id IS NOT NULL AND (github_repository_id <= 0 OR root_dev IS NULL OR publication_repository = '')) OR
  EXISTS(SELECT 1 FROM projects p WHERE (SELECT COUNT(*) FROM project_repositories r WHERE r.project_id = p.id AND r.is_default = 1 AND r.enabled = 1) <> 1) OR
  EXISTS(SELECT 1 FROM project_repositories r LEFT JOIN projects p ON p.id = r.project_id WHERE p.id IS NULL OR (r.is_default = 1 AND r.enabled = 0)) OR
  EXISTS(SELECT 1 FROM tasks t LEFT JOIN task_repository_bindings b ON b.task_id = t.id LEFT JOIN project_repositories r ON r.id = b.repository_id WHERE r.id IS NULL OR r.project_id <> t.project_id) OR

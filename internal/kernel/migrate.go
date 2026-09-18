@@ -48,6 +48,7 @@ const (
 	v21UserVersion      = 21
 	v22UserVersion      = 22
 	v23UserVersion      = 23
+	v24UserVersion      = 24
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -551,13 +552,23 @@ func v22SchemaStatements() []string {
 
 func v23SchemaStatements() []string {
 	statements := make([]string, 0, len(schemaStatements)-4)
-	for _, statement := range schemaStatements {
+	for _, statement := range v24SchemaStatements() {
 		_, name := schemaObjectIdentity(statement)
 		switch name {
 		case "intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances":
 			continue
 		}
 		statements = append(statements, statement)
+	}
+	return statements
+}
+
+func v24SchemaStatements() []string {
+	statements := append([]string(nil), schemaStatements...)
+	for i, statement := range statements {
+		if _, name := schemaObjectIdentity(statement); name == "repository_source_identities" {
+			statements[i] = strings.Replace(statement, "    github_repository_id INTEGER CHECK (github_repository_id IS NULL OR (github_repository_id > 0 AND root_dev IS NOT NULL AND publication_repository <> '')),\n", "", 1)
+		}
 	}
 	return statements
 }
@@ -682,6 +693,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v22SchemaStatements(), true
 	case v23UserVersion:
 		return v23SchemaStatements(), true
+	case v24UserVersion:
+		return v24SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -707,7 +720,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -756,6 +769,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[21:]
 	case v23UserVersion:
 		steps = all[22:]
+	case v24UserVersion:
+		steps = all[23:]
 	default:
 		return connection.Close()
 	}
@@ -1261,7 +1276,7 @@ func migrateV22Transaction(ctx context.Context, connection *sql.Conn) error {
 	if err := validateSchemaVersion(ctx, connection, v22UserVersion, v22SchemaStatements()); err != nil {
 		return err
 	}
-	target := expectedSchemaOf(schemaStatements)
+	target := expectedSchemaOf(v23SchemaStatements())
 	if _, err := connection.ExecContext(ctx, target["repository_source_identities"].sql); err != nil {
 		return err
 	}
@@ -1278,11 +1293,34 @@ func migrateV23Transaction(ctx context.Context, connection *sql.Conn) error {
 	if err := validateSchemaVersion(ctx, connection, v23UserVersion, v23SchemaStatements()); err != nil {
 		return err
 	}
-	target := expectedSchemaOf(schemaStatements)
+	target := expectedSchemaOf(v24SchemaStatements())
 	for _, name := range []string{"intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances"} {
 		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
 			return fmt.Errorf("create %s: %w", name, err)
 		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v24UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v24UserVersion, v24SchemaStatements())
+}
+
+func migrateV24Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v24UserVersion, v24SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	if _, err := connection.ExecContext(ctx, `ALTER TABLE repository_source_identities RENAME TO repository_source_identities_pre_migration`); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, target["repository_source_identities"].sql); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, `INSERT INTO repository_source_identities(repository_id, root_dev, root_inode, git_dev, git_inode, origin_digest, publication_repository) SELECT repository_id, root_dev, root_inode, git_dev, git_inode, origin_digest, publication_repository FROM repository_source_identities_pre_migration`); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, `DROP TABLE repository_source_identities_pre_migration`); err != nil {
+		return err
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err
