@@ -31,6 +31,7 @@ type ContentRevision struct {
 type NewContent struct {
 	ID                                                 ContentID
 	ProjectID                                          ProjectID
+	RepositoryID                                       RepositoryID
 	Kind                                               ContentKind
 	Title, Description, Body, Author, SourceReferences string
 	ObjectFormat, Commit, Path                         string
@@ -99,10 +100,10 @@ func (store *Store) CreateContent(ctx context.Context, spec NewContent, at UnixM
 		return ContentRevision{}, err
 	}
 	defer tx.Close()
-	return createContentTx(ctx, tx, spec, at)
+	return createContentTx(ctx, tx, spec, at, nil)
 }
 
-func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixMillis) (ContentRevision, error) {
+func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixMillis, authorTask *TaskID) (ContentRevision, error) {
 	if err := validateContent(spec); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
@@ -125,8 +126,32 @@ func createContentTx(ctx context.Context, tx *writeTx, spec NewContent, at UnixM
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, object_format, commit_oid, path, repository_dev, repository_inode, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), string(spec.Kind), spec.Title, spec.Description, spec.Body, spec.Author, spec.SourceReferences, nullableString(spec.ObjectFormat), nullableString(spec.Commit), nullableString(spec.Path), spec.RepositoryDevice, spec.RepositoryInode, at.Int64()); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
+	var repository ProjectRepository
+	var found bool
+	var err error
+	if authorTask != nil {
+		repository, found, err = taskRepository(ctx, tx.connection, *authorTask)
+		if err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+		if found && (repository.ProjectID != spec.ProjectID || !spec.RepositoryID.zero() && spec.RepositoryID != repository.ID) {
+			return ContentRevision{}, tx.Rollback(ErrUnauthorized)
+		}
+	}
+	if !found {
+		repository, err = resolveTaskRepository(ctx, tx.connection, spec.ProjectID, spec.RepositoryID)
+		if err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+	}
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, 1, ?)`, spec.ID.Bytes(), repository.ID.Bytes()); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, 1)
 	if err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
+	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -190,8 +215,18 @@ func reviseContentTx(ctx context.Context, tx *writeTx, expected Revision, spec N
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, object_format, commit_oid, path, repository_dev, repository_inode, deprecated, created_at_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), string(spec.Kind), next, spec.Title, spec.Description, spec.Body, spec.Author, spec.SourceReferences, nullableString(spec.ObjectFormat), nullableString(spec.Commit), nullableString(spec.Path), spec.RepositoryDevice, spec.RepositoryInode, deprecatedValue, at.Int64()); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
+	var repositoryID []byte
+	if err := tx.connection.QueryRowContext(ctx, `SELECT repository_id FROM content_repository_bindings WHERE content_id = ? AND content_revision = ?`, spec.ID.Bytes(), current).Scan(&repositoryID); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, ?, ?)`, spec.ID.Bytes(), next, repositoryID); err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
 	result, err := contentByRevision(ctx, tx.connection, spec.ID, next)
 	if err != nil {
+		return ContentRevision{}, tx.Rollback(err)
+	}
+	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
 		return ContentRevision{}, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -237,6 +272,13 @@ func deprecateContentTx(ctx context.Context, tx *writeTx, id ContentID, project 
 		next := latest + 1
 		_, err := tx.connection.ExecContext(ctx, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) SELECT id, project_id, kind, ?, title, description, body, ?, source_references, 1, ? FROM project_content_revisions WHERE id = ? AND revision = ? AND commit_oid IS NULL`, next, author, at.Int64(), id.Bytes(), expected.Int64())
 		if err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+		var repositoryID []byte
+		if err := tx.connection.QueryRowContext(ctx, `SELECT repository_id FROM content_repository_bindings WHERE content_id = ? AND content_revision = ?`, id.Bytes(), expected.Int64()).Scan(&repositoryID); err != nil {
+			return ContentRevision{}, tx.Rollback(err)
+		}
+		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, ?, ?)`, id.Bytes(), next, repositoryID); err != nil {
 			return ContentRevision{}, tx.Rollback(err)
 		}
 		result, err := contentByRevision(ctx, tx.connection, id, next)
@@ -289,8 +331,8 @@ func (store *Store) LegacyContent(ctx context.Context, id ContentID, revision in
 
 // CompleteContentExport installs an immutable Git pin and retires the legacy
 // SQLite body. The body comparison makes replay safe without another journal.
-func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, revision int64, body, objectFormat, commit, path string, repositoryDevice, repositoryInode int64) error {
-	if id.zero() || revision < 1 || objectFormat == "" || commit == "" || path == "" || repositoryDevice < 0 || repositoryInode <= 0 {
+func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, revision int64, body, objectFormat, commit, path string, repositoryID RepositoryID, repositoryDevice, repositoryInode int64) error {
+	if id.zero() || revision < 1 || repositoryID.zero() || objectFormat == "" || commit == "" || path == "" || repositoryDevice < 0 || repositoryInode <= 0 {
 		return fmt.Errorf("%w: invalid content export", ErrInvalidValue)
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -316,6 +358,23 @@ func (store *Store) CompleteContentExport(ctx context.Context, id ContentID, rev
 			}
 			return tx.Rollback(err)
 		}
+	}
+	content, err := contentByRevision(ctx, tx.connection, id, revision)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	repository, found, err := repositoryByID(ctx, tx.connection, repositoryID)
+	if err != nil || !found || repository.ProjectID != content.ProjectID {
+		if err == nil {
+			err = ErrConflict
+		}
+		return tx.Rollback(err)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `INSERT OR IGNORE INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, ?, ?)`, id.Bytes(), revision, repositoryID.Bytes()); err != nil {
+		return tx.Rollback(err)
+	}
+	if err := validateRepositoryBindings(ctx, tx.connection); err != nil {
+		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
 }
@@ -551,7 +610,7 @@ func (store *Store) CreateContentForAttempt(ctx context.Context, digest AttemptD
 		return ContentRevision{}, tx.Rollback(ErrUnauthorized)
 	}
 	spec.Author = contentProvenance(authority)
-	return createContentTx(ctx, tx, spec, at)
+	return createContentTx(ctx, tx, spec, at, &authority.TaskID)
 }
 
 func (store *Store) ListContentForAttempt(ctx context.Context, digest AttemptDigest, kind ContentKind, offset, limit int) (ContentPage, error) {

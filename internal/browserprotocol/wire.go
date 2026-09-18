@@ -23,11 +23,11 @@ const (
 )
 
 // controlLimit is the exact encoded bound for one message type. Client-to-
-// server control stays at 64 KiB; the bounded server snapshots, topology and
-// account discovery observations may reach 1 MiB.
+// server control stays at 64 KiB; the bounded server snapshots, topology,
+// account discovery, and repository observations may reach 1 MiB.
 func controlLimit(kind MessageType) int {
 	switch kind {
-	case TypeStateSnapshot, TypeTopology, TypeAccounts:
+	case TypeStateSnapshot, TypeTopology, TypeAccounts, TypeRepositories:
 		return MaxSnapshotBytes
 	}
 	return MaxControlBytes
@@ -67,6 +67,12 @@ const (
 	TypeAgentUpdateResult           MessageType = "AGENT_UPDATE_RESULT"
 	TypeProjectLimits               MessageType = "PROJECT_LIMITS"
 	TypeProjectLimitsResult         MessageType = "PROJECT_LIMITS_RESULT"
+	TypeProjectCreate               MessageType = "PROJECT_CREATE"
+	TypeProjectCreateResult         MessageType = "PROJECT_CREATE_RESULT"
+	TypeRepositoriesGet             MessageType = "REPOSITORIES_GET"
+	TypeRepositories                MessageType = "REPOSITORIES"
+	TypeRepositoryMutate            MessageType = "REPOSITORY_MUTATE"
+	TypeRepositoryMutateResult      MessageType = "REPOSITORY_MUTATE_RESULT"
 	TypeTaskUpdate                  MessageType = "TASK_UPDATE"
 	TypeTaskUpdateResult            MessageType = "TASK_UPDATE_RESULT"
 	TypeTopologyGet                 MessageType = "TOPOLOGY_GET"
@@ -410,6 +416,18 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(ProjectLimits)
 	case TypeProjectLimitsResult:
 		body = new(ProjectLimitsResult)
+	case TypeProjectCreate:
+		body = new(ProjectCreate)
+	case TypeProjectCreateResult:
+		body = new(ProjectCreateResult)
+	case TypeRepositoriesGet:
+		body = new(RepositoriesGet)
+	case TypeRepositories:
+		body = new(Repositories)
+	case TypeRepositoryMutate:
+		body = new(RepositoryMutate)
+	case TypeRepositoryMutateResult:
+		body = new(RepositoryMutateResult)
 	case TypeTaskUpdate:
 		body = new(TaskUpdate)
 	case TypeTaskUpdateResult:
@@ -548,7 +566,7 @@ func idRequired(kind MessageType) bool {
 		TypeHumanRequestReply, TypeHumanRequestReplyResult, TypeHumanRequestCancelRun, TypeHumanRequestCancelRunResult,
 		TypeTaskEnqueue, TypeTaskEnqueueResult, TypeAgentControl, TypeAgentControlResult, TypeTaskHistoryGet, TypeTaskHistory, TypeTaskListGet, TypeTaskList, TypeTaskDetailGet, TypeTaskDetail,
 		TypeProjectContent, TypeProjectContentResult,
-		TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeTopologyGet, TypeTopology,
+		TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeTopologyGet, TypeTopology,
 		TypeRunPathsGet, TypeRunPaths,
 		TypeAccountsDiscover, TypeAccounts, TypeAccountLink, TypeAccountLinkResult, TypeAccountUpdate, TypeAccountUpdateResult,
 		TypeBrowserClientsGet, TypeBrowserClients, TypeBrowserClientRevoke, TypeBrowserClientRevokeResult,
@@ -570,13 +588,13 @@ func typeAllowed(role senderRole, kind MessageType) bool {
 	if role == clientRole {
 		return kind == TypePairProve || kind == TypeAuthProve || kind == TypeStateGet ||
 			kind == TypeStateWatch || kind == TypeHumanRequestDetailGet || kind == TypeHumanRequestReply || kind == TypeHumanRequestCancelRun || kind == TypeTerminalTargetGet || kind == TypeTerminalAttach || kind == TypeTerminalAck || kind == TypeTerminalLeaseAcquire || kind == TypeTerminalLeaseRenew || kind == TypeTerminalLeaseRelease || kind == TypeTerminalResize || kind == TypeTerminalDetach || kind == TypeTaskEnqueue || kind == TypeRemoteInvite || kind == TypePushSubscribe ||
-			kind == TypeAgentControl || kind == TypeTaskHistoryGet || kind == TypeTaskDetailGet || kind == TypeTaskListGet || kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeTaskUpdate || kind == TypeTopologyGet || kind == TypeRunPathsGet ||
+			kind == TypeAgentControl || kind == TypeTaskHistoryGet || kind == TypeTaskDetailGet || kind == TypeTaskListGet || kind == TypeAgentUpdate || kind == TypeProjectLimits || kind == TypeProjectCreate || kind == TypeRepositoriesGet || kind == TypeRepositoryMutate || kind == TypeTaskUpdate || kind == TypeTopologyGet || kind == TypeRunPathsGet ||
 			kind == TypeProjectContent ||
 			kind == TypeAccountsDiscover || kind == TypeAccountLink || kind == TypeAccountUpdate || kind == TypeBrowserClientsGet || kind == TypeBrowserClientRevoke
 	}
 	return role == serverRole && (kind == TypeHello || kind == TypePairResult || kind == TypeAuthResult ||
 		kind == TypeStateSnapshot || kind == TypeStateChanged || kind == TypeHumanRequestDetail || kind == TypeHumanRequestReplyResult || kind == TypeHumanRequestCancelRunResult || kind == TypeTaskEnqueueResult || kind == TypeTerminalTarget || kind == TypeTerminalAttached || kind == TypeTerminalLeaseResult || kind == TypeTerminalResized || kind == TypeTerminalDetached || kind == TypeTerminalInputResult || kind == TypeTerminalEOF || kind == TypeTerminalExit || kind == TypeTerminalReset || kind == TypeRemoteInviteResult || kind == TypePushSubscribeResult ||
-		kind == TypeAgentControlResult || kind == TypeTaskHistory || kind == TypeTaskDetail || kind == TypeTaskList || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeTaskUpdateResult || kind == TypeTopology || kind == TypeRunPaths ||
+		kind == TypeAgentControlResult || kind == TypeTaskHistory || kind == TypeTaskDetail || kind == TypeTaskList || kind == TypeProjectContentResult || kind == TypeAgentUpdateResult || kind == TypeProjectLimitsResult || kind == TypeProjectCreateResult || kind == TypeRepositories || kind == TypeRepositoryMutateResult || kind == TypeTaskUpdateResult || kind == TypeTopology || kind == TypeRunPaths ||
 		kind == TypeAccounts || kind == TypeAccountLinkResult || kind == TypeAccountUpdateResult || kind == TypeBrowserClients || kind == TypeBrowserClientRevokeResult)
 }
 
@@ -795,7 +813,7 @@ func validateBody(kind MessageType, body any) error {
 		return validProjectContent(kind, body)
 	case TypeTaskEnqueue, TypeTaskEnqueueResult:
 		return validTaskControl(kind, body)
-	case TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeTopologyGet, TypeTopology,
+	case TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeTopologyGet, TypeTopology,
 		TypeRunPathsGet, TypeRunPaths, TypeAccountsDiscover, TypeAccounts, TypeAccountLink, TypeAccountLinkResult, TypeAccountUpdate, TypeAccountUpdateResult,
 		TypeBrowserClientsGet, TypeBrowserClients, TypeBrowserClientRevoke, TypeBrowserClientRevokeResult:
 		return validConsoleControl(kind, body)

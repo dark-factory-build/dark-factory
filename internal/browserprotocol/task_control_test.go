@@ -43,6 +43,12 @@ func TestTaskEnqueueControlBoundsAndDirection(t *testing.T) {
 	} else if frame, err := DecodeClientControl(wire); err != nil || frame.Body.(TaskEnqueue).Mode != "any" {
 		t.Fatalf("any-worker round-trip = %+v, %v", frame, err)
 	}
+	request.RepositoryID = strings.Repeat("04", 16)
+	if wire, err := EncodeTaskEnqueue("enqueue-repository", request); err != nil {
+		t.Fatal(err)
+	} else if frame, err := DecodeClientControl(wire); err != nil || frame.Body.(TaskEnqueue).RepositoryID != request.RepositoryID {
+		t.Fatalf("repository selection did not round-trip: %+v %v", frame, err)
+	}
 	request.Mode = "everyone"
 	if _, err := EncodeTaskEnqueue("enqueue-5", request); err == nil {
 		t.Fatal("unknown mode accepted")

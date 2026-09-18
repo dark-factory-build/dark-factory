@@ -54,6 +54,15 @@ func TestSupervisorPersistsEarlyWorkerFailure(t *testing.T) {
 			}
 			fixture.spec.activateOuter = nil
 			fixture.spec.BaseRevision = fixture.base
+			// Repair the durable default for new work. A boot flag change must not
+			// retarget the failed task's already-bound source.
+			repository, found, err := fixture.store.TaskRepository(context.Background(), fixture.taskID)
+			if err != nil || !found {
+				t.Fatalf("repository: found=%v err=%v", found, err)
+			}
+			if _, err := fixture.store.UpdateProjectRepositoryBase(context.Background(), repository.ID, repository.Revision, fixture.base, supervisorTime()); err != nil {
+				t.Fatal(err)
+			}
 			task, found, err := fixture.store.Task(context.Background(), fixture.taskID)
 			if err != nil || !found {
 				t.Fatalf("task: found=%v err=%v", found, err)

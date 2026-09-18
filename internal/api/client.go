@@ -285,6 +285,30 @@ func (client *OperatorClient) CreateProject(ctx context.Context, input CreatePro
 	return client.client.mutate(ctx, "create_project", input)
 }
 
+func (client *OperatorClient) ProjectRepositories(ctx context.Context, projectID string) (ProjectRepositories, error) {
+	if !validID(projectID) {
+		return ProjectRepositories{}, ErrInvalidInput
+	}
+	var result ProjectRepositories
+	if err := client.client.call(ctx, "project_repository", ProjectRepositoryInput{Action: "list", ProjectID: projectID}, &result); err != nil {
+		return ProjectRepositories{}, err
+	}
+	return result, nil
+}
+func (client *OperatorClient) ProjectRepository(ctx context.Context, input ProjectRepositoryInput) (ProjectRepository, error) {
+	var result ProjectRepository
+	if err := client.client.call(ctx, "project_repository", input, &result); err != nil {
+		return ProjectRepository{}, err
+	}
+	return result, nil
+}
+func (client *OperatorClient) RemoveProjectRepository(ctx context.Context, id string, revision uint64) error {
+	if !validID(id) || revision == 0 {
+		return ErrInvalidInput
+	}
+	return client.client.call(ctx, "project_repository", ProjectRepositoryInput{Action: "remove", ID: id, ExpectedRevision: revision}, &struct{}{})
+}
+
 func (client *OperatorClient) SetProjectLimits(ctx context.Context, input ProjectLimitsInput) (MutationResult, error) {
 	if !validID(input.ProjectID) || input.ExpectedRevision == 0 || input.RunBudget > uint64(^uint64(0)>>1) || input.MaxRunSeconds > 86400 {
 		return MutationResult{}, ErrInvalidInput
@@ -357,7 +381,7 @@ func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput)
 }
 
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
-	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
+	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.RepositoryID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "enqueue_task", input)

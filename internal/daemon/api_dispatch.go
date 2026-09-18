@@ -44,11 +44,11 @@ type Daemon struct {
 	scheduledRun func(context.Context, kernel.RunID) (kernel.Run, bool, error)
 	// successSource* are package-test-only seams for failure-injection coverage;
 	// production source validation always reads the concrete Store.
-	successSourceRun      func(context.Context, kernel.RunID) (kernel.Run, bool, error)
-	successSourceChange   func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
-	successSourceProject  func(context.Context, kernel.ProjectID) (kernel.Project, bool, error)
-	beforeSuccessProposal func()
-	successSourceInspect  func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
+	successSourceRun        func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	successSourceChange     func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
+	successSourceRepository func(context.Context, kernel.TaskID) (kernel.ProjectRepository, bool, error)
+	beforeSuccessProposal   func()
+	successSourceInspect    func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
 
 	browserMu          sync.Mutex
 	browserLifecycleMu sync.Mutex
@@ -196,6 +196,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.humanReplyOperator(ctx, call)
 	case api.CallCreateProject:
 		return daemon.createProject(ctx, call)
+	case api.CallProjectRepository:
+		return daemon.projectRepository(ctx, call)
 	case api.CallProjectLimits:
 		return daemon.setProjectLimits(ctx, call)
 	case api.CallCreateAgent:
@@ -1044,13 +1046,96 @@ func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	project, err := daemon.store.CreateProject(ctx, kernel.NewProject{
+	project, err := registerProject(ctx, daemon.store, kernel.NewProject{
 		ID: id, Name: input.Name, Root: input.Root, VerificationPolicy: kernel.VerificationNone,
 	}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	return daemon.mutation(ctx, project.Revision)
+}
+
+func repositoryDTO(value kernel.ProjectRepository) api.ProjectRepository {
+	return api.ProjectRepository{ID: value.ID.String(), ProjectID: value.ProjectID.String(), Name: value.Name, Root: value.Root, BaseRef: value.BaseRef, Enabled: value.Enabled, Default: value.Default, Revision: uint64(value.Revision.Int64())}
+}
+func (daemon *Daemon) projectRepository(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.ProjectRepositoryInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	parseRepo := func() (kernel.RepositoryID, bool) {
+		raw, err := parseID(input.ID)
+		if err != nil {
+			return kernel.RepositoryID{}, false
+		}
+		value, err := kernel.RepositoryIDFromBytes(raw)
+		return value, err == nil
+	}
+	parseProject := func() (kernel.ProjectID, bool) {
+		value, err := parseProjectID(input.ProjectID)
+		return value, err == nil
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	switch input.Action {
+	case "list":
+		project, valid := parseProject()
+		if !valid {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		values, err := daemon.store.ProjectRepositories(ctx, project)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		result := api.ProjectRepositories{Repositories: make([]api.ProjectRepository, 0, len(values))}
+		for _, value := range values {
+			result.Repositories = append(result.Repositories, repositoryDTO(value))
+		}
+		return api.NewContentReply(result)
+	case "add":
+		id, valid := parseRepo()
+		project, projectValid := parseProject()
+		if !valid || !projectValid {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		value, err := registerProjectRepository(ctx, daemon.store, kernel.NewProjectRepository{ID: id, ProjectID: project, Name: input.Name, Root: input.Root, BaseRef: input.BaseRef}, at)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(repositoryDTO(value))
+	case "name", "base", "default", "enabled", "remove":
+		id, valid := parseRepo()
+		expected, revisionErr := kernel.NewRevision(int64(input.ExpectedRevision))
+		if !valid || revisionErr != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		var value kernel.ProjectRepository
+		switch input.Action {
+		case "name":
+			value, err = daemon.store.UpdateProjectRepositoryName(ctx, id, expected, input.Name, at)
+		case "base":
+			value, err = updateRepositoryBase(ctx, daemon.store, id, expected, input.BaseRef, at)
+		case "default":
+			value, err = daemon.store.SetProjectRepositoryDefault(ctx, id, expected, at)
+		case "enabled":
+			if input.Enabled == nil {
+				return newErrorReply(api.RemoteInvalidRequest)
+			}
+			value, err = daemon.store.SetProjectRepositoryEnabled(ctx, id, expected, *input.Enabled, at)
+		case "remove":
+			err = daemon.store.RemoveProjectRepository(ctx, id, expected)
+		}
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		if input.Action == "remove" {
+			return api.NewContentReply(struct{}{})
+		}
+		return api.NewContentReply(repositoryDTO(value))
+	}
+	return newErrorReply(api.RemoteInvalidRequest)
 }
 
 func (daemon *Daemon) setProjectLimits(ctx context.Context, call api.Call) api.Reply {
@@ -1166,6 +1251,17 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	var repositoryID kernel.RepositoryID
+	if input.RepositoryID != "" {
+		raw, parseErr := parseID(input.RepositoryID)
+		if parseErr != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		repositoryID, err = kernel.RepositoryIDFromBytes(raw)
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+	}
 	agentID, err := parseOptionalAgentID(input.AssignedAgentID)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
@@ -1178,7 +1274,7 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	spec, err := newTaskSpec(id, projectID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
+	spec, err := newTaskSpec(id, projectID, repositoryID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
@@ -1193,8 +1289,8 @@ func (daemon *Daemon) enqueueTask(ctx context.Context, call api.Call) api.Reply 
 	return daemon.mutation(ctx, task.Revision)
 }
 
-func newTaskSpec(id kernel.TaskID, projectID kernel.ProjectID, agentID kernel.AgentID, incarnationID kernel.IncarnationID, title, body string, priority int64, prerequisites []api.TaskPrerequisiteInput, paths []string) (kernel.NewTask, error) {
-	spec := kernel.NewTask{ID: id, ProjectID: projectID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: title, Body: body, Priority: priority, ConflictPaths: append([]string(nil), paths...)}
+func newTaskSpec(id kernel.TaskID, projectID kernel.ProjectID, repositoryID kernel.RepositoryID, agentID kernel.AgentID, incarnationID kernel.IncarnationID, title, body string, priority int64, prerequisites []api.TaskPrerequisiteInput, paths []string) (kernel.NewTask, error) {
+	spec := kernel.NewTask{ID: id, ProjectID: projectID, RepositoryID: repositoryID, AssignedAgentID: agentID, IncarnationID: incarnationID, Title: title, Body: body, Priority: priority, ConflictPaths: append([]string(nil), paths...)}
 	spec.Prerequisites = make([]kernel.TaskPrerequisite, 0, len(prerequisites))
 	for _, input := range prerequisites {
 		taskID, err := parseTaskID(input.TaskID)
@@ -1572,7 +1668,7 @@ func (daemon *Daemon) overseerEnqueueTask(ctx context.Context, call api.Call) ap
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	spec, err := newTaskSpec(id, authority.ProjectID, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
+	spec, err := newTaskSpec(id, authority.ProjectID, kernel.RepositoryID{}, agentID, incarnationID, input.Title, input.Body, input.Priority, input.Prerequisites, input.ConflictPaths)
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}

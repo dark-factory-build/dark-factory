@@ -1,0 +1,1 @@
+{"type":"REPOSITORIES","id":"repositories-1","body":{"project_id":"01010101010101010101010101010101","items":[{"id":"02020202020202020202020202020202","project_id":"01010101010101010101010101010101","name":"Main checkout","root":"/Users/operator/main","base_ref":"main","enabled":true,"default":true,"revision":"3"}]}}

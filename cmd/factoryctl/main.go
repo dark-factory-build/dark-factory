@@ -72,6 +72,11 @@ const (
   factoryctl human list
   factoryctl human reply --operation-id ID --request ID --revision REVISION --reply TEXT
   factoryctl project create --name TEXT --root ABSOLUTE
+  factoryctl project repository list --project ID
+  factoryctl project repository add --id HEX32 --project ID --name TEXT --root ABSOLUTE --base REF
+  factoryctl project repository name --id ID --revision REVISION --name TEXT
+  factoryctl project repository base --id ID --revision REVISION --base REF
+  factoryctl project repository default|enable|disable|remove --id ID --revision REVISION
   factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
@@ -89,7 +94,7 @@ const (
   factoryctl agent select-account --agent ID --revision REVISION --account ID
 	factoryctl agent select-model --agent ID --revision REVISION --model TEXT [--reasoning-effort low|medium|high|xhigh|max|ultra]
 	factoryctl agent paths --agent ID
-  factoryctl task add --project ID --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
+  factoryctl task add --project ID [--repository ID] --agent ID|any --title TEXT [--body TEXT] [--priority N] [--task-id ID --incarnation-id ID]
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
@@ -160,6 +165,7 @@ const (
 	commandServiceUninstall
 	commandProjectCreate
 	commandProjectLimits
+	commandProjectRepository
 	commandAgentCreate
 	commandAgentIdlePolicy
 	commandAccountsDiscover
@@ -223,6 +229,7 @@ type attemptCommand struct {
 	name             string
 	root             string
 	project          string
+	repository       string
 	agent            string
 	role             string
 	provider         string
@@ -350,7 +357,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -1348,6 +1355,66 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 }
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
+	if len(args) >= 3 && args[0] == "project" && args[1] == "repository" {
+		action := args[2]
+		if action != "list" && action != "add" && action != "name" && action != "base" && action != "default" && action != "enable" && action != "disable" && action != "remove" {
+			return attemptCommand{}, false, false
+		}
+		command := attemptCommand{kind: commandProjectRepository, provider: action}
+		if (len(args)-3)%2 != 0 {
+			return attemptCommand{}, false, false
+		}
+		for i := 3; i < len(args); i += 2 {
+			key, value := args[i], args[i+1]
+			switch key {
+			case "--project":
+				if validHumanRequestKey(value) {
+					command.project = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--id":
+				if validHumanRequestKey(value) {
+					command.repository = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--name":
+				if validOperatorText(value, 1, 128) {
+					command.name = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--root":
+				if validHomeArg(value) {
+					command.root = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--base":
+				if validOperatorText(value, 1, 256) {
+					command.body = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--revision":
+				n, ok := parseRevision(value)
+				if !ok {
+					return attemptCommand{}, false, false
+				}
+				command.expectedRevision = n
+			default:
+				return attemptCommand{}, false, false
+			}
+		}
+		if action == "list" {
+			return command, false, command.project != ""
+		}
+		if action == "add" {
+			return command, false, command.repository != "" && command.project != "" && command.name != "" && command.root != "" && command.body != ""
+		}
+		return command, false, command.repository != "" && command.expectedRevision != 0
+	}
 	if len(args) >= 1 && args[0] == "worker" {
 		if len(args) == 4 && args[1] == "operation" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) {
 			return attemptCommand{kind: commandWorkerOperation, operationID: args[3]}, false, true
@@ -1451,6 +1518,8 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			command.root = value
 		case name == "--project" && (command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandTaskAdd) && validHumanRequestKey(value):
 			command.project = value
+		case name == "--repository" && command.kind == commandTaskAdd && validHumanRequestKey(value):
+			command.repository = value
 		case name == "--revision" && (command.kind == commandProjectLimits || command.kind == commandAgentIdlePolicy):
 			revision, ok := parseRevision(value)
 			if !ok {
@@ -2131,6 +2200,36 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "project limits", callErr)
 		}
 		return writeJSON(stdout, result)
+	case commandProjectRepository:
+		if command.provider == "list" {
+			result, err := client.ProjectRepositories(callContext, command.project)
+			if err != nil {
+				return writeWebFailure(stderr, "project repository list", err)
+			}
+			return writeJSON(stdout, result)
+		}
+		if command.provider == "remove" {
+			if err := client.RemoveProjectRepository(callContext, command.repository, command.expectedRevision); err != nil {
+				return writeWebFailure(stderr, "project repository remove", err)
+			}
+			return writeJSON(stdout, struct{}{})
+		}
+		input := api.ProjectRepositoryInput{Action: command.provider, ID: command.repository, ProjectID: command.project, Name: command.name, Root: command.root, BaseRef: command.body, ExpectedRevision: command.expectedRevision}
+		if command.provider == "enable" {
+			input.Action = "enabled"
+			value := true
+			input.Enabled = &value
+		}
+		if command.provider == "disable" {
+			input.Action = "enabled"
+			value := false
+			input.Enabled = &value
+		}
+		result, err := client.ProjectRepository(callContext, input)
+		if err != nil {
+			return writeWebFailure(stderr, "project repository", err)
+		}
+		return writeJSON(stdout, result)
 	case commandAgentCreate:
 		id, err := newOperatorID()
 		if err != nil {
@@ -2168,7 +2267,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 				return writeWebFailure(stderr, "task add", err)
 			}
 		}
-		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
+		result, callErr := client.EnqueueTask(callContext, api.EnqueueTaskInput{ID: id, ProjectID: command.project, RepositoryID: command.repository, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority})
 		if callErr != nil {
 			return writeWebFailure(stderr, "task add", callErr)
 		}

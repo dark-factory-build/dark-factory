@@ -25,6 +25,9 @@ import {
   encodeServerControl,
   encodeRemoteInviteResult,
   encodeTaskEnqueueResult,
+  encodeProjectCreateResult,
+  encodeRepositories,
+  encodeRepositoryMutateResult,
   encodeTaskHistory,
   encodeTaskDetail,
   encodeStateChanged,
@@ -315,6 +318,39 @@ test("authenticated task enqueue mints exact IDs and correlates the durable resu
   assert.equal(sharedFrame.body.agent_id, agentId);
   socket.reply(encodeTaskEnqueueResult(sharedFrame.id, { task_id: sharedFrame.body.task_id, revision: 3n, agent_revision: 7n }));
   await shared;
+  session.close();
+});
+
+test("private repository administration and enqueue selection are exact-correlated", async () => {
+  const { session, socket } = await openHumanSession();
+  const projectId = "7a".repeat(16);
+  const repositoryId = "7b".repeat(16);
+  const agentId = "7c".repeat(16);
+  const item = { id: repositoryId, project_id: projectId, name: "Checkout", root: "/private/checkout", base_ref: "main", enabled: true, default: true, revision: 3n };
+
+  const listed = session.getRepositories(projectId);
+  const listFrame = decodeClientControl(socket.sent.at(-1));
+  assert.deepEqual(listFrame, { type: "REPOSITORIES_GET", id: listFrame.id, body: { project_id: projectId } });
+  socket.reply(encodeRepositories(listFrame.id, { project_id: projectId, items: [item] }));
+  assert.deepEqual(await listed, [item]);
+
+  const updated = session.mutateRepository({ projectId, repositoryId, expectedRevision: 3n, action: "base", baseRef: "release" });
+  const updateFrame = decodeClientControl(socket.sent.at(-1));
+  assert.deepEqual(updateFrame.body, { action: "base", id: repositoryId, expected_revision: 3n, base_ref: "release" });
+  socket.reply(encodeRepositoryMutateResult(updateFrame.id, { repository: { ...item, base_ref: "release", revision: 4n } }));
+  assert.equal((await updated).base_ref, "release");
+
+  const enqueue = session.enqueueAgentTask({ agentId, expectedAgentRevision: 2n, repositoryId, instruction: "Use the selected checkout" });
+  const enqueueFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(enqueueFrame.body.repository_id, repositoryId);
+  socket.reply(encodeTaskEnqueueResult(enqueueFrame.id, { task_id: enqueueFrame.body.task_id, revision: 1n, agent_revision: 2n }));
+  await enqueue;
+
+  const project = session.createProject({ name: "New", root: "/private/new" });
+  const projectFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(projectFrame.type, "PROJECT_CREATE");
+  socket.reply(encodeProjectCreateResult(projectFrame.id, { project_id: projectFrame.body.project_id, revision: 1n }));
+  assert.equal((await project).projectId, projectFrame.body.project_id);
   session.close();
 });
 

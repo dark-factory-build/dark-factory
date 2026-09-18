@@ -73,10 +73,10 @@ func TestContentExportRetiresLegacyBodyAndReplays(t *testing.T) {
 		t.Fatal(err)
 	}
 	corruptSQL(t, store, `UPDATE project_content_revisions SET body = 'legacy', object_format = NULL, commit_oid = NULL, path = NULL WHERE id = ? AND revision = 1`, created.ID.Bytes())
-	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", 1, 2); err != nil {
+	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", RepositoryID(created.ProjectID), 1, 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", 1, 2); err != nil {
+	if err := store.CompleteContentExport(ctx, created.ID, 1, "legacy", "sha1", strings.Repeat("a", 40), ".dark-factory/content/item.md", RepositoryID(created.ProjectID), 1, 2); err != nil {
 		t.Fatalf("export replay: %v", err)
 	}
 	got, err := store.Content(ctx, created.ID, 1)

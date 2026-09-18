@@ -179,3 +179,27 @@ homes, task text and browser snapshots. Keep that record with the home backup.
 Git fetch authentication remains separate: use the operator-owned Git setup in
 the [provider guide](providers.md). A working Maintainer connection does not
 make a private checkout fetchable.
+
+## Project repositories (next release)
+
+Project settings can register several existing Git checkouts. Creating a project
+registers its initial checkout; an upgrade preserves the old project root and
+all existing task and Change identities. No operation clones or deletes files.
+
+For automation, `factoryctl project repository list --project PROJECT_ID`
+returns each private binding and its revision. Add an existing checkout with
+`factoryctl project repository add --id HEX32 --project PROJECT_ID --name NAME
+--root ABSOLUTE_PATH --base REF`, using a fresh 32-character lowercase hexadecimal
+ID and that repository's actual base/upstream ref. Registration verifies the
+checkout, Git directory and configured publication origin. Use the `name`,
+`base`, `default`, `enable`, `disable` or `remove` subcommands with `--id` and the
+current `--revision`; name/base changes also take `--name`/`--base` respectively.
+
+`factoryctl task add --project PROJECT_ID --repository REPOSITORY_ID ...`
+selects a checkout explicitly. A sole repository or configured default is used
+when selection is omitted; issue prose never chooses a repository. Changing a
+default or base does not redirect existing work, retries or retained source
+reviews. Disable prevents new selection while preserving history. Removal is
+refused while a binding remains referenced and never removes the checkout.
+Private Git fetch authentication remains operator-owned and separate from the
+Maintainer connection.

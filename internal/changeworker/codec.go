@@ -62,9 +62,11 @@ type Config struct {
 	AccountHome              string
 	// AccountConfigDir is the linked provider login this run launches with.
 	// Empty means the provider's own default configuration directory.
-	AccountConfigDir   string
-	RepositoryRoot     string
-	RepositoryIdentity change.RepositoryIdentity
+	AccountConfigDir       string
+	RepositoryRoot         string
+	RepositoryIdentity     change.RepositoryIdentity
+	RepositoryGitIdentity  change.RepositoryIdentity
+	RepositoryOriginDigest [32]byte
 	// GitCommonDir is the project repository's Git directory, which the
 	// worktree's commits and refs live in and a provider's local commands
 	// are granted: written by a worker, read by an orchestrator.
@@ -136,6 +138,8 @@ type configWire struct {
 	AccountConfigDir         string            `json:"account_config_dir"`
 	RepositoryRoot           string            `json:"repository_root"`
 	RepositoryIdentity       identityWire      `json:"repository_identity"`
+	RepositoryGitIdentity    identityWire      `json:"repository_git_identity"`
+	RepositoryOriginDigest   [32]byte          `json:"repository_origin_digest"`
 	GitCommonDir             string            `json:"git_common_dir"`
 	Revision                 string            `json:"revision"`
 	ChangeParent             string            `json:"change_parent"`
@@ -166,6 +170,7 @@ func EncodeConfig(config Config) ([]byte, error) {
 		AgentID: config.AgentID, TaskIncarnationID: config.TaskIncarnationID, PreviousWorkingDirectory: config.PreviousWorkingDirectory,
 		RuntimePath: config.RuntimePath, RuntimeIdentity: identityWire{Device: config.RuntimeIdentity.Device, Inode: config.RuntimeIdentity.Inode},
 		GitExecutable: config.GitExecutable, FactoryctlExecutable: config.FactoryctlExecutable, ToolPath: config.ToolPath, ToolchainReadRoots: config.ToolchainReadRoots, LocalCILeaseDir: config.LocalCILeaseDir, AccountHome: config.AccountHome, AccountConfigDir: config.AccountConfigDir,
+		RepositoryGitIdentity: identityWire{Device: config.RepositoryGitIdentity.Device(), Inode: config.RepositoryGitIdentity.Inode()}, RepositoryOriginDigest: config.RepositoryOriginDigest,
 		RepositoryRoot: config.RepositoryRoot, RepositoryIdentity: identityWire{Device: config.RepositoryIdentity.Device(), Inode: config.RepositoryIdentity.Inode()}, GitCommonDir: config.GitCommonDir, Revision: config.Revision,
 		ChangeParent: config.ChangeParent, FinalName: config.FinalName,
 		AttemptSocket: config.AttemptSocket, ProviderTask: bytes.Clone(config.ProviderTask),
@@ -194,6 +199,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	repositoryGitIdentity, _ := change.NewRepositoryIdentity(wire.RepositoryGitIdentity.Device, wire.RepositoryGitIdentity.Inode)
 	repositoryIdentity, err := change.NewRepositoryIdentity(wire.RepositoryIdentity.Device, wire.RepositoryIdentity.Inode)
 	if err != nil {
 		return Config{}, invalidContract(err)
@@ -216,6 +222,7 @@ func DecodeConfig(encoded []byte) (Config, error) {
 		AgentID: wire.AgentID, TaskIncarnationID: wire.TaskIncarnationID, PreviousWorkingDirectory: wire.PreviousWorkingDirectory,
 		RuntimePath: wire.RuntimePath, RuntimeIdentity: runner.FileIdentity{Device: wire.RuntimeIdentity.Device, Inode: wire.RuntimeIdentity.Inode},
 		GitExecutable: wire.GitExecutable, FactoryctlExecutable: wire.FactoryctlExecutable, ToolPath: wire.ToolPath, ToolchainReadRoots: wire.ToolchainReadRoots, LocalCILeaseDir: wire.LocalCILeaseDir, AccountHome: wire.AccountHome, AccountConfigDir: wire.AccountConfigDir,
+		RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: wire.RepositoryOriginDigest,
 		RepositoryRoot: wire.RepositoryRoot, RepositoryIdentity: repositoryIdentity, GitCommonDir: wire.GitCommonDir, Revision: wire.Revision,
 		ChangeParent: wire.ChangeParent, FinalName: wire.FinalName,
 		AttemptSocket: wire.AttemptSocket, Retained: retained, ProviderTask: bytes.Clone(wire.ProviderTask),
@@ -264,6 +271,9 @@ func validateConfig(config Config) error {
 	}
 	if _, err := change.NewRepositoryIdentity(config.RepositoryIdentity.Device(), config.RepositoryIdentity.Inode()); err != nil {
 		return invalidContract(err)
+	}
+	if config.Retained == nil && !(change.RepositorySourceIdentity{Root: config.RepositoryIdentity, Git: config.RepositoryGitIdentity, OriginDigest: config.RepositoryOriginDigest}).Valid() {
+		return invalidContract(nil)
 	}
 	if config.Retained != nil {
 		if validateResult(*config.Retained) != nil {

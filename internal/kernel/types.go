@@ -45,6 +45,10 @@ func (id identifier) Bytes() []byte {
 func (id identifier) String() string { return hex.EncodeToString(id.b[:]) }
 
 type ProjectID struct{ identifier }
+
+// RepositoryID names a checkout binding. It is deliberately separate from a
+// project: one project may route independent work to several checkouts.
+type RepositoryID struct{ identifier }
 type AgentID struct{ identifier }
 type AccountID struct{ identifier }
 type TaskID struct{ identifier }
@@ -68,6 +72,11 @@ type ContentEvidenceID struct{ identifier }
 func ProjectIDFromBytes(value []byte) (ProjectID, error) {
 	id, err := identifierFromBytes(value)
 	return ProjectID{id}, err
+}
+
+func RepositoryIDFromBytes(value []byte) (RepositoryID, error) {
+	id, err := identifierFromBytes(value)
+	return RepositoryID{id}, err
 }
 
 func AgentIDFromBytes(value []byte) (AgentID, error) {
@@ -473,6 +482,7 @@ func (config FactoryConfig) normalized() (FactoryConfig, error) {
 }
 
 type NewProject struct {
+	SourceIdentity     *RepositorySourceIdentity
 	ID                 ProjectID
 	Name               string
 	Root               string
@@ -515,8 +525,11 @@ type Account struct {
 }
 
 type NewTask struct {
-	ID              TaskID
-	ProjectID       ProjectID
+	ID        TaskID
+	ProjectID ProjectID
+	// RepositoryID is optional only for callers that want the project's current
+	// default. Enqueue persists the selected binding, never this default lookup.
+	RepositoryID    RepositoryID
 	AssignedAgentID AgentID
 	IncarnationID   IncarnationID
 	Title           string

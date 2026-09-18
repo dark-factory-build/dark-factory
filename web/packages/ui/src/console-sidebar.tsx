@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_PRIORITY, type DiscoveredAccount, type AccountItem, type AgentItem, type ProjectItem, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_PRIORITY, type DiscoveredAccount, type AccountItem, type AgentItem, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
@@ -528,6 +528,12 @@ export function SettingsDialog({
   onLoadAccounts,
   onLinkAccount,
   onUpdateAccount,
+  repositories,
+  repositoryPending,
+  repositoryErrors,
+  onLoadRepositories,
+  onMutateRepository,
+  onCreateProject,
   pairing,
   onClose,
 }: {
@@ -546,6 +552,12 @@ export function SettingsDialog({
   onLoadAccounts?: () => void;
   onLinkAccount?: (login: DiscoveredAccount, label: string) => void;
   onUpdateAccount?: (account: AccountItem, change: { label?: string; remove?: boolean }) => void;
+  repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
+  repositoryPending?: ReadonlySet<string>;
+  repositoryErrors?: ReadonlyMap<string, string>;
+  onLoadRepositories?: (projectId: string) => void;
+  onMutateRepository?: (request: RepositoryMutation) => void;
+  onCreateProject?: (request: { name: string; root: string }) => void;
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
   onClose?: () => void;
@@ -583,6 +595,7 @@ export function SettingsDialog({
           onUpdate={onUpdateAccount}
           onRefresh={onLoadAccounts}
         />
+        <RepositoriesSection state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
         <details className="dfConsoleSidebar__section" aria-label="Run limits">
           <summary>Run limits</summary>
           <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
@@ -598,6 +611,69 @@ export function SettingsDialog({
       </div>
     </dialog>
   );
+}
+
+function RepositoriesSection({ state, repositories, pending, errors, onLoad, onMutate, onCreateProject }: {
+  state: StateView | undefined;
+  repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
+  pending?: ReadonlySet<string>;
+  errors?: ReadonlyMap<string, string>;
+  onLoad?: (projectId: string) => void;
+  onMutate?: (request: RepositoryMutation) => void;
+  onCreateProject?: (request: { name: string; root: string }) => void;
+}) {
+  const projects = state === undefined ? [] : [...state.projects.values()];
+  const load = useRef(onLoad);
+  load.current = onLoad;
+  const projectIds = projects.map((project) => project.id).join(" ");
+  const canLoad = onLoad !== undefined;
+  useEffect(() => { if (canLoad && projectIds) projectIds.split(" ").forEach((id) => load.current?.(id)); }, [projectIds, canLoad]);
+  return <details className="dfConsoleSidebar__section" aria-label="Repositories">
+    <summary>Repositories</summary>
+    <p className="dfConsoleSidebar__inherit">Private checkout routing. It is never shown on the factory floor.</p>
+    {projects.map((project) => <RepositoryProject key={project.id} project={project} items={repositories?.get(project.id)} pending={pending?.has(project.id) === true} error={errors?.get(project.id)} onMutate={onMutate} />)}
+    <ProjectCreateForm onCreate={onCreateProject} error={errors?.get("create")} />
+  </details>;
+}
+
+function ProjectCreateForm({ onCreate, error }: { onCreate?: (request: { name: string; root: string }) => void; error?: string }) {
+  const [name, setName] = useState("");
+  const [root, setRoot] = useState("");
+  return <form className="dfConsoleSidebar__section" onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/")) onCreate?.({ name: name.trim(), root }); }}>
+    <h3>NEW PROJECT</h3>{error === undefined ? null : <p role="alert">{error}</p>}
+    <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
+    <label>Existing checkout<input value={root} placeholder="/absolute/path" onChange={(event) => setRoot(event.currentTarget.value)} /></label>
+    <button type="submit" disabled={onCreate === undefined || !name.trim() || !root.startsWith("/")}>CREATE PROJECT</button>
+  </form>;
+}
+
+function RepositoryProject({ project, items, pending, error, onMutate }: { project: ProjectItem; items?: readonly RepositoryView[]; pending: boolean; error?: string; onMutate?: (request: RepositoryMutation) => void }) {
+  const [name, setName] = useState(""); const [root, setRoot] = useState(""); const [baseRef, setBaseRef] = useState("HEAD");
+  return <section className="dfConsoleSidebar__section" aria-label={`Repositories for ${project.name}`}>
+    <h3>{project.name}</h3>{error === undefined ? null : <p role="alert">{error}</p>}
+    {items === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOADING REPOSITORIES" : "REPOSITORIES UNAVAILABLE"}</p> : <ul className="dfFactoryConsole__list">{items.map((item) => <RepositoryRow key={`${item.id}:${item.revision}`} project={project} item={item} pending={pending} onMutate={onMutate} />)}</ul>}
+    <form onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/") && baseRef.trim()) onMutate?.({ projectId: project.id, action: "add", name: name.trim(), root, baseRef: baseRef.trim() }); }}>
+      <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
+      <label>Existing checkout<input value={root} placeholder="/absolute/path" onChange={(event) => setRoot(event.currentTarget.value)} /></label>
+      <label>Base<input value={baseRef} onChange={(event) => setBaseRef(event.currentTarget.value)} /></label>
+      <button type="submit" disabled={pending || onMutate === undefined || !name.trim() || !root.startsWith("/") || !baseRef.trim()}>ADD CHECKOUT</button>
+    </form>
+  </section>;
+}
+
+function RepositoryRow({ project, item, pending, onMutate }: { project: ProjectItem; item: RepositoryView; pending: boolean; onMutate?: (request: RepositoryMutation) => void }) {
+  const [name, setName] = useState(item.name); const [baseRef, setBaseRef] = useState(item.base_ref);
+  const request = (action: RepositoryMutation["action"], values: Partial<{ name: string; baseRef: string; enabled: boolean }> = {}) => {
+    if (action === "name") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, name: values.name ?? name });
+    else if (action === "base") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, baseRef: values.baseRef ?? baseRef });
+    else if (action === "enabled") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, enabled: values.enabled ?? !item.enabled });
+    else if (action === "default" || action === "remove") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action });
+  };
+  return <li className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.name}{item.default ? " · DEFAULT" : ""}</p><p className="dfFactoryConsole__eyebrow">{item.root}</p>
+    <label>Name<input value={name} disabled={pending} onChange={(event) => setName(event.currentTarget.value)} /></label><button type="button" disabled={pending || !name.trim() || name === item.name} onClick={() => request("name")}>SAVE NAME</button>
+    <label>Base<input value={baseRef} disabled={pending} onChange={(event) => setBaseRef(event.currentTarget.value)} /></label><button type="button" disabled={pending || !baseRef.trim() || baseRef === item.base_ref} onClick={() => request("base")}>SAVE BASE</button>
+    <button type="button" disabled={pending || item.default} onClick={() => request("default")}>MAKE DEFAULT</button><button type="button" disabled={pending || item.default} onClick={() => request("enabled", { enabled: !item.enabled })}>{item.enabled ? "DISABLE" : "ENABLE"}</button><button type="button" disabled={pending || item.default} onClick={() => request("remove")}>REMOVE</button>
+  </li>;
 }
 
 function FloorAppearanceSection({ appearance, onChange, onReset }: {

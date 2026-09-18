@@ -88,7 +88,7 @@ export type HumanRequestReplyResultBody = { request_id: string; revision: bigint
 export type HumanRequestCancelRunBody = { request_id: string; expected_request_revision: bigint; expected_run_revision: bigint };
 export type HumanRequestCancelRunResultBody = { run_id: string; run_revision: bigint; request_id: string; request_revision: bigint };
 /** `mode` "any" queues the instruction for any eligible worker in the pane agent's project. */
-export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any" };
+export type TaskEnqueueBody = { task_id: string; incarnation_id: string; agent_id: string; repository_id?: string; expected_agent_revision: bigint; instruction: string; mode?: "now" | "queue" | "any" };
 export type TaskEnqueueResultBody = { task_id: string; revision: bigint; agent_revision: bigint };
 export type AgentControlAction = "message" | "interrupt" | "stop" | "replace";
 export type AgentControlBody = { operation_id: string; task_id: string; run_id: string; expected_task_revision: bigint; expected_run_revision: bigint; action: AgentControlAction; instruction: string; successor_task_id: string; successor_incarnation_id: string };
@@ -105,6 +105,14 @@ export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; app
 export type AgentUpdateResultBody = { agent_id: string; revision: bigint };
 export type ProjectLimitsBody = { project_id: string; expected_revision: bigint; run_budget: bigint; max_run_seconds: number };
 export type ProjectLimitsResultBody = { project_id: string; revision: bigint };
+export type ProjectCreateBody = { project_id: string; name: string; root: string };
+export type ProjectCreateResultBody = { project_id: string; revision: bigint };
+/** Administration-only private repository configuration; it is never STATE. */
+export type RepositoryItem = { id: string; project_id: string; name: string; root: string; base_ref: string; enabled: boolean; default: boolean; revision: bigint };
+export type RepositoriesGetBody = { project_id: string };
+export type RepositoriesBody = { project_id: string; items: RepositoryItem[] };
+export type RepositoryMutateBody = { action: "add" | "name" | "base" | "default" | "enabled" | "remove"; id?: string; project_id?: string; name?: string; root?: string; base_ref?: string; expected_revision?: bigint; enabled?: boolean };
+export type RepositoryMutateResultBody = { repository?: RepositoryItem };
 export type TaskUpdateBody = { task_id: string; expected_revision: bigint; title?: string; body?: string; priority?: number; assigned_agent_id?: string; status?: "cancelled" };
 export type TaskUpdateResultBody = { task_id: string; revision: bigint };
 export type TopologyGetBody = { project_id: string };
@@ -207,6 +215,9 @@ export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; b
   | { type: "TASK_LIST"; id: string; body: TaskListBody }
   | { type: "AGENT_UPDATE_RESULT"; id: string; body: AgentUpdateResultBody }
   | { type: "PROJECT_LIMITS_RESULT"; id: string; body: ProjectLimitsResultBody }
+  | { type: "PROJECT_CREATE_RESULT"; id: string; body: ProjectCreateResultBody }
+  | { type: "REPOSITORIES"; id: string; body: RepositoriesBody }
+  | { type: "REPOSITORY_MUTATE_RESULT"; id: string; body: RepositoryMutateResultBody }
   | { type: "TASK_UPDATE_RESULT"; id: string; body: TaskUpdateResultBody }
   | { type: "TOPOLOGY"; id: string; body: TopologyBody }
   | { type: "RUN_PATHS"; id: string; body: RunPathsBody }
@@ -229,6 +240,9 @@ export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: Pr
   | { type: "TASK_LIST_GET"; id: string; body: TaskListGetBody }
   | { type: "AGENT_UPDATE"; id: string; body: AgentUpdateBody }
   | { type: "PROJECT_LIMITS"; id: string; body: ProjectLimitsBody }
+  | { type: "PROJECT_CREATE"; id: string; body: ProjectCreateBody }
+  | { type: "REPOSITORIES_GET"; id: string; body: RepositoriesGetBody }
+  | { type: "REPOSITORY_MUTATE"; id: string; body: RepositoryMutateBody }
   | { type: "TASK_UPDATE"; id: string; body: TaskUpdateBody }
   | { type: "TOPOLOGY_GET"; id: string; body: TopologyGetBody }
   | { type: "RUN_PATHS_GET"; id: string; body: RunPathsGetBody }
@@ -257,6 +271,9 @@ export function encodeHumanRequestDetailGet(id: string, body: HumanRequestDetail
 export function encodeHumanRequestReply(id: string, body: HumanRequestReplyBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_REPLY", id, body }); }
 export function encodeHumanRequestCancelRun(id: string, body: HumanRequestCancelRunBody): string { return encodeClientControl({ type: "HUMAN_REQUEST_CANCEL_RUN", id, body }); }
 export function encodeTaskEnqueue(id: string, body: TaskEnqueueBody): string { return encodeClientControl({ type: "TASK_ENQUEUE", id, body }); }
+export function encodeProjectCreate(id: string, body: ProjectCreateBody): string { return encodeClientControl({ type: "PROJECT_CREATE", id, body }); }
+export function encodeRepositoriesGet(id: string, body: RepositoriesGetBody): string { return encodeClientControl({ type: "REPOSITORIES_GET", id, body }); }
+export function encodeRepositoryMutate(id: string, body: RepositoryMutateBody): string { return encodeClientControl({ type: "REPOSITORY_MUTATE", id, body }); }
 export function encodeAgentControl(id: string, body: AgentControlBody): string { return encodeClientControl({ type: "AGENT_CONTROL", id, body }); }
 export function encodeTaskHistoryGet(id: string, body: TaskHistoryGetBody): string { return encodeClientControl({ type: "TASK_HISTORY_GET", id, body }); }
 export function encodeTaskDetailGet(id: string, body: TaskDetailGetBody): string { return encodeClientControl({ type: "TASK_DETAIL_GET", id, body }); }
@@ -283,6 +300,9 @@ export function encodeHumanRequestDetail(id: string, body: HumanRequestDetailBod
 export function encodeHumanRequestReplyResult(id: string, body: HumanRequestReplyResultBody): string { return encodeServerControl({ type: "HUMAN_REQUEST_REPLY_RESULT", id, body }); }
 export function encodeHumanRequestCancelRunResult(id: string, body: HumanRequestCancelRunResultBody): string { return encodeServerControl({ type: "HUMAN_REQUEST_CANCEL_RUN_RESULT", id, body }); }
 export function encodeTaskEnqueueResult(id: string, body: TaskEnqueueResultBody): string { return encodeServerControl({ type: "TASK_ENQUEUE_RESULT", id, body }); }
+export function encodeProjectCreateResult(id: string, body: ProjectCreateResultBody): string { return encodeServerControl({ type: "PROJECT_CREATE_RESULT", id, body }); }
+export function encodeRepositories(id: string, body: RepositoriesBody): string { return encodeServerControl({ type: "REPOSITORIES", id, body }); }
+export function encodeRepositoryMutateResult(id: string, body: RepositoryMutateResultBody): string { return encodeServerControl({ type: "REPOSITORY_MUTATE_RESULT", id, body }); }
 export function encodeAgentControlResult(id: string, body: AgentControlResultBody): string { return encodeServerControl({ type: "AGENT_CONTROL_RESULT", id, body }); }
 export function encodeTaskHistory(id: string, body: TaskHistoryBody): string { return encodeServerControl({ type: "TASK_HISTORY", id, body }); }
 export function encodeTaskDetail(id: string, body: TaskDetailBody): string { return encodeServerControl({ type: "TASK_DETAIL", id, body }); }
@@ -318,7 +338,7 @@ function wireValue(value: unknown): unknown {
 }
 
 /** Only bounded server observations may exceed the 64 KiB control bound. */
-function controlLimit(type: ControlType): number { return type === "STATE_SNAPSHOT" || type === "TOPOLOGY" || type === "ACCOUNTS" ? MAX_SNAPSHOT_BYTES : MAX_CONTROL_BYTES; }
+function controlLimit(type: ControlType): number { return type === "STATE_SNAPSHOT" || type === "TOPOLOGY" || type === "ACCOUNTS" || type === "REPOSITORIES" ? MAX_SNAPSHOT_BYTES : MAX_CONTROL_BYTES; }
 
 function decodeControl(data: string | Uint8Array, role: "client" | "server"): ClientControlFrame | ServerControlFrame {
   let text: string;
@@ -392,10 +412,11 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "HUMAN_REQUEST_CANCEL_RUN": requireKeys(body, ["request_id", "expected_request_revision", "expected_run_revision"], wire); return { request_id: dynamicID(body.request_id), expected_request_revision: decimal(body.expected_request_revision, wire, true), expected_run_revision: decimal(body.expected_run_revision, wire, true) };
     case "HUMAN_REQUEST_CANCEL_RUN_RESULT": requireKeys(body, ["run_id", "run_revision", "request_id", "request_revision"], wire); return { run_id: dynamicID(body.run_id), run_revision: decimal(body.run_revision, wire, true), request_id: dynamicID(body.request_id), request_revision: decimal(body.request_revision, wire, true) };
     case "TASK_ENQUEUE": {
-      requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["mode"]);
+      requireKeys(body, ["task_id", "incarnation_id", "agent_id", "expected_agent_revision", "instruction"], wire, ["repository_id", "mode"]);
       const mode = present(body, "mode") ? body.mode : undefined;
       if (mode !== undefined && mode !== "now" && mode !== "queue" && mode !== "any") malformed();
-      return { task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }) };
+      const repository_id = present(body, "repository_id") ? dynamicID(body.repository_id) : undefined;
+      return { task_id: dynamicID(body.task_id), incarnation_id: dynamicID(body.incarnation_id), agent_id: dynamicID(body.agent_id), ...(repository_id === undefined ? {} : { repository_id }), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), instruction: boundedText(body.instruction, 1, MAX_TASK_INSTRUCTION_BYTES), ...(mode === undefined ? {} : { mode }) };
     }
     case "TASK_ENQUEUE_RESULT": requireKeys(body, ["task_id", "revision", "agent_revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true), agent_revision: decimal(body.agent_revision, wire, true) };
     case "AGENT_CONTROL": {
@@ -445,6 +466,12 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "AGENT_UPDATE_RESULT": requireKeys(body, ["agent_id", "revision"], wire); return { agent_id: dynamicID(body.agent_id), revision: decimal(body.revision, wire, true) };
     case "PROJECT_LIMITS": requireKeys(body, ["project_id", "expected_revision", "run_budget", "max_run_seconds"], wire); return { project_id: dynamicID(body.project_id), expected_revision: decimal(body.expected_revision, wire, true), run_budget: decimal(body.run_budget, wire), max_run_seconds: integer(body.max_run_seconds, 0, 86400) };
     case "PROJECT_LIMITS_RESULT": requireKeys(body, ["project_id", "revision"], wire); return { project_id: dynamicID(body.project_id), revision: decimal(body.revision, wire, true) };
+    case "PROJECT_CREATE": requireKeys(body, ["project_id", "name", "root"], wire); return { project_id: dynamicID(body.project_id), name: boundedText(body.name, 1, MAX_PROJECT_NAME_BYTES), root: boundedText(body.root, 1, 4096) };
+    case "PROJECT_CREATE_RESULT": requireKeys(body, ["project_id", "revision"], wire); return { project_id: dynamicID(body.project_id), revision: decimal(body.revision, wire, true) };
+    case "REPOSITORIES_GET": requireKeys(body, ["project_id"], wire); return { project_id: dynamicID(body.project_id) };
+    case "REPOSITORIES": return repositoriesBody(body, wire);
+    case "REPOSITORY_MUTATE": return repositoryMutateBody(body, wire);
+    case "REPOSITORY_MUTATE_RESULT": { requireKeys(body, [], wire, ["repository"]); return present(body, "repository") ? { repository: repositoryItem(body.repository, wire) } : {}; }
     case "TASK_UPDATE": requireKeys(body, ["task_id", "expected_revision"], wire, ["title", "body", "priority", "assigned_agent_id", "status"]); { const result: TaskUpdateBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "title")) result.title = boundedText(body.title, 1, MAX_TASK_TITLE_BYTES); if (present(body, "body")) result.body = boundedText(body.body, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "priority")) result.priority = integer(body.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY); if (present(body, "assigned_agent_id")) result.assigned_agent_id = dynamicID(body.assigned_agent_id); if (present(body, "status")) { if (body.status !== "cancelled") malformed(); result.status = body.status; } return result; }
     case "TASK_UPDATE_RESULT": requireKeys(body, ["task_id", "revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true) };
     case "TOPOLOGY_GET": requireKeys(body, ["project_id"], wire); return { project_id: dynamicID(body.project_id) };
@@ -579,6 +606,40 @@ const TOPOLOGY_KINDS = ["repository", "module", "package", "directory"] as const
 const TOPOLOGY_BUCKETS = ["empty", "tiny", "small", "medium", "large"] as const;
 /** Empty, or one canonical Git object name in either length Git itself uses. */
 function topologySource(value: unknown): string { if (typeof value !== "string" || value !== "" && !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) malformed(); return value; }
+function repositoryItem(value: unknown, wire: boolean): RepositoryItem {
+  if (!isObject(value)) malformed();
+  requireKeys(value, ["id", "project_id", "name", "root", "base_ref", "enabled", "default", "revision"], wire);
+  if (typeof value.enabled !== "boolean" || typeof value.default !== "boolean") malformed();
+  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), root: boundedText(value.root, 1, 4096), base_ref: boundedText(value.base_ref, 1, 4096), enabled: value.enabled, default: value.default, revision: decimal(value.revision, wire, true) };
+}
+
+function repositoriesBody(body: Record<string, unknown>, wire: boolean): RepositoriesBody {
+  requireKeys(body, ["project_id", "items"], wire);
+  const project_id = dynamicID(body.project_id);
+  if (!Array.isArray(body.items) || body.items.length > MAX_SNAPSHOT_ENTITIES) malformed();
+  const items = body.items.map((item) => repositoryItem(item, wire));
+  if (items.some((item) => item.project_id !== project_id)) malformed();
+  return { project_id, items };
+}
+
+function repositoryMutateBody(body: Record<string, unknown>, wire: boolean): RepositoryMutateBody {
+  requireKeys(body, ["action"], wire, ["id", "project_id", "name", "root", "base_ref", "expected_revision", "enabled"]);
+  const action = body.action;
+  if (action !== "add" && action !== "name" && action !== "base" && action !== "default" && action !== "enabled" && action !== "remove") malformed();
+  const id = present(body, "id") ? dynamicID(body.id) : undefined;
+  const project_id = present(body, "project_id") ? dynamicID(body.project_id) : undefined;
+  const name = present(body, "name") ? boundedText(body.name, 1, MAX_AGENT_NAME_BYTES) : undefined;
+  const root = present(body, "root") ? boundedText(body.root, 1, 4096) : undefined;
+  const base_ref = present(body, "base_ref") ? boundedText(body.base_ref, 1, 4096) : undefined;
+  const expected_revision = present(body, "expected_revision") ? decimal(body.expected_revision, wire, true) : undefined;
+  if (present(body, "enabled") && typeof body.enabled !== "boolean") malformed();
+  const enabled = present(body, "enabled") ? body.enabled as boolean : undefined;
+  if (action === "add") {
+    if (id === undefined || project_id === undefined || name === undefined || root === undefined || base_ref === undefined) malformed();
+  } else if (id === undefined || expected_revision === undefined || action === "name" && name === undefined || action === "base" && base_ref === undefined || action === "enabled" && enabled === undefined) malformed();
+  return { action, ...(id === undefined ? {} : { id }), ...(project_id === undefined ? {} : { project_id }), ...(name === undefined ? {} : { name }), ...(root === undefined ? {} : { root }), ...(base_ref === undefined ? {} : { base_ref }), ...(expected_revision === undefined ? {} : { expected_revision }), ...(enabled === undefined ? {} : { enabled }) };
+}
+
 function topologyBody(body: Record<string, unknown>, wire: boolean): TopologyBody {
   requireKeys(body, ["project_id", "digest", "source_revision", "nodes"], wire, ["dependencies", "inventory_omitted"]);
   const nodes = itemArray(body.nodes, (item) => topologyNode(item, wire));

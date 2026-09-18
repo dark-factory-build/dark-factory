@@ -192,3 +192,54 @@ func TestStopRunForAttemptTargetsOnlyWorkers(t *testing.T) {
 		t.Fatalf("durable worker stop history = %+v, %v", history, err)
 	}
 }
+
+func TestReplacementRetainsDisabledRepositoryAndOriginalBaseAfterDefaultChange(t *testing.T) {
+	ctx := context.Background()
+	store, run, _ := runningWorkerRun(t)
+	defer store.Close()
+	task, found, err := store.Task(ctx, run.TaskID)
+	if err != nil || !found {
+		t.Fatalf("task: %v %v", found, err)
+	}
+	original, found, err := store.TaskRepository(ctx, task.ID)
+	if err != nil || !found {
+		t.Fatalf("original route: %v %v", found, err)
+	}
+	other, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 230), ProjectID: task.ProjectID, Name: "other", Root: "/replacement-other", BaseRef: "release"}, mustTime(t, 40))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetProjectRepositoryDefault(ctx, other.ID, other.Revision, mustTime(t, 41)); err != nil {
+		t.Fatal(err)
+	}
+	changed, _, err := store.ProjectRepository(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err = store.UpdateProjectRepositoryBase(ctx, changed.ID, changed.Revision, "develop", mustTime(t, 42))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetProjectRepositoryEnabled(ctx, changed.ID, changed.Revision, false, mustTime(t, 43)); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := TaskInterventionIDFromBytes(bytes.Repeat([]byte{231}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: run.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: run.Revision, Kind: TaskInterventionReplace}
+	successor := NewTask{ID: taskID(t, 232), IncarnationID: incarnationID(t, 233), Body: "Continue original work"}
+	if _, err := store.StopRunForOperator(ctx, request, &successor, mustTime(t, 44)); err != nil {
+		t.Fatal(err)
+	}
+	retained, found, err := store.TaskRepository(ctx, successor.ID)
+	if err != nil || !found || retained.ID != original.ID || retained.Root != original.Root || retained.BaseRef != original.BaseRef || retained.Enabled {
+		t.Fatalf("replacement route: %+v, want %+v: %v", retained, original, err)
+	}
+	if _, err := store.StopRunForOperator(ctx, request, &successor, mustTime(t, 45)); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 234), ProjectID: task.ProjectID, RepositoryID: original.ID, IncarnationID: incarnationID(t, 235), Title: "new work"}, mustTime(t, 46)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("disabled repository accepted unrelated new work: %v", err)
+	}
+}

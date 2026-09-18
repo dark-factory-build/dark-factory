@@ -204,3 +204,26 @@ test("exceptional input ownership and replay loss are concise", () => {
   assert.equal(quiet.includes("TERMINAL OPEN ELSEWHERE"), false);
   assert.equal(quiet.includes("Earlier output"), false);
 });
+
+
+test("disabled or removed instruction checkout falls back to current routing", async () => {
+  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    for (const removed of [false, true]) {
+      const submitted = [];
+      const first = { id: "first", name: "First", enabled: true, default: false };
+      const second = { id: "second", name: "Second", enabled: true, default: true };
+      const props = { terminal: terminalView(), onSubmit: async (...args) => { submitted.push(args); return true; } };
+      let renderer;
+      await act(async () => { renderer = create(createElement(AgentInstruction, { ...props, repositories: [first, second] })); });
+      await act(async () => { renderer.root.findByType("select").props.onChange({ currentTarget: { value: "first" } }); });
+      await act(async () => { renderer.update(createElement(AgentInstruction, { ...props, repositories: removed ? [second] : [{ ...first, enabled: false }, second] })); });
+      assert.equal(renderer.root.findAllByType("select").length, 0);
+      await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "Use available checkout" } }); });
+      await act(async () => { renderer.root.findByType("form").props.onSubmit({ preventDefault() {} }); });
+      assert.deepEqual(submitted, [["Use available checkout", "now", undefined]]);
+      await act(async () => { renderer.unmount(); });
+    }
+  } finally { globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct; }
+});

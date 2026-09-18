@@ -151,6 +151,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		spec.AccountHome == "" || !filepath.IsAbs(spec.AccountHome) || filepath.Clean(spec.AccountHome) != spec.AccountHome || provider.ValidateToolPath(spec.ToolPath) != nil {
 		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
 	}
+	// Production initializes this before recovery/listeners; direct supervisors
+	// use the same one-time transition before any admission.
+	if err := daemon.store.InitializeRepositoryBase(ctx, spec.BaseRevision); err != nil {
+		return kernel.Run{}, err
+	}
 	keys, err := newSupervisorKeys(rand.Reader)
 	if err != nil {
 		return kernel.Run{}, err
@@ -254,6 +259,13 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if project.VerificationPolicy != run.VerificationPolicy || project.VerificationPolicy != kernel.VerificationNone {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, fmt.Errorf("%w: verification is not part of the kernel spike", kernel.ErrInvalidValue))
 	}
+	repository, found, err := daemon.store.TaskRepository(ctx, run.TaskID)
+	if err != nil || !found {
+		if err == nil {
+			err = kernel.ErrCorruptState
+		}
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, err)
+	}
 	// The account is read from the agent at launch, not copied onto the run:
 	// it is configuration, not part of the admitted work.
 	accountConfigDir, err := daemon.agentAccountConfigDir(ctx, run.AgentID)
@@ -264,7 +276,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
-	repositoryIdentity, err := inspectRepositoryIdentity(project.Root)
+	repositoryIdentity, err := inspectRepositoryIdentity(repository.Root)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
 	}
@@ -368,12 +380,25 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureInternal, kernel.ErrCorruptState)
 		}
 	}
+	var repositoryGitIdentity change.RepositoryIdentity
+	var repositoryOriginDigest [32]byte
+	if retained == nil {
+		source, sourceErr := inspectRegisteredRepository(ctx, repository.Root, "")
+		if sourceErr == nil {
+			sourceErr = daemon.store.BindRepositorySource(ctx, repository.ID, source)
+		}
+		if sourceErr != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
+		}
+		repositoryGitIdentity, _ = change.NewRepositoryIdentity(source.GitDevice, source.GitInode)
+		repositoryOriginDigest = source.OriginDigest
+	}
 	// The repository's Git directory holds every Change worktree's refs and
 	// commits; a run that cannot resolve it has no source to work in. CI is an
 	// optional execution capability on top: an unavailable or unsafe lease
 	// must not block otherwise valid source work; no lease directory is
 	// granted.
-	gitCommonDir, err := resolveGitCommonDir(ctx, spec.GitExecutable, project.Root)
+	gitCommonDir, err := resolveGitCommonDir(ctx, spec.GitExecutable, repository.Root)
 	if err != nil {
 		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, err)
 	}
@@ -430,8 +455,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		Provider: run.Provider, Role: run.Role, Model: run.Model, ReasoningEffort: run.ReasoningEffort,
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
-		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: project.Root, RepositoryIdentity: repositoryIdentity, GitCommonDir: gitCommonDir,
-		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName,
+		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, RepositoryGitIdentity: repositoryGitIdentity, RepositoryOriginDigest: repositoryOriginDigest, GitCommonDir: gitCommonDir,
+		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, RetainedSourceReview: retainedSourceReview, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)
@@ -634,8 +659,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		// administration; retained worktrees keep their layout. Verify the branch
 		// at the base for a fresh or adopted Change and at the settled head for
 		// a reopened one.
-		facts, err := change.InspectWorktree(ctx, spec.GitExecutable, project.Root, repositoryIdentity, filepath.Join(spec.ChangeParent, finalName))
-		if err != nil || facts.Branch() != change.BranchName(finalName) || retained == nil && facts.GitDirectory() != change.GitDirectoryForChange(project.Root, filepath.Join(spec.ChangeParent, finalName)) {
+		facts, err := change.InspectWorktree(ctx, spec.GitExecutable, repository.Root, repositoryIdentity, filepath.Join(spec.ChangeParent, finalName))
+		if err != nil || facts.Branch() != change.BranchName(finalName) || retained == nil && facts.GitDirectory() != change.GitDirectoryForChange(repository.Root, filepath.Join(spec.ChangeParent, finalName)) {
 			return daemon.failRun(run, kernel.FailureSource, errors.Join(err, errInvalidContract))
 		}
 		head, err := kernelCommit(facts.Head())

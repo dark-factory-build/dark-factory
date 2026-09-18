@@ -80,6 +80,25 @@ func (backend *consoleDispatchBackend) SetProjectLimits(_ context.Context, clien
 	}
 	return backend.limits, nil
 }
+func (backend *consoleDispatchBackend) CreateProject(_ context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.ProjectCreate) (browserprotocol.ProjectCreateResult, error) {
+	if err := backend.record(client); err != nil {
+		return browserprotocol.ProjectCreateResult{}, err
+	}
+	return browserprotocol.ProjectCreateResult{ProjectID: request.ProjectID, Revision: 1}, nil
+}
+
+func (backend *consoleDispatchBackend) Repositories(_ context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.RepositoriesGet) (browserprotocol.Repositories, error) {
+	if err := backend.record(client); err != nil {
+		return browserprotocol.Repositories{}, err
+	}
+	return browserprotocol.Repositories{ProjectID: request.ProjectID, Items: []browserprotocol.Repository{}}, nil
+}
+func (backend *consoleDispatchBackend) MutateRepository(_ context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.RepositoryMutate) (browserprotocol.RepositoryMutateResult, error) {
+	if err := backend.record(client); err != nil {
+		return browserprotocol.RepositoryMutateResult{}, err
+	}
+	return browserprotocol.RepositoryMutateResult{}, nil
+}
 
 func (backend *consoleDispatchBackend) Topology(ctx context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.TopologyGet) (browserprotocol.Topology, error) {
 	if err := backend.record(client); err != nil {

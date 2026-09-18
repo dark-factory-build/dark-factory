@@ -1,0 +1,1 @@
+{"type":"REPOSITORY_MUTATE_RESULT","id":"repository-mutate-1","body":{"repository":{"id":"02020202020202020202020202020202","project_id":"01010101010101010101010101010101","name":"Main checkout","root":"/Users/operator/main","base_ref":"main","enabled":false,"default":false,"revision":"4"}}}

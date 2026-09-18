@@ -31,6 +31,8 @@ type Store struct {
 	closed      atomic.Bool
 	close       sync.Once
 	closeErr    error
+
+	repositoryBase string // Boot-owned initial binding default; protected by writerGate.
 }
 
 func newStore() *Store {

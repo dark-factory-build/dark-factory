@@ -28,6 +28,9 @@ func TestCompletedWorkDoesNotFillActiveSnapshotAndPagesIndependently(t *testing.
 			t.Fatal(err)
 		}
 	}
+	if _, err := tx.Exec(fixtureTaskRepositorySQL); err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +45,9 @@ func TestCompletedWorkDoesNotFillActiveSnapshotAndPagesIndependently(t *testing.
 	// A new completion and unrelated head movement must not invalidate a cursor.
 	id := publicTaskID(t, count+1)
 	if _, err := store.writer.ExecContext(ctx, `INSERT INTO tasks(id,project_id,assigned_agent_id,incarnation_id,work_revision,title,body,status,priority,completed_at_ms,revision,created_at_ms,updated_at_ms) VALUES(?,?,?,?,1,'new completion','','cancelled',0,?,1,0,?)`, id.Bytes(), project.ID.Bytes(), agent.ID.Bytes(), id.Bytes(), count+1, count+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(fixtureTaskRepositorySQL); err != nil {
 		t.Fatal(err)
 	}
 	last := first.Tasks[len(first.Tasks)-1]

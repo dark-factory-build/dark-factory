@@ -312,6 +312,15 @@ orchestrator's session is given, from the Change's branch and head. Factoryd
 exposes no repository status, commit, push, pull-request, or publication
 operation of its own.
 
+Repository registration checks the actual Git root and local base, then pins
+the root and Git administration file identities plus a digest of origin
+settings. Fresh launches recheck that proof before source selection or fetch;
+a replacement checkout or changed publication target cannot inherit the route.
+Legacy registrations receive one proof on their first fresh launch, constrained
+by retained Change and content root identities. Origin URLs and credentials are
+not stored. The recorded GitHub name is configuration, not live authorization
+or a verified numeric repository ID.
+
 The durable record of a Change is its base commit, the repository identity
 and, once the worktree exists, its branch head: the base when the worktree is
 made, the branch tip the daemon reads at settlement afterwards. That head is

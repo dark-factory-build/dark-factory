@@ -22,6 +22,8 @@ import {
   type SessionErrorCode,
   type SessionStatus,
   type DiscoveredAccountView,
+  type RepositoryMutation,
+  type RepositoryView,
   type StateView,
   type TaskItem,
   type TaskListView,
@@ -142,6 +144,10 @@ export type FactoryAppSnapshot = Readonly<{
   accounts?: readonly DiscoveredAccountView[];
   accountsPending?: boolean;
   accountsError?: string;
+  /** Private SETTINGS observation; roots never enter StateView or STATE. */
+  repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
+  repositoryPending?: ReadonlySet<string>;
+  repositoryErrors?: ReadonlyMap<string, string>;
 }>;
 
 export type FactoryAppStatus =
@@ -151,7 +157,7 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -623,7 +629,7 @@ export class FactoryAppController {
     this.#replaceTerminal(selected === undefined ? {} : { agentId: selected.agent.id, agentRevision: selected.agent.revision });
   }
 
-  async enqueueAgentInstruction(instruction: string, mode: "now" | "queue" | "any" = "now"): Promise<boolean> {
+  async enqueueAgentInstruction(instruction: string, mode: "now" | "queue" | "any" = "now", repositoryId?: string): Promise<boolean> {
     const selected = this.#selectedAgent;
     const session = this.#client?.session;
     const body = instruction.trim();
@@ -657,6 +663,7 @@ export class FactoryAppController {
       const task = await session.enqueueAgentTask({
         agentId: selected.agent.id,
         expectedAgentRevision: selected.agent.revision,
+        ...(repositoryId === undefined ? {} : { repositoryId }),
         instruction: body,
         ...(mode === "now" ? {} : { mode }),
       });
@@ -774,6 +781,12 @@ export class FactoryAppController {
   updateAccount(request: Parameters<BrowserSession["updateAccount"]>[0]): Promise<void> {
     return this.#settings.updateAccount(request);
   }
+
+  loadRepositories(projectId: string): Promise<void> { return this.#settings.loadRepositories(projectId); }
+
+  mutateRepository(request: RepositoryMutation): Promise<void> { return this.#settings.mutateRepository(request); }
+
+  createProject(request: { name: string; root: string }): Promise<void> { return this.#settings.createProject(request); }
 
   loadDevices(): Promise<void> { return this.#settings.loadDevices(); }
 
@@ -1400,6 +1413,9 @@ export class FactoryAppController {
       accounts: this.#settings.accounts,
       accountsPending: this.#settings.accountsPending,
       accountsError: this.#settings.accountsError,
+      repositories: this.#settings.repositories,
+      repositoryPending: this.#settings.repositoryPending,
+      repositoryErrors: this.#settings.repositoryErrors,
       selectedAgent: this.#selectedAgent === undefined ? undefined : {
         id: this.#selectedAgent.agent.id,
         name: this.#selectedAgent.agent.name,

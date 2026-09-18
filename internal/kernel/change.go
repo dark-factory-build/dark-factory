@@ -170,7 +170,10 @@ func (store *Store) RecordChangePrepared(ctx context.Context, id ChangeID, expec
 		}
 		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'prepared', object_format = ?, base_commit = ?, repository_dev = ?, repository_inode = ?, prepared_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'reserved' AND revision = ?`,
 			selection.format.String(), selection.commit.Bytes(), selection.repository.device, selection.repository.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
-		return false, requireOneRow(result, err)
+		if err := requireOneRow(result, err); err != nil {
+			return false, err
+		}
+		return false, validateRepositoryBindings(ctx, connection)
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"path"
 	"sort"
 	"sync"
 	"time"
@@ -294,6 +295,13 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
 	}
+	var repositoryID kernel.RepositoryID
+	if request.RepositoryID != "" {
+		repositoryID, err = browserID(request.RepositoryID, kernel.RepositoryIDFromBytes)
+		if err != nil {
+			return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
+		}
+	}
 	at, err := backend.timestamp()
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
@@ -312,7 +320,7 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	} else if err := backend.prepareAgentInstruction(ctx, agentID, request.Instruction); err != nil {
 		return browserprotocol.TaskEnqueueResult{}, err
 	}
-	result, err := backend.store.EnqueueTaskForBrowserAgentMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, request.Instruction, mode, at)
+	result, err := backend.store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, repositoryID, request.Instruction, mode, at)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
 	}
@@ -412,6 +420,113 @@ func (backend *browserBackend) SetProjectLimits(ctx context.Context, rawClient [
 		backend.owner.notifyScheduler()
 	}
 	return browserprotocol.ProjectLimitsResult{ProjectID: project.ID.String(), Revision: decimalRevision(project.Revision)}, nil
+}
+
+func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.ProjectCreate) (browserprotocol.ProjectCreateResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.ProjectCreateResult{}, err
+	}
+	defer release()
+	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return browserprotocol.ProjectCreateResult{}, browser.ErrStale
+	}
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.ProjectCreateResult{}, mapBrowserError(err)
+	}
+	project, err := registerProject(ctx, backend.store, kernel.NewProject{ID: projectID, Name: request.Name, Root: request.Root, VerificationPolicy: kernel.VerificationNone}, at)
+	if err != nil {
+		return browserprotocol.ProjectCreateResult{}, consoleUpdateError(err)
+	}
+	return browserprotocol.ProjectCreateResult{ProjectID: project.ID.String(), Revision: decimalRevision(project.Revision)}, nil
+}
+
+func browserRepository(value kernel.ProjectRepository) browserprotocol.Repository {
+	return browserprotocol.Repository{ID: value.ID.String(), ProjectID: value.ProjectID.String(), Name: value.Name, Root: value.Root, BaseRef: value.BaseRef, Enabled: browserprotocol.Bool(value.Enabled), Default: browserprotocol.Bool(value.Default), Revision: decimalRevision(value.Revision)}
+}
+func (backend *browserBackend) Repositories(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.RepositoriesGet) (browserprotocol.Repositories, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.Repositories{}, err
+	}
+	defer release()
+	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return browserprotocol.Repositories{}, browser.ErrStale
+	}
+	values, err := backend.store.ProjectRepositories(ctx, projectID)
+	if err != nil {
+		return browserprotocol.Repositories{}, mapBrowserError(err)
+	}
+	result := browserprotocol.Repositories{ProjectID: request.ProjectID, Items: make([]browserprotocol.Repository, 0, len(values))}
+	for _, value := range values {
+		result.Items = append(result.Items, browserRepository(value))
+	}
+	return result, nil
+}
+func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.RepositoryMutate) (browserprotocol.RepositoryMutateResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.RepositoryMutateResult{}, err
+	}
+	defer release()
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.RepositoryMutateResult{}, mapBrowserError(err)
+	}
+	parse := func() (kernel.RepositoryID, error) { return browserID(request.ID, kernel.RepositoryIDFromBytes) }
+	if request.Action == "add" {
+		id, err := parse()
+		if err != nil {
+			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+		}
+		project, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+		if err != nil {
+			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+		}
+		value, err := registerProjectRepository(ctx, backend.store, kernel.NewProjectRepository{ID: id, ProjectID: project, Name: request.Name, Root: request.Root, BaseRef: request.BaseRef}, at)
+		if err != nil {
+			return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
+		}
+		item := browserRepository(value)
+		return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
+	}
+	id, err := parse()
+	if err != nil {
+		return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+	}
+	expected, err := browserDecimal(request.ExpectedRevision)
+	if err != nil {
+		return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+	}
+	var value kernel.ProjectRepository
+	switch request.Action {
+	case "name":
+		value, err = backend.store.UpdateProjectRepositoryName(ctx, id, expected, request.Name, at)
+	case "base":
+		value, err = updateRepositoryBase(ctx, backend.store, id, expected, request.BaseRef, at)
+	case "default":
+		value, err = backend.store.SetProjectRepositoryDefault(ctx, id, expected, at)
+	case "enabled":
+		if request.Enabled == nil {
+			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+		}
+		value, err = backend.store.SetProjectRepositoryEnabled(ctx, id, expected, bool(*request.Enabled), at)
+	case "remove":
+		err = backend.store.RemoveProjectRepository(ctx, id, expected)
+	default:
+		return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+	}
+	if err != nil {
+		return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
+	}
+	if request.Action == "remove" {
+		return browserprotocol.RepositoryMutateResult{}, nil
+	}
+	item := browserRepository(value)
+	return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
 }
 
 func (backend *browserBackend) UpdateTask(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error) {
@@ -721,6 +836,24 @@ func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserp
 	}
 	result := browserprotocol.RunPaths{AgentID: request.AgentID, Paths: paths}
 	if runID != (kernel.RunID{}) {
+		run, found, err := backend.store.Run(ctx, runID)
+		if err != nil || !found {
+			return browserprotocol.RunPaths{}, browser.ErrStale
+		}
+		repository, found, err := backend.store.TaskRepository(ctx, run.TaskID)
+		if err != nil || !found {
+			return browserprotocol.RunPaths{}, browser.ErrStale
+		}
+		repositories, err := backend.store.ProjectRepositories(ctx, run.ProjectID)
+		if err != nil {
+			return browserprotocol.RunPaths{}, mapBrowserError(err)
+		}
+		if len(repositories) > 1 {
+			result.Paths = make([]string, len(paths))
+			for index, relative := range paths {
+				result.Paths[index] = path.Join(repository.ID.String(), relative)
+			}
+		}
 		result.RunID = runID.String()
 	}
 	return result, nil

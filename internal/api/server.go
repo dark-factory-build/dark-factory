@@ -23,6 +23,7 @@ const (
 	CallHealth CallKind = iota + 1
 	CallSnapshot
 	CallCreateProject
+	CallProjectRepository
 	CallProjectLimits
 	CallCreateAgent
 	CallAgentIdlePolicy
@@ -109,6 +110,7 @@ type Call struct {
 	kind                CallKind
 	digest              AttemptDigest
 	project             CreateProjectInput
+	repository          ProjectRepositoryInput
 	projectLimits       ProjectLimitsInput
 	agent               CreateAgentInput
 	agentIdlePolicy     AgentIdlePolicyInput
@@ -230,6 +232,9 @@ func (call Call) HumanReplyInput() (OverseerHumanReplyInput, bool) {
 
 func (call Call) CreateProjectInput() (CreateProjectInput, bool) {
 	return call.project, call.kind == CallCreateProject
+}
+func (call Call) ProjectRepositoryInput() (ProjectRepositoryInput, bool) {
+	return call.repository, call.kind == CallProjectRepository
 }
 
 func (call Call) ProjectLimitsInput() (ProjectLimitsInput, bool) {
@@ -821,6 +826,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.project); err != nil || !validID(call.project.ID) || !validText(call.project.Name, 1, 128) || !validText(call.project.Root, 1, 4096) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallProjectRepository:
+		if err := decodeExact(request.Params, &call.repository); err != nil {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallProjectLimits:
 		if err := decodeExact(request.Params, &call.projectLimits); err != nil || !validID(call.projectLimits.ProjectID) || call.projectLimits.ExpectedRevision == 0 || call.projectLimits.RunBudget > uint64(^uint64(0)>>1) || call.projectLimits.MaxRunSeconds > 86400 {
 			return Call{}, RemoteInvalidRequest
@@ -838,7 +847,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallEnqueueTask:
-		if err := decodeExact(request.Params, &call.task); err != nil || !validID(call.task.ID) || !validID(call.task.ProjectID) || !validOptionalID(call.task.AssignedAgentID) || !validID(call.task.IncarnationID) || !validText(call.task.Title, 1, 1024) || !validText(call.task.Body, 0, 131072) || call.task.Priority < -1_000_000 || call.task.Priority > 1_000_000 {
+		if err := decodeExact(request.Params, &call.task); err != nil || !validID(call.task.ID) || !validID(call.task.ProjectID) || !validOptionalID(call.task.RepositoryID) || !validOptionalID(call.task.AssignedAgentID) || !validID(call.task.IncarnationID) || !validText(call.task.Title, 1, 1024) || !validText(call.task.Body, 0, 131072) || call.task.Priority < -1_000_000 || call.task.Priority > 1_000_000 {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallTaskRecovery:
@@ -1055,6 +1064,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallSnapshot, operatorDomain
 	case "create_project":
 		return CallCreateProject, operatorDomain
+	case "project_repository":
+		return CallProjectRepository, operatorDomain
 	case "project_limits":
 		return CallProjectLimits, operatorDomain
 	case "create_agent":
@@ -1293,6 +1304,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
 		return reply == replyOverseerSnapshot
+	case CallProjectRepository:
+		return reply == replyContent
 	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply:
 		return reply == replyMutation
 	case CallWebStatus:

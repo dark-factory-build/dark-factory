@@ -65,6 +65,9 @@ func newDispatchFixtureAt(t *testing.T, parent string) *dispatchFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.InitializeRepositoryBase(context.Background(), "HEAD"); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = store.Close() })
 	daemon, err := newDaemon(store, func() time.Time { return time.UnixMilli(1000) })
 	if err != nil {
@@ -171,7 +174,7 @@ func TestDaemonDispatchesOperatorCallsAndBoundsProjection(t *testing.T) {
 	waitDispatch(t, done)
 	assertNoSchedulerWake(t, fixture.daemon)
 
-	projectInput := api.CreateProjectInput{ID: testID(1), Name: "project", Root: filepath.Join(t.TempDir(), "source-root")}
+	projectInput := api.CreateProjectInput{ID: testID(1), Name: "project", Root: contentRepositoryFixture(t)}
 	done = fixture.serve(t)
 	projectResult, err := client.CreateProject(ctx, projectInput)
 	if err != nil || projectResult.Revision != 1 || projectResult.Head != 2 {
@@ -528,7 +531,7 @@ func TestDaemonDispatchesSendBackThroughBothDomains(t *testing.T) {
 	// anything, so a note's length cannot probe it.
 	elsewhere, stranger, foreign := testID(71), testID(72), testID(73)
 	done = fixture.serve(t)
-	if _, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: elsewhere, Name: "elsewhere", Root: filepath.Join(filepath.Dir(fixture.socket), "elsewhere-root")}); err != nil {
+	if _, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: elsewhere, Name: "elsewhere", Root: contentRepositoryFixture(t)}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
@@ -760,7 +763,7 @@ func prepareActiveAttemptInProject(t *testing.T, fixture *dispatchFixture, seed 
 	}
 	if !foundProject {
 		call(func() error {
-			_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "project", Root: filepath.Join(filepath.Dir(fixture.socket), "source-root")})
+			_, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "project", Root: contentRepositoryFixture(t)})
 			return err
 		})
 	}
@@ -1111,7 +1114,7 @@ func TestDaemonOperatorTaskReadBindsRevisionAndPagesUTF8(t *testing.T) {
 	}
 	projectID, agentID, taskID, incarnationID := testID(220), testID(221), testID(222), testID(223)
 	call(func() error {
-		_, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "read", Root: filepath.Join(filepath.Dir(fixture.socket), "read-root")})
+		_, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "read", Root: contentRepositoryFixture(t)})
 		return err
 	})
 	call(func() error {
@@ -1564,7 +1567,7 @@ func TestTaskEnqueuePreflightPreservesReplayAndOverseerAuthority(t *testing.T) {
 	}
 	waitDispatch(t, done)
 	done = fixture.serve(t)
-	if _, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: testID(220), Name: "other", Root: filepath.Join(t.TempDir(), "other-source")}); err != nil {
+	if _, err := operator.CreateProject(ctx, api.CreateProjectInput{ID: testID(220), Name: "other", Root: contentRepositoryFixture(t)}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)
@@ -1623,7 +1626,7 @@ func TestDaemonSelectAgentModelRequiresWorkerRevisionAndCompatibleControls(t *te
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	project := api.CreateProjectInput{ID: testID(50), Name: "project", Root: filepath.Join(t.TempDir(), "source")}
+	project := api.CreateProjectInput{ID: testID(50), Name: "project", Root: contentRepositoryFixture(t)}
 	done := fixture.serve(t)
 	if _, err := client.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
@@ -1776,7 +1779,7 @@ func TestDaemonSelectOverseerAccountPreservesSelectionGuards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	project := api.CreateProjectInput{ID: testID(40), Name: "project", Root: filepath.Join(t.TempDir(), "source")}
+	project := api.CreateProjectInput{ID: testID(40), Name: "project", Root: contentRepositoryFixture(t)}
 	done := fixture.serve(t)
 	_, err = client.CreateProject(ctx, project)
 	waitDispatch(t, done)

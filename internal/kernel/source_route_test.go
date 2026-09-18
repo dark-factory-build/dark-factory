@@ -161,6 +161,9 @@ func TestRetainedSourceReviewRouteResolvesLegacyQueuedTasks(t *testing.T) {
 			id.Bytes(), project.ID.Bytes(), claude.ID.Bytes(), incarnation.Bytes(), "legacy review", body, int64(20), int64(20)); err != nil {
 			t.Fatalf("insert legacy review handoff: %v", err)
 		}
+		if _, err := store.writer.Exec(fixtureTaskRepositorySQL); err != nil {
+			t.Fatal(err)
+		}
 		return id
 	}
 
@@ -238,6 +241,9 @@ func TestRetainedSourceReviewRouteAdmissionRequiresWorkerRole(t *testing.T) {
 	    ) VALUES(?, ?, ?, ?, 1, ?, ?, NULL, 'queued', 0, NULL, NULL, NULL, 1, ?, ?)`,
 		taskID(t, 4).Bytes(), project.ID.Bytes(), orchestrator.ID.Bytes(), incarnationID(t, 4).Bytes(), "legacy review", body, int64(5), int64(5)); err != nil {
 		t.Fatalf("insert legacy orchestrator review handoff: %v", err)
+	}
+	if _, err := store.writer.Exec(fixtureTaskRepositorySQL); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := store.EnqueueTask(ctx, NewTask{
 		ID: taskID(t, 5), ProjectID: project.ID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 5),

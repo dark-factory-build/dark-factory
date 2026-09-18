@@ -172,6 +172,12 @@ func TestV16OutcomeMigrationPreservesLibrary(t *testing.T) {
 	if err != nil || secondBody != "corrected definition" {
 		t.Fatalf("corrected revision: %+v %v", second, err)
 	}
+	for _, revision := range []int64{1, 2} {
+		repository, found, err := store.ContentRepository(ctx, contentID(t, 212), mustRevision(t, revision))
+		if err != nil || !found || repository.ID != RepositoryID(projectID(t, 1)) {
+			t.Fatalf("legacy revision %d has no retained repository: %v %v", revision, found, err)
+		}
+	}
 	evidence, err := store.ListContentEvidence(ctx, projectID(t, 1), contentID(t, 212), mustRevision(t, 1), 0, 4)
 	if err != nil || len(evidence.Items) != 1 || evidence.Items[0].Result != "passed" {
 		t.Fatalf("retained evidence: %+v %v", evidence, err)
@@ -329,6 +335,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		id := contentID(t, 212)
 		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, '', 'original definition', 'operator:local', '', 0, 9)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
 		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 2, ?, '', 'corrected definition', 'operator:local', '', 0, 10)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
+		corruptSQL(t, store, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) VALUES(?, 1, ?), (?, 2, ?)`, id.Bytes(), project.Bytes(), id.Bytes(), project.Bytes())
 		content := ContentRevision{ID: id, ProjectID: project, Revision: mustRevision(t, 1)}
 		evidence, err := ContentEvidenceIDFromBytes(bytes.Repeat([]byte{213}, IDBytes))
 		if err != nil {
@@ -459,7 +466,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	downgrade := []string{"DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	downgrade := []string{"DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
 	if version < v19UserVersion {
 		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
 	}
@@ -672,7 +679,10 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "c6b2b517bc127ee3bad157cd51b0b072eed009403c319c7f4f10cd6fe1b65036"},
+		{"current", schemaStatements, "301b6c8046552e1c5fb669c92001a449d215315c1a565e6526826b7fc5b0fa12"},
+		{"v22", v22SchemaStatements(), "3dd09f64e28fcb94ba6999129defe92286a10907e8ae5b6e4be4b37fb3281478"},
+		{"v21", v21SchemaStatements(), "17306bf8a7cae30e75dc0e3d85574a1ef96a45c3abfd63d2ca902fbb79c10092"},
+		{"v20", v20SchemaStatements(), "c6b2b517bc127ee3bad157cd51b0b072eed009403c319c7f4f10cd6fe1b65036"},
 		{"v19", v19SchemaStatements(), "d0334df36c119ed0311c1728656742999f4583366075dc78dc9a7b76dee4c35d"},
 		{"v18", v18SchemaStatements(), "a3af3c17a532d6b7b324507554a00080ec1c26d61831e3c51f1f1a6ac5279457"},
 		{"v17", v17SchemaStatements(), "8e566e2483f36de3f9b9d13722bbab6fb58293787b77f201ab16d98c7084ff54"},

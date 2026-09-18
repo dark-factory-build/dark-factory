@@ -344,6 +344,9 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
+	if err := store.InitializeRepositoryBase(ownedContext, configuration.baseRevision); err != nil {
+		return nil, err
+	}
 	startupPhase("store")
 	runtimes, err := owner.home.Runtimes()
 	if err != nil {

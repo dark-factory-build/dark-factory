@@ -99,6 +99,17 @@ test("floor appearance is local, field-validated, and available before a connect
   assert.doesNotMatch(markup, /Dependency links|Task props|Ambient life/);
 });
 
+test("repository roots stay inside private settings", () => {
+  const project = fixtureState.projects.get(ids.project);
+  const root = "/private/operator/checkout";
+  const repositories = new Map([[project.id, [{ id: "ad".repeat(16), project_id: project.id, name: "Checkout", root, base_ref: "main", enabled: true, default: true, revision: 1n }]]]);
+  assert.equal(render({ repositories }).includes(root), false);
+  const settings = render({ settingsOpen: true, repositories });
+  assert.match(settings, /Repositories/);
+  assert.match(settings, new RegExp(root));
+  assert.match(settings, /ADD CHECKOUT/);
+});
+
 test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
   const priorWindow = globalThis.window;
   const entries = new Map([
@@ -2143,4 +2154,23 @@ test("same-path wrappers retain navigation without overlapping displayed physica
   assert.equal(prepared.roomByID.get(id(pkg)).parentId, id(module));
   assert.equal(prepared.roomByID.get(id(child)).parentId, id(module));
   assert.equal(prepared.roomByID.get(id(root)).inventoryScope, "subtree", "selection does not mutate prepared source facts");
+});
+
+ test("repository response renders do not reload private settings", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const props = () => ({ status: "ready", state: baseState(), settingsOpen: true,
+    onToggleSettings: () => {}, onLoadRepositories: (id) => calls.push(id) });
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
+    const initial = [...calls];
+    assert.equal(initial.length, fixtureState.projects.size);
+    await act(async () => { renderer.update(createElement(FactoryConsole, props())); });
+    assert.deepEqual(calls, initial);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
 });

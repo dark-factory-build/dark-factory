@@ -127,7 +127,7 @@ func (store *Store) stopRunTx(ctx context.Context, tx *writeTx, request TaskInte
 		return existing, nil
 	}
 	if successor != nil {
-		if _, err := insertTaskOnConnection(ctx, tx.connection, spec, at); err != nil {
+		if _, err := insertTaskOnConnection(ctx, tx.connection, spec, at, task.ID); err != nil {
 			return TaskIntervention{}, err
 		}
 	}

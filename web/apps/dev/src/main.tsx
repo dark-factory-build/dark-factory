@@ -64,6 +64,14 @@ const fixtureChangedTopologies = new Map(fixtureHierarchyTopologies).set(fixture
   digest: "movement-topology",
   nodes: [...fixtureTopologies.values().next().value!.nodes, { id: "e5".repeat(32), parent_id: "a1".repeat(32), kind: "directory", path: "docs", label: "docs", language: "markdown", size_bucket: "tiny" }],
 });
+const fixtureRepositoryProjectID = fixtureFloorState.projects.keys().next().value!;
+const fixtureRepositories = new Map([[fixtureRepositoryProjectID, [{
+  id: "5a".repeat(16), project_id: fixtureRepositoryProjectID, name: "Primary checkout",
+  root: "/Users/operator/dark-factory", base_ref: "HEAD", enabled: true, default: true, revision: 1n,
+}, {
+  id: "6b".repeat(16), project_id: fixtureRepositoryProjectID, name: "Release checkout",
+  root: "/Users/operator/dark-factory-release", base_ref: "origin/release", enabled: true, default: false, revision: 1n,
+}]]]);
 
 const fixturePagedTopologies = new Map(fixtureHierarchyTopologies).set(fixtureObservedRun.projectId, {
   ...fixtureTopologies.get(fixtureObservedRun.projectId)!, digest: "paging-fixture",
@@ -98,6 +106,7 @@ function FixtureTour() {
   const actual = fixture === "actual" || fixture === "actual-idle";
   const inventoryFixture = actual || fixture === "inventory" || fixture === "inventory-idle" || fixture === "inventory-crowded";
   const terminalFixture = fixture === "terminal";
+  const repositoryFixture = fixture === "repositories";
   const archiveFixture = fixture === "archive" || fixture === "archived";
   const [inputRefused, setInputRefused] = useState(true);
   const fixtureAgent = fixtureFloorState.agents.values().next().value!;
@@ -111,7 +120,7 @@ function FixtureTour() {
   const [changedTopology, setChangedTopology] = useState(false);
   const [view, setView] = useState<FactoryConsoleProps["view"]>("floor");
   const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>(inventoryFixture ? "floor" : terminalFixture || archiveFixture ? "agent" : "needs-you");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(repositoryFixture);
   const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>(terminalFixture ? { id: fixtureAgent.id, name: fixtureAgent.name, revision: fixtureAgent.revision } : archiveFixture ? { id: archiveAgent.id, name: archiveAgent.name, revision: archiveAgent.revision } : undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [selectedHumanRequest, setSelectedHumanRequest] = useState<FactoryConsoleProps["selectedHumanRequest"]>();
@@ -147,6 +156,10 @@ function FixtureTour() {
         onDetail={setDetail}
         settingsOpen={settingsOpen}
         onToggleSettings={() => setSettingsOpen((open) => !open)}
+        repositories={repositoryFixture ? fixtureRepositories : undefined}
+        onLoadRepositories={repositoryFixture ? () => {} : undefined}
+        onMutateRepository={repositoryFixture ? () => {} : undefined}
+        onCreateProject={repositoryFixture ? () => {} : undefined}
         agentPanel={archiveFixture ? "config" : undefined}
         terminalContent={!terminalFixture ? undefined : <TerminalPanel terminal={{
           agentId: fixtureAgent.id, agentName: fixtureAgent.name, agentRevision: fixtureAgent.revision,
