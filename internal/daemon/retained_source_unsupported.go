@@ -6,10 +6,11 @@ import (
 	"context"
 	"errors"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
-func (daemon *Daemon) materializeAttemptSource(context.Context, *liveAttempt, kernel.RetainedChangeHandoff) (string, error) {
-	return "", errors.Join(install.ErrUnsupported, kernel.ErrConflict)
+func (daemon *Daemon) attemptSourceHandoff(context.Context, kernel.RetainedChangeHandoff) (api.RetainedChangeHandoff, error) {
+	return api.RetainedChangeHandoff{}, errors.Join(install.ErrUnsupported, kernel.ErrConflict)
 }

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -24,7 +25,10 @@ const (
 	// maintainerBridge is the Maintainer App's MCP bridge. An orchestrator
 	// launch names it to Claude, which is how an overseer publishes: the
 	// daemon itself exposes no repository or publication operation.
-	maintainerBridge     = "dark-factory-maintainer-mcp-bridge"
+	maintainerBridge = "dark-factory-maintainer-mcp-bridge"
+	// GitIdentityName and GitIdentityEmail author a worker's local commits.
+	GitIdentityName      = "Dark Factory Worker"
+	GitIdentityEmail     = "worker@darkfactory.build"
 	codexTool            = "codex"
 	maxPathBytes         = 4096
 	claudeConfigDir      = ".claude"
@@ -154,6 +158,32 @@ func ConfigHome(kind kernel.Provider, accountHome string) string {
 	return filepath.Join(accountHome, name)
 }
 
+// codexConfigHome is the exact CODEX_HOME a Codex launch reads, and the one
+// place that rule is spelled: the launch environment and Codex session
+// discovery both ask here, so discovery cannot look in a different account
+// than the one a launch actually uses.
+func codexConfigHome(runtime RuntimePaths) string {
+	if runtime.accountConfig != "" {
+		return runtime.accountConfig
+	}
+	return ConfigHome(kernel.ProviderCodex, runtime.accountHome)
+}
+
+// claudeConfigHome is the effective directory a Claude Code launch's own
+// configuration and native session transcripts live under: a linked
+// account's own directory when one differs from the default, else the
+// account home's own .claude directory (what the CLI reaches by default
+// through HOME). This is the one place that rule is spelled: the launch
+// environment (CLAUDE_CONFIG_DIR) and Claude session discovery both ask
+// here, so a linked launch's discovery can never disagree with the
+// directory the CLI itself was actually told to use.
+func claudeConfigHome(runtime RuntimePaths) string {
+	if configDir := filepath.Dir(ClaudeConfigFile(runtime.accountHome, runtime.accountConfig)); configDir != runtime.accountHome {
+		return configDir
+	}
+	return ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome)
+}
+
 func (Installation) String() string   { return "provider installation (private)" }
 func (Installation) GoString() string { return "provider.Installation{private}" }
 
@@ -163,13 +193,54 @@ func (Installation) GoString() string { return "provider.Installation{private}" 
 // capabilities that make these paths true immediately around Build and exec.
 // This value is never authority by itself.
 type RuntimePaths struct {
+	localCILeaseDir                                                          string
 	home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome string
 	// accountConfig is one linked provider login's own configuration
 	// directory. Empty means the provider's default, which is what every
 	// launch used before accounts existed.
 	accountConfig      string
 	toolchainReadRoots string
-	sourceReadPaths    []string
+	// gitCommonDir is the project repository's Git directory, where the
+	// Change worktree's index, refs and objects live. A worker's local
+	// commands write it; an orchestrator's read it for review and
+	// publication. It is metadata access, not a credential: the provider
+	// environment still has no Git credential helper, SSH or prompt.
+	gitCommonDir         string
+	gitCommonDirWritable bool
+	sourceReviewPath     string
+	sourceReviewGitDir   string
+}
+
+// WithLocalCILeaseDirectory carries daemon-resolved lease storage below the
+// Git directory into a worker.
+func (runtime RuntimePaths) WithLocalCILeaseDirectory(path string) (RuntimePaths, error) {
+	if path != "" && (!validAbsolute(path, maxPathBytes) || filepath.Base(path) != "dark-factory-local-ci") {
+		return RuntimePaths{}, ErrInvalid
+	}
+	runtime.localCILeaseDir = path
+	return runtime, nil
+}
+
+// WithGitCommonDirectory grants the project repository's Git directory to
+// local commands: writable for a worker committing on its Change branch,
+// read-only for an orchestrator reading a settled Change's commits.
+func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool) (RuntimePaths, error) {
+	if !validAbsolute(path, maxPathBytes) || filepath.Base(path) != ".git" || path == runtime.home || path == runtime.temp {
+		return RuntimePaths{}, ErrInvalid
+	}
+	runtime.gitCommonDir, runtime.gitCommonDirWritable = path, writable
+	return runtime, nil
+}
+
+// WithRetainedSourceReview grants one daemon-resolved retained Change to a
+// reviewer. Both paths come from the authenticated, revision-checked source
+// receipt; local commands may read them but never write them.
+func (runtime RuntimePaths) WithRetainedSourceReview(sourcePath, gitDirectory string) (RuntimePaths, error) {
+	if !validAbsolute(sourcePath, maxPathBytes) || !validAbsolute(gitDirectory, maxPathBytes) || filepath.Base(gitDirectory) != ".git" || sourcePath == runtime.home || sourcePath == runtime.temp {
+		return RuntimePaths{}, ErrInvalid
+	}
+	runtime.sourceReviewPath, runtime.sourceReviewGitDir = sourcePath, gitDirectory
+	return runtime, nil
 }
 
 func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath, accountHome, accountConfig, toolchainReadRoots string) (RuntimePaths, error) {
@@ -184,44 +255,54 @@ func NewRuntimePaths(home, temp, socket, token, factoryctl, gitCeiling, toolPath
 	return runtime, nil
 }
 
-// WithReadOnlySources adds exact daemon-selected retained trees to a Codex
-// launch profile. These are paths already derived from validated Change IDs.
-func (runtime RuntimePaths) WithReadOnlySources(paths []string) (RuntimePaths, error) {
-	seen := map[string]struct{}{}
-	for _, path := range paths {
-		if !validAbsolute(path, maxPathBytes) || path == runtime.home || path == runtime.temp {
-			return RuntimePaths{}, ErrInvalid
-		}
-		if _, duplicate := seen[path]; duplicate {
-			return RuntimePaths{}, ErrInvalid
-		}
-		seen[path] = struct{}{}
-	}
-	runtime.sourceReadPaths = append([]string(nil), paths...)
-	return runtime, nil
-}
-
 func (RuntimePaths) String() string   { return "provider runtime paths (private)" }
 func (RuntimePaths) GoString() string { return "provider.RuntimePaths{private}" }
 
 type Request struct {
-	provider         kernel.Provider
-	installation     Installation
-	model            string
-	reasoningEffort  string
-	runtime          RuntimePaths
-	workingDirectory string
-	role             kernel.AgentRole
+	provider          kernel.Provider
+	installation      Installation
+	model             string
+	reasoningEffort   string
+	runtime           RuntimePaths
+	workingDirectory  string
+	role              kernel.AgentRole
+	agentID           string
+	taskIncarnationID string
+	// previousWorkingDirectory is set only for an orchestrator, from the
+	// same agent's most recent terminal run (see
+	// kernel.Store.LatestTerminalRuntimeRoot). See WithPreviousWorkingDirectory.
+	previousWorkingDirectory string
 }
 
-func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths, workingDirectory string, role kernel.AgentRole) (Request, error) {
+// WithPreviousWorkingDirectory names the working directory a previous run of
+// the same orchestrator agent launched its provider in. An orchestrator's own
+// working directory is a fresh runtime root every run (unlike a worker's
+// stable Change directory), so it could never itself be found again; Build
+// uses this instead to look for that previous run's own Codex session. Empty
+// means no known previous run, and is the value every non-orchestrator
+// request keeps by leaving this unset.
+func (request Request) WithPreviousWorkingDirectory(path string) (Request, error) {
+	if path != "" && !validAbsolute(path, maxPathBytes) {
+		return Request{}, ErrInvalid
+	}
+	request.previousWorkingDirectory = path
+	return request, nil
+}
+
+// agentID and taskIncarnationID name the exact agent and task incarnation this
+// attempt belongs to. Build uses them only for Claude Code worker launches, to
+// derive a deterministic native-session key (see claudeSessionSelection); every
+// caller still supplies them so one validation rule covers every request.
+func NewRequest(kind kernel.Provider, installation Installation, model, reasoningEffort string, runtime RuntimePaths, workingDirectory string, role kernel.AgentRole, agentID, taskIncarnationID string) (Request, error) {
 	if kernel.ValidateProviderLaunchControls(kind, model, reasoningEffort) != nil || installation.provider != kind || installation.executable.Path() == "" || !runtime.valid() || role.String() == "" ||
+		!validValue(agentID, maxSessionKeyPartBytes) || !validValue(taskIncarnationID, maxSessionKeyPartBytes) ||
 		kind == kernel.ProviderCodex && (!validAbsolute(workingDirectory, maxPathBytes) || len(codexUntrustedProjectConfig(workingDirectory)) > runner.MaxArgumentBytes) {
 		return Request{}, ErrInvalid
 	}
 	return Request{
 		provider: kind, installation: installation,
 		model: model, reasoningEffort: reasoningEffort, runtime: runtime, workingDirectory: workingDirectory, role: role,
+		agentID: agentID, taskIncarnationID: taskIncarnationID,
 	}, nil
 }
 
@@ -257,6 +338,236 @@ const (
 	TaskDeliveryAttemptAPI
 )
 
+const (
+	// nativeSessionRotateBytes bounds one native provider transcript before
+	// Build starts a fresh session instead of resuming it, for both Claude
+	// Code and Codex.
+	// ponytail: a single size ceiling is the simplest measurable growth bound
+	// across an unbounded run of send-back retries on one task incarnation;
+	// revisit if 32 MiB proves too eager or too late for real transcripts.
+	nativeSessionRotateBytes = 32 << 20
+	// maxClaudeSessionGenerations bounds the rotation search below. Reaching
+	// it would mean thousands of rotations on one incarnation; ponytail:
+	// defensive ceiling only, never expected to bind in practice.
+	maxClaudeSessionGenerations = 1000
+	maxSessionKeyPartBytes      = 128
+	// maxCodexScanDays bounds how far back codexSessionSelection looks for a
+	// matching rollout: a session worth resuming was active recently, and
+	// this keeps discovery a bounded directory walk, not an unbounded one
+	// growing with the account's whole history.
+	maxCodexScanDays = 30
+	// maxCodexRolloutHeaderBytes bounds the read of a rollout's first JSON
+	// line (its session_meta record); Codex's own recorded metadata is small,
+	// so a candidate whose first line does not fit is skipped, not trusted.
+	maxCodexRolloutHeaderBytes = 64 << 10
+)
+
+// claudeSessionNamespace is a fixed, arbitrary namespace for the UUID v5 IDs
+// claudeSessionSelection derives; it need not be registered, only stable.
+var claudeSessionNamespace = sha256.Sum256([]byte("dark-factory.claude-code.session"))
+
+// claudeSessionSelection derives the native Claude Code session this worker
+// launch should use and decides fresh vs resume by whether that session's
+// transcript already exists on disk. Claude Code keys a conversation's
+// transcript by the exact launch cwd under its effective config directory
+// (claudeConfigHome, matching the launch's own CLAUDE_CONFIG_DIR:
+// <config-home>/projects/<escaped-cwd>/<uuid>.jsonl, see docs/providers.md),
+// and a worker's cwd is its task incarnation's Change directory, which a
+// send-back retry reuses (internal/kernel/change.go: one Change row per
+// project+task+incarnation). Deriving the id from provider+agent+incarnation
+// means no extra state is needed to remember which session belongs to which
+// task: the same retry always recomputes the same id.
+func claudeSessionSelection(runtime RuntimePaths, cwd, agentID, taskIncarnationID string) (id string, resume bool, err error) {
+	projectDir := filepath.Join(claudeConfigHome(runtime), "projects", escapeClaudeProjectPath(cwd))
+	seed := "claude-code\x00" + agentID + "\x00" + taskIncarnationID
+	for generation := 0; generation < maxClaudeSessionGenerations; generation++ {
+		candidate := formatUUID(uuidV5(claudeSessionNamespace, []byte(fmt.Sprintf("%s\x00%d", seed, generation))))
+		info, statErr := os.Stat(filepath.Join(projectDir, candidate+".jsonl"))
+		if statErr == nil && info.Size() < nativeSessionRotateBytes {
+			return candidate, true, nil
+		}
+		if statErr != nil {
+			// Missing, or some other stat failure: nothing provably resumable
+			// exists at this generation, so start fresh with this exact id
+			// rather than fail a launch over an absent or unreadable file.
+			return candidate, false, nil
+		}
+	}
+	return "", false, ErrInvalid
+}
+
+// escapeClaudeProjectPath is the CLI's own cwd-to-directory-name mapping:
+// every character outside [A-Za-z0-9] becomes '-' (observed: a Change under
+// `.dark-factory-recovered/changes/` is recorded under
+// `-dark-factory-recovered-changes-`). It must match exactly, because a miss
+// does not merely start fresh: the retry relaunches `--session-id` with the
+// same derived id, which the CLI refuses as already in use and exits 1 before
+// any attempt outcome.
+func escapeClaudeProjectPath(cwd string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, cwd)
+}
+
+// uuidV5 and formatUUID implement RFC 4122 UUID version 5 (SHA-1 name-based)
+// generation; the standard library has no UUID package.
+func uuidV5(namespace [sha256.Size]byte, name []byte) [16]byte {
+	hash := sha1.New()
+	hash.Write(namespace[:16])
+	hash.Write(name)
+	sum := hash.Sum(nil)
+	var id [16]byte
+	copy(id[:], sum)
+	id[6] = (id[6] & 0x0f) | 0x50
+	id[8] = (id[8] & 0x3f) | 0x80
+	return id
+}
+
+func formatUUID(id [16]byte) string {
+	return fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
+}
+
+// codexRolloutMeta is the first JSON line of a Codex rollout file, the exact
+// fields codexSessionSelection needs: the launch cwd, to match a candidate
+// against a working directory, and the resumable session/thread id (its
+// filename's own trailing UUID for an ordinary, non-subagent session).
+type codexRolloutMeta struct {
+	Payload struct {
+		ID  string `json:"id"`
+		Cwd string `json:"cwd"`
+	} `json:"payload"`
+}
+
+// canonicalUUID reports whether value is a lowercase 8-4-4-4-12 hyphenated
+// hex UUID: the exact text shape formatUUID produces and codex resume's own
+// SESSION_ID argument expects. A rollout's recorded payload.id is untrusted
+// file content; anything of another shape (oversized, containing NULs,
+// uppercase, or simply not a UUID) is never placed in argv, where the
+// runner's own argument-size guard would otherwise turn a malformed
+// recorded id into a failed launch instead of codexSessionSelection's
+// intended fallback to a fresh session.
+func canonicalUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if value[i] != '-' {
+				return false
+			}
+			continue
+		}
+		if c := value[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// codexSessionSelection looks for the newest Codex rollout recorded for the
+// exact cwd under this launch's CODEX_HOME, newest calendar day first within
+// maxCodexScanDays, and resumes it while it is under the shared rotation
+// ceiling. Unlike Claude Code, Codex assigns its own session id at creation
+// (see docs/providers.md: no CLI flag or config key chooses or names one), so
+// there is nothing to derive; this only discovers an existing rollout already
+// on disk. It never fails a launch: an unreadable or malformed candidate is
+// skipped, and an unresolvable case answers fresh, the same as no session
+// existing at all.
+func codexSessionSelection(runtime RuntimePaths, cwd string) (id string, resume bool) {
+	if cwd == "" {
+		return "", false
+	}
+	sessionsRoot := filepath.Join(codexConfigHome(runtime), "sessions")
+	scanned := 0
+	for _, year := range sortedNumericEntriesDescending(sessionsRoot) {
+		for _, month := range sortedNumericEntriesDescending(filepath.Join(sessionsRoot, year)) {
+			for _, day := range sortedNumericEntriesDescending(filepath.Join(sessionsRoot, year, month)) {
+				if scanned >= maxCodexScanDays {
+					return "", false
+				}
+				scanned++
+				rollouts, err := filepath.Glob(filepath.Join(sessionsRoot, year, month, day, "rollout-*.jsonl"))
+				if err != nil {
+					continue
+				}
+				slices.Sort(rollouts)
+				slices.Reverse(rollouts)
+				for _, rollout := range rollouts {
+					meta, size, err := readCodexRolloutMeta(rollout)
+					if err != nil || meta.Payload.Cwd != cwd || !canonicalUUID(meta.Payload.ID) {
+						continue
+					}
+					if size < nativeSessionRotateBytes {
+						return meta.Payload.ID, true
+					}
+					// The newest matching rollout is over the ceiling: rotate
+					// to fresh rather than resume an older, smaller one and
+					// jump the conversation backward.
+					return "", false
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// sortedNumericEntriesDescending lists a Codex sessions tree's YYYY/MM/DD
+// child directories, newest first; their zero-padded names sort correctly as
+// plain strings. A missing or unreadable directory answers no entries rather
+// than an error: an account with no session history yet is not a fault.
+func sortedNumericEntriesDescending(directory string) []string {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() && allDigits(entry.Name()) {
+			names = append(names, entry.Name())
+		}
+	}
+	slices.Sort(names)
+	slices.Reverse(names)
+	return names
+}
+
+func allDigits(value string) bool {
+	return value != "" && !strings.ContainsFunc(value, func(r rune) bool { return r < '0' || r > '9' })
+}
+
+// readCodexRolloutMeta reads and decodes only a rollout's first line, bounded
+// to maxCodexRolloutHeaderBytes, and returns the file's exact size alongside
+// it for the rotation check; codexSessionSelection never needs more.
+func readCodexRolloutMeta(path string) (codexRolloutMeta, int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return codexRolloutMeta{}, 0, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return codexRolloutMeta{}, 0, err
+	}
+	defer file.Close()
+	header, err := io.ReadAll(io.LimitReader(file, maxCodexRolloutHeaderBytes+1))
+	if err != nil {
+		return codexRolloutMeta{}, 0, err
+	}
+	line := header
+	if index := bytes.IndexByte(header, '\n'); index >= 0 {
+		line = header[:index]
+	} else if int64(len(header)) > maxCodexRolloutHeaderBytes {
+		return codexRolloutMeta{}, 0, ErrInvalid
+	}
+	var meta codexRolloutMeta
+	if err := json.Unmarshal(line, &meta); err != nil {
+		return codexRolloutMeta{}, 0, err
+	}
+	return meta, info.Size(), nil
+}
+
 // Build is the one closed provider-selection switch.
 func Build(request Request) (Launch, error) {
 	if err := request.installation.executable.Verify(); err != nil {
@@ -291,6 +602,17 @@ func Build(request Request) (Launch, error) {
 		}, nil
 	case kernel.ProviderClaudeCode:
 		argv := []string{path, "--dangerously-skip-permissions"}
+		if request.role == kernel.RoleWorker {
+			id, resume, err := claudeSessionSelection(request.runtime, request.workingDirectory, request.agentID, request.taskIncarnationID)
+			if err != nil {
+				return Launch{}, err
+			}
+			if resume {
+				argv = append(argv, "--resume", id)
+			} else {
+				argv = append(argv, "--session-id", id)
+			}
+		}
 		if request.model != "" {
 			argv = append(argv, "--model", request.model)
 		}
@@ -301,6 +623,7 @@ func Build(request Request) (Launch, error) {
 		// account configuration and Change-local .mcp.json cannot add servers.
 		argv = append(argv, "--strict-mcp-config")
 		servers := map[string]any{}
+		environment := request.runtime.environment(request.provider)
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
 		}
@@ -310,6 +633,7 @@ func Build(request Request) (Launch, error) {
 				return Launch{}, errors.Join(err, fmt.Errorf("%s on %s", maintainerBridge, request.runtime.toolPath))
 			}
 			servers["maintainer"] = map[string]string{"command": bridge}
+			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
 		if len(servers) > 0 {
 			config, err := json.Marshal(map[string]any{"mcpServers": servers})
@@ -320,15 +644,39 @@ func Build(request Request) (Launch, error) {
 		}
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryStartupTerminal,
+			environment: environment, taskDelivery: TaskDeliveryStartupTerminal,
 		}, nil
 	case kernel.ProviderCodex:
 		permissions, err := codexPermissions(request)
 		if err != nil {
 			return Launch{}, err
 		}
-		argv := []string{path, "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions=" + tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins"}
-		argv = append(argv, "-c", "mcp_servers.factory_attempt={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
+		// A worker's launch cwd is its task incarnation's retained Change
+		// directory, which a send-back retry reuses, so its own prior rollout
+		// is found there directly. An orchestrator's launch cwd is a fresh
+		// runtime root every run and could never itself be found again;
+		// previousWorkingDirectory instead names the same agent's most recent
+		// terminal run's cwd, so its standing tasks share one continuing
+		// session. Neither ever changes argv beyond an optional leading
+		// "resume <id>": Codex assigns its own session id, there is nothing
+		// to derive.
+		discoveryCwd := request.workingDirectory
+		if request.role == kernel.RoleOrchestrator {
+			discoveryCwd = request.previousWorkingDirectory
+		}
+		argv := []string{path}
+		if id, resume := codexSessionSelection(request.runtime, discoveryCwd); resume {
+			argv = append(argv, "resume", id)
+		}
+		// Codex's explicit resume can otherwise open its interactive CWD
+		// chooser when the recorded session belongs to an earlier attempt
+		// runtime. The runner's committed cwd is request.workingDirectory, so
+		// select that authorized current directory through Codex's native
+		// resume configuration before any prompt can be shown.
+		notify := "notify=[" + tomlBasicString(request.runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
+		argv = append(argv, "-c", notify, "--strict-config", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
+		attemptServer := codexAttemptServerName(request.runtime)
+		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
 			args := make([]string, len(browserArgs))
 			for i, arg := range browserArgs {
@@ -346,21 +694,23 @@ func Build(request Request) (Launch, error) {
 		if request.reasoningEffort != "" {
 			argv = append(argv, "-c", fmt.Sprintf("model_reasoning_effort=%q", request.reasoningEffort))
 		}
+		environment := request.runtime.environment(request.provider)
 		if request.role == kernel.RoleOrchestrator {
 			bridge, err := resolveBridge(request.runtime.toolPath, maintainerBridge)
 			if err != nil {
 				return Launch{}, err
 			}
 			argv = append(argv, "-c", "mcp_servers.dark_factory_maintainer={command="+tomlBasicString(bridge)+`,enabled=true,required=true,default_tools_approval_mode="approve"}`)
+			environment = append(environment, "DARK_FACTORY_MAINTAINER_BRIDGE="+bridge)
 		}
-		prompt := codexBootstrapPrompt
+		prompt := codexBootstrapPromptFor(request.runtime)
 		if request.role == kernel.RoleOrchestrator {
-			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For retained source, request attempt source --task TASK_ID and verify its exact task/work/Change receipt before reading source_path; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Do not poll or wait for workers: finish after current actions, as events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
+			prompt += " You are the project overseer. If no causal context is supplied, perform full reconciliation. On a causal wake, first read its prior overseer task result and affected tasks using overseer status --task without a head fence, then use the returned current head for subsequent pages; reconcile every fixed-head page only at startup, recovery, stale/uncertain cursors, omissions, or an event that cannot be resolved narrowly. For a settled worker Change, request attempt source --task TASK_ID and verify its exact task/work/Change receipt; its branch and head_commit are the work, read from git_directory with git, and source_path is that branch's worktree; never reconstruct private paths. Follow next_offset with --offset and --head; use --task and next_text_offset for complete text. Delegate with overseer task add; supervise with task update, agent pause/resume, worker message, worker interrupt, worker stop, worker replace and human reply. Keep enduring acceptance criteria, prerequisites and owner authority in the complete base instruction using overseer task update --body while the task is queued; preserve the original acceptance criteria. Send-back replaces previous feedback, so use it only for current findings or pointers, not durable requirements. Use the factory tool description for exact flags. Routine supported task routing needs no checkout. For repository edits, checks or publication, read docs/development/OVERSEER.md in the supplied checkout or authorized private clone; publish through your Maintainer App. A successful Maintainer response's structuredContent is its result: do not repeat the identical read or write after its content acknowledgement; observe an ambiguous write instead. Respect direct operator interventions. Do not retry a known capability refusal until role, capability, or runtime state changes; correct malformed paging once and restart stale paging at page one. Continue actionable supervision and delivery in this session; when none remains, report a durable checkpoint and exit without idle polling. Events remain pending for the next supervision task. Use attempt request-human only for operator decisions, keeping that session alive for its reply."
 		}
 		argv = append(argv, prompt)
 		return Launch{
 			executable: request.installation.executable, argv: argv,
-			environment: request.runtime.environment(request.provider), taskDelivery: TaskDeliveryAttemptAPI,
+			environment: environment, taskDelivery: TaskDeliveryAttemptAPI,
 		}, nil
 	default:
 		return Launch{}, ErrInvalid
@@ -388,8 +738,26 @@ func codexPermissions(request Request) (string, error) {
 	for _, root := range filepath.SplitList(request.runtime.toolchainReadRoots) {
 		entries = append(entries, tomlBasicString(root)+`="read"`)
 	}
-	for _, path := range request.runtime.sourceReadPaths {
-		entries = append(entries, tomlBasicString(path)+`="read"`)
+	if request.runtime.localCILeaseDir != "" {
+		entries = append(entries, tomlBasicString(request.runtime.localCILeaseDir)+`="write"`)
+		// The lease wrapper uses macOS Ruby's built-in setsid for its owned
+		// process group. Grant only the interpreter, not a standard-library tree.
+		entries = append(entries, tomlBasicString("/usr/bin/ruby")+`="read"`)
+	}
+	if request.runtime.gitCommonDir != "" {
+		access := "read"
+		if request.runtime.gitCommonDirWritable && request.runtime.gitCommonDir != request.runtime.sourceReviewGitDir {
+			access = "write"
+		}
+		entries = append(entries, tomlBasicString(request.runtime.gitCommonDir)+`="`+access+`"`)
+	}
+	for _, path := range []string{request.runtime.sourceReviewPath, request.runtime.sourceReviewGitDir} {
+		if path != "" {
+			if path == request.workingDirectory || path == request.runtime.gitCommonDir {
+				continue
+			}
+			entries = append(entries, tomlBasicString(path)+`="read"`)
+		}
 	}
 	// Codex merges profile tables. Use the existing private runtime identity
 	// rather than a shared name that could inherit an account profile.
@@ -402,6 +770,15 @@ func codexPermissions(request Request) (string, error) {
 
 func codexPermissionName(runtime RuntimePaths) string {
 	return fmt.Sprintf("dark-factory-%x", sha256.Sum256([]byte(runtime.home)))
+}
+
+func codexAttemptServerName(runtime RuntimePaths) string {
+	digest := sha256.Sum256([]byte(runtime.home))
+	return fmt.Sprintf("factory_attempt_%x", digest[:8])
+}
+
+func codexBootstrapPromptFor(runtime RuntimePaths) string {
+	return strings.Replace(codexBootstrapPrompt, "factory_attempt.factory", codexAttemptServerName(runtime)+".factory", 1)
 }
 
 func codexUntrustedProjectConfig(path string) string {
@@ -564,6 +941,9 @@ func unavailable(kind kernel.Provider) error {
 }
 
 func (runtime RuntimePaths) valid() bool {
+	if runtime.localCILeaseDir != "" && (!validAbsolute(runtime.localCILeaseDir, maxPathBytes) || filepath.Base(runtime.localCILeaseDir) != "dark-factory-local-ci") {
+		return false
+	}
 	paths := []string{runtime.home, runtime.temp, runtime.socket, runtime.token, runtime.factoryctl}
 	for _, path := range paths {
 		if !validAbsolute(path, maxPathBytes) {
@@ -595,14 +975,12 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 	// as it was.
 	switch kind {
 	case kernel.ProviderCodex:
-		codexHome := ConfigHome(kind, runtime.accountHome)
-		if runtime.accountConfig != "" {
-			codexHome = runtime.accountConfig
-		}
-		environment = append(environment, "CODEX_HOME="+codexHome,
+		environment = append(environment, "CODEX_HOME="+codexConfigHome(runtime),
 			"GOCACHE="+filepath.Join(runtime.home, ".cache", "go-build"),
 			"GOPATH="+filepath.Join(runtime.home, "go"),
 			"GOMODCACHE="+filepath.Join(runtime.home, "go", "pkg", "mod"),
+			"CARGO_HOME="+filepath.Join(runtime.home, ".cargo"),
+			"RUSTUP_HOME="+filepath.Join(runtime.accountHome, ".rustup"),
 			"COREPACK_HOME="+filepath.Join(runtime.home, ".cache", "corepack"),
 			"npm_config_cache="+filepath.Join(runtime.home, ".cache", "npm"),
 			"XDG_CACHE_HOME="+filepath.Join(runtime.home, ".cache"))
@@ -612,15 +990,25 @@ func (runtime RuntimePaths) environment(kind kernel.Provider) []string {
 		// lives in $HOME/.claude.json rather than inside it, so naming it
 		// would point the CLI at the flags-only file it does contain and
 		// launch the run with no login at all.
-		if configDir := filepath.Dir(ClaudeConfigFile(runtime.accountHome, runtime.accountConfig)); configDir != runtime.accountHome {
+		if configDir := claudeConfigHome(runtime); configDir != ConfigHome(kernel.ProviderClaudeCode, runtime.accountHome) {
 			environment = append(environment, "CLAUDE_CONFIG_DIR="+configDir)
 		}
 	}
+	if runtime.localCILeaseDir != "" {
+		environment = append(environment, "DARK_FACTORY_LOCAL_CI_DIRECTORY="+runtime.localCILeaseDir)
+	}
+	// Commits on the Change branch carry the factory's own identity; the
+	// operator's Git configuration is not read, so without these git commit
+	// would refuse. The published commit is authored by the Maintainer App.
 	return append(environment,
 		"LANG=C",
 		"LC_ALL=C",
 		"TERM=xterm-256color",
 		"SHELL=/bin/sh",
+		"GIT_AUTHOR_NAME="+GitIdentityName,
+		"GIT_AUTHOR_EMAIL="+GitIdentityEmail,
+		"GIT_COMMITTER_NAME="+GitIdentityName,
+		"GIT_COMMITTER_EMAIL="+GitIdentityEmail,
 		"GIT_CEILING_DIRECTORIES="+runtime.gitCeiling,
 		"GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
 		"GIT_CONFIG_NOSYSTEM=1",

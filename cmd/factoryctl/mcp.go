@@ -38,8 +38,17 @@ func runAttemptMCP(ctx context.Context, input io.Reader, output io.Writer, geten
 		case "tools/list":
 			var help []string
 			for _, line := range strings.Split(usage, "\n") {
-				if strings.HasPrefix(line, "  factoryctl attempt ") || strings.HasPrefix(line, "  factoryctl overseer ") {
-					help = append(help, strings.TrimSpace(line))
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "factoryctl content ") {
+					line = strings.Replace(line, "factoryctl content ", "factoryctl attempt content ", 1)
+					line = strings.Replace(line, "|--body-file PATH", "", 1)
+				}
+				if strings.HasPrefix(line, "factoryctl outcome ") {
+					line = strings.Replace(line, "factoryctl outcome ", "factoryctl attempt outcome ", 1)
+					line = strings.Replace(line, "--document JSON|--document-file PATH", "--document JSON", 1)
+				}
+				if strings.HasPrefix(line, "factoryctl attempt ") || strings.HasPrefix(line, "factoryctl overseer ") {
+					help = append(help, line)
 				}
 			}
 			response["result"] = map[string]any{"tools": []any{map[string]any{
@@ -55,9 +64,9 @@ func runAttemptMCP(ctx context.Context, input io.Reader, output io.Writer, geten
 			}
 			var stdout, stderr bytes.Buffer
 			exit := exitUsage
-			if json.Unmarshal(request.Params, &params) == nil && params.Name == "factory" && len(params.Arguments.Argv) >= 2 && len(params.Arguments.Argv) <= 64 {
+			if json.Unmarshal(request.Params, &params) == nil && params.Name == "factory" && len(params.Arguments.Argv) >= 2 && len(params.Arguments.Argv) <= 64 && (params.Arguments.Argv[0] == "attempt" || params.Arguments.Argv[0] == "overseer") {
 				command, help, ok := parse(params.Arguments.Argv)
-				if ok && !help && allowedAttemptMCPCommand(command.kind) {
+				if ok && !help && allowedAttemptMCPCommand(command.kind) && !(command.kind >= commandContentCreate && command.kind <= commandContentAttachments && command.bodyFile != "") && !(command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList && command.documentFile != "") {
 					exit = run(ctx, params.Arguments.Argv, getenv, &stdout, &stderr)
 				}
 			}
@@ -82,11 +91,18 @@ func allowedAttemptMCPCommand(kind commandKind) bool {
 	switch kind {
 	case commandSucceed, commandBlock, commandFail, commandRequestHuman,
 		commandPeerStatus, commandPeerAsk, commandPeerAnswer, commandSendBack,
-		commandAttemptTask, commandAttemptSource, commandOverseerStatus, commandOverseerTaskAdd,
+		commandAttemptTask, commandAttemptSource, commandTerminalObserve, commandOverseerStatus, commandOverseerTaskAdd,
 		commandOverseerTaskUpdate, commandOverseerTaskSendBack,
 		commandOverseerAgentUpdate, commandOverseerStopWorker,
 		commandOverseerReplaceWorker, commandOverseerMessageWorker,
 		commandOverseerInterruptWorker, commandOverseerReplyHuman:
+		return true
+	case commandContentCreate, commandContentRevise, commandContentDeprecate,
+		commandContentList, commandContentRead, commandContentBody,
+		commandContentEvidence, commandContentAttach,
+		commandContentEvidenceList, commandContentAttachments:
+		return true
+	case commandOutcomeWrite, commandOutcomeRead, commandOutcomeList:
 		return true
 	}
 	return false

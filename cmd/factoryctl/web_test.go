@@ -199,7 +199,7 @@ func TestWebRevokeReportsCommittedCleanupUncertainty(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := runWithOpener(context.Background(), []string{"web", "revoke", id, "--revision", "9"}, webEnvironment(fixture), &stdout, &stderr, nil)
 	result := awaitServer(t, done)
-	if exit == 0 || result.err != nil || stdout.Len() != 0 || stderr.String() != "factoryctl: web revoke committed but browser cleanup remains unresolved\n" {
+	if exit == 0 || result.err != nil || stdout.Len() != 0 || stderr.String() != "factoryctl: web revoke: local API completed revocation but could not prove browser cleanup\n" {
 		t.Fatalf("cleanup uncertainty = exit %d stdout %q stderr %q server %v", exit, stdout.String(), stderr.String(), result.err)
 	}
 }

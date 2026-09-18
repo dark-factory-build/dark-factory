@@ -26,10 +26,10 @@ func TestNullableDurableBlobsPreservePresenceAndFailClosed(t *testing.T) {
 			},
 		},
 		{
-			name: "Change tree digest",
+			name: "Change head commit",
 			corrupt: func(t *testing.T, store *Store) {
 				change := seedReservedChange(t, store)
-				corruptSQL(t, store, `UPDATE changes SET tree_digest = zeroblob(0) WHERE id = ?`, change.ID.Bytes())
+				corruptSQL(t, store, `UPDATE changes SET head_commit = zeroblob(0) WHERE id = ?`, change.ID.Bytes())
 			},
 			directRead: func(t *testing.T, store *Store) error {
 				_, _, err := store.Change(context.Background(), changeID(t, 35))
@@ -113,9 +113,6 @@ func TestNullableBlobRejectsWrongSQLiteStorageClass(t *testing.T) {
 
 func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 	selection := testChangeSelection(t)
-	stage, _ := NewFileIdentity(70, 80)
-	digest, _ := TreeDigestFromBytes(bytes.Repeat([]byte{0x81}, DigestBytes))
-	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
 	pathIdentity, _ := NewPathResourceIdentity(90, 100)
 	processIdentity := processIdentity(t, 101)
 	failure, _ := NewFailureProposal(FailureInternal, "failure")
@@ -147,16 +144,12 @@ func TestEveryPublicMutationValidatesDurableGraphBeforeDecision(t *testing.T) {
 			_, err := store.SetCapacity(context.Background(), mustRevision(t, 1), 2, at)
 			return err
 		}},
-		{name: "AdmitNext", invoke: func(store *Store) error {
-			_, err := store.AdmitNext(context.Background(), admissionKeys(t, 224, nil), at)
-			return err
-		}},
 		{name: "RecordChangePrepared", invoke: func(store *Store) error {
-			_, err := store.RecordChangePrepared(context.Background(), changeID(t, 225), mustRevision(t, 1), selection, stage, at)
+			_, err := store.RecordChangePrepared(context.Background(), changeID(t, 225), mustRevision(t, 1), selection, at)
 			return err
 		}},
 		{name: "MarkChangeAvailable", invoke: func(store *Store) error {
-			_, err := store.MarkChangeAvailable(context.Background(), changeID(t, 225), mustRevision(t, 1), availability, at)
+			_, err := store.MarkChangeAvailable(context.Background(), changeID(t, 225), mustRevision(t, 1), selection.commit, at)
 			return err
 		}},
 		{name: "ActivateResource", invoke: func(store *Store) error {
@@ -342,15 +335,13 @@ func TestChangePreparedAndReplayRefusePreexistingOwnershipCorruption(t *testing.
 			}
 			selection := testChangeSelection(t)
 			if replay {
-				tree, _ := NewFileIdentity(70, 80)
-				if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, tree, mustTime(t, 11)); err != nil {
+				if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, mustTime(t, 11)); err != nil {
 					t.Fatal(err)
 				}
 			}
 			corruptSQL(t, store, `UPDATE resources SET path = '/' WHERE kind = 'runtime_root'`)
 			before := captureWriteFootprint(t, store)
-			tree, _ := NewFileIdentity(70, 80)
-			if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, tree, mustTime(t, 20)); !errors.Is(err, ErrCorruptState) {
+			if _, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, mustTime(t, 20)); !errors.Is(err, ErrCorruptState) {
 				t.Fatalf("RecordChangePrepared = %v", err)
 			}
 			if after := captureWriteFootprint(t, store); after != before {
@@ -401,7 +392,7 @@ func testChangeSelection(t *testing.T) ChangeSelection {
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{0x71}, format.oidLength()))
 	repository, _ := NewFileIdentity(61, 62)
-	selection, err := NewChangeSelection(format, commit, changeTreeDigest(t, 0x81), 1, 1, repository)
+	selection, err := NewChangeSelection(format, commit, repository)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,4 +465,41 @@ func benchmarkValidationStore(b *testing.B) *Store {
 		b.Fatalf("admission = %+v, %v", result, err)
 	}
 	return store
+}
+
+func TestValidatedWriteChecksCancelledRunAndRelationships(t *testing.T) {
+	for _, test := range []struct{ name, corrupt string }{
+		{"valid", ""},
+		{"run row", `UPDATE runs SET proposal_kind = 'unknown'`},
+		{"task relationship", `UPDATE tasks SET incarnation_id = X'92929292929292929292929292929292'`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, run, _ := runningOrchestratorRun(t)
+			defer store.Close()
+			if _, err := store.CancelRun(context.Background(), run.ID, run.Revision, "operator cancelled", mustTime(t, 40)); err != nil {
+				t.Fatal(err)
+			}
+			if test.corrupt != "" {
+				corruptSQL(t, store, test.corrupt)
+			}
+			before := captureWriteFootprint(t, store)
+			tx, err := store.beginValidatedWrite(context.Background())
+			if tx != nil {
+				defer tx.Close()
+				defer tx.Rollback(nil)
+			}
+			if test.corrupt == "" {
+				if err != nil {
+					t.Fatalf("valid cancelled run: %v", err)
+				}
+			} else {
+				if !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("corrupted cancelled run accepted: %v", err)
+				}
+				if after := captureWriteFootprint(t, store); after != before {
+					t.Fatalf("refusal changed durable footprint: before=%+v after=%+v", before, after)
+				}
+			}
+		})
+	}
 }

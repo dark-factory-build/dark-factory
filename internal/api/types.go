@@ -3,15 +3,20 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
 const (
-	maxFrameBytes      = 1 << 20
-	maxSnapshotEntries = 4096
-	credentialBytes    = 32
+	maxFrameBytes          = 1 << 20
+	MaxRecoveryResultBytes = 65536
+	// Four metadata rows fit the frame even when every text byte is JSON-escaped.
+	MaxContentPageItems = 4
+	maxSnapshotEntries  = 4096
+	credentialBytes     = 32
 )
 
 var (
@@ -72,6 +77,37 @@ func (err *RemoteError) Code() RemoteErrorCode { return err.code }
 
 type HealthStatus struct {
 	Ready bool `json:"ready"`
+}
+
+// AgentPaths is the live worker's sampled modified-directory view. Paths are
+// relative to the run's change directory; they are not the worker's current
+// working directory.
+type AgentPaths struct {
+	AgentID     string   `json:"agent_id"`
+	RunID       string   `json:"run_id,omitempty"`
+	SourcePath  string   `json:"source_path,omitempty"`
+	RuntimePath string   `json:"runtime_path,omitempty"`
+	Paths       []string `json:"paths"`
+}
+
+type AgentPathsInput struct {
+	AgentID string `json:"agent_id"`
+}
+
+func validAgentPathsInput(value AgentPathsInput) bool { return validID(value.AgentID) }
+func validAgentPaths(value AgentPaths) bool {
+	if !validID(value.AgentID) || value.RunID != "" && !validID(value.RunID) || value.Paths == nil || len(value.Paths) > 16 || value.RunID == "" && (value.SourcePath != "" || value.RuntimePath != "") {
+		return false
+	}
+	if value.SourcePath != "" && !validCanonicalPath(value.SourcePath, 4096) || value.RuntimePath != "" && !validCanonicalPath(value.RuntimePath, 4096) {
+		return false
+	}
+	for _, path := range value.Paths {
+		if !validText(path, 0, 4096) || strings.HasPrefix(path, "/") {
+			return false
+		}
+	}
+	return true
 }
 
 // WebStatus is the bounded, non-secret operator view of the loopback browser
@@ -180,6 +216,33 @@ type OverseerHumanReplyResult struct {
 	State     string `json:"state"`
 }
 
+type HumanRequest struct {
+	ID       string   `json:"id"`
+	RunID    string   `json:"run_id"`
+	TaskID   string   `json:"task_id"`
+	AgentID  string   `json:"agent_id"`
+	Status   string   `json:"status"`
+	Revision uint64   `json:"revision"`
+	Question string   `json:"question"`
+	Options  []string `json:"options"`
+}
+
+type HumanRequestList struct {
+	Requests []HumanRequest `json:"requests"`
+}
+
+func validHumanRequestList(value HumanRequestList) bool {
+	if value.Requests == nil || len(value.Requests) > 1024 {
+		return false
+	}
+	for _, request := range value.Requests {
+		if !validID(request.ID) || !validID(request.RunID) || !validID(request.TaskID) || !validID(request.AgentID) || request.Revision == 0 || !validText(request.Question, 1, 8192) || request.Status != "open" && request.Status != "delivering" && request.Status != "delivery_unknown" || request.Options == nil || kernel.ValidateHumanOptions(request.Options) != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func validMutation(result MutationResult) bool {
 	if result.Revision == 0 {
 		return false
@@ -196,10 +259,249 @@ type OverseerInterventionResult struct {
 	Detail      string `json:"detail"`
 }
 
+type WorkerOperationInput struct {
+	OperationID string `json:"operation_id"`
+}
+
+type WorkerOperation struct {
+	OperationID string `json:"operation_id"`
+	TaskID      string `json:"task_id"`
+	RunID       string `json:"run_id"`
+	State       string `json:"state"`
+	Detail      string `json:"detail,omitempty"`
+}
+
+func validWorkerOperation(value WorkerOperation) bool {
+	return validID(value.OperationID) && validID(value.TaskID) && validID(value.RunID) && (value.State == "pending" || value.State == "delivered" || value.State == "unknown" || value.State == "rejected") && validText(value.Detail, 0, 4096)
+}
+
 // AttemptTask is the exact private task text visible only to the authenticated
 // live attempt that owns it.
 type AttemptTask struct {
-	Task string `json:"task"`
+	Task                   string `json:"task"`
+	TaskID                 string `json:"task_id,omitempty"`
+	IncarnationID          string `json:"incarnation_id,omitempty"`
+	WorkRevision           uint64 `json:"work_revision,omitempty"`
+	ChangeID               string `json:"change_id,omitempty"`
+	AdmittedChangeRevision uint64 `json:"admitted_change_revision,omitempty"`
+	ChangeRevision         uint64 `json:"change_revision,omitempty"`
+	BaseCommit             string `json:"base_commit,omitempty"`
+}
+
+// TerminalObserveInput identifies one exact attempt terminal. The API derives
+// authority from the bearer and requires all three durable identities to
+// match; cursor is a byte cursor in the runner's bounded replay ring.
+type TerminalObserveInput struct {
+	ProjectID string `json:"project_id"`
+	TaskID    string `json:"task_id"`
+	RunID     string `json:"run_id"`
+	Cursor    uint64 `json:"cursor"`
+	MaxBytes  uint32 `json:"max_bytes"`
+	Text      bool   `json:"text,omitempty"`
+}
+
+type TerminalObservation struct {
+	ProjectID  string `json:"project_id"`
+	TaskID     string `json:"task_id"`
+	RunID      string `json:"run_id"`
+	Cursor     uint64 `json:"cursor"`
+	NextCursor uint64 `json:"next_cursor"`
+	Floor      uint64 `json:"floor"`
+	Head       uint64 `json:"head"`
+	Source     string `json:"source"`
+	Gap        bool   `json:"gap"`
+	Omitted    uint64 `json:"omitted"`
+	Payload    []byte `json:"payload"`
+	TextMode   bool   `json:"text_mode,omitempty"`
+	Text       string `json:"text,omitempty"`
+}
+
+// MarshalDisplayJSON renders readable, terminal-safe text for CLI/MCP without
+// changing the byte payload or raw cursors on the local API wire.
+func (value TerminalObservation) MarshalDisplayJSON() ([]byte, error) {
+	type plain TerminalObservation
+	encoded, err := json.Marshal(struct {
+		plain
+		Payload string `json:"payload"`
+	}{plain(value), string(value.Payload)})
+	if err != nil {
+		return nil, err
+	}
+	return terminalSafeJSON(nil, encoded), nil
+}
+
+func validTerminalObservationInput(input TerminalObserveInput) bool {
+	return validID(input.ProjectID) && validID(input.TaskID) && validID(input.RunID) && input.MaxBytes > 0 && input.MaxBytes <= 65536 && (!input.Text || input.Cursor == 0)
+}
+
+func validTerminalObservation(value TerminalObservation) bool {
+	base := validID(value.ProjectID) && validID(value.TaskID) && validID(value.RunID) && value.NextCursor >= value.Cursor && value.Floor <= value.Head && value.NextCursor <= value.Head && (value.Source == "stored" || value.Source == "live" || value.Source == "none") && len(value.Payload) <= 65536 && len(value.Text) <= 65536 && utf8.ValidString(value.Text) && value.Omitted <= value.NextCursor-value.Cursor && uint64(len(value.Payload)) == value.NextCursor-value.Cursor-value.Omitted
+	if !base {
+		return false
+	}
+	if value.TextMode {
+		if value.Cursor != 0 || value.NextCursor != 0 || value.Gap || value.Omitted != 0 || len(value.Payload) != 0 || value.Source == "none" {
+			return false
+		}
+		for _, ch := range value.Text {
+			if ch < 0x20 || ch >= 0x7f && ch <= 0x9f {
+				return false
+			}
+		}
+		return true
+	}
+	return value.Text == ""
+}
+
+// Project content is deliberately a small wire DTO. Bodies are never placed
+// in list responses; callers use the explicit bounded body reader.
+type Content struct {
+	ID               string `json:"id"`
+	ProjectID        string `json:"project_id"`
+	Kind             string `json:"kind"`
+	Title            string `json:"title"`
+	Description      string `json:"description"`
+	Body             string `json:"body,omitempty"`
+	Author           string `json:"author"`
+	SourceReferences string `json:"source_references"`
+	ObjectFormat     string `json:"object_format,omitempty"`
+	Commit           string `json:"commit,omitempty"`
+	Path             string `json:"path,omitempty"`
+	Revision         uint64 `json:"revision"`
+	Deprecated       bool   `json:"deprecated"`
+	LatestRevision   uint64 `json:"latest_revision"`
+}
+type ContentList struct {
+	Items      []Content `json:"items"`
+	NextOffset uint64    `json:"next_offset,omitempty"`
+}
+type ContentBody struct {
+	ID         string `json:"id"`
+	Revision   uint64 `json:"revision"`
+	Offset     uint64 `json:"offset"`
+	Body       string `json:"body"`
+	NextOffset uint64 `json:"next_offset,omitempty"`
+	Complete   bool   `json:"complete"`
+}
+type ContentEvidence struct {
+	ID              string `json:"id"`
+	ProjectID       string `json:"project_id"`
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
+	TestedSource    string `json:"tested_source"`
+	Environment     string `json:"environment"`
+	Result          string `json:"result"`
+	Location        string `json:"location"`
+	Evaluator       string `json:"evaluator"`
+	Judgment        string `json:"judgment"`
+}
+type ContentEvidenceList struct {
+	Items      []ContentEvidence `json:"items"`
+	NextOffset uint64            `json:"next_offset,omitempty"`
+}
+type ContentAttachment struct {
+	TaskID           string `json:"task_id"`
+	ProjectID        string `json:"project_id"`
+	TaskWorkRevision uint64 `json:"task_work_revision"`
+	ContentID        string `json:"content_id"`
+	ContentRevision  uint64 `json:"content_revision"`
+	AttachedAtMs     uint64 `json:"attached_at_ms"`
+}
+type ContentAttachments struct {
+	Items []ContentAttachment `json:"items"`
+}
+
+type Outcome struct {
+	ID                    string                 `json:"id"`
+	ProjectID             string                 `json:"project_id"`
+	Revision              uint64                 `json:"revision"`
+	Document              kernel.OutcomeDocument `json:"document"`
+	Kind                  string                 `json:"kind"`
+	Objective             string                 `json:"objective"`
+	Criteria              string                 `json:"criteria"`
+	State                 string                 `json:"state"`
+	Author                string                 `json:"author"`
+	Authority             string                 `json:"authority"`
+	ObjectiveWorkRevision uint64                 `json:"objective_work_revision"`
+	Stale                 bool                   `json:"stale"`
+	MissingReferences     []string               `json:"missing_references,omitempty"`
+}
+type OutcomeList struct {
+	Items      []Outcome `json:"items"`
+	NextOffset uint64    `json:"next_offset,omitempty"`
+}
+type OutcomeWriteInput struct {
+	ID               string                 `json:"id"`
+	ProjectID        string                 `json:"project_id"`
+	Document         kernel.OutcomeDocument `json:"document"`
+	ExpectedRevision uint64                 `json:"expected_revision,omitempty"`
+}
+type OutcomeReadInput struct {
+	ProjectID string `json:"project_id"`
+	ID        string `json:"id"`
+	Revision  uint64 `json:"revision,omitempty"`
+}
+type OutcomeListInput struct {
+	ProjectID string `json:"project_id"`
+	Offset    uint64 `json:"offset,omitempty"`
+	Limit     uint64 `json:"limit,omitempty"`
+}
+type ContentInput struct {
+	ID               string `json:"id"`
+	ProjectID        string `json:"project_id"`
+	Kind             string `json:"kind"`
+	Title            string `json:"title"`
+	Description      string `json:"description"`
+	Body             string `json:"body"`
+	SourceReferences string `json:"source_references"`
+	Commit           string `json:"commit,omitempty"`
+	Path             string `json:"path,omitempty"`
+	ExpectedRevision uint64 `json:"expected_revision,omitempty"`
+}
+type ContentListInput struct {
+	ProjectID string `json:"project_id,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Offset    uint64 `json:"offset,omitempty"`
+	Limit     uint64 `json:"limit,omitempty"`
+}
+type ContentReadInput struct {
+	ID       string `json:"id"`
+	Revision uint64 `json:"revision"`
+}
+type ContentBodyInput struct {
+	ID       string `json:"id"`
+	Revision uint64 `json:"revision"`
+	Offset   uint64 `json:"offset"`
+	Limit    uint64 `json:"limit"`
+}
+type ContentEvidenceInput struct {
+	ID              string `json:"id"`
+	ProjectID       string `json:"project_id"`
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
+	TestedSource    string `json:"tested_source"`
+	Environment     string `json:"environment"`
+	Result          string `json:"result"`
+	Location        string `json:"location"`
+	Judgment        string `json:"judgment"`
+}
+type ContentAttachInput struct {
+	TaskID          string `json:"task_id"`
+	ProjectID       string `json:"project_id"`
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
+}
+type ContentEvidenceListInput struct {
+	ProjectID       string `json:"project_id,omitempty"`
+	ContentID       string `json:"content_id"`
+	ContentRevision uint64 `json:"content_revision"`
+	Offset          uint64 `json:"offset,omitempty"`
+	Limit           uint64 `json:"limit,omitempty"`
+}
+type ContentAttachmentsInput struct {
+	ProjectID        string `json:"project_id,omitempty"`
+	TaskID           string `json:"task_id,omitempty"`
+	TaskWorkRevision uint64 `json:"task_work_revision"`
 }
 
 func (AttemptTask) String() string   { return "AttemptTask(<redacted>)" }
@@ -212,12 +514,12 @@ func (task AttemptTask) MarshalJSON() ([]byte, error) {
 	if !validAttemptTask(task) {
 		return nil, ErrInvalidInput
 	}
-	quoted, err := json.Marshal(task.Task)
+	type plain AttemptTask
+	quoted, err := json.Marshal(plain(task))
 	if err != nil {
 		return nil, err
 	}
-	encoded := append([]byte(`{"task":`), terminalSafeJSON(nil, quoted)...)
-	return append(encoded, '}'), nil
+	return terminalSafeJSON(nil, quoted), nil
 }
 
 func terminalSafeJSON(dst, encoded []byte) []byte {
@@ -235,7 +537,21 @@ func terminalSafeJSON(dst, encoded []byte) []byte {
 }
 
 func validAttemptTask(task AttemptTask) bool {
-	return validText(task.Task, 0, 131072)
+	if !validText(task.Task, 0, 131072) {
+		return false
+	}
+	if task.TaskID == "" && task.IncarnationID == "" && task.WorkRevision == 0 && task.ChangeID == "" && task.AdmittedChangeRevision == 0 && task.ChangeRevision == 0 && task.BaseCommit == "" {
+		return true
+	}
+	if !validID(task.TaskID) || !validID(task.IncarnationID) || task.WorkRevision == 0 || !validID(task.ChangeID) || task.AdmittedChangeRevision == 0 || task.ChangeRevision == 0 || len(task.BaseCommit) != 40 && len(task.BaseCommit) != 64 {
+		return false
+	}
+	for _, ch := range task.BaseCommit {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 type FactorySummary struct {
@@ -255,15 +571,24 @@ type ProjectSummary struct {
 }
 
 type AgentSummary struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"project_id"`
-	Name      string `json:"name"`
-	Role      string `json:"role"`
-	Provider  string `json:"provider"`
-	AccountID string `json:"account_id"`
-	Paused    bool   `json:"paused"`
-	Archived  bool   `json:"archived"`
-	Revision  uint64 `json:"revision"`
+	ToolBudgetLimit  uint64 `json:"tool_budget_limit"`
+	ToolCallsUsed    uint64 `json:"tool_calls_used"`
+	ID               string `json:"id"`
+	ProjectID        string `json:"project_id"`
+	Name             string `json:"name"`
+	Role             string `json:"role"`
+	Provider         string `json:"provider"`
+	AccountID        string `json:"account_id"`
+	Paused           bool   `json:"paused"`
+	Archived         bool   `json:"archived"`
+	Model            string `json:"model"`
+	ReasoningEffort  string `json:"reasoning_effort"`
+	IdlePolicy       string `json:"idle_policy"`
+	IdleAfterSeconds uint32 `json:"idle_after_seconds"`
+	IdleInstruction  string `json:"idle_instruction"`
+	IdleRunBudget    uint32 `json:"idle_run_budget"`
+	IdleRunsUsed     uint32 `json:"idle_runs_used"`
+	Revision         uint64 `json:"revision"`
 }
 
 type TaskSummary struct {
@@ -276,6 +601,196 @@ type TaskSummary struct {
 	Status          string `json:"status"`
 	Priority        int64  `json:"priority"`
 	Revision        uint64 `json:"revision"`
+}
+
+type TaskRecoveryInput struct {
+	TaskID        string `json:"task_id"`
+	IncarnationID string `json:"incarnation_id"`
+}
+
+type TaskReadInput struct {
+	TaskID           string `json:"task_id"`
+	ExpectedRevision uint64 `json:"expected_revision"`
+	Offset           uint64 `json:"offset,omitempty"`
+}
+
+type TaskText struct {
+	TaskID      string  `json:"task_id"`
+	Revision    uint64  `json:"revision"`
+	Instruction string  `json:"instruction"`
+	Feedback    string  `json:"feedback"`
+	Outcome     *string `json:"outcome,omitempty"`
+	NextOffset  *uint64 `json:"next_offset,omitempty"`
+}
+
+type TaskRecovery struct {
+	Result                string   `json:"result"`
+	ResultTruncated       bool     `json:"result_truncated"`
+	BlockedReason         string   `json:"blocked_reason"`
+	RunWorkRevision       uint64   `json:"run_work_revision,omitempty"`
+	RunOutcome            string   `json:"run_outcome,omitempty"`
+	RunDetail             string   `json:"run_detail,omitempty"`
+	State                 string   `json:"state"`
+	TaskID                string   `json:"task_id"`
+	IncarnationID         string   `json:"incarnation_id"`
+	ProjectID             string   `json:"project_id"`
+	AssignedAgentID       string   `json:"assigned_agent_id"`
+	WorkRevision          uint64   `json:"work_revision"`
+	Revision              uint64   `json:"revision"`
+	Status                string   `json:"status"`
+	NeedsOperatorRecovery bool     `json:"needs_operator_recovery"`
+	ChangeID              string   `json:"change_id,omitempty"`
+	ChangeRevision        uint64   `json:"change_revision,omitempty"`
+	ChangePhase           string   `json:"change_phase,omitempty"`
+	SourceFormat          string   `json:"source_format,omitempty"`
+	SourceBaseCommit      string   `json:"source_base_commit,omitempty"`
+	SourceRepositoryDev   int64    `json:"source_repository_dev,omitempty"`
+	SourceRepositoryInode int64    `json:"source_repository_inode,omitempty"`
+	RunID                 string   `json:"run_id,omitempty"`
+	RunRevision           uint64   `json:"run_revision,omitempty"`
+	ArtifactPaths         []string `json:"artifact_paths"`
+	// Disposition is the decision durable state records after the latest
+	// run; OverseerNotification (none, pending, scheduled) says whether the
+	// standing overseer's wake cursor has consumed this task's newest event,
+	// which is neither seen nor handled; OverseerTask* name what that
+	// overseer is running or next queued on; LastProgressAtMs is the newest
+	// transition among the task, its runs, their human requests, its peer
+	// questions and interventions against it.
+	Disposition          string `json:"disposition,omitempty"`
+	HumanRequestID       string `json:"human_request_id,omitempty"`
+	OverseerAgentID      string `json:"overseer_agent_id,omitempty"`
+	OverseerNotification string `json:"overseer_notification,omitempty"`
+	OverseerTaskID       string `json:"overseer_task_id,omitempty"`
+	OverseerTaskStatus   string `json:"overseer_task_status,omitempty"`
+	OverseerTaskTitle    string `json:"overseer_task_title,omitempty"`
+	LastProgressAtMs     int64  `json:"last_progress_at_ms,omitempty"`
+	// Evidence for deciding whether the returned run refused before acting:
+	// its provider exit ("code N", "signal N", "absent"), how long it ran,
+	// and the retained Change head it left.
+	RunProviderExit  string `json:"run_provider_exit,omitempty"`
+	RunRunningMs     int64  `json:"run_running_ms,omitempty"`
+	ChangeHeadCommit string `json:"change_head_commit,omitempty"`
+}
+
+func validTaskRecovery(value TaskRecovery) bool {
+	if !utf8.ValidString(value.Result) || len(value.Result) > MaxRecoveryResultBytes || !utf8.ValidString(value.BlockedReason) || len(value.BlockedReason) > 4096 || !utf8.ValidString(value.RunDetail) || len(value.RunDetail) > 4096 {
+		return false
+	}
+	if (value.Result != "" || value.ResultTruncated) && value.Status != "succeeded" || value.BlockedReason != "" && value.Status != "blocked" {
+		return false
+	}
+	if value.ResultTruncated && len(value.Result) < MaxRecoveryResultBytes-3 {
+		return false
+	}
+	if value.RunID == "" && (value.RunWorkRevision != 0 || value.RunOutcome != "" || value.RunDetail != "") || value.RunID != "" && (value.RunWorkRevision == 0 || value.RunWorkRevision > value.WorkRevision) {
+		return false
+	}
+	switch value.RunOutcome {
+	case "":
+		if value.RunDetail != "" {
+			return false
+		}
+	case "succeeded":
+		if value.RunDetail != "" {
+			return false
+		}
+	case "blocked", "cancelled":
+		if value.RunDetail == "" {
+			return false
+		}
+	case "failed":
+	default:
+		return false
+	}
+
+	if value.State == "missing" {
+		return value.TaskID == "" && value.IncarnationID == "" && value.ProjectID == "" && value.AssignedAgentID == "" && value.WorkRevision == 0 && value.Revision == 0 && value.Status == "" && !value.NeedsOperatorRecovery && value.ChangeID == "" && value.ChangeRevision == 0 && value.ChangePhase == "" && value.SourceFormat == "" && value.SourceBaseCommit == "" && value.SourceRepositoryDev == 0 && value.SourceRepositoryInode == 0 && value.RunID == "" && value.RunRevision == 0 && value.ArtifactPaths != nil && len(value.ArtifactPaths) == 0 &&
+			value.Disposition == "" && value.HumanRequestID == "" && value.OverseerAgentID == "" && value.OverseerNotification == "" && value.OverseerTaskID == "" && value.OverseerTaskStatus == "" && value.OverseerTaskTitle == "" && value.LastProgressAtMs == 0 &&
+			value.RunProviderExit == "" && value.RunRunningMs == 0 && value.ChangeHeadCommit == ""
+	}
+	if value.State != "found" || !validID(value.TaskID) || !validID(value.IncarnationID) || !validID(value.ProjectID) || !validOptionalID(value.AssignedAgentID) || value.WorkRevision == 0 || value.Revision == 0 || !validTaskStatus(value.Status) || value.ArtifactPaths == nil || len(value.ArtifactPaths) > kernel.MaxRecoveryResources {
+		return false
+	}
+	// Empty additive fields are an older daemon's answer, tolerated.
+	switch value.Disposition {
+	case "", "queued", "retry_queued", "running", "succeeded", "cancelled", "needs_operator_recovery", "needs_you", "none":
+	default:
+		return false
+	}
+	switch value.OverseerNotification {
+	case "", "none":
+		if value.OverseerAgentID != "" {
+			return false
+		}
+	case "pending", "scheduled":
+		if !validID(value.OverseerAgentID) {
+			return false
+		}
+	default:
+		return false
+	}
+	if !validOptionalID(value.HumanRequestID) || value.Disposition == "needs_you" != (value.HumanRequestID != "") {
+		return false
+	}
+	if value.OverseerTaskID == "" {
+		if value.OverseerTaskStatus != "" || value.OverseerTaskTitle != "" {
+			return false
+		}
+	} else if value.OverseerAgentID == "" || !validID(value.OverseerTaskID) || value.OverseerTaskStatus != "running" && value.OverseerTaskStatus != "queued" || !validText(value.OverseerTaskTitle, 1, 1024) {
+		return false
+	}
+	if value.LastProgressAtMs < 0 || value.RunRunningMs < 0 || value.RunID == "" && (value.RunProviderExit != "" || value.RunRunningMs != 0) {
+		return false
+	}
+	switch {
+	case value.RunProviderExit == "", value.RunProviderExit == "absent":
+	case strings.HasPrefix(value.RunProviderExit, "code "), strings.HasPrefix(value.RunProviderExit, "signal "):
+		if _, err := strconv.ParseInt(value.RunProviderExit[strings.IndexByte(value.RunProviderExit, ' ')+1:], 10, 64); err != nil {
+			return false
+		}
+	default:
+		return false
+	}
+	if value.ChangeHeadCommit != "" && (value.ChangeID == "" || !(value.SourceFormat == "sha1" && len(value.ChangeHeadCommit) == 40 || value.SourceFormat == "sha256" && len(value.ChangeHeadCommit) == 64)) {
+		return false
+	}
+	if value.RunID == "" && value.RunRevision != 0 || value.RunID != "" && (!validID(value.RunID) || value.RunRevision == 0) {
+		return false
+	}
+	if value.ChangeID == "" {
+		if value.ChangeRevision != 0 || value.ChangePhase != "" || value.SourceFormat != "" {
+			return false
+		}
+	} else {
+		if !validID(value.ChangeID) || value.ChangeRevision == 0 {
+			return false
+		}
+		switch value.ChangePhase {
+		case "reserved", "prepared", "available", "retained", "abandoned":
+		default:
+			return false
+		}
+	}
+	if value.SourceFormat == "" {
+		if value.SourceBaseCommit != "" || value.SourceRepositoryDev != 0 || value.SourceRepositoryInode != 0 {
+			return false
+		}
+	} else {
+		if !(value.SourceFormat == "sha1" && len(value.SourceBaseCommit) == 40 || value.SourceFormat == "sha256" && len(value.SourceBaseCommit) == 64) || value.SourceRepositoryDev < 0 || value.SourceRepositoryInode <= 0 {
+			return false
+		}
+		for _, ch := range value.SourceBaseCommit {
+			if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+				return false
+			}
+		}
+	}
+	for _, path := range value.ArtifactPaths {
+		if value.RunID == "" || !validCanonicalPath(path, 4096) {
+			return false
+		}
+	}
+	return true
 }
 
 // DashboardSnapshot deliberately contains only the bounded public Store
@@ -306,22 +821,52 @@ type OverseerSnapshot struct {
 	Handoffs       []RetainedChangeHandoff `json:"retained_change_handoffs"`
 }
 
-// RetainedChangeHandoff identifies one server-observed tree.  Consumers must
-// reject it when any revision no longer matches their status snapshot.
+// RetainedChangeHandoff identifies one settled worker Change by its Git
+// identities: the branch its worktree is on, the base it started from and
+// the head the daemon settled it at. Consumers must reject it when any
+// revision no longer matches their status snapshot. Overseer status carries
+// only the identities; attempt source adds where to read them.
 type RetainedChangeHandoff struct {
-	ChangeID         string `json:"change_id"`
-	BaseCommit       string `json:"base_commit"`
+	ChangeID   string `json:"change_id"`
+	BaseCommit string `json:"base_commit"`
+	// HeadCommit is the settled tip of Branch, the exact head to review and
+	// publish. It is empty for a Change that is still a Git-free tree.
+	HeadCommit       string `json:"head_commit"`
+	Branch           string `json:"branch"`
 	TaskID           string `json:"task_id"`
 	TaskWorkRevision uint64 `json:"task_work_revision"`
 	ChangeRevision   uint64 `json:"change_revision"`
-	// SourcePath is the one daemon-derived retained tree this status record
-	// describes. It is usable only when the launch profile granted that exact
-	// path; consumers must refresh status after any revision change.
-	SourcePath string `json:"source_path"`
+	// SourcePath is the Change's worktree and GitDirectory the project
+	// repository's Git directory its commits live in; both are set only by
+	// an explicit attempt source request. Dirty reports uncommitted work in
+	// the worktree at that moment.
+	SourcePath   string `json:"source_path"`
+	GitDirectory string `json:"git_directory"`
+	Dirty        bool   `json:"dirty"`
 }
 
 func validRetainedChangeHandoff(handoff RetainedChangeHandoff) bool {
-	return validID(handoff.ChangeID) && validID(handoff.TaskID) && (len(handoff.BaseCommit) == 40 || len(handoff.BaseCommit) == 64) && handoff.TaskWorkRevision != 0 && handoff.ChangeRevision != 0 && validHandoffSourcePath(handoff.SourcePath, handoff.ChangeID)
+	return validID(handoff.ChangeID) && validID(handoff.TaskID) && validCommitHex(handoff.BaseCommit) && (handoff.HeadCommit == "" || len(handoff.HeadCommit) == len(handoff.BaseCommit) && validCommitHex(handoff.HeadCommit)) &&
+		(handoff.Branch == "" || handoff.Branch == "factory/"+handoff.ChangeID[:12]) && handoff.TaskWorkRevision != 0 && handoff.ChangeRevision != 0 &&
+		(handoff.SourcePath == "" || validHandoffSourcePath(handoff.SourcePath, handoff.ChangeID)) && (handoff.GitDirectory == "" || validHandoffGitDirectory(handoff.GitDirectory))
+}
+
+// validSourceHandoff is the attempt source reply: every identity and every
+// location present.
+func validSourceHandoff(handoff RetainedChangeHandoff) bool {
+	return validRetainedChangeHandoff(handoff) && handoff.HeadCommit != "" && handoff.Branch != "" && handoff.SourcePath != "" && handoff.GitDirectory != ""
+}
+
+func validCommitHex(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character >= 'a' && character <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type OverseerIntervention struct {
@@ -397,12 +942,19 @@ type OverseerQuestion struct {
 // OverseerTaskCreateInput intentionally has no project selector: the daemon
 // derives it from the live orchestrator attempt.
 type OverseerTaskCreateInput struct {
-	ID              string `json:"id"`
-	AssignedAgentID string `json:"assigned_agent_id"`
-	IncarnationID   string `json:"incarnation_id"`
-	Title           string `json:"title"`
-	Body            string `json:"body"`
-	Priority        int64  `json:"priority"`
+	ID              string                  `json:"id"`
+	AssignedAgentID string                  `json:"assigned_agent_id"`
+	IncarnationID   string                  `json:"incarnation_id"`
+	Title           string                  `json:"title"`
+	Body            string                  `json:"body"`
+	Priority        int64                   `json:"priority"`
+	Prerequisites   []TaskPrerequisiteInput `json:"prerequisites,omitempty"`
+	ConflictPaths   []string                `json:"conflict_paths,omitempty"`
+}
+
+type TaskPrerequisiteInput struct {
+	TaskID       string `json:"task_id"`
+	WorkRevision uint64 `json:"work_revision"`
 }
 
 type OverseerTaskUpdateInput struct {
@@ -413,6 +965,7 @@ type OverseerTaskUpdateInput struct {
 	Priority         *int64  `json:"priority,omitempty"`
 	AssignedAgentID  *string `json:"assigned_agent_id,omitempty"`
 	Cancel           bool    `json:"cancel,omitempty"`
+	Retry            bool    `json:"retry,omitempty"`
 }
 
 type OverseerAgentUpdateInput struct {
@@ -519,13 +1072,15 @@ func validCreateAgentInput(input CreateAgentInput) bool {
 }
 
 type EnqueueTaskInput struct {
-	ID              string `json:"id"`
-	ProjectID       string `json:"project_id"`
-	AssignedAgentID string `json:"assigned_agent_id"`
-	IncarnationID   string `json:"incarnation_id"`
-	Title           string `json:"title"`
-	Body            string `json:"body"`
-	Priority        int64  `json:"priority"`
+	ID              string                  `json:"id"`
+	ProjectID       string                  `json:"project_id"`
+	AssignedAgentID string                  `json:"assigned_agent_id"`
+	IncarnationID   string                  `json:"incarnation_id"`
+	Title           string                  `json:"title"`
+	Body            string                  `json:"body"`
+	Priority        int64                   `json:"priority"`
+	Prerequisites   []TaskPrerequisiteInput `json:"prerequisites,omitempty"`
+	ConflictPaths   []string                `json:"conflict_paths,omitempty"`
 }
 
 // HumanQuestionInput is the bounded provider-authored portion of a
@@ -535,6 +1090,7 @@ type HumanQuestionInput struct {
 	IdempotencyKey string   `json:"idempotency_key"`
 	Question       string   `json:"question"`
 	Options        []string `json:"options,omitempty"`
+	ReuseExisting  bool     `json:"reuse_existing,omitempty"`
 }
 
 type PeerQuestionInput struct {
@@ -559,9 +1115,10 @@ type PeerStatus struct {
 }
 
 type PeerStatusInput struct {
-	Offset       uint64 `json:"offset"`
-	TargetOffset uint64 `json:"target_offset"`
-	ExpectedHead uint64 `json:"expected_head"`
+	Offset         uint64 `json:"offset"`
+	TargetOffset   uint64 `json:"target_offset"`
+	ExpectedHead   uint64 `json:"expected_head"`
+	IncludeTargets bool   `json:"include_targets"`
 }
 
 // Peer status is printed in an authenticated provider terminal.

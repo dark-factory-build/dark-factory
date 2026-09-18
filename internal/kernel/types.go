@@ -7,13 +7,13 @@ import (
 )
 
 const (
-	IDBytes                = 16
-	DigestBytes            = 32
-	EventRetentionLimit    = 4096
-	SnapshotEntityLimit    = 4096
-	MaxFactoryCapacity     = 1024
-	MaxChangeTreeEntries   = 10_000
-	MaxChangeTreeBlobBytes = 1 << 30
+	IDBytes              = 16
+	DigestBytes          = 32
+	EventRetentionLimit  = 4096
+	SnapshotEntityLimit  = 4096
+	MaxFactoryCapacity   = 1024
+	MaxRecoveryRuns      = 64
+	MaxRecoveryResources = 16
 )
 
 type identifier struct {
@@ -61,6 +61,9 @@ type HumanRequestDeliveryID struct{ identifier }
 type TaskInterventionID struct{ identifier }
 type PeerQuestionID struct{ identifier }
 type PeerDeliveryID struct{ identifier }
+type ContinuationID struct{ identifier }
+type ContentID struct{ identifier }
+type ContentEvidenceID struct{ identifier }
 
 func ProjectIDFromBytes(value []byte) (ProjectID, error) {
 	id, err := identifierFromBytes(value)
@@ -129,6 +132,11 @@ func TaskInterventionIDFromBytes(value []byte) (TaskInterventionID, error) {
 	id, err := identifierFromBytes(value)
 	return TaskInterventionID{id}, err
 }
+
+func ContinuationIDFromBytes(value []byte) (ContinuationID, error) {
+	id, err := identifierFromBytes(value)
+	return ContinuationID{id}, err
+}
 func PeerQuestionIDFromBytes(value []byte) (PeerQuestionID, error) {
 	id, err := identifierFromBytes(value)
 	return PeerQuestionID{id}, err
@@ -136,6 +144,14 @@ func PeerQuestionIDFromBytes(value []byte) (PeerQuestionID, error) {
 func PeerDeliveryIDFromBytes(value []byte) (PeerDeliveryID, error) {
 	id, err := identifierFromBytes(value)
 	return PeerDeliveryID{id}, err
+}
+func ContentIDFromBytes(value []byte) (ContentID, error) {
+	id, err := identifierFromBytes(value)
+	return ContentID{id}, err
+}
+func ContentEvidenceIDFromBytes(value []byte) (ContentEvidenceID, error) {
+	id, err := identifierFromBytes(value)
+	return ContentEvidenceID{id}, err
 }
 
 func (id ProjectID) MarshalText() ([]byte, error)              { return []byte(id.String()), nil }
@@ -154,6 +170,8 @@ func (id HumanRequestDeliveryID) MarshalText() ([]byte, error) { return []byte(i
 func (id TaskInterventionID) MarshalText() ([]byte, error)     { return []byte(id.String()), nil }
 func (id PeerQuestionID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
 func (id PeerDeliveryID) MarshalText() ([]byte, error)         { return []byte(id.String()), nil }
+func (id ContentID) MarshalText() ([]byte, error)              { return []byte(id.String()), nil }
+func (id ContentEvidenceID) MarshalText() ([]byte, error)      { return []byte(id.String()), nil }
 
 type digest struct {
 	b [DigestBytes]byte
@@ -176,7 +194,6 @@ func (d digest) Bytes() []byte {
 
 type AttemptDigest struct{ digest }
 type ResultProofDigest struct{ digest }
-type TreeDigest struct{ digest }
 type BirthDigest struct{ digest }
 
 func AttemptDigestFromBytes(value []byte) (AttemptDigest, error) {
@@ -189,11 +206,6 @@ func ResultProofDigestFromBytes(value []byte) (ResultProofDigest, error) {
 	return ResultProofDigest{d}, err
 }
 
-func TreeDigestFromBytes(value []byte) (TreeDigest, error) {
-	d, err := digestFromBytes(value)
-	return TreeDigest{d}, err
-}
-
 func BirthDigestFromBytes(value []byte) (BirthDigest, error) {
 	d, err := digestFromBytes(value)
 	return BirthDigest{d}, err
@@ -201,7 +213,6 @@ func BirthDigestFromBytes(value []byte) (BirthDigest, error) {
 
 func (d AttemptDigest) Bytes() []byte     { return d.digest.Bytes() }
 func (d ResultProofDigest) bytes() []byte { return d.digest.Bytes() }
-func (d TreeDigest) Bytes() []byte        { return d.digest.Bytes() }
 func (d BirthDigest) Bytes() []byte       { return d.digest.Bytes() }
 
 type BrowserChallengeDigest struct{ digest }
@@ -385,6 +396,7 @@ const (
 	EntityHumanRequest
 	EntityAccount
 	EntityPeerQuestion
+	EntityContinuation
 )
 
 func parseEntityKind(value string) (EntityKind, error) {
@@ -407,6 +419,8 @@ func parseEntityKind(value string) (EntityKind, error) {
 		return EntityAccount, nil
 	case "peer_question":
 		return EntityPeerQuestion, nil
+	case "continuation":
+		return EntityContinuation, nil
 	default:
 		return 0, corruptControl("entity kind", value)
 	}
@@ -432,6 +446,8 @@ func (value EntityKind) String() string {
 		return "account"
 	case EntityPeerQuestion:
 		return "peer_question"
+	case EntityContinuation:
+		return "continuation"
 	default:
 		return ""
 	}
@@ -506,16 +522,26 @@ type NewTask struct {
 	Title           string
 	Body            string
 	Priority        int64
+	Prerequisites   []TaskPrerequisite
+	ConflictPaths   []string
+}
+
+// TaskPrerequisite pins a consumer to the producer's particular corrected
+// work revision. A later send-back cannot silently satisfy this edge.
+type TaskPrerequisite struct {
+	TaskID       TaskID
+	WorkRevision Revision
 }
 
 type FactoryState struct {
 	DaemonID        DaemonID
 	DispatchEnabled bool
 	Capacity        uint16
-	Revision        Revision
-	Head            EventSequence
-	Floor           EventSequence
-	updatedAt       UnixMillis
+	// Revision guards explicit controls; Head tracks activity and all other changes.
+	Revision  Revision
+	Head      EventSequence
+	Floor     EventSequence
+	updatedAt UnixMillis
 }
 
 type Project struct {
@@ -631,9 +657,11 @@ type AgentSummary struct {
 	ReasoningEffort string
 	// AccountID is the linked provider login this agent launches with; the
 	// zero identity means the provider default.
-	AccountID AccountID
-	Idle      IdleRule
-	Revision  Revision
+	AccountID       AccountID
+	ToolBudgetLimit uint64 `json:"-"`
+	ToolCallsUsed   uint64 `json:"-"`
+	Idle            IdleRule
+	Revision        Revision
 }
 
 // AccountSummary is the served account fact: which login it is and where its

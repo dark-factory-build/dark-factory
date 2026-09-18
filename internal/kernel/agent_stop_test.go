@@ -61,6 +61,30 @@ func TestReplaceTaskIsAtomicAndReplayBindsObjective(t *testing.T) {
 	}
 }
 
+func TestStopRunForOperatorUsesExactCASAndIdempotency(t *testing.T) {
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	task, _, err := store.Task(context.Background(), run.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, _ := TaskInterventionIDFromBytes(bytes.Repeat([]byte{210}, IDBytes))
+	request := TaskInterventionRequest{OperationID: operation, TaskID: task.ID, RunID: run.ID, ExpectedTaskRevision: task.Revision, ExpectedRunRevision: run.Revision, Kind: TaskInterventionStop}
+	stale := request
+	stale.ExpectedRunRevision = mustRevision(t, run.Revision.Int64()+1)
+	if _, err := store.StopRunForOperator(context.Background(), stale, nil, mustTime(t, 400)); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale operator stop = %v", err)
+	}
+	receipt, err := store.StopRunForOperator(context.Background(), request, nil, mustTime(t, 401))
+	if err != nil || receipt.Actor != TaskInterventionOperator || receipt.ActorRunID != nil || receipt.ActorBrowserClientID != nil {
+		t.Fatalf("operator stop = %+v, %v", receipt, err)
+	}
+	replay, err := store.StopRunForOperator(context.Background(), request, nil, mustTime(t, 402))
+	if err != nil || replay.OperationID != receipt.OperationID || replay.State != receipt.State || replay.UpdatedAt != receipt.UpdatedAt {
+		t.Fatalf("operator replay = %+v, %v", replay, err)
+	}
+}
+
 func TestReplacementAdmissionStaysAheadOfItsWorkersQueueOnly(t *testing.T) {
 	ctx := context.Background()
 	store, running, _ := runningWorkerRun(t)

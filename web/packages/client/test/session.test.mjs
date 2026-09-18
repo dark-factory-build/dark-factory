@@ -307,6 +307,14 @@ test("authenticated task enqueue mints exact IDs and correlates the durable resu
     agent_revision: 7n,
   }));
   await followUp;
+
+  // "any" queues the instruction for any eligible worker in the pane agent's project.
+  const shared = session.enqueueAgentTask({ agentId, expectedAgentRevision: 7n, instruction: "Whoever is free: fix the flaky test", mode: "any" });
+  const sharedFrame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(sharedFrame.body.mode, "any");
+  assert.equal(sharedFrame.body.agent_id, agentId);
+  socket.reply(encodeTaskEnqueueResult(sharedFrame.id, { task_id: sharedFrame.body.task_id, revision: 3n, agent_revision: 7n }));
+  await shared;
   session.close();
 });
 
@@ -2096,4 +2104,121 @@ test("paired identities list newest first and revoke at an exact revision, never
   await assert.rejects(session.revokeBrowserClient({ clientId: session.clientId, expectedRevision: 1n }), (error) => error instanceof SessionError && error.code === "invalid_request");
   await assert.rejects(session.revokeBrowserClient({ clientId: other, expectedRevision: 0n }), (error) => error instanceof SessionError && error.code === "invalid_request");
   session.close();
+});
+
+test("closed state watches reconnect only for transport loss or retryable errors without replaying mutations", { timeout: 3_000 }, async () => {
+  for (const failure of [null, { code: "rate_limited", retryable: true }, { code: "unauthorized", retryable: false }, { code: "internal", retryable: false }]) {
+    const store = new MemoryKeys();
+    const sockets = [];
+    const timer = new VirtualTimer();
+    let ready;
+    let readiness = new Promise((resolve) => { ready = resolve; });
+    const client = new BrowserClient({
+      url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge, keyStore: store, timer, reconnectInitialDelayMs: 10,
+      onStatus: (status) => { if (status === "ready") ready(); },
+      socketFactory: () => { const socket = new Socket(serverFor); sockets.push(socket); return socket; },
+    });
+    await client.connect();
+    await readiness;
+    readiness = new Promise((resolve) => { ready = resolve; });
+    const saved = store.value;
+    const mutation = client.session.updateTask({ taskId: "aa".repeat(16), expectedRevision: 1n, body: "one-shot instruction" });
+    const rejected = assert.rejects(mutation, (error) => error instanceof SessionError);
+    const watch = lastFrame(sockets[0], "STATE_WATCH");
+    if (failure === null) sockets[0].close();
+    else sockets[0].reply(encodeServerError(failure, watch.id));
+    await rejected;
+    await tick();
+    timer.advance(10);
+    const retry = failure === null || failure.retryable;
+    if (retry) await readiness;
+    assert.equal(sockets.length, retry ? 2 : 1);
+    assert.equal(client.status, retry ? "ready" : "closed");
+    assert.strictEqual(store.value, saved, "pairing must remain unchanged");
+    if (retry) {
+      const types = sockets[1].sent.map((wire) => decodeClientControl(wire).type);
+      assert.ok(types.includes("AUTH_PROVE"));
+      assert.ok(types.includes("STATE_GET"));
+      assert.ok(!types.includes("PAIR_PROVE"));
+      assert.ok(!types.includes("TASK_UPDATE"));
+      assert.ok(!types.some((type) => type.startsWith("TERMINAL_")));
+    }
+    client.close();
+  }
+});
+
+test("retryable read deadlines close the session and reconnect without replaying reads", { timeout: 3_000 }, async () => {
+  for (const request of ["HUMAN_REQUEST_DETAIL_GET", "TERMINAL_TARGET_GET"]) {
+    const store = new MemoryKeys();
+    const timer = new VirtualTimer();
+    const sockets = [];
+    let ready;
+    let readiness = new Promise((resolve) => { ready = resolve; });
+    const client = new BrowserClient({
+      url: "ws://127.0.0.1/browser", host: "127.0.0.1", origin: "https://preview.example", challenge,
+      keyStore: store, timer, reconnectInitialDelayMs: 10,
+      onStatus: (status) => { if (status === "ready") ready(); },
+      socketFactory: () => {
+        const socket = new Socket((current, frame) => {
+          serverFor(current);
+          if (sockets.length === 1 && frame.type === request) current.reply(encodeServerError({ code: "rate_limited", retryable: true }, frame.id));
+        });
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    await client.connect();
+    await ready;
+    readiness = new Promise((resolve) => { ready = resolve; });
+    const pending = request === "HUMAN_REQUEST_DETAIL_GET"
+      ? client.session.getHumanRequestDetail({ requestId: "aa".repeat(16), expectedRevision: 1n })
+      : client.session.resolveAgentTerminal({ agentId: "bb".repeat(16), expectedAgentRevision: 1n, expectedHead: 1n });
+    assert.equal(lastFrame(sockets[0], request).type, request);
+    await assert.rejects(pending, (error) => error instanceof SessionError && error.code === "rate_limited" && error.retryable);
+    assert.equal(client.status, "closed");
+    timer.advance(10);
+    await readiness;
+    assert.equal(sockets.length, 2);
+    const retryTypes = sockets[1].sent.map((wire) => decodeClientControl(wire).type);
+    assert.ok(!retryTypes.includes(request));
+    assert.ok(!retryTypes.some((type) => type.startsWith("TERMINAL_")));
+    client.close();
+  }
+});
+
+test("optional library stays unused until requested and correlates bounded replies", async () => {
+  const { session, socket } = await openHumanSession();
+  assert.equal(socket.sent.some((wire) => decodeClientControl(wire).type === "PROJECT_CONTENT"), false);
+  const input = { project_id: "01".repeat(16), offset: 0, limit: 4 };
+  const pending = session.projectContent("list", input);
+  const frame = lastFrame(socket, "PROJECT_CONTENT");
+  assert.deepEqual(frame.body, { operation: "list", input });
+  socket.reply(encodeServerControl({ type: "PROJECT_CONTENT_RESULT", id: frame.id, body: { operation: "list", output: { items: [], next_offset: 0 } } }));
+  assert.deepEqual(await pending, { items: [], next_offset: 0 });
+  await assert.rejects(session.projectContent("body", { revision: Number.MAX_SAFE_INTEGER + 1 }), ProtocolError);
+  const failed = session.projectContent("read", { project_id: input.project_id, id: "02".repeat(16), revision: 1 });
+  const request = lastFrame(socket, "PROJECT_CONTENT");
+  socket.reply(encodeServerError({ code: "unsupported", retryable: false }, request.id));
+  await assert.rejects(failed, (error) => error.code === "unsupported");
+  assert.equal(session.status, "ready");
+  session.close();
+});
+
+test("optional library requires private detail and writes additionally require human actions", async () => {
+  for (const capabilities of [CAPABILITIES.observe, CAPABILITIES.observe | CAPABILITIES.human_actions]) {
+    const { session, socket } = await openHumanSession(undefined, capabilities);
+    await assert.rejects(session.projectContent("list", { project_id: "01".repeat(16) }), (error) => error.code === "unauthorized");
+    await assert.rejects(session.projectContent("create", {}), (error) => error.code === "unauthorized");
+    assert.equal(socket.sent.some((wire) => decodeClientControl(wire).type === "PROJECT_CONTENT"), false);
+    session.close();
+  }
+  const { session } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.private_human_request_detail);
+  await assert.rejects(session.projectContent("outcome_write", {}), (error) => error.code === "unauthorized");
+  session.close();
+});
+
+test("library numeric bounds match the Go wire contract", () => {
+  const frame = (output) => JSON.stringify({ type: "PROJECT_CONTENT_RESULT", id: "limit", body: { operation: "read", output } });
+  for (const output of [{ revision: Number.MAX_SAFE_INTEGER }, { document: { anchor_work_revision: Number.MAX_SAFE_INTEGER } }]) assert.deepEqual(decodeServerControl(frame(output)).body.output, output);
+  for (const output of [{ revision: Number.MAX_SAFE_INTEGER + 1 }, { document: { anchor_work_revision: Number.MAX_SAFE_INTEGER + 1 } }]) assert.throws(() => decodeServerControl(frame(output)), ProtocolError);
 });

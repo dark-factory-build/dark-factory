@@ -11,6 +11,7 @@ import { prepareFloor, selectFloor, projectFloor } from "../dist/src/console-vie
 import { FactoryFloor, StageMeter } from "../dist/src/console-screens.js";
 import { FactoryScene } from "../dist/src/factory-scene/factory-scene.js";
 import { TerminalPanel } from "../dist/src/factory-app.js";
+import { DEFAULT_FLOOR_APPEARANCE, readFloorAppearance } from "../dist/src/floor-appearance.js";
 import { fixtureState, fixtureTopologies, fixtureTopology } from "../../../fixtures/state.mjs";
 
 const ids = {
@@ -30,6 +31,12 @@ const render = (props = {}) => renderToStaticMarkup(createElement(FactoryConsole
   state: baseState(),
   ...props,
 }));
+
+function consoleElements(props) {
+  let tree;
+  act(() => { tree = create(createElement(FactoryConsole, props)); });
+  return tree.root.findAll((node) => typeof node.type === "string").map((node) => ({ type: node.type, props: node.props }));
+}
 
 const VIEWS = ["floor", "agents"];
 
@@ -72,6 +79,60 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
   assert.equal(css.includes("@keyframes dfFactoryScene"), false);
 });
 
+test("floor appearance is local, field-validated, and available before a connection", () => {
+  assert.deepEqual(readFloorAppearance('{"scenery":"off","dependencyLinks":"bad","labels":"names-and-counts","taskProps":false,"animation":"off"}'), {
+    scenery: "off", dependencyLinks: "selected-room", labels: "names-and-counts", taskProps: false, animation: "off", ambientLife: "quiet",
+  });
+  assert.deepEqual(readFloorAppearance('{"scenery":"subtle"}'), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "subtle" });
+  assert.deepEqual(readFloorAppearance("not json"), DEFAULT_FLOOR_APPEARANCE);
+  const markup = render({ status: "closed", settingsOpen: true });
+  for (const text of ["Scenery", "Dependency links", "Labels", "Task props", "Animation", "Ambient life", "Reset floor appearance", "Saved in this browser. Does not change how the factory runs."]) assert.match(markup, new RegExp(text));
+  assert.match(markup, /<option value="selected-room" selected="">Selected room<\/option>/);
+});
+
+test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
+  const priorWindow = globalThis.window;
+  const entries = new Map([
+    ["dark-factory.floor-appearance", '{"scenery":"subtle","dependencyLinks":"overview","labels":"bad","taskProps":"bad","animation":"off"}'],
+    ["dark-factory.pairing", "keep"],
+  ]);
+  const writes = [];
+  globalThis.window = { localStorage: {
+    getItem: (key) => entries.get(key) ?? null,
+    setItem: (key, value) => { writes.push([key, value]); entries.set(key, value); },
+    removeItem: (key) => { writes.push([key]); entries.delete(key); },
+  } };
+  try {
+    let tree;
+    act(() => { tree = create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); });
+    assert.deepEqual(writes, [], "loading never writes defaults");
+    const selects = tree.root.findAllByType("select").slice(-6);
+    assert.equal(selects[0].props.value, "subtle");
+    assert.equal(selects[1].props.value, "overview");
+    assert.equal(selects[2].props.value, "names");
+    assert.equal(selects[3].props.value, "on");
+    act(() => { selects[0].props.onChange({ currentTarget: { value: "off" } }); });
+    assert.deepEqual(JSON.parse(entries.get("dark-factory.floor-appearance")), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", dependencyLinks: "overview", animation: "off" });
+    act(() => { tree.root.findAllByType("button").find((button) => button.props.children === "Reset floor appearance").props.onClick(); });
+    assert.equal(entries.has("dark-factory.floor-appearance"), false);
+    assert.equal(entries.get("dark-factory.pairing"), "keep");
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
+});
+
+test("blocked floor-appearance storage leaves the console renderable", () => {
+  const priorWindow = globalThis.window;
+  globalThis.window = { localStorage: { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => { throw new Error("blocked"); } } };
+  try {
+    assert.doesNotThrow(() => act(() => { create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); }));
+  } finally {
+    if (priorWindow === undefined) delete globalThis.window;
+    else globalThis.window = priorWindow;
+  }
+});
+
 test("one screen keeps Factory and the operator panels together", () => {
   const markup = render();
   assert.match(markup, /<main class="dfFactoryConsole" aria-label="Factory operator console">/);
@@ -102,7 +163,7 @@ test("a selected decision names the action and keeps one collapse control", () =
 
 test("suggested answers fill the reply without sending it", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value) }));
+  const elements = consoleElements({ status: "ready", state: baseState(), selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }), onHumanReplyChange: (value) => calls.push(value) });
   elements.find((element) => element.type === "button" && Array.isArray(element.props.children) && element.props.children[0] === "Continue").props.onClick();
   assert.deepEqual(calls, ["Continue"]);
   const markup = render({ selectedHumanRequest: selectedRequest({ options: ["Continue", "Stop"] }) });
@@ -751,6 +812,20 @@ test("a paused agent with queued work says the queue is paused", () => {
   assert.equal(markup.includes("QUEUED · WAITING FOR CAPACITY"), false);
 });
 
+test("unclaimed shared work waits under its project until an eligible worker claims it", () => {
+  const template = [...fixtureState.tasks.values()].find((task) => task.status === "queued");
+  const shared = { ...template, id: "3a".repeat(16), title: "Anyone free", assigned_agent_id: "" };
+  const markup = render({
+    state: baseState({ tasks: new Map([[shared.id, shared]]) }),
+    detail: "queue",
+    selectedAgent: agentSelection(),
+    onEditTask: () => {},
+  });
+  assert.match(markup, /Anyone free/);
+  assert.match(markup, /ANY ELIGIBLE WORKER · QUEUED · PRIORITY/);
+  assert.match(markup, /<option value="" disabled=""[^>]*>Any eligible worker<\/option>/);
+});
+
 test("the queued task row keeps served order and changes its exact priority", async () => {
   const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -1031,20 +1106,19 @@ test("a queued edit refusal remains visible after its task leaves the queue", ()
   }
 });
 
-test("the settings modal carries the factory readout and a pairing mount point", () => {
+test("the settings modal keeps actionable settings compact", () => {
   const markup = render({ settingsOpen: true, onToggleSettings: () => {} });
   assert.match(markup, /<dialog class="dfConsoleDialog" aria-label="Settings">/);
-  assert.match(markup, /aria-label="BUILDING"/);
-  assert.match(markup, /<dt>DISPATCH<\/dt><dd>ENABLED<\/dd>/);
-  // Project values have one editable home, rather than duplicate narrow metrics.
+  assert.doesNotMatch(markup, /aria-label="BUILDING"/);
+  assert.doesNotMatch(markup, /<dt>DISPATCH<\/dt>/);
+  assert.doesNotMatch(markup, /aria-label="This factory"/);
+  assert.match(markup, /aria-label="Run limits"/);
   assert.doesNotMatch(markup, /<dt>(RUN ALLOWANCE|PER-RUN LIMIT)<\/dt>/);
   assert.equal((markup.match(/aria-label="Limits for North Workshop"/g) ?? []).length, 1);
   assert.equal((markup.match(/aria-label="Limits for South Workshop"/g) ?? []).length, 1);
   assert.match(markup, /5 RUNS USED · 7 FUTURE RUNS LEFT/);
   assert.match(markup, /3 RUNS USED · UNLIMITED/);
   assert.match(markup, /value="900"/);
-  assert.match(markup, /Revision 42/);
-  assert.match(markup, /127\.0\.0\.1:43123/);
   assert.match(markup, /aria-label="PAIRING"/);
   assert.match(markup, /Pairing unavailable/);
   // The peer PR drops its own component into the same slot.
@@ -1236,17 +1310,17 @@ test("request, reply, cancel, and summary collapse forward only presentation int
     onCloseHumanRequest: () => calls.push(["close"]),
   };
 
-  const requestElements = expand(FactoryConsole(baseProps));
+  const requestElements = consoleElements(baseProps);
   requestElements.find((element) => element.type === "summary" && element.props.className === "dfConsoleItem__summary").props.onClick({ preventDefault() {} });
   assert.equal(calls[0][0], "select");
   assert.equal(calls[0][1], request);
-  const busyElements = expand(FactoryConsole({ ...baseProps, selectedHumanRequest: selectedRequest({ phase: "replying" }) }));
+  const busyElements = consoleElements({ ...baseProps, selectedHumanRequest: selectedRequest({ phase: "replying" }) });
   const busySummary = busyElements.find((element) => element.type === "summary" && element.props.className === "dfConsoleItem__summary");
   assert.equal(busySummary.props["aria-disabled"], true);
   busySummary.props.onClick({ preventDefault() {} });
   assert.equal(calls.length, 1, "an in-flight answer cannot be collapsed or switched");
 
-  const selectedElements = expand(FactoryConsole({ ...baseProps, selectedHumanRequest: selectedRequest() }));
+  const selectedElements = consoleElements({ ...baseProps, selectedHumanRequest: selectedRequest() });
   selectedElements.find((element) => element.type === "textarea").props.onChange({ currentTarget: { value: "Proceed." } });
   let prevented = false;
   selectedElements.find((element) => element.type === "form").props.onSubmit({ preventDefault: () => { prevented = true; } });
@@ -1284,12 +1358,12 @@ test("agent and question terminal actions expose only current public intent", as
 
 test("the view toggle and settings forward exactly one intent each", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({
+  const elements = consoleElements({
     status: "ready",
     state: baseState(),
     onView: (value) => calls.push(["view", value]),
     onToggleSettings: () => calls.push(["settings"]),
-  }));
+  });
   const chrome = elements.filter((element) => element.type === "button" && element.props.disabled !== true);
   assert.deepEqual(chrome.map((element) => element.props.children), ["Settings", "Floor", "Agents"]);
   chrome[0].props.onClick();
@@ -1305,7 +1379,7 @@ function expand(node, result = []) {
   if (!isValidElement(node)) return result;
   if (typeof node.type === "function") {
     // Stateful surfaces have their own renderer checks; this walk tests sibling intent callbacks.
-    if (["QueuePanel", "FactoryFloor"].includes(node.type.name)) return result;
+    if (["QueuePanel", "FactoryFloor", "ProjectLibrary"].includes(node.type.name)) return result;
     expand(node.type(node.props), result);
     return result;
   }
@@ -1518,7 +1592,9 @@ test("settings asks the daemon for logins on open and links the one the operator
     assert.deepEqual(asked, ["asked"]);
     const section = renderer.root.findAllByProps({ "aria-label": "ACCOUNTS" })[0];
     assert.ok(section !== undefined);
-    const label = renderer.root.findAllByType("input").find((input) => input.props.id === `df-account-label-${login.home}`);
+    assert.equal(JSON.stringify(renderer.toJSON()).includes(login.home), false, "account paths stay out of the common flow");
+    assert.equal(JSON.stringify(renderer.toJSON()).includes(login.default_model), false, "model details stay out of account linking");
+    const label = renderer.root.findAllByType("input").find((input) => input.props.id === `df-account-label-${login.provider}-0`);
     await act(async () => { label.props.onChange({ currentTarget: { value: "dogfood" } }); });
     const link = renderer.root.findAllByType("button").find((button) => button.props.children === "LINK");
     await act(async () => { link.props.onClick(); });
@@ -1560,7 +1636,15 @@ test("settings keeps an unavailable linked account visible with recovery guidanc
     linked_id: account.id,
     unavailable_reason: "login is no longer discoverable",
   }] });
-  assert.match(markup, /ACCOUNT UNAVAILABLE · login is no longer discoverable\. Sign in again in this directory, then refresh\./);
+  assert.match(markup, /ACCOUNT UNAVAILABLE · login is no longer discoverable\./);
+  assert.ok(markup.includes(`Sign in again using <code>${account.home}</code>, then refresh.`));
+});
+
+test("settings explains the next step when discovery finds no provider logins", () => {
+  const state = { ...baseState(), accounts: new Map() };
+  const guidance = "Sign in with your provider CLI on this Mac, then refresh.";
+  assert.ok(render({ settingsOpen: true, state, accounts: [] }).includes(guidance));
+  assert.equal(render({ settingsOpen: true, state }).includes(guidance), false, "no discovery result is not an empty result");
 });
 
 test("the RULES block saves an idle rule and sends only what changed", async () => {
@@ -1749,7 +1833,9 @@ test("dependency projection keeps served identity, hidden endpoints and project 
 test("floor omits the global evidence essay", () => {
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, view: "floor" }));
   assert.doesNotMatch(markup, /Floor evidence|Rooms describe a repository snapshot/);
+  assert.doesNotMatch(markup, /Scroll the floor to explore/);
   assert.match(markup, /Floor hierarchy/);
+  assert.match(markup, /dfFactoryFloor__spaceCount/);
 });
 
 
@@ -1777,9 +1863,9 @@ test("a viewed module shows direct contents beside distinct child subtrees", () 
 
 test("mobile navigation switches presentation without mutating work", () => {
   const calls = [];
-  const elements = expand(FactoryConsole({ status: "ready", state: fixtureState, detail: "floor", onDetail: (value) => calls.push(value) }));
+  const elements = consoleElements({ status: "ready", state: fixtureState, detail: "floor", onDetail: (value) => calls.push(value) });
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
-  const buttons = expand(nav).filter((element) => element.type === "button");
+  const buttons = nav.props.children.filter((element) => element.type === "button");
   assert.equal(buttons[0].props["aria-pressed"], true);
   buttons[2].props.onClick();
   assert.deepEqual(calls, ["queue"]);
@@ -1870,6 +1956,19 @@ test("nested observed areas follow visible served ancestors without duplicating 
   const archived = { ...fixtureState, agents: new Map(fixtureState.agents).set(ids.agent, { ...fixtureState.agents.get(ids.agent), archived: true }) };
   assert.equal(floorScene(archived, fixtureTopologies, samples).workers.some((worker) => worker.id === ids.agent), false);
   assert.equal(floorScene(archived, fixtureTopologies, samples).tasks.some((task) => task.id === ids.task), false);
+});
+
+test("a deep observation stays on its displayed parent's shared workbench", () => {
+  const root = fixtureTopology.nodes[0];
+  const store = fixtureTopology.nodes.find((node) => node.path === "internal/kernel/store");
+  const deep = { id: "e5".repeat(32), parent_id: store.id, kind: "directory", path: "internal/kernel/store/deep", label: "deep", language: "go", size_bucket: "tiny" };
+  const topology = served({ ...fixtureTopology, nodes: [...fixtureTopology.nodes, deep] });
+  const samples = new Map([[ids.agent, runSample(ids.agent, ["internal/kernel/store/deep/file.go"])]]);
+  const scene = floorScene(fixtureState, topology, samples, undefined, `${ids.project}:${root.id}`);
+  const worker = scene.workers.find((entry) => entry.id === ids.agent);
+  assert.equal(worker.nodeId, `${ids.project}:${fixtureTopology.nodes[1].id}`);
+  assert.equal(worker.locationWithin, true);
+  assert.equal(worker.observedBayId, undefined, "an ancestor's pictured child is not the exact observed component");
 });
 
 test("paging reaches all served siblings and leaf inspection; stale scopes and pages reconcile", () => {
@@ -2004,7 +2103,9 @@ test("same-path observed roots choose package then module independent of served 
       assert.deepEqual(task.roomIds, [exact]);
       assert.equal(task.representativeRoomId, exact);
       assert.equal(task.displayRoomId, `${ids.project}:${display}`);
-      assert.equal(scene.workers.find((worker) => worker.id === ids.agent).nodeId, task.displayRoomId);
+      const worker = scene.workers.find((worker) => worker.id === ids.agent);
+      assert.equal(worker.nodeId, task.displayRoomId);
+      assert.equal(worker.observedBayId, scope === `${ids.project}:${root.id}` && nodes.includes(pkg) ? exact : undefined, "only an exact direct child is placed in a pictured bay");
     }
   }
 });

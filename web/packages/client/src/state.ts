@@ -34,7 +34,9 @@ export function snapshotView(body: StateSnapshotBody): StateView {
     factory: Object.freeze({ ...body.factory }),
     projects: indexByID(body.projects),
     agents: indexByID(body.agents),
-    tasks: indexByID(body.tasks),
+    // Unclaimed shared work is one queue with claimed work; the wire keeps
+    // it apart only for consoles that predate the shared queue.
+    tasks: indexByID([...body.tasks, ...(body.shared_tasks ?? [])]),
     humanRequests: indexByID(body.human_requests),
     accounts: indexByID(body.accounts),
   });

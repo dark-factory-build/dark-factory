@@ -12,6 +12,7 @@ import {
   type RunPathSample,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
+import type { FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
   return value.slice(0, 8);
@@ -121,7 +122,7 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
 /** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
   state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true, floorAppearance,
 }: {
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
@@ -134,6 +135,7 @@ export function FactoryFloor({
   onSelectTask?: (taskId: string) => void;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
+  floorAppearance: FloorAppearance;
 }) {
   const [{ scopeId, page }, setView] = useState<{ scopeId?: string; page: number }>({ page: 0 });
   const setScopeId = (scopeId: string | undefined) => setView({ scopeId, page: 0 });
@@ -153,6 +155,7 @@ export function FactoryFloor({
         <button type="button" aria-current={index === scene.navigation.breadcrumbs.length - 1 ? "page" : undefined} disabled={index === scene.navigation.breadcrumbs.length - 1} onClick={() => setScopeId(crumb.id)}>{crumb.label}</button>
       </span>)}
       {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>BACK</button>}
+      <span className="dfFactoryFloor__spaceCount" aria-live="polite">{scene.topology.nodes.length} {scene.topology.nodes.length === 1 ? "space" : "spaces"}</span>
     </nav>
     {inventoryOmitted === 0 ? null : <p role="status">{inventoryOmitted} room inventories omitted from the served projects; those rooms show inventory unavailable.</p>}
     {scene.navigation.pageCount <= 1 ? null : <nav aria-label="Floor pages">
@@ -166,6 +169,7 @@ export function FactoryFloor({
     </p>}
     <div className="dfFactoryFloor__scene">
     <FactoryScene
+      appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       topology={scene.topology}

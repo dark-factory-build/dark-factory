@@ -31,6 +31,63 @@ func TestOverseerControlMethodsRemainAttemptScoped(t *testing.T) {
 	}
 }
 
+func TestOperatorControlsUseOperatorDomainWithoutAttemptAuthority(t *testing.T) {
+	var bearer credential
+	base := `"operation_id":"11111111111111111111111111111111","task_id":"22222222222222222222222222222222","expected_task_revision":1,"run_id":"33333333333333333333333333333333","expected_run_revision":1`
+	for _, test := range []struct {
+		method string
+		params string
+		kind   CallKind
+	}{
+		{"operator_update_agent", `"agent_id":"11111111111111111111111111111111","expected_revision":1,"paused":true`, CallOperatorUpdateAgent},
+		{"operator_stop_run", base, CallOperatorStopRun},
+		{"operator_replace_run", base + `,"successor_task_id":"44444444444444444444444444444444","successor_incarnation_id":"55555555555555555555555555555555","instruction":"continue"`, CallOperatorReplaceRun},
+		{"operator_message_worker", base + `,"message":"continue"`, CallOperatorMessageWorker},
+		{"operator_interrupt_worker", base, CallOperatorInterruptWorker},
+	} {
+		request := []byte(`{"method":"` + test.method + `","params":{` + test.params + `}}`)
+		call, code := decodeCall(operatorDomain, bearer, request)
+		if code != "" || call.Kind() != test.kind {
+			t.Fatalf("%s = %v, %v", test.method, call.Kind(), code)
+		}
+		if _, ok := call.AttemptDigest(); ok {
+			t.Fatalf("%s acquired attempt authority", test.method)
+		}
+		if _, code := decodeCall(attemptDomain, bearer, request); code != RemoteForbidden {
+			t.Fatalf("attempt domain accepted %s: %v", test.method, code)
+		}
+	}
+}
+
+func TestWorkerOperationLookupIsOperatorOnly(t *testing.T) {
+	var bearer credential
+	request := []byte(`{"method":"operator_worker_operation","params":{"operation_id":"11111111111111111111111111111111"}}`)
+	call, code := decodeCall(operatorDomain, bearer, request)
+	input, ok := call.WorkerOperationInput()
+	if code != "" || !ok || call.Kind() != CallOperatorWorkerOperation || input.OperationID != "11111111111111111111111111111111" {
+		t.Fatalf("operator lookup = kind %v input %+v ok=%v code=%v", call.Kind(), input, ok, code)
+	}
+	if _, ok := call.AttemptDigest(); ok {
+		t.Fatal("operator lookup acquired attempt authority")
+	}
+	if _, code := decodeCall(attemptDomain, bearer, request); code != RemoteForbidden {
+		t.Fatalf("attempt domain accepted operator lookup: %v", code)
+	}
+}
+
+func TestTaskReadIsOperatorOnlyAndRevisionBound(t *testing.T) {
+	var bearer credential
+	request := []byte(`{"method":"task_read","params":{"task_id":"11111111111111111111111111111111","expected_revision":2,"offset":2048}}`)
+	call, code := decodeCall(operatorDomain, bearer, request)
+	input, ok := call.TaskReadInput()
+	if code != "" || !ok || input.ExpectedRevision != 2 || input.Offset != 2048 {
+		t.Fatalf("task read = %+v, ok=%t code=%v", input, ok, code)
+	}
+	if _, code := decodeCall(attemptDomain, bearer, request); code != RemoteForbidden {
+		t.Fatalf("attempt task read = %v", code)
+	}
+}
+
 func TestMutationReplyValidatesOverseerHumanReplyState(t *testing.T) {
 	valid := MutationResult{Head: 3, Revision: 2, HumanReply: &OverseerHumanReplyResult{RequestID: "11111111111111111111111111111111", State: "delivery_unknown"}}
 	if _, err := NewMutationReply(valid); err != nil {
@@ -75,6 +132,49 @@ func TestOverseerSnapshotPagesFitTheResponseFrameAfterEscaping(t *testing.T) {
 	}
 }
 
+func TestTargetedOverseerSnapshotSerializationOmitsRosterEnvelope(t *testing.T) {
+	project := strings.Repeat("1", 32)
+	base := OverseerSnapshot{ProjectID: project, Head: 7, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []OverseerIntervention{}, Handoffs: []RetainedChangeHandoff{}}
+	for index := 0; index < 4; index++ {
+		id := fmt.Sprintf("%032x", index+2)
+		base.Agents = append(base.Agents, AgentSummary{ID: id, ProjectID: project, Name: "worker", Role: "worker", Provider: "codex", Revision: 1})
+	}
+	base.Tasks = append(base.Tasks, OverseerTask{ID: strings.Repeat("2", 32), ProjectID: project, AssignedAgentID: base.Agents[0].ID, Title: "Review", Objective: "same next action", Status: "queued", Revision: 1})
+	var bearer credential
+	request := []byte(`{"method":"overseer_snapshot","params":{"task_id":"22222222222222222222222222222222"}}`)
+	call, code := decodeCall(attemptDomain, bearer, request)
+	input, ok := call.OverseerSnapshotInput()
+	if code != "" || !ok || input.TaskID != base.Tasks[0].ID {
+		t.Fatalf("targeted API request = %#v, code=%q", input, code)
+	}
+	full, err := NewOverseerSnapshotReply(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetedSnapshot := base
+	targetedSnapshot.Agents = append([]AgentSummary(nil), base.Agents[:1]...)
+	targeted, err := NewOverseerSnapshotReply(targetedSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullBytes, err := json.Marshal(full.overseer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetedBytes, err := json.Marshal(targeted.overseer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed OverseerSnapshot
+	if err := json.Unmarshal(targetedBytes, &parsed); err != nil || !validOverseerSnapshot(parsed) || len(parsed.Agents) != 1 || parsed.Tasks[0].Objective != "same next action" {
+		t.Fatalf("targeted API response round trip = %#v, %v", parsed, err)
+	}
+	if len(targetedBytes) >= len(fullBytes) || !bytes.Contains(targetedBytes, []byte("same next action")) || bytes.Contains(targetedBytes, []byte(base.Agents[1].ID)) {
+		t.Fatalf("targeted serialization = %d, full = %d", len(targetedBytes), len(fullBytes))
+	}
+	t.Logf("deterministic overseer response bytes: full=%d targeted=%d saved=%d; calls full=1 targeted=1", len(fullBytes), len(targetedBytes), len(fullBytes)-len(targetedBytes))
+}
+
 func TestOverseerSnapshotReplyKeepsEmptyCollections(t *testing.T) {
 	snapshot := OverseerSnapshot{
 		ProjectID: strings.Repeat("1", 32), Head: 1,
@@ -106,12 +206,12 @@ func TestOverseerSnapshotContinuationRequiresTaskForText(t *testing.T) {
 
 func TestOverseerSnapshotRequiresAnExactSourcePathForEachHandoff(t *testing.T) {
 	project := strings.Repeat("1", 32)
-	handoff := RetainedChangeHandoff{ChangeID: strings.Repeat("2", 32), BaseCommit: strings.Repeat("a", 40), TaskID: strings.Repeat("3", 32), TaskWorkRevision: 1, ChangeRevision: 1, SourcePath: "/private/runtime/retained-source/22222222222222222222222222222222"}
+	handoff := RetainedChangeHandoff{ChangeID: strings.Repeat("2", 32), BaseCommit: strings.Repeat("a", 40), TaskID: strings.Repeat("3", 32), TaskWorkRevision: 1, ChangeRevision: 1}
 	snapshot := OverseerSnapshot{ProjectID: project, Head: 1, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []OverseerIntervention{}, Handoffs: []RetainedChangeHandoff{handoff}}
 	if _, err := NewOverseerSnapshotReply(snapshot); err != nil {
-		t.Fatalf("exact handoff rejected: %v", err)
+		t.Fatalf("identity-only handoff rejected: %v", err)
 	}
-	for _, source := range []string{"", "relative", "/private/factory/changes/../other", "/private/factory/changes/44444444444444444444444444444444"} {
+	for _, source := range []string{"relative", "/private/factory/changes/../other", "/private/factory/changes/44444444444444444444444444444444"} {
 		invalid := snapshot
 		invalid.Handoffs = append([]RetainedChangeHandoff(nil), snapshot.Handoffs...)
 		invalid.Handoffs[0].SourcePath = source

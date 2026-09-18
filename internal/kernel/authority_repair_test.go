@@ -198,8 +198,13 @@ func assertCorruptRunningAuthority(t *testing.T, store *Store, run Run, keys Adm
 }
 
 func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
+	store, run, keys, _ := runningWorkerRunWithPath(t)
+	return store, run, keys
+}
+
+func runningWorkerRunWithPath(t *testing.T) (*Store, Run, AdmissionKeys, string) {
 	t.Helper()
-	store, _, project, agent := newAdmissionStore(t, RoleWorker, 4)
+	store, path, project, agent := newAdmissionStore(t, RoleWorker, 4)
 	_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 210), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 211), Title: "worker"}, mustTime(t, 5))
 	if err != nil {
 		store.Close()
@@ -215,17 +220,14 @@ func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 	}
 	format, _ := NewObjectFormat("sha1")
 	commit, _ := NewCommitID(format, bytes.Repeat([]byte{1}, format.oidLength()))
-	digest := changeTreeDigest(t, 2)
 	repository, _ := NewFileIdentity(61, 62)
-	selection, _ := NewChangeSelection(format, commit, digest, 1, 1, repository)
-	stage, _ := NewFileIdentity(70, 80)
-	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, stage, mustTime(t, 12))
+	selection, _ := NewChangeSelection(format, commit, repository)
+	prepared, err := store.RecordChangePrepared(context.Background(), candidate, mustRevision(t, 1), selection, mustTime(t, 12))
 	if err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
-	availability, _ := NewChangeAvailability(digest, 1, 1, stage)
-	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, availability, mustTime(t, 13)); err != nil {
+	if _, err := store.MarkChangeAvailable(context.Background(), candidate, prepared.Revision, selection.commit, mustTime(t, 13)); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
@@ -236,5 +238,5 @@ func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
 		store.Close()
 		t.Fatal(err)
 	}
-	return store, run, keys
+	return store, run, keys, path
 }

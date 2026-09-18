@@ -1,9 +1,149 @@
 package change
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"path"
+	"strings"
+	"unicode/utf8"
 )
+
+// ObjectFormat is one closed Git object-format value.
+type ObjectFormat byte
+
+const (
+	objectFormatSHA1 ObjectFormat = iota + 1
+	objectFormatSHA256
+)
+
+// NewObjectFormat constructs the closed SHA-1/SHA-256 object-format value.
+func NewObjectFormat(name string) (ObjectFormat, error) {
+	switch name {
+	case "sha1":
+		return objectFormatSHA1, nil
+	case "sha256":
+		return objectFormatSHA256, nil
+	default:
+		return 0, &ValidationError{Reason: fmt.Sprintf("unsupported object format %q", name)}
+	}
+}
+
+// Name returns the canonical Git object-format name.
+func (f ObjectFormat) Name() string {
+	switch f {
+	case objectFormatSHA1:
+		return "sha1"
+	case objectFormatSHA256:
+		return "sha256"
+	default:
+		return ""
+	}
+}
+
+// OIDLength returns the exact raw object-ID length, or zero for an invalid format.
+func (f ObjectFormat) OIDLength() int {
+	switch f {
+	case objectFormatSHA1:
+		return sha1.Size
+	case objectFormatSHA256:
+		return sha256.Size
+	default:
+		return 0
+	}
+}
+
+func (f ObjectFormat) valid() bool { return f == objectFormatSHA1 || f == objectFormatSHA256 }
+
+// ObjectID is an immutable raw Git object ID.
+type ObjectID struct {
+	format ObjectFormat
+	raw    [sha256.Size]byte
+}
+
+// ContentSource identifies one ordinary repository file at an immutable commit.
+// The durable ref created by PinContentSource keeps that commit reachable after
+// the originating branch or Change worktree disappears.
+type ContentSource struct {
+	Commit ObjectID
+	Path   string
+}
+
+func validateContentPath(value string) error {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 || path.IsAbs(value) || path.Clean(value) != value || value == "." || strings.HasPrefix(value, "../") {
+		return &ValidationError{Reason: "content path must be a clean repository-relative path"}
+	}
+	return nil
+}
+
+// NewObjectID validates and copies one raw Git object ID.
+func NewObjectID(format ObjectFormat, raw []byte) (ObjectID, error) {
+	if !format.valid() || len(raw) != format.OIDLength() {
+		return ObjectID{}, &ValidationError{Reason: "object ID length does not match its format"}
+	}
+	var id ObjectID
+	id.format = format
+	copy(id.raw[:], raw)
+	return id, nil
+}
+
+func NewObjectIDFromHex(format string, encoded string) (ObjectID, error) {
+	f, err := NewObjectFormat(format)
+	if err != nil {
+		return ObjectID{}, err
+	}
+	raw, err := hex.DecodeString(encoded)
+	if err != nil {
+		return ObjectID{}, &ValidationError{Reason: "object ID is not hexadecimal"}
+	}
+	return NewObjectID(f, raw)
+}
+
+// Format returns the ID's object format.
+func (id ObjectID) Format() ObjectFormat { return id.format }
+
+// Bytes returns a copy of the raw object ID.
+func (id ObjectID) Bytes() []byte { return bytes.Clone(id.raw[:id.format.OIDLength()]) }
+
+// Hex returns the lowercase hexadecimal object ID.
+func (id ObjectID) Hex() string { return hex.EncodeToString(id.raw[:id.format.OIDLength()]) }
+
+// Equal reports exact object ID equality.
+func (id ObjectID) Equal(other ObjectID) bool { return id.equal(other) }
+
+func (id ObjectID) equal(other ObjectID) bool {
+	return id.format == other.format && id.raw == other.raw
+}
+
+// BranchName is the branch a Change's worktree is checked out on, one per
+// task incarnation, and the branch the Maintainer App publishes it to.
+func BranchName(changeID string) string { return "factory/" + changeID[:min(12, len(changeID))] }
+
+// WorktreeFacts are the observed facts of one Change worktree: the commit
+// its HEAD names, the branch HEAD is on (empty when detached), and whether
+// the work tree or index differs from that commit.
+type WorktreeFacts struct {
+	head         ObjectID
+	branch       string
+	dirty        bool
+	gitDirectory string
+}
+
+// Head returns the commit the worktree's HEAD names.
+func (f WorktreeFacts) Head() ObjectID { return f.head }
+
+// Branch returns the short branch name HEAD is on, or empty when detached.
+func (f WorktreeFacts) Branch() string { return f.branch }
+
+// Dirty reports uncommitted or untracked work in the worktree.
+func (f WorktreeFacts) Dirty() bool { return f.dirty }
+
+// GitDirectory returns the administration used by this worktree.
+func (f WorktreeFacts) GitDirectory() string { return f.gitDirectory }
 
 // TrustedGitExecutable is the only Git installation whose complete path is
 // rooted in system-owned directories on macOS. Xcode applications live below
@@ -16,6 +156,8 @@ const TrustedGitExecutable = "/Library/Developer/CommandLineTools/usr/bin/git"
 func TrustedDeveloperGitPath(path string) bool {
 	return path == TrustedGitExecutable
 }
+
+const maxStoreInteger = uint64(1<<63 - 1)
 
 // RepositoryIdentity is one immutable repository-root device/inode identity.
 type RepositoryIdentity struct {
@@ -74,7 +216,7 @@ type repositoryCheckpoint struct {
 	objects gitAdminIdentity
 }
 
-// Selection is one immutable exact commit and its complete regular-file tree.
+// Selection is one immutable exact commit of the project repository.
 // Repository paths and Git process configuration remain private.
 type Selection struct {
 	repositoryRoot string
@@ -83,7 +225,6 @@ type Selection struct {
 	gitIdentity    gitFileIdentity
 	format         ObjectFormat
 	base           ObjectID
-	manifest       Manifest
 }
 
 // RepositoryIdentity returns the exact selected repository-root identity.
@@ -95,18 +236,6 @@ func (s Selection) ObjectFormat() ObjectFormat { return s.format }
 // Base returns the exact selected commit object ID.
 func (s Selection) Base() ObjectID { return s.base }
 
-// Manifest returns the immutable selected tree manifest.
-func (s Selection) Manifest() Manifest { return s.manifest }
-
-// Commitment returns the base-bound selected tree commitment.
-func (s Selection) Commitment() Commitment { return s.manifest.Commitment() }
-
-// EntryCount returns selected regular files plus implied directories.
-func (s Selection) EntryCount() uint64 { return s.manifest.EntryCount() }
-
-// BlobBytes returns the exact sum of selected blob sizes.
-func (s Selection) BlobBytes() uint64 { return s.manifest.BlobBytes() }
-
 // String and GoString deliberately keep repository and executable locators out
 // of logs while the immutable selection is passed between daemon-owned phases.
 func (s Selection) String() string   { return "selected Git Change" }
@@ -115,8 +244,7 @@ func (s Selection) GoString() string { return "change.Selection{private}" }
 func (s Selection) valid() bool {
 	return s.repositoryRoot != "" && s.repository.root.valid() && s.gitExecutable != "" &&
 		s.gitIdentity.inode != 0 &&
-		s.format.valid() && s.base.format == s.format &&
-		s.manifest.format == s.format && s.manifest.base.equal(s.base)
+		s.format.valid() && s.base.format == s.format
 }
 
 type gitFailure byte

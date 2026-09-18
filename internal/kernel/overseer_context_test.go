@@ -2,11 +2,12 @@ package kernel
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
 func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) {
-	for _, outcome := range []string{"failed", "cancelled", "sent-back", "empty-success"} {
+	for _, outcome := range []string{"blocked", "failed", "failed-review", "empty-failure", "cancelled", "sent-back", "empty-success"} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx := context.Background()
 			store, first, firstKeys := runningOrchestratorRun(t)
@@ -51,8 +52,14 @@ func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) 
 			switch outcome {
 			case "failed":
 				proposal, _ = NewFailureProposal(FailureAttempt, "provider failed")
+			case "empty-failure":
+				proposal, _ = NewFailureProposal(FailureAttempt, "")
+			case "failed-review":
+				proposal, _ = NewFailureProposal(FailureAttempt, "REQUEST_CHANGES: "+strings.Repeat("finding ", 400))
 			case "cancelled":
 				proposal, _ = NewCancelledProposal("operator cancelled")
+			case "blocked":
+				proposal, _ = NewBlockedProposal("review rejected; inspect the recorded head")
 			case "sent-back":
 				proposal, _ = NewSuccessProposal("later result cleared by send-back")
 			case "empty-success":
@@ -75,11 +82,46 @@ func TestOverseerPriorContextRemainsReadableAfterUnproductivePass(t *testing.T) 
 			}
 			prior, err := latestOverseerTask(ctx, read.connection, first.AgentID)
 			read.Close()
-			if err != nil || prior == nil || *prior != first.TaskID {
-				t.Fatalf("readable prior: %v %v", prior, err)
+			wantPrior := first.TaskID
+			if outcome == "blocked" || outcome == "failed" || outcome == "failed-review" || outcome == "cancelled" {
+				wantPrior = second.TaskID
+			}
+			if err != nil || prior == nil || *prior != wantPrior {
+				t.Fatalf("readable prior: %v %v, want %v", prior, err, wantPrior)
 			}
 			snapshot, err := store.OverseerSnapshotForAttempt(ctx, readerKeys.AttemptDigest, OverseerSnapshotRequest{TaskID: prior})
-			if err != nil || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Result != decision {
+			wantResult := decision
+			switch outcome {
+			case "failed":
+				wantResult = "provider failed"
+			case "cancelled":
+				wantResult = "operator cancelled"
+			case "failed-review":
+				wantResult = "REQUEST_CHANGES: " + strings.Repeat("finding ", 400)
+				if err != nil || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Result != wantResult {
+					t.Fatalf("failed review detail: %+v %v", snapshot, err)
+				}
+				overview, err := store.OverseerSnapshotForAttempt(ctx, readerKeys.AttemptDigest, OverseerSnapshotRequest{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, task := range overview.Tasks {
+					if task.ID == *prior {
+						if !task.ResultTruncated || len(task.Result) != 1024 || !strings.HasPrefix(wantResult, task.Result) {
+							t.Fatalf("failed review overview: %+v", task)
+						}
+						return
+					}
+				}
+				t.Fatal("failed review absent from overview")
+			}
+			if outcome == "blocked" {
+				if err != nil || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].BlockedReason != "review rejected; inspect the recorded head" {
+					t.Fatalf("blocked context inaccessible through supported read: %+v %v", snapshot, err)
+				}
+				return
+			}
+			if err != nil || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Result != wantResult {
 				t.Fatalf("context inaccessible through supported read: %+v %v", snapshot, err)
 			}
 		})

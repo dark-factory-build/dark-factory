@@ -201,6 +201,10 @@ func replyForCall(call Call) Reply {
 			Projects: []ProjectSummary{}, Agents: []AgentSummary{}, Tasks: []TaskSummary{},
 		})
 		return reply
+	case CallAgentPaths:
+		input, _ := call.AgentPathsInput()
+		reply, _ := NewAgentPathsReply(AgentPaths{AgentID: input.AgentID, Paths: []string{}})
+		return reply
 	case CallAttemptTask:
 		reply, _ := NewAttemptTaskReply(AttemptTask{Task: "private-attempt-task"})
 		return reply
@@ -243,6 +247,12 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 	}{
 		{name: "health", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"health","params":{}}`, kind: CallHealth},
 		{name: "snapshot", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"snapshot","params":{}}`, kind: CallSnapshot},
+		{name: "agent paths", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"agent_paths","params":{"agent_id":"` + id('2') + `"}}`, kind: CallAgentPaths, check: func(t *testing.T, call Call) {
+			input, ok := call.AgentPathsInput()
+			if !ok || input.AgentID != id('2') {
+				t.Fatalf("agent paths input = %+v, %t", input, ok)
+			}
+		}},
 		{name: "create project", domain: operatorDomain, bearer: operatorBearer, body: `{"method":"create_project","params":{"id":"` + id('1') + `","name":"project","root":"/private/sentinel-root"}}`, kind: CallCreateProject, check: func(t *testing.T, call Call) {
 			input, ok := call.CreateProjectInput()
 			if !ok || input.Root != "/private/sentinel-root" {
@@ -350,6 +360,8 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				output = &HealthStatus{}
 			case CallSnapshot:
 				output = &DashboardSnapshot{}
+			case CallAgentPaths:
+				output = &AgentPaths{}
 			case CallAttemptTask:
 				output = &AttemptTask{}
 			default:
@@ -397,10 +409,9 @@ func TestOutcomeReceiptIsExactAndRequired(t *testing.T) {
 	}{
 		{name: "wrong receipt", wantError: true, send: func(connection *net.UnixConn, receipt []byte) error {
 			receipt[0] ^= 0xff
-			if err := writeFrame(connection, receipt); err != nil {
-				return err
-			}
-			return connection.CloseWrite()
+			// A wrong receipt is rejected immediately, before client EOF.
+			// Half-closing here races the server's expected rejection/close.
+			return writeFrame(connection, receipt)
 		}},
 		{name: "dropped receipt", wantError: true, send: func(connection *net.UnixConn, _ []byte) error {
 			return connection.CloseWrite()
@@ -449,6 +460,9 @@ func TestOutcomeReceiptIsExactAndRequired(t *testing.T) {
 				t.Fatal(err)
 			}
 			result := <-done
+			if test.name == "wrong receipt" && !errors.Is(result.err, ErrProtocol) {
+				t.Fatalf("wrong receipt must fail before client EOF: %v", result.err)
+			}
 			if result.call.Kind() != CallSucceed || (result.err != nil) != test.wantError {
 				t.Fatalf("outcome receipt = %v, %v", result.call.Kind(), result.err)
 			}
@@ -470,6 +484,7 @@ func TestServerRejectsDomainFallbackAndInvalidRequests(t *testing.T) {
 		{name: "attempt bearer does not authorize operator", domain: operatorDomain, bearer: attemptBearer, body: []byte(`{"method":"health","params":{}}`), code: RemoteUnauthorized},
 		{name: "operator domain cannot invoke attempt", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"fail","params":{"detail":"x"}}`), code: RemoteForbidden},
 		{name: "operator domain cannot read attempt task", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"task","params":{}}`), code: RemoteForbidden},
+		{name: "attempt domain cannot read operator paths", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"agent_paths","params":{"agent_id":"` + id('2') + `"}}`), code: RemoteForbidden},
 		{name: "attempt domain cannot set capacity", domain: attemptDomain, bearer: attemptBearer, body: []byte(`{"method":"set_capacity","params":{"expected_revision":1,"capacity":2}}`), code: RemoteForbidden},
 		{name: "unknown method", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"delete_all","params":{}}`), code: RemoteInvalidRequest},
 		{name: "null params", domain: operatorDomain, bearer: operatorBearer, body: []byte(`{"method":"health","params":null}`), code: RemoteInvalidRequest},

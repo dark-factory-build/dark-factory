@@ -1866,6 +1866,40 @@ func TestRemoveRecordedRuntimeBoundsDepthAndReestablishesDurableAbsence(t *testi
 	})
 }
 
+// TestRemoveRecordedRuntimeRemovesTakeoverEndpointResidue: a runner killed
+// while it held its takeover endpoint leaves its socket and its one-shot
+// grant behind, and one killed between that grant's write and its rename
+// leaves the rename scratch too. None of them is durable authority, and
+// refusing any of them as an unknown child strands the runtime for good.
+func TestRemoveRecordedRuntimeRemovesTakeoverEndpointResidue(t *testing.T) {
+	// Short root: the residue includes a real bound socket.
+	parent, runtime, path, identity := removableRuntimeFixtureAt(t, filepath.Join(runtimeTempDir(t), "private"))
+	defer parent.Close()
+	socket := filepath.Join(path, runner.TakeoverSocketName)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := os.Chmod(socket, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{runner.TakeoverGrantName, runner.TakeoverScratchName} {
+		if err := os.WriteFile(filepath.Join(path, name), []byte(`{"run_id":"x","token":"y"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := RemoveRecordedRuntime(context.Background(), parent, runtimeTestName, identity); err != nil || !done {
+		t.Fatalf("takeover residue removal = %v, %v", done, err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime persists after removal: %v", err)
+	}
+}
+
 func removableRuntimeFixture(t testing.TB) (*RuntimeParent, *Runtime, string, runner.FileIdentity) {
 	t.Helper()
 	parentPath := filepath.Join(runtimeTempDir(t), "private")
@@ -2160,4 +2194,123 @@ func stringsContainsAny(value string, candidates ...string) bool {
 		}
 	}
 	return false
+}
+
+// TestRemoveRecordedRuntimeTreatsLiveWriterRacesAsProgress is the #726
+// regression: a provider descendant still writing under the runtime's temp
+// tree (a surviving `go build` with TMPDIR inside the runtime) makes names
+// vanish between the listing and their removal and refills a directory
+// before its rmdir. Neither is an identity, ownership or lifetime question,
+// so both are bounded progress, not a permanent contract refusal that leaves
+// the run finalizing forever.
+func TestRemoveRecordedRuntimeTreatsLiveWriterRacesAsProgress(t *testing.T) {
+	inode := func(t *testing.T, path string) uint64 {
+		t.Helper()
+		var stat unix.Stat_t
+		if err := unix.Lstat(path, &stat); err != nil {
+			t.Fatal(err)
+		}
+		return stat.Ino
+	}
+	// syncOnce runs mutate the first time the removal syncs the directory
+	// whose inode is target, then behaves like fsync.
+	syncOnce := func(target uint64, mutate func()) func(int) error {
+		fired := false
+		return func(fd int) error {
+			var stat unix.Stat_t
+			if err := unix.Fstat(fd, &stat); err != nil {
+				return err
+			}
+			if !fired && stat.Ino == target {
+				fired = true
+				mutate()
+			}
+			return unix.Fsync(fd)
+		}
+	}
+
+	t.Run("entries vanish between listing and removal", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		work := filepath.Join(path, runtimeTempName, "go-build")
+		for _, name := range []string{"a", "b"} {
+			if err := os.MkdirAll(filepath.Join(work, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(work, name, "_pkg_.a"), []byte("object"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		// The writer finishes and removes its own work tree while the removal
+		// is inside "a": "a" is gone before its rmdir, "b" before its stat.
+		sync := syncOnce(inode(t, filepath.Join(work, "a")), func() {
+			if err := os.RemoveAll(work); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if done, err := removeRecordedRuntime(context.Background(), parent, runtimeTestName, identity, runtimeRemovalEffectLimit, sync); err != nil || !done {
+			t.Fatalf("removal racing a finishing writer = %v, %v", done, err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runtime retained: %v", err)
+		}
+	})
+
+	t.Run("directory refilled before its removal", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		work := filepath.Join(path, runtimeTempName, "go-build", "b001")
+		if err := os.MkdirAll(work, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(work, "importcfg"), []byte("packagefile"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		sync := syncOnce(inode(t, work), func() {
+			if err := os.WriteFile(filepath.Join(work, "_pkg_.a"), []byte("late"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if done, err := removeRecordedRuntime(context.Background(), parent, runtimeTestName, identity, runtimeRemovalEffectLimit, sync); err != nil || done {
+			t.Fatalf("removal racing a refilling writer = %v, %v (want bounded progress)", done, err)
+		}
+		if _, err := os.Lstat(filepath.Join(work, "_pkg_.a")); err != nil {
+			t.Fatalf("late entry was not retained for the next pass: %v", err)
+		}
+		if done, err := removeRecordedRuntime(context.Background(), parent, runtimeTestName, identity, runtimeRemovalEffectLimit, sync); err != nil || !done {
+			t.Fatalf("next pass after the writer stopped = %v, %v", done, err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("runtime retained: %v", err)
+		}
+	})
+
+	t.Run("a special bit still refuses for good", func(t *testing.T) {
+		parent, runtime, path, identity := removableRuntimeFixture(t)
+		defer parent.Close()
+		sticky := filepath.Join(path, runtimeTempName, "sticky")
+		if err := os.Mkdir(sticky, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Chmod(sticky, 0o1700); err != nil {
+			t.Fatal(err)
+		}
+		if err := runtime.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for pass := 0; pass < 2; pass++ {
+			if done, err := RemoveRecordedRuntime(context.Background(), parent, runtimeTestName, identity); !errors.Is(err, errInvalidContract) || done {
+				t.Fatalf("pass %d refusal = %v, %v", pass, done, err)
+			}
+		}
+		if info, err := os.Lstat(sticky); err != nil || !info.IsDir() {
+			t.Fatalf("refused entry mutated: %v %v", info, err)
+		}
+	})
 }

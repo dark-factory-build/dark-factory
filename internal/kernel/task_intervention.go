@@ -157,6 +157,15 @@ func (request TaskInterventionRequest) valid() error {
 const taskInterventionColumns = `operation_id, project_id, task_id, run_id, expected_task_revision, expected_run_revision,
 	actor_kind, actor_run_id, actor_browser_client_id, kind, payload, payload_digest, successor_task_id, state, result_detail, created_at_ms, updated_at_ms, terminal_at_ms`
 
+func (store *Store) TaskIntervention(ctx context.Context, id TaskInterventionID) (TaskIntervention, bool, error) {
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		return TaskIntervention{}, false, err
+	}
+	defer connection.Close()
+	return taskInterventionByID(ctx, connection, id)
+}
+
 func scanTaskIntervention(scanner rowScanner) (TaskIntervention, bool, error) {
 	var rawOperation, rawProject, rawTask, rawRun []byte
 	var expectedTask, expectedRun int64
@@ -271,6 +280,31 @@ func (store *Store) ReserveTaskInterventionForBrowser(ctx context.Context, clien
 	}
 	if client.RevokedAt != nil || !client.CapabilityMask.Has(BrowserCapabilityHumanActions) || (request.Kind == TaskInterventionMessage || request.Kind == TaskInterventionInterrupt) && !client.CapabilityMask.Has(BrowserCapabilityTerminalInput) {
 		return TaskIntervention{}, false, ErrUnauthorized
+	}
+	result, reserved, err := reserveTaskInterventionTx(ctx, tx, request, at)
+	if err != nil {
+		return TaskIntervention{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TaskIntervention{}, false, err
+	}
+	return result, reserved, nil
+}
+
+// ReserveTaskInterventionForOperator records a local operator intervention in
+// the same idempotent receipt table used by browser and attempt control.
+func (store *Store) ReserveTaskInterventionForOperator(ctx context.Context, request TaskInterventionRequest, at UnixMillis) (TaskIntervention, bool, error) {
+	if request.Actor != 0 || request.ActorRunID != nil || request.ActorBrowserClientID != nil {
+		return TaskIntervention{}, false, fmt.Errorf("%w: invalid operator task intervention", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return TaskIntervention{}, false, err
+	}
+	defer tx.Close()
+	request.Actor = TaskInterventionOperator
+	if err := request.valid(); err != nil {
+		return TaskIntervention{}, false, err
 	}
 	result, reserved, err := reserveTaskInterventionTx(ctx, tx, request, at)
 	if err != nil {

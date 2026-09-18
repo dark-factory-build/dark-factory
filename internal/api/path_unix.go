@@ -230,13 +230,14 @@ func openPrivateParentAt(path string, beforeOpen, afterOpen func(string)) (*priv
 }
 
 func openParentChain(parentPath string, beforeOpen, afterOpen func(string)) (*os.File, fileIdentity, error) {
-	directory, err := os.Open(string(filepath.Separator))
+	fd, err := unix.Open(string(filepath.Separator), ancestorOpenFlag|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fileIdentity{}, ErrInvalidClient
 	}
+	directory := os.NewFile(uintptr(fd), string(filepath.Separator))
 	currentPath := string(filepath.Separator)
 	components := strings.Split(strings.TrimPrefix(parentPath, string(filepath.Separator)), string(filepath.Separator))
-	for _, component := range components {
+	for index, component := range components {
 		if component == "" {
 			continue
 		}
@@ -250,7 +251,11 @@ func openParentChain(parentPath string, beforeOpen, afterOpen func(string)) (*os
 		if beforeOpen != nil {
 			beforeOpen(currentPath)
 		}
-		fd, openErr := unix.Openat(int(directory.Fd()), component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+		flag := ancestorOpenFlag
+		if index == len(components)-1 {
+			flag = unix.O_RDONLY
+		}
+		fd, openErr := unix.Openat(int(directory.Fd()), component, flag|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 		if openErr != nil {
 			directory.Close()
 			return nil, fileIdentity{}, ErrInvalidClient

@@ -48,9 +48,12 @@ type browserBackend struct {
 	inviteMints [4]time.Time
 	inviteNext  int
 
-	subMu   sync.Mutex
-	closing bool
-	subs    map[*browserStateWatch]struct{}
+	subMu          sync.Mutex
+	closing        bool
+	subs           map[*browserStateWatch]struct{}
+	observerCancel context.CancelFunc
+	observerDone   chan struct{}
+	observerWake   chan struct{}
 
 	// package-test-only seam for a task-detail read that races a durable edit.
 	afterTaskDetailTaskRead func()
@@ -295,10 +298,21 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
 	}
-	if err := backend.prepareAgentInstruction(ctx, agentID, request.Instruction); err != nil {
+	mode := kernel.BrowserEnqueueNow
+	switch request.Mode {
+	case "queue":
+		mode = kernel.BrowserEnqueueQueue
+	case "any":
+		mode = kernel.BrowserEnqueueAnyWorker
+	}
+	if mode == kernel.BrowserEnqueueAnyWorker {
+		if err := prepareSharedTaskText("Direct instruction", request.Instruction); err != nil {
+			return browserprotocol.TaskEnqueueResult{}, browser.ErrTooLarge
+		}
+	} else if err := backend.prepareAgentInstruction(ctx, agentID, request.Instruction); err != nil {
 		return browserprotocol.TaskEnqueueResult{}, err
 	}
-	result, err := backend.store.EnqueueTaskForBrowserAgentMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, request.Instruction, request.Mode == "queue", at)
+	result, err := backend.store.EnqueueTaskForBrowserAgentMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, request.Instruction, mode, at)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
 	}
@@ -1014,6 +1028,10 @@ func projectPublicSnapshot(snapshot kernel.PublicSnapshot, providerDefaults func
 		result.Agents = append(result.Agents, projectAgent(item, homes[item.AccountID], providerDefaults))
 	}
 	for _, item := range snapshot.Tasks {
+		if item.AssignedAgentID == (kernel.AgentID{}) {
+			result.SharedTasks = append(result.SharedTasks, projectTask(item))
+			continue
+		}
 		result.Tasks = append(result.Tasks, projectTask(item))
 	}
 	for _, item := range snapshot.HumanRequests {
@@ -1065,7 +1083,7 @@ func projectAgent(item kernel.AgentSummary, configHome string, providerDefaults 
 }
 
 func projectTask(item kernel.TaskSummary) browserprotocol.TaskItem {
-	return browserprotocol.TaskItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), AssignedAgentID: item.AssignedAgentID.String(), Title: item.Title, Status: item.Status, Priority: item.Priority, Revision: decimalRevision(item.Revision), UpdatedAtMillis: decimalMillis(item.UpdatedAt)}
+	return browserprotocol.TaskItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), AssignedAgentID: optionalAgentText(item.AssignedAgentID), Title: item.Title, Status: item.Status, Priority: item.Priority, Revision: decimalRevision(item.Revision), UpdatedAtMillis: decimalMillis(item.UpdatedAt)}
 }
 
 func projectHumanRequest(item kernel.HumanRequestProjection) (browserprotocol.HumanRequestItem, error) {
@@ -1107,6 +1125,22 @@ func mapBrowserError(err error) error {
 		// Otherwise the caller gave up, or its budget expired before anything
 		// was attempted. That is retryable busyness, not a fault: the same
 		// request converges when it is made again with a budget it fits in.
+		return browser.ErrRateLimited
+	case errors.Is(err, kernel.ErrStoreClosed):
+		// A connected browser's state watch can observe the store closing
+		// during the bounded daemon handoff; that plain condition is lifecycle
+		// busyness, not a permanent internal fault, so it is retryable. But a
+		// human-reply acknowledgement or lease renewal that raced a closed
+		// Store joins this same kernel.ErrStoreClosed with its own
+		// terminal/uncertain effect marker (terminal_effects.go); that owner
+		// verdict must survive, exactly as the context arm above preserves
+		// its own. Unlike that arm's cause, a revision conflict or other
+		// case below is never joined with ErrStoreClosed, so this guard is
+		// scoped to this case alone and leaves every other case's ordering
+		// untouched (see TestReleaseAfterCancelIsStaleNotInternal).
+		if terminalEffectVerdict(err) {
+			return err
+		}
 		return browser.ErrRateLimited
 	case errors.Is(err, kernel.ErrUnauthorized):
 		return browser.ErrUnauthorized

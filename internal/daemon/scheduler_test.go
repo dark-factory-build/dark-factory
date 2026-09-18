@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/ncruces/go-sqlite3"
 )
 
 func TestSchedulerUsesOneUnobservedProbeAndJoinsAdmittedOwners(t *testing.T) {
@@ -47,6 +49,14 @@ func TestSchedulerUsesOneUnobservedProbeAndJoinsAdmittedOwners(t *testing.T) {
 	}
 	if got := maxUnobserved.Load(); got != 1 {
 		t.Fatalf("concurrent unobserved probes=%d", got)
+	}
+	// Pausing new work must not detach the two already-admitted owners.
+	state, err := daemon.store.Factory(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := daemon.store.SetDispatch(context.Background(), state.Revision, false, schedulerTime(t, 2)); err != nil {
+		t.Fatal(err)
 	}
 	cancel()
 	if err := waitSchedulerDone(t, done); err != nil {
@@ -120,6 +130,99 @@ func TestSchedulerWakeAndPollCannotRaceHeldUnobservedProbe(t *testing.T) {
 	cancel()
 	if err := waitSchedulerDone(t, done); err != nil {
 		t.Fatalf("scheduler shutdown = %v", err)
+	}
+}
+
+func TestSchedulerCancellationBeforeAdmissionObservation(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	for iteration := 0; iteration < 32; iteration++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		polling, returning := make(chan struct{}), make(chan struct{})
+		polls := make(chan time.Time, 1)
+		polls <- time.Now()
+		clockCalls := 0
+		daemon.now = func() time.Time {
+			clockCalls++
+			if clockCalls == 1 {
+				return time.Now()
+			}
+			close(polling)
+			<-returning
+			// Let the canceled probe enqueue completion while the scheduler
+			// is still handling its poll, so both select inputs are ready.
+			runtime.Gosched()
+			return time.Now()
+		}
+		spec := SupervisorSpec{schedulerPoll: polls, scheduledAttempt: func(ctx context.Context, _ SupervisorSpec) (kernel.Run, error) {
+			<-polling
+			cancel()
+			close(returning)
+			return kernel.Run{}, ctx.Err()
+		}}
+		err := daemon.RunScheduler(ctx, spec)
+		cancel()
+		if err != nil {
+			t.Fatalf("iteration %d: canceled unobserved probe = %v", iteration, err)
+		}
+	}
+}
+
+func TestSchedulerUnobservedCompletionPreservesUnexpectedErrors(t *testing.T) {
+	for _, stopping := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stopping=%t", stopping), func(t *testing.T) {
+			daemon := newSchedulerTestDaemon(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cause := error(context.Canceled)
+			if stopping {
+				cause = errors.New("unrelated probe failure")
+			}
+			spec := SupervisorSpec{scheduledAttempt: func(context.Context, SupervisorSpec) (kernel.Run, error) {
+				if stopping {
+					cancel()
+				}
+				return kernel.Run{}, cause
+			}}
+			if err := daemon.RunScheduler(ctx, spec); !errors.Is(err, kernel.ErrCorruptState) || !errors.Is(err, cause) {
+				t.Fatalf("unobserved completion lost unexpected failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestSchedulerUnobservedCompletionPreservesJoinedFailures(t *testing.T) {
+	sentinel := errors.New("admission reconciliation failed")
+	for _, test := range []struct {
+		name    string
+		outcome error
+		failure bool
+	}{
+		{"joined cancellation and failure", errors.Join(context.Canceled, sentinel), true},
+		{"wrapped unknown joined outcome", kernel.NewOutcomeUnknownError(errors.Join(context.Canceled, sentinel)), true},
+		{"unknown pure cancellation", kernel.NewOutcomeUnknownError(context.Canceled), true},
+		{"joined interrupt and failure", errors.Join(sqlite3.INTERRUPT, sentinel), true},
+		{"wrapped pure interrupt", fmt.Errorf("sqlite: %w", sqlite3.INTERRUPT), false},
+		{"joined cancellation and interrupt", errors.Join(context.Canceled, sqlite3.INTERRUPT), false},
+		{"nested pure cancellation", fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", context.Canceled)), false},
+		{"joined pure cancellation", errors.Join(context.Canceled, fmt.Errorf("wrapped: %w", context.Canceled)), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			daemon := newSchedulerTestDaemon(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			spec := SupervisorSpec{scheduledAttempt: func(context.Context, SupervisorSpec) (kernel.Run, error) {
+				cancel()
+				return kernel.Run{}, test.outcome
+			}}
+			err := daemon.RunScheduler(ctx, spec)
+			if test.failure {
+				if !errors.Is(err, test.outcome) || !errors.Is(err, kernel.ErrCorruptState) {
+					t.Fatalf("joined failure lost: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("pure cancellation refused: %v", err)
+			}
+		})
 	}
 }
 
@@ -560,5 +663,96 @@ func TestSchedulerPreservesAdmittedRunWhenAttemptCompletionIsUnknown(t *testing.
 	err := daemon.RunScheduler(context.Background(), spec)
 	if !errors.Is(err, sentinel) || completed.ID != runID || completed.Phase != kernel.RunFinalizing {
 		t.Fatalf("unknown completion lost admitted run: run=%+v err=%v", completed, err)
+	}
+}
+
+func TestSchedulerPausedDispatchDefersAutomaticWorkUntilResume(t *testing.T) {
+	daemon := newSchedulerTestDaemon(t)
+	store := daemon.store
+	ctx := context.Background()
+	state, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.SetDispatch(ctx, state.Revision, false, schedulerTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 0x71))
+	project, err := store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "paused", Root: t.TempDir()}, schedulerTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
+		id, _ := kernel.AgentIDFromBytes(adapterID(t, byte(0x72+index)))
+		agent, err := store.CreateAgent(ctx, kernel.NewAgent{ID: id, ProjectID: project.ID, Name: "automatic", Role: role, Provider: kernel.ProviderShell, ToolBudgetLimit: 4}, schedulerTime(t, 4))
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, after, instruction := kernel.IdleStandingInstruction, uint32(1), "Inspect current work."
+		if _, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, kernel.AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, schedulerTime(t, 5)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clockCalls := make(chan struct{}, 16)
+	daemon.now = func() time.Time { clockCalls <- struct{}{}; return time.UnixMilli(100_000) }
+	polls := make(chan time.Time)
+	tick := func() {
+		t.Helper()
+		select {
+		case polls <- time.Now():
+		case <-time.After(5 * time.Second):
+			t.Fatal("scheduler did not receive poll")
+		}
+	}
+	var attempts atomic.Int64
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	spec := SupervisorSpec{schedulerPoll: polls, scheduledAttempt: func(_ context.Context, spec SupervisorSpec) (kernel.Run, error) {
+		attempts.Add(1)
+		spec.admissionObserved(false)
+		return kernel.Run{}, fmt.Errorf("%w: fixture admission", kernel.ErrConflict)
+	}}
+	go func() { done <- daemon.RunScheduler(runCtx, spec) }()
+	// Receiving the next unbuffered tick proves the preceding paused pass
+	// completed, including run-limit enforcement, without a sleep.
+	tick()
+	tick()
+	for index := 0; index < 3; index++ {
+		select {
+		case <-clockCalls:
+		case <-time.After(5 * time.Second):
+			t.Fatal("paused scheduler stopped enforcing limits")
+		}
+	}
+	after, err := store.Factory(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Head != before.Head || attempts.Load() != 0 {
+		t.Fatalf("paused scheduler mutated or probed: before=%+v after=%+v attempts=%d", before, after, attempts.Load())
+	}
+	if _, err := store.SetDispatch(ctx, after.Revision, true, schedulerTime(t, 90_000)); err != nil {
+		t.Fatal(err)
+	}
+	daemon.notifyScheduler()
+	waitSchedulerCalls(t, &attempts, 1)
+	tick()
+	tick() // prior enabled tick completed both original enqueue paths
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 2 {
+		t.Fatalf("resume lost automatic worker/overseer work: %+v", snapshot.Tasks)
+	}
+	cancel()
+	if err := waitSchedulerDone(t, done); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -270,6 +270,22 @@ test("a running or paused agent accepts an explicit follow-up without opening a 
   assert.equal(context.calls.some((call) => call.kind === "resolve"), false);
 });
 
+test("shared work from a pane is queued for any eligible worker and is not the pane's queued task", async () => {
+  const context = terminalHarness();
+  context.controller.start();
+  const tasks = new Map(fixtureState.tasks);
+  for (const [id, task] of tasks) if (task.assigned_agent_id === thirdAgent.id && task.status === "queued") tasks.delete(id);
+  context.ready(stateAt(42, { tasks }));
+  context.controller.selectAgent(thirdAgent);
+  assert.equal(context.latest().terminal.queued, false);
+  assert.equal(await context.controller.enqueueAgentInstruction("Whoever is free: fix the flaky test", "any"), true);
+  assert.deepEqual(context.calls.at(-1), {
+    kind: "enqueue",
+    value: { agentId: thirdAgent.id, expectedAgentRevision: thirdAgent.revision, instruction: "Whoever is free: fix the flaky test", mode: "any" },
+  });
+  assert.equal(context.latest().terminal.queued, false, "unclaimed shared work is not this pane's queued task");
+});
+
 test("a paused agent refuses immediate work but accepts a queued follow-up", async () => {
   const context = terminalHarness();
   context.controller.start();

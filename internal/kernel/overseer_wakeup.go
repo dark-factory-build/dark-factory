@@ -12,9 +12,10 @@ import (
 // EnqueueOverseerWakeups consumes worker activity from the durable
 // invalidation journal. A cursor is deliberately left behind a queued or
 // running overseer, so activity while it works causes one follow-up after it
-// exits. Journal pruning is conservative: a cursor behind the floor wakes once.
+// exits. Unfinished work is reconsidered after the configured quiet interval
+// even without new events; a failed coordination run cannot strand the backlog.
 func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) ([]Task, error) {
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -24,8 +25,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 		return nil, tx.Rollback(err)
 	}
 	rows, err := tx.connection.QueryContext(ctx, `SELECT `+agentColumns+` FROM agents
-		WHERE role = 'orchestrator' AND idle_policy = 'standing_instruction' AND paused = 0
-		  AND tool_calls_used < tool_budget_limit
+		WHERE role = 'orchestrator' AND idle_policy = 'standing_instruction' AND paused = 0 AND archived = 0
 		  AND MAX(updated_at_ms, COALESCE((SELECT MAX(terminal_at_ms) FROM runs WHERE agent_id = agents.id), 0)) + idle_after_seconds * 1000 <= ?
 		ORDER BY id`, at.Int64())
 	if err != nil {
@@ -67,13 +67,27 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 			continue
 		}
 		// A missing cursor is the one initial inspection for a newly enabled
-		// rule. Thereafter only worker activity (or conservative prune recovery)
-		// can start the instruction again.
+		// rule. Worker events retain targeted context; an unchanged unfinished
+		// backlog gets a full reconciliation after the same quiet interval.
 		fullReconciliation := !found || cursor < factory.Floor.Int64()-1
 		var targets []TaskID
 		if !fullReconciliation {
 			targets, err = workerInvalidationTargetsAfter(ctx, tx.connection, agent.ProjectID, cursor, factory.Head.Int64())
 			if err != nil {
+				return nil, tx.Rollback(err)
+			}
+		}
+		if !fullReconciliation && len(targets) == 0 {
+			var unfinished bool
+			if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = ? AND status IN ('queued', 'running', 'blocked', 'failed'))`, agent.ProjectID.Bytes()).Scan(&unfinished); err != nil {
+				return nil, tx.Rollback(err)
+			}
+			fullReconciliation = unfinished
+		}
+		// Validate once, before the first task or cursor write; an unchanged
+		// poll rolls back without scanning unrelated retained history.
+		if !changed && (fullReconciliation || len(targets) != 0 || cursor != factory.Head.Int64()) {
+			if err := validateDurableControls(ctx, tx.connection); err != nil {
 				return nil, tx.Rollback(err)
 			}
 		}
@@ -102,6 +116,7 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 				return nil, tx.Rollback(err)
 			}
 			tasks = append(tasks, task)
+			changed = true
 		}
 		if cursor != factory.Head.Int64() || !found {
 			if err := setOverseerWakeCursor(ctx, tx.connection, agent, factory.Head.Int64()); err != nil {
@@ -121,11 +136,17 @@ func (store *Store) EnqueueOverseerWakeups(ctx context.Context, at UnixMillis) (
 
 // latestOverseerTask is durable continuity, not a new conversation store. The
 // next wake names this task so its result, decisions and operation IDs are one
-// targeted status read away.
+// targeted status read away. Failure and cancellation detail comes from the
+// exact settled run, rather than the task row, through that same status read.
 func latestOverseerTask(ctx context.Context, connection *sql.Conn, agentID AgentID) (*TaskID, error) {
 	var raw []byte
 	err := connection.QueryRowContext(ctx, `SELECT t.id FROM runs AS r JOIN tasks AS t ON t.id = r.task_id
-		WHERE r.agent_id = ? AND r.role = 'orchestrator' AND r.phase = 'terminal' AND t.status = 'succeeded' AND t.result IS NOT NULL AND length(trim(t.result)) > 0
+		WHERE r.agent_id = ? AND r.role = 'orchestrator' AND r.phase = 'terminal'
+		AND r.task_incarnation_id = t.incarnation_id AND r.admitted_task_work_revision = t.work_revision AND (
+			(t.status = 'succeeded' AND t.result IS NOT NULL AND length(trim(t.result)) > 0) OR
+			(t.status = 'blocked' AND t.blocked_reason IS NOT NULL AND length(trim(t.blocked_reason)) > 0) OR
+			(t.status IN ('failed', 'cancelled') AND r.terminal_detail IS NOT NULL AND length(trim(r.terminal_detail)) > 0)
+		)
 		ORDER BY r.terminal_at_ms DESC, r.id DESC LIMIT 1`, agentID.Bytes()).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -173,8 +194,8 @@ func workerInvalidationTargetsAfter(ctx context.Context, connection *sql.Conn, p
 	}
 	rows, err := connection.QueryContext(ctx, `SELECT task_id FROM (
 		SELECT i.sequence, t.id AS task_id FROM invalidations AS i
-		JOIN tasks AS t ON t.id = i.entity_id JOIN agents AS a ON a.id = t.assigned_agent_id
-		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'task' AND t.project_id = ? AND a.project_id = t.project_id AND a.role = 'worker'
+		JOIN tasks AS t ON t.id = i.entity_id LEFT JOIN agents AS a ON a.id = t.assigned_agent_id AND a.project_id = t.project_id
+		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'task' AND t.project_id = ? AND (t.assigned_agent_id IS NULL OR a.role = 'worker')
 		UNION ALL SELECT i.sequence, r.task_id FROM invalidations AS i JOIN runs AS r ON r.id = i.entity_id
 		WHERE i.sequence > ? AND i.sequence <= ? AND i.entity_kind = 'run' AND r.project_id = ? AND r.role = 'worker'
 		UNION ALL SELECT i.sequence, r.task_id FROM invalidations AS i JOIN human_requests AS h ON h.id = i.entity_id JOIN runs AS r ON r.id = h.run_id

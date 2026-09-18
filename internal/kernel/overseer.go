@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"unicode/utf8"
 )
 
@@ -26,8 +27,11 @@ type OverseerSnapshot struct {
 // reviewer must match before reading a daemon-retained worker tree. It is
 // deliberately an identity, not a caller-supplied pathname.
 type RetainedChangeHandoff struct {
-	ChangeID         ChangeID
-	BaseCommit       string
+	ChangeID   ChangeID
+	BaseCommit string
+	// HeadCommit is the settled tip of the Change's branch, or empty while the
+	// Change is still a Git-free tree that no worktree has adopted.
+	HeadCommit       string
 	TaskID           TaskID
 	TaskWorkRevision Revision
 	ChangeRevision   Revision
@@ -103,7 +107,14 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	offset := int64(request.Offset)
 	nextOffset := uint64(offset + OverseerSnapshotPageSize)
 	hasMore := false
-	agents, err := read.connection.QueryContext(ctx, agentSummarySelect+` WHERE a.project_id = ? ORDER BY a.id LIMIT ? OFFSET ?`, authority.ProjectID.Bytes(), OverseerSnapshotPageSize+1, offset)
+	agentQuery, agentArgs := agentSummarySelect+` WHERE a.project_id = ? ORDER BY a.id LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), OverseerSnapshotPageSize + 1, offset}
+	if request.TaskID != nil {
+		// A targeted read already carries the task's assigned-agent identity.
+		// Repeating every project agent is routine envelope noise; the full
+		// project page remains the explicit roster read.
+		agentQuery, agentArgs = agentSummarySelect+` WHERE a.project_id = ? AND a.id = (SELECT assigned_agent_id FROM tasks WHERE project_id = ? AND id = ?)`, []any{authority.ProjectID.Bytes(), authority.ProjectID.Bytes(), request.TaskID.Bytes()}
+	}
+	agents, err := read.connection.QueryContext(ctx, agentQuery, agentArgs...)
 	if err != nil {
 		return OverseerSnapshot{}, err
 	}
@@ -126,7 +137,35 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	if err := agents.Close(); err != nil {
 		return OverseerSnapshot{}, err
 	}
-	taskQuery, taskArgs := `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE project_id = ? AND (status IN ('queued', 'running') OR id IN (SELECT id FROM tasks WHERE project_id = ? AND status NOT IN ('queued', 'running') ORDER BY updated_at_ms DESC, id DESC LIMIT 32)) ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), authority.ProjectID.Bytes(), OverseerSnapshotPageSize + 1, offset}
+	if request.TaskID != nil && len(result.Agents) == 0 {
+		// A pooled or otherwise not-yet-assigned task has no agent to target;
+		// preserve the existing paged roster so the overseer can decide what
+		// owns it without a second management read.
+		agents, err = read.connection.QueryContext(ctx, agentSummarySelect+` WHERE a.project_id = ? ORDER BY a.id LIMIT ? OFFSET ?`, authority.ProjectID.Bytes(), OverseerSnapshotPageSize+1, offset)
+		if err != nil {
+			return OverseerSnapshot{}, err
+		}
+		for agents.Next() {
+			agent, err := scanAgentSummary(agents)
+			if err != nil {
+				agents.Close()
+				return OverseerSnapshot{}, err
+			}
+			if len(result.Agents) == OverseerSnapshotPageSize {
+				hasMore = true
+				break
+			}
+			result.Agents = append(result.Agents, agent)
+		}
+		if err := agents.Err(); err != nil {
+			agents.Close()
+			return OverseerSnapshot{}, err
+		}
+		if err := agents.Close(); err != nil {
+			return OverseerSnapshot{}, err
+		}
+	}
+	taskQuery, taskArgs := `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE project_id = ? AND (status IN ('queued', 'running', 'blocked', 'failed') OR id IN (SELECT id FROM tasks WHERE project_id = ? AND status IN ('succeeded', 'cancelled') ORDER BY updated_at_ms DESC, id DESC LIMIT 32)) ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), authority.ProjectID.Bytes(), OverseerSnapshotPageSize + 1, offset}
 	if request.TaskID != nil {
 		taskQuery, taskArgs = `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE project_id = ? AND id = ?`, []any{authority.ProjectID.Bytes(), request.TaskID.Bytes()}
 	}
@@ -146,6 +185,32 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 		if request.TaskID == nil && len(result.Tasks) == OverseerSnapshotPageSize {
 			hasMore = true
 			break
+		}
+		// Failed/cancelled task rows have no result; their exact settled run
+		// retains the report needed to diagnose and route the next action. A
+		// run the provider left without an outcome adds the provider's exit
+		// and running time, since that exit alone says nothing about effects.
+		if task.Status == TaskFailed || task.Status == TaskCancelled {
+			var detail, code sql.NullString
+			var exitCode, exitSignal, runningAt, terminalAt sql.NullInt64
+			err := read.connection.QueryRowContext(ctx, `SELECT terminal_detail, terminal_code, provider_exit_code, provider_exit_signal, running_at_ms, terminal_at_ms FROM runs
+				WHERE task_id = ? AND task_incarnation_id = ? AND admitted_task_work_revision = ? AND phase = 'terminal'
+				ORDER BY terminal_at_ms DESC, id DESC LIMIT 1`, task.ID.Bytes(), task.IncarnationID.Bytes(), task.WorkRevision.Int64()).Scan(&detail, &code, &exitCode, &exitSignal, &runningAt, &terminalAt)
+			if err != nil && err != sql.ErrNoRows {
+				tasks.Close()
+				return OverseerSnapshot{}, err
+			}
+			task.Result = detail.String
+			if code.String == FailureProviderExit.String() {
+				if exitCode.Valid {
+					task.Result += fmt.Sprintf("; provider exit code %d", exitCode.Int64)
+				} else if exitSignal.Valid {
+					task.Result += fmt.Sprintf("; provider exit signal %d", exitSignal.Int64)
+				}
+				if runningAt.Valid && terminalAt.Valid {
+					task.Result += fmt.Sprintf("; ran %d ms after activation", terminalAt.Int64-runningAt.Int64)
+				}
+			}
 		}
 		objective, objectiveTruncated, objectiveMore := overseerTaskText(task.Body, request.TaskID == nil, request.TextOffset)
 		resultText, resultTruncated, resultMore := overseerTaskText(task.Result, request.TaskID == nil, request.TextOffset)
@@ -308,18 +373,21 @@ func retainedChangeHandoff(ctx context.Context, connection *sql.Conn, projectID 
 	if !found || run.ProjectID != projectID || run.Role != RoleWorker || run.Phase != RunTerminal || run.Terminal == nil || run.TaskID != task.ID {
 		return RetainedChangeHandoff{}, false, ErrCorruptState
 	}
-	// Retained failed or blocked trees, and a tree from an earlier work
-	// revision after send-back, remain durable evidence but are not launch
-	// authority. Only the task's current successful settlement is handoffable.
-	if run.Terminal.Kind() != OutcomeSucceeded || run.AdmittedTaskWorkRevision != task.WorkRevision {
+	// Every current settled tree is inspectable evidence, regardless of outcome.
+	// A send-back invalidates this identity; it never authorizes execution.
+	if run.AdmittedTaskWorkRevision != task.WorkRevision {
 		return RetainedChangeHandoff{}, false, nil
 	}
-	return RetainedChangeHandoff{ChangeID: change.ID, BaseCommit: hex.EncodeToString(change.Selection.Commit().Bytes()), TaskID: task.ID, TaskWorkRevision: task.WorkRevision, ChangeRevision: change.Revision}, true, nil
+	handoff := RetainedChangeHandoff{ChangeID: change.ID, BaseCommit: hex.EncodeToString(change.Selection.Commit().Bytes()), TaskID: task.ID, TaskWorkRevision: task.WorkRevision, ChangeRevision: change.Revision}
+	if change.HeadCommit != nil {
+		handoff.HeadCommit = hex.EncodeToString(change.HeadCommit.Bytes())
+	}
+	return handoff, true, nil
 }
 
 // RetainedChangeHandoffForTask returns the current handoff identity for one
-// project task. It is used before a send-back makes that identity stale, so a
-// daemon can revoke launch-time filesystem grants before reopening the Change.
+// project task. The daemon copies it into an immutable attempt-local snapshot;
+// a send-back makes the identity stale for subsequent source requests.
 func (store *Store) RetainedChangeHandoffForTask(ctx context.Context, projectID ProjectID, taskID TaskID) (RetainedChangeHandoff, bool, error) {
 	read, err := store.beginRead(ctx)
 	if err != nil {
@@ -401,15 +469,17 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 	if spec.ProjectID != run.ProjectID {
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
-	agent, found, err := agentByID(ctx, tx.connection, spec.AssignedAgentID)
-	if err != nil {
-		return Task{}, tx.Rollback(err)
-	}
-	if !found || agent.ProjectID != run.ProjectID || agent.Role != RoleWorker {
-		return Task{}, tx.Rollback(ErrUnauthorized)
-	}
-	if agent.Archived {
-		return Task{}, tx.Rollback(ErrConflict)
+	if !spec.AssignedAgentID.zero() {
+		agent, found, err := agentByID(ctx, tx.connection, spec.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found || agent.ProjectID != run.ProjectID || agent.Role != RoleWorker {
+			return Task{}, tx.Rollback(ErrUnauthorized)
+		}
+		if agent.Archived {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
 	}
 	existing, replay, err := taskCreationReplay(ctx, tx.connection, spec)
 	if err != nil {

@@ -36,7 +36,52 @@ const (
 	v9UserVersion       = 9
 	v10UserVersion      = 10
 	v11UserVersion      = 11
-	v8HumanRequests     = `CREATE TABLE human_requests (
+	v12UserVersion      = 12
+	v13UserVersion      = 13
+	v14UserVersion      = 14
+	v15UserVersion      = 15
+	v16UserVersion      = 16
+	v17UserVersion      = 17
+	v18UserVersion      = 18
+	v19UserVersion      = 19
+	// v13Changes is the changes table before managed Git worktrees. It bound a
+	// Git-free published tree by a manifest digest, its entry and byte counts
+	// and its root inode. v14 names the tree's own branch head instead and
+	// drops those columns; a v13 row keeps its base, repository and settled
+	// run and gets no head until its tree is adopted into a worktree.
+	v13Changes = `CREATE TABLE changes (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16),
+    task_incarnation_id BLOB NOT NULL CHECK (length(task_incarnation_id) = 16),
+	phase TEXT NOT NULL CHECK (phase IN ('reserved', 'prepared', 'available', 'retained', 'abandoned')),
+    object_format TEXT CHECK (object_format IS NULL OR object_format IN ('sha1', 'sha256')),
+	base_commit BLOB,
+	repository_dev INTEGER CHECK (repository_dev IS NULL OR repository_dev >= 0),
+	repository_inode INTEGER CHECK (repository_inode IS NULL OR repository_inode > 0),
+    prepared_at_ms INTEGER CHECK (prepared_at_ms IS NULL OR prepared_at_ms >= 0),
+    tree_digest BLOB CHECK (tree_digest IS NULL OR length(tree_digest) = 32),
+    entry_count INTEGER CHECK (entry_count IS NULL OR entry_count BETWEEN 0 AND 10000),
+    total_bytes INTEGER CHECK (total_bytes IS NULL OR total_bytes BETWEEN 0 AND 1073741824),
+	tree_dev INTEGER CHECK (tree_dev IS NULL OR tree_dev >= 0),
+	tree_inode INTEGER CHECK (tree_inode IS NULL OR tree_inode > 0),
+    available_at_ms INTEGER CHECK (available_at_ms IS NULL OR available_at_ms >= 0),
+	settled_run_id BLOB CHECK (settled_run_id IS NULL OR length(settled_run_id) = 16),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    FOREIGN KEY (task_id, project_id, task_incarnation_id) REFERENCES tasks(id, project_id, incarnation_id),
+	FOREIGN KEY (settled_run_id, id, project_id, task_id, task_incarnation_id) REFERENCES runs(id, change_id, project_id, task_id, task_incarnation_id),
+	CHECK ((object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL) OR (object_format = 'sha1' AND length(base_commit) = 20 AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL) OR (object_format = 'sha256' AND length(base_commit) = 32 AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL)),
+	CHECK (
+		(phase = 'reserved' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
+		(phase = 'prepared' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NULL AND settled_run_id IS NULL) OR
+		(phase = 'available' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NULL) OR
+		(phase = 'retained' AND object_format IS NOT NULL AND base_commit IS NOT NULL AND repository_dev IS NOT NULL AND repository_inode IS NOT NULL AND prepared_at_ms IS NOT NULL AND tree_digest IS NOT NULL AND entry_count IS NOT NULL AND total_bytes IS NOT NULL AND tree_dev IS NOT NULL AND tree_inode IS NOT NULL AND available_at_ms IS NOT NULL AND settled_run_id IS NOT NULL) OR
+		(phase = 'abandoned' AND object_format IS NULL AND base_commit IS NULL AND repository_dev IS NULL AND repository_inode IS NULL AND prepared_at_ms IS NULL AND tree_digest IS NULL AND entry_count IS NULL AND total_bytes IS NULL AND tree_dev IS NULL AND tree_inode IS NULL AND available_at_ms IS NULL AND settled_run_id IS NOT NULL)
+	)
+) STRICT, WITHOUT ROWID`
+	v8HumanRequests = `CREATE TABLE human_requests (
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     run_id BLOB NOT NULL CHECK (length(run_id) = 16) REFERENCES runs(id),
     idempotency_key BLOB NOT NULL CHECK (length(idempotency_key) = 16 AND idempotency_key <> zeroblob(16)),
@@ -179,6 +224,33 @@ const (
     CHECK (provider <> 'shell' OR (model IS NULL AND reasoning_effort IS NULL AND account_id IS NULL))
 ) STRICT, WITHOUT ROWID`
 
+	v12Tasks = `CREATE TABLE tasks (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16),
+    assigned_agent_id BLOB NOT NULL CHECK (length(assigned_agent_id) = 16),
+    incarnation_id BLOB NOT NULL CHECK (length(incarnation_id) = 16),
+    work_revision INTEGER NOT NULL CHECK (work_revision >= 1),
+    title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 1024),
+    body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 131072),
+    sent_back_instruction_bytes INTEGER CHECK (sent_back_instruction_bytes IS NULL OR sent_back_instruction_bytes BETWEEN 0 AND length(CAST(body AS BLOB))),
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'blocked', 'succeeded', 'failed', 'cancelled')),
+    priority INTEGER NOT NULL CHECK (priority BETWEEN -1000000 AND 1000000),
+    blocked_reason TEXT CHECK (blocked_reason IS NULL OR length(CAST(blocked_reason AS BLOB)) BETWEEN 1 AND 4096),
+    result TEXT CHECK (result IS NULL OR length(CAST(result AS BLOB)) <= 131072),
+    completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= 0),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    FOREIGN KEY (assigned_agent_id, project_id) REFERENCES agents(id, project_id),
+    CHECK (
+        (status IN ('queued', 'running') AND blocked_reason IS NULL AND result IS NULL AND completed_at_ms IS NULL) OR
+        (status = 'blocked' AND blocked_reason IS NOT NULL AND result IS NULL AND completed_at_ms IS NULL) OR
+        (status = 'succeeded' AND blocked_reason IS NULL AND completed_at_ms IS NOT NULL) OR
+        (status IN ('failed', 'cancelled') AND blocked_reason IS NULL AND result IS NULL AND completed_at_ms IS NOT NULL)
+    ),
+    CHECK (completed_at_ms IS NULL OR completed_at_ms = updated_at_ms)
+) STRICT, WITHOUT ROWID`
+
 	v4Tasks = `CREATE TABLE tasks (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),
@@ -282,7 +354,7 @@ func v8SchemaStatements() []string {
 
 // v9SchemaStatements predates durable sprite appearance.
 func v9SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v12SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statements[i] = v7Agents
@@ -293,7 +365,7 @@ func v9SchemaStatements() []string {
 
 // v10 predates worker archiving.
 func v10SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v12SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statement = strings.Replace(statement, "\tarchived INTEGER NOT NULL CHECK (archived IN (0, 1)),\n", "", 1)
@@ -309,13 +381,129 @@ func v10SchemaStatements() []string {
 // an existing home is rebuilt rather than served with weaker constraints than
 // its recorded user_version promises.
 func v11SchemaStatements() []string {
-	statements := append([]string(nil), schemaStatements...)
+	statements := v12SchemaStatements()
 	for i, statement := range statements {
 		if _, name := schemaObjectIdentity(statement); name == "agents" {
 			statement = strings.Replace(statement, "idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0),", "idle_runs_used INTEGER NOT NULL CHECK (idle_runs_used >= 0 AND idle_runs_used <= idle_run_budget),", 1)
 			statement = strings.Replace(statement, "CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> ''))", "CHECK (idle_policy <> 'standing_instruction' OR (idle_after_seconds >= 1 AND idle_instruction <> '' AND idle_run_budget >= 1))", 1)
 			statements[i] = statement
 		}
+	}
+	return statements
+}
+
+// v12 predates the shared queue: every task named one agent. v13 lets a
+// queued task carry no assigned agent (any eligible worker claims it at
+// admission) and requires an agent on every other status.
+func v12SchemaStatements() []string {
+	statements := v13SchemaStatements()
+	for i, statement := range statements {
+		if _, name := schemaObjectIdentity(statement); name == "tasks" {
+			statements[i] = v12Tasks
+		}
+	}
+	return statements
+}
+
+// v13SchemaStatements is the exact schema before managed Git worktrees.
+func v13SchemaStatements() []string {
+	statements := v14SchemaStatements()
+	for i, statement := range statements {
+		if _, name := schemaObjectIdentity(statement); name == "changes" {
+			statements[i] = v13Changes
+		}
+	}
+	return statements
+}
+
+func v14SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-3)
+	for _, statement := range v15SchemaStatements() {
+		_, name := schemaObjectIdentity(statement)
+		if !strings.Contains(statement, "task_prerequisites") && name != "task_conflict_paths" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
+
+// v15 predates the optional project library. No existing table is changed.
+func v15SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-5)
+	for _, statement := range v16SchemaStatements() {
+		_, name := schemaObjectIdentity(statement)
+		if !strings.HasPrefix(name, "project_content_") && name != "task_content_references" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
+
+// v16 predates optional outcome and comparison decisions.
+func v16SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-2)
+	for _, statement := range v17SchemaStatements() {
+		_, name := schemaObjectIdentity(statement)
+		if !strings.HasPrefix(name, "project_outcome_") {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
+
+const v17ProjectContentRevisions = `CREATE TABLE project_content_revisions (
+    id BLOB NOT NULL CHECK (length(id) = 16),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    kind TEXT NOT NULL CHECK (length(CAST(kind AS BLOB)) BETWEEN 1 AND 64),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 1024),
+    description TEXT NOT NULL CHECK (length(CAST(description AS BLOB)) <= 4096),
+    body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 1048576),
+    author TEXT NOT NULL CHECK (length(CAST(author AS BLOB)) BETWEEN 1 AND 256),
+    source_references TEXT NOT NULL CHECK (length(CAST(source_references AS BLOB)) <= 32768),
+    deprecated INTEGER NOT NULL CHECK (deprecated IN (0, 1)),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (id, revision)
+) STRICT, WITHOUT ROWID`
+
+func v17SchemaStatements() []string {
+	statements := v18SchemaStatements()
+	for i, statement := range statements {
+		if _, name := schemaObjectIdentity(statement); name == "project_content_revisions" {
+			statements[i] = v17ProjectContentRevisions
+		}
+	}
+	return statements
+}
+
+// v18 predates retained terminal diagnostics and yielded continuations.
+func v18SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-4)
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name == "terminal_diagnostics" || name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
+			continue
+		}
+		if name == "invalidations" {
+			statement = strings.Replace(statement, ", 'continuation'", "", 1)
+		}
+		statements = append(statements, statement)
+	}
+	return statements
+}
+
+// v19 has retained terminal diagnostics but predates yielded continuations.
+func v19SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-3)
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
+			continue
+		}
+		if name == "invalidations" {
+			statement = strings.Replace(statement, ", 'continuation'", "", 1)
+		}
+		statements = append(statements, statement)
 	}
 	return statements
 }
@@ -416,6 +604,22 @@ func migratableSchema(version int) ([]string, bool) {
 		return v10SchemaStatements(), true
 	case v11UserVersion:
 		return v11SchemaStatements(), true
+	case v12UserVersion:
+		return v12SchemaStatements(), true
+	case v13UserVersion:
+		return v13SchemaStatements(), true
+	case v14UserVersion:
+		return v14SchemaStatements(), true
+	case v15UserVersion:
+		return v15SchemaStatements(), true
+	case v16UserVersion:
+		return v16SchemaStatements(), true
+	case v17UserVersion:
+		return v17SchemaStatements(), true
+	case v18UserVersion:
+		return v18SchemaStatements(), true
+	case v19UserVersion:
+		return v19SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -441,7 +645,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -466,6 +670,22 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[9:]
 	case v11UserVersion:
 		steps = all[10:]
+	case v12UserVersion:
+		steps = all[11:]
+	case v13UserVersion:
+		steps = all[12:]
+	case v14UserVersion:
+		steps = all[13:]
+	case v15UserVersion:
+		steps = all[14:]
+	case v16UserVersion:
+		steps = all[15:]
+	case v17UserVersion:
+		steps = all[16:]
+	case v18UserVersion:
+		steps = all[17:]
+	case v19UserVersion:
+		steps = all[18:]
 	default:
 		return connection.Close()
 	}
@@ -711,13 +931,127 @@ func migrateV11Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	columns := `id, project_id, name, role, provider, model, reasoning_effort, account_id, paused, archived, appearance, idle_policy, idle_after_seconds, idle_instruction, idle_run_budget, idle_runs_used, tool_budget_limit, tool_calls_used, revision, created_at_ms, updated_at_ms`
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "agents", columns, "agents_id_project_unique", "", ""); err != nil {
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v12SchemaStatements()), "agents", columns, "agents_id_project_unique", "", ""); err != nil {
 		return err
 	}
-	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v12UserVersion)); err != nil {
 		return err
 	}
-	return validateExactSchema(ctx, connection)
+	return validateSchemaVersion(ctx, connection, v12UserVersion, v12SchemaStatements())
+}
+
+// migrateV12Transaction relaxes tasks.assigned_agent_id to nullable. Every
+// existing task keeps the agent it always had; only new shared work is NULL.
+func migrateV12Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v12UserVersion, v12SchemaStatements()); err != nil {
+		return err
+	}
+	columns := `id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms`
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(v13SchemaStatements()), "tasks", columns, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v13UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v13UserVersion, v13SchemaStatements())
+}
+
+// migrateV13Transaction replaces the Git-free tree facts of every Change with
+// the head column. Every row keeps its identity, phase, base, repository,
+// chronology, revision and settled run; no row gets a head, since none of
+// those trees is a worktree yet. Each is adopted, at its recorded base and
+// with its contents untouched, the next time it is reopened or read.
+func migrateV13Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v13UserVersion, v13SchemaStatements()); err != nil {
+		return err
+	}
+	columns := `id, project_id, task_id, task_incarnation_id, phase, object_format, base_commit, repository_dev, repository_inode, prepared_at_ms, available_at_ms, settled_run_id, revision, created_at_ms, updated_at_ms`
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "changes", columns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "head_commit", "NULL"); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v14UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v14UserVersion, v14SchemaStatements())
+}
+
+func migrateV14Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v14UserVersion, v14SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	for _, name := range []string{"task_prerequisites", "task_prerequisites_upstream", "task_conflict_paths"} {
+		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
+			return err
+		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v15UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v15UserVersion, v15SchemaStatements())
+}
+
+func migrateV15Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v15UserVersion, v15SchemaStatements()); err != nil {
+		return err
+	}
+	for _, statement := range v16SchemaStatements() {
+		_, name := schemaObjectIdentity(statement)
+		if strings.HasPrefix(name, "project_content_") || name == "task_content_references" {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v16UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v16UserVersion, v16SchemaStatements())
+}
+func migrateV16Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v16UserVersion, v16SchemaStatements()); err != nil {
+		return err
+	}
+	for _, statement := range v17SchemaStatements() {
+		_, name := schemaObjectIdentity(statement)
+		if strings.HasPrefix(name, "project_outcome_") {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v17UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v17UserVersion, v17SchemaStatements())
+}
+
+func migrateV17Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v17UserVersion, v17SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	columns := "id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms"
+	if err := rebuildTable(ctx, connection, target, "project_content_revisions", columns, "project_content_revisions_project_kind", "object_format, commit_oid, path, repository_dev, repository_inode", "NULL, NULL, NULL, NULL, NULL"); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v18UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v18UserVersion, v18SchemaStatements())
+}
+
+func migrateV18Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v18UserVersion, v18SchemaStatements()); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, expectedSchemaOf(schemaStatements)["terminal_diagnostics"].sql); err != nil {
+		return fmt.Errorf("create terminal diagnostics: %w", err)
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v19UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v19UserVersion, v19SchemaStatements())
 }
 
 // rebuildTable replaces one table with its target definition, preserving every
@@ -774,4 +1108,25 @@ func setForeignKeys(ctx context.Context, connection *sql.Conn, enforced bool) er
 		return fmt.Errorf("%w: sqlite foreign key enforcement is %d, want %d", ErrCorruptState, got, want)
 	}
 	return nil
+}
+
+func migrateV19Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v19UserVersion, v19SchemaStatements()); err != nil {
+		return err
+	}
+	if err := rebuildTable(ctx, connection, expectedSchemaOf(schemaStatements), "invalidations", "sequence, occurred_at_ms, entity_kind, entity_id, revision, deleted", "invalidations_entity_revision_unique", "", ""); err != nil {
+		return err
+	}
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name == "continuations" || name == "continuations_one_waiting_per_condition" || name == "continuations_admission_queue" {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
+		return err
+	}
+	return validateExactSchema(ctx, connection)
 }

@@ -236,28 +236,41 @@ type liveAttemptResult struct {
 	notice            *runner.AttemptResultNotice
 	err               error
 	observersRetained bool
+	// handedOver reports a clean protocol-2 shutdown handover: the runner
+	// still owns a live provider under a fresh takeover grant, the run stays
+	// durably running, and this daemon makes no further Store mutation for
+	// it. notice and err are unused when this is set.
+	handedOver bool
 }
 
 // liveAttempt is intentionally concrete. Except for the receipt fence named
 // below, mutable fields belong to its one owner goroutine after construction;
 // the registry mutex protects only the daemon's map membership.
 type liveAttempt struct {
-	daemon     *Daemon
-	runID      kernel.RunID
+	daemon *Daemon
+	runID  kernel.RunID
+	// Immutable observation facts from the inspected source, installed before registration.
+	agentID    kernel.AgentID
+	changeID   kernel.ChangeID
+	pathsSince kernel.UnixMillis
 	sessionID  kernel.TerminalSessionID
 	controller *runner.AttemptController
-	// sourceSnapshots binds explicitly requested immutable source identities to
-	// private per-run materializations. A later work or Change revision cannot
-	// reuse an older grant; no live run reads the shared Changes parent.
-	sourceSnapshots    map[kernel.RetainedChangeHandoff]string
-	sourceRoot         string
-	sourceMu           sync.Mutex
-	sourceGate         chan struct{}
-	sourceOpsMu        sync.Mutex
-	sourceOpsDone      chan struct{}
-	sourceCloseStarted chan struct{}
-	sourceOps          int
-	sourceClosing      bool
+	// sourceOps counts explicit source requests in flight for this attempt,
+	// so shutdown refuses new ones and waits for admitted ones to finish.
+	sourceOpsMu                 sync.Mutex
+	sourceOpsDone               chan struct{}
+	sourceCloseStarted          chan struct{}
+	sourceOps                   int
+	sourceClosing               bool
+	attemptDigest               kernel.AttemptDigest
+	diagnosticMu                sync.Mutex
+	diagnosticPayload           [kernel.MaxTerminalDiagnosticsBytes]byte
+	diagnosticOffset            int
+	diagnosticLength            int
+	diagnosticFloor             uint64
+	diagnosticHead              uint64
+	diagnosticReplayCorrelation uint64
+	diagnosticReplayHead        uint64
 
 	commands chan liveAttemptCommand
 	wake     chan struct{}
@@ -268,6 +281,14 @@ type liveAttempt struct {
 	// It spans durable finalization through the reporting client's validated
 	// response acknowledgement, without holding that global gate during I/O.
 	outcomeReceiptPending bool
+	// outcomeRefusal is written and consumed under daemon.operationMu. It is a
+	// typed refusal from this exact bearer, never a generic unauthorized hint.
+	outcomeRefusal error
+	// pendingOutcome retains the exact proposal whose live API call was refused
+	// until the authenticated runner result gives the supervisor one final,
+	// owner-bound chance to commit it. It is not terminal authority and is never
+	// recovered or replayed after this owner is gone.
+	pendingOutcome *kernel.Proposal
 
 	subs            map[*TerminalAttachment]struct{}
 	correlations    map[uint64]*TerminalAttachment
@@ -279,11 +300,15 @@ type liveAttempt struct {
 	terminationDelivered bool
 	resultReturned       bool
 	shutdownRequested    bool
-	resultNotice         *runner.AttemptResultNotice
-	creditOutstanding    uint64
-	finalErr             error
-	binding              terminalBinding
-	effectLimit          time.Duration
+	// handedOver is set once a released, terminal-ready controller has
+	// cleanly quiesced onto the runner's own takeover endpoint. See
+	// convergeForShutdown.
+	handedOver        bool
+	resultNotice      *runner.AttemptResultNotice
+	creditOutstanding uint64
+	finalErr          error
+	binding           terminalBinding
+	effectLimit       time.Duration
 	// These exact seams are fixed before the owner starts. Production uses the
 	// concrete Store renewal below; daemon tests replace it or pause one phase
 	// to prove ambiguous Store and operation-gate schedules causally.
@@ -293,13 +318,65 @@ type liveAttempt struct {
 	beforeProviderStateCheck func() error
 }
 
+func (attempt *liveAttempt) retainDiagnosticOutput(start, end uint64, payload []byte) {
+	if attempt == nil || end < start {
+		return
+	}
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	if uint64(len(payload)) > end-start {
+		payload = payload[:min(len(payload), int(end-start))]
+	}
+	for len(payload) > 0 {
+		if attempt.diagnosticLength == kernel.MaxTerminalDiagnosticsBytes {
+			attempt.diagnosticOffset = (attempt.diagnosticOffset + 1) % kernel.MaxTerminalDiagnosticsBytes
+			attempt.diagnosticLength--
+		}
+		index := (attempt.diagnosticOffset + attempt.diagnosticLength) % kernel.MaxTerminalDiagnosticsBytes
+		n := min(len(payload), kernel.MaxTerminalDiagnosticsBytes-attempt.diagnosticLength)
+		n = min(n, kernel.MaxTerminalDiagnosticsBytes-index)
+		copy(attempt.diagnosticPayload[index:index+n], payload[:n])
+		attempt.diagnosticLength += n
+		payload = payload[n:]
+	}
+	attempt.diagnosticHead = end
+	if uint64(attempt.diagnosticLength) > attempt.diagnosticHead {
+		attempt.diagnosticLength = 0
+	}
+	attempt.diagnosticFloor = attempt.diagnosticHead - uint64(attempt.diagnosticLength)
+}
+
+func (attempt *liveAttempt) resetDiagnosticOutput(floor, head uint64) {
+	if attempt == nil || head < floor {
+		return
+	}
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	attempt.diagnosticOffset = 0
+	attempt.diagnosticLength = 0
+	attempt.diagnosticFloor = floor
+	attempt.diagnosticHead = head
+}
+
+func (attempt *liveAttempt) diagnosticSnapshot() (uint64, uint64, []byte) {
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	out := make([]byte, attempt.diagnosticLength)
+	if attempt.diagnosticLength > 0 {
+		first := min(attempt.diagnosticLength, kernel.MaxTerminalDiagnosticsBytes-attempt.diagnosticOffset)
+		copy(out, attempt.diagnosticPayload[attempt.diagnosticOffset:attempt.diagnosticOffset+first])
+		copy(out[first:], attempt.diagnosticPayload[:attempt.diagnosticLength-first])
+	}
+	return attempt.diagnosticFloor, attempt.diagnosticHead, out
+}
+
 func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.TerminalSessionID, controller *runner.AttemptController) *liveAttempt {
 	attempt := &liveAttempt{
 		daemon: daemon, runID: runID, sessionID: sessionID, controller: controller,
 		commands: make(chan liveAttemptCommand, liveAttemptMailboxCap),
 		wake:     make(chan struct{}, 1), done: make(chan struct{}), result: make(chan liveAttemptResult, 1),
 		subs: make(map[*TerminalAttachment]struct{}), correlations: make(map[uint64]*TerminalAttachment),
-		sourceGate: make(chan struct{}, 1), sourceOpsDone: make(chan struct{}), sourceCloseStarted: make(chan struct{}),
+		sourceOpsDone: make(chan struct{}), sourceCloseStarted: make(chan struct{}),
 		effectLimit: liveAttemptEffectLimit,
 	}
 	if daemon != nil && daemon.store != nil {
@@ -383,20 +460,39 @@ func (daemon *Daemon) unregisterLiveAttempt(runID kernel.RunID, attempt *liveAtt
 	daemon.attemptMu.Unlock()
 }
 
+// liveAttemptForDigest finds the owner for an exact attempt bearer without
+// asking SQLite to authenticate it. The caller has already validated the
+// digest shape; this lookup is only a best-effort wake route for a refused
+// outcome, and the owner still rereads durable state before acting.
+func (daemon *Daemon) liveAttemptForDigest(digest kernel.AttemptDigest) *liveAttempt {
+	if daemon == nil {
+		return nil
+	}
+	daemon.attemptMu.Lock()
+	defer daemon.attemptMu.Unlock()
+	for _, attempt := range daemon.attempts {
+		if attempt != nil && attempt.attemptDigest == digest {
+			return attempt
+		}
+	}
+	return nil
+}
+
 // closeLiveAttempts is the daemon shutdown seam. It first closes admission to
 // the in-memory owner registry, then synchronously asks each owner to converge
 // and joins it. The Store remains the authority for recovery after an
 // abnormal daemon death; this method only covers normal in-process shutdown.
 func (daemon *Daemon) closeLiveAttempts() error {
+	if daemon != nil && daemon.cleanupCancel != nil {
+		daemon.cleanupCancel()
+	}
 	if daemon == nil {
 		return nil
 	}
-	daemon.operationMu.Lock()
 	daemon.attemptMu.Lock()
 	if daemon.closing {
 		done := daemon.closeDone
 		daemon.attemptMu.Unlock()
-		daemon.operationMu.Unlock()
 		if done != nil {
 			<-done
 		}
@@ -414,7 +510,6 @@ func (daemon *Daemon) closeLiveAttempts() error {
 		supervisors = append(supervisors, registration)
 	}
 	daemon.attemptMu.Unlock()
-	daemon.operationMu.Unlock()
 	for _, registration := range supervisors {
 		registration.cancel()
 	}
@@ -452,6 +547,26 @@ func (attempt *liveAttempt) notify() {
 	case attempt.wake <- struct{}{}:
 	default:
 	}
+}
+
+func (attempt *liveAttempt) notifyOutcomeRefusal(err error) {
+	if attempt == nil || err == nil || attempt.daemon == nil {
+		return
+	}
+	attempt.outcomeRefusal = err
+	attempt.notify()
+}
+
+func (attempt *liveAttempt) pendingOutcomeSnapshot() (kernel.Proposal, bool) {
+	if attempt == nil || attempt.daemon == nil {
+		return kernel.Proposal{}, false
+	}
+	attempt.daemon.operationMu.Lock()
+	defer attempt.daemon.operationMu.Unlock()
+	if attempt.pendingOutcome == nil {
+		return kernel.Proposal{}, false
+	}
+	return *attempt.pendingOutcome, true
 }
 
 func (attempt *liveAttempt) submit(ctx context.Context, command liveAttemptCommand) error {
@@ -569,13 +684,4 @@ func (attempt *liveAttempt) waitResult() liveAttemptResult {
 		return liveAttemptResult{err: ErrTerminalClosed}
 	}
 	return <-attempt.result
-}
-
-func (attempt *liveAttempt) acquireSourceGate(ctx context.Context) bool {
-	select {
-	case attempt.sourceGate <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
-	}
 }

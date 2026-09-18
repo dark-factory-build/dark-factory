@@ -30,38 +30,104 @@ type runPathsResult struct {
 	paths []string
 }
 
+func (daemon *Daemon) liveAttemptForAgent(agentID kernel.AgentID) (*liveAttempt, error) {
+	daemon.attemptMu.Lock()
+	defer daemon.attemptMu.Unlock()
+	var owner *liveAttempt
+	for _, candidate := range daemon.attempts {
+		if candidate.agentID != agentID {
+			continue
+		}
+		select {
+		case <-candidate.done:
+			continue
+		default:
+		}
+		if owner != nil {
+			return nil, fmt.Errorf("%w: multiple live agent owners", kernel.ErrCorruptState)
+		}
+		owner = candidate
+	}
+	return owner, nil
+}
+
+// liveRunLocations returns daemon-owned absolute locations for one live run.
+// The operator projection uses these facts only; it never derives them from
+// private database rows or an attempt source request.
+func (daemon *Daemon) liveRunLocations(ctx context.Context, agentID kernel.AgentID) (kernel.RunID, string, string, error) {
+	owner, err := daemon.liveAttemptForAgent(agentID)
+	if err != nil {
+		return kernel.RunID{}, "", "", err
+	}
+	if owner == nil {
+		return kernel.RunID{}, "", "", nil
+	}
+	runID, changeID := owner.runID, owner.changeID
+
+	var sourcePath string
+	if changeID != (kernel.ChangeID{}) {
+		if parent := daemon.changeParent.Load(); parent != nil && *parent != "" {
+			sourcePath = filepath.Join(*parent, changeID.String())
+		}
+	}
+	var runtimePath string
+	resources, err := daemon.store.Resources(ctx, runID)
+	if err != nil {
+		return kernel.RunID{}, "", "", err
+	}
+	for _, resource := range resources {
+		if resource.Kind == kernel.ResourceRuntimeRoot {
+			runtimePath = resource.Path
+			break
+		}
+	}
+	current, err := daemon.liveAttemptForAgent(agentID)
+	if err != nil {
+		return kernel.RunID{}, "", "", err
+	}
+	if current != owner {
+		return kernel.RunID{}, "", "", fmt.Errorf("%w: live agent owner changed", kernel.ErrConflict)
+	}
+	return runID, sourcePath, runtimePath, nil
+}
+
 // RunPaths reports the directories one agent's live run has touched since its
 // change directory was published, as paths relative to that directory. An
-// agent with no non-terminal run has no run identity and no paths.
+// agent without a registered live source owner has no run identity or paths.
 func (daemon *Daemon) RunPaths(ctx context.Context, agentID kernel.AgentID) (kernel.RunID, []string, error) {
 	if daemon == nil || daemon.store == nil {
 		return kernel.RunID{}, nil, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
 	}
-	// ponytail: the store has no agent-to-open-run read, and every non-terminal
-	// run is already loaded with its Change here. Add a narrower read only if
-	// this shows up in a profile.
-	runs, err := daemon.store.RecoverableRuns(ctx)
+	// Observation follows the existing owner, never the recovery graph. Before
+	// registration or after owner exit the location is honestly unknown.
+	owner, err := daemon.liveAttemptForAgent(agentID)
 	if err != nil {
 		return kernel.RunID{}, nil, err
 	}
-	for _, candidate := range runs {
-		if candidate.Run.AgentID != agentID || candidate.Change == nil || candidate.Change.AvailableAt == nil {
-			continue
-		}
-		// A retained change keeps the AvailableAt of its first publication, so
-		// a continued run would otherwise report an earlier run's edits. The
-		// moment this run started is the later, truthful cut.
-		cut := *candidate.Change.AvailableAt
-		if candidate.Run.RunningAt != nil && candidate.Run.RunningAt.Int64() > cut.Int64() {
-			cut = *candidate.Run.RunningAt
-		}
-		paths, err := daemon.cachedRunPaths(ctx, candidate.Run.ID, candidate.Change.ID.String(), cut)
-		if err != nil {
-			return kernel.RunID{}, nil, err
-		}
-		return candidate.Run.ID, paths, nil
+	if owner == nil {
+		return kernel.RunID{}, []string{}, nil
 	}
-	return kernel.RunID{}, []string{}, nil
+	if owner.changeID == (kernel.ChangeID{}) {
+		return kernel.RunID{}, []string{}, nil
+	}
+	paths, err := daemon.cachedRunPaths(ctx, owner.runID, owner.changeID.String(), owner.pathsSince)
+	if err != nil {
+		return kernel.RunID{}, nil, err
+	}
+	currentOwner, err := daemon.liveAttemptForAgent(agentID)
+	if err != nil {
+		return kernel.RunID{}, nil, err
+	}
+	current := currentOwner == owner
+	select {
+	case <-owner.done:
+		current = false
+	default:
+	}
+	if !current {
+		return kernel.RunID{}, []string{}, nil
+	}
+	return owner.runID, paths, nil
 }
 
 // cachedRunPaths keeps one walk per run for runPathsTTL. The mutex covers the
@@ -105,20 +171,24 @@ func (daemon *Daemon) rememberedRunPaths(runID kernel.RunID, now time.Time) ([]s
 	return entry.paths, ok
 }
 
-// rememberSupervisorAccount records the one changes root and the one account
-// home the supervisor was given. The daemon does not own the operational home
-// layout and never derives either; these are the same values every run in the
-// process is published under, so the stores are lock-free publications that
-// RunNext never waits on.
-func (daemon *Daemon) rememberSupervisorAccount(parent, accountHome string) {
+// RememberSupervisorAccount records the one changes root, the one account
+// home, and the one Git executable the supervisor was given. The daemon does
+// not own the operational home layout and never derives any of them; these
+// are the same values every run in the process is published under, so the
+// stores are lock-free publications that RunNext never waits on. Boot calls
+// this once before the recovery sweep so a leftover retained-Change
+// settlement does not need a live attempt to have run first; RunNext calls it
+// again on every attempt, which is an idempotent republish of the same
+// values.
+func (daemon *Daemon) RememberSupervisorAccount(parent, accountHome, gitExecutable string) {
 	daemon.changeParent.Store(&parent)
 	daemon.accountHome.Store(&accountHome)
+	daemon.gitExecutable.Store(&gitExecutable)
 }
 
 // changedDirectories returns the deepest directory of every file modified
-// after the given moment, deduplicated and sorted. A published change
-// directory is a plain materialized tree with no repository metadata, so the
-// modification time is the only evidence of the worker's edits. Every stop --
+// after the given moment, deduplicated and sorted. It is a hint about where
+// the worker is, read without running Git in its worktree. Every stop --
 // a missing tree, an unreadable entry, an exhausted budget -- answers with
 // what was found rather than an error, so there is nothing to report.
 func changedDirectories(ctx context.Context, root string, since time.Time) []string {

@@ -43,7 +43,8 @@ func idleRuleFromRow(policy string, after int64, instruction string, budget, use
 // itself once its quiet spell has passed, and spends one of its idle runs
 // for it, in one transaction. Idle means the agent itself could take work
 // (not paused, tool budget left; the factory's dispatch switch and capacity
-// stay admission's to apply once the task is queued) and has no queued or
+// stay admission's to apply once the task is queued; the daemon defers
+// automatic enqueue calls while dispatch is paused) and has no queued or
 // running task, so the rule never stacks on work; a run in flight is a
 // running task, which the durable checks enforce. The quiet spell starts at
 // the later of the agent's last edit and its
@@ -53,7 +54,7 @@ func idleRuleFromRow(policy string, after int64, instruction string, budget, use
 // The agent revision is the same CAS the console's enqueue uses, so a human
 // instruction landing in the same window wins or loses cleanly.
 func (store *Store) EnqueueIdleInstructions(ctx context.Context, at UnixMillis) ([]Task, error) {
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +82,14 @@ func (store *Store) EnqueueIdleInstructions(ctx context.Context, at UnixMillis) 
 	if err := rows.Err(); err != nil {
 		return nil, tx.Rollback(err)
 	}
+	if len(due) == 0 {
+		return nil, tx.Rollback(nil)
+	}
+	// A no-op poll needs no full history scan. The reserved transaction keeps
+	// these candidates unchanged until validation precedes the first write.
+	if err := validateDurableControls(ctx, tx.connection); err != nil {
+		return nil, tx.Rollback(err)
+	}
 	var tasks []Task
 	for _, agent := range due {
 		task, err := enqueueStandingTask(ctx, tx.connection, agent, at)
@@ -88,9 +97,6 @@ func (store *Store) EnqueueIdleInstructions(ctx context.Context, at UnixMillis) 
 			return nil, tx.Rollback(err)
 		}
 		tasks = append(tasks, task)
-	}
-	if len(tasks) == 0 {
-		return nil, tx.Rollback(nil)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err

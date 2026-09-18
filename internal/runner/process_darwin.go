@@ -1375,13 +1375,26 @@ func registerExit(kq, pid int) error {
 	return nil
 }
 
+// ReadOwnedProcessIdentity exposes only the current user's process birth and group
+// for the local CI lease helper; it neither signals nor inspects arguments.
+func ReadOwnedProcessIdentity(pid int) (Identity, error) {
+	return readProcessIdentity(pid, true)
+}
+
 func readIdentity(pid int) (Identity, error) {
+	return readProcessIdentity(pid, false)
+}
+
+func readProcessIdentity(pid int, sameUID bool) (Identity, error) {
 	if pid <= 1 {
 		return Identity{}, ErrIdentity
 	}
 	p, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
 		return Identity{}, err
+	}
+	if sameUID && p.Eproc.Ucred.Uid != uint32(os.Getuid()) {
+		return Identity{}, ErrIdentity
 	}
 	id := Identity{PID: pid, PGID: int(p.Eproc.Pgid), Birth: Birth{Seconds: p.Proc.P_starttime.Sec, Microseconds: p.Proc.P_starttime.Usec}}
 	if !id.Valid() || int(p.Proc.P_pid) != pid {

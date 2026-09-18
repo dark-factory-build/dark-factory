@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -34,42 +32,47 @@ func projectionHandoff(t *testing.T) (kernel.RetainedChangeHandoff, kernel.Proje
 	return kernel.RetainedChangeHandoff{ChangeID: changeID, BaseCommit: "0123456789abcdef0123456789abcdef01234567", TaskID: taskID, TaskWorkRevision: work, ChangeRevision: work}, projectID, head
 }
 
-func TestProjectOverseerSnapshotUsesOnlyPrivateSourceSnapshot(t *testing.T) {
+// Status carries each settled Change's identities and nothing about where
+// it is; an explicit attempt source request answers that.
+func TestProjectOverseerSnapshotCarriesHandoffIdentitiesWithoutLocations(t *testing.T) {
 	handoff, projectID, head := projectionHandoff(t)
-	runtime := t.TempDir()
-	source := filepath.Join(runtime, "retained-source", handoff.ChangeID.String())
-	if err := os.MkdirAll(source, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	projected, err := projectOverseerSnapshot(kernel.OverseerSnapshot{ProjectID: projectID, Head: head, Handoffs: []kernel.RetainedChangeHandoff{handoff}}, map[kernel.RetainedChangeHandoff]string{handoff: source})
-	if err != nil || len(projected.Handoffs) != 1 || projected.Handoffs[0].SourcePath != source {
-		t.Fatalf("projected handoff = %+v, %v", projected, err)
-	}
-}
-
-func TestProjectOverseerTargetedSnapshotKeepsTaskStateWithoutSourceGrant(t *testing.T) {
-	handoff, projectID, head := projectionHandoff(t)
+	handoff.HeadCommit = "89abcdef0123456789abcdef0123456789abcdef"
 	snapshot := kernel.OverseerSnapshot{ProjectID: projectID, Head: head, Tasks: []kernel.OverseerTask{{ID: handoff.TaskID, ProjectID: projectID, Title: "state"}}, Handoffs: []kernel.RetainedChangeHandoff{handoff}}
-	projected, err := projectOverseerSnapshot(snapshot, nil)
-	if err != nil || len(projected.Tasks) != 1 || len(projected.Handoffs) != 0 {
-		t.Fatalf("ungranted task state = %+v, %v", projected, err)
+	projected, err := projectOverseerSnapshot(snapshot)
+	if err != nil || len(projected.Tasks) != 1 || len(projected.Handoffs) != 1 {
+		t.Fatalf("projected = %+v, %v", projected, err)
+	}
+	got := projected.Handoffs[0]
+	if got.ChangeID != handoff.ChangeID.String() || got.BaseCommit != handoff.BaseCommit || got.HeadCommit != handoff.HeadCommit || got.TaskID != handoff.TaskID.String() || got.TaskWorkRevision != uint64(handoff.TaskWorkRevision.Int64()) || got.ChangeRevision != uint64(handoff.ChangeRevision.Int64()) || got.SourcePath != "" || got.GitDirectory != "" || got.Branch != "" || got.Dirty {
+		t.Fatalf("projected handoff = %+v", got)
+	}
+	handoff.HeadCommit = ""
+	projected, err = projectOverseerSnapshot(kernel.OverseerSnapshot{ProjectID: projectID, Head: head, Handoffs: []kernel.RetainedChangeHandoff{handoff}})
+	if err != nil || len(projected.Handoffs) != 1 || projected.Handoffs[0].HeadCommit != "" {
+		t.Fatalf("Git-free handoff projected = %+v, %v", projected, err)
 	}
 }
 
-func TestProjectRetainedChangeHandoffsRejectsMissingAndEscapingSnapshots(t *testing.T) {
-	handoff, _, _ := projectionHandoff(t)
-	if _, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: "/private/factory/changes/" + handoff.ChangeID.String()}); err == nil {
-		t.Fatal("shared Changes path accepted")
-	}
-	source := filepath.Join(t.TempDir(), "retained-source", handoff.ChangeID.String())
-	if _, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: source}); err == nil {
-		t.Fatal("missing snapshot accepted")
-	}
-	if err := os.MkdirAll(source, 0o700); err != nil {
+func TestAgentProjectionCarriesLaunchAndIdleControlsToBothOperatorViews(t *testing.T) {
+	projectID, err := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{1}, kernel.IDBytes))
+	if err != nil {
 		t.Fatal(err)
 	}
-	projected, err := projectRetainedChangeHandoffs(map[kernel.RetainedChangeHandoff]string{handoff: source})
-	if err != nil || len(projected) != 1 || projected[0].SourcePath != source {
-		t.Fatalf("projected snapshot = %+v, %v", projected, err)
+	agentID, err := kernel.AgentIDFromBytes(bytes.Repeat([]byte{2}, kernel.IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := kernel.NewRevision(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := kernel.AgentSummary{ID: agentID, ProjectID: projectID, Name: "worker", Role: "worker", Provider: "codex", Model: "gpt-6-astra", ReasoningEffort: "high", ToolBudgetLimit: 8, ToolCallsUsed: 3, Idle: kernel.IdleRule{Policy: kernel.IdleStandingInstruction, AfterSeconds: 12, Instruction: "inspect", RunBudget: 4, RunsUsed: 2}, Revision: revision}
+	dashboard := projectSnapshot(kernel.DashboardSnapshot{Agents: []kernel.AgentSummary{agent}})
+	if len(dashboard.Agents) != 1 || dashboard.Agents[0].ToolBudgetLimit != 8 || dashboard.Agents[0].ToolCallsUsed != 3 || dashboard.Agents[0].Model != agent.Model || dashboard.Agents[0].ReasoningEffort != agent.ReasoningEffort || dashboard.Agents[0].IdlePolicy != string(agent.Idle.Policy) || dashboard.Agents[0].IdleAfterSeconds != agent.Idle.AfterSeconds || dashboard.Agents[0].IdleInstruction != agent.Idle.Instruction || dashboard.Agents[0].IdleRunBudget != agent.Idle.RunBudget || dashboard.Agents[0].IdleRunsUsed != agent.Idle.RunsUsed {
+		t.Fatalf("dashboard agent = %+v", dashboard.Agents)
+	}
+	overseer, err := projectOverseerSnapshot(kernel.OverseerSnapshot{ProjectID: projectID, Agents: []kernel.AgentSummary{agent}})
+	if err != nil || len(overseer.Agents) != 1 || overseer.Agents[0] != dashboard.Agents[0] {
+		t.Fatalf("overseer agent = %+v, err=%v", overseer.Agents, err)
 	}
 }

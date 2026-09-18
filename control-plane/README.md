@@ -48,8 +48,8 @@ Access policy, or App configuration is live.
   tools observe the default head, any branch head, a file at an exact commit, one
   commit's parents and complete tree, or a determinate refusal when GitHub
   truncates it, and durable operation state, manage a bounded issue lifecycle,
-  publish an exact commit and pull request, close a pull request at an exact
-  head, submit an exact-head
+  publish an exact commit, as the merge a worker made when it integrated the
+  default branch, and pull request, close a pull request at an exact head, submit an exact-head
   `ALLOW`, `COMMENT`, or `REQUEST_CHANGES` verdict, diagnose and rerun exact CI,
   observe eventual merge state, enqueue through a merge queue, perform a
   strict exact-head squash merge where a base has no queue, publish and observe

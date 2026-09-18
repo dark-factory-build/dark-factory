@@ -8,11 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -29,8 +27,6 @@ type runtimeAuthority struct {
 }
 
 const providerTaskName = ".provider-task"
-
-var copyRetainedFS = copyRetainedTree
 
 func runProvider(ctx context.Context) (resultErr error) {
 	control, err := runner.OpenWorkerControl()
@@ -72,6 +68,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 
 	home := filepath.Join(config.RuntimePath, HomeName)
 	var cwd *os.File
+	gitDirectory := config.GitCommonDir
 	publishedPath := filepath.Join(config.ChangeParent, config.FinalName)
 	if config.Role == kernel.RoleOrchestrator {
 		// An orchestrator has no Change. It walks the same checkpoints with
@@ -89,7 +86,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 		publishedPath = home
 		cwd, err = authority.openHome(ctx, runtimeDir)
 	} else {
-		cwd, err = openChangeDirectory(ctx, control, config, authority)
+		cwd, gitDirectory, err = openChangeDirectory(ctx, control, config, authority)
 	}
 	if err != nil {
 		return err
@@ -104,11 +101,28 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	// Only the daemon can materialize an explicitly requested source here.
-	runtimePaths, err = runtimePaths.WithReadOnlySources([]string{filepath.Join(config.RuntimePath, "retained-source")})
+	if config.Role == kernel.RoleWorker && config.LocalCILeaseDir == "" {
+		fmt.Fprintln(os.Stderr, "factory: shared local CI lease unavailable; continue source work, but required CI needs host preparation before it can run")
+	}
+	runtimePaths, err = runtimePaths.WithLocalCILeaseDirectory(config.LocalCILeaseDir)
 	if err != nil {
 		_ = cwd.Close()
 		return err
+	}
+	// Grant the verified worktree's actual administration. New Changes have
+	// private Git state; retained canonical worktrees keep their existing layout.
+	runtimePaths, err = runtimePaths.WithGitCommonDirectory(gitDirectory, config.Role == kernel.RoleWorker)
+	if err != nil {
+		_ = cwd.Close()
+		return err
+	}
+	if config.RetainedSourceReview != nil {
+		r := config.RetainedSourceReview
+		runtimePaths, err = runtimePaths.WithRetainedSourceReview(r.SourcePath, r.GitDirectory)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
 	}
 	installation, err := provider.ResolveInstallation(config.Provider, config.ToolPath)
 	if err != nil {
@@ -117,10 +131,17 @@ func runProvider(ctx context.Context) (resultErr error) {
 	}
 	// Keep the one verified publication path as the authority for both Codex's
 	// project policy and the runner's process cwd below.
-	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths, publishedPath, config.Role)
+	request, err := provider.NewRequest(config.Provider, installation, config.Model, config.ReasoningEffort, runtimePaths, publishedPath, config.Role, config.AgentID, config.TaskIncarnationID)
 	if err != nil {
 		_ = cwd.Close()
 		return err
+	}
+	if config.PreviousWorkingDirectory != "" {
+		request, err = request.WithPreviousWorkingDirectory(config.PreviousWorkingDirectory)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
 	}
 	launch, err := provider.Build(request)
 	if err != nil {
@@ -194,231 +215,61 @@ func runProvider(ctx context.Context) (resultErr error) {
 	return control.ExecProvider(spec, cwd, task)
 }
 
-// MaterializeRetainedSource copies one selected retained tree into the reader's private runtime.
-func MaterializeRetainedSource(ctx context.Context, changeParent, runtimePath string, retained RetainedSource) (string, error) {
-	if !validAbsolute(changeParent, maximumLocatorBytes) || !validAbsolute(runtimePath, maximumLocatorBytes) || len(retained.ID) != 32 || strings.Trim(retained.ID, "0123456789abcdef") != "" || validateResult(retained.Result) != nil {
-		return "", invalidContract(nil)
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	// OpenPublished scans the server-observed tree through its exact root
-	// identity before CopyFS sees a pathname. Reinspect the private copy
-	// against the same commitment afterwards, so a send-back or mutation
-	// between selection and copying cannot be labelled with old receipt facts.
-	verified, err := change.OpenPublished(ctx, changeParent, retained.ID, retained.Result.Tree, retained.Result.Format, retained.Result.Base)
-	if err != nil {
-		return "", fmt.Errorf("open retained source: %w", err)
-	}
-	source := filepath.Join(changeParent, retained.ID)
-	target := filepath.Join(runtimePath, "retained-source", retained.ID)
-	parent := filepath.Dir(target)
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("create retained source parent: %w", err)
-	}
-	if err := os.Chmod(parent, 0o700); err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("secure retained source parent: %w", err)
-	}
-	staging, err := os.MkdirTemp(parent, "."+retained.ID+".stage-")
-	if err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("create retained source staging: %w", err)
-	}
-	published := false
-	var publishedIdentity change.StageIdentity
-	defer func() {
-		if !published {
-			_ = os.RemoveAll(staging)
-		}
-	}()
-	if err := os.Remove(staging); err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("prepare retained source staging: %w", err)
-	}
-	cleanup := func(cause error) error {
-		if published {
-			if removeErr := change.RemoveRecordedTree(context.Background(), parent, retained.ID, publishedIdentity); removeErr != nil {
-				return errors.Join(cause, fmt.Errorf("remove failed retained source: %w", removeErr))
-			}
-			return cause
-		}
-		return errors.Join(cause, os.RemoveAll(staging))
-	}
-	if err := copyRetainedFS(ctx, staging, os.DirFS(source)); err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("materialize retained source: %w", cleanup(err))
-	}
-	if err := ctx.Err(); err != nil {
-		_ = verified.Close()
-		return "", cleanup(err)
-	}
-	if err := os.Chmod(staging, 0o700); err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("secure retained source: %w", cleanup(err))
-	}
-	stageInfo, err := os.Lstat(staging)
-	if err != nil || !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 {
-		_ = verified.Close()
-		return "", fmt.Errorf("materialized retained source staging is unavailable: %w", cleanup(errors.Join(err, ErrWorker)))
-	}
-	stageStat, ok := stageInfo.Sys().(*syscall.Stat_t)
-	if !ok {
-		_ = verified.Close()
-		return "", fmt.Errorf("materialized retained source staging has no filesystem identity: %w", cleanup(ErrWorker))
-	}
-	publishedIdentity, err = change.NewStageIdentity(uint64(stageStat.Dev), uint64(stageStat.Ino))
-	if err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("materialized retained source staging identity: %w", cleanup(err))
-	}
-	parentDir, err := os.Open(parent)
-	if err == nil {
-		err = unix.RenameatxNp(int(parentDir.Fd()), filepath.Base(staging), int(parentDir.Fd()), retained.ID, unix.RENAME_EXCL)
-		if err == nil {
-			published = true
-		}
-		if syncErr := unix.Fsync(int(parentDir.Fd())); err == nil {
-			err = syncErr
-		}
-		if closeErr := parentDir.Close(); err == nil {
-			err = closeErr
-		}
-	}
-	if err != nil {
-		_ = verified.Close()
-		return "", fmt.Errorf("publish retained source: %w", cleanup(err))
-	}
-	if err := verified.Close(); err != nil {
-		return "", fmt.Errorf("close retained source: %w", cleanup(err))
-	}
-	if err := ctx.Err(); err != nil {
-		return "", cleanup(err)
-	}
-	info, err := os.Lstat(target)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("materialized retained source is unavailable: %w", cleanup(errors.Join(err, ErrWorker)))
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", fmt.Errorf("materialized retained source has no filesystem identity: %w", cleanup(ErrWorker))
-	}
-	identity, err := change.NewStageIdentity(uint64(stat.Dev), uint64(stat.Ino))
-	if err != nil {
-		return "", fmt.Errorf("materialized retained source identity: %w", cleanup(err))
-	}
-	facts, err := change.InspectPublished(ctx, filepath.Dir(target), retained.ID, identity, retained.Result.Format, retained.Result.Base)
-	if err != nil {
-		return "", fmt.Errorf("verify materialized retained source: %w", cleanup(err))
-	}
-	if !retainedContentFactsEqual(retained.Result, facts) {
-		return "", fmt.Errorf("materialized retained source differs from selected tree: %w", cleanup(ErrWorker))
-	}
-	if err := ctx.Err(); err != nil {
-		return "", cleanup(err)
-	}
-	return target, nil
-}
-
-func copyRetainedTree(ctx context.Context, destination string, source fs.FS) error {
-	if err := os.CopyFS(destination, contextFS{ctx: ctx, source: source}); err != nil {
-		return err
-	}
-	return secureCopiedDirectories(destination)
-}
-
-type contextFS struct {
-	ctx    context.Context
-	source fs.FS
-}
-
-func (source contextFS) Open(name string) (fs.File, error) {
-	if err := source.ctx.Err(); err != nil {
-		return nil, err
-	}
-	file, err := source.source.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	return contextFile{ctx: source.ctx, file: file}, nil
-}
-
-type contextFile struct {
-	ctx  context.Context
-	file fs.File
-}
-
-func (file contextFile) Stat() (fs.FileInfo, error) { return file.file.Stat() }
-func (file contextFile) Close() error               { return file.file.Close() }
-
-func (file contextFile) Read(p []byte) (int, error) {
-	if err := file.ctx.Err(); err != nil {
-		return 0, err
-	}
-	return file.file.Read(p)
-}
-
-func (file contextFile) ReadDir(n int) ([]fs.DirEntry, error) {
-	if err := file.ctx.Err(); err != nil {
-		return nil, err
-	}
-	reader, ok := file.file.(fs.ReadDirFile)
-	if !ok {
-		return nil, &fs.PathError{Op: "readdir", Path: ".", Err: fs.ErrInvalid}
-	}
-	return reader.ReadDir(n)
-}
-
-func secureCopiedDirectories(root string) error {
-	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return os.Chmod(path, 0o700)
-		}
-		return nil
-	})
-}
-
-// openChangeDirectory prepares or reopens the run's Change and returns its
-// verified directory, the provider's working directory.
-func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, config Config, authority *runtimeAuthority) (_ *os.File, resultErr error) {
-	var verified *change.VerifiedPublished
+// openChangeDirectory makes or reopens the run's Change worktree and returns
+// its directory and verified Git administration.
+func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, config Config, authority *runtimeAuthority) (*os.File, string, error) {
+	var expected change.WorktreeFacts
 	var err error
 	if config.Retained == nil {
-		verified, err = prepareFreshChange(ctx, control, config)
+		expected, err = prepareFreshChange(ctx, control, config)
 	} else {
-		verified, err = openRetainedChange(ctx, control, config)
+		expected, err = openRetainedChange(ctx, control, config)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	verifiedOpen := true
-	defer func() {
-		if verifiedOpen {
-			resultErr = errors.Join(resultErr, verified.Close())
-		}
-	}()
 	if err := authority.verify(ctx); err != nil {
-		return nil, fmt.Errorf("runtime authority verification: %w", err)
+		return nil, "", fmt.Errorf("runtime authority verification: %w", err)
 	}
-	cwd, err := verified.DuplicateDirectory(ctx)
+	path := filepath.Join(config.ChangeParent, config.FinalName)
+	// The provider has not run: the branch must still be where it was left.
+	facts, err := change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	if err := verified.Close(); err != nil {
-		verifiedOpen = false
-		_ = cwd.Close()
-		return nil, err
+	if facts.Branch() != expected.Branch() || !facts.Head().Equal(expected.Head()) || facts.GitDirectory() != expected.GitDirectory() {
+		return nil, "", errors.Join(ErrWorker, errors.New("Change worktree moved before the provider ran"))
 	}
-	verifiedOpen = false
+	cwd, err := openWorktreeDirectory(path)
+	if err != nil {
+		return nil, "", err
+	}
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
-		return nil, fmt.Errorf("runtime authority verification: %w", err)
+		return nil, "", fmt.Errorf("runtime authority verification: %w", err)
 	}
-	return cwd, nil
+	return cwd, facts.GitDirectory(), nil
+}
+
+// openWorktreeDirectory opens the worktree root as the provider's working
+// directory: an owned private directory holding the gitfile that makes it
+// a linked worktree.
+func openWorktreeDirectory(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW_ANY, 0)
+	if err != nil {
+		return nil, ErrWorker
+	}
+	directory := os.NewFile(uintptr(fd), "change-worktree")
+	if _, err := privateDirectory(directory); err != nil {
+		_ = directory.Close()
+		return nil, err
+	}
+	var gitFile unix.Stat_t
+	if err := unix.Fstatat(fd, ".git", &gitFile, unix.AT_SYMLINK_NOFOLLOW); err != nil || gitFile.Mode&unix.S_IFMT != unix.S_IFREG {
+		_ = directory.Close()
+		return nil, ErrWorker
+	}
+	return directory, nil
 }
 
 // openHome returns a fresh descriptor for the private runtime home the
@@ -530,111 +381,95 @@ func (a *runtimeAuthority) sealProviderTask(kind kernel.Provider, task []byte) (
 	return reader, nil
 }
 
-func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, config Config) (_ *change.VerifiedPublished, resultErr error) {
+func prepareFreshChange(ctx context.Context, control *runner.WorkerControl, config Config) (change.WorktreeFacts, error) {
 	selection, err := change.SelectGit(ctx, config.GitExecutable, config.RepositoryRoot, config.Revision, config.RepositoryIdentity)
 	if err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
 	if !selection.RepositoryIdentity().Equal(config.RepositoryIdentity) || control.ReportSelection(nil) != nil {
-		return nil, ErrWorker
+		return change.WorktreeFacts{}, ErrWorker
 	}
 	if err := control.AwaitPreparation(); err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
-	prepared, err := change.Prepare(ctx, config.ChangeParent, config.FinalName, config.StagingName)
-	if err != nil {
-		return nil, err
-	}
-	preparedOpen := true
-	defer func() {
-		if preparedOpen {
-			resultErr = errors.Join(resultErr, prepared.Close())
-		}
-	}()
-	preparationBytes, err := EncodeResult(Result{
-		Format: selection.ObjectFormat(), Base: selection.Base(), Commitment: selection.Commitment(),
-		EntryCount: selection.EntryCount(), BlobBytes: selection.BlobBytes(), Tree: prepared.Identity(),
-	})
+	preparationBytes, err := EncodeResult(Result{Format: selection.ObjectFormat(), Base: selection.Base()})
 	if err != nil || control.ReportPreparation(preparationBytes) != nil {
-		return nil, ErrWorker
+		return change.WorktreeFacts{}, ErrWorker
 	}
 	if err := control.AwaitPopulation(); err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
-	blobs, err := change.OpenGitBlobs(ctx, config.GitExecutable, config.RepositoryRoot, selection)
+	path := filepath.Join(config.ChangeParent, config.FinalName)
+	facts, err := change.AddPrivateWorktree(ctx, selection, path, change.BranchName(config.FinalName))
 	if err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
-	blobsOpen := true
-	defer func() {
-		if blobsOpen {
-			resultErr = errors.Join(resultErr, blobs.Abort())
-		}
-	}()
-	published, err := prepared.PopulateAndPublish(ctx, selection.Manifest(), blobs.Read)
-	if err != nil {
-		return nil, err
+	if err := os.Chmod(path, 0o700); err != nil {
+		return change.WorktreeFacts{}, ErrWorker
 	}
-	if err := blobs.Close(); err != nil {
-		blobsOpen = false
-		return nil, err
-	}
-	blobsOpen = false
-	if err := prepared.Close(); err != nil {
-		preparedOpen = false
-		return nil, err
-	}
-	preparedOpen = false
 	if err := reportPopulation(control); err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
 	if err := control.AwaitProvider(); err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
-	return published.Reinspect(ctx)
+	return facts, nil
 }
 
-func openRetainedChange(ctx context.Context, control *runner.WorkerControl, config Config) (*change.VerifiedPublished, error) {
+// openRetainedChange reopens a settled Change: its worktree must still be
+// on its branch at the head the daemon recorded. A Change from before
+// managed worktrees is adopted into one first, at its recorded base, with
+// every file as the worker left it.
+func openRetainedChange(ctx context.Context, control *runner.WorkerControl, config Config) (change.WorktreeFacts, error) {
 	retained := config.Retained
 	if retained == nil || change.VerifyRepositoryRoot(config.RepositoryRoot, config.RepositoryIdentity) != nil {
-		return nil, ErrWorker
+		return change.WorktreeFacts{}, ErrWorker
 	}
 	if control.ReportSelection(nil) != nil {
-		return nil, ErrWorker
+		return change.WorktreeFacts{}, ErrWorker
 	}
 	if err := control.AwaitPreparation(); err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
 	preparationBytes, err := EncodeResult(*retained)
 	if err != nil || control.ReportPreparation(preparationBytes) != nil {
-		return nil, ErrWorker
+		return change.WorktreeFacts{}, ErrWorker
 	}
 	if err := control.AwaitPopulation(); err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
-	facts, err := change.InspectPublished(ctx, config.ChangeParent, config.FinalName, retained.Tree, retained.Format, retained.Base)
-	if err != nil || !retainedFactsEqual(*retained, facts) {
-		return nil, errors.Join(err, ErrWorker)
+	path := filepath.Join(config.ChangeParent, config.FinalName)
+	branch := change.BranchName(config.FinalName)
+	var facts change.WorktreeFacts
+	if retained.Head == nil {
+		facts, err = change.AdoptWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path, branch, retained.Base)
+	} else {
+		facts, err = change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path)
+		if err == nil && (!facts.Head().Equal(*retained.Head) || facts.Branch() != branch) {
+			err = errors.New("retained Change worktree is not at its settled head")
+		}
+		if err == nil {
+			// The recorded base must be where the branch's work started.
+			var descends bool
+			descends, err = change.DescendsFrom(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path, retained.Base)
+			if err == nil && !descends {
+				err = errors.New("retained Change head does not descend from its recorded base")
+			}
+		}
+	}
+	if err != nil {
+		return change.WorktreeFacts{}, errors.Join(err, ErrWorker)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return change.WorktreeFacts{}, ErrWorker
 	}
 	if err := reportPopulation(control); err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
 	if err := control.AwaitProvider(); err != nil {
-		return nil, err
+		return change.WorktreeFacts{}, err
 	}
-	if err := change.VerifyRepositoryRoot(config.RepositoryRoot, config.RepositoryIdentity); err != nil {
-		return nil, err
-	}
-	verified, err := change.OpenPublished(ctx, config.ChangeParent, config.FinalName, retained.Tree, retained.Format, retained.Base)
-	if err != nil {
-		return nil, err
-	}
-	verifiedFacts, err := verified.Facts()
-	if err != nil || !retainedFactsEqual(*retained, verifiedFacts) {
-		_ = verified.Close()
-		return nil, errors.Join(err, ErrWorker)
-	}
-	return verified, nil
+	return facts, nil
 }
 
 func reportPopulation(control *runner.WorkerControl) error {
@@ -646,14 +481,6 @@ func reportPopulation(control *runner.WorkerControl) error {
 		return ErrWorker
 	}
 	return nil
-}
-
-func retainedFactsEqual(retained Result, facts change.TreeFacts) bool {
-	return facts.Identity().Equal(retained.Tree) && retainedContentFactsEqual(retained, facts)
-}
-
-func retainedContentFactsEqual(retained Result, facts change.TreeFacts) bool {
-	return facts.Commitment().Equal(retained.Commitment) && facts.EntryCount() == retained.EntryCount && facts.BlobBytes() == retained.BlobBytes
 }
 
 func openRuntimeAuthority(ctx context.Context, runtimeDir *os.File, config Config) (*runtimeAuthority, error) {

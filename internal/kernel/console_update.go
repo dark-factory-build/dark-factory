@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
@@ -50,6 +51,15 @@ func (store *Store) UpdateAgentForOverseer(ctx context.Context, digest AttemptDi
 		return Agent{}, fmt.Errorf("%w: invalid overseer agent update", ErrInvalidValue)
 	}
 	return store.updateAgent(ctx, &digest, id, expected, patch, at)
+}
+
+// UpdateAgentForOperator applies the same bounded lifecycle edit without
+// inventing browser authority for the local operator.
+func (store *Store) UpdateAgentForOperator(ctx context.Context, id AgentID, expected Revision, patch AgentPatch, at UnixMillis) (Agent, error) {
+	if patch.Paused == nil && patch.Archived == nil || patch.Paused != nil && patch.Archived != nil || patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.Appearance != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil {
+		return Agent{}, fmt.Errorf("%w: invalid operator agent update", ErrInvalidValue)
+	}
+	return store.updateAgent(ctx, nil, id, expected, patch, at)
 }
 
 func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id AgentID, expected Revision, patch AgentPatch, at UnixMillis) (Agent, error) {
@@ -192,6 +202,10 @@ func (store *Store) UpdateTaskForOverseer(ctx context.Context, digest AttemptDig
 	return store.updateTask(ctx, &digest, id, expected, patch, at)
 }
 
+func (store *Store) UpdateTaskForOperator(ctx context.Context, id TaskID, expected Revision, patch TaskPatch, at UnixMillis) (Task, error) {
+	return store.updateTask(ctx, nil, id, expected, patch, at)
+}
+
 // AuthorizeWorkerTaskForOverseer establishes that a live overseer may inspect
 // a worker task before the daemon validates a provider-specific edit.
 func (store *Store) AuthorizeWorkerTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID) error {
@@ -214,7 +228,16 @@ func (store *Store) AuthorizeWorkerTaskForOverseer(ctx context.Context, digest A
 	if !found || task.ProjectID != overseer.ProjectID {
 		return ErrUnauthorized
 	}
-	agent, found, err := agentByID(ctx, read.connection, task.AssignedAgentID)
+	return requireWorkerTask(ctx, read.connection, task)
+}
+
+// requireWorkerTask authorizes an overseer edit: the task is a worker's, or
+// unclaimed shared work that only a worker can claim.
+func requireWorkerTask(ctx context.Context, connection *sql.Conn, task Task) error {
+	if task.AssignedAgentID.zero() {
+		return nil
+	}
+	agent, found, err := agentByID(ctx, connection, task.AssignedAgentID)
 	if err != nil {
 		return err
 	}
@@ -251,12 +274,8 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		return Task{}, tx.Rollback(ErrUnauthorized)
 	}
 	if digest != nil {
-		agent, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
-		if err != nil {
+		if err := requireWorkerTask(ctx, tx.connection, task); err != nil {
 			return Task{}, tx.Rollback(err)
-		}
-		if !found || agent.Role != RoleWorker {
-			return Task{}, tx.Rollback(ErrUnauthorized)
 		}
 	}
 	if task.Status != TaskQueued {
@@ -289,6 +308,25 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		}
 		task.AssignedAgentID = agent.ID
 	}
+	// Validate the resulting pair, including a body and assignment changed in
+	// the same revision-checked edit. This prevents a queued task from becoming
+	// a doomed review by changing only one side of the pair. Cancelling always
+	// resolves the queued state rather than keeping it eligible to run, so a
+	// legacy queued task that predates this validator (or that has no agent
+	// yet) remains cancellable; only an edit that would leave the ineligible
+	// pair queued is refused.
+	if !patch.Cancel && !task.AssignedAgentID.zero() {
+		assigned, found, err := agentByID(ctx, tx.connection, task.AssignedAgentID)
+		if err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+		if !found {
+			return Task{}, tx.Rollback(ErrCorruptState)
+		}
+		if err := validateRetainedSourceReviewRoute(task.Body, assigned); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
+	}
 	status, completed := task.Status.String(), any(nil)
 	if patch.Cancel {
 		status, completed = TaskCancelled.String(), at.Int64()
@@ -301,7 +339,7 @@ func (store *Store) updateTask(ctx context.Context, digest *AttemptDigest, id Ta
 		sentBack = *task.SentBackInstructionBytes
 	}
 	result, err := tx.connection.ExecContext(ctx, `UPDATE tasks SET title = ?, body = ?, sent_back_instruction_bytes = ?, priority = ?, assigned_agent_id = ?, status = ?, completed_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status = 'queued' AND revision = ?`,
-		task.Title, task.Body, sentBack, task.Priority, task.AssignedAgentID.Bytes(), status, completed, at.Int64(), id.Bytes(), expected.Int64())
+		task.Title, task.Body, sentBack, task.Priority, nullableAgentID(task.AssignedAgentID), status, completed, at.Int64(), id.Bytes(), expected.Int64())
 	if err := requireOneRow(result, err); err != nil {
 		return Task{}, tx.Rollback(err)
 	}

@@ -3,7 +3,7 @@ set -eu
 
 # This suite creates an independent throwaway repository so it can exercise
 # mutated wrappers even when local-ci.sh itself owns the production repo lease.
-unset DARK_FACTORY_LOCAL_CI_LEASE_HELD
+unset DARK_FACTORY_LOCAL_CI_LEASE_HELD DARK_FACTORY_LOCAL_CI_DIRECTORY
 
 repository_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 

@@ -15,18 +15,31 @@ type BrowserTaskEnqueue struct {
 	AgentRevision Revision
 }
 
+// BrowserEnqueueMode is how the console submits an instruction from an
+// agent's pane: start it on that agent now, queue it for that agent, or queue
+// it for any eligible worker in that agent's project.
+type BrowserEnqueueMode uint8
+
+const (
+	BrowserEnqueueNow BrowserEnqueueMode = iota
+	BrowserEnqueueQueue
+	BrowserEnqueueAnyWorker
+)
+
 // EnqueueTaskForBrowserAgent atomically revalidates the browser client's
 // authority, the selected agent's identity/revision and its runnable state,
 // then inserts a normal-priority task. The browser never chooses project,
 // title or priority: those are derived here from the durable agent and fixed
 // operator semantics.
 func (store *Store) EnqueueTaskForBrowserAgent(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, instruction string, at UnixMillis) (BrowserTaskEnqueue, error) {
-	return store.EnqueueTaskForBrowserAgentMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, instruction, false, at)
+	return store.EnqueueTaskForBrowserAgentMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, instruction, BrowserEnqueueNow, at)
 }
 
 // EnqueueTaskForBrowserAgentMode permits queued work while busy or paused;
-// direct instructions still require an empty, unpaused agent.
-func (store *Store) EnqueueTaskForBrowserAgentMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, instruction string, queue bool, at UnixMillis) (BrowserTaskEnqueue, error) {
+// direct instructions still require an empty, unpaused agent. Any-worker
+// work is queued with no assigned agent; admission claims it.
+func (store *Store) EnqueueTaskForBrowserAgentMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, instruction string, mode BrowserEnqueueMode, at UnixMillis) (BrowserTaskEnqueue, error) {
+	queue := mode != BrowserEnqueueNow
 	if clientID.zero() || taskID.zero() || incarnationID.zero() || agentID.zero() || expectedAgentRevision.Int64() < 1 || strings.Trim(instruction, " \t\r\n") == "" || !utf8.ValidString(instruction) || byteLen(instruction) > 32768 {
 		return BrowserTaskEnqueue{}, fmt.Errorf("%w: invalid browser task enqueue", ErrInvalidValue)
 	}
@@ -53,6 +66,9 @@ func (store *Store) EnqueueTaskForBrowserAgentMode(ctx context.Context, clientID
 		return BrowserTaskEnqueue{}, tx.Rollback(ErrRevisionConflict)
 	}
 	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Direct instruction", Body: instruction, Priority: 0}
+	if mode == BrowserEnqueueAnyWorker {
+		spec.AssignedAgentID = AgentID{}
+	}
 	if err := validateNewTask(spec); err != nil {
 		return BrowserTaskEnqueue{}, tx.Rollback(err)
 	}

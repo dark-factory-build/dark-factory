@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 	"path/filepath"
 	"strings"
@@ -152,6 +153,11 @@ func TestOverseerWakeupConsumesWorkerEventsAndLeavesEventsDuringItsRunPending(t 
 	policy, after, budget, instruction := IdleStandingInstruction, uint32(60), uint32(4), "Inspect worker progress."
 	overseer, err = store.UpdateAgent(ctx, overseer.ID, overseer.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleRunBudget: &budget, IdleInstruction: &instruction}, mustTime(t, 4))
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A standing overseer is event-admitted. The obsolete tool counter must
+	// neither suppress its initial durable wake nor consume the sole capacity.
+	if _, err := store.writer.Exec(`UPDATE agents SET tool_calls_used = tool_budget_limit WHERE id = ?`, overseer.ID.Bytes()); err != nil {
 		t.Fatal(err)
 	}
 	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 5)); err != nil || len(tasks) != 0 {
@@ -368,5 +374,141 @@ func TestOverseerWakeInstructionPreservesLegalClaudeInstruction(t *testing.T) {
 	body, fits := overseerWakeInstruction(ProviderClaudeCode, instruction, nil, nil, true)
 	if !fits || body != instruction {
 		t.Fatalf("Claude instruction was not preserved when wake context overflowed: fits=%t body=%d", fits, len(body))
+	}
+}
+
+func TestEnqueuePollValidatesBeforeTaskAndCursorWrites(t *testing.T) {
+	for _, role := range []AgentRole{RoleWorker, RoleOrchestrator} {
+		for _, corrupt := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/corrupt=%v", role, corrupt), func(t *testing.T) {
+				ctx := context.Background()
+				store, _ := newTestStore(t)
+				seedDurableAuthority(t, store)
+				agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 30), ProjectID: projectID(t, 1), Name: "idle", Role: role, Provider: ProviderShell, ToolBudgetLimit: 4}, mustTime(t, 100))
+				if err != nil {
+					t.Fatal(err)
+				}
+				policy, after, instruction := IdleStandingInstruction, uint32(1), "Inspect existing work."
+				if _, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 101)); err != nil {
+					t.Fatal(err)
+				}
+				enqueue := store.EnqueueIdleInstructions
+				if role == RoleOrchestrator {
+					enqueue = store.EnqueueOverseerWakeups
+				}
+				if corrupt {
+					if _, err := store.writer.Exec(`UPDATE runs SET admitted_task_work_revision = admitted_task_work_revision + 1`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := captureWriteFootprint(t, store)
+				// An early poll cannot mutate anything, even with unrelated damaged history.
+				if tasks, err := enqueue(ctx, mustTime(t, 102)); err != nil || len(tasks) != 0 {
+					t.Fatalf("early poll = %v, %v", tasks, err)
+				}
+				if got := captureWriteFootprint(t, store); got != before {
+					t.Fatalf("no-op mutated footprint: %+v -> %+v", before, got)
+				}
+				tasks, err := enqueue(ctx, mustTime(t, 1101))
+				if corrupt {
+					if !errors.Is(err, ErrCorruptState) {
+						t.Fatalf("due corrupt poll = %v", err)
+					}
+					if got := captureWriteFootprint(t, store); got != before {
+						t.Fatalf("refusal mutated footprint: %+v -> %+v", before, got)
+					}
+					var cursors int
+					if err := store.readers.QueryRow(`SELECT COUNT(*) FROM overseer_wake_cursors`).Scan(&cursors); err != nil || cursors != 0 {
+						t.Fatalf("refusal wrote cursor: %d, %v", cursors, err)
+					}
+					return
+				}
+				if err != nil || len(tasks) != 1 {
+					t.Fatalf("due valid poll = %v, %v", tasks, err)
+				}
+				if role != RoleOrchestrator {
+					return
+				}
+				if _, err := store.UpdateTask(ctx, tasks[0].ID, tasks[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 1102)); err != nil {
+					t.Fatal(err)
+				}
+				var cursor int64
+				if err := store.readers.QueryRow(`SELECT invalidation_sequence FROM overseer_wake_cursors WHERE agent_id = ?`, agent.ID.Bytes()).Scan(&cursor); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.writer.Exec(`UPDATE runs SET admitted_task_work_revision = admitted_task_work_revision + 1`); err != nil {
+					t.Fatal(err)
+				}
+				before = captureWriteFootprint(t, store)
+				if _, err := enqueue(ctx, mustTime(t, 2202)); !errors.Is(err, ErrCorruptState) {
+					t.Fatalf("cursor-only corrupt poll = %v", err)
+				}
+				var afterCursor int64
+				if err := store.readers.QueryRow(`SELECT invalidation_sequence FROM overseer_wake_cursors WHERE agent_id = ?`, agent.ID.Bytes()).Scan(&afterCursor); err != nil || afterCursor != cursor {
+					t.Fatalf("refusal advanced cursor %d -> %d: %v", cursor, afterCursor, err)
+				}
+				if got := captureWriteFootprint(t, store); got != before {
+					t.Fatalf("cursor refusal mutated footprint: %+v -> %+v", before, got)
+				}
+			})
+		}
+	}
+}
+
+func TestOverseerReconsidersUnchangedUnfinishedWork(t *testing.T) {
+	blocked, _ := NewBlockedProposal("external prerequisite")
+	failed, _ := NewFailureProposal(FailureInternal, "provider exited")
+	for _, proposal := range []Proposal{blocked, failed} {
+		store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
+		func() {
+			defer store.Close()
+			ctx := context.Background()
+			terminal, err := finalizeTestRun(t, store, finalizing, 70)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _, err := store.Task(ctx, terminal.TaskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 151), ProjectID: terminal.ProjectID, Name: "supervisor", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 8}, mustTime(t, 71))
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, after, instruction := IdleStandingInstruction, uint32(1), "Reconcile unfinished work without blind retries."
+			if _, err := store.UpdateAgent(ctx, agent.ID, agent.Revision, AgentPatch{IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction}, mustTime(t, 72)); err != nil {
+				t.Fatal(err)
+			}
+			first, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 1072))
+			if err != nil || len(first) != 1 {
+				t.Fatalf("initial wake: %+v, %v", first, err)
+			}
+			if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 2072)); err != nil || len(tasks) != 0 {
+				t.Fatalf("stacked wake: %+v, %v", tasks, err)
+			}
+			if _, err := store.UpdateTask(ctx, first[0].ID, first[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 2073)); err != nil {
+				t.Fatal(err)
+			}
+			// Consume the cancellation without a worker event, then repeat at the
+			// same head. Reconciliation must commit even when the cursor is current.
+			second, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 2074))
+			if err != nil || len(second) != 1 || !strings.Contains(second[0].Body, "mode=full") {
+				t.Fatalf("unchanged backlog wake: %+v, %v", second, err)
+			}
+			if _, err := store.UpdateTask(ctx, second[0].ID, second[0].Revision, TaskPatch{Cancel: true}, mustTime(t, 2075)); err != nil {
+				t.Fatal(err)
+			}
+			if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 3073)); err != nil || len(tasks) != 0 {
+				t.Fatalf("ignored quiet interval: %+v, %v", tasks, err)
+			}
+			third, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 3074))
+			if err != nil || len(third) != 1 {
+				t.Fatalf("periodic backlog wake: %+v, %v", third, err)
+			}
+			afterTask, _, err := store.Task(ctx, terminal.TaskID)
+			if err != nil || afterTask.Status != before.Status || afterTask.WorkRevision != before.WorkRevision || afterTask.Revision != before.Revision {
+				t.Fatalf("reconsideration mutated worker: %+v, %v", afterTask, err)
+			}
+		}()
 	}
 }

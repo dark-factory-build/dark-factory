@@ -35,6 +35,42 @@ func TestTaskEnqueueControlBoundsAndDirection(t *testing.T) {
 	if _, err := EncodeTaskEnqueue("enqueue-3", request); err != nil {
 		t.Fatalf("non-ASCII whitespace drifted from the TypeScript contract: %v", err)
 	}
+	// "any" queues the instruction for any eligible worker in the pane
+	// agent's project; other modes stay refused.
+	request.Instruction, request.Mode = "shared", "any"
+	if wire, err := EncodeTaskEnqueue("enqueue-4", request); err != nil {
+		t.Fatalf("any-worker mode refused: %v", err)
+	} else if frame, err := DecodeClientControl(wire); err != nil || frame.Body.(TaskEnqueue).Mode != "any" {
+		t.Fatalf("any-worker round-trip = %+v, %v", frame, err)
+	}
+	request.Mode = "everyone"
+	if _, err := EncodeTaskEnqueue("enqueue-5", request); err == nil {
+		t.Fatal("unknown mode accepted")
+	}
+}
+
+// Unclaimed shared work travels in the additive shared_tasks member, so a
+// console from before the shared queue (every task item names an agent)
+// ignores it. A task item without an agent is still malformed.
+func TestSharedTasksCarryOnlyUnclaimedQueuedWork(t *testing.T) {
+	item := TaskItem{ID: strings.Repeat("01", 16), ProjectID: strings.Repeat("02", 16), AssignedAgentID: "", Title: "shared", Status: "queued", Priority: 0, Revision: 1}
+	snapshot := StateSnapshot{Head: 1, Factory: FactoryItem{Capacity: 1, Revision: 1}, SharedTasks: []TaskItem{item}}
+	if err := validateStateSnapshot(snapshot); err != nil {
+		t.Fatalf("unclaimed queued task refused: %v", err)
+	}
+	if err := validateStateSnapshot(StateSnapshot{Head: 1, Factory: snapshot.Factory, Tasks: []TaskItem{item}}); err == nil {
+		t.Fatal("task item without an agent accepted")
+	}
+	claimed := item
+	claimed.AssignedAgentID = strings.Repeat("03", 16)
+	if err := validateStateSnapshot(StateSnapshot{Head: 1, Factory: snapshot.Factory, Tasks: []TaskItem{claimed}, SharedTasks: []TaskItem{item}}); err == nil {
+		t.Fatal("one task served as both claimed and shared")
+	}
+	for _, bad := range []TaskItem{{ID: item.ID, ProjectID: item.ProjectID, AssignedAgentID: claimed.AssignedAgentID, Title: "shared", Status: "queued", Priority: 0, Revision: 1}, {ID: item.ID, ProjectID: item.ProjectID, Title: "shared", Status: "running", Priority: 0, Revision: 1}} {
+		if err := validateStateSnapshot(StateSnapshot{Head: 1, Factory: snapshot.Factory, SharedTasks: []TaskItem{bad}}); err == nil {
+			t.Fatalf("shared task item accepted: %+v", bad)
+		}
+	}
 }
 
 func TestAgentControlRejectsAmbiguousObjectives(t *testing.T) {

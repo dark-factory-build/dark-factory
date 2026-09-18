@@ -42,7 +42,9 @@ func newRecoveryFixture(t *testing.T, seed byte) *recoveryFixture {
 func newRecoveryFixtureWithRole(t *testing.T, seed byte, role kernel.AgentRole) *recoveryFixture {
 	t.Helper()
 	ctx := context.Background()
-	root, err := os.MkdirTemp("/private/tmp", "dark-factory-recovery-")
+	// Short prefix: a takeover.sock fixture binds a real Unix domain socket
+	// inside this tree, and sockaddr_un's sun_path budget is only 104 bytes.
+	root, err := os.MkdirTemp("/private/tmp", "df-rec-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +317,7 @@ func TestReconciliationWaitsForBriefWriterContention(t *testing.T) {
 	cause := errors.New("writer contention")
 	completed := make(chan result, 1)
 	go func() {
-		run, err := fixture.daemon.failRunBeforeRuntime(fixture.run, fixture.keys.Resources.RuntimeRoot, kernel.FailureInternal, cause)
+		run, err := fixture.daemon.failRunBeforeRuntime(context.Background(), fixture.run, fixture.keys.Resources.RuntimeRoot, kernel.FailureInternal, cause)
 		completed <- result{run: run, err: err}
 	}()
 
@@ -349,7 +351,7 @@ func TestReturnedRunRecoveryIgnoresStaleLiveAttemptRegistry(t *testing.T) {
 		fixture.daemon.attemptMu.Unlock()
 	}()
 
-	run, err := fixture.daemon.recoverReturnedRun(fixture.parent, fixture.changeParent, fixture.run.ID)
+	run, err := fixture.daemon.recoverReturnedRun(context.Background(), fixture.parent, fixture.changeParent, fixture.run.ID)
 	if err != nil {
 		t.Fatalf("returned-run recovery = %+v, %v", run, err)
 	}
@@ -588,17 +590,17 @@ func TestRecoveryReplaysResultAcrossCompletedEdges(t *testing.T) {
 		{name: "after runner absence", advance: func(t *testing.T, fixture *recoveryFixture, _ kernel.AttemptResult) {
 			run := fixture.currentRun(t)
 			runner := fixture.resourceStates(t)[kernel.ResourceRunnerProcess]
-			if _, err := fixture.daemon.recordRecoveredRunnerAbsence(run.ID, runner.ID, runner.Identity); err != nil {
+			if _, err := fixture.daemon.recordRecoveredRunnerAbsence(context.Background(), run.ID, runner.ID, runner.Identity); err != nil {
 				t.Fatalf("record runner absence: %v", err)
 			}
 		}},
 		{name: "after terminal close", advance: func(t *testing.T, fixture *recoveryFixture, result kernel.AttemptResult) {
 			run := fixture.currentRun(t)
 			runner := fixture.resourceStates(t)[kernel.ResourceRunnerProcess]
-			if _, err := fixture.daemon.recordRecoveredRunnerAbsence(run.ID, runner.ID, runner.Identity); err != nil {
+			if _, err := fixture.daemon.recordRecoveredRunnerAbsence(context.Background(), run.ID, runner.ID, runner.Identity); err != nil {
 				t.Fatalf("record runner absence: %v", err)
 			}
-			if _, err := fixture.daemon.closeTerminalAfterRunner(result); err != nil {
+			if _, err := fixture.daemon.closeTerminalAfterRunner(context.Background(), result); err != nil {
 				t.Fatalf("close terminal: %v", err)
 			}
 		}},
@@ -612,7 +614,7 @@ func TestRecoveryReplaysResultAcrossCompletedEdges(t *testing.T) {
 				fixture.activateRunner(t)
 				fixture.writeMarker(t, runner.OuterActivationMarkerName)
 				result, body := resultCase.setup(t, fixture, runtimeIdentity)
-				if _, err := fixture.daemon.consumeAttemptResult(result, false); err != nil {
+				if _, err := fixture.daemon.consumeAttemptResult(context.Background(), result, false); err != nil {
 					t.Fatalf("initial result consume: %v", err)
 				}
 				fixture.writeArtifact(t, body)
@@ -658,6 +660,12 @@ func TestRecoverySweepConvergesPartialReleasingRuntimeOnlyAfterResultConsumption
 		}
 		if states := fixture.resourceStates(t); states[kernel.ResourceRuntimeRoot].State != kernel.ResourceReleasing {
 			t.Fatalf("runtime after refusal = %+v", states[kernel.ResourceRuntimeRoot])
+		}
+		states := fixture.resourceStates(t)
+		if states[kernel.ResourceRunnerProcess].State != kernel.ResourceReleased ||
+			states[kernel.ResourceProviderProcess].State != kernel.ResourceReleased ||
+			states[kernel.ResourceProviderGroup].State != kernel.ResourceReleased {
+			t.Fatalf("released process footprint after bounded cleanup = %+v", states)
 		}
 		if _, err := os.Stat(filepath.Join(fixture.parentPath, fixture.run.ID.String(), runner.AttemptResultSpoolName)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("consumed artifact remains: %v", err)
@@ -818,5 +826,328 @@ func TestRecoverySweepFailsClosedForActiveAttemptWithoutResult(t *testing.T) {
 	resweep := fixture.sweep(t)
 	if resweep.Action != RecoveredConverged || resweep.Err != nil {
 		t.Fatalf("re-sweep disposition = %+v", resweep)
+	}
+}
+
+func TestContinueUnsettledRunFinishesBoundedRuntimeRemoval(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x4a)
+	fixture.stageRuntime(t)
+	fixture.beginRunnerStart(t)
+	fixture.activateRunner(t)
+	fixture.writeMarker(t, runner.OuterActivationMarkerName)
+	body, err := json.Marshal(forgedResultWire{Version: 1, AttemptID: fixture.run.ID.String(), Kind: "inner_unregistered_converged", Proof: hex.EncodeToString(fixture.proof[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeArtifact(t, body)
+	root := filepath.Join(fixture.parentPath, fixture.run.ID.String())
+	// A four-second pass makes at most 162 calls of 256 effects (including
+	// the exact-deadline case). 85,000 files exceed TWO passes, so both the
+	// initial sweep yields and ContinueUnsettledRun must retry pending cleanup.
+	for i := 0; i < 85000; i++ {
+		if err := os.WriteFile(filepath.Join(root, runtimeHomeName, fmt.Sprintf("file-%05d", i)), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := fixture.sweep(t)
+	if first.Action != RecoveredResultConsumed || !errors.Is(first.Err, errRuntimeCleanupPending) {
+		t.Fatalf("bounded pass = %+v", first)
+	}
+	if run := fixture.currentRun(t); run.Phase != kernel.RunFinalizing {
+		t.Fatalf("premature settlement: %+v", run)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if run := fixture.currentRun(t); run.Phase != kernel.RunTerminal || run.Terminal == nil {
+		t.Fatalf("unsettled run: %+v", run)
+	}
+	for kind, resource := range fixture.resourceStates(t) {
+		if resource.State != kernel.ResourceReleased {
+			t.Fatalf("%s retained: %+v", kind, resource)
+		}
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime persists: %v", err)
+	}
+}
+
+func TestConvergenceWritesUseLifecycleContext(t *testing.T) {
+	for _, edge := range []string{"consume result", "runner absence"} {
+		for _, cancelRequest := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/cancel=%v", edge, cancelRequest), func(t *testing.T) {
+				fixture := newRecoveryFixture(t, 0x80)
+				runtimeIdentity := fixture.stageRuntime(t)
+				fixture.beginRunnerStart(t)
+				fixture.activateRunner(t)
+				result, err := kernel.NewInnerUnregisteredConvergedAttemptResult(fixture.run.ID, fixture.run.CredentialDigest, fixture.run.ResultProofDigest(), runtimeIdentity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if edge == "runner absence" {
+					if _, err := fixture.daemon.consumeAttemptResult(context.Background(), result, false); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := fixture.currentRun(t)
+				runnerResource := fixture.resourceStates(t)[kernel.ResourceRunnerProcess]
+				lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer lock.Close()
+				lock.SetMaxOpenConns(1)
+				if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+					t.Fatal(err)
+				}
+				defer lock.Exec("ROLLBACK")
+				entered := make(chan struct{}, 1)
+				fixture.daemon.now = func() time.Time {
+					select {
+					case entered <- struct{}{}:
+					default:
+					}
+					return time.UnixMilli(9000)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() {
+					var err error
+					if edge == "consume result" {
+						_, err = fixture.daemon.consumeAttemptResult(ctx, result, false)
+					} else {
+						_, err = fixture.daemon.recordRecoveredRunnerAbsence(ctx, fixture.run.ID, runnerResource.ID, runnerResource.Identity)
+					}
+					done <- err
+				}()
+				select {
+				case <-entered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("convergence did not reach mutation")
+				}
+				if cancelRequest {
+					cancel()
+					select {
+					case err := <-done:
+						if !errors.Is(err, context.Canceled) {
+							t.Fatalf("cancelled convergence: %v", err)
+						}
+					case <-time.After(10 * time.Second):
+						t.Fatal("convergence ignored cancellation")
+					}
+					if current := fixture.currentRun(t); current.Revision != before.Revision {
+						t.Fatal("cancelled write changed run revision")
+					}
+					return
+				}
+				// Exhaust every former polling-budget retry while the real writer is held.
+				select {
+				case err := <-done:
+					t.Fatalf("convergence abandoned before writer release: %v", err)
+				case <-time.After(time.Duration(supervisorReconcileAttempts)*liveAttemptStoreTimeout + 300*time.Millisecond):
+				}
+				if _, err := lock.Exec("ROLLBACK"); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("convergence did not finish after writer release")
+				}
+				current := fixture.currentRun(t)
+				if edge == "consume result" && current.Proposal == nil {
+					t.Fatal("result consumption lost proposal")
+				}
+				if edge == "runner absence" && (current.RunnerExit == nil || !current.RunnerExit.RecoveredAbsence()) {
+					t.Fatal("runner absence not retained")
+				}
+			})
+		}
+	}
+}
+
+func TestDaemonCloseCancelsCleanupWaitingForWriter(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0xa0)
+	fixture.failBeforeRuntime(t)
+	before := fixture.currentRun(t)
+	lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	entered := make(chan struct{}, 1)
+	fixture.daemon.now = func() time.Time {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		return time.UnixMilli(9000)
+	}
+	registration, err := fixture.daemon.registerSupervisor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupDone := make(chan error, 1)
+	go func() {
+		_, err := fixture.daemon.settleRun(fixture.daemon.cleanupCtx, fixture.changeParent, fixture.run.ID)
+		cleanupDone <- err
+		fixture.daemon.endSupervisor(registration, err)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup did not reach writer")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- fixture.daemon.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("shutdown did not cancel unreleased writer wait")
+	}
+	select {
+	case err := <-cleanupDone:
+		if err == nil || !errors.Is(fixture.daemon.cleanupCtx.Err(), context.Canceled) {
+			t.Fatalf("shutdown cleanup result: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup did not finish after shutdown")
+	}
+	if current := fixture.currentRun(t); current.Revision != before.Revision || current.Phase != kernel.RunFinalizing {
+		t.Fatal("shutdown lost recoverable finalizing run")
+	}
+}
+
+func TestRuntimeAbsentRecoveryHonorsCancellationWhileWriterHeld(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0xc0)
+	before := fixture.currentRun(t)
+	// An unrelated live operation must not gate this runtime-absent transition.
+	fixture.daemon.operationMu.Lock()
+	defer fixture.daemon.operationMu.Unlock()
+	lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lock.SetMaxOpenConns(1)
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	entered := make(chan struct{}, 1)
+	fixture.daemon.now = func() time.Time {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		return time.UnixMilli(9000)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.daemon.RecoverAbandonedRuns(ctx, fixture.parent, fixture.changeParent)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("absent-runtime recovery did not reach mutation")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("recovery ignored caller cancellation with writer held")
+	}
+	if current := fixture.currentRun(t); current.Revision != before.Revision {
+		t.Fatal("canceled recovery mutated admitted run")
+	}
+}
+
+func TestUnsettledContinuationPreservesFailureAlongsideCancellation(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x9b)
+	fixture.failBeforeRuntime(t)
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID)
+	if !errors.Is(err, kernel.ErrStoreClosed) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled continuation = %v, want retained store failure and caller cancellation", err)
+	}
+}
+
+// TestContinueUnsettledRunOutlivesRuntimeWriter is the #726 shape end to end:
+// the consumed result's runtime cannot be removed while a provider
+// descendant keeps writing under tmp, and the exact-run continuation must
+// still settle the run once that writer stops instead of stopping on a
+// contract refusal and leaving the run finalizing with its worker slot held.
+func TestContinueUnsettledRunOutlivesRuntimeWriter(t *testing.T) {
+	fixture := newRecoveryFixture(t, 0x4c)
+	fixture.stageRuntime(t)
+	fixture.beginRunnerStart(t)
+	fixture.activateRunner(t)
+	fixture.writeMarker(t, runner.OuterActivationMarkerName)
+	body, err := json.Marshal(forgedResultWire{Version: 1, AttemptID: fixture.run.ID.String(), Kind: "inner_unregistered_converged", Proof: hex.EncodeToString(fixture.proof[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeArtifact(t, body)
+	work := filepath.Join(fixture.parentPath, fixture.run.ID.String(), runtimeTempName, "go-build")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A `go build` look-alike: create and delete action directories and
+	// their outputs as fast as the filesystem allows, for a bounded window.
+	writerCtx, stopWriter := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer stopWriter()
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for round := 0; writerCtx.Err() == nil; round++ {
+			for index := 0; index < 64; index++ {
+				action := filepath.Join(work, fmt.Sprintf("b%03d", index))
+				_ = os.Mkdir(action, 0o755)
+				_ = os.WriteFile(filepath.Join(action, "importcfg"), nil, 0o644)
+				_ = os.WriteFile(filepath.Join(action, "_pkg_.a"), nil, 0o644)
+			}
+			for index := 0; index < 64; index += 2 {
+				_ = os.RemoveAll(filepath.Join(work, fmt.Sprintf("b%03d", index)))
+			}
+		}
+	}()
+	first := fixture.sweep(t)
+	if first.Action != RecoveredResultConsumed && first.Action != RecoveredResultConsumedUnsettled {
+		t.Fatalf("consumed-result pass = %+v", first)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := fixture.daemon.ContinueUnsettledRun(ctx, fixture.parent, fixture.changeParent, fixture.run.ID); err != nil {
+		t.Fatalf("continuation stopped: %v", err)
+	}
+	<-writerDone
+	if run := fixture.currentRun(t); run.Phase != kernel.RunTerminal || run.Terminal == nil {
+		t.Fatalf("unsettled run: %+v", run)
+	}
+	for kind, resource := range fixture.resourceStates(t) {
+		if resource.State != kernel.ResourceReleased {
+			t.Fatalf("%s retained: %+v", kind, resource)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fixture.parentPath, fixture.run.ID.String())); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime persists: %v", err)
 	}
 }

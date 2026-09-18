@@ -8,7 +8,7 @@ import (
 )
 
 const changeColumns = `id, project_id, task_id, task_incarnation_id, phase,
-    object_format, base_commit, repository_dev, repository_inode, tree_digest, entry_count, total_bytes, tree_dev, tree_inode,
+    object_format, base_commit, repository_dev, repository_inode, head_commit,
     prepared_at_ms, available_at_ms, settled_run_id, revision, created_at_ms, updated_at_ms`
 
 func changeByID(ctx context.Context, connection *sql.Conn, id ChangeID) (Change, bool, error) {
@@ -49,14 +49,14 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 	var rawID, rawProjectID, rawTaskID, rawIncarnationID []byte
 	var phase string
 	var objectFormat sql.NullString
-	var baseCommit, treeDigest nullableBlob
-	var repositoryDev, repositoryInode, entryCount, totalBytes, treeDev, treeInode sql.NullInt64
+	var baseCommit, headCommit nullableBlob
+	var repositoryDev, repositoryInode sql.NullInt64
 	var preparedAt, availableAt sql.NullInt64
 	var rawSettledRunID nullableBlob
 	var revision, createdAt, updatedAt int64
 	if err := scanner.Scan(
 		&rawID, &rawProjectID, &rawTaskID, &rawIncarnationID, &phase,
-		&objectFormat, &baseCommit, &repositoryDev, &repositoryInode, &treeDigest, &entryCount, &totalBytes, &treeDev, &treeInode,
+		&objectFormat, &baseCommit, &repositoryDev, &repositoryInode, &headCommit,
 		&preparedAt, &availableAt, &rawSettledRunID, &revision, &createdAt, &updatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -79,24 +79,30 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 		ID: id, ProjectID: projectID, TaskID: taskID, TaskIncarnationID: incarnationID,
 		Phase: parsedPhase, Revision: rev, CreatedAt: created, UpdatedAt: updated,
 	}
-	preparedFields := objectFormat.Valid || baseCommit.valid || repositoryDev.Valid || repositoryInode.Valid || treeDigest.valid || entryCount.Valid || totalBytes.Valid || treeDev.Valid || treeInode.Valid || preparedAt.Valid
+	preparedFields := objectFormat.Valid || baseCommit.valid || repositoryDev.Valid || repositoryInode.Valid || preparedAt.Valid
 	if preparedFields {
-		if !objectFormat.Valid || !baseCommit.valid || !repositoryDev.Valid || !repositoryInode.Valid || !treeDigest.valid || len(treeDigest.bytes) != DigestBytes || !entryCount.Valid || !totalBytes.Valid || !treeDev.Valid || !treeInode.Valid || !preparedAt.Valid || entryCount.Int64 < 0 || entryCount.Int64 > MaxChangeTreeEntries || totalBytes.Int64 < 0 || totalBytes.Int64 > MaxChangeTreeBlobBytes {
+		if !objectFormat.Valid || !baseCommit.valid || !repositoryDev.Valid || !repositoryInode.Valid || !preparedAt.Valid {
 			return Change{}, false, fmt.Errorf("%w: partial prepared Change", ErrCorruptState)
 		}
 		format, formatErr := parseObjectFormat(objectFormat.String)
 		commit, commitErr := NewCommitID(format, baseCommit.bytes)
-		commitment, commitmentErr := TreeDigestFromBytes(treeDigest.bytes)
 		repository, repositoryErr := NewFileIdentity(repositoryDev.Int64, repositoryInode.Int64)
-		selection, selectionErr := NewChangeSelection(format, commit, commitment, uint32(entryCount.Int64), uint64(totalBytes.Int64), repository)
-		tree, treeErr := NewFileIdentity(treeDev.Int64, treeInode.Int64)
+		selection, selectionErr := NewChangeSelection(format, commit, repository)
 		prepared, preparedErr := NewUnixMillis(preparedAt.Int64)
-		if formatErr != nil || commitErr != nil || commitmentErr != nil || repositoryErr != nil || selectionErr != nil || treeErr != nil || preparedErr != nil || preparedAt.Int64 < createdAt || preparedAt.Int64 > updatedAt {
+		if formatErr != nil || commitErr != nil || repositoryErr != nil || selectionErr != nil || preparedErr != nil || preparedAt.Int64 < createdAt || preparedAt.Int64 > updatedAt {
 			return Change{}, false, fmt.Errorf("%w: invalid prepared Change", ErrCorruptState)
 		}
 		result.Selection = &selection
-		result.TreeIdentity = &tree
 		result.PreparedAt = &prepared
+		if headCommit.valid {
+			head, err := NewCommitID(format, headCommit.bytes)
+			if err != nil {
+				return Change{}, false, fmt.Errorf("%w: invalid Change head", ErrCorruptState)
+			}
+			result.HeadCommit = &head
+		}
+	} else if headCommit.valid {
+		return Change{}, false, fmt.Errorf("%w: Change head without a selection", ErrCorruptState)
 	}
 	if availableAt.Valid {
 		available, err := NewUnixMillis(availableAt.Int64)
@@ -118,7 +124,7 @@ func scanChange(scanner rowScanner) (Change, bool, error) {
 			return Change{}, false, fmt.Errorf("%w: inconsistent reserved Change", ErrCorruptState)
 		}
 	case ChangePrepared:
-		if result.Selection == nil || result.AvailableAt != nil || result.SettledRunID != nil {
+		if result.Selection == nil || result.HeadCommit != nil || result.AvailableAt != nil || result.SettledRunID != nil {
 			return Change{}, false, fmt.Errorf("%w: inconsistent prepared Change", ErrCorruptState)
 		}
 	case ChangeAvailable:
@@ -146,12 +152,14 @@ func (store *Store) Change(ctx context.Context, id ChangeID) (Change, bool, erro
 	return changeByID(ctx, tx.connection, id)
 }
 
-func (store *Store) RecordChangePrepared(ctx context.Context, id ChangeID, expected Revision, selection ChangeSelection, tree FileIdentity, at UnixMillis) (Change, error) {
-	if id.zero() || !selection.valid() || !tree.valid() {
+// RecordChangePrepared pins the selected base of a reserved Change before
+// its worktree exists.
+func (store *Store) RecordChangePrepared(ctx context.Context, id ChangeID, expected Revision, selection ChangeSelection, at UnixMillis) (Change, error) {
+	if id.zero() || !selection.valid() {
 		return Change{}, fmt.Errorf("%w: invalid prepared Change request", ErrInvalidValue)
 	}
 	return store.advanceChange(ctx, id, expected, at, func(change Change, connection *sql.Conn) (bool, error) {
-		if change.Phase == ChangePrepared && change.Revision.Int64() == expected.Int64()+1 && change.Selection != nil && change.TreeIdentity != nil && changeSelectionEqual(*change.Selection, selection) && *change.TreeIdentity == tree {
+		if change.Phase == ChangePrepared && change.Revision.Int64() == expected.Int64()+1 && change.Selection != nil && changeSelectionEqual(*change.Selection, selection) {
 			return true, nil
 		}
 		if change.Phase != ChangeReserved || change.Revision != expected || at.Int64() < change.CreatedAt.Int64() {
@@ -160,30 +168,86 @@ func (store *Store) RecordChangePrepared(ctx context.Context, id ChangeID, expec
 		if err := requireChangeMutationOwner(ctx, connection, change, expected, at); err != nil {
 			return false, err
 		}
-		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'prepared', object_format = ?, base_commit = ?, repository_dev = ?, repository_inode = ?, tree_digest = ?, entry_count = ?, total_bytes = ?, tree_dev = ?, tree_inode = ?, prepared_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'reserved' AND revision = ?`,
-			selection.format.String(), selection.commit.Bytes(), selection.repository.device, selection.repository.inode, selection.commitment.Bytes(), int64(selection.entries), int64(selection.bytes), tree.device, tree.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
+		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'prepared', object_format = ?, base_commit = ?, repository_dev = ?, repository_inode = ?, prepared_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'reserved' AND revision = ?`,
+			selection.format.String(), selection.commit.Bytes(), selection.repository.device, selection.repository.inode, at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
 		return false, requireOneRow(result, err)
 	})
 }
 
-func (store *Store) MarkChangeAvailable(ctx context.Context, id ChangeID, expected Revision, available ChangeAvailability, at UnixMillis) (Change, error) {
-	if id.zero() || !available.valid() {
+// MarkChangeAvailable records that the prepared Change's worktree exists on
+// its own branch at head, which is the selected base.
+func (store *Store) MarkChangeAvailable(ctx context.Context, id ChangeID, expected Revision, head CommitID, at UnixMillis) (Change, error) {
+	if id.zero() || head.format.oidLength() == 0 {
 		return Change{}, fmt.Errorf("%w: invalid available Change request", ErrInvalidValue)
 	}
 	return store.advanceChange(ctx, id, expected, at, func(change Change, connection *sql.Conn) (bool, error) {
-		if change.Phase == ChangeAvailable && change.Revision.Int64() == expected.Int64()+1 && changeAvailabilityMatches(change, available) {
+		if change.Phase == ChangeAvailable && change.Revision.Int64() == expected.Int64()+1 && change.HeadCommit != nil && change.HeadCommit.equal(head) {
 			return true, nil
 		}
-		if change.Phase != ChangePrepared || change.Revision != expected || change.TreeIdentity == nil || *change.TreeIdentity != available.tree || at.Int64() < change.UpdatedAt.Int64() || !changeAvailabilityMatches(change, available) {
+		if change.Phase != ChangePrepared || change.Revision != expected || change.Selection == nil || !change.Selection.commit.equal(head) || at.Int64() < change.UpdatedAt.Int64() {
 			return false, ErrRevisionConflict
 		}
 		if err := requireChangeMutationOwner(ctx, connection, change, expected, at); err != nil {
 			return false, err
 		}
-		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'available', available_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'prepared' AND revision = ? AND tree_dev = ? AND tree_inode = ?`,
-			at.Int64(), at.Int64(), id.Bytes(), expected.Int64(), available.tree.device, available.tree.inode)
+		result, err := connection.ExecContext(ctx, `UPDATE changes SET phase = 'available', head_commit = ?, available_at_ms = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND phase = 'prepared' AND revision = ?`,
+			head.Bytes(), at.Int64(), at.Int64(), id.Bytes(), expected.Int64())
 		return false, requireOneRow(result, err)
 	})
+}
+
+// RecordChangeWorktree fills in the head of a Change whose Git-free tree was
+// adopted into a worktree at its recorded base. It is a fact about the same
+// tree, not a mutation of the Change: the revision, the timestamps and the
+// settled run stay exactly as they were, so the retry and settlement
+// provenance history remains valid. Only a retained or available Change with
+// no head yet takes it, and the head must be the recorded base.
+func (store *Store) RecordChangeWorktree(ctx context.Context, id ChangeID, expected Revision, head CommitID) (Change, error) {
+	if id.zero() || head.format.oidLength() == 0 {
+		return Change{}, fmt.Errorf("%w: invalid Change worktree request", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return Change{}, err
+	}
+	defer tx.Close()
+	change, found, err := changeByID(ctx, tx.connection, id)
+	if err != nil {
+		return Change{}, tx.Rollback(err)
+	}
+	if !found {
+		return Change{}, tx.Rollback(ErrNotFound)
+	}
+	if change.Revision != expected || change.Selection == nil || !change.Selection.commit.equal(head) {
+		return Change{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if change.HeadCommit != nil {
+		if !change.HeadCommit.equal(head) {
+			return Change{}, tx.Rollback(ErrConflict)
+		}
+		if err := tx.Rollback(nil); err != nil {
+			return Change{}, err
+		}
+		return change, nil
+	}
+	if change.Phase != ChangeRetained && change.Phase != ChangeAvailable {
+		return Change{}, tx.Rollback(ErrConflict)
+	}
+	result, err := tx.connection.ExecContext(ctx, `UPDATE changes SET head_commit = ? WHERE id = ? AND revision = ? AND head_commit IS NULL AND phase IN ('retained', 'available')`, head.Bytes(), id.Bytes(), expected.Int64())
+	if err := requireOneRow(result, err); err != nil {
+		return Change{}, tx.Rollback(err)
+	}
+	change, found, err = changeByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return Change{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Change{}, err
+	}
+	return change, nil
 }
 
 func (store *Store) advanceChange(ctx context.Context, id ChangeID, expected Revision, at UnixMillis, apply func(Change, *sql.Conn) (bool, error)) (Change, error) {
@@ -244,11 +308,7 @@ func requireChangeMutationOwner(ctx context.Context, connection *sql.Conn, chang
 }
 
 func changeSelectionEqual(left, right ChangeSelection) bool {
-	return left.format == right.format && left.commit.equal(right.commit) && left.commitment == right.commitment && left.entries == right.entries && left.bytes == right.bytes && left.repository == right.repository
-}
-
-func changeAvailabilityMatches(change Change, available ChangeAvailability) bool {
-	return change.Selection != nil && change.TreeIdentity != nil && change.Selection.commitment == available.commitment && change.Selection.entries == available.entries && change.Selection.bytes == available.bytes && *change.TreeIdentity == available.tree
+	return left.format == right.format && left.commit.equal(right.commit) && left.repository == right.repository
 }
 
 func requireOneRow(result sql.Result, err error) error {

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -33,12 +34,18 @@ func TestParseExactOperatorCommands(t *testing.T) {
 		{name: "task add minimal", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "Tighten the queue ordering"}},
 		{name: "task add full", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--body", "b", "--priority", "-5"}},
 		{name: "task add supplied identities", args: []string{"task", "add", "--project", id, "--agent", id, "--title", "t", "--task-id", id, "--incarnation-id", strings.Repeat("cd", 16)}},
+		{name: "task add any eligible worker", args: []string{"task", "add", "--project", id, "--agent", "any", "--title", "t"}},
 		{name: "status", args: []string{"status"}},
 		{name: "task send back", args: []string{"task", "send-back", "--task", id, "--note", "five findings"}},
 		{name: "dispatch on", args: []string{"dispatch", "on"}},
 		{name: "dispatch off", args: []string{"dispatch", "off"}},
 		{name: "dispatch guarded", args: []string{"dispatch", "on", "--revision", "7"}},
 		{name: "worker capacity", args: []string{"capacity", "--workers", "2", "--revision", "7"}},
+		{name: "worker stop", args: []string{"worker", "stop", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3"}},
+		{name: "worker replace", args: []string{"worker", "replace", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3", "--successor-task", strings.Repeat("cd", 16), "--successor-incarnation", strings.Repeat("ef", 16), "--instruction", "continue"}},
+		{name: "worker message", args: []string{"worker", "message", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3", "--message", "continue"}},
+		{name: "worker interrupt", args: []string{"worker", "interrupt", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3"}},
+		{name: "worker operation", args: []string{"worker", "operation", "--operation-id", id}},
 	}
 	for _, test := range valid {
 		t.Run(test.name, func(t *testing.T) {
@@ -50,6 +57,13 @@ func TestParseExactOperatorCommands(t *testing.T) {
 	}
 	if command, _, _ := parse(valid[1].args); command.role != "worker" {
 		t.Fatalf("default role = %q", command.role)
+	}
+	// `--agent any` is the CLI spelling of the wire's empty assigned agent.
+	if command, _, _ := parse([]string{"task", "add", "--project", id, "--agent", "any", "--title", "t"}); command.agent != "any" || anyWorkerAgent(command.agent) != "" || anyWorkerAgent(id) != id {
+		t.Fatalf("any-worker task add = %+v", command)
+	}
+	if _, _, ok := parse([]string{"agent", "select-model", "--agent", "any", "--revision", "7", "--model", "m"}); ok {
+		t.Fatal("`any` accepted where one agent is required")
 	}
 	invalid := [][]string{
 		{"project", "create", "--name", "n"},
@@ -113,6 +127,86 @@ func TestParseExactOperatorCommands(t *testing.T) {
 	for _, args := range [][]string{{"project", "--help"}, {"project", "create", "--help"}, {"task", "add", "-h"}, {"dispatch", "--help"}} {
 		if _, help, ok := parse(args); !help || !ok {
 			t.Fatalf("help form rejected: %v", args)
+		}
+	}
+}
+
+func TestWorkerStopUsesOperatorClient(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	id := strings.Repeat("ab", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.OverseerRunStopInput()
+		if !ok || call.Kind() != api.CallOperatorStopRun || input.OperationID != id || input.ExpectedTaskRevision != 2 || input.ExpectedRunRevision != 3 {
+			t.Errorf("operator stop call = kind %v input %+v ok=%v", call.Kind(), input, ok)
+		}
+		reply, err := api.NewMutationReply(api.MutationResult{Head: 4, Revision: 5, Intervention: &api.OverseerInterventionResult{OperationID: id, State: "delivered"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"worker", "stop", "--operation-id", id, "--task", id, "--task-revision", "2", "--run", id, "--run-revision", "3"}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"state":"delivered"`) {
+		t.Fatalf("worker stop = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestWorkerOperationUsesReadOnlyOperatorCall(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	id := strings.Repeat("ab", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.WorkerOperationInput()
+		if !ok || call.Kind() != api.CallOperatorWorkerOperation || input.OperationID != id {
+			t.Errorf("operator receipt call = kind %v input %+v ok=%v", call.Kind(), input, ok)
+		}
+		reply, err := api.NewWorkerOperationReply(api.WorkerOperation{OperationID: id, TaskID: strings.Repeat("cd", 16), RunID: strings.Repeat("ef", 16), State: "unknown", Detail: "delivery uncertain"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"worker", "operation", "--operation-id", id}, webEnvironment(fixture), &stdout, &stderr)
+	awaitServer(t, done)
+	if exit != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"state":"unknown"`) || !strings.Contains(stdout.String(), `"detail":"delivery uncertain"`) {
+		t.Fatalf("worker operation = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	}
+}
+
+func TestParseOperatorTaskAndAgentControls(t *testing.T) {
+	id := strings.Repeat("1", 32)
+	task, help, ok := parse([]string{"task", "update", "--task", id, "--revision", "7", "--retry"})
+	if !ok || help || !task.operatorControl || task.kind != commandOverseerTaskUpdate || !task.retry {
+		t.Fatalf("task control = %+v, help=%t ok=%t", task, help, ok)
+	}
+	agent, help, ok := parse([]string{"agent", "pause", "--agent", id, "--revision", "8"})
+	if !ok || help || !agent.operatorControl || agent.kind != commandOverseerAgentUpdate || !agent.paused {
+		t.Fatalf("agent control = %+v, help=%t ok=%t", agent, help, ok)
+	}
+}
+
+func TestParseOperatorTaskRead(t *testing.T) {
+	id := strings.Repeat("2", 32)
+	command, help, ok := parse([]string{"task", "read", "--task", id, "--revision", "7", "--offset", "2048"})
+	if !ok || help || command.kind != commandTaskRead || command.id != id || command.expectedRevision != 7 || command.offset != 2048 {
+		t.Fatalf("task read = %+v, help=%t ok=%t", command, help, ok)
+	}
+}
+
+func TestOperatorObservationCommandsUseOperatorAuthority(t *testing.T) {
+	id := strings.Repeat("1", 32)
+	for _, args := range [][]string{
+		{"agent", "paths", "--agent", id},
+		{"terminal", "observe", "--project", id, "--task", id, "--run", id},
+	} {
+		var stdout, stderr bytes.Buffer
+		exit := run(context.Background(), args, func(string) string { return "" }, &stdout, &stderr)
+		if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "operator client configuration is invalid") {
+			t.Fatalf("%v routed incorrectly: exit %d stdout %q stderr %q", args, exit, stdout.String(), stderr.String())
 		}
 	}
 }
@@ -342,26 +436,40 @@ func TestDispatchReadsExactFactoryRevisionThenSets(t *testing.T) {
 }
 
 func TestDispatchExplicitRevisionDoesNotRefreshOrOverrideTheGuard(t *testing.T) {
-	fixture := newAPIFixture(t)
-	defer fixture.close(t)
-	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
-		revision, enabled, ok := call.Dispatch()
-		if !ok || call.Kind() != api.CallSetDispatch || revision != 19 || !enabled {
-			t.Errorf("guarded dispatch = kind=%v revision=%d enabled=%v ok=%v", call.Kind(), revision, enabled, ok)
-		}
-		reply, err := api.NewErrorReply(api.RemoteConflict)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return reply
-	})
-	var stdout, stderr bytes.Buffer
-	exit := run(context.Background(), []string{"dispatch", "on", "--revision", "19"}, webEnvironment(fixture), &stdout, &stderr)
-	if result := awaitServer(t, done); result.err != nil {
-		t.Fatal(result.err)
-	}
-	if exit == 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not accepted") {
-		t.Fatalf("guarded stale dispatch = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+	for _, test := range []struct {
+		code    api.RemoteErrorCode
+		message string
+	}{
+		{api.RemoteConflict, "local API request conflicts with durable state"},
+		{api.RemoteRevisionConflict, "local API revision is stale"},
+		{api.RemoteInternal, "local API failed internally"},
+		{api.RemoteUnauthorized, "local API credential is unauthorized"},
+		{api.RemoteForbidden, "local API request is forbidden"},
+		{api.RemoteUnavailable, "local API is unavailable"},
+	} {
+		t.Run(string(test.code), func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+				revision, enabled, ok := call.Dispatch()
+				if !ok || call.Kind() != api.CallSetDispatch || revision != 19 || !enabled {
+					t.Errorf("guarded dispatch = kind=%v revision=%d enabled=%v ok=%v", call.Kind(), revision, enabled, ok)
+				}
+				reply, err := api.NewErrorReply(test.code)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return reply
+			})
+			var stdout, stderr bytes.Buffer
+			exit := run(context.Background(), []string{"dispatch", "on", "--revision", "19"}, webEnvironment(fixture), &stdout, &stderr)
+			if result := awaitServer(t, done); result.err != nil {
+				t.Fatal(result.err)
+			}
+			if exit != exitFailure || stdout.Len() != 0 || stderr.String() != "factoryctl: dispatch: "+test.message+"\n" {
+				t.Fatalf("guarded stale dispatch = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 
@@ -402,7 +510,7 @@ func TestOperatorRemoteRejectionIsReportedWithoutFabricatedSuccess(t *testing.T)
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"agent", "create", "--project", strings.Repeat("11", 16), "--name", "Builder", "--provider", "shell", "--tool-budget", "10"}, webEnvironment(fixture), &stdout, &stderr)
 	awaitServer(t, done)
-	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "agent create was not accepted") {
+	if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "agent create: local API request conflicts with durable state") {
 		t.Fatalf("rejection = exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 	}
 }
@@ -481,6 +589,73 @@ func TestAccountDiscoverCLICollectsPagesAndRejectsRepeatedCursor(t *testing.T) {
 			var result api.Accounts
 			if exit != 0 || json.Unmarshal(stdout.Bytes(), &result) != nil || len(result.Accounts) != 4097 || result.NextOffset != nil || result.Accounts[4096].UnavailableReason == "" {
 				t.Fatalf("CLI discovery exit=%d count=%d stderr=%q", exit, len(result.Accounts), stderr.String())
+			}
+		})
+	}
+}
+
+func TestTaskRecoveryUsesOperatorClient(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	taskID, incarnationID := strings.Repeat("11", 16), strings.Repeat("22", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.TaskRecoveryInput()
+		if !ok || input.TaskID != taskID || input.IncarnationID != incarnationID {
+			t.Errorf("unexpected recovery call: %+v", call)
+		}
+		reply, err := api.NewTaskRecoveryReply(api.TaskRecovery{State: "found", TaskID: taskID, IncarnationID: incarnationID, ProjectID: taskID, AssignedAgentID: taskID, WorkRevision: 1, Revision: 1, Status: "blocked", BlockedReason: "tool unavailable", ArtifactPaths: []string{}, Disposition: "none", OverseerNotification: "none"})
+		if err != nil {
+			t.Error(err)
+		}
+		return reply
+	})
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"task", "recovery", "--task", taskID, "--incarnation", incarnationID}, webEnvironment(fixture), &stdout, &stderr)
+	if exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("task recovery = exit %d stderr %q", exit, stderr.String())
+	}
+	awaitServer(t, done)
+	var result api.TaskRecovery
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.BlockedReason != "tool unavailable" {
+		t.Fatalf("recovery response %q: %v", stdout.String(), err)
+	}
+}
+
+func TestHumanCommandsUseOperatorClient(t *testing.T) {
+	id := strings.Repeat("11", 16)
+	operation := strings.Repeat("22", 16)
+	for _, reply := range []bool{false, true} {
+		t.Run(fmt.Sprint(reply), func(t *testing.T) {
+			fixture := newAPIFixture(t)
+			defer fixture.close(t)
+			args := []string{"human", "list"}
+			if reply {
+				args = []string{"human", "reply", "--operation-id", operation, "--request", id, "--revision", "3", "--reply", "Proceed"}
+			}
+			done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+				if !reply {
+					if call.Kind() != api.CallHumanRequests {
+						t.Errorf("wrong list call %v", call.Kind())
+					}
+					return api.NewHumanRequestListReply(api.HumanRequestList{Requests: []api.HumanRequest{}})
+				}
+				input, ok := call.HumanReplyInput()
+				if !ok || input.RequestID != id || input.OperationID != operation || input.ExpectedRevision != 3 || input.Reply != "Proceed" {
+					t.Errorf("wrong reply input %+v", input)
+				}
+				result, err := api.NewMutationReply(api.MutationResult{Head: 7, Revision: 4})
+				if err != nil {
+					t.Error(err)
+				}
+				return result
+			})
+			var stdout, stderr bytes.Buffer
+			if exit := run(context.Background(), args, webEnvironment(fixture), &stdout, &stderr); exit != 0 || stderr.Len() != 0 {
+				t.Fatalf("command failed: exit=%d stderr=%q", exit, stderr.String())
+			}
+			awaitServer(t, done)
+			if !json.Valid(stdout.Bytes()) {
+				t.Fatalf("invalid output %q", stdout.String())
 			}
 		})
 	}

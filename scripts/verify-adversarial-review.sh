@@ -1,33 +1,10 @@
 #!/bin/sh
-# Verify the Maintainer review contract at one exact pull request head.
-#
-# The review itself happens elsewhere: an agent that did not write the change
-# reads the diff and records its verdict through the maintainer App, which
-# writes a `Dark-Factory-Review:` line the caller cannot forge and pins the
-# review to `commit_id`. This script is the part GitHub can see.
-#
-# Deciding here rather than in a jq expression or a workflow `run:` block is
-# deliberate: this is the logic that gates every merge, so it lives somewhere
-# a test can drive it. The workflow only projects GitHub's JSON into TSV.
-#
-# It runs in the merge queue and nowhere else. Recording a verdict fires no
-# workflow event, so a pull-request-time run could never turn green after the
-# reviewer acted -- it would have failed before the verdict existed, and the
-# only way to re-run it is to push, which moves the head and orphans the
-# verdict. The queue re-reads the verdict at merge time instead, which is the
-# one moment it has to be true.
+# Verify independent-review attestations at one exact pull request head.
+# Any GitHub review publisher may record the verdict of a separate reviewer.
+# The publisher authenticates the record; this gate does not prove reviewer
+# independence. GitHub permissions, protected merge and required CI still apply.
+# Run the default branch's policy in the merge queue, after review publication.
 set -eu
-
-# The App's numeric bot user id, not its login. `docs/development/GITHUB_APP.md`
-# calls `dark-factory-maintainer[bot]` a "target bot identity ... subject to
-# GitHub name availability": a rename would make every verdict invisible and
-# this gate would report "nobody has reviewed anything" on every pull request
-# at once, which reads like a review failure rather than a misconfiguration.
-# The id is stable, and it is the same discipline as `integration_id` in the
-# ruleset. Deliberately not overridable: the workflow that supplies this
-# script's inputs comes from the pull request under review, so an override
-# would let a change choose who counts as its own reviewer.
-APP_USER_ID=319516570
 
 usage() {
     echo "usage: verify-adversarial-review.sh [--pull-number]" >&2
@@ -142,8 +119,10 @@ allowed=0
 blocked=0
 considered=0
 findings=$(mktemp "${TMPDIR:-/tmp}/df-review-findings.XXXXXX")
-trap 'rm -f "$findings"' EXIT
-trap 'rm -f "$findings"; exit 130' HUP INT TERM
+blocked_records=$(mktemp "${TMPDIR:-/tmp}/df-review-blocks.XXXXXX")
+corrections=$(mktemp "${TMPDIR:-/tmp}/df-review-corrections.XXXXXX")
+trap 'rm -f "$findings" "$blocked_records" "$corrections"' EXIT
+trap 'rm -f "$findings" "$blocked_records" "$corrections"; exit 130' HUP INT TERM
 
 # `|| [ -n "$line" ]` keeps the final record when the file has no trailing
 # newline. Without it `read` returns non-zero and the loop body never runs for
@@ -155,18 +134,19 @@ while IFS= read -r line || [ -n "$line" ]; do
         echo "verify-adversarial-review: malformed review record" >&2
         exit 1
     fi
-    # A verdict counts only from the App, and only against this exact commit.
-    # A human's review is not an agent's adversarial review, and a verdict
-    # against an earlier head reviewed code that is no longer proposed.
-    [ "$field_author" = "$APP_USER_ID" ] || continue
+    # GitHub supplies the authenticated publisher identity; no allowlist.
+    case "$field_author" in
+        '' | 0* | *[!0-9]*) echo "verify-adversarial-review: malformed review publisher" >&2; exit 1 ;;
+    esac
     [ "$field_commit" = "$head_sha" ] || continue
+    case "$field_state" in COMMENTED | APPROVED | CHANGES_REQUESTED) ;; *) continue ;; esac
     considered=$((considered + 1))
 
     verdict=none
-    case $field_body in
-        *"Dark-Factory-Review: allow $head_sha"*) verdict=allow ;;
-        *"Dark-Factory-Review: block $head_sha"*) verdict=block ;;
-        *"Dark-Factory-Review: note $head_sha"*) verdict=note ;;
+    case " $field_body " in
+        *" Dark-Factory-Review: block $head_sha "*) verdict=block ;;
+        *" Dark-Factory-Review: allow $head_sha "*) verdict=allow ;;
+        *" Dark-Factory-Review: note $head_sha "*) verdict=note ;;
     esac
     # CHANGES_REQUESTED is GitHub's own blocking state. Honour it even when the
     # verdict line is absent, so a review recorded before this line existed, or
@@ -177,8 +157,21 @@ while IFS= read -r line || [ -n "$line" ]; do
 
     case $verdict in
         allow) allowed=$((allowed + 1)) ;;
-        block) blocked=$((blocked + 1)) ;;
+        block)
+            operation_id=
+            if [ "$field_state" != CHANGES_REQUESTED ]; then
+                operation_id=$(printf '%s\n' "$field_body" | sed -n 's/.*dark-factory-operation:\([0-9a-f-][0-9a-f-]*\):.*/\1/p' | tail -1)
+            fi
+            printf '%s\t%s\n' "$field_author" "$operation_id" >>"$blocked_records"
+            ;;
     esac
+
+    if [ "$verdict" = allow ]; then
+        # Only the original publisher can correct its own blocked operation.
+        sed -n "s/.*Dark-Factory-Review: allow $head_sha Dark-Factory-Review-Correction: \([0-9a-f-][0-9a-f-]*\) <!-- dark-factory-operation:.*/$field_author${tab}\1/p" <<EOF >>"$corrections"
+$field_body
+EOF
+    fi
 
     {
         printf '<details><summary><code>%s</code> — <code>%s</code></summary>\n\n' \
@@ -186,6 +179,16 @@ while IFS= read -r line || [ -n "$line" ]; do
         printf '<pre>%s</pre>\n\n</details>\n\n' "$(bounded_html "$field_body")"
     } >>"$findings"
 done <"$reviews"
+
+# A correction is effective only for its publisher's exact blocked operation.
+# Blocks without that identity (including
+# GitHub-native CHANGES_REQUESTED) remain conservative and cannot be cleared
+# by a second opinion.
+while IFS="${tab}" read -r blocked_author blocked_operation; do
+    if [ -z "$blocked_operation" ] || ! grep -F -x -- "$blocked_author${tab}$blocked_operation" "$corrections" >/dev/null; then
+        blocked=$((blocked + 1))
+    fi
+done <"$blocked_records"
 
 summary '### Adversarial review'
 summary ''
@@ -206,7 +209,7 @@ if [ "$allowed" -eq 0 ]; then
     summary '**NO VERDICT** — no reviewer has recorded an ALLOW at this head.'
     summary ''
     summary 'A reviewer that did not write the change reviews the diff and records:'
-    summary '`submit_pull_request_review` with `event: ALLOW` and this exact `head_sha`.'
+    summary 'Publish a GitHub review bound to this commit with `Dark-Factory-Review: allow HEAD_SHA`.'
     echo "verify-adversarial-review: no ALLOW verdict at $head_sha" >&2
     exit 1
 fi

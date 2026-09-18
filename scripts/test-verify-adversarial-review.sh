@@ -11,9 +11,9 @@ trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 other=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-# The App's numeric bot user id, which is what the projection emits and the
-# gate binds to. A login can be renamed; this cannot.
-app=319516570
+# Synthetic GitHub identities; neither one has privileged publisher status.
+app=101
+human=202
 tab=$(printf '\t')
 
 # commit_id, state, author, flattened body -- exactly what the workflow's
@@ -91,14 +91,56 @@ expect_fail 'allow whose rendered head is a different commit'
 record "$head" COMMENTED "$app" "Three findings. Dark-Factory-Review: note $head" >"$reviews"
 expect_fail 'note is not an allow'
 
-# A blocking verdict blocks even when an ALLOW also stands at the same head,
-# so a second opinion can never launder the first one away. Clearing it means
-# pushing a fix, which moves the head and orphans both.
+# A blocking verdict blocks even when a plain ALLOW also stands at the same
+# head, so an unrelated second opinion can never launder the first one away.
+# Clearing it means either pushing a fix, which moves the head and orphans
+# both, or an ALLOW that explicitly names and corrects this exact block
+# operation (below).
 {
     record "$head" COMMENTED "$app" "Dark-Factory-Review: allow $head"
     record "$head" COMMENTED "$app" "Reaps nothing on failure. Dark-Factory-Review: block $head"
 } >"$reviews"
 expect_fail 'block outranks a co-existing allow'
+assert_summary '**BLOCKED**'
+
+# A corrected metadata/body review may clear an erroneous same-head block only
+# by naming that block's exact App operation. A same-head ALLOW without the
+# correction binding remains blocked.
+block_operation=11111111-1111-4111-8111-111111111111
+correction_operation=22222222-2222-4222-8222-222222222222
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_pass 'an exact operation-bound review correction clears a same-head block'
+assert_summary '**ALLOWED**'
+
+{
+    record "$head" COMMENTED "$app" "Finding. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$human" "Other publisher. Dark-Factory-Review: allow $head Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_fail 'another publisher cannot correct an existing block'
+assert_summary '**BLOCKED**'
+
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head"
+} >"$reviews"
+expect_fail 'an unbound same-head allow cannot clear a block'
+
+# Corrections use a fixed position immediately after the verdict line. A
+# quoted correction elsewhere in the findings must not clear a block.
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Dark-Factory-Review-Correction: $block_operation Metadata was corrected. Dark-Factory-Review: allow $head <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_fail 'a correction line before the verdict line does not clear a block'
+assert_summary '**BLOCKED**'
+{
+    record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head extra text Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_fail 'a correction line separated from the verdict line does not clear a block'
 assert_summary '**BLOCKED**'
 
 # ...and clears only by pushing. A block belongs to the head it was recorded
@@ -128,6 +170,13 @@ assert_summary '**BLOCKED**'
 expect_fail 'CHANGES_REQUESTED outranks an allow'
 assert_summary '**BLOCKED**'
 
+{
+    record "$head" CHANGES_REQUESTED "$human" "Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$human" "Dark-Factory-Review: allow $head Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_fail 'an operation marker cannot make native CHANGES_REQUESTED correctable'
+assert_summary '**BLOCKED**'
+
 # A review with no body at all is a real shape: GitHub returns `body: null`
 # and the projection emits a trailing tab, so the record has an empty fourth
 # field. It must neither crash the loop nor mask a valid verdict beside it.
@@ -139,18 +188,36 @@ expect_pass 'an empty-bodied review does not mask a valid verdict'
 record "$head" COMMENTED "$app" "" >"$reviews"
 expect_fail 'an empty-bodied review is not itself a verdict'
 
-# Only the App's verdict counts. Anyone can type the line into a review by
-# hand; the author check is what stops that being a merge gate bypass.
-record "$head" COMMENTED 109233175 "Dark-Factory-Review: allow $head" >"$reviews"
-expect_fail 'a real human account id does not count'
-record "$head" COMMENTED 3195165 "Dark-Factory-Review: allow $head" >"$reviews"
-expect_fail 'a truncated author id does not count'
-record "$head" COMMENTED 3195165700 "Dark-Factory-Review: allow $head" >"$reviews"
-expect_fail 'a lengthened author id does not count'
-record "$head" COMMENTED " $app" "Dark-Factory-Review: allow $head" >"$reviews"
-expect_fail 'a padded author id does not count'
-record "$head" COMMENTED 'dark-factory-maintainer[bot]' "Dark-Factory-Review: allow $head" >"$reviews"
-expect_fail 'the login is not the identity the gate binds to'
+# Any authenticated GitHub review publisher can attest the independent result.
+for publisher in "$app" "$human" 303; do
+    record "$head" COMMENTED "$publisher" "Independent review recorded. Dark-Factory-Review: allow $head" >"$reviews"
+    expect_pass "publisher $publisher can record an allow"
+done
+for publisher in '' 0 ' 101' 'reviewer-login'; do
+    record "$head" COMMENTED "$publisher" "Dark-Factory-Review: allow $head" >"$reviews"
+    expect_fail 'malformed publisher identity'
+    assert_stderr 'malformed review publisher'
+done
+for state in DISMISSED PENDING; do
+    record "$head" "$state" "$human" "Dark-Factory-Review: allow $head" >"$reviews"
+    expect_fail "$state review cannot allow"
+    {
+        record "$head" "$state" "$human" "Dark-Factory-Review: block $head"
+        record "$head" COMMENTED "$app" "Dark-Factory-Review: allow $head"
+    } >"$reviews"
+    expect_pass "$state review cannot block"
+done
+{
+    record "$head" COMMENTED "$app" "Dark-Factory-Review: allow $head"
+    record "$head" COMMENTED "$human" "Dark-Factory-Review: block $head"
+} >"$reviews"
+expect_fail 'a different publisher block outranks an allow'
+assert_summary '**BLOCKED**'
+record "$head" COMMENTED "$human" "Dark-Factory-Review: allow $head Dark-Factory-Review: block $head" >"$reviews"
+expect_fail 'a block in the same body outranks an allow'
+assert_summary '**BLOCKED**'
+record "$head" COMMENTED "$human" "Dark-Factory-Review: allow ${head}0" >"$reviews"
+expect_fail 'a longer rendered SHA is not the exact head'
 
 # A final record with no trailing newline must still be read. `while read`
 # returns non-zero on an unterminated last line, so without the `|| [ -n ... ]`
@@ -308,8 +375,6 @@ grep -Fq 'refs/heads/${DEFAULT_BRANCH}' "$workflow"
 # Enforcement lives in the merge queue. On a pull request a verdict recorded
 # after the run cannot re-trigger it, so a gate there could never go green.
 grep -Fq "if: github.event_name == 'merge_group'" "$workflow"
-# The projection must emit the App's numeric id, which is what this gate binds
-# to. Emitting the login instead would make every verdict invisible at once.
+# The projection supplies GitHub's numeric publisher identity for validation.
 grep -Fq '(.user.id | tostring)' "$workflow"
-grep -Fq "APP_USER_ID=319516570" "$verify"
 echo "adversarial review gate passed its failure modes"

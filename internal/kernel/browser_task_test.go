@@ -318,7 +318,7 @@ func TestBrowserQueueAcceptsBusyPausedAgentWithoutChangingCurrentWork(t *testing
 		t.Fatal(err)
 	}
 	agent = pauseBrowserTaskAgent(t, store, agent)
-	next, err := store.EnqueueTaskForBrowserAgentMode(ctx, client.ID, taskID(t, 183), incarnationID(t, 184), agent.ID, agent.Revision, "next", true, mustTime(t, 130))
+	next, err := store.EnqueueTaskForBrowserAgentMode(ctx, client.ID, taskID(t, 183), incarnationID(t, 184), agent.ID, agent.Revision, "next", BrowserEnqueueQueue, mustTime(t, 130))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestBrowserQueueAcceptsBusyPausedAgentWithoutChangingCurrentWork(t *testing
 	if err != nil || !found || current != first.Task {
 		t.Fatalf("current changed: %+v %v", current, err)
 	}
-	if _, err := store.EnqueueTaskForBrowserAgentMode(ctx, client.ID, taskID(t, 185), incarnationID(t, 186), agent.ID, agent.Revision, "now", false, mustTime(t, 131)); !errors.Is(err, ErrRevisionConflict) {
+	if _, err := store.EnqueueTaskForBrowserAgentMode(ctx, client.ID, taskID(t, 185), incarnationID(t, 186), agent.ID, agent.Revision, "now", BrowserEnqueueNow, mustTime(t, 131)); !errors.Is(err, ErrRevisionConflict) {
 		t.Fatalf("now bypassed queue/paused agent: %v", err)
 	}
 }

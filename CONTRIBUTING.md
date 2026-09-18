@@ -19,14 +19,25 @@ The complete local gate is:
 ./scripts/local-ci.sh
 ```
 
-The routine source gate is the Go gate: `gofmt`, `go vet`, risk-scoped short Go
-suites, one TypeScript client proof, and the real browser, daemon and
-service end-to-end lifecycles, followed by
-`git diff --check`. It additionally checks release-source, publisher, and
-package fixtures. The daemon is Darwin-only today, so the gate is macOS-only;
-Linux support is #120/#141-144. Affected-package tests and focused `-race`
-checks cover concurrency or ownership changes without imposing broad stress on
-unrelated changes.
+The routine source gate is:
+
+```sh
+./scripts/go-check.sh
+```
+
+It runs `gofmt`, `go vet`, ordinary short Go tests, the TypeScript build and
+tests, and `git diff --check`. Add focused tests for the changed package; run
+process-sensitive Go tests with `-count=1` through `./scripts/with-local-ci-lease.sh`.
+
+The complete local gate is the explicit full check above. It adds repository
+fixtures, process and lifecycle checks, and release/package fixtures. Fixed
+`./scripts/local-ci.sh --ui`, `--runtime`, and `--release` modes match those
+component boundaries; the release mode also runs the routine source check.
+CI selects a mode from the complete merge-queue diff;
+uncertain or mixed changes use the full gate. The daemon is Darwin-only today,
+so the gate is macOS-only; Linux support is #120/#141-144. A focused `-race`
+check covers concurrency or ownership changes without imposing broad stress
+on unrelated changes.
 
 The gate checks:
 

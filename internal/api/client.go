@@ -110,6 +110,20 @@ func (client *OperatorClient) WebStatus(ctx context.Context) (WebStatus, error) 
 	return result, nil
 }
 
+func (client *OperatorClient) TerminalObserve(ctx context.Context, input TerminalObserveInput) (TerminalObservation, error) {
+	if !validTerminalObservationInput(input) {
+		return TerminalObservation{}, ErrInvalidInput
+	}
+	var result TerminalObservation
+	if err := client.client.call(ctx, "operator_terminal_observe", input, &result); err != nil {
+		return TerminalObservation{}, err
+	}
+	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor || len(result.Payload) > int(input.MaxBytes) || len(result.Text) > int(input.MaxBytes) || input.Text != result.TextMode || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
+		return TerminalObservation{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) WebListClients(ctx context.Context, after string) (WebClientPage, error) {
 	if after != "" && !validID(after) {
 		return WebClientPage{}, ErrInvalidInput
@@ -165,6 +179,66 @@ func (client *OperatorClient) Snapshot(ctx context.Context) (DashboardSnapshot, 
 		return DashboardSnapshot{}, ErrProtocol
 	}
 	return result, nil
+}
+
+func (client *OperatorClient) AgentPaths(ctx context.Context, input AgentPathsInput) (AgentPaths, error) {
+	if !validAgentPathsInput(input) {
+		return AgentPaths{}, ErrInvalidInput
+	}
+	var result AgentPaths
+	if err := client.client.call(ctx, "agent_paths", input, &result); err != nil {
+		return AgentPaths{}, err
+	}
+	if !validAgentPaths(result) {
+		return AgentPaths{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) HumanRequests(ctx context.Context) (HumanRequestList, error) {
+	var result HumanRequestList
+	if err := client.client.call(ctx, "human_requests", struct{}{}, &result); err != nil {
+		return HumanRequestList{}, err
+	}
+	if !validHumanRequestList(result) {
+		return HumanRequestList{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) HumanReply(ctx context.Context, input OverseerHumanReplyInput) (MutationResult, error) {
+	if !validID(input.OperationID) || !validID(input.RequestID) || input.ExpectedRevision == 0 || !validText(input.Reply, 1, 8192) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "human_reply", input)
+}
+
+func (client *OperatorClient) StopRun(ctx context.Context, input OverseerRunStopInput) (MutationResult, error) {
+	if !validOverseerRunStopInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_stop_run", input)
+}
+
+func (client *OperatorClient) ReplaceRun(ctx context.Context, input OverseerRunReplaceInput) (MutationResult, error) {
+	if !validOverseerRunReplaceInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_replace_run", input)
+}
+
+func (client *OperatorClient) MessageWorker(ctx context.Context, input OverseerWorkerMessageInput) (MutationResult, error) {
+	if !validOverseerWorkerMessageInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_message_worker", input)
+}
+
+func (client *OperatorClient) InterruptWorker(ctx context.Context, input OverseerWorkerInterruptInput) (MutationResult, error) {
+	if !validOverseerWorkerInterruptInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_interrupt_worker", input)
 }
 
 func (client *OperatorClient) DiscoverAccounts(ctx context.Context) (Accounts, error) {
@@ -240,11 +314,67 @@ func (client *OperatorClient) SendBackTask(ctx context.Context, input SendBackIn
 	return client.client.mutate(ctx, "send_back_task", input)
 }
 
+func (client *OperatorClient) TaskRecovery(ctx context.Context, input TaskRecoveryInput) (TaskRecovery, error) {
+	if !validID(input.TaskID) || !validID(input.IncarnationID) {
+		return TaskRecovery{}, ErrInvalidInput
+	}
+	var result TaskRecovery
+	if err := client.client.call(ctx, "task_recovery", input, &result); err != nil {
+		return TaskRecovery{}, err
+	}
+	if !validTaskRecovery(result) || result.State == "found" && (result.TaskID != input.TaskID || result.IncarnationID != input.IncarnationID) {
+		return TaskRecovery{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) WorkerOperation(ctx context.Context, operationID string) (WorkerOperation, error) {
+	if !validID(operationID) {
+		return WorkerOperation{}, ErrInvalidInput
+	}
+	var result WorkerOperation
+	if err := client.client.call(ctx, "operator_worker_operation", WorkerOperationInput{OperationID: operationID}, &result); err != nil {
+		return WorkerOperation{}, err
+	}
+	if !validWorkerOperation(result) || result.OperationID != operationID {
+		return WorkerOperation{}, ErrProtocol
+	}
+	return result, nil
+}
+
+func (client *OperatorClient) ReadTask(ctx context.Context, input TaskReadInput) (TaskText, error) {
+	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Offset > uint64(^uint64(0)>>1) {
+		return TaskText{}, ErrInvalidInput
+	}
+	var result TaskText
+	if err := client.client.call(ctx, "task_read", input, &result); err != nil {
+		return TaskText{}, err
+	}
+	if result.TaskID != input.TaskID || result.Revision != input.ExpectedRevision || !validText(result.Instruction, 0, 8192) || !validText(result.Feedback, 0, 8192) || result.Outcome != nil && !validText(*result.Outcome, 0, 8192) || result.NextOffset != nil && *result.NextOffset != input.Offset+2048 {
+		return TaskText{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTaskInput) (MutationResult, error) {
-	if !validID(input.ID) || !validID(input.ProjectID) || !validID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
+	if !validID(input.ID) || !validID(input.ProjectID) || !validOptionalID(input.AssignedAgentID) || !validID(input.IncarnationID) || !validText(input.Title, 1, 1024) || !validText(input.Body, 0, 131072) || input.Priority < -1_000_000 || input.Priority > 1_000_000 {
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "enqueue_task", input)
+}
+
+func (client *OperatorClient) UpdateTask(ctx context.Context, input OverseerTaskUpdateInput) (MutationResult, error) {
+	if !validOverseerTaskUpdateInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_update_task", input)
+}
+
+func (client *OperatorClient) UpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_update_agent", input)
 }
 
 func (client *OperatorClient) SetDispatch(ctx context.Context, expectedRevision uint64, enabled bool) (MutationResult, error) {
@@ -299,7 +429,7 @@ func (client *AttemptClient) Source(ctx context.Context, taskID string) (Retaine
 	}{TaskID: taskID}, &result); err != nil {
 		return RetainedChangeHandoff{}, err
 	}
-	if !validRetainedChangeHandoff(result) {
+	if !validSourceHandoff(result) {
 		return RetainedChangeHandoff{}, ErrProtocol
 	}
 	return result, nil
@@ -331,11 +461,24 @@ func (client *AttemptClient) PeerStatus(ctx context.Context) (PeerStatus, error)
 }
 
 func (client *AttemptClient) PeerStatusPage(ctx context.Context, offset, targetOffset, expectedHead uint64) (PeerStatus, error) {
+	return client.peerStatusPage(ctx, offset, targetOffset, expectedHead, true)
+}
+
+// PeerInboxPage reads only the caller's task-linked conversation. Target
+// discovery stays available through PeerStatusPage when the caller needs it.
+func (client *AttemptClient) PeerInboxPage(ctx context.Context, offset, expectedHead uint64) (PeerStatus, error) {
+	return client.peerStatusPage(ctx, offset, 0, expectedHead, false)
+}
+
+func (client *AttemptClient) peerStatusPage(ctx context.Context, offset, targetOffset, expectedHead uint64, includeTargets bool) (PeerStatus, error) {
 	if offset > uint64(^uint64(0)>>1)-1 || targetOffset > uint64(^uint64(0)>>1)-4 || expectedHead > uint64(^uint64(0)>>1) || expectedHead == 0 && (offset != 0 || targetOffset != 0) {
 		return PeerStatus{}, ErrInvalidInput
 	}
+	if !includeTargets && targetOffset != 0 {
+		return PeerStatus{}, ErrInvalidInput
+	}
 	var result PeerStatus
-	if err := client.client.call(ctx, "peer_status", PeerStatusInput{Offset: offset, TargetOffset: targetOffset, ExpectedHead: expectedHead}, &result); err != nil {
+	if err := client.client.call(ctx, "peer_status", PeerStatusInput{Offset: offset, TargetOffset: targetOffset, ExpectedHead: expectedHead, IncludeTargets: includeTargets}, &result); err != nil {
 		return PeerStatus{}, err
 	}
 	if !validPeerStatus(result) || expectedHead != 0 && result.Head != expectedHead {
@@ -356,6 +499,21 @@ func (client *AttemptClient) PeerAnswer(ctx context.Context, input PeerAnswerInp
 		return MutationResult{}, ErrInvalidInput
 	}
 	return client.client.mutate(ctx, "peer_answer", input)
+}
+
+func (client *AttemptClient) TerminalObserve(ctx context.Context, input TerminalObserveInput) (TerminalObservation, error) {
+	if !validTerminalObservationInput(input) || input.Text {
+		return TerminalObservation{}, ErrInvalidInput
+	}
+	var result TerminalObservation
+	if err := client.client.call(ctx, "terminal_observe", input, &result); err != nil {
+		return TerminalObservation{}, err
+	}
+	futureCursorReset := result.Gap && input.Cursor > result.Head && result.Cursor == result.Head
+	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor && !futureCursorReset || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
+		return TerminalObservation{}, ErrProtocol
+	}
+	return result, nil
 }
 
 // SendBack returns a finished task of the attempt's project to its queue
@@ -518,7 +676,7 @@ func (client client) call(ctx context.Context, method string, params, output any
 
 	payload := make([]byte, requestPrelude+len(encoded))
 	payload[0] = client.domain
-	copy(payload[1:requestPrelude], current.bearer[:])
+	copy(payload[1:requestPrelude], client.token.bearer[:])
 	copy(payload[requestPrelude:], encoded)
 	if err := writeFrame(connection, payload); err != nil {
 		return classifyTransport(ctx)
@@ -889,6 +1047,10 @@ func validID(value string) bool {
 	return err == nil && value == strings.ToLower(value)
 }
 
+// validOptionalID accepts a task's assigned agent: empty is any eligible
+// worker in the project, until admission claims it for one.
+func validOptionalID(value string) bool { return value == "" || validID(value) }
+
 func validText(value string, minimum, maximum int) bool {
 	return utf8.ValidString(value) && !strings.ContainsRune(value, 0) && len(value) >= minimum && len(value) <= maximum
 }
@@ -908,7 +1070,7 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 		}
 	}
 	for _, task := range snapshot.Tasks {
-		if !validID(task.ID) || !validID(task.ProjectID) || !validID(task.AssignedAgentID) || !validID(task.IncarnationID) || task.WorkRevision == 0 || !validText(task.Title, 1, 1024) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || task.Revision == 0 {
+		if !validID(task.ID) || !validID(task.ProjectID) || !validOptionalID(task.AssignedAgentID) || !validID(task.IncarnationID) || task.WorkRevision == 0 || !validText(task.Title, 1, 1024) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || task.Revision == 0 {
 			return false
 		}
 	}
@@ -916,12 +1078,15 @@ func validSnapshot(snapshot DashboardSnapshot) bool {
 }
 
 func validOverseerTaskCreateInput(input OverseerTaskCreateInput) bool {
-	return validID(input.ID) && validID(input.AssignedAgentID) && validID(input.IncarnationID) && input.ID != input.IncarnationID &&
+	return validID(input.ID) && validOptionalID(input.AssignedAgentID) && validID(input.IncarnationID) && input.ID != input.IncarnationID &&
 		validText(input.Title, 1, 1024) && validText(input.Body, 0, 131072) && input.Priority >= -1_000_000 && input.Priority <= 1_000_000
 }
 
 func validOverseerTaskUpdateInput(input OverseerTaskUpdateInput) bool {
-	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel {
+	if !validID(input.TaskID) || input.ExpectedRevision == 0 || input.Title == nil && input.Body == nil && input.Priority == nil && input.AssignedAgentID == nil && !input.Cancel && !input.Retry {
+		return false
+	}
+	if input.Retry && (input.Title != nil || input.Body != nil || input.Priority != nil || input.Cancel) {
 		return false
 	}
 	if input.Title != nil && !validText(*input.Title, 1, 1024) || input.Body != nil && !validText(*input.Body, 0, 131072) {
@@ -951,7 +1116,7 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 		}
 	}
 	for _, task := range snapshot.Tasks {
-		if !validID(task.ID) || task.ProjectID != snapshot.ProjectID || !validID(task.AssignedAgentID) || !validText(task.Title, 1, 1024) || !validText(task.Objective, 0, 131072) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || !validText(task.BlockedReason, 0, 8192) || !validText(task.Result, 0, 131072) || task.Revision == 0 {
+		if !validID(task.ID) || task.ProjectID != snapshot.ProjectID || !validOptionalID(task.AssignedAgentID) || !validText(task.Title, 1, 1024) || !validText(task.Objective, 0, 131072) || !validTaskStatus(task.Status) || task.Priority < -1_000_000 || task.Priority > 1_000_000 || !validText(task.BlockedReason, 0, 8192) || !validText(task.Result, 0, 131072) || task.Revision == 0 {
 			return false
 		}
 	}
@@ -980,7 +1145,11 @@ func validOverseerSnapshot(snapshot OverseerSnapshot) bool {
 }
 
 func validHandoffSourcePath(value, changeID string) bool {
-	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID && filepath.Base(filepath.Dir(value)) == "retained-source"
+	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == changeID
+}
+
+func validHandoffGitDirectory(value string) bool {
+	return validText(value, 1, 4096) && filepath.IsAbs(value) && filepath.Clean(value) == value && filepath.Base(value) == ".git"
 }
 
 func validOverseerSnapshotInput(input OverseerSnapshotInput) bool {
