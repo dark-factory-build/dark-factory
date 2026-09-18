@@ -1149,6 +1149,95 @@ test("the settings modal keeps actionable settings compact", () => {
   assert.match(both, /aria-label="Agent Builder One"/);
 });
 
+test("private GitHub settings stays behind the paired admin surface", async () => {
+  const calls = [];
+  const settings = { settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => calls.push(request) };
+  const disconnected = render(settings);
+  assert.match(disconnected, /aria-label="GITHUB SETTINGS"/);
+  assert.match(disconnected, />PRIVATE OPERATOR CONNECTION · DISCONNECTED</);
+  assert.match(disconnected, />CONNECT GITHUB<\/button>/);
+  let renderer;
+  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings })); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CONNECT GITHUB").props.onClick(); });
+  assert.ok(calls.some((request) => request.action === "connect"));
+  renderer.unmount();
+  const denied = render({ ...settings, github: { pending: false, result: { state: "denied" } } });
+  assert.match(denied, /GITHUB ACCESS WAS DENIED OR EXPIRED/);
+  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "denied" } } })); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RESET GITHUB ACCESS").props.onClick(); });
+  assert.equal(calls.at(-1).action, "disconnect");
+  renderer.unmount();
+  const unavailable = render({ ...settings, github: { pending: false, result: { state: "unavailable" } } });
+  assert.match(unavailable, /GITHUB IS UNAVAILABLE/);
+  const disconnectPending = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } } });
+  assert.match(disconnectPending, /RETRY DISCONNECT/);
+  const awaitingConfirmation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "awaiting_confirmation", repositories: [] } } } });
+  assert.match(awaitingConfirmation, /RESET GITHUB ACCESS/);
+  const connecting = render({ ...settings, github: { pending: false, result: { state: "ok", authorization: { connection_id: "c", authorization_url: "https://github.com/login/oauth/authorize", expires_at: 123n } } } });
+  assert.match(connecting, /RESET GITHUB ACCESS/);
+  const expired = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } });
+  assert.match(expired, /RESET GITHUB ACCESS/);
+  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } })); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RESET GITHUB ACCESS").props.onClick(); });
+  assert.equal(calls.at(-1).action, "disconnect");
+  renderer.unmount();
+  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "unavailable" } } })); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RETRY GITHUB ACCESS").props.onClick(); });
+  assert.equal(calls.at(-1).action, "refresh");
+  renderer.unmount();
+  const connected = render({ ...settings, github: { pending: false, result: {
+    state: "ok",
+    status: { connection_id: "c", state: "connected", repositories: [] },
+    installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 },
+  } } });
+  assert.match(connected, /REFRESH ACCESS/);
+  assert.match(connected, /DISCONNECT/);
+  assert.match(connected, /factory-org · available/);
+  assert.match(connected, /href="https:\/\/github.com\/settings\/installations\/7"/);
+  assert.match(connected, /MORE INSTALLATIONS/);
+  assert.equal(connected.includes("javascript:"), false);
+  assert.equal(connected.includes("evil.example"), false);
+  assert.match(disconnected, /GITHUB/);
+
+  const pagerCalls = [];
+  const pageProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => pagerCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "pager", state: "connected", repositories: [] }, installations } } });
+  act(() => { renderer = create(createElement(FactoryConsole, pageProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 }))); });
+  pagerCalls.length = 0;
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "MORE INSTALLATIONS").props.onClick(); });
+  act(() => { renderer.update(createElement(FactoryConsole, pageProps({ installations: [{ id: 8, account: { id: 9, login: "another-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/8", eligibility: "available" }], next_page: 3 }))); });
+  assert.equal(renderer.root.findAllByType("button").some((button) => button.props.children === "PREVIOUS INSTALLATIONS"), true);
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "REFRESH ACCESS").props.onClick(); });
+  assert.deepEqual(pagerCalls, [{ action: "installations", page: 2 }, { action: "refresh" }]);
+  assert.equal(renderer.root.findAllByType("button").some((button) => button.props.children === "PREVIOUS INSTALLATIONS"), false);
+  renderer.unmount();
+
+  const repositoryCalls = [];
+  const statusRepositories = [];
+  const repositoryProps = (repositories, delegated = statusRepositories, installationID = 7) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: installationID, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
+  act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
+  act(() => { renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
+  await act(async () => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 102, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => String(button.props.children).startsWith("DELEGATE SELECTED")).props.onClick(); });
+  assert.deepEqual(repositoryCalls.find((request) => request.action === "delegate"), { action: "delegate", repositories: [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }] });
+  renderer.unmount();
+
+  const delegated = [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }];
+  act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
+  assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, []))); });
+  assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 0);
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 202, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
+  assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 1);
+  renderer.unmount();
+});
+
 test("settings edits project limits as future runs with an explicit unlimited choice", () => {
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, onSaveProjectLimits: () => {} });
   assert.match(markup, /aria-label="Project limits"/);
@@ -1636,6 +1725,24 @@ test("settings asks the daemon for logins on open and links the one the operator
     await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, accountsError: "not_found" })); });
     assert.ok(renderer.root.findAllByProps({ role: "alert" }).length > 0);
     await act(async () => { renderer.unmount(); });
+  } finally {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
+  }
+});
+
+test("settings rereads private GitHub state when the browser reconnects", async () => {
+  const previousAct = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    const calls = [];
+    const props = { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => calls.push(request) };
+    let renderer;
+    await act(async () => { renderer = create(createElement(FactoryConsole, props)); });
+    assert.deepEqual(calls, [{ action: "status" }]);
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "connecting" })); });
+    await act(async () => { renderer.update(createElement(FactoryConsole, { ...props, status: "ready" })); });
+    assert.deepEqual(calls, [{ action: "status" }, { action: "status" }]);
+    renderer.unmount();
   } finally {
     globalThis.IS_REACT_ACT_ENVIRONMENT = previousAct;
   }

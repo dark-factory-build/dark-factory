@@ -1,0 +1,162 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { FactorySettingsCoordinator } from "../dist/src/factory-settings-coordinator.js";
+
+const authorization = { connection_id: "new", authorization_url: "https://github.com/login/oauth/authorize", expires_at: 123n };
+const installation = { id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" };
+
+test("GitHub settings pages stay scoped to the current connection", async () => {
+  const calls = [];
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request);
+      if (request.action === "connect") return { state: "ok", authorization };
+      if (request.action === "confirm") return { state: "ok" };
+      if (request.action === "refresh") return { state: "ok", status: { connection_id: "new", state: "connected", repositories: [] } };
+      if (request.action === "installations") return { state: "ok", installations: { installations: [installation], next_page: null } };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "connect" });
+  assert.equal(coordinator.github.result.installations, undefined);
+  await coordinator.githubConnection({ action: "confirm", code: "0123456789" });
+  assert.deepEqual(calls.map(({ action }) => action), ["connect", "confirm", "refresh", "installations"]);
+  assert.equal(coordinator.github.result.status.connection_id, "new");
+  assert.equal(coordinator.github.result.installations.installations[0].id, 7);
+  await coordinator.githubConnection({ action: "connect" });
+  assert.equal(coordinator.github.result.installations, undefined);
+});
+
+test("pending authorization survives a settings status refresh", async () => {
+  const calls = [];
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request.action);
+      if (request.action === "connect") return { state: "ok", authorization };
+      if (request.action === "status") return { state: "ok", status: { connection_id: "new", state: "pending", repositories: [] } };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "connect" });
+  await coordinator.githubConnection({ action: "status" });
+  assert.deepEqual(calls, ["connect", "status"]);
+  assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
+});
+
+test("a failed confirmation keeps its form and does not refresh away the retry", async () => {
+  const calls = [];
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request.action);
+      if (request.action === "connect") return { state: "ok", authorization };
+      if (request.action === "confirm") return { state: "denied" };
+      if (request.action === "status") return { state: "denied" };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "connect" });
+  await coordinator.githubConnection({ action: "confirm", code: "0123456789" });
+  assert.deepEqual(calls, ["connect", "confirm"]);
+  assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
+  await coordinator.githubConnection({ action: "status" });
+  assert.deepEqual(calls, ["connect", "confirm", "status"]);
+  assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
+});
+
+test("a connected refresh drops discovery pages before reloading installations", async () => {
+  const calls = [];
+  let refreshes = 0;
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request.action);
+      if (request.action === "refresh") { refreshes += 1; return { state: "ok", status: { connection_id: "new", state: "connected", repositories: [] } }; }
+      if (request.action === "installations") return refreshes === 1 ? { state: "ok", installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }] } } : { state: "ok", installations: { installations: [] } };
+      if (request.action === "repositories") return { state: "ok", repositories: { repositories: [{ id: 9, full_name: "factory-org/worker", permissions: { pull: true, push: true, maintain: true, admin: true } }] } };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "refresh" });
+  await coordinator.githubConnection({ action: "repositories", installation_id: 7, page: 1 });
+  await coordinator.githubConnection({ action: "refresh" });
+  assert.deepEqual(calls, ["refresh", "installations", "repositories", "refresh", "installations"]);
+  assert.equal(coordinator.github.result.installations.installations.length, 0);
+  assert.equal(coordinator.github.result.repositories, undefined);
+});
+
+test("clearing GitHub state drops private observations before a replacement session", async () => {
+  const owner = { session: () => ({ capabilities: 1, clientId: "client", async githubConnection() { return { state: "ok", status: { connection_id: "new", state: "connected", repositories: [] } }; } }), ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "status" });
+  assert.equal(coordinator.github.result.status.connection_id, "new");
+  coordinator.clearGitHub();
+  assert.equal(coordinator.github.result, undefined);
+});
+
+test("reopening settings reloads installations from page one", async () => {
+  const calls = [];
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request);
+      if (request.action === "status") return { state: "ok", status: { connection_id: "same", state: "connected", repositories: [] } };
+      if (request.action === "installations") return { state: "ok", installations: { installations: [], next_page: undefined } };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "status" });
+  assert.deepEqual(calls, [{ action: "status" }, { action: "installations", page: 1 }]);
+  assert.equal(coordinator.github.result.installations.installations.length, 0);
+});
+
+test("reopening settings queues status behind a pending installation page", async () => {
+  const calls = [];
+  let release;
+  let installationRequest = 0;
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request);
+      if (request.action === "status") return { state: "ok", status: { connection_id: "same", state: "connected", repositories: [] } };
+      if (request.action === "installations") {
+        installationRequest += 1;
+        if (installationRequest === 1) return await new Promise((resolve) => { release = resolve; });
+        return { state: "ok", installations: { installations: [{ id: 9, account: { id: 10, login: "page-one" }, suspended_at: null, eligibility: "available" }], next_page: undefined } };
+      }
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  const first = coordinator.githubConnection({ action: "status" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await coordinator.githubConnection({ action: "status" });
+  release({ state: "ok", installations: { installations: [{ id: 8, account: { id: 9, login: "page-two" }, suspended_at: null, eligibility: "available" }], next_page: 3 } });
+  await first;
+  assert.deepEqual(calls.map(({ action, page }) => page === undefined ? { action } : { action, page }), [
+    { action: "status" },
+    { action: "installations", page: 1 },
+    { action: "status" },
+    { action: "installations", page: 1 },
+  ]);
+  assert.equal(coordinator.github.result.installations.installations[0].account.login, "page-one");
+});

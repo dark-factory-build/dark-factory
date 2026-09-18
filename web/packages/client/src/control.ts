@@ -136,6 +136,9 @@ export type BrowserClientItem = { client_id: string; capabilities: CapabilityMas
 export type BrowserClientsBody = { clients: BrowserClientItem[]; more: boolean };
 export type BrowserClientRevokeBody = { client_id: string; expected_revision: bigint };
 export type BrowserClientRevokeResultBody = { client_id: string; revision: bigint };
+export type GitHubDelegationBody = { installation_id: number; repository_id: number; repository: string };
+export type GitHubConnectionBody = { action: "connect" | "confirm" | "status" | "refresh" | "disconnect" | "installations" | "repositories" | "delegate"; code?: string; page?: number; installation_id?: number; repositories?: GitHubDelegationBody[] };
+export type GitHubConnectionResultBody = { state: string; authorization?: { connection_id: string; authorization_url: string; expires_at: bigint }; status?: { connection_id: string; state: string; github_user?: { id: number; login: string; type?: string }; repositories: GitHubDelegationBody[] }; installations?: { installations: { id: number; account: { id: number; login: string; type?: string }; suspended_at: string | null; html_url?: string; eligibility: string }[]; next_page?: number }; repositories?: { repositories: { id: number; full_name: string; permissions: { pull: boolean; push: boolean; maintain: boolean; admin: boolean } }[]; next_page?: number } };
 export type TerminalTargetGetBody = { agent_id: string; expected_agent_revision: bigint; expected_head: bigint };
 export type TerminalTargetDescriptor = { run_id: string; session_id: string; run_revision: bigint; session_revision: bigint };
 export type TerminalTargetBody = { agent_id: string; agent_revision: bigint; head: bigint; target: TerminalTargetDescriptor | null };
@@ -226,6 +229,7 @@ export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; b
   | { type: "ACCOUNT_UPDATE_RESULT"; id: string; body: AccountUpdateResultBody }
   | { type: "BROWSER_CLIENTS"; id: string; body: BrowserClientsBody }
   | { type: "BROWSER_CLIENT_REVOKE_RESULT"; id: string; body: BrowserClientRevokeResultBody }
+  | { type: "GITHUB_CONNECTION_RESULT"; id: string; body: GitHubConnectionResultBody }
   | { type: "TERMINAL_TARGET"; id: string; body: TerminalTargetBody }
   | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
@@ -251,6 +255,7 @@ export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: Pr
   | { type: "ACCOUNT_UPDATE"; id: string; body: AccountUpdateBody }
   | { type: "BROWSER_CLIENTS_GET"; id: string; body: BrowserClientsGetBody }
   | { type: "BROWSER_CLIENT_REVOKE"; id: string; body: BrowserClientRevokeBody }
+  | { type: "GITHUB_CONNECTION"; id: string; body: GitHubConnectionBody }
   | { type: "TERMINAL_TARGET_GET"; id: string; body: TerminalTargetGetBody }
   | { type: "REMOTE_INVITE"; id: string; body: RemoteInviteBody }
   | { type: "PUSH_SUBSCRIBE"; id: string; body: PushSubscribeBody }
@@ -489,6 +494,13 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "BROWSER_CLIENTS": requireKeys(body, ["clients", "more"], wire); { if (!Array.isArray(body.clients) || body.clients.length > MAX_ARRAY_ITEMS || typeof body.more !== "boolean") malformed(); return { clients: body.clients.map((item) => { if (!isObject(item)) malformed(); const client = item; requireKeys(client, ["client_id", "capabilities", "revision", "created_at_ms"], wire); return { client_id: dynamicID(client.client_id), capabilities: capabilities(client.capabilities), revision: decimal(client.revision, wire, true), created_at_ms: decimal(client.created_at_ms, wire) }; }), more: body.more }; }
     case "BROWSER_CLIENT_REVOKE": requireKeys(body, ["client_id", "expected_revision"], wire); return { client_id: dynamicID(body.client_id), expected_revision: decimal(body.expected_revision, wire, true) };
     case "BROWSER_CLIENT_REVOKE_RESULT": requireKeys(body, ["client_id", "revision"], wire); return { client_id: dynamicID(body.client_id), revision: decimal(body.revision, wire, true) };
+    case "GITHUB_CONNECTION": {
+      requireKeys(body, ["action"], wire, ["code", "page", "installation_id", "repositories"]);
+      if (!("connect status refresh disconnect confirm installations repositories delegate".split(" ").includes(body.action as string)) || body.action === "confirm" && (typeof body.code !== "string" || !/^[0-9A-F]{10}$/.test(body.code)) || body.action !== "confirm" && present(body, "code") || present(body, "page") && (!Number.isSafeInteger(body.page) || (body.page as number) < 1 || (body.page as number) > 1000) || present(body, "installation_id") && (!Number.isSafeInteger(body.installation_id) || (body.installation_id as number) < 1) || body.action === "repositories" && (!present(body, "installation_id") || !present(body, "page")) || body.action !== "repositories" && present(body, "installation_id") || body.action !== "installations" && body.action !== "repositories" && present(body, "page") || body.action !== "delegate" && present(body, "repositories")) malformed();
+      if (present(body, "repositories")) { if (!Array.isArray(body.repositories) || body.repositories.length > 100) malformed(); for (const item of body.repositories) { if (!isObject(item)) malformed(); requireKeys(item, ["installation_id", "repository_id", "repository"], wire); integer(item.installation_id, 1, Number.MAX_SAFE_INTEGER); integer(item.repository_id, 1, Number.MAX_SAFE_INTEGER); const repository = boundedText(item.repository, 3, 140); if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9_.-]{1,100}$/.test(repository)) malformed(); } }
+      return { action: body.action, ...(present(body, "code") ? { code: body.code } : {}), ...(present(body, "page") ? { page: body.page } : {}), ...(present(body, "installation_id") ? { installation_id: body.installation_id } : {}), ...(present(body, "repositories") ? { repositories: body.repositories } : {}) } as GitHubConnectionBody;
+    }
+    case "GITHUB_CONNECTION_RESULT": return githubConnectionResult(body, wire);
     case "TERMINAL_TARGET_GET": requireKeys(body, ["agent_id", "expected_agent_revision", "expected_head"], wire); return { agent_id: dynamicID(body.agent_id), expected_agent_revision: decimal(body.expected_agent_revision, wire, true), expected_head: decimal(body.expected_head, wire) };
     case "TERMINAL_TARGET": requireKeys(body, ["agent_id", "agent_revision", "head", "target"], wire); { const target = body.target === null ? null : terminalTargetDescriptor(body.target, wire); return { agent_id: dynamicID(body.agent_id), agent_revision: decimal(body.agent_revision, wire, true), head: decimal(body.head, wire), target }; }
     case "TERMINAL_ATTACH": requireKeys(body, ["run_id", "session_id", "expected_run_revision", "expected_session_revision", "after_sequence"], wire); return { run_id: dynamicID(body.run_id), session_id: dynamicID(body.session_id), expected_run_revision: decimal(body.expected_run_revision, wire, true), expected_session_revision: decimal(body.expected_session_revision, wire, true), after_sequence: decimal(body.after_sequence, wire) };
@@ -510,6 +522,93 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "PUSH_SUBSCRIBE_RESULT": requireKeys(body, [], wire); return {};
     case "REMOTE_INVITE_RESULT": requireKeys(body, ["link", "expires_at_ms", "svg"], wire); { const link = boundedText(body.link, 1, MAX_REMOTE_INVITE_LINK_BYTES); const svg = boundedText(body.svg, 1, MAX_REMOTE_INVITE_SVG_BYTES); if (!link.startsWith(REMOTE_INVITE_LINK_PREFIX) || /[\u0000-\u001f\u007f]/.test(link) || !svg.startsWith("<svg")) malformed(); return { link, expires_at_ms: decimal(body.expires_at_ms, wire, true), svg }; }
     case "ERROR": requireKeys(body, ["code", "retryable"], wire); if (typeof body.code !== "string" || !(ERROR_CODES as readonly string[]).includes(body.code) || typeof body.retryable !== "boolean") malformed(); return { code: body.code as ErrorCode, retryable: body.retryable };
+  }
+}
+
+function githubConnectionResult(body: Record<string, unknown>, wire: boolean): GitHubConnectionResultBody {
+  requireKeys(body, ["state"], wire, ["authorization", "status", "installations", "repositories"]);
+  const result: GitHubConnectionResultBody = { state: boundedText(body.state, 1, 64) };
+  if (present(body, "authorization")) {
+    if (!isObject(body.authorization)) malformed();
+    requireKeys(body.authorization, ["connection_id", "authorization_url", "expires_at"], wire);
+    const authorization_url = boundedText(body.authorization.authorization_url, 1, 2048);
+    if (!githubAuthorizationURL(authorization_url)) malformed();
+    result.authorization = { connection_id: boundedText(body.authorization.connection_id, 1, 128), authorization_url, expires_at: decimal(body.authorization.expires_at, wire) };
+  }
+  if (present(body, "status")) {
+    if (!isObject(body.status)) malformed();
+    requireKeys(body.status, ["connection_id", "state", "repositories"], wire, ["github_user"]);
+    const repositories = githubDelegations(body.status.repositories, wire, 100);
+    const state = boundedText(body.status.state, 1, 64);
+    const status: GitHubConnectionResultBody["status"] = { connection_id: boundedText(body.status.connection_id, state === "disconnected" || state === "disconnect_pending" ? 0 : 1, 128), state, repositories };
+    if (present(body.status, "github_user")) status.github_user = githubUser(body.status.github_user, wire);
+    result.status = status;
+  }
+  if (present(body, "installations")) {
+    if (!isObject(body.installations)) malformed();
+    requireKeys(body.installations, ["installations"], wire, ["next_page"]);
+    if (!Array.isArray(body.installations.installations) || body.installations.installations.length > MAX_ARRAY_ITEMS) malformed();
+    const next_page = present(body.installations, "next_page") && body.installations.next_page !== null ? integer(body.installations.next_page, 1, 1000) : undefined;
+    result.installations = { installations: body.installations.installations.map((item) => githubInstallation(item, wire)), ...(next_page === undefined ? {} : { next_page }) };
+  }
+  if (present(body, "repositories")) {
+    if (!isObject(body.repositories)) malformed();
+    requireKeys(body.repositories, ["repositories"], wire, ["next_page"]);
+    if (!Array.isArray(body.repositories.repositories) || body.repositories.repositories.length > MAX_ARRAY_ITEMS) malformed();
+    const next_page = present(body.repositories, "next_page") && body.repositories.next_page !== null ? integer(body.repositories.next_page, 1, 1000) : undefined;
+    result.repositories = { repositories: body.repositories.repositories.map((item) => githubRepository(item, wire)), ...(next_page === undefined ? {} : { next_page }) };
+  }
+  return result;
+}
+
+function githubUser(value: unknown, wire: boolean): { id: number; login: string; type?: string } {
+  if (!isObject(value)) malformed();
+  requireKeys(value, ["id", "login"], wire, ["type"]);
+  const result: { id: number; login: string; type?: string } = { id: integer(value.id, 1, Number.MAX_SAFE_INTEGER), login: boundedText(value.login, 1, 128) };
+  if (present(value, "type")) result.type = boundedText(value.type, 1, 32);
+  return result;
+}
+
+function githubDelegations(value: unknown, wire: boolean, maximum: number): GitHubDelegationBody[] {
+  if (!Array.isArray(value) || value.length > maximum) malformed();
+  return value.map((item) => {
+    if (!isObject(item)) malformed();
+    requireKeys(item, ["installation_id", "repository_id", "repository"], wire);
+    const repository = boundedText(item.repository, 3, 140);
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9_.-]{1,100}$/.test(repository)) malformed();
+    return { installation_id: integer(item.installation_id, 1, Number.MAX_SAFE_INTEGER), repository_id: integer(item.repository_id, 1, Number.MAX_SAFE_INTEGER), repository };
+  });
+}
+
+type GitHubInstallationBody = NonNullable<GitHubConnectionResultBody["installations"]>["installations"][number];
+type GitHubRepositoryBody = NonNullable<GitHubConnectionResultBody["repositories"]>["repositories"][number];
+
+function githubInstallation(value: unknown, wire: boolean): GitHubInstallationBody {
+  if (!isObject(value)) malformed();
+  requireKeys(value, ["id", "account", "suspended_at", "eligibility"], wire, ["html_url"]);
+  const result = { id: integer(value.id, 1, Number.MAX_SAFE_INTEGER), account: githubUser(value.account, wire), suspended_at: value.suspended_at === null ? null : boundedText(value.suspended_at, 1, 128), eligibility: boundedText(value.eligibility, 0, 64) } as GitHubInstallationBody;
+  if (present(value, "html_url")) result.html_url = boundedText(value.html_url, 1, 2048);
+  return result;
+}
+
+function githubRepository(value: unknown, wire: boolean): GitHubRepositoryBody {
+  if (!isObject(value)) malformed();
+  requireKeys(value, ["id", "full_name", "permissions"], wire);
+  if (!isObject(value.permissions)) malformed();
+  requireKeys(value.permissions, ["pull", "push", "maintain", "admin"], wire);
+  if (![value.permissions.pull, value.permissions.push, value.permissions.maintain, value.permissions.admin].every((item) => typeof item === "boolean")) malformed();
+  const permissions = { pull: value.permissions.pull as boolean, push: value.permissions.push as boolean, maintain: value.permissions.maintain as boolean, admin: value.permissions.admin as boolean };
+  const full_name = boundedText(value.full_name, 3, 140);
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,38})?\/[A-Za-z0-9_.-]{1,100}$/.test(full_name)) malformed();
+  return { id: integer(value.id, 1, Number.MAX_SAFE_INTEGER), full_name, permissions };
+}
+
+function githubAuthorizationURL(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.pathname === "/login/oauth/authorize";
+  } catch {
+    return false;
   }
 }
 

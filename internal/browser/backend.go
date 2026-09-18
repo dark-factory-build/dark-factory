@@ -227,6 +227,13 @@ type ConsoleBackend interface {
 	RevokeBrowserClient(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.BrowserClientRevoke) (browserprotocol.BrowserClientRevokeResult, error)
 }
 
+// GitHubBackend is kept separate so existing console adapters cannot
+// accidentally expose the operator's private connection authority.
+type GitHubBackend interface {
+	Backend
+	GitHubConnection(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.GitHubConnection) (browserprotocol.GitHubConnectionResult, error)
+}
+
 // TerminalBackend is the optional effect half of browser v1. Keeping it
 // separate preserves the small state backend seam used by bootstrap/tests;
 // production daemon backends implement both interfaces.

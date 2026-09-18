@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { DiscoveredAccount, AccountItem, AgentItem, ProjectItem, RepositoryMutation, RepositoryView, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView } from "@dark-factory/client";
+import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, ProjectItem, RepositoryMutation, RepositoryView, SpriteAppearance, TaskHistoryView, TaskItem, TaskListView } from "@dark-factory/client";
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
@@ -53,6 +53,7 @@ export type FactoryConsoleProps = FactoryAppSnapshot & {
   onLoadRepositories?: (projectId: string) => void;
   onMutateRepository?: (request: RepositoryMutation) => void;
   onCreateProject?: (request: { name: string; root: string }) => void;
+  onGitHub?: (request: GitHubConnectionBody) => void;
   /** The loopback address this console is served from. */
   address?: string;
   /** Overrides the pairing surface the settings modal mounts by default. */
@@ -143,6 +144,7 @@ export function FactoryConsole({
   accounts,
   accountsPending,
   accountsError,
+  github,
   onLoadAccounts,
   onLinkAccount,
   onUpdateAccount,
@@ -152,6 +154,7 @@ export function FactoryConsole({
   onLoadRepositories,
   onMutateRepository,
   onCreateProject,
+  onGitHub,
   address = BROWSER_HOST,
   pairing,
   terminalContent,
@@ -318,6 +321,8 @@ export function FactoryConsole({
           onLoadRepositories={onLoadRepositories}
           onMutateRepository={onMutateRepository}
           onCreateProject={onCreateProject}
+          github={github}
+          onGitHub={onGitHub}
           edit={edit}
           onSaveProjectLimits={onSaveProjectLimits}
           pairing={pairing ?? (!remoteInviteAllowed ? undefined : (

@@ -691,6 +691,17 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeBrowserClientRevokeResult(frame.ID, result)
+	case browserprotocol.GitHubConnection:
+		if current.server.githubBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.githubBackend.GitHubConnection(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		payload, err = browserprotocol.EncodeGitHubConnectionResult(frame.ID, result)
 	case browserprotocol.RemoteInvite:
 		if current.server.taskBackend == nil {
 			err = ErrUnauthorized

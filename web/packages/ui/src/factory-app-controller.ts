@@ -33,7 +33,7 @@ import {
   type TopologyView,
 } from "@dark-factory/client";
 import { agentCurrentTask, type RunPathSample } from "./console-view.js";
-import { FactorySettingsCoordinator, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
+import { FactorySettingsCoordinator, type FactoryGitHubView, type FactoryRemoteInvite } from "./factory-settings-coordinator.js";
 import { HumanRequestFlow, type HumanRequestPhase } from "./human-request-flow.js";
 import { MAX_PENDING_INPUT_BYTES, TerminalController, type TerminalControllerSnapshot, type TerminalErrorSource, type TerminalSurface } from "./terminal-controller.js";
 
@@ -148,6 +148,7 @@ export type FactoryAppSnapshot = Readonly<{
   repositories?: ReadonlyMap<string, readonly RepositoryView[]>;
   repositoryPending?: ReadonlySet<string>;
   repositoryErrors?: ReadonlyMap<string, string>;
+  github?: FactoryGitHubView;
 }>;
 
 export type FactoryAppStatus =
@@ -157,7 +158,7 @@ export type FactoryAppStatus =
 type HumanSession = Pick<BrowserSession, "getHumanRequestDetail" | "replyHumanRequest" | "cancelHumanRequest">;
 type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTerminal" | "close">;
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
-type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "clientId">;
+type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
 type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
@@ -788,6 +789,8 @@ export class FactoryAppController {
 
   createProject(request: { name: string; root: string }): Promise<void> { return this.#settings.createProject(request); }
 
+  githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> { return this.#settings.githubConnection(request); }
+
   loadDevices(): Promise<void> { return this.#settings.loadDevices(); }
 
   revokeDevice(request: { clientId: string; expectedRevision: bigint }): Promise<void> { return this.#settings.revokeDevice(request); }
@@ -904,6 +907,9 @@ export class FactoryAppController {
       this.#human.clear(true);
       // A reconnect must not show a code minted for the connection that dropped.
       this.#settings.clearRemoteInvite();
+      // GitHub is private session state; a replacement browser session must
+      // reread it rather than displaying observations from the old socket.
+      this.#settings.clearGitHub();
     }
     // A wire-level state restart resnapshots on the same authenticated socket;
     // exact terminal discovery and handles remain owned by that session.
@@ -1416,6 +1422,7 @@ export class FactoryAppController {
       repositories: this.#settings.repositories,
       repositoryPending: this.#settings.repositoryPending,
       repositoryErrors: this.#settings.repositoryErrors,
+      github: this.#settings.github,
       selectedAgent: this.#selectedAgent === undefined ? undefined : {
         id: this.#selectedAgent.agent.id,
         name: this.#selectedAgent.agent.name,
