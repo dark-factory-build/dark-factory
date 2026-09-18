@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"path"
 	"sort"
 	"sync"
 	"time"
@@ -835,6 +836,24 @@ func (backend *browserBackend) RunPaths(ctx context.Context, rawClient [browserp
 	}
 	result := browserprotocol.RunPaths{AgentID: request.AgentID, Paths: paths}
 	if runID != (kernel.RunID{}) {
+		run, found, err := backend.store.Run(ctx, runID)
+		if err != nil || !found {
+			return browserprotocol.RunPaths{}, browser.ErrStale
+		}
+		repository, found, err := backend.store.TaskRepository(ctx, run.TaskID)
+		if err != nil || !found {
+			return browserprotocol.RunPaths{}, browser.ErrStale
+		}
+		repositories, err := backend.store.ProjectRepositories(ctx, run.ProjectID)
+		if err != nil {
+			return browserprotocol.RunPaths{}, mapBrowserError(err)
+		}
+		if len(repositories) > 1 {
+			result.Paths = make([]string, len(paths))
+			for index, relative := range paths {
+				result.Paths[index] = path.Join(repository.ID.String(), relative)
+			}
+		}
 		result.RunID = runID.String()
 	}
 	return result, nil

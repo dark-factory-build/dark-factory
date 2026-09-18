@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -77,6 +78,54 @@ func TestProjectTopologyUsesMemoryFreshnessWithoutDiskCache(t *testing.T) {
 	missing, _ := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x52}, kernel.IDBytes))
 	if _, err := daemon.ProjectTopology(ctx, missing); !errors.Is(err, kernel.ErrNotFound) {
 		t.Fatalf("missing project error = %v", err)
+	}
+}
+
+func TestProjectTopologyKeepsRepositoryPathsDistinctAndInvalidatesConfiguration(t *testing.T) {
+	ctx := context.Background()
+	at, _ := kernel.NewUnixMillis(1)
+	store, err := createTestStore(ctx, filepath.Join(t.TempDir(), "kernel.sqlite"), kernel.FactoryConfig{Capacity: 1}, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	daemon, err := newDaemon(store, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := kernel.ProjectIDFromBytes(bytes.Repeat([]byte{0x61}, kernel.IDBytes))
+	firstRoot, secondRoot := t.TempDir(), t.TempDir()
+	for _, root := range []string{firstRoot, secondRoot} {
+		writeTopologyFixture(t, root, "src/code.go", "package src\n")
+	}
+	if _, err := store.CreateProject(ctx, kernel.NewProject{ID: id, Name: "two repositories", Root: firstRoot}, at); err != nil {
+		t.Fatal(err)
+	}
+	before, err := daemon.ProjectTopology(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := kernel.RepositoryIDFromBytes(bytes.Repeat([]byte{0x62}, kernel.IDBytes))
+	if _, err := store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: other, ProjectID: id, Name: "second", Root: secondRoot, BaseRef: "release"}, at); err != nil {
+		t.Fatal(err)
+	}
+	after, err := daemon.ProjectTopology(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Digest == before.Digest {
+		t.Fatal("configuration change reused old cache")
+	}
+	paths := map[string]bool{}
+	for _, node := range after.Nodes {
+		paths[node.RelativePath] = true
+	}
+	if !paths[id.String()+"/src"] || !paths[other.String()+"/src"] {
+		t.Fatalf("repository paths conflated: %#v", paths)
+	}
+	wire := projectTopology(id.String(), after)
+	if _, err := browserprotocol.EncodeTopology("repositories", wire); err != nil {
+		t.Fatal(err)
 	}
 }
 
