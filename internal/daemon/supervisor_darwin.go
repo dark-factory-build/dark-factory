@@ -288,11 +288,9 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	if run.Provider != kernel.ProviderShell && len(rawProviderTask) == 0 {
 		rawProviderTask = []byte(task.Title)
 	}
-	if run.Provider != kernel.ProviderCodex {
-		rawProviderTask, err = providerTaskWithContinuationContext(run.Provider, rawProviderTask, run.ContinuationContexts)
-		if err != nil {
-			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
-		}
+	rawProviderTask, err = providerTaskForContinuationLaunch(run.Provider, rawProviderTask, run.ContinuationContexts)
+	if err != nil {
+		return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSpawn, err)
 	}
 	delivery, preparedTask, err := provider.PrepareTask(run.Provider, rawProviderTask)
 	if err != nil {

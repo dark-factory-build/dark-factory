@@ -7,16 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"unicode/utf8"
 )
-
-func TestContinuationTaskTextCapsCodexAtProviderLimit(t *testing.T) {
-	context := ContinuationContext{ConditionKind: ConditionHumanRequest, ConditionRevision: mustRevision(t, 1), ResolutionDetail: strings.Repeat("答", 4096)}
-	text := ContinuationTaskText(ProviderCodex, strings.Repeat("x", 7168), []ContinuationContext{context})
-	if len(text) > 8192 || !utf8.ValidString(text) {
-		t.Fatalf("bounded continuation task length=%d valid=%v", len(text), utf8.ValidString(text))
-	}
-}
 
 func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
 	ctx := context.Background()
@@ -41,6 +32,55 @@ func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
 	read, found, err := store.Continuation(ctx, continuation)
 	if err != nil || !found || read.State != ContinuationWaiting || read.ConditionRevision != request.Revision {
 		t.Fatalf("atomic question/yield continuation: %+v found=%v err=%v", read, found, err)
+	}
+}
+
+func TestYieldedHumanReplyPersistsFullSchemaBound(t *testing.T) {
+	for _, size := range []int{4097, MaxHumanRequestReplyBytes} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			ctx := context.Background()
+			store, run, keys, path := runningWorkerRunWithPath(t)
+			request, err := store.CreateHumanQuestionAndYieldForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{IdempotencyKey: humanKey(byte(size % 251)), QuestionText: "full reply"}, mustTime(t, 40))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var condition ContinuationConditionID
+			copy(condition[:], request.ID.Bytes())
+			continuationID := continuationForRequest(t, store, run, condition)
+			reply := strings.Repeat("r", size)
+			deliveryKey := humanKey(byte(size%251 + 1))
+			deliveryID, err := HumanRequestDeliveryIDFromBytes(deliveryKey[:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := store.beginValidatedWrite(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			continuation, found, err := continuationByID(ctx, tx.connection, continuationID)
+			if err != nil || !found {
+				t.Fatalf("read yielded continuation: found=%v err=%v", found, err)
+			}
+			if err := resolveHumanContinuationOnConnection(ctx, tx, request, continuation, deliveryID, reply, mustTime(t, 50)); err != nil {
+				t.Fatalf("resolve %d-byte reply: %v", size, err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			tx.Close()
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			persisted, found, err := reopened.Continuation(ctx, continuationID)
+			if err != nil || !found || persisted.ResolutionDetail != reply {
+				t.Fatalf("persisted %d-byte reply: len=%d found=%v err=%v", size, len(persisted.ResolutionDetail), found, err)
+			}
+		})
 	}
 }
 

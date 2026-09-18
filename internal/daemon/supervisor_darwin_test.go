@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -144,9 +145,31 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	copy(condition[:], supervisorIDBytes(240))
 	revision, _ := kernel.NewRevision(1)
 	task := bytes.Repeat([]byte{'x'}, runner.MaxCodexTaskBytes)
-	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}})
-	if err != nil || len(framed) <= len(task) || !bytes.Equal(framed[:len(task)], task) || !bytes.Contains(framed, []byte("resolution=continue")) {
-		t.Fatalf("maximum Codex continuation framing: bytes=%d err=%v", len(framed), err)
+	contexts := []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}}
+	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
+	metadata := []byte("condition=human_request condition_id=" + hex.EncodeToString(condition.Bytes()) + " condition_revision=1 context_digest=" + strings.Repeat("0", 64) + " resolution=continue")
+	if err != nil || len(framed) <= len(task) || !bytes.Equal(framed[:len(task)], task) || bytes.Count(framed, []byte("Factory continuation context:")) != 1 || !bytes.Contains(framed, metadata) {
+		t.Fatalf("maximum Codex API continuation framing: bytes=%d err=%v", len(framed), err)
+	}
+	launchTask, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, task, contexts)
+	if err != nil || string(launchTask) != continuationTaskFetchInstruction {
+		t.Fatalf("maximum Codex launch task = %q, %v", launchTask, err)
+	}
+	if _, _, err := provider.PrepareTask(kernel.ProviderCodex, launchTask); err != nil {
+		t.Fatalf("bounded Codex continuation launch: %v", err)
+	}
+	short := []byte("continue the exact task")
+	want, err := providerTaskWithContinuationContext(kernel.ProviderClaudeCode, short, contexts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := providerTaskForContinuationLaunch(kernel.ProviderClaudeCode, short, contexts)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("short native continuation changed: %q, %v", got, err)
+	}
+	shell, err := providerTaskForContinuationLaunch(kernel.ProviderShell, []byte("printf ok"), contexts)
+	if err != nil || !bytes.Contains(shell, []byte("# Factory continuation context:")) || !bytes.Contains(shell, []byte("# condition=")) {
+		t.Fatalf("shell continuation comments = %q, %v", shell, err)
 	}
 }
 
