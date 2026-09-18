@@ -1038,6 +1038,27 @@ type CreateProjectInput struct {
 	Root string `json:"root"`
 }
 
+// ProjectRepositoryInput is private operator configuration. Root is never
+// included in dashboard snapshots or browser protocol messages.
+type ProjectRepositoryInput struct {
+	Action           string `json:"action"`
+	ID               string `json:"id,omitempty"`
+	ProjectID        string `json:"project_id,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Root             string `json:"root,omitempty"`
+	BaseRef          string `json:"base_ref,omitempty"`
+	ExpectedRevision uint64 `json:"expected_revision,omitempty"`
+	Enabled          *bool  `json:"enabled,omitempty"`
+}
+type ProjectRepository struct {
+	ID, ProjectID, Name, Root, BaseRef string
+	Enabled, Default                   bool
+	Revision                           uint64
+}
+type ProjectRepositories struct {
+	Repositories []ProjectRepository `json:"repositories"`
+}
+
 type ProjectLimitsInput struct {
 	ProjectID        string `json:"project_id"`
 	ExpectedRevision uint64 `json:"expected_revision"`

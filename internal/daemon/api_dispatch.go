@@ -194,6 +194,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.humanReplyOperator(ctx, call)
 	case api.CallCreateProject:
 		return daemon.createProject(ctx, call)
+	case api.CallProjectRepository:
+		return daemon.projectRepository(ctx, call)
 	case api.CallProjectLimits:
 		return daemon.setProjectLimits(ctx, call)
 	case api.CallCreateAgent:
@@ -1043,6 +1045,89 @@ func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Repl
 		return newErrorReply(remoteErrorCode(err))
 	}
 	return daemon.mutation(ctx, project.Revision)
+}
+
+func repositoryDTO(value kernel.ProjectRepository) api.ProjectRepository {
+	return api.ProjectRepository{ID: value.ID.String(), ProjectID: value.ProjectID.String(), Name: value.Name, Root: value.Root, BaseRef: value.BaseRef, Enabled: value.Enabled, Default: value.Default, Revision: uint64(value.Revision.Int64())}
+}
+func (daemon *Daemon) projectRepository(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.ProjectRepositoryInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	parseRepo := func() (kernel.RepositoryID, bool) {
+		raw, err := parseID(input.ID)
+		if err != nil {
+			return kernel.RepositoryID{}, false
+		}
+		value, err := kernel.RepositoryIDFromBytes(raw)
+		return value, err == nil
+	}
+	parseProject := func() (kernel.ProjectID, bool) {
+		value, err := parseProjectID(input.ProjectID)
+		return value, err == nil
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	switch input.Action {
+	case "list":
+		project, valid := parseProject()
+		if !valid {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		values, err := daemon.store.ProjectRepositories(ctx, project)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		result := api.ProjectRepositories{Repositories: make([]api.ProjectRepository, 0, len(values))}
+		for _, value := range values {
+			result.Repositories = append(result.Repositories, repositoryDTO(value))
+		}
+		return api.NewContentReply(result)
+	case "add":
+		id, valid := parseRepo()
+		project, projectValid := parseProject()
+		if !valid || !projectValid {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		value, err := daemon.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: id, ProjectID: project, Name: input.Name, Root: input.Root, BaseRef: input.BaseRef}, at)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(repositoryDTO(value))
+	case "name", "base", "default", "enabled", "remove":
+		id, valid := parseRepo()
+		expected, revisionErr := kernel.NewRevision(int64(input.ExpectedRevision))
+		if !valid || revisionErr != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		var value kernel.ProjectRepository
+		switch input.Action {
+		case "name":
+			value, err = daemon.store.UpdateProjectRepositoryName(ctx, id, expected, input.Name, at)
+		case "base":
+			value, err = daemon.store.UpdateProjectRepositoryBase(ctx, id, expected, input.BaseRef, at)
+		case "default":
+			value, err = daemon.store.SetProjectRepositoryDefault(ctx, id, expected, at)
+		case "enabled":
+			if input.Enabled == nil {
+				return newErrorReply(api.RemoteInvalidRequest)
+			}
+			value, err = daemon.store.SetProjectRepositoryEnabled(ctx, id, expected, *input.Enabled, at)
+		case "remove":
+			err = daemon.store.RemoveProjectRepository(ctx, id, expected)
+		}
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		if input.Action == "remove" {
+			return api.NewContentReply(struct{}{})
+		}
+		return api.NewContentReply(repositoryDTO(value))
+	}
+	return newErrorReply(api.RemoteInvalidRequest)
 }
 
 func (daemon *Daemon) setProjectLimits(ctx context.Context, call api.Call) api.Reply {

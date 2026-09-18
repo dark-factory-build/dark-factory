@@ -153,6 +153,7 @@ const (
 	commandServiceUninstall
 	commandProjectCreate
 	commandProjectLimits
+	commandProjectRepository
 	commandAgentCreate
 	commandAgentIdlePolicy
 	commandAccountsDiscover
@@ -1333,6 +1334,66 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 }
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
+	if len(args) >= 3 && args[0] == "project" && args[1] == "repository" {
+		action := args[2]
+		if action != "list" && action != "add" && action != "name" && action != "base" && action != "default" && action != "enable" && action != "disable" && action != "remove" {
+			return attemptCommand{}, false, false
+		}
+		command := attemptCommand{kind: commandProjectRepository, provider: action}
+		if (len(args)-3)%2 != 0 {
+			return attemptCommand{}, false, false
+		}
+		for i := 3; i < len(args); i += 2 {
+			key, value := args[i], args[i+1]
+			switch key {
+			case "--project":
+				if validHumanRequestKey(value) {
+					command.project = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--id":
+				if validHumanRequestKey(value) {
+					command.repository = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--name":
+				if validOperatorText(value, 1, 128) {
+					command.name = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--root":
+				if validHomeArg(value) {
+					command.root = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--base":
+				if validOperatorText(value, 1, 256) {
+					command.body = value
+				} else {
+					return attemptCommand{}, false, false
+				}
+			case "--revision":
+				n, ok := parseRevision(value)
+				if !ok {
+					return attemptCommand{}, false, false
+				}
+				command.expectedRevision = n
+			default:
+				return attemptCommand{}, false, false
+			}
+		}
+		if action == "list" {
+			return command, false, command.project != ""
+		}
+		if action == "add" {
+			return command, false, command.repository != "" && command.project != "" && command.name != "" && command.root != "" && command.body != ""
+		}
+		return command, false, command.repository != "" && command.expectedRevision != 0
+	}
 	if len(args) >= 1 && args[0] == "worker" {
 		if len(args) == 4 && args[1] == "operation" && args[2] == "--operation-id" && validHumanRequestKey(args[3]) {
 			return attemptCommand{kind: commandWorkerOperation, operationID: args[3]}, false, true
@@ -2116,6 +2177,34 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds})
 		if callErr != nil {
 			return writeWebFailure(stderr, "project limits", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandProjectRepository:
+		if command.provider == "list" {
+			result, err := client.ProjectRepositories(callContext, command.project)
+			if err != nil {
+				return writeWebFailure(stderr, "project repository list", err)
+			}
+			return writeJSON(stdout, result)
+		}
+		if command.provider == "remove" {
+			if err := client.RemoveProjectRepository(callContext, command.repository, command.expectedRevision); err != nil {
+				return writeWebFailure(stderr, "project repository remove", err)
+			}
+			return writeJSON(stdout, struct{}{})
+		}
+		input := api.ProjectRepositoryInput{Action: command.provider, ID: command.repository, ProjectID: command.project, Name: command.name, Root: command.root, BaseRef: command.body, ExpectedRevision: command.expectedRevision}
+		if command.provider == "enable" {
+			value := true
+			input.Enabled = &value
+		}
+		if command.provider == "disable" {
+			value := false
+			input.Enabled = &value
+		}
+		result, err := client.ProjectRepository(callContext, input)
+		if err != nil {
+			return writeWebFailure(stderr, "project repository", err)
 		}
 		return writeJSON(stdout, result)
 	case commandAgentCreate:
