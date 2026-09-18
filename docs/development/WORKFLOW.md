@@ -249,14 +249,12 @@ no lease grant and an explicit startup diagnostic; required CI remains blocked.
 
 ## Cutover to worktree Changes
 
-Installing the private-Git write fence requires a full worker drain: disable
-dispatch and wait for all old attempts to reach terminal before installation.
-Runner handover does not retrofit a sandbox onto an existing provider. Retained
-canonical linked worktrees are isolated only at their next quiescent population;
-their source files, original Git registration and canonical branch remain intact.
-Do not prune these original registrations or delete private administration as
-part of installation. A conflicting Git lock or unsupported configuration fails
-closed for operator inspection; never reset source to unblock migration.
+Independent Git administration applies only to new Changes. Retained linked
+worktrees keep their source, Gitfile, index and refs in the original layout,
+including on retry. Legacy canonical Changes are not independent; do not
+migrate or prune them as part of installation. Use each exact source receipt's
+`git_directory` for review and publication. Provider permissions are unchanged;
+independent Git state is not an enforced filesystem boundary.
 
 The worktree runtime changes the SQLite schema (`changes` gains `head_commit`
 and loses the manifest facts) and reads every retained Change through Git.

@@ -68,6 +68,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 
 	home := filepath.Join(config.RuntimePath, HomeName)
 	var cwd *os.File
+	gitDirectory := config.GitCommonDir
 	publishedPath := filepath.Join(config.ChangeParent, config.FinalName)
 	if config.Role == kernel.RoleOrchestrator {
 		// An orchestrator has no Change. It walks the same checkpoints with
@@ -85,7 +86,7 @@ func runProvider(ctx context.Context) (resultErr error) {
 		publishedPath = home
 		cwd, err = authority.openHome(ctx, runtimeDir)
 	} else {
-		cwd, err = openChangeDirectory(ctx, control, config, authority)
+		cwd, gitDirectory, err = openChangeDirectory(ctx, control, config, authority)
 	}
 	if err != nil {
 		return err
@@ -108,12 +109,8 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
-	// Workers write only their private administration. Overseers retain
-	// read access to the project's metadata, including settled private heads.
-	gitDirectory := config.GitCommonDir
-	if config.Role == kernel.RoleWorker {
-		gitDirectory = change.GitDirectoryForChange(config.RepositoryRoot, publishedPath)
-	}
+	// Grant the verified worktree's actual administration. New Changes have
+	// private Git state; retained canonical worktrees keep their existing layout.
 	runtimePaths, err = runtimePaths.WithGitCommonDirectory(gitDirectory, config.Role == kernel.RoleWorker)
 	if err != nil {
 		_ = cwd.Close()
@@ -156,12 +153,6 @@ func runProvider(ctx context.Context) (resultErr error) {
 	if err != nil {
 		_ = cwd.Close()
 		return err
-	}
-	if config.Role == kernel.RoleWorker {
-		if err := spec.ProtectSourceWrites(config.RepositoryRoot, config.ChangeParent, gitDirectory, config.LocalCILeaseDir); err != nil {
-			_ = cwd.Close()
-			return err
-		}
 	}
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
@@ -217,8 +208,8 @@ func runProvider(ctx context.Context) (resultErr error) {
 }
 
 // openChangeDirectory makes or reopens the run's Change worktree and returns
-// its directory, the provider's working directory.
-func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, config Config, authority *runtimeAuthority) (*os.File, error) {
+// its directory and verified Git administration.
+func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, config Config, authority *runtimeAuthority) (*os.File, string, error) {
 	var expected change.WorktreeFacts
 	var err error
 	if config.Retained == nil {
@@ -227,29 +218,29 @@ func openChangeDirectory(ctx context.Context, control *runner.WorkerControl, con
 		expected, err = openRetainedChange(ctx, control, config)
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := authority.verify(ctx); err != nil {
-		return nil, fmt.Errorf("runtime authority verification: %w", err)
+		return nil, "", fmt.Errorf("runtime authority verification: %w", err)
 	}
 	path := filepath.Join(config.ChangeParent, config.FinalName)
 	// The provider has not run: the branch must still be where it was left.
 	facts, err := change.InspectWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	if facts.Branch() != expected.Branch() || !facts.Head().Equal(expected.Head()) || facts.GitDirectory() != change.GitDirectoryForChange(config.RepositoryRoot, path) {
-		return nil, errors.Join(ErrWorker, errors.New("Change worktree moved before the provider ran"))
+	if facts.Branch() != expected.Branch() || !facts.Head().Equal(expected.Head()) || facts.GitDirectory() != expected.GitDirectory() {
+		return nil, "", errors.Join(ErrWorker, errors.New("Change worktree moved before the provider ran"))
 	}
 	cwd, err := openWorktreeDirectory(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if err := authority.verify(ctx); err != nil {
 		_ = cwd.Close()
-		return nil, fmt.Errorf("runtime authority verification: %w", err)
+		return nil, "", fmt.Errorf("runtime authority verification: %w", err)
 	}
-	return cwd, nil
+	return cwd, facts.GitDirectory(), nil
 }
 
 // openWorktreeDirectory opens the worktree root as the provider's working
@@ -458,12 +449,6 @@ func openRetainedChange(ctx context.Context, control *runner.WorkerControl, conf
 			}
 		}
 	}
-	if err != nil {
-		return change.WorktreeFacts{}, errors.Join(err, ErrWorker)
-	}
-	// Only a quiescent retained Change reaches population. Existing running
-	// workers keep their original administration through settlement.
-	facts, err = change.IsolateWorktree(ctx, config.GitExecutable, config.RepositoryRoot, config.RepositoryIdentity, path, branch, facts.Head())
 	if err != nil {
 		return change.WorktreeFacts{}, errors.Join(err, ErrWorker)
 	}

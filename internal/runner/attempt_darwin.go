@@ -831,17 +831,7 @@ func execPreparedCurrent(spec *LaunchSpec, cwd, task *os.File, worker *WorkerCon
 	if err := sealProviderDescriptors(hasProviderTask); err != nil {
 		return fmt.Errorf("runner: seal provider descriptors: %w", err)
 	}
-	program, argv := spec.commit.Executable.Path, spec.commit.Argv
-	if spec.sandbox != nil {
-		if err := spec.sandbox.Verify(); err != nil {
-			return fmt.Errorf("runner: source write boundary: %w", err)
-		}
-		// sandbox-exec replaces itself with the already-verified provider;
-		// PID, process group and the owned inherited descriptors stay unchanged.
-		program = spec.sandbox.Path()
-		argv = append([]string{program, "-p", spec.sandboxProfile}, argv...)
-	}
-	if err := unix.Exec(program, argv, spec.commit.Env); err != nil {
+	if err := unix.Exec(spec.commit.Executable.Path, spec.commit.Argv, spec.commit.Env); err != nil {
 		return fmt.Errorf("runner: current exec: %w", err)
 	}
 	return nil

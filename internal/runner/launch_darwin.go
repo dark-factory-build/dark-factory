@@ -8,11 +8,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -82,109 +80,6 @@ func PrepareCommittedExecSpec(executable ExecutableCommitment, argv, environment
 		Argv:       append([]string(nil), argv...),
 		Env:        append([]string(nil), environment...),
 	}}, nil
-}
-
-// ProtectSourceWrites applies the same inherited macOS boundary to every
-// provider. Git arguments and environment cannot grant writes to another
-// Change or the project, whose only writable exception is the shared CI lease.
-// The Change must already have private Git administration before this is used.
-func (spec *LaunchSpec) ProtectSourceWrites(repository, changes, gitDirectory, lease string) error {
-	if spec == nil || spec.sandbox != nil {
-		return ErrState
-	}
-	for _, path := range []string{repository, changes} {
-		resolved, err := canonical(path)
-		if err != nil || resolved != path || path == "/" || path == spec.commit.Cwd.Path {
-			return ErrIdentity
-		}
-	}
-	if filepath.Dir(spec.commit.Cwd.Path) != changes || lease != "" && lease != filepath.Join(repository, ".git", "dark-factory-local-ci") {
-		return ErrIdentity
-	}
-	if gitDirectory != filepath.Join(repository, ".git", "dark-factory-changes", filepath.Base(spec.commit.Cwd.Path), ".git") {
-		return ErrIdentity
-	}
-	if resolved, err := canonical(gitDirectory); err != nil || resolved != gitDirectory {
-		return ErrIdentity
-	}
-	roots := []string{repository, changes}
-	if repository == changes || strings.HasPrefix(changes, repository+"/") {
-		roots = []string{repository}
-	} else if strings.HasPrefix(repository, changes+"/") {
-		roots = []string{changes}
-	}
-	type linkCensus struct{ count, links uint64 }
-	// Keep writable exceptions in separate link domains so a protected-to-
-	// writable alias cannot be mistaken for an internal protected hardlink.
-	groups := [][]string{roots, {spec.commit.Cwd.Path}, {gitDirectory}}
-	if lease != "" {
-		if _, err := os.Lstat(lease); err == nil {
-			groups = append(groups, []string{lease})
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-	}
-	profile := "(version 1)(allow default)(deny file-link)"
-	for groupIndex, group := range groups {
-		linked := make(map[FileIdentity]linkCensus)
-		for _, root := range group {
-			// A path fence cannot revoke a pre-existing hardlink elsewhere. Refuse
-			// aliases outside the protected union without modifying retained source.
-			// Links wholly within that union (e.g. compiler caches) are safe; the
-			// global file-link denial prevents providers from exporting new aliases.
-			// ponytail: this metadata walk is O(protected files) per launch; a
-			// future filesystem boundary must retain the same alias guarantee.
-			if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				if groupIndex == 0 && (path == spec.commit.Cwd.Path || path == gitDirectory || lease != "" && path == lease) {
-					return filepath.SkipDir
-				}
-				if entry.Type().IsRegular() {
-					var stat unix.Stat_t
-					if err := unix.Lstat(path, &stat); err != nil {
-						return err
-					}
-					if stat.Nlink > 1 {
-						key := FileIdentity{Device: uint64(stat.Dev), Inode: stat.Ino}
-						value := linked[key]
-						if value.count != 0 && value.links != uint64(stat.Nlink) {
-							return ErrIdentity
-						}
-						value.count++
-						value.links = uint64(stat.Nlink)
-						linked[key] = value
-					}
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
-			if groupIndex == 0 {
-				profile += "(deny file-write* (require-all (subpath " + strconv.Quote(root) + ") (require-not (subpath " + strconv.Quote(spec.commit.Cwd.Path) + ")) (require-not (subpath " + strconv.Quote(gitDirectory) + "))"
-				if lease != "" {
-					profile += " (require-not (subpath " + strconv.Quote(lease) + "))"
-				}
-				profile += "))"
-			}
-		}
-		for _, value := range linked {
-			if value.count != value.links {
-				return fmt.Errorf("runner: protected source has an external hardlink: %w", ErrIdentity)
-			}
-		}
-	}
-	sandbox, err := CommitExecutableLocator("/usr/bin/sandbox-exec")
-	if err != nil {
-		return err
-	}
-	argv := append([]string{sandbox.Path(), "-p", profile}, spec.commit.Argv...)
-	if err := validateArgv(argv, sandbox.Path()); err != nil {
-		return err
-	}
-	spec.sandbox, spec.sandboxProfile = &sandbox, profile
-	return nil
 }
 
 func validateArgv(argv []string, executable string) error {

@@ -2837,9 +2837,7 @@ func cleanupFailureProgram(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Sticky metadata is refused by runtime cleanup without relying on a
-	// sandboxed provider being permitted to create a setuid file.
-	return "set -eu\nprintf x > __WITNESS__\nprintf x > \"$TMPDIR/unsafe\" && chmod 1600 \"$TMPDIR/unsafe\"\n" + quoteShell(executable) + " --supervisor-attempt-succeed typed-success\n"
+	return "set -eu\nprintf x > __WITNESS__\nprintf x > \"$TMPDIR/unsafe\" && chmod 4600 \"$TMPDIR/unsafe\"\n" + quoteShell(executable) + " --supervisor-attempt-succeed typed-success\n"
 }
 
 func quoteShell(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }

@@ -13,7 +13,7 @@ import (
 )
 
 // attemptSourceHandoff answers an explicit source request for one settled
-// Change with where its work is: the worktree, the repository's Git
+// Change with where its work is: the worktree, its actual Git
 // directory, the branch and the exact head the Change settled at. The
 // worktree must still be at that head; a branch that moved since settlement
 // is refused rather than described by a stale receipt. A Change from before

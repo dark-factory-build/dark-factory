@@ -57,12 +57,12 @@ Preparation does not back up, migrate a browser profile, or alter the service.
 
 ## Order matters
 
-**Worker Git write isolation.** Its initial installation requires every old
-attempt to be terminal, even if its runner has a takeover endpoint. Pause
-dispatch and drain fully: handover preserves the old provider's enforcement
-profile. Retained source is migrated only on its next quiescent population,
-without changing active workers or resetting edits. Verify the installed build
-and fresh Codex and Claude source-write denial before claiming enforcement.
+**Independent Change Git state.** Only newly created Changes receive private
+Git administration. Retained linked worktrees keep their existing layout,
+including on retry; legacy canonical Changes remain shared. Follow the normal
+installation procedure above, then verify the installed build and fresh Codex
+and Claude commit/settlement/source receipts. This is accident prevention,
+not an enforced filesystem boundary or a provider-permission change.
 
 **Pairing capability mask.** Both ends accept any subset of the five known
 capability bits with `observe` set, and reject any other bit as malformed:

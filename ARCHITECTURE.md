@@ -300,9 +300,10 @@ The provider works in that worktree: it edits, tests and commits there with
 the factory's fixed Git identity. Each new worker has self-contained private
 Git administration under `.git/dark-factory-changes/<Change ID>/.git`, using
 native bare Git initialization, an exact-base fetch, and a linked worktree.
-The macOS launch fence allows writes to its Change and private administration
-but denies project and sibling writes, except the shared CI lease. The same
-fence wraps both providers. Orchestrators read project Git administration.
+Ordinary Git commands in that worktree update its private refs, objects and
+index, not the project's shared administration. Provider permissions are
+unchanged; this prevents accidental shared-Git interference, not arbitrary
+filesystem writes. Orchestrators read project Git administration.
 The provider environment carries no Git credential helper, SSH command or
 prompt. An orchestrator run binds no Change: it
 works in its private runtime home, and publication of a worker's retained
@@ -330,18 +331,11 @@ revision policies and retained Changes do not fetch. Trusted Git resolves the
 revision once, and `git worktree add` checks out that exact commit. A
 concurrent attempt in the same repository contends only for Git's own locks.
 
-A retained legacy worktree is converted only during a later quiescent
-population: no provider or host Git/source writer may edit that same Change
-during conversion. The branch/index locks do not freeze every Git operation's
-metadata. Unrelated project refs can still change; migration never rewrites them.
-A native local bare clone without hardlinks retains all objects,
-including dangling operation-state objects; copied
-per-worktree administration preserves the index, split-index and operation
-state. A durable preparation precedes the atomic Gitfile replacement. Original
-canonical refs and registration remain intact, while new commits stay private.
-Settlement and source receipts report the actual Git directory; publication
-needs no canonical-ref import. Unsupported or conflicting administration fails
-closed without resetting source files.
+Retained linked worktrees keep their existing administration, including on
+retry: no automatic conversion rewrites their Gitfiles, indexes or refs.
+Legacy canonical worktrees therefore do not have independent Git state.
+Settlement and source receipts report the actual Git directory for either
+layout; publication fetches that exact head without a canonical-ref import.
 
 Changes made before managed worktrees are Git-free copies of their base with
 the worker's edits in them. They stay readable, reviewable and resumable: the

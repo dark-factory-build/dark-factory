@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -93,6 +94,31 @@ func TestPrivateWorktreeDoesNotWriteCanonicalGit(t *testing.T) {
 	if facts.GitDirectory() != wantGit || !facts.Head().equal(fixture.base) || facts.Branch() != BranchName(testChangeID) {
 		t.Fatalf("private facts = %+v, git directory %q", facts, facts.GitDirectory())
 	}
+	canonicalIndexPath := filepath.Join(fixture.repository, ".git", "index")
+	canonicalIndexBefore, err := os.ReadFile(canonicalIndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(wantGit, "objects", "info", "alternates")); !os.IsNotExist(err) {
+		t.Fatalf("private objects have alternates: %v", err)
+	}
+	err = filepath.WalkDir(filepath.Join(wantGit, "objects"), func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Nlink != 1 {
+			return fmt.Errorf("private object %q is shared", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := runFixtureGitOutput(t, fixture.git, fixture.repository, "for-each-ref", "--format=%(refname)=%(objectname)"); got != before {
 		t.Fatalf("canonical refs changed: before %q after %q", before, got)
 	}
@@ -104,6 +130,54 @@ func TestPrivateWorktreeDoesNotWriteCanonicalGit(t *testing.T) {
 	facts, err = InspectWorktree(context.Background(), fixture.git, fixture.repository, fixture.identity, path)
 	if err != nil || facts.Dirty() || facts.GitDirectory() != wantGit || facts.Head().equal(fixture.base) {
 		t.Fatalf("private committed facts = %+v, %v", facts, err)
+	}
+	if canonicalIndexAfter, err := os.ReadFile(canonicalIndexPath); err != nil || !bytes.Equal(canonicalIndexAfter, canonicalIndexBefore) {
+		t.Fatalf("canonical index changed: %v", err)
+	}
+}
+
+func TestInspectLegacyWorktreeLeavesItsAdministrationUntouched(t *testing.T) {
+	fixture := newLocalGitFixture(t, "sha1")
+	selected, err := SelectGit(context.Background(), fixture.git, fixture.repository, "HEAD", fixture.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secureTempDir(t), testChangeID)
+	branch := BranchName(testChangeID)
+	if _, err := AddWorktree(context.Background(), selected, path, branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "staged.txt"), []byte("staged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, fixture.git, path, "add", "staged.txt")
+	if err := os.WriteFile(filepath.Join(path, "untracked.txt"), []byte("untracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := strings.TrimSpace(runFixtureGitOutput(t, fixture.git, path, "rev-parse", "--git-path", "index"))
+	indexBefore, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitfileBefore, err := os.ReadFile(filepath.Join(path, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refsBefore := runFixtureGitOutput(t, fixture.git, fixture.repository, "for-each-ref", "--format=%(refname)=%(objectname)")
+	facts, err := InspectWorktree(context.Background(), fixture.git, fixture.repository, fixture.identity, path)
+	if err != nil || !facts.Dirty() || facts.GitDirectory() == GitDirectoryForChange(fixture.repository, path) {
+		t.Fatalf("legacy facts = %+v, %v", facts, err)
+	}
+	indexAfter, err := os.ReadFile(indexPath)
+	if err != nil || !bytes.Equal(indexAfter, indexBefore) {
+		t.Fatalf("legacy index changed: %v", err)
+	}
+	gitfileAfter, err := os.ReadFile(filepath.Join(path, ".git"))
+	if err != nil || !bytes.Equal(gitfileAfter, gitfileBefore) {
+		t.Fatalf("legacy Gitfile changed: %v", err)
+	}
+	if got := runFixtureGitOutput(t, fixture.git, fixture.repository, "for-each-ref", "--format=%(refname)=%(objectname)"); got != refsBefore {
+		t.Fatalf("canonical refs changed: before %q after %q", refsBefore, got)
 	}
 }
 

@@ -590,11 +590,12 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return daemon.failRun(run, kernel.FailureSource, errInvalidContract)
 	}
 	if worker {
-		// The daemon reads the worktree itself: it must use the Change's private
-		// Git administration and branch, at the base for a fresh
-		// or adopted Change and at the settled head for a reopened one.
+		// The daemon reads the worktree itself: fresh Changes use private Git
+		// administration; retained worktrees keep their layout. Verify the branch
+		// at the base for a fresh or adopted Change and at the settled head for
+		// a reopened one.
 		facts, err := change.InspectWorktree(ctx, spec.GitExecutable, project.Root, repositoryIdentity, filepath.Join(spec.ChangeParent, finalName))
-		if err != nil || facts.Branch() != change.BranchName(finalName) || facts.GitDirectory() != change.GitDirectoryForChange(project.Root, filepath.Join(spec.ChangeParent, finalName)) {
+		if err != nil || facts.Branch() != change.BranchName(finalName) || retained == nil && facts.GitDirectory() != change.GitDirectoryForChange(project.Root, filepath.Join(spec.ChangeParent, finalName)) {
 			return daemon.failRun(run, kernel.FailureSource, errors.Join(err, errInvalidContract))
 		}
 		head, err := kernelCommit(facts.Head())
