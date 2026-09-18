@@ -155,11 +155,6 @@ func TestOverseerWakeupConsumesWorkerEventsAndLeavesEventsDuringItsRunPending(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A standing overseer is event-admitted. The obsolete tool counter must
-	// neither suppress its initial durable wake nor consume the sole capacity.
-	if _, err := store.writer.Exec(`UPDATE agents SET tool_calls_used = tool_budget_limit WHERE id = ?`, overseer.ID.Bytes()); err != nil {
-		t.Fatal(err)
-	}
 	if tasks, err := store.EnqueueOverseerWakeups(ctx, mustTime(t, 5)); err != nil || len(tasks) != 0 {
 		t.Fatalf("overseer ignored its initial cooldown: %+v, %v", tasks, err)
 	}

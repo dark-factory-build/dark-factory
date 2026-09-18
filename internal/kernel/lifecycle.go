@@ -445,7 +445,7 @@ func (store *Store) ProposeAttemptOutcome(ctx context.Context, digest AttemptDig
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil {
 		return Run{}, tx.Rollback(ErrUnauthorized)
 	}
-	finalizing, err := store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil, nil)
+	finalizing, err := store.enterFinalizing(ctx, tx, run, run.Revision, proposal, at, nil)
 	if err != nil && (errors.Is(err, ErrConflict) || errors.Is(err, ErrRevisionConflict)) {
 		return Run{}, NewOutcomeRefusal(err)
 	}
@@ -485,7 +485,7 @@ func (store *Store) FailRun(ctx context.Context, runID RunID, expected Revision,
 	if run.Phase != RunAdmitted && run.Phase != RunRunning {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	return store.enterFinalizing(ctx, tx, run, expected, failure, at, nil, nil)
+	return store.enterFinalizing(ctx, tx, run, expected, failure, at, nil)
 }
 
 // FailRunWithRuntimeAbsent is the sole no-runtime-effect failure edge. Its
@@ -548,7 +548,7 @@ func (store *Store) FailRunWithRuntimeAbsent(ctx context.Context, runID RunID, r
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, runID, at, false, nil, nil)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, runID, at, false, nil)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
@@ -607,18 +607,10 @@ func (store *Store) CancelRun(ctx context.Context, runID RunID, expected Revisio
 	if run.Phase != RunAdmitted && run.Phase != RunRunning {
 		return Run{}, tx.Rollback(ErrConflict)
 	}
-	return store.enterFinalizing(ctx, tx, run, expected, proposal, at, nil, nil)
+	return store.enterFinalizing(ctx, tx, run, expected, proposal, at, nil)
 }
 
-func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID, preserveCondition *ContinuationConditionID) (Run, error) {
-	return store.enterFinalizingWithCommit(ctx, tx, run, expected, proposal, at, cancelRequest, preserveCondition, true)
-}
-
-func (store *Store) enterFinalizingInTransaction(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID, preserveCondition *ContinuationConditionID) (Run, error) {
-	return store.enterFinalizingWithCommit(ctx, tx, run, expected, proposal, at, cancelRequest, preserveCondition, false)
-}
-
-func (store *Store) enterFinalizingWithCommit(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID, preserveCondition *ContinuationConditionID, commit bool) (Run, error) {
+func (store *Store) enterFinalizing(ctx context.Context, tx *writeTx, run Run, expected Revision, proposal Proposal, at UnixMillis, cancelRequest *HumanRequestID) (Run, error) {
 	if run.Revision != expected || at.Int64() < run.UpdatedAt.Int64() {
 		return Run{}, tx.Rollback(ErrRevisionConflict)
 	}
@@ -671,7 +663,7 @@ func (store *Store) enterFinalizingWithCommit(ctx context.Context, tx *writeTx, 
 		}
 	}
 	pending := []pendingInvalidation{{kind: EntityRun, id: run.ID.Bytes(), revision: expected.Int64() + 1}}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, cancelRequest, preserveCondition)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, cancelRequest)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}
@@ -686,10 +678,8 @@ func (store *Store) enterFinalizingWithCommit(ctx context.Context, tx *writeTx, 
 		}
 		return Run{}, tx.Rollback(err)
 	}
-	if commit {
-		if err := tx.Commit(ctx); err != nil {
-			return Run{}, err
-		}
+	if err := tx.Commit(ctx); err != nil {
+		return Run{}, err
 	}
 	return run, nil
 }
@@ -767,7 +757,7 @@ func (store *Store) ObserveProviderExit(ctx context.Context, runID RunID, expect
 		if err := moveTerminalToReleasing(ctx, tx.connection, session, at); err != nil {
 			return Run{}, tx.Rollback(err)
 		}
-		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil, nil)
+		requestInvalidations, transitionErr := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, false, nil)
 		if transitionErr != nil {
 			return Run{}, tx.Rollback(transitionErr)
 		}
@@ -983,7 +973,7 @@ func (store *Store) finalizeRun(ctx context.Context, runID RunID, expected Revis
 	if err := requireOneRow(updated, err); err != nil {
 		return Run{}, tx.Rollback(err)
 	}
-	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, true, nil, nil)
+	requestInvalidations, err := transitionHumanRequestsForRun(ctx, tx.connection, run.ID, at, true, nil)
 	if err != nil {
 		return Run{}, tx.Rollback(err)
 	}

@@ -23,14 +23,6 @@ func TestV8PendingQuestionSurvivesOptionsMigration(t *testing.T) {
 	if _, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{"DROP INDEX continuations_admission_queue", "DROP INDEX continuations_one_waiting_per_condition", "DROP TABLE continuations"} {
-		if _, err := connection.ExecContext(ctx, statement); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := rebuildTable(ctx, connection, expectedSchemaOf(v8SchemaStatements()), "invalidations", testInvalidationColumns, "invalidations_entity_revision_unique", "", ""); err != nil {
-		t.Fatal(err)
-	}
 	if err := rebuildTable(ctx, connection, expectedSchemaOf(v8SchemaStatements()), "agents", v7AgentColumns, "agents_id_project_unique", "", ""); err != nil {
 		t.Fatal(err)
 	}

@@ -198,13 +198,8 @@ func assertCorruptRunningAuthority(t *testing.T, store *Store, run Run, keys Adm
 }
 
 func runningWorkerRun(t *testing.T) (*Store, Run, AdmissionKeys) {
-	store, run, keys, _ := runningWorkerRunWithPath(t)
-	return store, run, keys
-}
-
-func runningWorkerRunWithPath(t *testing.T) (*Store, Run, AdmissionKeys, string) {
 	t.Helper()
-	store, path, project, agent := newAdmissionStore(t, RoleWorker, 4)
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 4)
 	_, err := store.EnqueueTask(context.Background(), NewTask{ID: taskID(t, 210), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 211), Title: "worker"}, mustTime(t, 5))
 	if err != nil {
 		store.Close()
@@ -238,5 +233,5 @@ func runningWorkerRunWithPath(t *testing.T) (*Store, Run, AdmissionKeys, string)
 		store.Close()
 		t.Fatal(err)
 	}
-	return store, run, keys, path
+	return store, run, keys
 }

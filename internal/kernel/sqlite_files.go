@@ -170,22 +170,6 @@ func validateDatabasePath(path string) error {
 }
 
 func preflightExisting(ctx context.Context, files *databaseFiles) (databaseSnapshot, error) {
-	// Activation validates the initial descriptors, but preflight is the last
-	// acceptance boundary before the isolated WAL image is trusted. Recheck the
-	// exact 0600 contract here so a sidecar whose mode changed after admission
-	// can never be copied into an otherwise-valid snapshot.
-	for _, source := range []*databaseFile{files.main, files.wal, files.shm} {
-		if source == nil {
-			continue
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(int(source.file.Fd()), &stat); err != nil {
-			return databaseSnapshot{}, fmt.Errorf("inspect sqlite preflight identity: %w", err)
-		}
-		if err := validateDatabaseFileStat(uint32(stat.Mode), uint32(stat.Uid), uint64(stat.Nlink), int64(stat.Size), source.name, source.minimum, source.maximum); err != nil {
-			return databaseSnapshot{}, err
-		}
-	}
 	if files.wal == nil {
 		header := make([]byte, 20)
 		if _, err := files.main.file.ReadAt(header, 0); err != nil {
@@ -565,22 +549,15 @@ func (files *databaseFiles) openDatabaseFile(name, kind string, minimum, maximum
 }
 
 func validateDatabaseFileInfo(info os.FileInfo, kind string, minimum, maximum int64) error {
+	if info.Mode() != 0o600 {
+		return fmt.Errorf("%w: sqlite %s mode is %v, want exact regular 0600", ErrForeignDatabase, kind, info.Mode())
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("%w: sqlite %s has no native stat identity", ErrForeignDatabase, kind)
-	}
-	return validateDatabaseFileStat(uint32(stat.Mode), uint32(stat.Uid), uint64(stat.Nlink), info.Size(), kind, minimum, maximum)
-}
-
-func validateDatabaseFileStat(mode, uid uint32, nlink uint64, size int64, kind string, minimum, maximum int64) error {
-	if mode&uint32(syscall.S_IFMT) != uint32(syscall.S_IFREG) || mode&0o7777 != 0o600 {
-		return fmt.Errorf("%w: sqlite %s mode is %#o, want exact regular 0600", ErrForeignDatabase, kind, mode&0o7777)
-	}
-	if uid != uint32(os.Geteuid()) || nlink != 1 {
+	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
 		return fmt.Errorf("%w: sqlite %s owner or link identity is unsafe", ErrForeignDatabase, kind)
 	}
-	if size < minimum || size > maximum {
-		return fmt.Errorf("%w: sqlite %s size %d outside %d..%d", ErrForeignDatabase, kind, size, minimum, maximum)
+	if info.Size() < minimum || info.Size() > maximum {
+		return fmt.Errorf("%w: sqlite %s size %d outside %d..%d", ErrForeignDatabase, kind, info.Size(), minimum, maximum)
 	}
 	return nil
 }

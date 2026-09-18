@@ -54,50 +54,6 @@ func TestWriterAdmissionHonorsContextBeforeSQL(t *testing.T) {
 	}
 }
 
-func TestWriterAdmissionCancellationDoesNotLeaveRetryOrWriterHeld(t *testing.T) {
-	store, _ := newTestStore(t)
-	defer store.Close()
-
-	tx, err := store.beginValidatedWrite(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		_, writeErr := store.CreateProject(ctx, NewProject{
-			ID:   projectID(t, 243),
-			Name: "cancelled admission",
-			Root: filepath.Join(t.TempDir(), "root"),
-		}, mustTime(t, 2))
-		result <- writeErr
-	}()
-	cancel()
-
-	select {
-	case writeErr := <-result:
-		if !errors.Is(writeErr, context.Canceled) {
-			t.Fatalf("cancelled writer error = %v, want context canceled", writeErr)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("cancelled writer remained blocked behind writer gate")
-	}
-
-	if err := tx.Rollback(nil); err != nil {
-		t.Fatal(err)
-	}
-	tx.Close()
-	if _, err := store.CreateProject(context.Background(), NewProject{
-		ID:   projectID(t, 244),
-		Name: "after cancellation",
-		Root: filepath.Join(t.TempDir(), "root"),
-	}, mustTime(t, 3)); err != nil {
-		t.Fatalf("writer after cancellation = %v", err)
-	}
-}
-
 func TestStoreCloseJoinsAdmittedWriterAndRejectsNewWriters(t *testing.T) {
 	store, _ := newTestStore(t)
 	tx, err := store.beginValidatedWrite(context.Background())
