@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 from urllib.parse import urlparse
 import uuid
 
@@ -27,6 +28,10 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 
 class ReviewError(Exception):
     pass
+
+
+class Unproven(Exception):
+    """A footer claims a source this pass cannot prove; only that PR is skipped."""
 
 
 def review_provider(config):
@@ -60,7 +65,54 @@ def mirror(config):
     return path
 
 
-def linked_issue(body, journal, repository):
+def app_receipt(body, kinds, number, repository, object_path):
+    """True when the body's App marker is a completed receipt that created or rewrote object `number`."""
+    marker = publication.APP_MARKER_TRAILER.search(body)
+    if marker is None:
+        return False
+    value = observe_operation(marker.group(1))
+    result = value.get("result")
+    if value["state"] != "completed" or value.get("kind") not in kinds or value.get("request_digest") != marker.group(2):
+        return False
+    if not isinstance(result, dict) or result.get("number") != number or not isinstance(result.get("url"), str):
+        return False
+    parsed = urlparse(result["url"])
+    expected = "/" + repository + "/" + object_path + "/" + str(number)
+    return parsed.scheme == "https" and parsed.netloc == "github.com" and not parsed.params \
+        and not parsed.query and not parsed.fragment and parsed.path.casefold() == expected.casefold()
+
+
+def app_update_receipt(body, number, repository):
+    """Prove the exact current body was rendered by one completed App update."""
+    marker = publication.APP_MARKER_TRAILER.search(body)
+    if marker is None:
+        return False
+    value = observe_operation(marker.group(1))
+    result = value.get("result")
+    if value["state"] != "completed" or value.get("kind") != "update_pull_request_body" \
+            or value.get("request_digest") != marker.group(2) or not isinstance(result, dict) \
+            or result.get("number") != number or not isinstance(result.get("url"), str):
+        return False
+    parsed = urlparse(result["url"])
+    expected = "/" + repository + "/pull/" + str(number)
+    if parsed.scheme != "https" or parsed.netloc != "github.com" or parsed.params or parsed.query or parsed.fragment \
+            or parsed.path.casefold() != expected.casefold():
+        return False
+    prefix = body[:marker.start()]
+    if prefix == "":
+        updated_body = ""
+    elif prefix.endswith("\n\n"):
+        updated_body = prefix[:-2]
+    else:
+        return False
+    request = {"repository": repository, "operation_id": marker.group(1),
+               "pull_number": number, "body": updated_body}
+    digest = hashlib.sha256(json.dumps(request, separators=(",", ":")).encode()).hexdigest()
+    return digest == marker.group(2)
+
+
+def linked_issue(config, pr, journal, existing=None):
+    body = pr["body"]
     if not isinstance(body, str):
         raise ReviewError("pull request body is invalid")
     footer = publication.terminal_footer(body)
@@ -72,22 +124,61 @@ def linked_issue(body, journal, repository):
     if footer is None:
         return None
     issue = int(footer.group(2))
-    return issue if issue in known else None
+    if issue in known:
+        return issue
+    if matched:
+        raise Unproven("terminal footer #" + str(issue) + " is not the tracked source #" + str(min(matched)) + " the body also links")
+    if existing is not None and existing.get("source_marker") == intake.source_marker(config, {"number": issue}):
+        return issue
+    # An overseer tracking issue never enters the intake journal (it has no
+    # intake label), so prove the App wrote both objects: the PR's own marker
+    # is a completed publication receipt for this PR number, and the footer
+    # issue's marker is the completed create_issue receipt for that number.
+    if not app_receipt(body, {"create_pull_request", "update_pull_request_body"}, pr["number"], config["repository"], "pull"):
+        raise Unproven("footer #" + str(issue) + " is not an intake-managed source and PR #" + str(pr["number"]) + " has no completed App publication receipt")
+    try:
+        source = intake.exact_issue(config, issue)
+    except intake.IssueBodyTooLarge as exc:
+        raise Unproven("footer #" + str(issue) + " points to a source whose body exceeds the intake limit") from exc
+    if not app_receipt(source["body"], {"create_issue"}, issue, config["repository"], "issues"):
+        raise Unproven("footer #" + str(issue) + " is neither an intake-managed source nor an App-created tracking issue (no completed create_issue receipt)")
+    return issue
 
 
-def list_prs(config):
-    limit = int(config.get("max_issues", 25))
-    raw = intake.command(["gh", "pr", "list", "--repo", config["repository"], "--state", "open", "--limit", str(limit + 1), "--json", "number,headRefOid,body"], timeout=int(config.get("command_timeout", 30)))
+def discovery_batch_size(config):
+    # GitHub's REST pull-request endpoint caps per_page at 100.
+    return min(int(config.get("max_issues", 25)), 100)
+
+
+def next_discovery_page(config, page, discovered):
+    return 1 if discovered < discovery_batch_size(config) else page + 1
+
+
+def list_prs(config, page=1):
+    batch = discovery_batch_size(config)
+    if type(page) is not int or page < 1:
+        raise ReviewError("pull request discovery page is invalid")
+    # GitHub's pull-list endpoint gives us a bounded page cursor. Rotating the
+    # durable page across passes prevents entries beyond one full page from
+    # being permanently starved by newer open PRs.
+    raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls", "--method", "GET",
+                          "--field", "state=open", "--field", "per_page=" + str(batch),
+                          "--field", "page=" + str(page)], timeout=int(config.get("command_timeout", 30)))
     try:
         values = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ReviewError("gh returned invalid pull request JSON") from exc
-    if not isinstance(values, list) or len(values) > limit:
-        raise ReviewError("pull request review cap reached")
+    if not isinstance(values, list) or len(values) > batch:
+        raise ReviewError("gh returned more pull requests than the bounded discovery batch")
+    normalized = []
     for value in values:
-        if not isinstance(value, dict) or not isinstance(value.get("number"), int) or value["number"] < 1 or not isinstance(value.get("body"), str) or not isinstance(value.get("headRefOid"), str) or not SHA.fullmatch(value["headRefOid"]):
+        head = value.get("head") if isinstance(value, dict) else None
+        if not isinstance(value, dict) or not isinstance(value.get("number"), int) or value["number"] < 1 \
+                or not isinstance(value.get("body"), (str, type(None))) or not isinstance(head, dict) \
+                or not isinstance(head.get("sha"), str) or not SHA.fullmatch(head["sha"]):
             raise ReviewError("gh returned an invalid pull request")
-    return values
+        normalized.append({"number": value["number"], "headRefOid": head["sha"], "body": value.get("body") or ""})
+    return normalized
 
 
 def ready(config, path, pr, issue):
@@ -163,7 +254,37 @@ def observe_review(config, operation):
             or url.path.lower() != ("/" + config["repository"] + "/pull/" + str(operation["pr"])).lower() or url.query or not re.fullmatch(r"(pullrequestreview-[0-9]+)?", url.fragment) \
             or result.get("head_sha") != operation["head"] or result.get("verdict") not in {"allow", "block"}:
         raise ReviewError("review receipt does not match the exact head and pull request")
+    if result["verdict"] == "allow" and operation.get("prior_review_operation") and not correction_review_is_explicit(config, operation, result):
+        raise ReviewError("correction ALLOW does not explicitly correct the prior App BLOCK")
     return result["verdict"]
+
+
+def correction_review_is_explicit(config, operation, result):
+    review_id = result.get("review_id")
+    if type(review_id) is not int or review_id < 1:
+        return False
+    try:
+        raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls/" + str(operation["pr"]) + "/reviews", "--paginate"], timeout=int(config.get("command_timeout", 30)))
+        reviews = json.loads(raw)
+    except (intake.IntakeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(reviews, list):
+        return False
+    for review in reviews:
+        if not isinstance(review, dict) or review.get("id") != review_id or review.get("commit_id") != operation["head"]:
+            continue
+        body = review.get("body")
+        if not isinstance(body, str):
+            return False
+        lines = [line.strip() for line in body.splitlines()]
+        verdict = "Dark-Factory-Review: allow " + operation["head"]
+        correction = "Dark-Factory-Review-Correction: " + operation["prior_review_operation"]
+        marker = "<!-- dark-factory-operation:" + operation["review_operation"] + ":"
+        for index in range(len(lines) - 2):
+            if lines[index] == verdict and lines[index + 1] == correction and lines[index + 2].startswith(marker):
+                return True
+        return False
+    return False
 
 
 def enqueue_request_digest(config, operation):
@@ -177,6 +298,8 @@ def enqueue_request_digest(config, operation):
     # :3351-3365), so an uppercase persisted id must be lowercased here too.
     expected = {"repository": config["repository"].lower(), "operation_id": operation["enqueue_operation"].lower(),
                 "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"]}
+    if operation.get("reviewed_body_digest"):
+        expected["reviewed_body_digest"] = operation["reviewed_body_digest"]
     return hashlib.sha256(json.dumps(expected, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -191,6 +314,35 @@ def observe_enqueue(config, operation):
     return "queued"
 
 
+def observe_merge(config, operation):
+    reviewed_body_digest = operation.get("reviewed_body_digest")
+    if reviewed_body_digest is not None and (not isinstance(reviewed_body_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", reviewed_body_digest)):
+        raise ReviewError("merge observation lacks the reviewed body digest")
+    arguments = {"repository": config["repository"], "enqueue_operation_id": operation["enqueue_operation"],
+                 "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"]}
+    if reviewed_body_digest is not None:
+        arguments["reviewed_body_digest"] = reviewed_body_digest
+    result = bridge_call("observe_pull_request_merge", arguments)
+    value = result.get("structuredContent")
+    if result.get("isError") or not isinstance(value, dict) or value.get("pull_number") != operation["pr"] \
+            or value.get("head_sha") != operation["head"] or value.get("base") != operation["enqueue_base"] \
+            or value.get("state") not in {"ACTIVE_QUEUE", "MERGED_AFTER_ENQUEUE_ATTEMPT", "NOT_QUEUED"} \
+            or value.get("pull_state") not in {"open", "closed"}:
+        raise ReviewError("merge observation does not match the exact enqueue")
+    return {"state": value["state"], "pull_state": value["pull_state"]}
+
+
+def merge_failure_followup(config, operation):
+    task_id = intake.sha_id("queue-failure", config["project_id"], config["repository"], str(operation["pr"]), operation["head"], operation["enqueue_operation"])
+    return {"task_id": task_id, "incarnation_id": intake.sha_id("incarnation", task_id),
+            "priority": operation["priority"],
+            "title": "Reconcile dropped merge-queue entry for GitHub PR #" + str(operation["pr"]),
+            "body": ("The completed App enqueue operation " + operation["enqueue_operation"] + " for " + config["repository"] + " PR #" + str(operation["pr"]) +
+                     " at exact head " + operation["head"] + " was observed at " + str(operation["merge_observed_at"]) +
+                     " as NOT_QUEUED while the pull request remained open. The queue run may have failed or dropped the entry. Route this causal notification to the original source owner/task " +
+                     operation["source_marker"] + " and raise the required human request. Do not enqueue again, replay the review, or alter source/PR state." )}
+
+
 def enqueue_allowed(config, operation, journal_path, receipts):
     # One durable id per exact head, journaled before the write; an id an
     # operator already recorded is kept so a repair is never replayed.
@@ -201,8 +353,11 @@ def enqueue_allowed(config, operation, journal_path, receipts):
     if state == "missing" and not operation.get("enqueue_attempted"):
         operation["enqueue_attempted"] = True
         intake.atomic_json(journal_path, receipts)
+        if not operation.get("reviewed_body_digest"):
+            raise ReviewError("enqueue requires an operation-bound reviewed body digest")
         result = bridge_call("enqueue_pull_request", {"repository": config["repository"], "operation_id": operation["enqueue_operation"],
-                                                      "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"]})
+                                                      "pull_number": operation["pr"], "head_sha": operation["head"], "base": operation["enqueue_base"],
+                                                      "reviewed_body_digest": operation["reviewed_body_digest"]})
         value = result.get("structuredContent")
         if result.get("isError"):
             # The App names refusals and conflicts; only those are concrete. An
@@ -235,12 +390,36 @@ def launch_review(config, path, pr, operation):
     env = dict(os.environ, DARK_FACTORY_REVIEW_PROVIDER=operation.get("provider", review_provider(config)),
                DARK_FACTORY_REVIEW_OPERATION_ID=operation["review_operation"],
                DARK_FACTORY_REVIEW_REMOTE="file://" + str(path.parent.parent))
+    if operation.get("prior_review_operation"):
+        env["DARK_FACTORY_REVIEW_CORRECTS_OPERATION_ID"] = operation["prior_review_operation"]
+    else:
+        env.pop("DARK_FACTORY_REVIEW_CORRECTS_OPERATION_ID", None)
     env.pop("DARK_FACTORY_REVIEW_EVIDENCE_FILE", None)
     with (directory / "launch.log").open("w") as output:
         return subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-process-owner",
                                str(HERE / "go-gate-environment.sh"), "1200", str(HERE / "cold-review.sh"),
                                config["repository"], str(pr["number"]), operation["head"], operation["base"], str(body)],
                               cwd=directory, env=env, stdout=output, stderr=subprocess.STDOUT).returncode
+
+
+def review_body_path(config, pr, operation):
+    return Path(config["journal"]).parent / ("review-" + str(pr["number"]) + "-" + operation["head"]) / "body.md"
+
+
+def verify_review_body(config, pr, operation):
+    try:
+        raw = intake.command(["gh", "pr", "view", str(pr["number"]), "--repo", config["repository"], "--json", "body,headRefOid"], timeout=int(config.get("command_timeout", 30)))
+        current = json.loads(raw)
+        body = current["body"]
+        head = current["headRefOid"]
+        reviewed = review_body_path(config, pr, operation).read_text()
+    except (intake.IntakeError, OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise ReviewError("live pull request body is unavailable") from exc
+    if head != operation["head"]:
+        raise ReviewError("pull request head changed after review")
+    if not isinstance(body, str) or body != reviewed:
+        raise ReviewError("pull request body changed after review")
+    operation["reviewed_body_digest"] = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
 
 
 def review_followup(config, operation, state):
@@ -307,13 +486,23 @@ def run_locked(config, path, journal, journal_path):
     else:
         receipts = {"version": 2, "config_fingerprint": config_fingerprint(config), "pulls": {}}
     messages = []
+    page = receipts.get("discovery_page", 1)
+    if type(page) is not int or page < 1:
+        raise ReviewError("review receipt discovery page is invalid")
+    discovered = list_prs(config, page)
+    batch = discovery_batch_size(config)
+    next_page = next_discovery_page(config, page, len(discovered))
     launched = False
-    for pr in list_prs(config):
-        issue = linked_issue(pr["body"], journal, config["repository"])
-        if issue is None:
-            continue
+    for pr in discovered:
         key = str(pr["number"]) + ":" + pr["headRefOid"]
         existing = receipts["pulls"].get(key)
+        try:
+            issue = linked_issue(config, pr, journal, existing)
+        except Unproven as exc:
+            messages.append("skipped PR #" + str(pr["number"]) + ": " + str(exc))
+            continue
+        if issue is None:
+            continue
         if existing is None:
             operation = ready(config, path, pr, issue)
             operation["provider"] = provider
@@ -326,6 +515,29 @@ def run_locked(config, path, journal, journal_path):
             verify_existing(path, pr, operation)
         operation.setdefault("review_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-review:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"])))
         state = observe_review(config, operation)
+        if state == "block" and not operation.get("prior_review_operation"):
+            snapshot_path = review_body_path(config, pr, operation)
+            try:
+                snapshot = snapshot_path.read_text()
+            except FileNotFoundError:
+                snapshot = pr["body"]
+            except OSError as exc:
+                raise ReviewError("stale review body snapshot is unavailable") from exc
+            if snapshot != pr["body"]:
+                if not app_update_receipt(pr["body"], pr["number"], config["repository"]):
+                    raise ReviewError("changed review body has no completed App metadata update receipt")
+                prior = operation["review_operation"]
+                operation["prior_review_operation"] = prior
+                operation["prior_review_state"] = "block"
+                operation["review_operation"] = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                    "dark-factory:host-review-correction:" + config["repository"] + ":" + str(pr["number"]) + ":" + operation["head"] + ":" + prior))
+                operation["review_attempted"] = False
+                operation.pop("review_exit", None)
+                operation.pop("review_state", None)
+                operation["correction_body"] = pr["body"]
+                snapshot_path.write_text(pr["body"])
+                intake.atomic_json(journal_path, receipts)
+                state = observe_review(config, operation)
         if state == "missing" and not operation.get("review_attempted"):
             if launched:
                 continue
@@ -342,11 +554,34 @@ def run_locked(config, path, journal, journal_path):
         operation["review_state"] = state
         intake.atomic_json(journal_path, receipts)
         if state == "allow":
+            # The body is an authorization input only before enqueue. Once a
+            # completed enqueue is journaled, later metadata edits must not
+            # block read-only merge reconciliation; the App receipt remains
+            # bound to the persisted reviewed_body_digest.
+            if not operation.get("reviewed_body_digest"):
+                existing_enqueue = observe_enqueue(config, operation) if operation.get("enqueue_operation") else "missing"
+                if existing_enqueue == "missing":
+                    verify_review_body(config, pr, operation)
+                elif existing_enqueue == "queued":
+                    operation["enqueue_state"] = "queued"
             enqueue_allowed(config, operation, journal_path, receipts)
+            if operation.get("enqueue_state") == "queued":
+                merge = observe_merge(config, operation)
+                operation["merge_state"] = merge["state"]
+                operation["merge_pull_state"] = merge["pull_state"]
+                operation["merge_observed_at"] = int(time.time())
+                intake.atomic_json(journal_path, receipts)
+                if merge["state"] == "NOT_QUEUED" and merge["pull_state"] == "open":
+                    followup = merge_failure_followup(config, operation)
+                    if intake.task_state(config, followup) is None:
+                        intake.enqueue(config, followup)
+                        messages.append("woke PR #" + str(pr["number"]) + " queue failure")
         followup = review_followup(config, operation, state)
         if intake.task_state(config, followup) is None:
             intake.enqueue(config, followup)
             messages.append("woke PR #" + str(pr["number"]) + " review " + state)
+    receipts["discovery_page"] = next_page
+    intake.atomic_json(journal_path, receipts)
     return messages
 
 

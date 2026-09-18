@@ -9,9 +9,9 @@ use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(target_arch = "wasm32")]
-use crate::journal::{
-    DeliveryJournal, Operation, OperationObservation, OperationRecord, OperationTransition,
-};
+use crate::journal::{DeliveryJournal, OperationRecord, OperationTransition};
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+use crate::journal::{Operation, OperationObservation};
 use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
@@ -547,6 +547,8 @@ pub(crate) struct ObservePullRequestMerge {
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) base: String,
+    #[serde(default)]
+    pub(crate) reviewed_body_digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -628,6 +630,11 @@ pub(crate) struct EnqueuePullRequest {
     /// different branch than the caller believes would be enqueued onto that
     /// branch's queue instead.
     pub(crate) base: String,
+    /// Digest of the exact rendered PR body that was independently reviewed.
+    /// Checked after the durable claim, immediately before enqueue. GitHub
+    /// atomically binds only the head; a body edit can race with that write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reviewed_body_digest: Option<String>,
 }
 
 /// Merge one pull request directly, but only after proving every repository,
@@ -2293,13 +2300,26 @@ impl AppAuthority {
         request.validate()?;
         let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("enqueue_pull_request")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
+        // Older completed enqueue operations were intentionally bound without
+        // a body digest. Read those exact rows without beginning a new one;
+        // an omitted digest on a new request must not leave a planned claim
+        // that poisons a corrected retry under the same UUID.
+        let state = if request.reviewed_body_digest.is_some() {
+            journal
+                .begin_operation(&operation)
+                .await
+                .map_err(|_| OperationError::Unavailable)?
+        } else {
+            let observation = journal
+                .observe_operation(&operation.operation_id)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return legacy_completed_result(observation.as_ref(), &operation);
+        };
         if let Some(result) = completed_or_conflict::<EnqueueResult>(&state)? {
             return Ok(result);
         }
+        let reviewed_body_digest = request.reviewed_body_digest.as_deref().unwrap();
         let token = self
             .0
             .installation_token(
@@ -2379,6 +2399,40 @@ impl AppAuthority {
                 return Err(OperationError::Unavailable);
             }
         }
+        // Re-read after the durable claim: the body may have changed while
+        // the journal write was in flight. A known mismatch releases the
+        // claim, so this UUID remains retryable without enqueueing a stale
+        // reviewed body.
+        let pull = match self
+            .0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await
+        {
+            Ok(pull) => pull,
+            Err(error) => {
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                return Err(error);
+            }
+        };
+        match revalidate_enqueue_pull(Ok(&pull), &request, reviewed_body_digest) {
+            Ok(()) => {}
+            Err(OperationError::Conflict) => {
+                journal
+                    .mark_operation(&operation, OperationTransition::Refused)
+                    .await
+                    .map_err(|_| OperationError::Unavailable)?;
+                return Err(OperationError::Conflict);
+            }
+            Err(OperationError::Indeterminate) => {
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                return Err(OperationError::Indeterminate);
+            }
+            Err(error) => return Err(error),
+        };
         match self.0.enqueue_entry(&token, &pull.node_id, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
             Err(OperationError::Refused(reason)) => {
@@ -2764,12 +2818,39 @@ impl AppAuthority {
     ) -> Result<PullRequestMergeResult, OperationError> {
         request.validate()?;
         let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("contents", "read"),
+                    ("merge_queues", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
+            .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        if request.base != repository.default_branch {
+            return Err(OperationError::Conflict);
+        }
+        let pull = self
+            .0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await?;
+        if pull.base.name != request.base {
+            return Err(OperationError::Conflict);
+        }
+        if !matches!(pull.state.as_str(), "open" | "closed") {
+            return Err(OperationError::Unavailable);
+        }
         let mut enqueue_request = EnqueuePullRequest {
             repository: request.repository.clone(),
             operation_id: request.enqueue_operation_id.clone(),
             pull_number: request.pull_number,
             head_sha: request.head_sha.clone(),
             base: request.base.clone(),
+            reviewed_body_digest: request.reviewed_body_digest.clone(),
         };
         enqueue_request.validate()?;
         let enqueue_operation = enqueue_request.operation("enqueue_pull_request")?;
@@ -2796,32 +2877,6 @@ impl AppAuthority {
             || !valid_queue_state(&enqueue.state_when_recorded)
             || valid_text(&enqueue.entry_id, 1, 256, true).is_err()
         {
-            return Err(OperationError::Unavailable);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("contents", "read"),
-                    ("merge_queues", "read"),
-                    ("metadata", "read"),
-                    ("pull_requests", "read"),
-                ]),
-            )
-            .await?;
-        let repository = self.0.repository_metadata(&token).await?;
-        if request.base != repository.default_branch {
-            return Err(OperationError::Conflict);
-        }
-        let pull = self
-            .0
-            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
-            .await?;
-        if pull.base.name != request.base {
-            return Err(OperationError::Conflict);
-        }
-        if !matches!(pull.state.as_str(), "open" | "closed") {
             return Err(OperationError::Unavailable);
         }
         if pull.merged {
@@ -3151,7 +3206,11 @@ impl EnqueuePullRequest {
         canonical_operation_id(&mut self.operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
-        valid_ref(&self.base)
+        valid_ref(&self.base)?;
+        if let Some(digest) = self.reviewed_body_digest.as_deref() {
+            valid_digest(digest).map_err(|_| OperationError::InvalidInput)?;
+        }
+        Ok(())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3405,7 +3464,11 @@ impl ObservePullRequestMerge {
         canonical_operation_id(&mut self.enqueue_operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
-        valid_ref(&self.base)
+        valid_ref(&self.base)?;
+        if let Some(digest) = self.reviewed_body_digest.as_deref() {
+            valid_digest(digest)?;
+        }
+        Ok(())
     }
 }
 
@@ -3673,6 +3736,11 @@ fn valid_sha(value: &str) -> Result<(), OperationError> {
     .ok_or(OperationError::InvalidInput)
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn text_digest(value: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(value.as_bytes())))
+}
+
 fn valid_exact_integer(value: i64) -> Result<(), OperationError> {
     (1..=MAX_EXACT_INTEGER)
         .contains(&value)
@@ -3748,6 +3816,30 @@ fn completed_or_conflict<T: serde::de::DeserializeOwned>(
         OperationRecord::Conflict => Err(OperationError::Conflict),
         _ => Ok(None),
     }
+}
+
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+fn legacy_completed_result<T: serde::de::DeserializeOwned>(
+    observation: Option<&OperationObservation>,
+    operation: &Operation,
+) -> Result<T, OperationError> {
+    let Some(observation) = observation else {
+        return Err(OperationError::InvalidInput);
+    };
+    if observation.kind != operation.kind || observation.request_digest != operation.request_digest
+    {
+        return Err(OperationError::Conflict);
+    }
+    if observation.state != "completed" {
+        return Err(OperationError::InvalidInput);
+    }
+    serde_json::from_str(
+        observation
+            .result_json
+            .as_deref()
+            .ok_or(OperationError::Unavailable)?,
+    )
+    .map_err(|_| OperationError::Unavailable)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -6362,6 +6454,25 @@ struct PullReference {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn revalidate_enqueue_pull(
+    pull: Result<&PullRequest, Error>,
+    request: &EnqueuePullRequest,
+    reviewed_body_digest: &str,
+) -> Result<(), OperationError> {
+    let pull = pull.map_err(|_| {
+        // GitHub exposes no expected-body-digest CAS. An uncertain re-read
+        // therefore cannot safely release the claim or enqueue a stale body.
+        OperationError::Indeterminate
+    })?;
+    if pull.base.name != request.base
+        || pull.body.as_deref().map(text_digest).as_deref() != Some(reviewed_body_digest)
+    {
+        return Err(OperationError::Conflict);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone, Debug, Deserialize)]
 struct BranchSnapshot {
     name: String,
@@ -8736,6 +8847,119 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn enqueue_revalidation_catches_in_flight_body_changes_without_replaying() {
+        let request = EnqueuePullRequest {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "5c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 848,
+            head_sha: "a".repeat(40),
+            base: "main".into(),
+            reviewed_body_digest: Some(text_digest("reviewed body")),
+        };
+        let pull = |body: Result<&str, Error>| -> Result<PullRequest, Error> {
+            Ok(PullRequest {
+                number: request.pull_number,
+                node_id: "PR_node".into(),
+                html_url: "https://github.com/dark-factory-build/dark-factory/pull/848".into(),
+                title: "Exact-head change".into(),
+                body: body.ok().map(str::to_owned),
+                draft: false,
+                head: PullReference {
+                    name: "feature".into(),
+                    sha: request.head_sha.clone(),
+                },
+                base: PullReference {
+                    name: request.base.clone(),
+                    sha: "b".repeat(40),
+                },
+                state: "open".into(),
+                merged: false,
+            })
+        };
+        let digest = request.reviewed_body_digest.as_deref().unwrap();
+
+        assert_eq!(
+            revalidate_enqueue_pull(
+                pull(Ok("reviewed body")).as_ref().map_err(|error| *error),
+                &request,
+                digest
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            revalidate_enqueue_pull(
+                pull(Ok("edited while claiming"))
+                    .as_ref()
+                    .map_err(|error| *error),
+                &request,
+                digest
+            ),
+            Err(OperationError::Conflict)
+        );
+        assert_eq!(
+            revalidate_enqueue_pull(Err(Error::Unavailable), &request, digest),
+            Err(OperationError::Indeterminate)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "development-sqlite")]
+    fn an_omitted_digest_does_not_claim_a_uuid_before_a_corrected_retry() {
+        let missing_digest = EnqueuePullRequest {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "6c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 848,
+            head_sha: "a".repeat(40),
+            base: "main".into(),
+            reviewed_body_digest: None,
+        };
+        let operation = Operation {
+            operation_id: missing_digest.operation_id.clone(),
+            kind: "enqueue_pull_request".into(),
+            request_digest: request_digest(&missing_digest).unwrap(),
+        };
+        assert!(matches!(
+            legacy_completed_result::<EnqueueResult>(None, &operation),
+            Err(OperationError::InvalidInput)
+        ));
+
+        let mut observed = OperationObservation {
+            kind: operation.kind.clone(),
+            request_digest: operation.request_digest.clone(),
+            state: "planned".into(),
+            result_json: None,
+        };
+        for state in ["planned", "executing", "refused", "indeterminate"] {
+            observed.state = state.into();
+            assert!(matches!(
+                legacy_completed_result::<EnqueueResult>(Some(&observed), &operation),
+                Err(OperationError::InvalidInput)
+            ));
+        }
+        observed.state = "completed".into();
+        observed.result_json = Some("42".into());
+        assert_eq!(
+            legacy_completed_result::<u32>(Some(&observed), &operation).unwrap(),
+            42
+        );
+        observed.request_digest = "f".repeat(64);
+        assert!(matches!(
+            legacy_completed_result::<u32>(Some(&observed), &operation),
+            Err(OperationError::Conflict)
+        ));
+
+        let corrected = EnqueuePullRequest {
+            reviewed_body_digest: Some(text_digest("reviewed body")),
+            ..missing_digest
+        };
+        assert_ne!(
+            request_digest(&corrected).unwrap(),
+            operation.request_digest,
+            "the corrected request must be a new journal binding, not a retry of a poisoned plan"
+        );
+    }
+
     /// The reason must survive to the caller-visible rendering: each refusal
     /// names itself distinctly, and a multi-class rejection carries every
     /// class rather than whichever arrived first (#371).
@@ -8795,6 +9019,7 @@ mod tests {
             pull_number: 329,
             head_sha: head.clone(),
             base: "main".into(),
+            reviewed_body_digest: None,
         };
         assert!(request.validate().is_ok());
 
@@ -9720,6 +9945,7 @@ mod tests {
             pull_number: 390,
             head_sha: "d".repeat(40),
             base: "main".into(),
+            reviewed_body_digest: Some("sha256:".to_owned() + &"d".repeat(64)),
         };
         assert!(merge.validate().is_ok());
         assert!(

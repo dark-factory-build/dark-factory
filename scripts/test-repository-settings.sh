@@ -82,15 +82,17 @@ assert_job_field relay if "needs.scope.result == 'success' && needs.scope.output
 assert_job_field review if "github.event_name == 'merge_group'"
 assert_job_field required if "always()"
 assert_job_field required needs "[eligibility, scope, checks, control-plane, relay, review]"
-require_job scope 'BASE_SHA: ${{ github.event.merge_group.base_sha }}'
-require_job scope 'git diff --check "$BASE_SHA" "$GITHUB_SHA"'
-require_job scope 'git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$BASE_SHA" "$GITHUB_SHA"'
-expected_scope_keys=$(printf '%s\n' name id env run)
+require_job scope 'git fetch --no-tags --filter=blob:none origin refs/heads/main:refs/remotes/origin/main'
+require_job scope 'git diff --check "$merge_base" "$GITHUB_SHA"'
+require_job scope 'git diff --name-only -z --no-renames --diff-filter=ACDMRTUXB "$merge_base" "$GITHUB_SHA"'
+require_job scope "macos_mode=full"
+expected_scope_keys=$(printf '%s\n' name id run)
 [ "$(step_keys scope 'Select fixed gates from the combined tree')" = "$expected_scope_keys" ] || {
     echo "combined-tree scope has unexpected step controls" >&2
     exit 1
 }
 require_job checks './scripts/local-ci.sh'
+require_job checks './scripts/local-ci.sh --ui'
 require_job relay './relay/scripts/local-ci.sh'
 diagnostic_events="github.event_name == 'pull_request' || github.event_name == 'merge_group'"
 [ "$(step_field required 'Confirm the live merge rules' if)" = "$diagnostic_events" ] || {
@@ -187,8 +189,18 @@ cat >"$temporary/bin/git" <<'STUB'
 #!/bin/sh
 set -eu
 printf '%s\n' "$*" >>"$DF_SCOPE_GIT_LOG"
+if [ -n "${DF_SCOPE_REAL_REPOSITORY-}" ]; then
+    if [ "$1:${2-}" = remote:add ]; then
+        exec "$DF_SCOPE_REAL_GIT" remote add origin "$DF_SCOPE_REAL_REPOSITORY"
+    fi
+    exec "$DF_SCOPE_REAL_GIT" "$@"
+fi
 case "$1:${2-}" in
     init:|remote:add|fetch:*) ;;
+    merge-base:*)
+        [ "${DF_SCOPE_BASE_FAIL-}" != 1 ] || exit 1
+        printf '%s\n' cccccccccccccccccccccccccccccccccccccccc
+        ;;
     diff:--check) [ "${DF_SCOPE_DIFF_FAIL-}" != 1 ] ;;
     diff:--name-only)
         while IFS= read -r path; do [ -z "$path" ] || printf '%s\0' "$path"; done <"$DF_SCOPE_PATHS"
@@ -199,7 +211,7 @@ STUB
 chmod 755 "$temporary/bin/git"
 run_scope() (
     event=$1
-    base=$2
+    head=$2
     diff_fail=$3
     shift 3
     printf '%s\n' "$@" >"$temporary/scope-paths"
@@ -207,38 +219,60 @@ run_scope() (
     : >"$temporary/scope-git-log"
     export PATH="$temporary/bin:/usr/bin:/bin"
     export DF_SCOPE_PATHS="$temporary/scope-paths" DF_SCOPE_GIT_LOG="$temporary/scope-git-log"
-    export GITHUB_EVENT_NAME="$event" BASE_SHA="$base"
-    export GITHUB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    export GITHUB_EVENT_NAME="$event" GITHUB_SHA="$head"
     export GITHUB_REPOSITORY=dark-factory-build/dark-factory
     export GITHUB_OUTPUT="$temporary/scope-output" RUNNER_TEMP="$temporary"
     [ "$diff_fail" = false ] || export DF_SCOPE_DIFF_FAIL=1
-    CDPATH= cd -- "$temporary"
+    CDPATH= cd -- "${DF_SCOPE_WORKTREE:-$temporary}"
     /bin/bash "$temporary/scope.sh"
 )
 scope_case() {
     want_macos=$1
     want_control=$2
     want_relay=$3
-    shift 3
+    want_mode=$4
+    shift 4
     run_scope merge_group aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa false "$@"
     [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
-        "control_plane=$want_control macos=$want_macos relay=$want_relay " ]
+        "control_plane=$want_control macos=$want_macos macos_mode=$want_mode relay=$want_relay " ]
 }
-scope_case false false false docs/install.md README.md
-scope_case false true false control-plane
-scope_case false true false control-plane/src/lib.rs
-scope_case false true false .github/workflows/deploy-control-plane.yml
-scope_case true false false internal/kernel/store.go
-scope_case true true false control-plane/src/lib.rs internal/kernel/store.go
-scope_case true true true .github/workflows/ci.yml
-scope_case true true false .gitignore
-scope_case true true false scripts/bootstrap-maintainer-v2.sh
-scope_case false false true relay/src/index.ts
-scope_case false false true relay
-scope_case true false false unclassified-boundary
+scope_case false false false none docs/install.md README.md
+scope_case false true false none control-plane
+scope_case false true false none control-plane/src/lib.rs
+scope_case false true false none .github/workflows/deploy-control-plane.yml
+scope_case true false false ui web/packages/ui/src/console-view.tsx
+scope_case true false false ui web/packages/ui/src/factory-console.tsx
+scope_case true false false ui web/packages/ui/test/console-view.test.mjs
+scope_case true false false full web/packages/ui/src/factory-app-controller.ts
+scope_case true false false full web/packages/client/src/state.ts
+scope_case true false false full web/fixtures/state.mjs
+scope_case true false true full relay/fixtures/tokens.json
+scope_case true false false full protocol/browser/fixtures/agent_control.json
+scope_case true false false full internal/buildinfo/buildinfo.go
+scope_case true false false full internal/install/install_darwin.go
+scope_case true false false full cmd/factoryctl/main.go
+scope_case true false false full web/package.json
+scope_case true false false full VERSION
+scope_case true false false release scripts/package-release.sh
+scope_case true false false runtime internal/kernel/store.go
+scope_case true true false runtime control-plane/src/lib.rs internal/kernel/store.go
+scope_case true true true full .github/workflows/ci.yml
+scope_case true true false full .gitignore
+scope_case true true false full scripts/bootstrap-maintainer-v2.sh
+scope_case true false true full relay/src/index.ts
+scope_case true false true full relay/src/tokens.ts
+scope_case true false true full relay/src/envelope.ts
+scope_case false false true none relay/tests/tokens.vectors.test.mjs
+scope_case false false true none relay
+scope_case true false false full unclassified-boundary
+scope_case true false false full web/packages/ui/src/console-view.tsx internal/kernel/store.go
+# A rename/deletion is represented by the old and new paths because the
+# selector deliberately disables rename detection; either side must force the
+# same conservative mode.
+scope_case true false false full web/packages/ui/src/console-view.ts web/packages/ui/src/console-view.tsx
 run_scope workflow_dispatch '' false
 [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
-    'control_plane=true macos=true relay=true ' ]
+    'control_plane=true macos=true macos_mode=full relay=true ' ]
 if run_scope merge_group bad false >/dev/null 2>&1; then
     echo "invalid scope commit passed" >&2
     exit 1
@@ -247,6 +281,43 @@ if run_scope merge_group aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa true >/dev/nul
     echo "failing combined-tree diff check passed" >&2
     exit 1
 fi
+
+if DF_SCOPE_BASE_FAIL=1 run_scope merge_group aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa false >/dev/null 2>&1; then
+    echo "missing merge base passed scope selection" >&2
+    exit 1
+fi
+
+# A real queue chain: a relay contract entry precedes a docs-only entry. The
+# event's synthetic parent must not hide the earlier entry from selection.
+(
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+    real_git=$(command -v git)
+    history=$temporary/history
+    "$real_git" init -q -b main "$history"
+    "$real_git" -C "$history" config user.name Fixture
+    "$real_git" -C "$history" config user.email fixture@example.invalid
+    "$real_git" -C "$history" config core.hooksPath /dev/null
+    "$real_git" -C "$history" commit -q --allow-empty -m main
+    "$real_git" -C "$history" checkout -q -b queue
+    mkdir -p "$history/relay/src" "$history/docs"
+    printf '%s\n' contract >"$history/relay/src/tokens.ts"
+    "$real_git" -C "$history" add .
+    "$real_git" -C "$history" commit -q -m 'earlier queue entry'
+    export BASE_SHA=$("$real_git" -C "$history" rev-parse HEAD)
+    printf '%s\n' docs >"$history/docs/last.md"
+    "$real_git" -C "$history" add .
+    "$real_git" -C "$history" commit -q -m 'last queue entry'
+    head=$("$real_git" -C "$history" rev-parse HEAD)
+    export DF_SCOPE_REAL_REPOSITORY="$history" DF_SCOPE_REAL_GIT="$real_git"
+    export DF_SCOPE_WORKTREE="$temporary/combined-scope"
+    mkdir "$DF_SCOPE_WORKTREE"
+    run_scope merge_group "$head" false
+    [ "$(sort "$temporary/scope-output" | tr '\n' ' ')" = \
+        'control_plane=false macos=true macos_mode=full relay=true ' ] || {
+        echo "earlier queue entry escaped combined-tree selection" >&2
+        exit 1
+    }
+)
 
 # Execute the actual inline merge-rule step, including its jq projection, from
 # raw ruleset JSON. Every missing or misbound fact and an API failure must stop.

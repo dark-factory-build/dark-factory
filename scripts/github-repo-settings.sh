@@ -50,7 +50,7 @@ try gh repo edit "$repository" --enable-squash-merge --enable-rebase-merge \
 
 # One ruleset protects main with no bypass. Every change needs a pull request,
 # resolved threads, the merge queue, and the `required` aggregate from GitHub
-# Actions (integration 15368). The Maintainer's exact-head ALLOW is the review
+# Actions (integration 15368). An independent exact-head ALLOW is the review
 # gate for ordinary changes. Native CODEOWNER review is reserved for the few
 # paths that can rewrite that gate; the App cannot approve its own pull request.
 # Currency is the queue's job, not a strict up-to-date check. Nobody pushes to

@@ -4,6 +4,8 @@ import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-con
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js";
+import { AnswerControls } from "./console-interactions.js";
+import type { FloorAppearance } from "./floor-appearance.js";
 
 /** Only the controls the operator actually changed; the rest are left alone. */
 export type AgentConfigEdit = Readonly<{ model?: string; reasoningEffort?: string; accountId?: string; paused?: boolean; archived?: boolean; idlePolicy?: "wait" | "standing_instruction"; idleAfterSeconds?: number; idleInstruction?: string; idleRunBudget?: number }>;
@@ -512,6 +514,9 @@ function QueuedTask({
  * focus trap and focus return, so every exit goes through close().
  */
 export function SettingsDialog({
+  floorAppearance,
+  onFloorAppearanceChange,
+  onResetFloorAppearance,
   state,
   ready,
   address,
@@ -526,6 +531,9 @@ export function SettingsDialog({
   pairing,
   onClose,
 }: {
+  floorAppearance: FloorAppearance;
+  onFloorAppearanceChange: (appearance: FloorAppearance) => void;
+  onResetFloorAppearance: () => void;
   state: StateView | undefined;
   ready: boolean;
   address: string;
@@ -575,26 +583,33 @@ export function SettingsDialog({
           onUpdate={onUpdateAccount}
           onRefresh={onLoadAccounts}
         />
-        <div className="dfConsoleSidebar__section" aria-label="BUILDING">
-          <h3>Factory controls</h3>
-          {state === undefined ? <p className="dfFactoryConsole__empty">BUILDING STATE UNAVAILABLE</p> : (
-            <dl className="dfFactoryConsole__metrics">
-              <div><dt>DISPATCH</dt><dd>{state.factory.dispatch_enabled ? "ENABLED" : "PAUSED"}</dd></div>
-              <div><dt>WORKER SLOTS</dt><dd>{String(state.factory.capacity)}</dd></div>
-              <div><dt>ACTIVE RUNS</dt><dd>{`${state.factory.active_runs} TOTAL`}</dd></div>
-            </dl>
-          )}
-        </div>
-        <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
-        <details className="dfConsoleSidebar__section" aria-label="This factory">
-          <summary>Diagnostics</summary>
-          <p className="dfConsoleSidebar__address">{address}</p>
-          {state === undefined ? null : <p>Revision {state.factory.revision.toString()}</p>}
+        <details className="dfConsoleSidebar__section" aria-label="Run limits">
+          <summary>Run limits</summary>
+          <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
         </details>
+        <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} />
 
       </div>
     </dialog>
   );
+}
+
+function FloorAppearanceSection({ appearance, onChange, onReset }: {
+  appearance: FloorAppearance;
+  onChange: (appearance: FloorAppearance) => void;
+  onReset: () => void;
+}) {
+  return <section className="dfConsoleSidebar__section" aria-label="FLOOR APPEARANCE">
+    <h3>Floor appearance</h3>
+    <p>Saved in this browser. Does not change how the factory runs.</p>
+    <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
+    <label>Dependency links<select value={appearance.dependencyLinks} onChange={(event) => onChange({ ...appearance, dependencyLinks: event.currentTarget.value as FloorAppearance["dependencyLinks"] })}><option value="selected-room">Selected room</option><option value="overview">Overview</option><option value="off">Off</option></select></label>
+    <label>Labels<select value={appearance.labels} onChange={(event) => onChange({ ...appearance, labels: event.currentTarget.value as FloorAppearance["labels"] })}><option value="names">Names</option><option value="names-and-counts">Names and counts</option></select></label>
+    <label>Task props<select value={appearance.taskProps ? "on" : "off"} onChange={(event) => onChange({ ...appearance, taskProps: event.currentTarget.value === "on" })}><option value="on">On</option><option value="off">Off</option></select></label>
+    <label>Animation<select value={appearance.animation} onChange={(event) => onChange({ ...appearance, animation: event.currentTarget.value as FloorAppearance["animation"] })}><option value="follow-device">Follow device</option><option value="off">Off</option></select></label>
+    <label>Ambient life<select value={appearance.ambientLife} onChange={(event) => onChange({ ...appearance, ambientLife: event.currentTarget.value as FloorAppearance["ambientLife"] })}><option value="off">Off</option><option value="quiet">Quiet</option><option value="lively">Lively</option></select></label>
+    <button type="button" onClick={onReset}>Reset floor appearance</button>
+  </section>;
 }
 
 function ProjectLimitsSection({ state, edit, ready, onSave }: {
@@ -681,8 +696,8 @@ function AccountsSection({
   const unlinked = (accounts ?? []).filter((login) => login.linked_id === "");
   return (
     <div className="dfConsoleSidebar__section" aria-label="ACCOUNTS">
-      <h3>ACCOUNTS</h3>
-      <details><summary>ADD ACCOUNT</summary><p>Sign in with your provider CLI on this Mac. For another login, use a separate profile directory named .codex-name or .claude-name in your home folder. Then refresh and link it below.</p></details>
+      <h3>PROVIDER LOGINS</h3>
+      <p className="dfConsoleSidebar__inherit">{accounts !== undefined && linked.length === 0 && unlinked.length === 0 ? "Sign in with your provider CLI on this Mac, then refresh." : "Link a login already available on this Mac."}</p>
       <button type="button" disabled={pending || onRefresh === undefined} onClick={onRefresh}>{pending ? "REFRESHING" : "REFRESH ACCOUNTS"}</button>
       {error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{EDIT_ERRORS.get(error) ?? "THE FACTORY REFUSED THIS"}</p>}
       {linked.length === 0 ? <p className="dfFactoryConsole__empty">NO ACCOUNTS LINKED</p> : (
@@ -693,9 +708,8 @@ function AccountsSection({
             return (
               <li key={`${account.id}:${account.revision}`} className="dfConsoleSidebar__account">
                 <p className="dfConsoleRow__title">{account.label} · {account.provider}</p>
-                <p>{identity === "" ? account.home : identity}</p>
-                {login?.default_model ? <p className="dfConsoleSidebar__inherit">CLI default: {login.default_model}</p> : null}
-                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again in this directory, then refresh.</p>}
+                <p>{identity === "" ? `${account.provider} login linked` : identity}</p>
+                {!login?.unavailable_reason ? null : <p className="dfConsoleSidebar__inherit">ACCOUNT UNAVAILABLE · {login.unavailable_reason}. Sign in again using <code>{account.home}</code>, then refresh.</p>}
                 <div className="dfConsoleSidebar__taskActions">
                   <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-linked-account-${account.id}`}>Label for {account.label}</label>
                   <input id={`df-linked-account-${account.id}`} value={labels[`${account.id}:${account.revision}`] ?? account.label} disabled={pending || onUpdate === undefined} onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [`${account.id}:${account.revision}`]: value })); }} />
@@ -709,18 +723,18 @@ function AccountsSection({
         </ul>
       )}
       <p className="dfConsoleSidebar__inherit">Unlinking keeps the provider login and credentials.</p>
-      <h3>AVAILABLE TO LINK</h3>
+      <h3>AVAILABLE LOGINS</h3>
       {accounts === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOOKING" : "NOT LOOKED YET"}</p>
         : unlinked.length === 0 ? <p className="dfFactoryConsole__empty">NO UNLINKED LOGINS FOUND</p> : (
         <ul className="dfFactoryConsole__list">
-          {unlinked.map((login) => (
+          {unlinked.map((login, index) => (
             <li key={login.home} className="dfConsoleSidebar__account">
-              <p className="dfConsoleRow__title">{login.home}</p>
-              <p className="dfFactoryConsole__eyebrow">{[login.provider, login.email, login.default_model].filter((part) => part !== "").join(" · ")}</p>
+              <p className="dfConsoleRow__title">{login.provider} login</p>
+              <p className="dfFactoryConsole__eyebrow">{[login.email, login.organization].filter((part) => part !== "").join(" · ") || "Ready to link"}</p>
               <div className="dfConsoleSidebar__taskActions">
-                <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-account-label-${login.home}`}>Label for {login.home}</label>
+                <label className="dfFactoryConsole__visuallyHidden" htmlFor={`df-account-label-${login.provider}-${index}`}>Label for {login.provider} login</label>
                 <input
-                  id={`df-account-label-${login.home}`}
+                  id={`df-account-label-${login.provider}-${index}`}
                   value={labels[login.home] ?? login.label}
                   disabled={pending || onLink === undefined}
                   onChange={(event) => { const value = event.currentTarget.value; setLabels((current) => ({ ...current, [login.home]: value })); }}
@@ -758,29 +772,14 @@ export function HumanRequestPanel({
   terminalReady: boolean;
 }) {
   const busy = selected.phase === "replying" || selected.phase === "cancelling";
-  const submit = (event: FormEvent) => { event.preventDefault(); onReply?.(); };
   return (
     <article className="dfFactoryConsole__humanRequest" aria-label="Selected question" aria-live="polite">
       {selected.phase === "loading" ? <p className="dfFactoryConsole__empty">LOADING THE QUESTION…</p> : (
         <>
           <h3>DECISION NEEDED</h3>
           <p className="dfFactoryConsole__question">{selected.question}</p>
-          {selected.options.length === 0 ? null : <div className="dfFactoryConsole__answerOptions" role="group" aria-label="Suggested answers">
-            {selected.options.map((option, index) => <button type="button" key={option} disabled={busy || !selected.canReply || onReplyChange === undefined} onClick={() => onReplyChange?.(option)}>{option}{index === 0 ? " · RECOMMENDED" : ""}</button>)}
-          </div>}
-          {selected.canReply ? (
-            <form className="dfFactoryConsole__reply" aria-label="Answer this question" onSubmit={submit}>
-              <label htmlFor="dfHumanRequestReply">YOUR ANSWER</label>
-              <textarea
-                id="dfHumanRequestReply"
-                value={selected.reply}
-                maxLength={selected.replyMaxBytes}
-                disabled={busy || onReplyChange === undefined}
-                onChange={(event) => onReplyChange?.(event.currentTarget.value)}
-              />
-              <button type="submit" disabled={busy || onReply === undefined}>{selected.phase === "replying" ? "ANSWERING…" : "ANSWER"}</button>
-            </form>
-          ) : <p className="dfFactoryConsole__empty">{selected.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${selected.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
+          <AnswerControls surface="factory" options={selected.options} canReply={selected.canReply} reply={selected.reply} replyMaxBytes={selected.replyMaxBytes} busy={busy} onReplyChange={onReplyChange} onReply={onReply} submitLabel="ANSWER" submittingLabel="ANSWERING…" />
+          {selected.canReply ? null : <p className="dfFactoryConsole__empty">{selected.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${selected.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
           <div className="dfFactoryConsole__humanActions">
             {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>STOP TASK</button> : null}
             {onOpenTerminal === undefined ? null : <button type="button" disabled={busy || !terminalReady} onClick={() => onOpenTerminal(selected.request)}>OPEN TERMINAL</button>}

@@ -16,7 +16,7 @@ import (
 )
 
 func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
-	data := []byte("compile x.go\nAuthorization: Bearer private-value\nconfig /Users/operator/.codex/auth.json\n{\"token\":\"json-secret\"}\nfinished\npartial secret=value")
+	data := []byte("compile x.go\nAuthorization: Bearer private-value\nconfig /Users/operator/.codex/auth.json\n{\"token\":\n\"json-secret\"}\n{\"path\":\"/Users/operator/\n.secret\"}\n{\"message\":\n\"visible\"}\nfinished\npartial secret=value")
 	for cursor := 0; cursor < len(data); cursor++ {
 		for size := 1; size <= len(data)-cursor; size++ {
 			got, omitted := redactTerminalWindow(data[cursor:cursor+size], uint64(cursor))
@@ -28,6 +28,49 @@ func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
 	got, _ := redactTerminalWindow(data, 0)
 	if !bytes.Contains(got, []byte("compile x.go")) || !bytes.Contains(got, []byte("finished")) {
 		t.Fatalf("lost useful output: %q", got)
+	}
+	if got, _ := redactTerminalWindow([]byte("{\"token\":\n\"split-secret\"}\n{\"message\":\n\"visible\"}\n"), 0); bytes.Contains(got, []byte("split-secret")) || !bytes.Contains(got, []byte("visible")) {
+		t.Fatalf("split JSON redaction or benign JSON handling = %q", got)
+	}
+	if got, _ := redactTerminalWindow([]byte("{\"path\":\"/Users/operator/\n.secret\"}\n"), 0); bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte(".secret")) {
+		t.Fatalf("split JSON path leaked: %q", got)
+	}
+	for _, secretKey := range []string{"token", "secret", "password"} {
+		markerFree := []byte("{\"" + secretKey + "\":\n\"hunter2\"}\nnext\n")
+		keyLineEnd := bytes.IndexByte(markerFree, '\n')
+		for cursor := 1; cursor < keyLineEnd; cursor++ {
+			got, _ := redactTerminalWindow(markerFree[cursor:], uint64(cursor), terminalLookbehind{start: 0, bytes: markerFree[:cursor]})
+			if bytes.Contains(got, []byte("hunter2")) || !bytes.Contains(got, []byte("next")) {
+				t.Fatalf("marker-free split JSON %s cursor=%d handling = %q", secretKey, cursor, got)
+			}
+		}
+		if secretKey == "token" {
+			// If replay begins above the key's opening byte, the ambiguous final
+			// suffix is conservatively suppressed rather than exposed.
+			if got, _ := redactTerminalWindow(markerFree[6:], 6); bytes.Contains(got, []byte("hunter2")) || !bytes.Contains(got, []byte("next")) {
+				t.Fatalf("floor-loss ambiguous split JSON secret handling = %q", got)
+			}
+		}
+	}
+	multiline := []byte("ordinary one\nordinary two\n{\"token\":\n\"multiline-secret\"}\nnext\n")
+	keyCursor := bytes.Index(multiline, []byte("token")) + 2
+	got, _ = redactTerminalWindow(multiline[keyCursor:], uint64(keyCursor), terminalLookbehind{start: 0, bytes: multiline[:keyCursor]})
+	if bytes.Contains(got, []byte("multiline-secret")) || !bytes.Contains(got, []byte("next")) {
+		t.Fatalf("multiline lookbehind redaction = %q", got)
+	}
+	liveTail, omitted := redactTerminalWindow([]byte("ret\n"), 0, terminalLookbehind{start: 22, bytes: []byte("Authorization: Bearer sec")})
+	if bytes.Contains(liveTail, []byte("ret")) || omitted != 0 || len(liveTail) != len("ret\n") {
+		t.Fatalf("live lookbehind redaction = %q omitted=%d", liveTail, omitted)
+	}
+	for _, key := range []string{"message", "login", "version", "monkey"} {
+		benign := []byte("{\"" + key + "\":\n\"visible\"}\n")
+		keyLineEnd := bytes.IndexByte(benign, '\n')
+		for cursor := 1; cursor < keyLineEnd; cursor++ {
+			got, _ := redactTerminalWindow(benign[cursor:], uint64(cursor), terminalLookbehind{start: 0, bytes: benign[:cursor]})
+			if !bytes.Contains(got, []byte("visible")) {
+				t.Fatalf("cursor-boundary benign %s JSON was over-redacted at cursor %d: %q", key, cursor, got)
+			}
+		}
 	}
 }
 
@@ -69,7 +112,7 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 		{"cursor inside secret", active, uint64(strings.Index(string(data), "secret-value") + 3), 65536, uint64(len(data)), false, false, false, false, "done\n"},
 		{"fixed snapshot excludes new output", active, 0, 65536, 8, false, false, false, false, "compile\n"},
 		{"empty at head", active, uint64(len(data)), 65536, uint64(len(data)), false, false, true, false, ""},
-		{"live output after attachment", active, 8, 65536, 8, false, false, false, true, "live\n"},
+		{"live credential continuation after attachment", active, 40, 65536, 40, false, false, false, true, "***\n"},
 		{"expired replay cursor", active, 0, 65536, uint64(len(data)), true, false, false, false, ""},
 		{"future cursor rejected attach", active, 99, 65536, 12, false, true, false, false, ""},
 	}
@@ -103,8 +146,9 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 			} else if test.rejected {
 				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: test.cursor, Head: test.head, Status: string(runner.TerminalResultRejected)})
 			} else if test.live {
-				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: test.cursor, Head: test.head, Status: string(runner.TerminalResultOK)})
-				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalOutput), Start: test.head, End: test.head + 5, Payload: []byte("live\n")})
+				context := []byte("Authorization: Bearer sec")
+				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: test.cursor, Head: test.head, Status: string(runner.TerminalResultOK), ContextStart: test.head - uint64(len(context)), Context: context})
+				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalOutput), Start: test.head, End: test.head + 4, Payload: []byte("ret\n")})
 				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalPTYEOF)})
 			} else {
 				writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: test.cursor, Head: test.head, Status: string(runner.TerminalResultOK)})
@@ -133,7 +177,7 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 				return
 			}
 			if test.live {
-				if got.err != nil || got.value.Source != "live" || string(got.value.Payload) != test.want || got.value.Head != test.head+5 || got.value.NextCursor != test.head+5 || got.value.Gap {
+				if got.err != nil || got.value.Source != "live" || string(got.value.Payload) != test.want || got.value.Head != test.head+4 || got.value.NextCursor != test.head+4 || got.value.Gap {
 					t.Fatalf("live observation=%+v err=%v", got.value, got.err)
 				}
 				return
@@ -194,6 +238,15 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 		t.Fatalf("settled caller retained observation authority: %v", err)
 	}
 
+}
+
+func TestTerminalObservationSettledCursorUsesRetainedLookbehind(t *testing.T) {
+	retained := []byte("{\"token\":\n\"hunter2\"}\nnext\n")
+	floor, offset := uint64(100), uint64(1)
+	got, _ := redactTerminalWindow(retained[offset:], floor+offset, terminalLookbehind{start: floor, bytes: retained[:offset]})
+	if bytes.Contains(got, []byte("hunter2")) || !bytes.Contains(got, []byte("next")) {
+		t.Fatalf("settled cursor redaction = %q", got)
+	}
 }
 
 func TestTerminalObservationTargetAuthorizationMatrix(t *testing.T) {

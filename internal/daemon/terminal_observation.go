@@ -13,13 +13,54 @@ import (
 // its first line, and a partial final line is omitted, so a caller cannot
 // bypass credential labels by requesting a cursor inside their value.
 var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:blank:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^[:space:]]+`)
+var terminalJSONSecret = regexp.MustCompile(`(?is)"(?:api[_-]?key|password|token|secret)"[[:space:]]*:[[:space:]]*"[^"]{0,512}"`)
+var terminalJSONPrivatePath = regexp.MustCompile(`(?is)"[^"]{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^"]{0,512}"`)
+var terminalJSONSecretKey = regexp.MustCompile(`(?i)^[[:space:]\{"']*(?:api[_-]?key|password|assword|ssword|sword|secret|ecret|cret|token|oken|ken|en|n)["']?[[:space:]]*:`)
+var terminalJSONAmbiguousSecretKey = regexp.MustCompile(`(?i)^[[:space:]\{"']*n["']?[[:space:]]*:`)
+var terminalJSONPathStart = regexp.MustCompile(`(?i)"[^"]{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)`)
+var terminalJSONOrphanValue = regexp.MustCompile(`(?m)^[^:\r\n]{1,512}"[[:space:]]*[},]`)
+var terminalJSONOrphanSecret = regexp.MustCompile(`(?im)^[^:\r\n]{0,512}(?:secret|token|password|bearer|api[_-]?key)[^:\r\n]{0,512}"[[:space:]]*[},]`)
+var terminalJSONOrphanPath = regexp.MustCompile(`(?im)^[[:space:]]*(?:\.|/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^:\r\n]{0,512}"[[:space:]]*[},]`)
 
-func redactTerminalWindow(payload []byte, start uint64) ([]byte, uint64) {
+type terminalLookbehind struct {
+	start uint64
+	bytes []byte
+}
+
+func redactTerminalWindow(payload []byte, start uint64, lookbehind ...terminalLookbehind) ([]byte, uint64) {
 	original := len(payload)
-	if start != 0 {
-		end := bytes.IndexByte(payload, '\n')
+	if start == 0 && len(lookbehind) != 0 && len(lookbehind[0].bytes) != 0 {
+		prefixLen := len(lookbehind[0].bytes)
+		end := bytes.LastIndexByte(payload, '\n')
 		if end < 0 {
 			return nil, uint64(original)
+		}
+		combined := append(append([]byte(nil), lookbehind[0].bytes...), payload[:end+1]...)
+		redact := func(match []byte) []byte { return bytes.Repeat([]byte("*"), len(match)) }
+		result := terminalJSONSecret.ReplaceAllFunc(combined, redact)
+		result = terminalJSONPrivatePath.ReplaceAllFunc(result, redact)
+		result = terminalPrivateText.ReplaceAllFunc(result, redact)
+		return result[prefixLen:], uint64(original - (end + 1))
+	}
+	var droppedKeyLine []byte
+	if start != 0 {
+		end := bytes.IndexByte(payload, '\n')
+		prefixLen := 0
+		if len(lookbehind) != 0 && lookbehind[0].start+uint64(len(lookbehind[0].bytes)) == start {
+			combined := append(append([]byte(nil), lookbehind[0].bytes...), payload...)
+			lineStart := bytes.LastIndexByte(combined[:len(lookbehind[0].bytes)], '\n') + 1
+			if combinedEnd := bytes.IndexByte(combined[len(lookbehind[0].bytes):], '\n'); combinedEnd >= 0 {
+				combinedEnd += len(lookbehind[0].bytes)
+				prefixLen = len(lookbehind[0].bytes)
+				end = combinedEnd - prefixLen
+				droppedKeyLine = combined[lineStart:combinedEnd]
+			}
+		}
+		if end < 0 {
+			return nil, uint64(original)
+		}
+		if len(droppedKeyLine) == 0 {
+			droppedKeyLine = payload[:end]
 		}
 		payload = payload[end+1:]
 	}
@@ -28,7 +69,21 @@ func redactTerminalWindow(payload []byte, start uint64) ([]byte, uint64) {
 		return nil, uint64(original)
 	}
 	payload = payload[:end+1]
-	result := terminalPrivateText.ReplaceAllFunc(payload, func(match []byte) []byte { return bytes.Repeat([]byte("*"), len(match)) })
+	redact := func(match []byte) []byte { return bytes.Repeat([]byte("*"), len(match)) }
+	result := terminalJSONSecret.ReplaceAllFunc(payload, redact)
+	result = terminalJSONPrivatePath.ReplaceAllFunc(result, redact)
+	if start != 0 {
+		// A cursor can begin on the value line after a JSON key was omitted.
+		// Hide that orphaned quoted fragment so split credentials and paths
+		// cannot be recovered by choosing a later cursor.
+		result = terminalJSONOrphanSecret.ReplaceAllFunc(result, redact)
+		result = terminalJSONOrphanPath.ReplaceAllFunc(result, redact)
+		fullLookbehind := len(lookbehind) != 0 && lookbehind[0].start+uint64(len(lookbehind[0].bytes)) == start
+		if terminalJSONSecretKey.Match(droppedKeyLine) || terminalJSONPathStart.Match(droppedKeyLine) || (!fullLookbehind && terminalJSONAmbiguousSecretKey.Match(droppedKeyLine)) {
+			result = terminalJSONOrphanValue.ReplaceAllFunc(result, redact)
+		}
+	}
+	result = terminalPrivateText.ReplaceAllFunc(result, redact)
 	return result, uint64(original - len(payload))
 }
 
@@ -116,7 +171,14 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 			return newErrorReply(api.RemoteInternal)
 		}
 		raw := diagnostics.Payload[offset : offset+remaining]
-		payload, omitted := redactTerminalWindow(raw, input.Cursor)
+		var payload []byte
+		var omitted uint64
+		if offset == 0 {
+			payload, omitted = redactTerminalWindow(raw, input.Cursor)
+		} else {
+			contextOffset := offset - min(offset, uint64(512))
+			payload, omitted = redactTerminalWindow(raw, input.Cursor, terminalLookbehind{start: diagnostics.Floor + contextOffset, bytes: diagnostics.Payload[contextOffset:offset]})
+		}
 		result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: input.Cursor + remaining, Floor: diagnostics.Floor, Head: diagnostics.Head, Source: "stored", Omitted: omitted, Payload: payload}
 		reply, err := api.NewTerminalObservationReply(result)
 		if err != nil {
@@ -142,12 +204,17 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 	result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: input.Cursor, Source: "none"}
 	raw := make([]byte, 0, input.MaxBytes)
 	var attachedHead uint64
+	var lookbehind terminalLookbehind
 	finish := func() api.Reply {
 		redactionStart := input.Cursor
 		if result.Source == "live" && input.Cursor == attachedHead {
 			redactionStart = 0
 		}
-		result.Payload, result.Omitted = redactTerminalWindow(raw, redactionStart)
+		if len(lookbehind.bytes) != 0 {
+			result.Payload, result.Omitted = redactTerminalWindow(raw, redactionStart, lookbehind)
+		} else {
+			result.Payload, result.Omitted = redactTerminalWindow(raw, redactionStart)
+		}
 		reply, err := api.NewTerminalObservationReply(result)
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
@@ -165,6 +232,7 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 			switch event.Kind {
 			case TerminalEventAttached:
 				result.Floor, result.Head, attachedHead = event.Floor, event.Head, event.Head
+				lookbehind = terminalLookbehind{start: event.ContextStart, bytes: append([]byte(nil), event.Context...)}
 				if input.Cursor > event.Head {
 					// A rejected attach reports the current head before the
 					// attachment closes. Rebase a future cursor to that head so
