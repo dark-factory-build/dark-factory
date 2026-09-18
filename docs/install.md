@@ -285,15 +285,25 @@ historical destinations are refused explicitly. The source preserves the label
 filter and trusted human authors,
 poll interval, default priority and maximum matching label priority. Priority
 label changes update the same queued task, without new acceptance or recovery.
-Review companion settings are retained immutably. The old companion is supported
-only for an owner home that has never opted into customer GitHub authorization;
-it requires the existing host Git, provider, and operator-installed legacy
-Maintainer bridge. Once the home opts in, the companion stops with an actionable
-error, including after disconnect or expiry. Customer publication uses the
-installed attempt-authenticated Maintainer bridge. The existing review journal
-and separate release-only schedule remain in place. No GitHub credentials are
-copied. Initial customer connection waits until a legacy controller/review pass
-releases its existing ownership lock; finish or stop that pass and retry Connect.
+Review companion settings and its operation journal are retained. After cutover,
+the companion uses the installed private operator adapter and the connected
+Maintainer for PR reads, independent review, enqueue and merge observation.
+It keeps the source issue repository separate from the frozen publication
+destination and uses each PR's actual base branch. Preview requires that
+publication destination to be bound and delegated and its configured Git review
+mirror to be ready before stopping the old schedule. Git fetch uses the
+operator's existing Git authentication; no broker credential is copied.
+
+The independent reviewer sees only status, observation of its own operation,
+and submission for its exact repository, PR, head and review UUID. Disconnect,
+expiry or withdrawal refuses new publication through live host checks; it never
+falls back to `gh` or the old owner bridge. A standalone old companion stops
+after customer opt-in. Existing legacy broker receipts require explicit
+administrative transfer with their original request proof before the customer
+connection can observe them; their UUIDs and stored outcomes remain unchanged.
+Initial customer connection waits until an existing controller/review pass
+releases its ownership lock; finish or stop that pass and retry Connect.
+The separate release-only schedule and its journal remain in place.
 
 Legacy `app/…` and `…[bot]` author entries are listed as a policy narrowing in
 preview. Already imported work and receipts are preserved. Future bot-authored

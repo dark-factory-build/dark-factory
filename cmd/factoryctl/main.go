@@ -291,6 +291,9 @@ type attemptCommand struct {
 }
 
 func main() {
+	if len(os.Args) == 4 && os.Args[1] == "intake" && os.Args[2] == "review-mcp" {
+		os.Exit(runIntakeReviewMCP(context.Background(), os.Args[3], os.Stdin, os.Stdout, os.Getenv))
+	}
 	if len(os.Args) == 3 && os.Args[1] == "attempt" && os.Args[2] == "maintainer-mcp" {
 		os.Exit(runMaintainerMCP(context.Background(), os.Stdin, os.Stdout, os.Getenv))
 	}
@@ -307,7 +310,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 type browserOpener func(context.Context, string) error
 
 func runWithOpener(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
-	if len(args) == 2 && args[0] == "intake" && (args[1] == "legacy_preview" || args[1] == "legacy_commit" || args[1] == "legacy_lineage") {
+	if len(args) == 2 && args[0] == "intake" && (args[1] == "legacy_preview" || args[1] == "legacy_commit" || args[1] == "legacy_lineage" || args[1] == "review") {
 		return runLegacyIntakeProtocol(ctx, args[1], os.Stdin, getenv, stdout)
 	}
 	if len(args) >= 2 && args[0] == "intake" && args[1] == "service" {

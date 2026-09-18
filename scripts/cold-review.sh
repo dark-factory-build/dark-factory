@@ -99,6 +99,12 @@ esac
     exit 2
 }
 
+# An installed customer reviewer uses the same executable with a fixed private
+# context. JSON is also valid TOML for this string array; no shell evaluation.
+bridge_args='[]'
+if [ -n "${DARK_FACTORY_REVIEW_ADAPTER_CONTEXT:-}" ]; then
+    bridge_args=$(python3 -c 'import json,sys; print(json.dumps(["intake","review-mcp",sys.argv[1]]))' "$DARK_FACTORY_REVIEW_ADAPTER_CONTEXT") || exit 2
+fi
 provider=${DARK_FACTORY_REVIEW_PROVIDER:-codex}
 case "$provider" in
     codex | claude) ;;
@@ -199,6 +205,7 @@ case "$provider" in
         model=${DARK_FACTORY_REVIEW_MODEL:-gpt-5.6-sol}
         DARK_FACTORY_REVIEW_CHECKOUT="$work/repo" codex exec --disable computer_use --disable browser_use --disable plugins --ephemeral --ignore-user-config --strict-config -c 'approval_policy={ granular={sandbox_approval=false,rules=false,mcp_elicitations=true,request_permissions=false,skill_approval=false}}' -c 'approvals_reviewer="auto_review"' --sandbox read-only --ignore-rules --skip-git-repo-check --model "$model" \
             -c "mcp_servers.dark_factory_maintainer.command=\"$bridge\"" \
+            -c "mcp_servers.dark_factory_maintainer.args=$bridge_args" \
             -c 'mcp_servers.dark_factory_maintainer.enabled=true' \
             -c 'mcp_servers.dark_factory_maintainer.required=true' \
             -c 'mcp_servers.dark_factory_maintainer.startup_timeout_sec=120' \
@@ -209,7 +216,7 @@ case "$provider" in
     claude)
         model=${DARK_FACTORY_REVIEW_CLAUDE_MODEL:-opus}
         DARK_FACTORY_REVIEW_CHECKOUT="$work/repo" claude -p "$prompt" --model "$model" \
-            --strict-mcp-config --mcp-config "{\"mcpServers\":{\"maintainer\":{\"command\":\"$bridge\"}}}" \
+            --strict-mcp-config --mcp-config "{\"mcpServers\":{\"maintainer\":{\"command\":\"$bridge\",\"args\":$bridge_args}}}" \
             --allowedTools "mcp__maintainer__maintainer_status,mcp__maintainer__observe_operation,mcp__maintainer__submit_pull_request_review,Bash(git -C $work/repo:*),Read,Grep,Glob" \
             > "$out" 2>&1 || true
         ;;

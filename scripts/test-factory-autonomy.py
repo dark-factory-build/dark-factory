@@ -735,7 +735,7 @@ class LegacyCutoverTest(unittest.TestCase):
             return subprocess.CompletedProcess(args,0,'','')
         def api(_binary,_home,args,value=None):
             if args[0] == 'legacy_preview':
-                return {'state':'legacy_committed' if self.sources else 'legacy_preview','legacy':{'plan_hash': self.plan, 'target_repository_id':'b'*32, 'requires_policy_acknowledgement': bool(value['legacy'].get('manual_app_authors'))}}
+                return {'state':'legacy_committed' if self.sources else 'legacy_preview','legacy':{'plan_hash': self.plan, 'target_repository_id':'b'*32, 'publication_repository':'fixture/publication', 'requires_policy_acknowledgement': bool(value['legacy'].get('manual_app_authors'))}}
             if args[0] == 'legacy_commit':
                 if value['legacy']['plan_hash'] != self.plan:
                     return {'state':'stale','legacy':{'plan_hash':self.plan, 'target_repository_id':'b'*32}}
@@ -754,9 +754,19 @@ class LegacyCutoverTest(unittest.TestCase):
         self.api = api
         self.addCleanup(patch.stopall)
         patch.object(autonomy,'__file__',str(self.script)).start()
+        self.review_ready = patch.object(autonomy,'legacy_review_ready').start()
         patch.object(autonomy,'managed_plist_root',return_value=self.plists).start()
         patch.object(autonomy,'managed_launchctl',side_effect=launchctl).start()
         patch.object(autonomy,'managed_api',side_effect=api).start()
+
+    def test_review_readiness_is_checked_before_stopping_legacy(self):
+        self.fixture()
+        self.review_ready.side_effect=ValueError('review mirror unavailable')
+        with self.assertRaisesRegex(ValueError,'review mirror unavailable'):
+            autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
+        self.assertFalse(any(call[0]=='bootout' for call in self.calls))
+        self.assertEqual(0,self.commits)
+        self.review_ready.assert_called_once_with(self.config,'fixture/publication')
 
     def test_processed_history_hash_is_proven_only_by_the_retained_matching_snapshot(self):
         self.fixture()
