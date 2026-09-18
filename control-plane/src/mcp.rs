@@ -87,10 +87,63 @@ pub(crate) async fn receive(
         Ok(request) => request,
         Err(_) => return json_rpc_error(Value::Null, -32700, "Parse error"),
     };
-    dispatch(request, mcp).await
+    dispatch(request, mcp, false).await
 }
 
-async fn dispatch(request: Value, mcp: &McpState) -> Response {
+/// Called only after the connection DO has verified the host bearer, live
+/// GitHub user and delegated repository. No Access/owner fallback is possible.
+pub(crate) async fn connection_dispatch(
+    request: Value,
+    mcp: &McpState,
+    owner: &str,
+    repository: Option<&str>,
+    grants: std::collections::BTreeMap<String, (i64, i64)>,
+) -> Response {
+    let mut scoped = mcp.clone();
+    scoped.app = mcp.app.for_connection(grants);
+    if let Some(repository) = repository {
+        scoped.journal = match mcp.journal.for_connection(owner, repository) {
+            Ok(journal) => journal,
+            Err(_) => return error_response(StatusCode::UNAUTHORIZED, "unauthorized"),
+        };
+        // Workflow observations reconstruct a remote marker without otherwise
+        // reading the journal. Bind those and every referenced UUID before any
+        // GitHub read, exactly as the mutation/reconciliation paths already do.
+        let name = request
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if let Some(arguments) = request
+            .pointer("/params/arguments")
+            .and_then(Value::as_object)
+        {
+            for (key, value) in arguments {
+                let referenced = key.ends_with("_operation_id")
+                    || (key == "operation_id"
+                        && matches!(
+                            name,
+                            "observe_release_workflow" | "observe_control_plane_deploy"
+                        ));
+                if referenced && !value.is_null() {
+                    let Some(id) = value.as_str() else {
+                        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
+                    };
+                    let mut id = id.to_owned();
+                    if canonical_operation_id(&mut id).is_err()
+                        || !matches!(scoped.journal.observe_operation(&id).await, Ok(Some(_)))
+                    {
+                        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
+                    }
+                }
+            }
+        }
+    } else if request.get("method").and_then(Value::as_str) == Some("tools/call") {
+        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    dispatch(request, &scoped, true).await
+}
+
+async fn dispatch(request: Value, mcp: &McpState, connection: bool) -> Response {
     let Some(request) = request.as_object() else {
         return json_rpc_error(Value::Null, -32600, "Invalid Request");
     };
@@ -113,7 +166,20 @@ async fn dispatch(request: Value, mcp: &McpState) -> Response {
                 "instructions": "Every tool names its `owner/name` repository, and acts only on repositories this App is installed on. Read status before a write. Every write is operation-bound and may fail closed."
             }),
         ),
-        "tools/list" => json_rpc_result(id, tools()),
+        "tools/list" => {
+            let mut list = tools();
+            if connection {
+                if let Some(tool) = list["tools"].as_array_mut().and_then(|tools| {
+                    tools
+                        .iter_mut()
+                        .find(|tool| tool["name"] == "observe_operation")
+                }) {
+                    tool["inputSchema"]["properties"]["repository"] = json!({"type":"string"});
+                    tool["inputSchema"]["required"] = json!(["operation_id", "repository"]);
+                }
+            }
+            json_rpc_result(id, list)
+        }
         "tools/call" => call_tool(id, request, mcp).await,
         _ => json_rpc_error(id, -32601, "Method not found"),
     }

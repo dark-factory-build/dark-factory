@@ -68,9 +68,13 @@ const DEPLOY_WORKFLOW: WorkflowRef<'static> = WorkflowRef {
 #[derive(Clone)]
 pub(crate) struct AppAuthority(Arc<Authority>);
 
+#[derive(Clone)]
 struct Authority {
     app_id: i64,
-    private_key: PrivateKey,
+    private_key: Arc<PrivateKey>,
+    // Name -> (installation ID, repository ID), proved by live user access.
+    // None is the legacy Access authority; Some binds every customer token.
+    repository_grants: Option<BTreeMap<String, (i64, i64)>>,
 }
 
 struct PrivateKey(Vec<u8>);
@@ -947,6 +951,12 @@ pub(crate) struct ControlPlaneDeployObservationResult {
 }
 
 impl AppAuthority {
+    pub(crate) fn for_connection(&self, grants: BTreeMap<String, (i64, i64)>) -> Self {
+        let mut authority = (*self.0).clone();
+        authority.repository_grants = Some(grants);
+        Self(Arc::new(authority))
+    }
+
     pub(crate) fn new(
         app_id: i64,
         private_key: String,
@@ -964,7 +974,8 @@ impl AppAuthority {
         }
         Ok(Self(Arc::new(Authority {
             app_id,
-            private_key: PrivateKey(private_key),
+            private_key: Arc::new(PrivateKey(private_key)),
+            repository_grants: None,
         })))
     }
 
@@ -3944,7 +3955,7 @@ async fn refuse<T>(
     Err(OperationError::Refused(reason))
 }
 
-struct RepositoryName {
+pub(crate) struct RepositoryName {
     full_name: String,
     owner: String,
     name: String,
@@ -3966,7 +3977,7 @@ impl RepositoryName {
     /// returns while the caller's spelling is still in hand -- the token
     /// grant's -- is therefore case-insensitive. Afterwards the token carries
     /// GitHub's own spelling, so later comparisons are exact.
-    fn requested(value: &mut str) -> Result<Self, OperationError> {
+    pub(crate) fn requested(value: &mut str) -> Result<Self, OperationError> {
         value.make_ascii_lowercase();
         Self::new(value.to_owned())
     }
@@ -4104,13 +4115,27 @@ impl Authority {
         validate_installation(&installation, self.app_id, &permissions).map_err(|defect| {
             OperationError::Refused(RefusalReason::InstallationRejected(defect))
         })?;
-        // Named, not numbered: the caller supplies `owner/name`, and the numeric
-        // id is what GitHub hands back for it. Requesting by id would need an id
-        // the caller cannot be trusted to supply and this service no longer
-        // stores.
+        // The connection already proved this numeric identity with the user's
+        // live grant. Bind the App token to it so a rename/replacement cannot
+        // turn an authorized name into authority over another repository.
+        let expected_id = match &self.repository_grants {
+            Some(grants) => {
+                let (installation_id, repository_id) = grants
+                    .get(&repository.full_name.to_ascii_lowercase())
+                    .ok_or(OperationError::Unavailable)?;
+                if *installation_id != installation.id {
+                    return Err(OperationError::Unavailable);
+                }
+                Some(*repository_id)
+            }
+            None => None,
+        };
         #[derive(Serialize)]
         struct TokenRequest<'a> {
-            repositories: [&'a str; 1],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            repositories: Option<[&'a str; 1]>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            repository_ids: Option<[i64; 1]>,
             permissions: BTreeMap<&'static str, &'static str>,
         }
         let expected_permissions = permissions
@@ -4130,7 +4155,8 @@ impl Authority {
             &token_url,
             jwt.as_str(),
             Some(&TokenRequest {
-                repositories: [repository.name.as_str()],
+                repositories: expected_id.is_none().then_some([repository.name.as_str()]),
+                repository_ids: expected_id.map(|id| [id]),
                 permissions,
             }),
         )
@@ -4146,10 +4172,12 @@ impl Authority {
             );
             return Err(OperationError::Unavailable);
         };
-        // Three independent conditions. Two of them became caller-reachable
+        // Independent conditions. Some became caller-reachable
         // when the repository stopped being configuration, so a single line
         // reporting a permission count would send the reader to the wrong one.
-        let mismatch = if response.permissions != expected_permissions {
+        let mismatch = if expected_id.is_some_and(|id| granted.id != id) {
+            Some("repository_id")
+        } else if response.permissions != expected_permissions {
             Some("permissions")
         } else if !granted
             .full_name
@@ -7879,7 +7907,7 @@ async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn github_json<T: serde::de::DeserializeOwned>(
+pub(crate) async fn github_json<T: serde::de::DeserializeOwned>(
     url: &str,
     credential: &str,
 ) -> Result<T, Error> {
@@ -7995,7 +8023,7 @@ async fn github_request(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn read_github_response(
+pub(crate) async fn read_github_response(
     mut response: worker::Response,
     url: &str,
     limit: usize,
