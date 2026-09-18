@@ -28,9 +28,9 @@ type GitHubUser struct {
 }
 
 type GitHubAuthorization struct {
-	ConnectionID string `json:"connection_id"`
-	URL          string `json:"authorization_url"`
-	ExpiresAt    int64  `json:"expires_at"`
+	ConnectionID string  `json:"connection_id"`
+	URL          string  `json:"authorization_url"`
+	ExpiresAt    Decimal `json:"expires_at"`
 }
 
 type GitHubStatus struct {
@@ -109,11 +109,16 @@ func validGitHubConnection(kind MessageType, body any) error {
 		if validateBoundedText(value.State, 1, 64) != nil {
 			return bad()
 		}
-		if value.Authorization != nil && (validateBoundedText(value.Authorization.ConnectionID, 1, 128) != nil || validateBoundedText(value.Authorization.URL, 1, 2048) != nil || !validGitHubAuthorizationURL(value.Authorization.URL) || value.Authorization.ExpiresAt < 0) {
+		if value.Authorization != nil && (validateBoundedText(value.Authorization.ConnectionID, 1, 128) != nil || validateBoundedText(value.Authorization.URL, 1, 2048) != nil || !validGitHubAuthorizationURL(value.Authorization.URL)) {
 			return bad()
 		}
 		if value.Status != nil {
-			if validateBoundedText(value.Status.ConnectionID, 1, 128) != nil || validateBoundedText(value.Status.State, 1, 64) != nil || len(value.Status.Repositories) > 100 {
+			if validateBoundedText(value.Status.ConnectionID, func() int {
+				if value.Status.State == "disconnected" {
+					return 0
+				}
+				return 1
+			}(), 128) != nil || validateBoundedText(value.Status.State, 1, 64) != nil || len(value.Status.Repositories) > 100 {
 				return bad()
 			}
 			if value.Status.User != nil && !validGitHubUser(*value.Status.User) {

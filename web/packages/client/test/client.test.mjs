@@ -64,6 +64,12 @@ test("GitHub settings frames keep the paired admin bridge bounded", () => {
   expectMalformed(() => decodeClientControl(request.replace('"action":"delegate"', '"action":"confirm","code":"abcdef1234"')));
   const result = decodeServerControl(fixture("github_connection_result.json"));
   assert.equal(result.body.state, "ok");
+  const disconnected = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", status: { connection_id: "", state: "disconnected", repositories: [] }, installations: { installations: [], next_page: null }, repositories: { repositories: [], next_page: null } } }));
+  assert.equal(disconnected.body.status.connection_id, "");
+  assert.equal(disconnected.body.installations.next_page, undefined);
+  assert.equal(disconnected.body.repositories.next_page, undefined);
+  const authorization = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", authorization: { connection_id: "c", authorization_url: "https://github.com/login/oauth/authorize", expires_at: "123" } } }));
+  assert.equal(authorization.body.authorization.expires_at, 123n);
   expectMalformed(() => decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", authorization: { connection_id: "c", authorization_url: "javascript:alert(1)", expires_at: "1" } } })));
   expectMalformed(() => decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", repositories: { repositories: [{ id: 1, full_name: "factory-org/private\n", permissions: { pull: true, push: false, maintain: false, admin: true } }] } } })));
 });

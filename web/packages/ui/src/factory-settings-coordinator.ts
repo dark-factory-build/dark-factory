@@ -121,6 +121,10 @@ export class FactorySettingsCoordinator {
   clearRemoteInvite(): void {
     this.#remoteInvite = undefined;
     this.#remoteInviteError = undefined;
+=======
+    if (request.action === "refresh" && this.#github?.status?.state === "connected") {
+      await this.githubConnection({ action: "installations", page: 1 });
+    }
   }
 
   async loadAccounts(): Promise<void> {

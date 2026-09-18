@@ -735,6 +735,8 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
     repositorySource.current = repositories;
     setLoadedRepositories(repositories === undefined || installationID === undefined ? undefined : { installationID, value: repositories });
   }, [repositories, installationID]);
+=======
+  const canConnect = status === "disconnected" || status === "denied" || status === "unavailable" || status === "invalid" || status === "already_connected" || github?.error !== undefined;
   return <section className="dfConsoleSidebar__section" aria-label="GITHUB SETTINGS">
     <h3>GITHUB</h3>
     <p className="dfConsoleSidebar__inherit">PRIVATE OPERATOR CONNECTION · {status.toUpperCase().replaceAll("_", " ")}</p>

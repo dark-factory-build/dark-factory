@@ -539,7 +539,8 @@ function githubConnectionResult(body: Record<string, unknown>, wire: boolean): G
     if (!isObject(body.status)) malformed();
     requireKeys(body.status, ["connection_id", "state", "repositories"], wire, ["github_user"]);
     const repositories = githubDelegations(body.status.repositories, wire, 100);
-    const status: GitHubConnectionResultBody["status"] = { connection_id: boundedText(body.status.connection_id, 1, 128), state: boundedText(body.status.state, 1, 64), repositories };
+    const state = boundedText(body.status.state, 1, 64);
+    const status: GitHubConnectionResultBody["status"] = { connection_id: boundedText(body.status.connection_id, state === "disconnected" ? 0 : 1, 128), state, repositories };
     if (present(body.status, "github_user")) status.github_user = githubUser(body.status.github_user, wire);
     result.status = status;
   }
@@ -547,14 +548,14 @@ function githubConnectionResult(body: Record<string, unknown>, wire: boolean): G
     if (!isObject(body.installations)) malformed();
     requireKeys(body.installations, ["installations"], wire, ["next_page"]);
     if (!Array.isArray(body.installations.installations) || body.installations.installations.length > MAX_ARRAY_ITEMS) malformed();
-    const next_page = present(body.installations, "next_page") ? integer(body.installations.next_page, 1, 1000) : undefined;
+    const next_page = present(body.installations, "next_page") && body.installations.next_page !== null ? integer(body.installations.next_page, 1, 1000) : undefined;
     result.installations = { installations: body.installations.installations.map((item) => githubInstallation(item, wire)), ...(next_page === undefined ? {} : { next_page }) };
   }
   if (present(body, "repositories")) {
     if (!isObject(body.repositories)) malformed();
     requireKeys(body.repositories, ["repositories"], wire, ["next_page"]);
     if (!Array.isArray(body.repositories.repositories) || body.repositories.repositories.length > MAX_ARRAY_ITEMS) malformed();
-    const next_page = present(body.repositories, "next_page") ? integer(body.repositories.next_page, 1, 1000) : undefined;
+    const next_page = present(body.repositories, "next_page") && body.repositories.next_page !== null ? integer(body.repositories.next_page, 1, 1000) : undefined;
     result.repositories = { repositories: body.repositories.repositories.map((item) => githubRepository(item, wire)), ...(next_page === undefined ? {} : { next_page }) };
   }
   return result;

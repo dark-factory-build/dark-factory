@@ -356,7 +356,7 @@ func (backend *browserBackend) GitHubConnection(ctx context.Context, rawClient [
 func projectGitHubConnection(result api.GitHubConnectionResult) browserprotocol.GitHubConnectionResult {
 	value := browserprotocol.GitHubConnectionResult{State: result.State}
 	if result.Authorization != nil {
-		value.Authorization = &browserprotocol.GitHubAuthorization{ConnectionID: result.Authorization.ConnectionID, URL: result.Authorization.URL, ExpiresAt: result.Authorization.ExpiresAt}
+		value.Authorization = &browserprotocol.GitHubAuthorization{ConnectionID: result.Authorization.ConnectionID, URL: result.Authorization.URL, ExpiresAt: browserprotocol.Decimal(result.Authorization.ExpiresAt)}
 	}
 	if result.Status != nil {
 		value.Status = &browserprotocol.GitHubStatus{ConnectionID: result.Status.ConnectionID, State: result.Status.State, Repositories: make([]browserprotocol.GitHubDelegation, len(result.Status.Repositories))}
