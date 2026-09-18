@@ -83,6 +83,10 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 		_, _ = io.WriteString(stderr, githubUsage)
 		return exitUsage
 	}
+	if getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE") != "" {
+		_, _ = io.WriteString(stderr, "GitHub connection settings require an operator session, not a worker attempt\n")
+		return exitFailure
+	}
 	client, err := api.NewOperatorClient(getenv("DARK_FACTORY_SOCKET"), getenv("DARK_FACTORY_OPERATOR_TOKEN_FILE"))
 	if err != nil {
 		_, _ = io.WriteString(stderr, "Set DARK_FACTORY_SOCKET and DARK_FACTORY_OPERATOR_TOKEN_FILE for your factory home\n")
