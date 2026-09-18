@@ -49,7 +49,7 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 	}
 	// Project creation keeps the old root input as the first durable binding so
 	// existing CLI invocations remain valid while every later route uses it.
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, 'HEAD', 1, 1, 1, ?, ?)`, spec.ID.Bytes(), spec.ID.Bytes(), spec.Root, at.Int64(), at.Int64()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'HEAD', 1, 1, 1, ?, ?)`, spec.ID.Bytes(), spec.ID.Bytes(), spec.Name, spec.Root, at.Int64(), at.Int64()); err != nil {
 		return Project{}, tx.Rollback(err)
 	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityProject, id: spec.ID.Bytes(), revision: 1}}); err != nil {

@@ -19,7 +19,7 @@ func TestTaskRepositoryBindingSnapshotsDefaultAndScopesConflict(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	second, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 90), ProjectID: project.ID, Root: filepath.Join(t.TempDir(), "second"), BaseRef: "release"}, mustTime(t, 10))
+	second, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 90), ProjectID: project.ID, Name: "second", Root: filepath.Join(t.TempDir(), "second"), BaseRef: "release"}, mustTime(t, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,14 +61,14 @@ func TestRepositoryDisableAndRemovalRespectBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 111), ProjectID: project.ID, Root: filepath.Join(t.TempDir(), "second"), BaseRef: "HEAD"}, mustTime(t, 2))
+	second, err := store.AddProjectRepository(ctx, NewProjectRepository{ID: repositoryID(t, 111), ProjectID: project.ID, Name: "second", Root: filepath.Join(t.TempDir(), "second"), BaseRef: "HEAD"}, mustTime(t, 2))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RemoveProjectRepository(ctx, second.ID, second.Revision); err != nil {
 		t.Fatalf("unreferenced remove: %v", err)
 	}
-	second, err = store.AddProjectRepository(ctx, NewProjectRepository{ID: second.ID, ProjectID: project.ID, Root: second.Root, BaseRef: "HEAD"}, mustTime(t, 3))
+	second, err = store.AddProjectRepository(ctx, NewProjectRepository{ID: second.ID, ProjectID: project.ID, Name: "second", Root: second.Root, BaseRef: "HEAD"}, mustTime(t, 3))
 	if err != nil {
 		t.Fatal(err)
 	}

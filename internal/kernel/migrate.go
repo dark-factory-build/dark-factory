@@ -45,6 +45,7 @@ const (
 	v18UserVersion      = 18
 	v19UserVersion      = 19
 	v20UserVersion      = 20
+	v21UserVersion      = 21
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -526,6 +527,16 @@ func v20SchemaStatements() []string {
 	return statements
 }
 
+func v21SchemaStatements() []string {
+	statements := append([]string(nil), schemaStatements...)
+	for i, statement := range statements {
+		if _, name := schemaObjectIdentity(statement); name == "project_repositories" {
+			statements[i] = strings.Replace(statement, "    name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),\n", "", 1)
+		}
+	}
+	return statements
+}
+
 // priorSchemaStatements is the exact v3 schema: v4 with the frozen agents
 // definition substituted. Every other statement is read live from
 // schemaStatements, so editing any of them silently changes what this claims
@@ -640,6 +651,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v19SchemaStatements(), true
 	case v20UserVersion:
 		return v20SchemaStatements(), true
+	case v21UserVersion:
+		return v21SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -665,7 +678,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -708,6 +721,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[18:]
 	case v20UserVersion:
 		steps = all[19:]
+	case v21UserVersion:
+		steps = all[20:]
 	default:
 		return connection.Close()
 	}
@@ -1171,6 +1186,37 @@ func migrateV20Transaction(ctx context.Context, connection *sql.Conn) error {
 	}
 	if _, err := connection.ExecContext(ctx, `INSERT INTO content_repository_bindings(content_id, content_revision, repository_id) SELECT id, revision, project_id FROM project_content_revisions WHERE commit_oid IS NOT NULL`); err != nil {
 		return err
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v21UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v21UserVersion, v21SchemaStatements())
+}
+
+func migrateV21Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v21UserVersion, v21SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	if _, err := connection.ExecContext(ctx, `CREATE TABLE project_repositories_pre_migration AS SELECT id, project_id, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms FROM project_repositories`); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, `DROP TABLE project_repositories`); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, target["project_repositories"].sql); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) SELECT r.id, r.project_id, p.name, r.root, r.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms FROM project_repositories_pre_migration r JOIN projects p ON p.id = r.project_id`); err != nil {
+		return err
+	}
+	if _, err := connection.ExecContext(ctx, `DROP TABLE project_repositories_pre_migration`); err != nil {
+		return err
+	}
+	for _, name := range []string{"project_repositories_root_unique", "project_repositories_one_default"} {
+		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
+			return err
+		}
 	}
 	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", userVersion)); err != nil {
 		return err

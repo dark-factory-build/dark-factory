@@ -11,6 +11,7 @@ import (
 type ProjectRepository struct {
 	ID        RepositoryID
 	ProjectID ProjectID
+	Name      string
 	Root      string
 	BaseRef   string
 	Enabled   bool
@@ -23,14 +24,15 @@ type ProjectRepository struct {
 type NewProjectRepository struct {
 	ID            RepositoryID
 	ProjectID     ProjectID
+	Name          string
 	Root, BaseRef string
 }
 
 func scanProjectRepository(scanner rowScanner) (ProjectRepository, bool, error) {
 	var rawID, rawProjectID []byte
-	var root, base string
+	var name, root, base string
 	var enabled, defaultValue, revision, created, updated int64
-	if err := scanner.Scan(&rawID, &rawProjectID, &root, &base, &enabled, &defaultValue, &revision, &created, &updated); err != nil {
+	if err := scanner.Scan(&rawID, &rawProjectID, &name, &root, &base, &enabled, &defaultValue, &revision, &created, &updated); err != nil {
 		if err == sql.ErrNoRows {
 			return ProjectRepository{}, false, nil
 		}
@@ -41,14 +43,14 @@ func scanProjectRepository(scanner rowScanner) (ProjectRepository, bool, error) 
 	rev, revErr := NewRevision(revision)
 	createdAt, createdErr := NewUnixMillis(created)
 	updatedAt, updatedErr := NewUnixMillis(updated)
-	if idErr != nil || projectErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || !validAbsolutePath(root) || byteLen(base) < 1 || byteLen(base) > 256 || (enabled != 0 && enabled != 1) || (defaultValue != 0 && defaultValue != 1) || updated < created {
+	if idErr != nil || projectErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || byteLen(base) < 1 || byteLen(base) > 256 || (enabled != 0 && enabled != 1) || (defaultValue != 0 && defaultValue != 1) || updated < created {
 		return ProjectRepository{}, false, fmt.Errorf("%w: invalid project repository", ErrCorruptState)
 	}
-	return ProjectRepository{ID: id, ProjectID: projectID, Root: root, BaseRef: base, Enabled: enabled == 1, Default: defaultValue == 1, Revision: rev, CreatedAt: createdAt, UpdatedAt: updatedAt}, true, nil
+	return ProjectRepository{ID: id, ProjectID: projectID, Name: name, Root: root, BaseRef: base, Enabled: enabled == 1, Default: defaultValue == 1, Revision: rev, CreatedAt: createdAt, UpdatedAt: updatedAt}, true, nil
 }
 
-const projectRepositoryColumns = `id, project_id, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms`
-const qualifiedProjectRepositoryColumns = `r.id, r.project_id, r.root, r.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms`
+const projectRepositoryColumns = `id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms`
+const qualifiedProjectRepositoryColumns = `r.id, r.project_id, r.name, r.root, r.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms`
 
 func repositoryByID(ctx context.Context, connection *sql.Conn, id RepositoryID) (ProjectRepository, bool, error) {
 	if id.zero() {
@@ -133,7 +135,7 @@ func (store *Store) DefaultProjectRepository(ctx context.Context, projectID Proj
 }
 
 func (store *Store) AddProjectRepository(ctx context.Context, spec NewProjectRepository, at UnixMillis) (ProjectRepository, error) {
-	if spec.ID.zero() || spec.ProjectID.zero() || !validAbsolutePath(spec.Root) || byteLen(spec.BaseRef) < 1 || byteLen(spec.BaseRef) > 256 {
+	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !validAbsolutePath(spec.Root) || byteLen(spec.BaseRef) < 1 || byteLen(spec.BaseRef) > 256 {
 		return ProjectRepository{}, ErrInvalidValue
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -150,7 +152,7 @@ func (store *Store) AddProjectRepository(ctx context.Context, spec NewProjectRep
 	if existing, found, err := repositoryByID(ctx, tx.connection, spec.ID); err != nil {
 		return ProjectRepository{}, tx.Rollback(err)
 	} else if found {
-		if existing.ProjectID == spec.ProjectID && existing.Root == spec.Root && existing.BaseRef == spec.BaseRef {
+		if existing.ProjectID == spec.ProjectID && existing.Name == spec.Name && existing.Root == spec.Root && existing.BaseRef == spec.BaseRef {
 			if err := tx.Rollback(nil); err != nil {
 				return ProjectRepository{}, err
 			}
@@ -158,7 +160,7 @@ func (store *Store) AddProjectRepository(ctx context.Context, spec NewProjectRep
 		}
 		return ProjectRepository{}, tx.Rollback(ErrConflict)
 	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 1, 0, 1, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.Root, spec.BaseRef, at.Int64(), at.Int64()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 1, 0, 1, ?, ?)`, spec.ID.Bytes(), spec.ProjectID.Bytes(), spec.Name, spec.Root, spec.BaseRef, at.Int64(), at.Int64()); err != nil {
 		return ProjectRepository{}, tx.Rollback(err)
 	}
 	value, found, err := repositoryByID(ctx, tx.connection, spec.ID)
@@ -266,6 +268,41 @@ func (store *Store) UpdateProjectRepositoryBase(ctx context.Context, id Reposito
 		return ProjectRepository{}, tx.Rollback(ErrRevisionConflict)
 	}
 	if _, err := tx.connection.ExecContext(ctx, `UPDATE project_repositories SET base_ref = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, base, at.Int64(), id.Bytes(), expected.Int64()); err != nil {
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	updated, found, err := repositoryByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrCorruptState
+		}
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ProjectRepository{}, err
+	}
+	return updated, nil
+}
+
+func (store *Store) UpdateProjectRepositoryName(ctx context.Context, id RepositoryID, expected Revision, name string, at UnixMillis) (ProjectRepository, error) {
+	if byteLen(name) < 1 || byteLen(name) > 128 {
+		return ProjectRepository{}, ErrInvalidValue
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return ProjectRepository{}, err
+	}
+	defer tx.Close()
+	value, found, err := repositoryByID(ctx, tx.connection, id)
+	if err != nil || !found {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return ProjectRepository{}, tx.Rollback(err)
+	}
+	if value.Revision != expected {
+		return ProjectRepository{}, tx.Rollback(ErrRevisionConflict)
+	}
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE project_repositories SET name = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, name, at.Int64(), id.Bytes(), expected.Int64()); err != nil {
 		return ProjectRepository{}, tx.Rollback(err)
 	}
 	updated, found, err := repositoryByID(ctx, tx.connection, id)
