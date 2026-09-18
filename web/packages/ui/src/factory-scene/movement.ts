@@ -1,4 +1,4 @@
-import type { SceneLayout, ScenePoint, SceneWorkerPlacement } from "./scene.js";
+import { WORKER_SIZE, type SceneLayout, type ScenePoint, type SceneWorkerPlacement } from "./scene.js";
 
 type WalkingDirection = "north" | "south" | "east" | "west";
 
@@ -57,7 +57,7 @@ function leaveRoom(layout: SceneLayout, room: SceneLayout["rooms"][number], from
   ];
 }
 
-const PERSON_RADIUS = 8;
+const PERSON_RADIUS = WORKER_SIZE / 2;
 
 function crossesContent(from: ScenePoint, to: ScenePoint, room: SceneLayout["rooms"][number]) {
   const left = Math.min(from.x, to.x), right = Math.max(from.x, to.x);

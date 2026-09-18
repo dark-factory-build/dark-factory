@@ -9,7 +9,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
-import { PADDING, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
+import { PADDING, WORKER_SIZE, commonSeating, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
 import { resolvedAppearance, spriteOptions, workerFrames } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
@@ -93,9 +93,9 @@ function corridorReachability(layout) {
     && room.door.y >= corridor.y && room.door.y <= corridor.y + corridor.height));
 }
 
-/** Verify the rendered 16px person stays on the floor and crosses walls only at doors. */
+/** Verify the rendered 20px person stays on the floor and crosses walls only at doors. */
 function assertRouteGeometry(layout, start, route, message) {
-  const clearance = spriteAtlas.frame / 2;
+  const clearance = WORKER_SIZE / 2;
   const spine = layout.corridors.at(-1);
   assert.ok(spine, `${message}: missing spine`);
   const clearRect = (point, rect) => point.x - clearance >= rect.x && point.x + clearance <= rect.x + rect.width
@@ -266,10 +266,10 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.equal(new Set(densePlacements.map(({ x, y }) => `${x},${y}`)).size, denseWorkers.length);
   const srcRoom = layout.rooms.find((room) => room.id === "src");
   assert.deepEqual(densePlacements[0], { id: "worker-0", area: "room", roomId: "src", x: srcRoom.door.x, y: srcRoom.door.y - 32 });
-  for (const placement of densePlacements.filter(({ y }) => y < layout.height)) {
-    assert.ok(placement.x - 8 >= srcRoom.x && placement.x + 8 <= srcRoom.x + srcRoom.width);
-    assert.ok(placement.y - 8 >= srcRoom.y && placement.y + 8 <= srcRoom.y + srcRoom.height);
-    assert.ok(placement.y - 8 >= srcRoom.y + 40, "room workers stay below the title and kind");
+  for (const placement of densePlacements.filter(({ area }) => area === "room")) {
+    assert.ok(placement.x - WORKER_SIZE / 2 >= srcRoom.x && placement.x + WORKER_SIZE / 2 <= srcRoom.x + srcRoom.width);
+    assert.ok(placement.y - WORKER_SIZE / 2 >= srcRoom.y && placement.y + WORKER_SIZE / 2 <= srcRoom.y + srcRoom.height);
+    assert.ok(placement.y - WORKER_SIZE / 2 >= srcRoom.y + 40, "room workers stay below the title and kind");
   }
   const denseSvg = render({ workers: denseWorkers });
   assert.match(denseSvg, /aria-label="Planning"/);
@@ -280,16 +280,16 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     ...denseWorkers,
     { ...workers[1], location: "resting" },
   ]);
-  const restingBottom = Math.max(...mixedPlacements.filter((placement) => placement.area === "resting").map((placement) => placement.y + 8));
   const overflowTop = Math.min(...mixedPlacements.filter((placement) => placement.area === "overflow").map((placement) => placement.y));
-  assert.ok(overflowTop - restingBottom >= 24, "resting and overflow areas have separate rows");
+  assert.equal(overflowTop, layout.restingTop, "wide floors put planning beside breaks");
+  assert.ok(mixedPlacements.filter(({ area }) => area === "overflow").every(({ x }) => x > mixedPlacements.find(({ area }) => area === "resting").x + WORKER_SIZE));
   const directOutside = placeWorkers(layout, [
     { ...workers[1], location: "resting" },
     { ...workers[0], location: "unobserved", nodeId: undefined },
   ]);
-  const directRestingBottom = Math.max(...directOutside.filter((placement) => placement.area === "resting").map((placement) => placement.y + 8));
   const directStagingTop = Math.min(...directOutside.filter((placement) => placement.area === "staging").map((placement) => placement.y));
-  assert.ok(directStagingTop - directRestingBottom >= 24, "direct placement keeps resting and unobserved workers apart");
+  assert.equal(directStagingTop, layout.restingTop, "unobserved work shares the planning bay");
+  assert.ok(directOutside[0].x !== directOutside[1].x, "break and planning seats remain separate");
 
   const changed = layoutScene({
     digest: "fixture-2",
@@ -307,7 +307,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   // An empty floor in a wide column stays a panel, not a poster.
   assert.match(emptySvg, new RegExp(`min-width:${emptyLayout.width}px`));
   assert.match(emptySvg, /aria-label="Break room"/);
-  const emptyArea = emptySvg.match(/aria-label="Break room"><rect x="[^"]+" y="([0-9.]+)" width="[^"]+" height="([0-9.]+)"/);
+  const emptyArea = emptySvg.match(/aria-label="Common room"><rect x="[^"]+" y="([0-9.]+)" width="[^"]+" height="([0-9.]+)"/);
   const emptyLabel = emptySvg.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
   const emptyHeight = Number(emptySvg.match(/viewBox="0 0 [^ ]+ ([0-9.]+)"/)[1]);
   assert.ok(emptyArea !== null && emptyLabel !== null);
@@ -317,7 +317,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     topology: { digest: "empty", nodes: [] },
     workers: [...emptyWorkers, { ...workers[0], location: "unobserved", nodeId: undefined }],
   });
-  const stagingArea = emptyWithStaging.match(/aria-label="Planning"><rect x="[^"]+" y="([0-9.]+)"/);
+  const stagingArea = emptyWithStaging.match(/aria-label="Planning"><text x="[^"]+" y="([0-9.]+)"/);
   const stagingLabel = emptyWithStaging.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
   assert.ok(stagingArea !== null && stagingLabel !== null);
   assert.ok(Number(stagingLabel[1]) + PADDING <= Number(stagingArea[1]), "empty-floor label clears the staging area");
@@ -676,6 +676,29 @@ test("queue selection picks the exact task sharing a representative workstation"
 });
 
 
+test("larger workers fit compact common seating in narrow, wide and crowded floors", () => {
+  for (const roomCount of [1, 3, 11]) {
+    const nodes = Array.from({ length: roomCount }, (_, index) => ({ ...inventoryTopology.nodes[0], id: `room-${index}`, path: `room-${index}` }));
+    const layout = layoutScene({ digest: "proportions", nodes });
+    for (const count of [0, 1, 12, 100]) {
+      const seating = commonSeating(layout, count, count);
+      const seats = [...seating.resting, ...seating.planning];
+      assert.equal(new Set(seats.map(({ x, y }) => `${x},${y}`)).size, seats.length);
+      for (const seat of seats) {
+        assert.ok(seat.x - WORKER_SIZE / 2 >= PADDING && seat.x + WORKER_SIZE / 2 <= layout.width - PADDING);
+        for (const other of seats) if (seat !== other) assert.ok(Math.abs(seat.x - other.x) >= WORKER_SIZE || Math.abs(seat.y - other.y) >= WORKER_SIZE);
+      }
+      if (count > 0) assert.equal(seating.resting[0].y, seating.planning[0].y);
+      const previewWorkers = seats.map((seat, index) => ({ ...workers[0], id: `seat-${index}`, location: index < seating.resting.length ? "resting" : "unobserved" }));
+      const markup = render({ topology: { digest: "proportions", nodes }, workers: previewWorkers });
+      assert.ok(markup.includes('transform="scale(1.25)"'));
+      assert.equal((markup.match(/aria-label="Planning"/g) ?? []).length, count > 0 ? 1 : 0);
+      const height = Number(markup.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
+      assert.ok(height > Math.max(...seats.map(({ y }) => y + WORKER_SIZE / 2)));
+    }
+  }
+});
+
 test("narrow bays truncate full-width titles while retaining their accessible name", () => {
   for (const glyph of ["界", "😀", "👨‍👩‍👧‍👦", "🇯🇵", "é"]) {
     const label = glyph.repeat(15);
@@ -699,10 +722,10 @@ test("pictured contents and occupied surface slots leave door routes clear in ev
       const occupied = placements.filter((item) => item.area === "room");
       assert.ok(occupied.length > 0 && occupied.length < placements.length);
       assert.equal(occupied[0].x, surface.x + surface.width / 2);
-      assert.equal(occupied[0].y, surface.y + surface.height + 8);
+      assert.equal(occupied[0].y, surface.y + surface.height + WORKER_SIZE / 2);
       for (const person of occupied) {
-        assert.ok(person.x - 8 >= surface.x && person.x + 8 <= surface.x + surface.width);
-        const lane = { x: Math.min(person.x, room.door.x) - 8, y: person.y - 8, width: Math.abs(person.x - room.door.x) + 16, height: 16 };
+        assert.ok(person.x - WORKER_SIZE / 2 >= surface.x && person.x + WORKER_SIZE / 2 <= surface.x + surface.width);
+        const lane = { x: Math.min(person.x, room.door.x) - WORKER_SIZE / 2, y: person.y - WORKER_SIZE / 2, width: Math.abs(person.x - room.door.x) + WORKER_SIZE, height: WORKER_SIZE };
         for (const object of room.contents) assert.ok(object.y + object.height <= lane.y || !overlaps(object, lane), "route never crosses pictured content interiors");
         const route = routeFromSpine(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, person);
         assert.ok(route);
