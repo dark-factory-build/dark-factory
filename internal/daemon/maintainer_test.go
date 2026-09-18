@@ -151,6 +151,9 @@ func TestAcceptedAttemptContextAndRestrictionsSurviveSourceSettingsChanges(t *te
 	fixture := newDispatchFixture(t)
 	ctx := context.Background()
 	project := mustProjectID(t, testID(180))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "project", Root: "/project/180", SourceIdentity: &kernel.RepositorySourceIdentity{RootDevice: 1, RootInode: 180, GitDevice: 1, GitInode: 181, OriginDigest: [32]byte{180}, PublicationRepository: "publish/destination"}}, mustKernelTime(t, 999)); err != nil {
+		t.Fatal(err)
+	}
 	var source kernel.IntakeSource
 	var accepted kernel.IntakeAcceptance
 	active := prepareActiveAttemptInProject(t, fixture, 180, project.String(), "orchestrator", func() {
@@ -181,33 +184,14 @@ func TestAcceptedAttemptContextAndRestrictionsSurviveSourceSettingsChanges(t *te
 	if _, err := fixture.store.UpdateIntakeSource(ctx, source.ID, source.Revision, kernel.NewIntakeSource{ID: source.ID, ProjectID: project, TargetRepositoryID: source.TargetRepositoryID, GitHubRepositoryID: 99, GitHubRepositoryName: "feed/changed", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, false, mustKernelTime(t, 1001)); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.store.BindRepositoryGitHubID(ctx, accepted.RepositoryID, 43); err != nil {
+		t.Fatal(err)
+	}
 	done := fixture.serve(t)
 	assignment, err := active.client.Task(ctx)
 	waitDispatch(t, done)
 	if err != nil || assignment.Task != accepted.Snapshot.Body || assignment.Intake == nil || assignment.Intake.AcceptanceID != accepted.ID.String() || assignment.Intake.Repository != "feed/original" || assignment.Intake.RepositoryID != 42 || assignment.Intake.IssueNumber != 9 || assignment.Intake.TargetRepositoryID != accepted.RepositoryID.String() {
 		t.Fatalf("frozen accepted assignment: %+v %v", assignment, err)
-	}
-	// No customer host is installed. A denied result therefore proves the
-	// accepted-receipt guard ran before any broker path could be reached.
-	for _, request := range []api.MaintainerInput{
-		{Request: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"publish/destination","issue_number":9}}}`)},
-		{Request: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":10}}}`)},
-	} {
-		done := fixture.serve(t)
-		result, err := active.client.Maintainer(ctx, request)
-		waitDispatch(t, done)
-		if err != nil || result.State != "denied" || len(result.Response) != 0 {
-			t.Fatalf("unaccepted issue observation: %+v %v", result, err)
-		}
-	}
-	// An offline customer connection exercises local rejection without any
-	// remote request or private credential in the fixture.
-	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
-		t.Fatal(err)
-	}
-	fixture.daemon.github, err = maintainer.OpenHost(fixture.home)
-	if err != nil {
-		t.Fatal(err)
 	}
 	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
 	if err != nil || !found {
@@ -220,6 +204,32 @@ func TestAcceptedAttemptContextAndRestrictionsSurviveSourceSettingsChanges(t *te
 		t.Fatal(err)
 	}
 	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	// No customer host is installed. The valid receipt request reaches the host
+	// boundary (unavailable); the two mismatches are denied before it.
+	for _, check := range []struct {
+		request api.MaintainerInput
+		state   string
+	}{
+		{api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"publish/destination","issue_number":9}}}`)}, "denied"},
+		{api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":10}}}`)}, "denied"},
+		{api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9}}}`)}, "unavailable"},
+	} {
+		done := fixture.serve(t)
+		result, err := active.client.Maintainer(ctx, check.request)
+		waitDispatch(t, done)
+		if err != nil || result.State != check.state || len(result.Response) != 0 {
+			t.Fatalf("accepted issue observation: %+v %v", result, err)
+		}
+	}
+	// An offline customer connection exercises local rejection without any
+	// remote request or private credential in the fixture.
+	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.daemon.github, err = maintainer.OpenHost(fixture.home)
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := api.MaintainerInput{Request: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_issues","arguments":{"repository":"feed/original"}}}`)}
 	for _, want := range []string{"accepted_snapshot_required", "denied"} {
 		done := fixture.serve(t)
