@@ -79,6 +79,7 @@ var schemaStatements = []string{
     PRIMARY KEY(source_id, login)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE intake_acceptances (
+    source_repository TEXT NOT NULL CHECK (length(source_repository) BETWEEN 3 AND 140),
     id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
     github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
     issue_number INTEGER NOT NULL CHECK (issue_number > 0),
