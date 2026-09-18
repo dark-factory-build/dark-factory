@@ -532,6 +532,8 @@ type ProjectSummary struct {
 }
 
 type AgentSummary struct {
+	ToolBudgetLimit  uint64 `json:"tool_budget_limit"`
+	ToolCallsUsed    uint64 `json:"tool_calls_used"`
 	ID               string `json:"id"`
 	ProjectID        string `json:"project_id"`
 	Name             string `json:"name"`

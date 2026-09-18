@@ -66,9 +66,9 @@ func TestAgentProjectionCarriesLaunchAndIdleControlsToBothOperatorViews(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := kernel.AgentSummary{ID: agentID, ProjectID: projectID, Name: "worker", Role: "worker", Provider: "codex", Model: "gpt-6-astra", ReasoningEffort: "high", Idle: kernel.IdleRule{Policy: kernel.IdleStandingInstruction, AfterSeconds: 12, Instruction: "inspect", RunBudget: 4, RunsUsed: 2}, Revision: revision}
+	agent := kernel.AgentSummary{ID: agentID, ProjectID: projectID, Name: "worker", Role: "worker", Provider: "codex", Model: "gpt-6-astra", ReasoningEffort: "high", ToolBudgetLimit: 8, ToolCallsUsed: 3, Idle: kernel.IdleRule{Policy: kernel.IdleStandingInstruction, AfterSeconds: 12, Instruction: "inspect", RunBudget: 4, RunsUsed: 2}, Revision: revision}
 	dashboard := projectSnapshot(kernel.DashboardSnapshot{Agents: []kernel.AgentSummary{agent}})
-	if len(dashboard.Agents) != 1 || dashboard.Agents[0].Model != agent.Model || dashboard.Agents[0].ReasoningEffort != agent.ReasoningEffort || dashboard.Agents[0].IdlePolicy != string(agent.Idle.Policy) || dashboard.Agents[0].IdleAfterSeconds != agent.Idle.AfterSeconds || dashboard.Agents[0].IdleInstruction != agent.Idle.Instruction || dashboard.Agents[0].IdleRunBudget != agent.Idle.RunBudget || dashboard.Agents[0].IdleRunsUsed != agent.Idle.RunsUsed {
+	if len(dashboard.Agents) != 1 || dashboard.Agents[0].ToolBudgetLimit != 8 || dashboard.Agents[0].ToolCallsUsed != 3 || dashboard.Agents[0].Model != agent.Model || dashboard.Agents[0].ReasoningEffort != agent.ReasoningEffort || dashboard.Agents[0].IdlePolicy != string(agent.Idle.Policy) || dashboard.Agents[0].IdleAfterSeconds != agent.Idle.AfterSeconds || dashboard.Agents[0].IdleInstruction != agent.Idle.Instruction || dashboard.Agents[0].IdleRunBudget != agent.Idle.RunBudget || dashboard.Agents[0].IdleRunsUsed != agent.Idle.RunsUsed {
 		t.Fatalf("dashboard agent = %+v", dashboard.Agents)
 	}
 	overseer, err := projectOverseerSnapshot(kernel.OverseerSnapshot{ProjectID: projectID, Agents: []kernel.AgentSummary{agent}})

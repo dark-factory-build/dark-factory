@@ -88,6 +88,7 @@ func projectAgentSummary(agent kernel.AgentSummary) api.AgentSummary {
 		ID: agent.ID.String(), ProjectID: agent.ProjectID.String(), Name: agent.Name,
 		Role: agent.Role, Provider: agent.Provider, Paused: agent.Paused, Archived: agent.Archived,
 		Model: agent.Model, ReasoningEffort: agent.ReasoningEffort,
+		ToolBudgetLimit: agent.ToolBudgetLimit, ToolCallsUsed: agent.ToolCallsUsed,
 		IdlePolicy: string(agent.Idle.Policy), IdleAfterSeconds: agent.Idle.AfterSeconds,
 		IdleInstruction: agent.Idle.Instruction, IdleRunBudget: agent.Idle.RunBudget, IdleRunsUsed: agent.Idle.RunsUsed,
 		AccountID: optionalAccountText(agent.AccountID), Revision: uint64(agent.Revision.Int64()),
