@@ -125,7 +125,7 @@ func TestLegacyRepositoryBasePinsOnceAcrossMigrationAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reproduce the exact v20 schema, which had no repository/base setting.
-	for _, statement := range []string{"DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "PRAGMA user_version = 20"} {
+	for _, statement := range []string{"DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "PRAGMA user_version = 20"} {
 		if _, err := store.writer.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
