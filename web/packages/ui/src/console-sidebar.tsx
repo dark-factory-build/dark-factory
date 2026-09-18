@@ -743,7 +743,7 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
     setSelected(Object.fromEntries((result?.status?.repositories ?? []).map((item) => [`${item.installation_id}:${item.repository_id}`, item])));
   }, [connected, connectionID, result?.status?.repositories]);
   useEffect(() => {
-    if (installations?.installations.length !== 0) setInstallationSeen(true);
+    if ((installations?.installations.length ?? 0) > 0) setInstallationSeen(true);
   }, [installations]);
   useEffect(() => {
     if (repositories === repositorySource.current) return;

@@ -1227,6 +1227,15 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("INSTALL OR REQUEST GITHUB APP ACCESS")), false);
   renderer.unmount();
 
+  const refreshCalls = [];
+  const refreshProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => refreshCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "refresh-link", state: "connected", repositories: [] }, installations } } });
+  act(() => { renderer = create(createElement(FactoryConsole, refreshProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }] }))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "REFRESH ACCESS").props.onClick(); });
+  act(() => { renderer.update(createElement(FactoryConsole, refreshProps({ installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
+  assert.equal(refreshCalls.at(-1).action, "refresh");
+  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("INSTALL OR REQUEST GITHUB APP ACCESS")), true);
+  renderer.unmount();
+
   const repositoryCalls = [];
   const statusRepositories = [];
   const repositoryProps = (repositories, delegated = statusRepositories, installationID = 7) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: installationID, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
