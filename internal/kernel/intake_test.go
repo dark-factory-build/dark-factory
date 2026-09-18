@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -137,7 +138,7 @@ func TestIntakeSourceValidationRejectsUnstableConfiguration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			source := intakeSourceForTest(t, IntakePolicyTrustedAuthors)
 			mutate(&source)
-			if validIntakeSource(source) {
+			if ValidIntakeSource(source) {
 				t.Fatal("accepted invalid source")
 			}
 		})
@@ -150,11 +151,11 @@ func TestIntakeSourceTrustedAuthorLimit(t *testing.T) {
 	for index := range source.TrustedGitHubLogins {
 		source.TrustedGitHubLogins[index] = fmt.Sprintf("reviewer%02d", index)
 	}
-	if !validIntakeSource(source) {
+	if !ValidIntakeSource(source) {
 		t.Fatal("trusted-author limit rejected")
 	}
 	source.TrustedGitHubLogins = append(source.TrustedGitHubLogins, "reviewer26")
-	if validIntakeSource(source) {
+	if ValidIntakeSource(source) {
 		t.Fatal("trusted-author overflow accepted")
 	}
 }
@@ -462,6 +463,28 @@ func TestBotAuthorMetadataNeverGrantsAutomaticAcceptance(t *testing.T) {
 	}
 	if validGitHubAuthor("github-actions[bot]", GitHubAuthorUser) || validGitHubLogin("github-actions[bot]") || validGitHubAuthor("app/owner", GitHubAuthorBot) {
 		t.Fatal("bot spelling leaked into human authority or invalid metadata")
+	}
+}
+
+func TestIntakePriorityRulesBoundEncodedOperatorConfiguration(t *testing.T) {
+	source := intakeSourceForTest(t, IntakePolicyManual)
+	source.PriorityByLabel = map[string]int64{}
+	for i := 0; i < 25; i++ {
+		source.PriorityByLabel[fmt.Sprint("label", i)] = 1
+	}
+	if !ValidIntakeSource(source) {
+		t.Fatal("supported priority mapping rejected")
+	}
+	source.PriorityByLabel["overflow"] = 1
+	if ValidIntakeSource(source) {
+		t.Fatal("26 priority rules accepted")
+	}
+	source.PriorityByLabel = map[string]int64{}
+	for i := 0; i < 4; i++ {
+		source.PriorityByLabel[strings.Repeat("\x01", 99)+fmt.Sprint(i)] = 1
+	}
+	if ValidIntakeSource(source) {
+		t.Fatal("escaped priority JSON exceeds the private reply ceiling")
 	}
 }
 

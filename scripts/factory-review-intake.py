@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run one independent host review and wake its overseer with the App receipt."""
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -24,6 +25,8 @@ PUBLICATION_SPEC = importlib.util.spec_from_file_location("factory_publication",
 publication = importlib.util.module_from_spec(PUBLICATION_SPEC)
 PUBLICATION_SPEC.loader.exec_module(publication)
 SHA = re.compile(r"^[0-9a-f]{40}$")
+# ponytail: the existing controller owns one sequential review pass per home.
+CUSTOMER_REVIEW = None
 
 
 class ReviewError(Exception):
@@ -107,34 +110,48 @@ def app_update_receipt(body, number, repository):
     return digest == marker.group(2)
 
 
-def linked_issue(config, pr, journal, existing=None):
+def linked_issue(config, pr, journal, existing=None, managed=None):
     body = pr["body"]
     if not isinstance(body, str):
         raise ReviewError("pull request body is invalid")
     footer = publication.terminal_footer(body)
     numbers = {int(value) for repository, value in publication.FOOTER.findall(body)
-               if not repository or repository.casefold() == config["repository"].casefold()}
+               if not repository or repository.casefold() == source_config(config)["repository"].casefold()}
     known = {record.get("number") for record in journal["issues"].values() if isinstance(record, dict) and record.get("managed")}
     matched = numbers & known
     if len(matched) > 1:
         raise ReviewError("pull request links multiple tracked source issues")
     if footer is None:
         return None
-    if footer.group(2) and footer.group(2).casefold() != config["repository"].casefold():
+    if footer.group(2) and footer.group(2).casefold() != source_config(config)["repository"].casefold():
         return None  # Another source controller owns this fully qualified backlog.
     issue = int(footer.group(3))
     if issue in known:
+        if managed is not None:
+            controller, receipt, factoryctl = managed
+            request = dict(receipt['request'], action='legacy_lineage', issue_number=issue)
+            reply = controller.managed_api(factoryctl, Path(config['factory_home']), ['legacy_lineage'], request)
+            if reply.get('state') not in {'imported', 'legacy_existing_work'} or not isinstance(reply.get('task_id'), str) or not intake.ID_RE.fullmatch(reply['task_id']):
+                raise Unproven('retained source lineage is unavailable for footer #' + str(issue))
         return issue
     if matched:
         raise Unproven("terminal footer #" + str(issue) + " is not the tracked source #" + str(min(matched)) + " the body also links")
-    if existing is not None and existing.get("source_marker") == intake.source_marker(config, {"number": issue}):
+    if managed is None and existing is not None and existing.get("source_marker") == intake.source_marker(source_config(config), {"number": issue}):
         return issue
-    # An overseer tracking issue never enters the intake journal (it has no
-    # intake label), so prove the App wrote both objects: the PR's own marker
-    # is a completed publication receipt for this PR number, and the footer
-    # issue's marker is the completed create_issue receipt for that number.
+    # New managed work needs both imported acceptance lineage and a completed
+    # PR publication receipt. The legacy App-created tracking-issue fallback
+    # below still proves both objects; App authorship alone grants no approval.
     if not app_receipt(body, {"create_pull_request", "update_pull_request_body"}, pr["number"], config["repository"], "pull"):
         raise Unproven("footer #" + str(issue) + " is not an intake-managed source and PR #" + str(pr["number"]) + " has no completed App publication receipt")
+    if managed is not None:
+        controller, receipt, factoryctl = managed
+        request = dict(receipt['request'], action='legacy_lineage', issue_number=issue)
+        reply = controller.managed_api(factoryctl, Path(config['factory_home']), ['legacy_lineage'], request)
+        if reply.get('state') == 'imported' and all(isinstance(reply.get(key), str) and intake.ID_RE.fullmatch(reply[key]) for key in ('acceptance_id', 'task_id')):
+            return issue
+        if reply.get('state') != 'not_found':
+            raise Unproven('managed source lineage is unavailable for footer #' + str(issue))
+        raise Unproven('source has no imported acceptance; review and accept it before publication')
     try:
         source = intake.exact_issue(config, issue)
     except intake.IssueBodyTooLarge as exc:
@@ -146,7 +163,7 @@ def linked_issue(config, pr, journal, existing=None):
 
 def discovery_batch_size(config):
     # GitHub's REST pull-request endpoint caps per_page at 100.
-    return min(int(config.get("max_issues", 25)), 100)
+    return 2 if CUSTOMER_REVIEW is not None else min(int(config.get("max_issues", 25)), 100)
 
 
 def next_discovery_page(config, page, discovered):
@@ -154,6 +171,16 @@ def next_discovery_page(config, page, discovered):
 
 
 def list_prs(config, page=1):
+    if CUSTOMER_REVIEW is not None:
+        value = bridge_call("list_pull_requests", {"page": page}).get("structuredContent")
+        if not isinstance(value, dict) or not isinstance(value.get("pull_requests"), list) or len(value["pull_requests"]) > 2:
+            raise ReviewError("customer pull request page is invalid")
+        normalized = []
+        for item in value['pull_requests']:
+            if not isinstance(item, dict) or type(item.get('number')) is not int or item['number'] < 1 or not isinstance(item.get('body'), str) or not isinstance(item.get('head_sha'), str) or not SHA.fullmatch(item['head_sha']) or not isinstance(item.get('base_sha'), str) or not SHA.fullmatch(item['base_sha']) or not isinstance(item.get('base_ref'), str):
+                raise ReviewError('customer pull request is invalid')
+            normalized.append({'number': item['number'], 'body': item['body'], 'headRefOid': item['head_sha'], 'baseRefName': item['base_ref'], 'baseRefOid': item['base_sha']})
+        return normalized
     batch = discovery_batch_size(config)
     if type(page) is not int or page < 1:
         raise ReviewError("pull request discovery page is invalid")
@@ -181,17 +208,21 @@ def list_prs(config, page=1):
 
 
 def ready(config, path, pr, issue):
-    base = config.get("base", "main")
-    if not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,240}", base):
+    base = pr.get("baseRefName") if CUSTOMER_REVIEW is not None else config.get("base", "main")
+    if CUSTOMER_REVIEW is not None:
+        if not isinstance(base, str) or not base or len(base.encode()) > 4096:
+            raise ReviewError('base must be an explicit branch name')
+        intake.command(['git', 'check-ref-format', 'refs/heads/' + base])
+    elif not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,240}", base):
         raise ReviewError("base must be an explicit branch name")
     intake.command(["git", "-C", str(path), "fetch", "--no-tags", "origin", "+refs/heads/" + base + ":refs/remotes/origin/" + base, "+refs/pull/" + str(pr["number"]) + "/head:refs/pull/" + str(pr["number"]) + "/head"], timeout=120)
     head = intake.command(["git", "-C", str(path), "rev-parse", "refs/pull/" + str(pr["number"]) + "/head"]).strip()
     observed_base = intake.command(["git", "-C", str(path), "rev-parse", "refs/remotes/origin/" + base]).strip()
-    if head != pr["headRefOid"] or not SHA.fullmatch(observed_base):
+    if head != pr["headRefOid"] or not SHA.fullmatch(observed_base) or (CUSTOMER_REVIEW is not None and observed_base != pr["baseRefOid"]):
         raise ReviewError("mirror did not prove the App-reported exact head and base")
-    marker = intake.source_marker(config, {"number": issue})
+    marker = intake.source_marker(source_config(config), {"number": issue})
     return {"pr": pr["number"], "head": head, "base": observed_base, "source_marker": marker,
-            "priority": int(config.get("priority_default", 0))}
+            "priority": int(config.get("priority_default", 0)), "enqueue_base": base}
 
 
 
@@ -206,7 +237,33 @@ def verify_existing(path, pr, operation):
     intake.command(["git", "-C", str(path), "cat-file", "-e", base + "^{commit}"])
 
 
+def customer_review(name, arguments):
+    config, managed = CUSTOMER_REVIEW
+    controller, receipt, factoryctl = managed
+    arguments = dict(arguments)
+    arguments.pop('repository', None)
+    request = dict(receipt['request'], action='review', review=dict(arguments, tool=name))
+    if name in {'submit_pull_request_review', 'enqueue_pull_request'}:
+        request['issue_number'] = config.get('_review_issue', 0)
+    reply = controller.managed_api(factoryctl, Path(config['factory_home']), ['review'], request)
+    if reply.get('state') != 'ok' or not isinstance(reply.get('review'), dict):
+        raise ReviewError('Customer review access unavailable (' + str(reply.get('state', 'unavailable')) + '); connect or refresh GitHub and bind the publication repository. Legacy credentials are never used.')
+    return reply['review']
+
+
+def source_config(config):
+    return dict(config, repository=config.get('source_repository', config['repository']))
+
+
 def bridge_call(name, arguments):
+    if CUSTOMER_REVIEW is not None:
+        try:
+            reply = json.loads(customer_review(name, arguments).get("response", ""))
+        except (TypeError, ValueError) as exc:
+            raise ReviewError(name + " reply invalid") from exc
+        if not isinstance(reply, dict) or not isinstance(reply.get("result"), dict):
+            raise ReviewError(name + " unavailable")
+        return reply["result"]
     bridge = os.environ.get("DARK_FACTORY_MAINTAINER_BRIDGE") or shutil.which("dark-factory-maintainer-mcp-bridge")
     if not bridge or not os.path.isabs(bridge):
         raise ReviewError("maintainer bridge is unavailable")
@@ -215,7 +272,7 @@ def bridge_call(name, arguments):
         raise ReviewError("maintainer bridge is not a safe executable")
     request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
     try:
-        response = subprocess.run([bridge], input=json.dumps(request) + "\n", capture_output=True, text=True, timeout=40, check=True)
+        response = subprocess.run([bridge], input=json.dumps(request) + "\n", capture_output=True, text=True, timeout=40, check=True, pass_fds=() if intake.CONTROLLER_LOCK_FD is None else (intake.CONTROLLER_LOCK_FD,))
         reply = json.loads(response.stdout)
         result = reply["result"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
@@ -263,8 +320,11 @@ def correction_review_is_explicit(config, operation, result):
     if type(review_id) is not int or review_id < 1:
         return False
     try:
-        raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls/" + str(operation["pr"]) + "/reviews", "--paginate"], timeout=int(config.get("command_timeout", 30)))
-        reviews = json.loads(raw)
+        if CUSTOMER_REVIEW is not None:
+            reviews = [bridge_call("observe_pull_request_review", {"pull_number": operation["pr"], "review_id": review_id}).get("structuredContent")]
+        else:
+            raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls/" + str(operation["pr"]) + "/reviews", "--paginate"], timeout=int(config.get("command_timeout", 30)))
+            reviews = json.loads(raw)
     except (intake.IntakeError, json.JSONDecodeError, TypeError, ValueError):
         return False
     if not isinstance(reviews, list):
@@ -343,6 +403,7 @@ def merge_failure_followup(config, operation):
 
 
 def enqueue_allowed(config, operation, journal_path, receipts):
+    require_legacy_home(config)
     # One durable id per exact head, journaled before the write; an id an
     # operator already recorded is kept so a repair is never replayed.
     operation.setdefault("enqueue_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-enqueue:" + config["repository"] + ":" + str(operation["pr"]) + ":" + operation["head"])))
@@ -380,6 +441,7 @@ def enqueue_allowed(config, operation, journal_path, receipts):
 
 
 def launch_review(config, path, pr, operation):
+    require_legacy_home(config)
     # The existing process-group wrapper owns and verifies reviewer cleanup.
     # A parent subprocess timeout must not kill only the shell and orphan Codex.
     directory = Path(config["journal"]).parent / ("review-" + str(pr["number"]) + "-" + operation["head"])
@@ -394,11 +456,25 @@ def launch_review(config, path, pr, operation):
     else:
         env.pop("DARK_FACTORY_REVIEW_CORRECTS_OPERATION_ID", None)
     env.pop("DARK_FACTORY_REVIEW_EVIDENCE_FILE", None)
+    env.pop("DARK_FACTORY_REVIEW_ADAPTER_CONTEXT", None)
+    if CUSTOMER_REVIEW is not None:
+        _, receipt, factoryctl = CUSTOMER_REVIEW[1]
+        request = dict(receipt["request"], action="review", issue_number=config["_review_issue"],
+                       review={"tool": "submit_pull_request_review", "pull_number": operation["pr"], "head_sha": operation["head"], "operation_id": operation["review_operation"]})
+        if operation.get("prior_review_operation"):
+            request["review"]["corrects_review_operation_id"] = operation["prior_review_operation"]
+        context = directory / "adapter.json"
+        intake.atomic_json(context, {"home": config["factory_home"], "repository": config["repository"], "request": request})
+        os.chmod(context, 0o600)
+        env["DARK_FACTORY_MAINTAINER_BRIDGE"] = str(factoryctl)
+        env["DARK_FACTORY_REVIEW_ADAPTER_CONTEXT"] = str(context)
+        for key in ("DARK_FACTORY_OPERATOR_TOKEN_FILE", "DARK_FACTORY_ATTEMPT_TOKEN_FILE", "DARK_FACTORY_SOCKET", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+            env.pop(key, None)
     with (directory / "launch.log").open("w") as output:
         return subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-process-owner",
                                str(HERE / "go-gate-environment.sh"), "1200", str(HERE / "cold-review.sh"),
                                config["repository"], str(pr["number"]), operation["head"], operation["base"], str(body)],
-                              cwd=directory, env=env, stdout=output, stderr=subprocess.STDOUT).returncode
+                              cwd=directory, env=env, stdout=output, stderr=subprocess.STDOUT, pass_fds=() if intake.CONTROLLER_LOCK_FD is None else (intake.CONTROLLER_LOCK_FD,)).returncode
 
 
 def review_body_path(config, pr, operation):
@@ -407,10 +483,16 @@ def review_body_path(config, pr, operation):
 
 def verify_review_body(config, pr, operation):
     try:
-        raw = intake.command(["gh", "pr", "view", str(pr["number"]), "--repo", config["repository"], "--json", "body,headRefOid"], timeout=int(config.get("command_timeout", 30)))
-        current = json.loads(raw)
-        body = current["body"]
-        head = current["headRefOid"]
+        if CUSTOMER_REVIEW is not None:
+            pulls = bridge_call("list_pull_requests", {"page": 1, "pull_number": pr["number"]}).get("structuredContent", {}).get("pull_requests")
+            if not isinstance(pulls, list) or len(pulls) != 1 or pulls[0].get("number") != pr["number"]:
+                raise ReviewError("exact customer pull request is unavailable")
+            body, head = pulls[0]["body"], pulls[0]["head_sha"]
+        else:
+            raw = intake.command(["gh", "pr", "view", str(pr["number"]), "--repo", config["repository"], "--json", "body,headRefOid"], timeout=int(config.get("command_timeout", 30)))
+            current = json.loads(raw)
+            body = current["body"]
+            head = current["headRefOid"]
         reviewed = review_body_path(config, pr, operation).read_text()
     except (intake.IntakeError, OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ReviewError("live pull request body is unavailable") from exc
@@ -446,11 +528,13 @@ def review_followup(config, operation, state):
 
 
 def config_fingerprint(config):
+    config = source_config(config)
     value = {key: config.get(key) for key in ("repository", "project_id", "overseer_agent_id", "review_mirror_root", "review_provider")}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def legacy_config_fingerprint(config):
+    config = source_config(config)
     # Pre-review_provider version-2 receipts were fingerprinted without that
     # field. Recognize their existing digest so upgrading this script does
     # not invalidate every journal already on disk; a receipt only earns the
@@ -459,23 +543,93 @@ def legacy_config_fingerprint(config):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def run_once(config):
-    config = intake.validate_config(config)
-    path = mirror(config)
-    journal_path = Path(config["journal"] + ".reviews.json")
-    lock_path = Path(str(journal_path) + ".lock")
-    journal = intake.load_journal(Path(config["journal"]))
-    intake.bind_journal(config, journal)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+") as lock:
+def require_legacy_home(config):
+    if CUSTOMER_REVIEW is not None:
+        customer_review("configuration", {})
+        return
+    home = Path(config['factory_home'])
+    if not home.is_dir() or home.stat().st_uid != os.geteuid():
+        raise ReviewError('legacy review factory home is unavailable')
+    try:
+        (Path(config['factory_home']) / 'maintainer.json').lstat()
+    except FileNotFoundError:
+        return
+    raise ReviewError('Legacy review is owner-only and stops after customer GitHub opt-in, including disconnect. Use the installed customer publication workflow; do not restart the legacy bridge.')
+
+
+@contextlib.contextmanager
+def review_ownership(config, inherited):
+    # ponytail: one CLI pass owns one factory. Parallel reviews require passing
+    # the retained descriptor explicitly instead of this process-local handle.
+    path = Path(str(Path(config['factory_home']).resolve()) + '.autonomy.lock')
+    with contextlib.ExitStack() as ownership:
+        if inherited is None:
+            spec = importlib.util.spec_from_file_location('factory_autonomy', HERE / 'factory-autonomy.py')
+            controller = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(controller)
+            inherited = ownership.enter_context(controller.managed_lock(path))
+        else:
+            proof, current = os.fstat(inherited), path.lstat()
+            if not stat.S_ISREG(proof.st_mode) or proof.st_uid != os.geteuid() or stat.S_IMODE(proof.st_mode) != 0o600 or proof.st_nlink != 1 or (proof.st_dev, proof.st_ino) != (current.st_dev, current.st_ino):
+                raise ReviewError('legacy controller ownership is invalid')
+            fcntl.flock(inherited, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        previous = intake.CONTROLLER_LOCK_FD
+        intake.CONTROLLER_LOCK_FD = inherited
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ReviewError("another review intake process owns the journal") from exc
-        return run_locked(config, path, journal, journal_path)
+            yield
+        finally:
+            intake.CONTROLLER_LOCK_FD = previous
 
 
-def run_locked(config, path, journal, journal_path):
+def run_once(config, managed=None, controller_lock_fd=None):
+    global CUSTOMER_REVIEW
+    config = dict(intake.validate_config(config))
+    previous = CUSTOMER_REVIEW
+    if managed is not None:
+        CUSTOMER_REVIEW = config, managed
+    try:
+        return run_owned(config, managed, controller_lock_fd)
+    finally:
+        CUSTOMER_REVIEW = previous
+
+
+def run_owned(config, managed, controller_lock_fd):
+    with review_ownership(config, controller_lock_fd):
+        require_legacy_home(config)
+        if CUSTOMER_REVIEW is not None:
+            route = customer_review("configuration", {})
+            config["source_repository"] = config["repository"]
+            config["repository"] = route["repository"]
+        path = mirror(config)
+        journal_path = Path(config["journal"] + ".reviews.json")
+        lock_path = Path(str(journal_path) + ".lock")
+        journal = intake.load_journal(Path(config["journal"]))
+        intake.bind_journal(source_config(config), journal)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ReviewError("another review intake process owns the journal") from exc
+            return run_locked(config, path, journal, journal_path, managed)
+
+
+def enqueue_followup(config, followup, pr, journal, managed):
+    require_legacy_home(config)
+    if managed is not None:
+        # Review may run for minutes. Recheck withdrawal/live authority at the
+        # write boundary and bind this generated operator task to the frozen route.
+        try:
+            if linked_issue(config, pr, journal, managed=managed) is None:
+                return False
+        except Unproven:
+            return False
+        followup['repository_id'] = managed[1]['request']['configuration']['target_repository_id']
+    intake.enqueue(config, followup)
+    return True
+
+
+def run_locked(config, path, journal, journal_path, managed=None):
     provider = review_provider(config)
     if journal_path.exists():
         try:
@@ -497,14 +651,17 @@ def run_locked(config, path, journal, journal_path):
     launched = False
     for pr in discovered:
         key = str(pr["number"]) + ":" + pr["headRefOid"]
+        if config.get("source_repository", config["repository"]).casefold() != config["repository"].casefold():
+            key = config["repository"].casefold() + ":" + key
         existing = receipts["pulls"].get(key)
         try:
-            issue = linked_issue(config, pr, journal, existing)
+            issue = linked_issue(config, pr, journal, existing, managed)
         except Unproven as exc:
             messages.append("skipped PR #" + str(pr["number"]) + ": " + str(exc))
             continue
         if issue is None:
             continue
+        config["_review_issue"] = issue
         if existing is None:
             operation = ready(config, path, pr, issue)
             operation["provider"] = provider
@@ -546,8 +703,7 @@ def run_locked(config, path, journal, journal_path):
                 # only block on it, so wake the overseer and wait for the body.
                 # One wake per distinct body: a rewrite that still omits the head wakes again.
                 followup = review_followup(config, operation, "stale-body:" + hashlib.sha256(pr["body"].encode()).hexdigest())
-                if intake.task_state(config, followup) is None:
-                    intake.enqueue(config, followup)
+                if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                     messages.append("woke PR #" + str(pr["number"]) + " stale body")
                 continue
             if launched:
@@ -584,12 +740,10 @@ def run_locked(config, path, journal, journal_path):
                 intake.atomic_json(journal_path, receipts)
                 if merge["state"] == "NOT_QUEUED" and merge["pull_state"] == "open":
                     followup = merge_failure_followup(config, operation)
-                    if intake.task_state(config, followup) is None:
-                        intake.enqueue(config, followup)
+                    if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                         messages.append("woke PR #" + str(pr["number"]) + " queue failure")
         followup = review_followup(config, operation, state)
-        if intake.task_state(config, followup) is None:
-            intake.enqueue(config, followup)
+        if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
             messages.append("woke PR #" + str(pr["number"]) + " review " + state)
     receipts["discovery_page"] = next_page
     intake.atomic_json(journal_path, receipts)
@@ -600,10 +754,25 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--controller-lock-fd", type=int)
+    parser.add_argument("--managed-migration", type=Path)
+    parser.add_argument("--factoryctl", type=Path)
     args = parser.parse_args(argv)
     try:
         config = json.loads(args.config.read_text())
-        print(json.dumps({"ok": True, "messages": run_once(config)}))
+        managed = None
+        if args.managed_migration is not None:
+            spec = importlib.util.spec_from_file_location('factory_autonomy', HERE / 'factory-autonomy.py')
+            controller = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(controller)
+            home, state, identity = controller.managed_paths(Path(config['factory_home']))
+            if args.managed_migration != state / 'migration.json' or args.factoryctl is None or not args.factoryctl.is_absolute():
+                raise ReviewError('managed review requires the installed controller receipt and CLI')
+            receipt = controller.managed_read(args.managed_migration, maximum=4 << 20)
+            if not receipt or receipt.get('phase') != 'completed' or receipt.get('home_identity') != identity or json.loads(receipt['config']) != config:
+                raise ReviewError('managed review migration does not match the frozen configuration')
+            managed = controller, receipt, args.factoryctl
+        print(json.dumps({"ok": True, "messages": run_once(config, managed, args.controller_lock_fd)}))
         return 0
     except (OSError, ValueError, json.JSONDecodeError, intake.IntakeError, ReviewError) as exc:
         print("factory-review-intake: " + str(exc), file=__import__("sys").stderr)

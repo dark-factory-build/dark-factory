@@ -62,6 +62,9 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validateIntake(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
+	if err := validateLegacyIntake(ctx, connection); err != nil {
+		return FactoryState{}, err
+	}
 	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}

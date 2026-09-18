@@ -75,10 +75,10 @@ def refresh_controller(checkout, release_config, receipt):
     git('merge', '--ff-only', sha)
 
 
-def tick(config_path, config, release_only=False):
+def tick(config_path, config, release_only=False, skip_intake=False, environment=None, review_arguments=(), controller_lock_fd=None):
     scripts = Path(__file__).resolve().parent
     calls = []
-    if not release_only:
+    if not release_only and not skip_intake:
         calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
     releases = config.get('release_configs', []) if release_only else []
     for release_config in releases:
@@ -86,14 +86,14 @@ def tick(config_path, config, release_only=False):
     if not release_only and 'review_mirror_root' in config:
         if not isinstance(config['review_mirror_root'], str) or not Path(config['review_mirror_root']).is_absolute():
             raise ValueError('review_mirror_root must be an absolute path')
-        calls.append([sys.executable, str(scripts / 'factory-review-intake.py'), str(config_path), '--once'])
+        calls.append([sys.executable, str(scripts / 'factory-review-intake.py'), str(config_path), '--once'] + list(review_arguments) + (['--controller-lock-fd', str(controller_lock_fd)] if controller_lock_fd is not None else []))
     results = []
     for argv in calls:
         try:
-            completed = subprocess.run(argv, capture_output=True, text=True, timeout=1300 if Path(argv[1]).name == 'factory-intake.py' else None)
+            completed = subprocess.run(argv, capture_output=True, text=True, env=environment, pass_fds=() if controller_lock_fd is None else (controller_lock_fd,), timeout=1300 if Path(argv[1]).name == 'factory-intake.py' else None)
             result = {'component': Path(argv[1]).stem, 'ok': completed.returncode == 0}
             if completed.returncode:
-                result['error'] = 'exit_' + str(completed.returncode)
+                result['error'] = 'legacy_review_customer_unsupported: use the installed customer publication workflow' if Path(argv[1]).name == 'factory-review-intake.py' and 'Legacy review is owner-only' in completed.stderr else 'exit_' + str(completed.returncode)
             results.append(result)
             if completed.returncode == 0 and Path(argv[1]).name == 'factory-release.py':
                 receipt = json.loads(completed.stdout)
@@ -177,25 +177,26 @@ def managed_read(path, default=None, maximum=1 << 20, private=True, decode=json.
 
 
 @contextlib.contextmanager
-def managed_lock(path):
+def managed_lock(path, private=True):
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, 'a+') as stream:
         metadata = os.fstat(stream.fileno())
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1:
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or (stat.S_IMODE(metadata.st_mode) != 0o600 if private else metadata.st_mode & 0o022) or metadata.st_nlink != 1:
             raise ValueError('managed intake lock is not private')
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise ValueError('another controller owns this factory') from error
-        yield
+        yield descriptor
 
 
-def managed_api(factoryctl, home, arguments):
+def managed_api(factoryctl, home, arguments, value=None):
     environment = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
                    'DARK_FACTORY_SOCKET': str(home / 'runtimes/factory.sock'),
                    'DARK_FACTORY_OPERATOR_TOKEN_FILE': str(home / 'operator.token')}
     try:
         response = subprocess.run([str(factoryctl), 'intake'] + arguments, env=environment,
+                                  input=json.dumps(value) if value is not None else None,
                                   capture_output=True, text=True, timeout=125)
         result = json.loads(response.stdout)
         if response.returncode != 0 or not isinstance(result, dict) or len(response.stdout) > 1 << 20:
@@ -207,7 +208,10 @@ def managed_api(factoryctl, home, arguments):
 
 def managed_tick(home, factoryctl):
     home, state, identity = managed_paths(home)
-    with managed_lock(Path(str(home) + '.autonomy.lock')), managed_lock(state / 'journal.lock'):
+    with managed_lock(Path(str(home) + '.autonomy.lock')) as controller_lock_fd, managed_lock(state / 'journal.lock'):
+        migration = managed_read(state / 'migration.json', maximum=4 << 20)
+        if migration and (migration.get('home_identity') != identity or migration.get('phase') != 'completed'):
+            return {'state': 'migration_pending'}
         now = int(time.time())
         journal = managed_read(state / 'journal.json', {'version': 1, 'home_identity': identity, 'sources': {}, 'last_success_at': 0})
         if not isinstance(journal, dict) or journal.get('version') != 1 or journal.get('home_identity') != identity or not isinstance(journal.get('sources'), dict):
@@ -302,7 +306,17 @@ def managed_tick(home, factoryctl):
             if result.get('state') != 'ok' or error == 'overflow':
                 summary.update(last_attempt_at=now, state='error', error=error)
             summaries[identifier] = summary
+        review = journal.get('review', [])
+        if migration and migration['job']['was_loaded'] and 'review_mirror_root' in json.loads(migration['config']) and now >= journal.get('review_next_due', 0):
+            environment = dict(os.environ, PATH=migration['job']['path_environment'])
+            review = tick(state / 'legacy-review.json', json.loads(migration['config']), skip_intake=True, environment=environment, review_arguments=['--managed-migration', str(state / 'migration.json'), '--factoryctl', str(factoryctl)], controller_lock_fd=controller_lock_fd)
+            journal.update(review=review, review_next_due=now + int(json.loads(migration['config']).get('poll_seconds',120)))
+            atomic_json(state / 'journal.json',journal)
+        if any(not item['ok'] for item in review):
+            error = 'review_unavailable'
         summary = {'version': 1, 'state': 'error' if error else 'ok', 'error': error, 'sources': summaries}
+        if review:
+            summary['review'] = review
         if len(json.dumps(summary).encode()) > 64 << 10:
             raise ValueError('managed intake status exceeds its bound')
         atomic_json(state / 'status.json', summary)
@@ -325,7 +339,113 @@ def managed_launchctl(*arguments):
     return subprocess.run(['/bin/launchctl', *arguments], capture_output=True, text=True, timeout=30)
 
 
-def refuse_legacy_intake_service(home):
+def legacy_migration_input(home, config_path):
+    spec = importlib.util.spec_from_file_location('legacy_intake', Path(__file__).with_name('factory-intake.py'))
+    legacy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(legacy)
+    raw_config = managed_read(config_path, maximum=64 << 10, private=False, decode=lambda data: data)
+    if raw_config is None:
+        raise ValueError('legacy configuration is missing')
+    config = json.loads(raw_config)
+    try:
+        legacy.validate_config(config)
+        validate_controller_config(config)
+    except legacy.IntakeError as error:
+        raise ValueError(str(error)) from error
+    if Path(config['factory_home']).resolve() != home:
+        raise ValueError('legacy configuration belongs to another factory')
+    known = {'repository', 'project_id', 'overseer_agent_id', 'label', 'allowed_authors', 'journal', 'factory_home', 'max_issues', 'poll_seconds', 'command_timeout', 'priority_default', 'priority_by_label', 'review_mirror_root', 'review_provider', 'base', 'release_configs'}
+    if set(config) - known:
+        raise ValueError('unsupported legacy configuration fields: ' + ', '.join(sorted(set(config) - known)))
+    raw_journal = managed_read(Path(config['journal']), maximum=1 << 20, decode=lambda data: data)
+    if raw_journal is None:
+        raise ValueError('migration requires the existing legacy journal')
+    journal = json.loads(raw_journal)
+    if not isinstance(journal, dict) or journal.get('version') != 2 or not isinstance(journal.get('issues'), dict) or len(journal['issues']) > 200:
+        raise ValueError('migration requires a version 2 journal with at most 200 issues')
+    if set(journal) - {'version', 'updated_at', 'issues', 'config_fingerprint'}:
+        raise ValueError('unsupported legacy journal fields require review before cutover')
+    try:
+        legacy.bind_journal(config, journal)
+    except legacy.IntakeError as error:
+        raise ValueError(str(error)) from error
+    if config.get('review_provider', 'codex') not in ('codex', 'claude'):
+        raise ValueError('review_provider must be codex or claude')
+    if 'review_mirror_root' in config and (not isinstance(config['review_mirror_root'], str) or not Path(config['review_mirror_root']).is_absolute()):
+        raise ValueError('review_mirror_root must be an absolute path')
+    history = []
+    for key, record in sorted(journal['issues'].items()):
+        if not isinstance(record, dict) or type(record.get('number')) is not int or key != legacy.issue_key(config, record['number']) or record.get('managed') is not True or set(record) - {'number', 'managed', 'processed_fingerprint', 'desired', 'desired_fingerprint', 'operation', 'needs_operator_recovery'}:
+            raise ValueError('legacy journal issue record is unsupported')
+        desired = record.get('desired')
+        if not isinstance(desired, dict) or legacy.fingerprint(desired) != record.get('desired_fingerprint') or desired.get('number') != record['number']:
+            raise ValueError('legacy snapshot fingerprint is invalid')
+        operation, recovery = record.get('operation'), record.get('needs_operator_recovery')
+        fingerprint = (recovery or operation or {}).get('fingerprint') or record.get('processed_fingerprint', '')
+        entry = {'number': record['number'], 'kind': 'observed'}
+        if fingerprint:
+            task = legacy.sha_id('source', legacy.source_marker(config, record), fingerprint)
+            incarnation = legacy.sha_id('incarnation', task)
+            if operation and (operation.get('task_id') != task or operation.get('incarnation_id') != incarnation) or recovery and recovery.get('task_id') != task:
+                raise ValueError('legacy task receipt is invalid')
+            entry.update(kind='recovery' if recovery else 'operation' if operation else 'processed', task_id=task, incarnation_id=incarnation, fingerprint=fingerprint)
+            if fingerprint == record['desired_fingerprint']:
+                entry['historical_content_hash'] = hashlib.sha256((desired['title'] + '\0' + desired['body']).encode()).hexdigest()
+        history.append(entry)
+    manual_apps = sorted(author for author in config['allowed_authors'] if author.startswith('app/') or author.endswith('[bot]'))
+    humans = [author for author in config['allowed_authors'] if author not in manual_apps]
+    configuration = {'priority_default': config.get('priority_default', 0), 'priority_by_label': config.get('priority_by_label', {}), 'repository': config['repository'], 'overseer_agent_id': config['overseer_agent_id'], 'label': config['label'], 'policy': 'trusted_authors' if humans else 'manual', 'trusted_authors': humans, 'poll_seconds': int(config.get('poll_seconds', 120)), 'admission_limit': int(config.get('max_issues', 25))}
+    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    source_id = hashlib.sha256(('legacy-intake\0' + str(home) + '\0' + str(config_path)).encode()).hexdigest()[:32]
+    request = {'action': 'legacy_preview', 'source_id': source_id, 'project_id': config['project_id'], 'configuration': configuration, 'legacy': {'review_companion': 'review_mirror_root' in config, 'manual_app_authors': manual_apps, 'config_hash': digest(config), 'journal_hash': digest(history), 'history': history}}
+    return request, config, raw_config.decode(), raw_journal.decode()
+
+
+def legacy_review_ready(config, publication):
+    if 'review_mirror_root' not in config:
+        return
+    if not isinstance(publication, str) or not publication:
+        raise ValueError('review publication repository is unbound; legacy schedule remains untouched')
+    spec = importlib.util.spec_from_file_location('legacy_review_preflight', Path(__file__).with_name('factory-review-intake.py'))
+    reviewer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reviewer)
+    try:
+        reviewer.mirror(dict(config, repository=publication))
+    except (reviewer.ReviewError, reviewer.intake.IntakeError, OSError) as error:
+        raise ValueError('prepare the configured Git review mirror for the publication repository before cutover; legacy schedule remains untouched') from error
+
+
+def legacy_migration_job(config_path):
+    label = 'build.darkfactory.autonomy.' + hashlib.sha256(str(config_path).encode()).hexdigest()[:12]
+    target = 'gui/' + str(os.geteuid()) + '/' + label
+    loaded = managed_launchctl('print', target)
+    if loaded.returncode not in (0, 113):
+        raise ValueError('legacy schedule status unavailable; refusing cutover')
+    paths = []
+    if loaded.returncode == 0:
+        paths = [Path(line.strip()[7:]) for line in loaded.stdout.splitlines() if line.strip().startswith('path = ')]
+    else:
+        candidates = list(managed_plist_root().glob('*.plist'))
+        if len(candidates) > 200:
+            raise ValueError('legacy schedule discovery exceeds 200 plists')
+        for path in candidates:
+            try:
+                value = managed_read(path, maximum=64 << 10, private=False, decode=plistlib.loads)
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                continue
+            if isinstance(value, dict) and value.get('Label') == label:
+                paths.append(path)
+    if len(paths) != 1 or not paths[0].is_absolute():
+        raise ValueError('one exact generated legacy intake schedule is required for cutover')
+    raw = managed_read(paths[0], maximum=64 << 10, private=False, decode=lambda data: data)
+    value = plistlib.loads(raw)
+    args = value.get('ProgramArguments', [])
+    if value.get('Label') != label or not isinstance(args, list) or len(args) != 4 or not all(isinstance(arg, str) for arg in args) or Path(args[1]).name != 'factory-autonomy.py' or Path(args[2]).resolve() != config_path or args[3] != '--once' or set(value.get('EnvironmentVariables', {})) - {'PATH'}:
+        raise ValueError('legacy schedule arguments or environment require explicit review')
+    return {'label': label, 'target': target, 'path': str(paths[0]), 'plist': raw.hex(), 'was_loaded': loaded.returncode == 0, 'path_environment': value.get('EnvironmentVariables', {}).get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')}
+
+
+def refuse_legacy_intake_service(home, permitted_path=None):
     # The per-pass lock only serializes controllers; independent schedules
     # still create different task IDs from the same issue on successive ticks.
     paths = set(managed_plist_root().glob('*.plist'))
@@ -348,6 +468,8 @@ def refuse_legacy_intake_service(home):
     if len(paths) > 200:
         raise ValueError('intake service discovery exceeds 200 plists; refusing install')
     for path in paths:
+        if path == permitted_path:
+            continue
         try:
             job = managed_read(path, maximum=64 << 10, private=False, decode=plistlib.loads)
         except (OSError, ValueError, plistlib.InvalidFileException):
@@ -368,9 +490,20 @@ def refuse_legacy_intake_service(home):
             raise ValueError('legacy intake already schedules this factory; migrate its configuration and journal before installing managed intake')
 
 
-def managed_service(home, factoryctl, action):
+def managed_install_assets(factoryctl):
+    script, factoryctl, python = Path(__file__).resolve(), Path(factoryctl).resolve(strict=True), Path(sys.executable).resolve(strict=True)
+    prefix = factoryctl.parent.parent if factoryctl.parent.name == 'bin' else factoryctl.parent
+    if script != prefix / 'libexec/dark-factory/factory-autonomy.py':
+        raise ValueError('managed intake must be installed from the release or Homebrew libexec directory')
+    return script, factoryctl, python
+
+
+def managed_service(home, factoryctl, action, migration=False):
     home, state, identity = managed_paths(home)
     if action == 'install':
+        pending = managed_read(state / 'migration.json', maximum=4 << 20)
+        if pending and pending.get('phase') != 'completed' and not migration:
+            raise ValueError('resume the explicit legacy migration before installing intake')
         refuse_legacy_intake_service(home)
     label = 'com.dark-factory.intake.' + hashlib.sha256(str(home).encode()).hexdigest()[:12]
     domain = 'gui/' + str(os.geteuid())
@@ -404,10 +537,7 @@ def managed_service(home, factoryctl, action):
             raise ValueError('unknown managed service action')
         value, body = None, None
         if action == 'install':
-            script, factoryctl, python = Path(__file__).resolve(), Path(factoryctl).resolve(strict=True), Path(sys.executable).resolve(strict=True)
-            expected_prefix = factoryctl.parent.parent if factoryctl.parent.name == 'bin' else factoryctl.parent
-            if script != expected_prefix / 'libexec/dark-factory/factory-autonomy.py':
-                raise ValueError('managed intake must be installed from the release or Homebrew libexec directory')
+            script, factoryctl, python = managed_install_assets(factoryctl)
             plist_path.parent.mkdir(parents=True, exist_ok=True)
             parent = plist_path.parent.lstat()
             if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
@@ -451,13 +581,149 @@ def managed_service(home, factoryctl, action):
         return {'state': 'scheduled'}
 
 
+def managed_migrate(home, factoryctl, config_path, plan_hash=None, acknowledge_policy_narrowing=False):
+    home, config_path = Path(home).resolve(strict=True), Path(config_path).resolve(strict=True)
+    metadata = home.stat()
+    if not home.is_dir() or metadata.st_uid != os.geteuid():
+        raise ValueError('factory home is not owned by this operator')
+    identity, state = [metadata.st_dev, metadata.st_ino], Path(str(home) + '.intake')
+    receipt_path = state / 'migration.json'
+    receipt = managed_read(receipt_path, maximum=4 << 20)
+    if receipt and (receipt.get('version') != 1 or receipt.get('home_identity') != identity or receipt.get('config_path') != str(config_path)):
+        raise ValueError('migration receipt belongs to another factory or configuration')
+    request, config, raw_config, raw_journal = legacy_migration_input(home, config_path)
+    if config.get('release_configs'):
+        raise ValueError('legacy release companion uses host GitHub authority; customer migration requires a customer-scoped release path, so the legacy schedules remain untouched')
+    if receipt and receipt['phase'] == 'completed':
+        if plan_hash is not None and plan_hash != receipt['plan_hash']:
+            raise ValueError('migration already completed under a different plan')
+        return {'state': 'migrated', 'source_id': receipt['request']['source_id'], 'plan_hash': receipt['plan_hash']}
+    if plan_hash is None:
+        # Preview never creates state or modifies either schedule.
+        if receipt:
+            request = dict(receipt['request'], action='legacy_preview')
+        else:
+            job = legacy_migration_job(config_path)
+            refuse_legacy_intake_service(home, Path(job['path']))
+        reply = managed_api(factoryctl, home, ['legacy_preview'], request)
+        if reply.get('state') == 'legacy_preview':
+            legacy_review_ready(config, reply.get('legacy', {}).get('publication_repository'))
+        reply['configuration'] = dict(request['configuration'], target_repository_id=reply.get('legacy', {}).get('target_repository_id', request['configuration'].get('target_repository_id', '')))
+        reply['companions'] = {key: config[key] for key in ('review_mirror_root','review_provider','base','release_configs','command_timeout') if key in config}
+        reply['source_id'] = request['source_id']
+        if receipt:
+            reply['cutover_phase'] = receipt['phase']
+        return reply
+    if len(plan_hash) != 64 or any(c not in '0123456789abcdef' for c in plan_hash):
+        raise ValueError('migration requires the exact reviewed plan hash')
+    if not receipt and request['legacy']['manual_app_authors'] and not acknowledge_policy_narrowing:
+        raise ValueError('review App/bot policy narrowing: imported work is preserved, future bot issues require manual acceptance; apply with --acknowledge-policy-narrowing')
+    script, _, _ = managed_install_assets(factoryctl)  # Fail before stopping anything.
+    if 'review_mirror_root' in config and managed_read(script.with_name('factory-review-intake.py'), private=False, maximum=1 << 20, decode=lambda data: data) is None:
+        raise ValueError('installed review companion is missing; legacy schedule remains untouched')
+    home, state, identity = managed_paths(home)
+    with managed_lock(Path(str(home) + '.autonomy.lock')), managed_lock(Path(config['journal'] + '.lock'), private=False):
+        receipt = managed_read(receipt_path, maximum=4 << 20)
+        request, config, raw_config, raw_journal = legacy_migration_input(home, config_path)
+        if receipt:
+            if receipt.get('home_identity') != identity or receipt.get('config_path') != str(config_path):
+                raise ValueError('resume migration with its recorded plan and configuration')
+            if request['legacy']['config_hash'] != receipt['request']['legacy']['config_hash'] or request['legacy']['journal_hash'] != receipt['request']['legacy']['journal_hash']:
+                raise ValueError('legacy configuration or task history changed; cutover remains stopped for review')
+            request = receipt['request']
+            if receipt['plan_hash'] != plan_hash:
+                if receipt['phase'] != 'old_stopped':
+                    raise ValueError('resume migration with its recorded plan')
+                current = dict(request, action='legacy_preview')
+                reply = managed_api(factoryctl, home, ['legacy_preview'], current)
+                if reply.get('state') != 'legacy_preview' or reply.get('legacy', {}).get('plan_hash') != plan_hash:
+                    return reply
+                receipt['plan_hash'] = plan_hash
+                legacy_review_ready(config, reply['legacy'].get('publication_repository'))
+                request['legacy']['plan_hash'] = plan_hash
+                request['configuration']['target_repository_id'] = reply['legacy']['target_repository_id']
+                atomic_json(receipt_path, receipt)
+        else:
+            if request['legacy']['manual_app_authors'] and not acknowledge_policy_narrowing:
+                raise ValueError('apply the reviewed App/bot policy with --acknowledge-policy-narrowing')
+            job = legacy_migration_job(config_path)
+            refuse_legacy_intake_service(home, Path(job['path']))
+            reply = managed_api(factoryctl, home, ['legacy_preview'], request)
+            if reply.get('state') != 'legacy_preview' or reply.get('legacy', {}).get('plan_hash') != plan_hash:
+                return reply if reply.get('state') != 'legacy_preview' else dict(reply, state='stale')
+            legacy_review_ready(config, reply['legacy'].get('publication_repository'))
+            request['legacy']['plan_hash'] = plan_hash
+            request['legacy']['acknowledge_policy_narrowing'] = bool(request['legacy']['manual_app_authors']) and acknowledge_policy_narrowing
+            request['configuration']['target_repository_id'] = reply['legacy']['target_repository_id']
+            receipt = {'version': 1, 'home_identity': identity, 'config_path': str(config_path), 'phase': 'prepared', 'plan_hash': plan_hash, 'request': request, 'job': job, 'config': raw_config, 'journal': raw_journal}
+            atomic_json(receipt_path, receipt)
+        job = receipt['job']
+        if receipt['phase'] == 'prepared':
+            raw = managed_read(Path(job['path']), maximum=64 << 10, private=False, decode=lambda data: data)
+            if raw is not None and raw.hex() != job['plist']:
+                raise ValueError('legacy schedule changed; refusing to stop a foreign job')
+            loaded = managed_launchctl('print', job['target'])
+            paths = [line.strip()[7:] for line in loaded.stdout.splitlines() if line.strip().startswith('path = ')]
+            if loaded.returncode == 0:
+                if paths != [job['path']]:
+                    raise ValueError('legacy loaded schedule ownership changed')
+                if managed_launchctl('bootout', job['target']).returncode != 0:
+                    raise ValueError('legacy schedule stop failed; retry the same migration')
+            elif loaded.returncode != 113:
+                raise ValueError('legacy schedule status unavailable')
+            if raw is not None:
+                Path(job['path']).unlink()
+                descriptor = os.open(Path(job['path']).parent, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            receipt['phase'] = 'old_stopped'
+            atomic_json(receipt_path, receipt)
+        if receipt['phase'] == 'old_stopped':
+            request['action'] = 'legacy_commit'
+            reply = managed_api(factoryctl, home, ['legacy_commit'], request)
+            if reply.get('state') != 'legacy_committed':
+                # Do not restart legacy after an ambiguous reply: the atomic
+                # baseline may already exist. An exact retry reads its receipt.
+                return dict(reply, cutover_phase='old_stopped', resume_plan=plan_hash)
+            receipt['phase'] = 'baseline_committed'
+            atomic_json(receipt_path, receipt)
+        if receipt['phase'] == 'baseline_committed':
+            atomic_json(state / 'legacy-review.json', json.loads(receipt['config']))
+            managed_service(home, factoryctl, 'install', migration=True)
+            receipt['phase'] = 'managed_started'
+            atomic_json(receipt_path, receipt)
+        if receipt['phase'] == 'managed_started':
+            if job['was_loaded']:
+                sources = managed_api(factoryctl, home, ['config'])
+                found = [source for source in sources.get('sources', []) if source.get('id') == request['source_id']]
+                if sources.get('state') != 'ok' or len(found) != 1:
+                    raise ValueError('migration source status unavailable; retry the same plan')
+                source = found[0]
+                if source.get('revision') == 1 and source.get('enabled') is False:
+                    reply = managed_api(factoryctl, home, ['enable', '--source', request['source_id'], '--revision', '1', '--reviewed-revision', '1'])
+                    if reply.get('state') != 'ok':
+                        return dict(reply, cutover_phase='managed_started', resume_plan=plan_hash)
+                elif source.get('revision') != 2 or source.get('enabled') is not True:
+                    raise ValueError('operator changed the migration source; it remains under operator control')
+            receipt['phase'] = 'completed'
+            atomic_json(receipt_path, receipt)
+        if receipt['phase'] != 'completed':
+            raise ValueError('unknown migration phase; refusing controller activation')
+        return {'state': 'migrated', 'source_id': request['source_id'], 'plan_hash': plan_hash}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('config', type=Path, nargs='?')
     parser.add_argument('--managed', action='store_true')
     parser.add_argument('--factory-home', type=Path)
     parser.add_argument('--factoryctl', type=Path)
-    parser.add_argument('--service', choices=('install', 'uninstall', 'status'))
+    parser.add_argument('--service', choices=('install', 'uninstall', 'status', 'migrate'))
+    parser.add_argument('--legacy-config', type=Path)
+    parser.add_argument('--plan')
+    parser.add_argument('--acknowledge-policy-narrowing', action='store_true')
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--release-only', action='store_true', help='Run the separately scheduled release and delivery pass.')
     parser.add_argument('--plist', action='store_true', help='Print a launchd plist; does not install or start it.')
@@ -467,11 +733,18 @@ def main():
             parser.error('managed intake requires --factory-home and --factoryctl only')
         if sys.version_info < (3, 9):
             raise ValueError('managed intake requires Python 3.9 or newer')
-        result = managed_service(args.factory_home, args.factoryctl, args.service) if args.service else managed_tick(args.factory_home, args.factoryctl)
+        if args.service == 'migrate':
+            if args.legacy_config is None or not args.legacy_config.is_absolute():
+                parser.error('migration requires --legacy-config ABS')
+            result = managed_migrate(args.factory_home, args.factoryctl, args.legacy_config, args.plan, args.acknowledge_policy_narrowing)
+        else:
+            if args.legacy_config is not None or args.plan is not None or args.acknowledge_policy_narrowing:
+                parser.error('migration arguments require --service migrate')
+            result = managed_service(args.factory_home, args.factoryctl, args.service) if args.service else managed_tick(args.factory_home, args.factoryctl)
         if args.service:
             print(json.dumps(result), flush=True)
         return 0 if result['state'] != 'error' else 1
-    if args.config is None or args.factory_home is not None or args.factoryctl is not None or args.service is not None:
+    if args.config is None or args.factory_home is not None or args.factoryctl is not None or args.service is not None or args.legacy_config is not None or args.plan is not None or args.acknowledge_policy_narrowing:
         parser.error('legacy controller requires its configuration file')
     config_path = args.config.resolve(strict=True)
     config = json.loads(config_path.read_text())
@@ -496,7 +769,9 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise ValueError('another controller owns this factory') from error
-        results = tick(config_path, config, args.release_only)
+        if not args.release_only and Path(str(Path(config['factory_home']).resolve()) + '.intake/migration.json').exists():
+            raise ValueError('legacy intake was explicitly cut over; resume or use the managed service')
+        results = tick(config_path, config, args.release_only, controller_lock_fd=lock.fileno())
         write_health(config, results, args.release_only)
     print(json.dumps({'at': int(time.time()), 'components': results}), flush=True)
     return 0 if all(result['ok'] for result in results) else 1

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"maps"
 	"math"
 	"strings"
 )
@@ -64,7 +65,10 @@ func intakeSourceByID(ctx context.Context, connection *sql.Conn, id IntakeSource
 	if err := rows.Err(); err != nil {
 		return IntakeSource{}, false, err
 	}
-	if !validIntakeSource(value) {
+	if err := loadIntakePriorities(ctx, connection, &value); err != nil {
+		return IntakeSource{}, false, err
+	}
+	if !ValidIntakeSource(value) {
 		return IntakeSource{}, false, ErrCorruptState
 	}
 	return value, true, nil
@@ -179,8 +183,8 @@ func (store *Store) UpdateIntakeSource(ctx context.Context, id IntakeSourceID, e
 	if existing.Revision != expected || at.Int64() < existing.UpdatedAt.Int64() {
 		return IntakeSource{}, tx.Rollback(ErrRevisionConflict)
 	}
-	value := IntakeSource{ID: id, GitHubRepositoryID: spec.GitHubRepositoryID, GitHubRepositoryName: spec.GitHubRepositoryName, ProjectID: spec.ProjectID, TargetRepositoryID: spec.TargetRepositoryID, OverseerAgentID: spec.OverseerAgentID, LabelFilter: spec.LabelFilter, Enabled: enabled, Policy: spec.Policy, TrustedGitHubLogins: append([]string(nil), spec.TrustedGitHubLogins...), PollSeconds: spec.PollSeconds, AdmissionLimit: spec.AdmissionLimit, Revision: existing.Revision, CreatedAt: existing.CreatedAt, UpdatedAt: at}
-	if !validIntakeSource(value) {
+	value := IntakeSource{PriorityDefault: spec.PriorityDefault, PriorityByLabel: spec.PriorityByLabel, ID: id, GitHubRepositoryID: spec.GitHubRepositoryID, GitHubRepositoryName: spec.GitHubRepositoryName, ProjectID: spec.ProjectID, TargetRepositoryID: spec.TargetRepositoryID, OverseerAgentID: spec.OverseerAgentID, LabelFilter: spec.LabelFilter, Enabled: enabled, Policy: spec.Policy, TrustedGitHubLogins: append([]string(nil), spec.TrustedGitHubLogins...), PollSeconds: spec.PollSeconds, AdmissionLimit: spec.AdmissionLimit, Revision: existing.Revision, CreatedAt: existing.CreatedAt, UpdatedAt: at}
+	if !ValidIntakeSource(value) {
 		return IntakeSource{}, tx.Rollback(ErrInvalidValue)
 	}
 	if err := validateIntakeSourceRoute(ctx, tx.connection, value); err != nil {
@@ -197,6 +201,9 @@ func (store *Store) UpdateIntakeSource(ctx context.Context, id IntakeSourceID, e
 			return IntakeSource{}, tx.Rollback(err)
 		}
 	}
+	if err := writeIntakePriorities(ctx, tx.connection, value); err != nil {
+		return IntakeSource{}, tx.Rollback(err)
+	}
 	value, found, err = intakeSourceByID(ctx, tx.connection, id)
 	if err != nil || !found {
 		if err == nil {
@@ -211,65 +218,67 @@ func (store *Store) UpdateIntakeSource(ctx context.Context, id IntakeSourceID, e
 }
 
 func (store *Store) CreateIntakeSource(ctx context.Context, spec NewIntakeSource, at UnixMillis) (IntakeSource, error) {
-	policy := spec.Policy
-	if policy == "" {
-		policy = IntakePolicyManual
-	}
-	value := IntakeSource{ID: spec.ID, GitHubRepositoryID: spec.GitHubRepositoryID, GitHubRepositoryName: spec.GitHubRepositoryName, ProjectID: spec.ProjectID, TargetRepositoryID: spec.TargetRepositoryID, OverseerAgentID: spec.OverseerAgentID, LabelFilter: spec.LabelFilter, Policy: policy, TrustedGitHubLogins: append([]string(nil), spec.TrustedGitHubLogins...), PollSeconds: spec.PollSeconds, AdmissionLimit: spec.AdmissionLimit, Revision: Revision{value: 1}, CreatedAt: at, UpdatedAt: at}
-	if !validIntakeSource(value) {
-		return IntakeSource{}, ErrInvalidValue
-	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return IntakeSource{}, err
 	}
 	defer tx.Close()
-	existing, found, err := intakeSourceByID(ctx, tx.connection, value.ID)
+	value, err := createIntakeSource(ctx, tx.connection, spec, at)
 	if err != nil {
 		return IntakeSource{}, tx.Rollback(err)
-	}
-	if found {
-		if intakeSourceMatchesCreation(existing, value) {
-			if err := tx.Rollback(nil); err != nil {
-				return IntakeSource{}, err
-			}
-			return existing, nil
-		}
-		return IntakeSource{}, tx.Rollback(ErrConflict)
-	}
-	var sourceCount int
-	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM intake_sources`).Scan(&sourceCount); err != nil {
-		return IntakeSource{}, tx.Rollback(err)
-	}
-	if sourceCount >= globalMaxIntakeSources {
-		return IntakeSource{}, tx.Rollback(ErrConflict)
-	}
-	if err := validateIntakeSourceRoute(ctx, tx.connection, value); err != nil {
-		return IntakeSource{}, tx.Rollback(err)
-	}
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_sources(`+intakeSourceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?)`, value.ID.Bytes(), int64(value.GitHubRepositoryID), value.GitHubRepositoryName, value.ProjectID.Bytes(), value.TargetRepositoryID.Bytes(), nullableAgentID(value.OverseerAgentID), value.LabelFilter, string(value.Policy), int64(value.PollSeconds), int64(value.AdmissionLimit), at.Int64(), at.Int64()); err != nil {
-		return IntakeSource{}, tx.Rollback(err)
-	}
-	for _, login := range value.TrustedGitHubLogins {
-		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_source_trusted_logins(source_id, login) VALUES(?, ?)`, value.ID.Bytes(), strings.ToLower(login)); err != nil {
-			return IntakeSource{}, tx.Rollback(err)
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return IntakeSource{}, err
 	}
-	result, found, err := store.IntakeSource(ctx, value.ID)
-	if err != nil || !found {
-		if err == nil {
-			err = ErrCorruptState
-		}
+	return value, nil
+}
+
+func createIntakeSource(ctx context.Context, connection *sql.Conn, spec NewIntakeSource, at UnixMillis) (IntakeSource, error) {
+	policy := spec.Policy
+	if policy == "" {
+		policy = IntakePolicyManual
+	}
+	value := IntakeSource{PriorityDefault: spec.PriorityDefault, PriorityByLabel: spec.PriorityByLabel, ID: spec.ID, GitHubRepositoryID: spec.GitHubRepositoryID, GitHubRepositoryName: spec.GitHubRepositoryName, ProjectID: spec.ProjectID, TargetRepositoryID: spec.TargetRepositoryID, OverseerAgentID: spec.OverseerAgentID, LabelFilter: spec.LabelFilter, Policy: policy, TrustedGitHubLogins: append([]string(nil), spec.TrustedGitHubLogins...), PollSeconds: spec.PollSeconds, AdmissionLimit: spec.AdmissionLimit, Revision: Revision{value: 1}, CreatedAt: at, UpdatedAt: at}
+	if !ValidIntakeSource(value) {
+		return IntakeSource{}, ErrInvalidValue
+	}
+	existing, found, err := intakeSourceByID(ctx, connection, value.ID)
+	if err != nil {
 		return IntakeSource{}, err
 	}
-	return result, nil
+	if found {
+		if intakeSourceMatchesCreation(existing, value) {
+			return existing, nil
+		}
+		return IntakeSource{}, ErrConflict
+	}
+	var sourceCount int
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM intake_sources`).Scan(&sourceCount); err != nil {
+		return IntakeSource{}, err
+	}
+	if sourceCount >= globalMaxIntakeSources {
+		return IntakeSource{}, ErrConflict
+	}
+	if err := validateIntakeSourceRoute(ctx, connection, value); err != nil {
+		return IntakeSource{}, err
+	}
+	if _, err := connection.ExecContext(ctx, `INSERT INTO intake_sources(`+intakeSourceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?)`, value.ID.Bytes(), int64(value.GitHubRepositoryID), value.GitHubRepositoryName, value.ProjectID.Bytes(), value.TargetRepositoryID.Bytes(), nullableAgentID(value.OverseerAgentID), value.LabelFilter, string(value.Policy), int64(value.PollSeconds), int64(value.AdmissionLimit), at.Int64(), at.Int64()); err != nil {
+		return IntakeSource{}, err
+	}
+	for _, login := range value.TrustedGitHubLogins {
+		if _, err := connection.ExecContext(ctx, `INSERT INTO intake_source_trusted_logins(source_id, login) VALUES(?, ?)`, value.ID.Bytes(), strings.ToLower(login)); err != nil {
+			return IntakeSource{}, err
+		}
+	}
+	if err := writeIntakePriorities(ctx, connection, value); err != nil {
+		return IntakeSource{}, err
+	}
+	result, _, err := intakeSourceByID(ctx, connection, value.ID)
+	return result, err
 }
 
 func intakeSourceMatchesCreation(existing, value IntakeSource) bool {
-	if existing.GitHubRepositoryID != value.GitHubRepositoryID || existing.GitHubRepositoryName != value.GitHubRepositoryName || existing.ProjectID != value.ProjectID || existing.TargetRepositoryID != value.TargetRepositoryID || existing.OverseerAgentID != value.OverseerAgentID || existing.LabelFilter != value.LabelFilter || existing.Enabled || existing.Policy != value.Policy || existing.PollSeconds != value.PollSeconds || existing.AdmissionLimit != value.AdmissionLimit || existing.Revision.Int64() != 1 || existing.UpdatedAt != existing.CreatedAt || len(existing.TrustedGitHubLogins) != len(value.TrustedGitHubLogins) {
+	if existing.PriorityDefault != value.PriorityDefault || !maps.Equal(existing.PriorityByLabel, value.PriorityByLabel) || existing.GitHubRepositoryID != value.GitHubRepositoryID || existing.GitHubRepositoryName != value.GitHubRepositoryName || existing.ProjectID != value.ProjectID || existing.TargetRepositoryID != value.TargetRepositoryID || existing.OverseerAgentID != value.OverseerAgentID || existing.LabelFilter != value.LabelFilter || existing.Enabled || existing.Policy != value.Policy || existing.PollSeconds != value.PollSeconds || existing.AdmissionLimit != value.AdmissionLimit || existing.Revision.Int64() != 1 || existing.UpdatedAt != existing.CreatedAt || len(existing.TrustedGitHubLogins) != len(value.TrustedGitHubLogins) {
 		return false
 	}
 	seen := make(map[string]bool, len(existing.TrustedGitHubLogins))
@@ -555,6 +564,17 @@ func (store *Store) WithdrawIntakeAcceptance(ctx context.Context, id IntakeAccep
 }
 
 func (store *Store) ImportIntakeAcceptance(ctx context.Context, id IntakeAcceptanceID, at UnixMillis, expectedSource ...IntakeSource) (Task, error) {
+	return store.importIntakeAcceptance(ctx, id, at, 0, expectedSource...)
+}
+
+func (store *Store) ImportIntakeAcceptanceWithPriority(ctx context.Context, id IntakeAcceptanceID, at UnixMillis, source IntakeSource, priority int64) (Task, error) {
+	if priority < -1000000 || priority > 1000000 {
+		return Task{}, ErrInvalidValue
+	}
+	return store.importIntakeAcceptance(ctx, id, at, priority, source)
+}
+
+func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAcceptanceID, at UnixMillis, priority int64, expectedSource ...IntakeSource) (Task, error) {
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return Task{}, err
@@ -589,7 +609,7 @@ func (store *Store) ImportIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		}
 		return Task{}, tx.Rollback(err)
 	}
-	spec := NewTask{ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, AssignedAgentID: accepted.OverseerAgentID, Title: accepted.Snapshot.Title, Body: accepted.Snapshot.Body}
+	spec := NewTask{Priority: priority, ID: accepted.TaskID, IncarnationID: accepted.IncarnationID, ProjectID: accepted.ProjectID, RepositoryID: accepted.RepositoryID, AssignedAgentID: accepted.OverseerAgentID, Title: accepted.Snapshot.Title, Body: accepted.Snapshot.Body}
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, tx.Rollback(err)
 	}

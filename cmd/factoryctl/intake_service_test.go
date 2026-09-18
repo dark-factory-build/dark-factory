@@ -90,3 +90,15 @@ func TestIntakeServiceRefusesAttemptBeforeAnyMutation(t *testing.T) {
 		t.Fatalf("result=%d output=%s", result, output.String())
 	}
 }
+
+func TestIntakeServicePolicyAcknowledgementOnlyAppliesReviewedMigration(t *testing.T) {
+	for _, args := range [][]string{
+		{"install", "--home", "/unused", "--acknowledge-policy-narrowing"},
+		{"migrate", "--home", "/unused", "--legacy-config", "/legacy", "--preview", "--acknowledge-policy-narrowing"},
+	} {
+		var output bytes.Buffer
+		if result := runIntakeService(context.Background(), args, func(string) string { return "" }, &output, &output); result != exitUsage {
+			t.Fatalf("unreviewed policy acknowledgement: %d %s", result, output.String())
+		}
+	}
+}

@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 26
+	userVersion   = 27
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -18,6 +18,37 @@ const (
 )
 
 var schemaStatements = []string{
+	`CREATE TABLE intake_source_priorities (
+    source_id BLOB NOT NULL REFERENCES intake_sources(id),
+    label TEXT NOT NULL CHECK (length(CAST(label AS BLOB)) <= 100),
+    priority INTEGER NOT NULL CHECK (priority BETWEEN -1000000 AND 1000000),
+    PRIMARY KEY (source_id, label)
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE intake_legacy_migrations (
+    source_id BLOB PRIMARY KEY REFERENCES intake_sources(id),
+    github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
+    plan_hash BLOB NOT NULL CHECK (length(plan_hash) = 32),
+    config_hash BLOB NOT NULL CHECK (length(config_hash) = 32),
+    journal_hash BLOB NOT NULL CHECK (length(journal_hash) = 32),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0)
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE intake_legacy_suppressions (
+    github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
+    issue_number INTEGER NOT NULL CHECK (issue_number > 0),
+    issue_node_id TEXT NOT NULL CHECK (length(CAST(issue_node_id AS BLOB)) BETWEEN 1 AND 256),
+    project_id BLOB NOT NULL REFERENCES projects(id),
+    repository_id BLOB NOT NULL REFERENCES project_repositories(id),
+    content_hash BLOB NOT NULL CHECK (length(content_hash) = 32),
+    migration_source_id BLOB NOT NULL REFERENCES intake_legacy_migrations(source_id),
+    has_history INTEGER NOT NULL CHECK (has_history IN (0, 1)),
+    historical_content_hash BLOB CHECK (historical_content_hash IS NULL OR (length(historical_content_hash) = 32 AND has_history = 1)),
+    legacy_task_id BLOB REFERENCES tasks(id),
+    legacy_incarnation_id BLOB CHECK (legacy_incarnation_id IS NULL OR length(legacy_incarnation_id) = 16),
+    legacy_task_revision INTEGER CHECK (legacy_task_revision IS NULL OR legacy_task_revision >= 1),
+    CHECK ((legacy_task_id IS NULL AND legacy_incarnation_id IS NULL AND legacy_task_revision IS NULL) OR (legacy_task_id IS NOT NULL AND legacy_incarnation_id IS NOT NULL AND legacy_task_revision IS NOT NULL)),
+    PRIMARY KEY (github_repository_id, issue_number, issue_node_id, project_id, repository_id)
+) STRICT, WITHOUT ROWID`,
+
 	// This slice deliberately creates only the kernel authority tables.
 	// Final-v1 agent-message, verification-effect, removal, and checkpoint state
 	// is absent until its owning slice can add it before the incompatible v1 ships.

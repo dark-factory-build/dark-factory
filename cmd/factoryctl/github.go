@@ -145,7 +145,7 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 		return writeWebFailure(stderr, "GitHub connection", err)
 	}
 	if result.State == "legacy_overseers_running" {
-		_, _ = io.WriteString(stderr, "Stop existing legacy overseers through the factory controls before connecting GitHub, then retry.\n")
+		_, _ = io.WriteString(stderr, "Finish or stop the existing legacy overseer, controller, or review pass before connecting GitHub, then retry.\n")
 		return exitFailure
 	}
 	if result.State != "ok" {

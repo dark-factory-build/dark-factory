@@ -25,8 +25,9 @@ and refresh credentials; the host stores only its connection credential through
 the private credential mechanism. Every remote read, write, receipt observation
 and reconciliation checks the current connection and delegated repository.
 Disconnect and access loss fail closed, including replay. Existing operator
-receipts retain their operation IDs and legacy owner; migration cannot make
-them visible to customer connections. Cloudflare Access routing must allow the
+receipts retain their operation IDs and legacy owner. A reviewed, authenticated
+transfer can bind an existing receipt to a customer connection without changing
+the operation ID. Cloudflare Access routing must allow the
 authorization flow while remote operations still require authenticated authority.
 The old operator/service identity is not a customer fallback.
 

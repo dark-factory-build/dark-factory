@@ -29,7 +29,7 @@ func intakeFailure(err error) api.IntakeResult {
 }
 func intakeSourceView(source kernel.IntakeSource) api.IntakeSource {
 	return api.IntakeSource{ID: source.ID.String(), ProjectID: source.ProjectID.String(), GitHubRepositoryID: source.GitHubRepositoryID, Enabled: source.Enabled, Revision: uint64(source.Revision.Int64()),
-		Repository: source.GitHubRepositoryName, TargetRepositoryID: source.TargetRepositoryID.String(), OverseerAgentID: source.OverseerAgentID.String(), Label: source.LabelFilter, Policy: string(source.Policy), TrustedAuthors: source.TrustedGitHubLogins, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}
+		PriorityDefault: source.PriorityDefault, PriorityByLabel: source.PriorityByLabel, Repository: source.GitHubRepositoryName, TargetRepositoryID: source.TargetRepositoryID.String(), OverseerAgentID: source.OverseerAgentID.String(), Label: source.LabelFilter, Policy: string(source.Policy), TrustedAuthors: source.TrustedGitHubLogins, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}
 }
 
 // Intake is the one authenticated operator path. Remote content and identity
@@ -41,6 +41,15 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 	at, err := daemon.timestamp()
 	if err != nil {
 		return intakeFailure(err)
+	}
+	if input.Action == "review" {
+		return daemon.intakeReview(ctx, input)
+	}
+	if input.Action == "legacy_lineage" {
+		return daemon.legacyIntakeLineage(ctx, input)
+	}
+	if input.Action == "legacy_preview" || input.Action == "legacy_commit" {
+		return daemon.legacyIntake(ctx, input, at)
 	}
 	if input.Action == "list" {
 		var sources []kernel.IntakeSource
@@ -139,7 +148,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 				authors[index] = status.User.Login
 			}
 		}
-		spec := kernel.NewIntakeSource{ID: sourceID, GitHubRepositoryID: remoteID, GitHubRepositoryName: config.Repository, ProjectID: project, TargetRepositoryID: target, OverseerAgentID: agent, LabelFilter: config.Label, Policy: kernel.IntakePolicy(config.Policy), TrustedGitHubLogins: authors, PollSeconds: config.PollSeconds, AdmissionLimit: config.AdmissionLimit}
+		spec := kernel.NewIntakeSource{ID: sourceID, GitHubRepositoryID: remoteID, GitHubRepositoryName: config.Repository, ProjectID: project, TargetRepositoryID: target, OverseerAgentID: agent, LabelFilter: config.Label, Policy: kernel.IntakePolicy(config.Policy), TrustedGitHubLogins: authors, PriorityDefault: config.PriorityDefault, PriorityByLabel: config.PriorityByLabel, PollSeconds: config.PollSeconds, AdmissionLimit: config.AdmissionLimit}
 		var source kernel.IntakeSource
 		if input.Action == "create" {
 			source, err = daemon.store.CreateIntakeSource(ctx, spec, at)
@@ -188,6 +197,16 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		}
 		if !intakeMatches(source, issue) {
 			return api.IntakeResult{State: "ineligible"}
+		}
+		legacy, exists, legacyErr := daemon.store.LegacyIntakeSuppression(ctx, source, snapshot)
+		if legacyErr != nil {
+			return intakeFailure(legacyErr)
+		}
+		if exists && legacyExistingContent(legacy, digest) {
+			if legacy.TaskID == (kernel.TaskID{}) {
+				return api.IntakeResult{State: "legacy_history_unresolved"}
+			}
+			return api.IntakeResult{State: "legacy_existing_work", TaskID: legacy.TaskID.String()}
 		}
 		accepted, acceptErr := daemon.store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, at, source.Revision)
 		if acceptErr != nil {
@@ -248,7 +267,11 @@ func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.
 		if err != nil {
 			return kernel.Task{}, err
 		}
-		task, err := daemon.store.ImportIntakeAcceptance(ctx, accepted.ID, at, source)
+		priority := kernel.IntakePriority(source, issue.Labels)
+		task, err := daemon.store.ImportIntakeAcceptanceWithPriority(ctx, accepted.ID, at, source, priority)
+		if err == nil && task.Status == kernel.TaskQueued && task.Priority != priority {
+			task, err = daemon.store.UpdateTaskForOperator(ctx, task.ID, task.Revision, kernel.TaskPatch{Priority: &priority}, at)
+		}
 		if err == nil {
 			daemon.notifyScheduler()
 		}
@@ -392,6 +415,25 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			candidate.AcceptanceID = accepted.ID.String()
 			candidate.TaskID = accepted.TaskID.String()
 		}
+		if !found {
+			legacy, suppressed, err := daemon.store.LegacyIntakeSuppression(ctx, source, snapshot)
+			if err != nil {
+				return intakeFailure(err)
+			}
+			if suppressed {
+				reason = "legacy_suppressed"
+				if legacy.HasHistory && legacy.HistoricalContentHash == nil {
+					reason = "legacy_history_unresolved"
+				}
+				if legacy.TaskID != (kernel.TaskID{}) {
+					candidate.TaskID = legacy.TaskID.String()
+					if legacyExistingContent(legacy, hash) {
+						reason = "legacy_existing_work"
+					}
+				}
+				candidate.Reason = reason
+			}
+		}
 		if tick && reason == string(kernel.IntakeEligibleTrusted) && len(result.ImportedTasks) < int(source.AdmissionLimit) {
 			at, err := daemon.timestamp()
 			if err != nil {
@@ -409,6 +451,21 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			candidate.TaskID = task.ID.String()
 			candidate.Reason = "imported"
 			result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
+		}
+		if tick && found && reason == string(kernel.IntakeAlreadyAccepted) {
+			_, imported, err := daemon.store.Task(ctx, accepted.TaskID)
+			if err != nil {
+				return intakeFailure(err)
+			}
+			if imported || len(result.ImportedTasks) < int(source.AdmissionLimit) {
+				task, err := daemon.importAcceptedIntake(ctx, accepted)
+				if err == nil && !imported {
+					result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
+					candidate.Reason = "imported"
+				} else if err != nil && !errors.Is(err, kernel.ErrConflict) && !errors.Is(err, kernel.ErrRevisionConflict) {
+					return intakeFailure(err)
+				}
+			}
 		}
 		if tick && found && accepted.WithdrawnAt != nil {
 			if err := daemon.reconcileIntakeWithdrawal(ctx, accepted); err != nil {

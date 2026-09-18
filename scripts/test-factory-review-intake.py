@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
+import fcntl
+import sys
 import json
 import tempfile
 import subprocess
@@ -7,13 +9,15 @@ import shutil
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SPEC = importlib.util.spec_from_file_location('review_intake', Path(__file__).with_name('factory-review-intake.py'))
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)
 SHA = 'a' * 40
+CUSTOMER_BRIDGE = review.bridge_call
+CUSTOMER_OBSERVE = review.observe_review
 
 
 class ReviewIntakeTest(unittest.TestCase):
@@ -23,6 +27,7 @@ class ReviewIntakeTest(unittest.TestCase):
         self.config = {'repository': 'o/r', 'project_id': '1' * 32, 'overseer_agent_id': '3' * 32,
                        'label': 'factory:ready', 'allowed_authors': ['maintainer'], 'factory_home': str(root / 'home'),
                        'journal': str(root / 'intake.json'), 'review_mirror_root': str(root / 'mirrors')}
+        Path(self.config['factory_home']).mkdir(mode=0o700)
         review.intake.atomic_json(Path(self.config['journal']), {'version': 2, 'updated_at': 0, 'config_fingerprint': review.intake.config_fingerprint(self.config),
             'issues': {'o/r#7': {'number': 7, 'managed': True}}})
         self.observe = patch.object(review, 'observe_review', return_value='block').start()
@@ -36,10 +41,181 @@ class ReviewIntakeTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_customer_modes_refuse_before_gh_or_legacy_bridge(self):
+        path = Path(self.config['factory_home']) / 'maintainer.json'
+        for state, record in [('connected', {'id':'a'*64,'credential':'fixture'}),
+                              ('disconnected', {'disabled':True}),
+                              ('expired', {'id':'b'*64,'credential':'expired-fixture'})]:
+            with self.subTest(state=state):
+                path.write_text(json.dumps(record))
+                path.chmod(0o600)
+                with patch.object(review.intake,'command') as command, patch.object(review,'bridge_call') as bridge, patch.object(review,'mirror') as mirror:
+                    with self.assertRaisesRegex(review.ReviewError,'owner-only.*including disconnect'):
+                        review.run_once(self.config)
+                    command.assert_not_called()
+                    bridge.assert_not_called()
+                    mirror.assert_not_called()
+        path.unlink()
+        with patch.object(review,'mirror',return_value=Path('/mirror')), patch.object(review,'list_prs',return_value=[]):
+            self.assertEqual([],review.run_once(self.config))
+
+    def test_customer_companion_reviews_and_enqueues_exact_target_without_legacy_auth(self):
+        (Path(self.config['factory_home'])/'maintainer.json').write_text('{"id":"fixture"}')
+        request = {'source_id':'a'*32,'project_id':self.config['project_id'],
+                   'configuration':{'repository':'o/r','target_repository_id':'b'*32},
+                   'legacy':{'plan_hash':'c'*64,'config_hash':'d'*64,'journal_hash':'e'*64}}
+        controller = Mock()
+        managed = controller, {'request':request}, Path('/installed/factoryctl')
+        operations, calls, enqueued = {}, [], set()
+        pull = {'number':9,'body':'Reviewed publication '+SHA+'\n\nRefs o/r#7','head_sha':SHA,'base_sha':'b'*40,'base_ref':'release+candidate'}
+        def api(_binary, _home, _args, value):
+            if value['action']=='legacy_lineage':
+                return {'state':'legacy_existing_work','task_id':'d'*32}  # Daemon-proven historical work.
+            self.assertEqual('b'*32,value['configuration']['target_repository_id'])
+            item=value['review']; tool=item['tool']; calls.append(tool)
+            if tool=='configuration':
+                return {'state':'ok','review':{'repository':'delivery/target','repository_id':42}}
+            if tool=='list_pull_requests': result={'pull_requests':[pull],'repository_id':42,'next_page':None}
+            elif tool=='observe_operation': result=operations.get(item['operation_id'],{'operation_id':item['operation_id'],'state':'missing'})
+            elif tool=='submit_pull_request_review':
+                self.assertEqual(7,value['issue_number'])
+                result={'url':'https://github.com/delivery/target/pull/9#pullrequestreview-71','head_sha':SHA,'verdict':'allow','review_id':71}
+                operations[item['operation_id']]={'operation_id':item['operation_id'],'state':'completed','kind':tool,'result':result}
+            elif tool=='enqueue_pull_request':
+                self.assertEqual('release+candidate',item['base'])
+                self.assertEqual(7,value['issue_number'])
+                result={'pull_number':9,'head_sha':SHA}
+                operation={'enqueue_operation':item['operation_id'],'pr':9,'head':SHA,'enqueue_base':item['base'],'reviewed_body_digest':item['reviewed_body_digest']}
+                operations[item['operation_id']]={'operation_id':item['operation_id'],'state':'completed','kind':tool,'result':result,'request_digest':review.enqueue_request_digest({'repository':'delivery/target'},operation)}
+            elif tool=='observe_pull_request_merge': result={'pull_number':9,'head_sha':SHA,'base':'release+candidate','state':'MERGED_AFTER_ENQUEUE_ATTEMPT','pull_state':'closed'}
+            else: self.fail('unexpected customer tool '+tool)
+            return {'state':'ok','review':{'repository':'delivery/target','repository_id':42,'response':json.dumps({'jsonrpc':'2.0','id':1,'result':{'structuredContent':result,'isError':False}})}}
+        controller.managed_api.side_effect=api
+        def git(argv, **_kwargs):
+            self.assertEqual('git',argv[0])  # No gh or legacy credential bridge.
+            if 'rev-parse' in argv:
+                return SHA if argv[-1].startswith('refs/pull/') else 'b'*40
+            return ''
+        def launch(config,_path,pr,operation):
+            body=review.review_body_path(config,pr,operation);body.parent.mkdir(parents=True,exist_ok=True);body.write_text(pr['body'])
+            review.bridge_call('submit_pull_request_review',{'repository':config['repository'],'operation_id':operation['review_operation'],'pull_number':9,'head_sha':SHA,'event':'ALLOW','body':'Independent review'})
+            return 0
+        with patch.object(review,'bridge_call',side_effect=CUSTOMER_BRIDGE), patch.object(review,'observe_review',side_effect=CUSTOMER_OBSERVE), patch.object(review,'mirror',return_value=Path('/mirror')) as mirror, patch.object(review.intake,'command',side_effect=git), patch.object(review,'launch_review',side_effect=launch) as launched, patch.object(review.intake,'task_state',side_effect=lambda _c,task:'queued' if task['task_id'] in enqueued else None), patch.object(review.intake,'enqueue',side_effect=lambda _c,task:enqueued.add(task['task_id'])):
+            review.run_once(self.config,managed)
+            review.run_once(self.config,managed)
+            self.assertEqual('delivery/target',mirror.call_args.args[0]['repository'])
+            self.assertEqual(1,launched.call_count)
+        self.assertEqual(1,calls.count('enqueue_pull_request'))
+        self.assertEqual(1,len(enqueued))
+        self.assertEqual('o/r',self.config['repository'])
+        self.assertIsNone(review.CUSTOMER_REVIEW)
+        for state in ('denied','unavailable'):
+            controller.managed_api.return_value={'state':state}; controller.managed_api.side_effect=None
+            with patch.object(review.intake,'command') as command, patch.object(review,'mirror') as mirror:
+                with self.assertRaisesRegex(review.ReviewError,'Customer review access unavailable'):
+                    review.run_once(self.config,managed)
+                command.assert_not_called();mirror.assert_not_called()
+
+    def test_review_child_retains_same_lock_after_parent_scope_exits(self):
+        child = None
+        try:
+            with review.review_ownership(self.config,None):
+                descriptor = review.intake.CONTROLLER_LOCK_FD
+                with patch.object(review.intake.subprocess,'run',return_value=subprocess.CompletedProcess([],0,'ok','')) as run:
+                    self.assertEqual('ok',review.intake.command(['fixture']))
+                    self.assertEqual((descriptor,),run.call_args.kwargs['pass_fds'])
+                child = subprocess.Popen([sys.executable,'-c','import sys; print("ready",flush=True); sys.stdin.read()'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=(descriptor,))
+                self.assertEqual(b'ready\n',child.stdout.readline())
+            self.assertIsNone(review.intake.CONTROLLER_LOCK_FD)
+            with open(self.config['factory_home']+'.autonomy.lock','rb') as competing:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(competing,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                child.communicate(timeout=5)
+                self.assertEqual(0,child.returncode)
+                fcntl.flock(competing,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        finally:
+            if child is not None and child.poll() is None:
+                child.kill()
+                child.communicate()
+
     def test_qualified_source_cannot_borrow_same_number_local_issue(self):
         journal = json.loads(Path(self.config['journal']).read_text())
         self.assertIsNone(review.linked_issue(self.config, {'number': 9, 'body': 'Refs other/backlog#7'}, journal))
         self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': 'Refs O/R#7'}, journal))
+
+    def test_post_cutover_human_issue_uses_imported_lineage_not_frozen_journal(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        before = json.dumps(journal, sort_keys=True)
+        pr = {'number': 19, 'body': 'Refs o/r#8'}
+        controller = Mock()
+        receipt = {'request': {'source_id': 'a'*32, 'project_id': self.config['project_id'],
+                              'configuration': {'repository': 'o/r', 'target_repository_id': 'b'*32}}}
+        managed = controller, receipt, Path('/installed/factoryctl')
+        controller.managed_api.return_value = {'state':'imported','acceptance_id':'c'*32,'task_id':'d'*32}
+        with patch.object(review, 'app_receipt', return_value=True), patch.object(review.intake, 'exact_issue') as exact:
+            self.assertEqual(8, review.linked_issue(self.config, pr, journal, managed=managed))
+            exact.assert_not_called()  # Human source need not carry an App create_issue marker.
+        request = controller.managed_api.call_args.args[3]
+        self.assertEqual('legacy_lineage',request['action'])
+        self.assertEqual(8,request['issue_number'])
+        self.assertEqual('b'*32,request['configuration']['target_repository_id'])
+        self.assertEqual(before,json.dumps(journal,sort_keys=True))
+        for state in ('not_found','withdrawn','denied','unavailable'):
+            controller.managed_api.return_value = {'state':state}
+            with patch.object(review, 'app_receipt', side_effect=[True,False]), patch.object(review.intake, 'exact_issue', return_value={'body':'human instructions'}):
+                with self.assertRaises(review.Unproven):
+                    review.linked_issue(self.config,pr,journal,existing={'source_marker':'FACTORY_SOURCE o/r#8'},managed=managed)
+        with patch.object(review, 'app_receipt', return_value=False), self.assertRaises(review.Unproven):
+            review.linked_issue(self.config,pr,journal,managed=managed)
+
+    def test_managed_followup_rechecks_lineage_and_freezes_operator_destination(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        pr = {'number':19,'body':'Refs o/r#8'}
+        controller = Mock()
+        receipt = {'request': {'source_id':'a'*32,'configuration':{'target_repository_id':'b'*32}}}
+        managed = controller, receipt, Path('/installed/factoryctl')
+        controller.managed_api.return_value = {'state':'imported','acceptance_id':'c'*32,'task_id':'d'*32}
+        followup = review.review_followup(self.config,dict(self.operation,review_operation='e'*32),'block')
+        with patch.object(review,'app_receipt',return_value=True), patch.object(review.intake,'command',return_value=json.dumps({'id':followup['task_id'],'incarnation_id':followup['incarnation_id']})) as command:
+            self.assertTrue(review.enqueue_followup(self.config,followup,pr,journal,managed))
+            self.assertEqual(['--repository','b'*32],command.call_args.args[0][-2:])
+        controller.managed_api.return_value = {'state':'withdrawn'}
+        with patch.object(review,'app_receipt',return_value=True), patch.object(review.intake,'exact_issue') as exact, patch.object(review.intake,'enqueue') as enqueue:
+            self.assertFalse(review.enqueue_followup(self.config,followup,pr,journal,managed))
+            enqueue.assert_not_called()
+            exact.assert_not_called()  # An App-created source cannot bypass withdrawal.
+
+    def test_managed_stale_body_followup_uses_frozen_route_and_rechecks_withdrawal(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        pr = {'number':9, 'headRefOid':SHA, 'body':'Old description\nRefs o/r#7'}
+        controller = Mock()
+        managed = controller, {'request': {'source_id':'a'*32, 'configuration':{'target_repository_id':'b'*32}}}, Path('/installed/factoryctl')
+        for state in ('imported', 'withdrawn'):
+            with self.subTest(state=state):
+                receipt = Path(self.temp.name) / (state + '.reviews.json')
+                controller.managed_api.side_effect = [{'state':'imported','task_id':'d'*32}, {'state':state,'task_id':'d'*32}]
+                with patch.object(review,'list_prs',return_value=[pr]), patch.object(review,'ready',return_value=dict(self.operation)), patch.object(review,'observe_review',return_value='missing'), patch.object(review.intake,'task_state',return_value=None), patch.object(review.intake,'enqueue') as enqueue:
+                    messages = review.run_locked(self.config,Path('/mirror'),journal,receipt,managed)
+                    if state == 'withdrawn':
+                        enqueue.assert_not_called()
+                        self.assertEqual([],messages)
+                    else:
+                        self.assertEqual('b'*32,enqueue.call_args.args[1]['repository_id'])
+                        self.assertEqual(['woke PR #9 stale body'],messages)
+                self.assertEqual(2,controller.managed_api.call_count)
+                controller.reset_mock()
+
+    def test_legacy_journal_alone_cannot_authorize_managed_followup(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        pr = {'number':9,'body':'Refs o/r#7'}
+        controller = Mock()
+        managed = controller, {'request': {'source_id':'a'*32,'configuration':{'target_repository_id':'b'*32}}}, Path('/installed/factoryctl')
+        followup = review.review_followup(self.config,dict(self.operation,review_operation='e'*32),'block')
+        for state in ('not_found','legacy_existing_work','imported'):
+            controller.managed_api.return_value = {'state':state,'task_id':'d'*32}
+            with patch.object(review.intake,'enqueue') as enqueue:
+                self.assertEqual(state != 'not_found',review.enqueue_followup(self.config,followup,pr,journal,managed))
+                self.assertEqual(state != 'not_found',enqueue.called)
 
     def test_discovery_processes_one_bounded_overflow_pr_instead_of_starving_it(self):
         prs = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 11)]

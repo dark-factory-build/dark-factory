@@ -16,21 +16,32 @@ import (
 	"syscall"
 )
 
-const intakeServiceUsage = "factoryctl intake service install|uninstall|status --home ABSOLUTE\n"
+const intakeServiceUsage = "factoryctl intake service install|uninstall|status --home ABSOLUTE\nfactoryctl intake service migrate --home ABSOLUTE --legacy-config ABSOLUTE [--preview | --plan HASH [--acknowledge-policy-narrowing]]\n"
 
 func runIntakeService(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	if getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE") != "" {
 		_, _ = io.WriteString(stderr, "Intake service management requires the local operator.\n")
 		return exitFailure
 	}
-	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall" && args[0] != "status") {
+	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall" && args[0] != "status" && args[0] != "migrate") {
 		_, _ = io.WriteString(stderr, intakeServiceUsage)
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("intake service", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	home := flags.String("home", "", "installed factory home")
+	legacyConfig := flags.String("legacy-config", "", "existing operator-owned intake configuration")
+	preview := flags.Bool("preview", false, "inspect cutover without mutation")
+	acknowledge := flags.Bool("acknowledge-policy-narrowing", false, "accept reviewed App/bot author policy narrowing")
+	plan := flags.String("plan", "", "apply or resume the reviewed cutover plan hash")
 	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || !filepath.IsAbs(*home) || filepath.Clean(*home) != *home || *home == "/" {
+		return exitUsage
+	}
+	if args[0] == "migrate" {
+		if !filepath.IsAbs(*legacyConfig) || (*preview && *plan != "") || (*acknowledge && *plan == "") {
+			return exitUsage
+		}
+	} else if *legacyConfig != "" || *preview || *plan != "" || *acknowledge {
 		return exitUsage
 	}
 	if runtime.GOOS != "darwin" {
@@ -50,7 +61,7 @@ func runIntakeService(ctx context.Context, args []string, getenv func(string) st
 		return exitFailure
 	}
 	script, err := installedIntakeController(executable)
-	if err != nil && args[0] != "install" {
+	if err != nil && args[0] != "install" && args[0] != "migrate" {
 		script, err = recordedIntakeController(canonical)
 	}
 	if err != nil {
@@ -66,7 +77,17 @@ func runIntakeService(ctx context.Context, args []string, getenv func(string) st
 	if err != nil {
 		return exitFailure
 	}
-	command := exec.CommandContext(ctx, python, script, "--managed", "--factory-home", canonical, "--factoryctl", executable, "--service", args[0])
+	arguments := []string{script, "--managed", "--factory-home", canonical, "--factoryctl", executable, "--service", args[0]}
+	if args[0] == "migrate" {
+		arguments = append(arguments, "--legacy-config", *legacyConfig)
+		if *acknowledge {
+			arguments = append(arguments, "--acknowledge-policy-narrowing")
+		}
+		if *plan != "" {
+			arguments = append(arguments, "--plan", *plan)
+		}
+	}
+	command := exec.CommandContext(ctx, python, arguments...)
 	command.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 	command.Stdout, command.Stderr = stdout, stderr
 	if err := command.Run(); err != nil {

@@ -699,5 +699,245 @@ class ManagedIntakeTest(unittest.TestCase):
                 autonomy.managed_launchctl('bootout', target)
 
 
+class LegacyCutoverTest(unittest.TestCase):
+    setUp = ManagedIntakeTest.setUp
+
+    def fixture(self):
+        import shutil
+        import hashlib
+        import plistlib
+        shutil.copyfile(Path(__file__).with_name('factory-intake.py'), self.script.with_name('factory-intake.py'))
+        self.script.with_name('factory-review-intake.py').write_text('# fixture')
+        self.config_path, journal = self.root / 'legacy.json', self.root / 'legacy-journal.json'
+        self.config = {'repository':'fixture/issues','project_id':'1'*32,'overseer_agent_id':'2'*32,'label':'ready','allowed_authors':['owner'],'factory_home':str(self.home),'journal':str(journal),'priority_by_label':{'urgent':5,'later':-2},'review_mirror_root':str(self.root / 'reviews')}
+        autonomy.atomic_json(self.config_path, self.config)
+        legacy = module('factory-intake')
+        autonomy.atomic_json(journal, {'version':2,'config_fingerprint':legacy.config_fingerprint(self.config),'issues':{}})
+        label = 'build.darkfactory.autonomy.' + hashlib.sha256(str(self.config_path).encode()).hexdigest()[:12]
+        self.plists.mkdir()
+        self.legacy_plist = self.plists / (label + '.plist')
+        self.legacy_plist.write_bytes(plistlib.dumps({'Label':label,'ProgramArguments':[sys.executable,str(self.script),str(self.config_path),'--once'],'EnvironmentVariables':{'PATH':'/legacy/bin:/usr/bin:/bin'}}))
+        self.loaded = {label:str(self.legacy_plist)}
+        self.calls, self.sources, self.commits = [], {}, 0
+        self.plan = 'a'*64
+        def launchctl(*args):
+            self.calls.append(args)
+            label = args[1].split('/')[-1] if len(args)>1 else ''
+            if args[0] == 'list':
+                return subprocess.CompletedProcess(args,0,'\n'.join(self.loaded),'')
+            if args[0] == 'print':
+                return subprocess.CompletedProcess(args,0,'path = '+self.loaded[label],'') if label in self.loaded else subprocess.CompletedProcess(args,113,'','')
+            if args[0] == 'bootout':
+                self.loaded.pop(label, None)
+            if args[0] == 'bootstrap':
+                value = plistlib.loads(Path(args[2]).read_bytes())
+                self.loaded[value['Label']] = args[2]
+            return subprocess.CompletedProcess(args,0,'','')
+        def api(_binary,_home,args,value=None):
+            if args[0] == 'legacy_preview':
+                return {'state':'legacy_committed' if self.sources else 'legacy_preview','legacy':{'plan_hash': self.plan, 'target_repository_id':'b'*32, 'publication_repository':'fixture/publication', 'requires_policy_acknowledgement': bool(value['legacy'].get('manual_app_authors'))}}
+            if args[0] == 'legacy_commit':
+                if value['legacy']['plan_hash'] != self.plan:
+                    return {'state':'stale','legacy':{'plan_hash':self.plan, 'target_repository_id':'b'*32}}
+                if not self.sources:
+                    self.commits += 1
+                    self.sources[value['source_id']] = dict(value['configuration'],id=value['source_id'],enabled=False,revision=1)
+                return {'state':'legacy_committed','legacy':{'plan_hash':self.plan, 'target_repository_id':'b'*32}}
+            if args[0] == 'config':
+                return {'state':'ok','sources':list(self.sources.values())}
+            if args[0] == 'enable':
+                self.sources[args[2]].update(enabled=True,revision=2)
+                return {'state':'ok'}
+            if args[0] == 'tick':
+                return {'state':'ok'}
+            raise AssertionError(args)
+        self.api = api
+        self.addCleanup(patch.stopall)
+        patch.object(autonomy,'__file__',str(self.script)).start()
+        self.review_ready = patch.object(autonomy,'legacy_review_ready').start()
+        patch.object(autonomy,'managed_plist_root',return_value=self.plists).start()
+        patch.object(autonomy,'managed_launchctl',side_effect=launchctl).start()
+        patch.object(autonomy,'managed_api',side_effect=api).start()
+
+    def test_review_readiness_is_checked_before_stopping_legacy(self):
+        self.fixture()
+        self.review_ready.side_effect=ValueError('review mirror unavailable')
+        with self.assertRaisesRegex(ValueError,'review mirror unavailable'):
+            autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
+        self.assertFalse(any(call[0]=='bootout' for call in self.calls))
+        self.assertEqual(0,self.commits)
+        self.review_ready.assert_called_once_with(self.config,'fixture/publication')
+
+    def test_release_companion_refuses_cutover_before_schedule_or_baseline_changes(self):
+        self.fixture()
+        self.config['release_configs'] = [str(self.root / 'release.json')]
+        autonomy.atomic_json(self.root / 'release.json', {'journal': str(self.root / 'release-journal.json')})
+        autonomy.atomic_json(self.config_path, self.config)
+        legacy = module('factory-intake')
+        autonomy.atomic_json(Path(self.config['journal']), {'version': 2, 'config_fingerprint': legacy.config_fingerprint(self.config), 'issues': {}})
+        original = self.legacy_plist.read_bytes()
+        for plan in (None, self.plan):
+            with self.assertRaisesRegex(ValueError, 'customer-scoped release path'):
+                autonomy.managed_migrate(self.home, self.factoryctl, self.config_path, plan)
+        self.assertEqual(original, self.legacy_plist.read_bytes())
+        self.assertFalse(any(call[0] == 'bootout' for call in self.calls))
+        self.assertEqual(0, self.commits)
+
+    def test_processed_history_hash_is_proven_only_by_the_retained_matching_snapshot(self):
+        self.fixture()
+        legacy = module('factory-intake')
+        desired = {'number':1,'title':'Original','body':'Bytes','author':'owner','labels':['ready'],'state':'OPEN','updated_at':'before','url':'https://github.com/fixture/issues/issues/1'}
+        fingerprint = legacy.fingerprint(desired)
+        record = {'number':1,'managed':True,'processed_fingerprint':fingerprint,'desired':desired,'desired_fingerprint':fingerprint}
+        journal = {'version':2,'config_fingerprint':legacy.config_fingerprint(self.config),'issues':{'fixture/issues#1':record}}
+        autonomy.atomic_json(Path(self.config['journal']),journal)
+        request,_,_,_=autonomy.legacy_migration_input(self.home,self.config_path)
+        self.assertIn('historical_content_hash',request['legacy']['history'][0])
+        task=request['legacy']['history'][0]['task_id']
+        desired['updated_at']='after'
+        record['desired_fingerprint']=legacy.fingerprint(desired)
+        autonomy.atomic_json(Path(self.config['journal']),journal)
+        request,_,_,_=autonomy.legacy_migration_input(self.home,self.config_path)
+        self.assertEqual(task,request['legacy']['history'][0]['task_id'])
+        self.assertNotIn('historical_content_hash',request['legacy']['history'][0])
+        journal['issues'].update({str(i):{} for i in range(201)})
+        autonomy.atomic_json(Path(self.config['journal']),journal)
+        with self.assertRaisesRegex(ValueError,'at most 200'):
+            autonomy.legacy_migration_input(self.home,self.config_path)
+
+    def test_preview_preserves_priority_and_makes_no_state_or_schedule_changes(self):
+        self.fixture()
+        before = self.legacy_plist.read_bytes()
+        result = autonomy.managed_migrate(self.home,self.factoryctl,self.config_path)
+        self.assertEqual('legacy_preview',result['state'])
+        self.assertEqual(self.config['priority_by_label'],result['configuration']['priority_by_label'])
+        self.assertEqual(['owner'],result['configuration']['trusted_authors'])
+        self.assertEqual('b'*32,result['configuration']['target_repository_id'])
+        self.assertFalse(Path(str(self.home)+'.intake').exists())
+        self.assertEqual(before,self.legacy_plist.read_bytes())
+        self.assertTrue(all(call[0] in ('print','list') for call in self.calls))
+
+    def test_app_authors_require_reviewed_narrowing_before_any_stop_and_resume_keeps_ack(self):
+        self.fixture()
+        self.config['allowed_authors'] = ['owner', 'app/factory', 'automation[bot]']
+        autonomy.atomic_json(self.config_path,self.config)
+        legacy = module('factory-intake')
+        journal_path = Path(self.config['journal'])
+        autonomy.atomic_json(journal_path, {'version':2,'config_fingerprint':legacy.config_fingerprint(self.config),'issues':{}})
+        before = journal_path.read_bytes()
+        preview = autonomy.managed_migrate(self.home,self.factoryctl,self.config_path)
+        self.assertTrue(preview['legacy']['requires_policy_acknowledgement'])
+        self.assertEqual(['owner'], preview['configuration']['trusted_authors'])
+        with self.assertRaisesRegex(ValueError, 'acknowledge-policy-narrowing'):
+            autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
+        self.assertTrue(self.legacy_plist.exists())
+        self.assertFalse(any(call[0] == 'bootout' for call in self.calls))
+        write = autonomy.atomic_json
+        def crash(path,value):
+            write(path,value)
+            if Path(path).name == 'migration.json' and value['phase'] == 'prepared':
+                raise RuntimeError('phase crash')
+        with patch.object(autonomy,'atomic_json',side_effect=crash):
+            with self.assertRaisesRegex(RuntimeError,'phase crash'):
+                autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan,True)
+        receipt = autonomy.managed_read(Path(str(self.home)+'.intake/migration.json'),maximum=4<<20)
+        self.assertTrue(receipt['request']['legacy']['acknowledge_policy_narrowing'])
+        self.assertEqual(['app/factory','automation[bot]'],receipt['request']['legacy']['manual_app_authors'])
+        self.assertEqual('b'*32,receipt['request']['configuration']['target_repository_id'])
+        result = autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
+        self.assertEqual('migrated',result['state'])
+        self.assertEqual(before,journal_path.read_bytes())
+        self.assertEqual(1,self.commits)
+
+    def test_app_only_legacy_policy_becomes_manual(self):
+        self.fixture()
+        self.config['allowed_authors'] = ['app/factory']
+        autonomy.atomic_json(self.config_path,self.config)
+        legacy = module('factory-intake')
+        autonomy.atomic_json(Path(self.config['journal']), {'version':2,'config_fingerprint':legacy.config_fingerprint(self.config),'issues':{}})
+        request,_,_,_ = autonomy.legacy_migration_input(self.home,self.config_path)
+        self.assertEqual('manual',request['configuration']['policy'])
+        self.assertEqual([],request['configuration']['trusted_authors'])
+
+    def test_every_durable_phase_resumes_once_and_preserves_history_and_companion(self):
+        for phase in ('prepared','old_stopped','baseline_committed','managed_started','completed'):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.fixture()
+                before = Path(self.config['journal']).read_bytes()
+                write = autonomy.atomic_json
+                failed = False
+                def crash(path,value):
+                    nonlocal failed
+                    write(path,value)
+                    if path.name == 'migration.json' and value.get('phase') == phase and not failed:
+                        failed = True
+                        raise RuntimeError('simulated crash')
+                with patch.object(autonomy,'atomic_json',side_effect=crash):
+                    with self.assertRaisesRegex(RuntimeError,'simulated crash'):
+                        autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
+                receipt = autonomy.managed_read(Path(str(self.home)+'.intake/migration.json'),maximum=4<<20)
+                self.assertEqual(phase,receipt['phase'])
+                self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
+                self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
+                self.assertEqual(1,self.commits)
+                self.assertEqual(1,len(self.loaded))
+                self.assertTrue(next(iter(self.loaded)).startswith('com.dark-factory.intake.'))
+                self.assertEqual(1,sum(call[0]=='bootout' for call in self.calls))
+                self.assertEqual(before,Path(self.config['journal']).read_bytes())
+                self.assertEqual(before.decode(),receipt['journal'])
+                with patch.object(autonomy,'tick',return_value=[{'ok':True}]) as companion:
+                    autonomy.managed_tick(self.home,self.factoryctl)
+                    self.assertTrue(companion.call_args.kwargs['skip_intake'])
+                    self.assertEqual('/legacy/bin:/usr/bin:/bin',companion.call_args.kwargs['environment']['PATH'])
+                    self.assertEqual(self.config,companion.call_args.args[1])
+                    self.assertEqual(['--managed-migration',str(Path(str(self.home)+'.intake/migration.json')),'--factoryctl',str(self.factoryctl)],companion.call_args.kwargs['review_arguments'])
+                patch.stopall()
+
+    def test_lost_commit_response_never_restarts_legacy_or_duplicates_baseline(self):
+        self.fixture()
+        lost = False
+        def api(binary,home,args,value=None):
+            nonlocal lost
+            reply = self.api(binary,home,args,value)
+            if args[0] == 'legacy_commit' and not lost:
+                lost = True
+                return {'state':'unavailable'}
+            return reply
+        with patch.object(autonomy,'managed_api',side_effect=api):
+            result = autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
+            self.assertEqual('old_stopped',result['cutover_phase'])
+            self.assertEqual({},self.loaded)
+            self.assertFalse(next(iter(self.sources.values()))['enabled'])
+            self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
+        self.assertEqual(1,self.commits)
+
+    def test_stale_remote_plan_requires_review_and_can_resume_while_legacy_stays_stopped(self):
+        self.fixture()
+        def api(binary,home,args,value=None):
+            if args[0] == 'legacy_commit':
+                self.plan='b'*64
+            return self.api(binary,home,args,value)
+        with patch.object(autonomy,'managed_api',side_effect=api):
+            self.assertEqual('stale',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,'a'*64)['state'])
+        self.assertEqual({},self.loaded)
+        preview=autonomy.managed_migrate(self.home,self.factoryctl,self.config_path)
+        self.assertEqual('b'*64,preview['legacy']['plan_hash'])
+        self.assertEqual('migrated',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,'b'*64)['state'])
+        self.assertEqual(1,self.commits)
+
+    def test_unsettled_legacy_plan_and_second_same_home_job_refuse_before_stop(self):
+        self.fixture()
+        with patch.object(autonomy,'managed_api',return_value={'state':'legacy_blocked'}):
+            self.assertEqual('legacy_blocked',autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)['state'])
+        self.assertTrue(self.legacy_plist.exists())
+        self.assertFalse(any(call[0]=='bootout' for call in self.calls))
+        import shutil
+        shutil.copyfile(self.legacy_plist,self.plists/'second.plist')
+        with self.assertRaisesRegex(ValueError,'legacy intake already'):
+            autonomy.managed_migrate(self.home,self.factoryctl,self.config_path,self.plan)
+        self.assertFalse(any(call[0]=='bootout' for call in self.calls))
+
+
 if __name__ == '__main__':
     unittest.main()
