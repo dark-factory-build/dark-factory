@@ -609,11 +609,7 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
     <h3>Floor appearance</h3>
     <p>Saved in this browser. Does not change how the factory runs.</p>
     <label>Scenery<select value={appearance.scenery} onChange={(event) => onChange({ ...appearance, scenery: event.currentTarget.value as FloorAppearance["scenery"] })}><option value="off">Off</option><option value="subtle">Subtle</option><option value="rich">Rich</option></select></label>
-    <label>Dependency links<select value={appearance.dependencyLinks} onChange={(event) => onChange({ ...appearance, dependencyLinks: event.currentTarget.value as FloorAppearance["dependencyLinks"] })}><option value="selected-room">Selected room</option><option value="overview">Overview</option><option value="off">Off</option></select></label>
-    <label>Labels<select value={appearance.labels} onChange={(event) => onChange({ ...appearance, labels: event.currentTarget.value as FloorAppearance["labels"] })}><option value="names">Names</option><option value="names-and-counts">Names and counts</option></select></label>
-    <label>Task props<select value={appearance.taskProps ? "on" : "off"} onChange={(event) => onChange({ ...appearance, taskProps: event.currentTarget.value === "on" })}><option value="on">On</option><option value="off">Off</option></select></label>
     <label>Animation<select value={appearance.animation} onChange={(event) => onChange({ ...appearance, animation: event.currentTarget.value as FloorAppearance["animation"] })}><option value="follow-device">Follow device</option><option value="off">Off</option></select></label>
-    <label>Ambient life<select value={appearance.ambientLife} onChange={(event) => onChange({ ...appearance, ambientLife: event.currentTarget.value as FloorAppearance["ambientLife"] })}><option value="off">Off</option><option value="quiet">Quiet</option><option value="lively">Lively</option></select></label>
     <button type="button" onClick={onReset}>Reset floor appearance</button>
   </section>;
 }

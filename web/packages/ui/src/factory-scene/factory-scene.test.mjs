@@ -170,17 +170,16 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     project: { id: `p-${index % 2}`, name: `Project ${index % 2}` },
   })) });
   assert.equal(corridorReachability(multi), true, "multi-project rooms remain reachable from the spine");
-  const independent = layoutScene({ digest: "independent", nodes: [
-    { id: "left", parentId: "", path: ".", label: "Left", kind: "repository", sizeBucket: "large", project: { id: "left-project", name: "Left" } },
-    { id: "right", parentId: "", path: ".", label: "Right", kind: "repository", sizeBucket: "large", project: { id: "right-project", name: "Right" } },
-  ] });
-  assert.equal(independent.width, PADDING + 32 + 240 + PADDING, "independent one-room projects share one visual column");
 
   const buckets = ["empty", "tiny", "small", "medium", "large"];
   const sized = layoutScene({ digest: "sizes", nodes: buckets.map((sizeBucket) => ({ id: sizeBucket, path: sizeBucket, label: sizeBucket, kind: "directory", sizeBucket })) });
   const areas = buckets.map((bucket) => { const room = sized.rooms.find((room) => room.id === bucket); return room.width * room.height; });
   assert.equal(areas[0], areas[1], "empty and tiny rooms stay compact");
-  assert.ok(areas[1] < areas[2] && areas[2] < areas[3] && areas[3] < areas[4]);
+  assert.equal(new Set(areas).size, 1, "file volume does not create gaps between workshops");
+  for (const room of sized.rooms) {
+    const next = sized.rooms.find((other) => other.y === room.y && other.x > room.x);
+    if (next) assert.equal(room.x + room.width, next.x, "neighbouring rooms share walls");
+  }
   assert.ok(areas[4] <= areas[0] * 3, "one large component cannot dominate the map");
   assert.equal(corridorReachability(sized), true, "mixed footprints share reachable doorway edges");
 
@@ -199,18 +198,14 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.match(first, /data-topology-digest="fixture-1"/);
   assert.equal(first.includes(">STAGED</text>"), false);
   assert.match(first, /data-room-id="src"/);
-  // The subtitle identifies the inventory scope; absent structure stays explicit.
-  assert.match(first, />PACKAGE · SUBTREE</);
-  assert.match(renderToStaticMarkup(createElement(FactoryScene, {
-    topology: { digest: "d", nodes: [{ id: "p", parentId: "", path: "Project", label: "Project", kind: "repository" }] },
-    workers: []
-  })), />STRUCTURE UNAVAILABLE<\/text>/);
+  assert.match(first, /package · subtree/);
+  assert.doesNotMatch(first, /dfRoomDetails|Inspect room|PACKAGE · SUBTREE/);
   const compact = renderToStaticMarkup(createElement(FactoryScene, {
     topology: { digest: "compact", nodes: [{ id: "p", path: ".", label: "Project", kind: "repository", sizeBucket: "large" }] },
     workers: [], omittedLocations: 1,
   }));
   const compactWidth = Number(compact.match(/viewBox="0 0 (\d+)/)[1]);
-  assert.ok(Number(compact.match(/max-width:([\d.]+)px/)[1]) <= compactWidth * 2, "a one-room scope caps sprite magnification");
+  assert.ok(Number(compact.match(/max-width:(\d+)px/)[1]) <= compactWidth * 2, "a one-room scope caps sprite magnification");
   assert.match(compact, /current locations not shown in this view/);
   assert.equal(compact.includes("omitted by the room cap"), false);
   assert.match(first, /&lt;Shared &amp; Library/);
@@ -225,23 +220,23 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     const rendered = first.slice(first.indexOf(`data-worker-id="${worker.id}"`));
     const frame = rendered.slice(0, rendered.indexOf("</g>")).match(/href="#df-frame-([^"]+)"/g)
       .map((match) => match.slice('href="#df-frame-'.length, -1));
-    assert.deepEqual(frame, workerFrames(worker));
+    assert.deepEqual(frame, workerFrames(worker).filter((name) => worker.location === "working" || !name.startsWith("person.tool.")));
     for (const name of frame) assert.ok(name in spriteAtlas.frames, name);
   }
   assert.equal(first.includes("dfFactoryScene__alternate"), false);
   assert.match(first, /data-corridor/);
   assert.equal(first.includes("<animate"), false);
   const unobserved = render({ workers: [{ ...workers[0], location: "unobserved", nodeId: undefined }] });
-  assert.match(unobserved, /STAGING · 1/);
+  assert.match(unobserved, /aria-label="Planning"/);
   assert.match(unobserved, /working; location not yet observed/);
   assert.doesNotMatch(unobserved, /data-worker-task-id/);
-  assert.match(first, /RESTING AREA · 1/);
+  assert.match(first, /aria-label="Break room"/);
   const restingY = Number(first.match(/data-worker-id="worker-a"[^>]*transform="translate\([^ ]+ ([0-9.]+)\)"/)[1]);
   const roomYs = [...first.matchAll(/data-room-id="[^"]+"[^>]*>[\s\S]*?<rect x="[^"]+" y="([0-9.]+)"/g)].map((match) => Number(match[1]));
-  const roomBottoms = [...first.matchAll(/data-room-id="[^"]+"[^>]*>\s*<title>[\s\S]*?<rect x="[^"]+" y="([0-9.]+)" width="[^"]+" height="([0-9.]+)"/g)].map((match) => Number(match[1]) + Number(match[2]));
+  const roomBottoms = [...first.matchAll(/data-room-id="[^"]+"[^>]*>\s*<rect x="[^"]+" y="([0-9.]+)" width="[^"]+" height="([0-9.]+)"/g)].map((match) => Number(match[1]) + Number(match[2]));
   assert.ok(restingY >= Math.max(...roomBottoms) + 24, "resting area stays below every room with clearance");
   const capped = render({ workers: [{ ...workers[0], location: "working", locationLabel: "Source", nodeId: undefined }], omittedLocations: 1 });
-  assert.match(capped, /OUTSIDE DISPLAYED ROOMS · 1/);
+  assert.match(capped, /aria-label="Planning"/);
   assert.match(capped, /representative location near observed changes in Source; outside displayed rooms/);
   const observed = render({ workers: [{ ...workers[1], location: "last-observed", locationLabel: "Source" }] });
   assert.match(observed, /last observed near changes in Source/);
@@ -274,7 +269,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     assert.ok(placement.y - 8 >= srcRoom.y + 40, "room workers stay below the title and kind");
   }
   const denseSvg = render({ workers: denseWorkers });
-  assert.match(denseSvg, /WORKER AREA AT CAPACITY · 99/);
+  assert.match(denseSvg, /aria-label="Planning"/);
   const denseHeight = Number(denseSvg.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
   assert.ok(denseHeight > Math.max(...densePlacements.map(({ y }) => y + 8)));
 
@@ -308,8 +303,8 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.match(emptySvg, /EMPTY FLOOR/);
   // An empty floor in a wide column stays a panel, not a poster.
   assert.match(emptySvg, new RegExp(`min-width:${emptyLayout.width}px`));
-  assert.match(emptySvg, /aria-label="RESTING AREA · 20"/);
-  const emptyArea = emptySvg.match(/aria-label="RESTING AREA · 20"><rect x="[^"]+" y="([0-9.]+)" width="[^"]+" height="([0-9.]+)"/);
+  assert.match(emptySvg, /aria-label="Break room"/);
+  const emptyArea = emptySvg.match(/aria-label="Break room"><rect x="[^"]+" y="([0-9.]+)" width="[^"]+" height="([0-9.]+)"/);
   const emptyLabel = emptySvg.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
   const emptyHeight = Number(emptySvg.match(/viewBox="0 0 [^ ]+ ([0-9.]+)"/)[1]);
   assert.ok(emptyArea !== null && emptyLabel !== null);
@@ -319,7 +314,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     topology: { digest: "empty", nodes: [] },
     workers: [...emptyWorkers, { ...workers[0], location: "unobserved", nodeId: undefined }],
   });
-  const stagingArea = emptyWithStaging.match(/aria-label="STAGING · 1"><rect x="[^"]+" y="([0-9.]+)"/);
+  const stagingArea = emptyWithStaging.match(/aria-label="Planning"><rect x="[^"]+" y="([0-9.]+)"/);
   const stagingLabel = emptyWithStaging.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
   assert.ok(stagingArea !== null && stagingLabel !== null);
   assert.ok(Number(stagingLabel[1]) + PADDING <= Number(stagingArea[1]), "empty-floor label clears the staging area");
@@ -400,7 +395,7 @@ test("every generated person layer is reachable, including fallbacks", () => {
     for (const provider of ["claude_code", "codex", "shell"]) {
       for (const activity of ["busy", "waiting", "needs-you", "idle"]) {
         const base = { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 };
-        const add = (appearance) => { for (const frame of workerFrames({ id: "agent", name: "Agent", role, provider, activity, appearance })) reached.add(frame); };
+        const add = (appearance) => { for (const motion of [undefined, { action: "interacting", frame: 1 }]) for (const frame of workerFrames({ id: "agent", name: "Agent", role, provider, activity, appearance }, motion)) reached.add(frame); };
         for (const field of ["skin", "face", "shoes", "tool", "headwear"]) for (let index = 0; index < spriteOptions[field].length; index++) add({ ...base, [field]: index });
         for (let hair = 0; hair < spriteOptions.hair.length; hair++) for (let hair_colour = 0; hair_colour < spriteOptions.hair_colour.length; hair_colour++) add({ ...base, hair, hair_colour });
         for (let outfit = 0; outfit < spriteOptions.outfit.length; outfit++) for (let clothes_colour = 0; clothes_colour < spriteOptions.clothes_colour.length; clothes_colour++) add({ ...base, outfit, clothes_colour });
@@ -414,8 +409,6 @@ test("every generated person layer is reachable, including fallbacks", () => {
     for (const name of workerFrames(fallback, { action: "walking", direction, frame })) reached.add(name);
   }
   for (const frame of [0, 1]) for (const name of workerFrames(fallback, { action: "interacting", frame })) reached.add(name);
-  reached.add("person.ambient.seated");
-  for (let skin = 0; skin < spriteOptions.skin.length; skin++) for (const facing of ["left", "right"]) reached.add(`person.ambient.face.${skin}.${facing}`);
   const personFrames = Object.keys(spriteAtlas.frames).filter((name) => name.startsWith("person."));
   assert.deepEqual([...reached].sort(), personFrames.sort());
 });
@@ -473,7 +466,11 @@ test("movement uses clear corridor lanes, doors and standing points", () => {
     assert.deepEqual(pointOnRoute(destination, returned, returned.length), { x: common.x, y: common.y });
     assertRouteGeometry(layout, destination, returned, `${common.area} return`);
   }
-  assert.equal(routeBetween(layout, source, { ...destination, area: "outside" }), undefined, "omitted rooms never gain an invented route");
+  const planner = placeWorkers(layout, [{ ...workers[0], nodeId: "omitted" }])[0];
+  const planningRoute = routeBetween(layout, source, planner);
+  assert.ok(planningRoute, "work outside displayed rooms goes to the planning table");
+  assertRouteGeometry(layout, source, planningRoute, "planning table");
+  assert.deepEqual(pointOnRoute(source, planningRoute, planningRoute.length), { x: planner.x, y: planner.y });
 });
 
 test("rapid retargeting uses the room containing the rendered worker", () => {
@@ -657,10 +654,12 @@ test("stationary tasks expose affected areas and link the existing queue and que
   assert.match(markup, /role="button" tabindex="0"/);
   assert.match(markup, /&lt;script&gt;unsafe &amp; title&lt;\/script&gt;/);
   assert.doesNotMatch(markup, /<script>/);
+  assert.doesNotMatch(markup, /stroke-dasharray|CHANGES WITHIN|CHANGED|>task-0</);
+  assert.equal((markup.match(/data-room-operating="true"/g) ?? []).length, 2);
+  assert.doesNotMatch(render({ tasks, connected: false }), /data-room-operating="true"/);
+  assert.doesNotMatch(render({ tasks: tasks.map((task) => ({ ...task, status: "succeeded" })) }), /data-room-operating="true"/);
   const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
   assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
-  const propsOff = render({ tasks, appearance: { scenery: "off", dependencyLinks: "off", labels: "names", taskProps: false, animation: "off", ambientLife: "off" } });
-  assert.doesNotMatch(propsOff, /data-floor-queue=|data-work-footprint=|data-workbench-task-id=/);
 });
 
 
@@ -697,65 +696,40 @@ test("pictured contents and occupied surface slots leave door routes clear in ev
   }
 });
 
-test("pictured child bays use a side approach around shared work surfaces in every footprint", () => {
-  const clearOfContents = (from, route, room) => {
-    let previous = from;
-    for (const point of route.points) {
-      const left = Math.min(previous.x, point.x), right = Math.max(previous.x, point.x);
-      const top = Math.min(previous.y, point.y), bottom = Math.max(previous.y, point.y);
-      for (const item of room.contents) {
-        assert.ok(left >= item.x + item.width + 8 || right <= item.x - 8 || top >= item.y + item.height + 8 || bottom <= item.y - 8,
-          `${room.id}: route crosses ${item.key}`);
-      }
-      previous = point;
+test("compact tooltips open on hover, focus and tap and dismiss without a detail panel", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const priorWindow = globalThis.window;
+  const priorDocument = globalThis.document;
+  globalThis.window = { innerWidth: 390, innerHeight: 844 };
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology: inventoryTopology, workers: [] })); });
+    const map = renderer.root.findByProps({ className: "dfFactoryFloor__map" });
+    const target = renderer.root.findAll((node) => node.props["data-tooltip"])[0];
+    const event = { target: { closest: (selector) => selector === '[role="tooltip"]' ? null : ({ querySelector: () => null, getBoundingClientRect: () => ({ left: 380, bottom: 830 }), getAttribute: () => target.props["data-tooltip"] }) } };
+    for (const handler of ["onPointerOver", "onFocus", "onClick"]) {
+      await act(async () => map.props[handler](event));
+      const tip = renderer.root.findByProps({ role: "tooltip" });
+      assert.match(tip.props.children, /200 source/);
+      assert.ok(tip.props.style.left <= 118 && tip.props.style.top <= 732);
+      await act(async () => map.props.onKeyDown({ key: "Escape" }));
+      assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 0);
     }
-  };
-  for (const sizeBucket of ["empty", "tiny", "small", "medium", "large"]) {
-    const child = { id: `child-${sizeBucket}`, label: "Pictured child" };
-    const node = { ...inventoryTopology.nodes[0], sizeBucket, components: [child] };
-    const layout = layoutScene({ digest: `child-${sizeBucket}`, nodes: [node] });
-    const room = layout.rooms[0];
-    const worker = placeWorkers(layout, [{ ...workers[0], observedBayId: child.id, nodeId: node.id }])[0];
-    assert.equal(worker.bayId, child.id);
-    const start = { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop };
-    const route = routeFromSpine(layout, start, worker);
-    assert.ok(route);
-    clearOfContents(start, route, room);
-    assertRouteGeometry(layout, start, route, `${sizeBucket} child bay`);
-    const returnRoute = routeBetween(layout, worker, { ...worker, area: "resting", roomId: undefined, x: start.x, y: start.y });
-    assert.ok(returnRoute);
-    clearOfContents(worker, returnRoute, room);
-    assertRouteGeometry(layout, worker, returnRoute, `${sizeBucket} child bay exit`);
-    const surface = room.contents.find((item) => item.workSurface);
-    const bench = { ...worker, bayId: undefined, x: surface.x + surface.width / 2, y: surface.y + surface.height + 8 };
-    const reassigned = routeBetween(layout, worker, bench);
-    assert.ok(reassigned);
-    clearOfContents(worker, reassigned, room);
+    await act(async () => map.props.onFocus(event));
+    await act(async () => map.props.onScroll());
+    assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 0);
+    globalThis.document = { activeElement: { ...event.target.closest("[data-tooltip]"), matches: () => true } };
+    await act(async () => map.props.onFocus(event));
+    await act(async () => map.props.onScroll());
+    assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 1, "keyboard autoscroll retains the focused tooltip");
+    assert.equal(renderer.root.findAllByType("select").length, 0);
+    assert.equal(renderer.root.findAllByType("table").length, 0);
+  } finally {
+    await act(async () => renderer?.unmount());
+    globalThis.window = priorWindow;
+    globalThis.document = priorDocument;
   }
 });
-
-test("room inspection distinguishes bounded static evidence, hidden endpoints and unavailable support", async () => {
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const links = Array.from({ length: 10 }, (_, index) => ({ nodeId: `hidden-${index}`, label: `Hidden ${index}`, path: `area-${index}`, direction: "to", weight: 1 }));
-  const evidenced = { ...topology, nodes: topology.nodes.map((node, index) => index === 0 ? { ...node, dependencies: { omitted: 3, links } } : node) };
-  const entered = [];
-  let renderer;
-  await act(async () => { renderer = create(createElement(FactoryScene, { topology: evidenced, workers: [], onEnterRoom: (id) => entered.push(id) })); });
-  const select = () => renderer.root.findByProps({ "aria-label": "Inspect room" });
-  await act(async () => { select().props.onChange({ target: { value: "repo" } }); });
-  const details = () => renderer.root.findByProps({ "aria-label": "Room details" });
-  assert.equal(details().findByType("details").props.open, true);
-  assert.equal(details().findByType("summary").props.children, "Room info");
-  assert.ok(details().findAllByType("p").some((p) => typeof p.props.children === "string" && p.props.children.startsWith("Dashed lines: sampled static")));
-  const buttons = details().findAllByType("button");
-  assert.equal(buttons.length, 8, "the selected neighbourhood remains bounded");
-  await act(async () => { buttons[0].props.onClick(); });
-  assert.deepEqual(entered, ["hidden-0"], "hidden endpoint navigation uses its served identity");
-  await act(async () => { select().props.onChange({ target: { value: "lib" } }); });
-  assert.ok(details().findAllByType("p").some((p) => p.props.children === "Dependencies unavailable."));
-  await act(async () => { renderer.unmount(); });
-});
-
 
 test("inventory equipment is bounded, counted once and clears standing lanes in every room size", () => {
   const counts = { source: 200, tests: 140, documentation: 36, configuration: 6, assets: 98, unclassified: 4 };
@@ -784,22 +758,6 @@ test("inventory equipment is bounded, counted once and clears standing lanes in 
     assert.deepEqual(layoutScene({ digest: "plain", nodes: [plain] }).rooms[0].contents, [], "unavailable does not invent equipment");
     assert.deepEqual(layoutScene({ digest: "zero", nodes: [{ ...plain, inventory: { ...node.inventory, total: Object.fromEntries(Object.keys(counts).map((key) => [key, 0])) } }] }).rooms[0].contents, [], "explicit zero inventory stays empty");
   }
-});
-
-test("inventory inspection discloses actual omitted categories and plans", async () => {
-  const counts = { source: 2, tests: 0, documentation: 0, configuration: 0, assets: 0, unclassified: 4 };
-  const node = { ...topology.nodes[0], sizeBucket: "tiny", inventory: { direct: counts, total: counts, samples: ["main.go"], samples_omitted: 5 }, components: [{ id: "a", label: "A" }, { id: "b", label: "B" }] };
-  let renderer;
-  await act(async () => { renderer = create(createElement(FactoryScene, { topology: { digest: "inventory", nodes: [node] }, workers: [] })); });
-  await act(async () => { renderer.root.findByProps({ "aria-label": "Inspect room" }).props.onChange({ target: { value: node.id } }); });
-  const text = JSON.stringify(renderer.toJSON());
-  assert.match(text, /scanned files in other categories/);
-  assert.match(text, /subcomponents without pictured plans/);
-  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 1 && p.props.children[1].includes("subcomponents")));
-  const shown = layoutScene({ digest: "inventory", nodes: [node] }).rooms[0].contents.filter((item) => item.kind !== "component").reduce((sum, item) => sum + item.count, 0);
-  assert.ok(renderer.root.findAllByType("p").some((p) => p.props.children[0] === 6 - shown && p.props.children[1].includes("scanned files")));
-  assert.match(text, /5 direct filenames omitted/);
-  await act(async () => renderer.unmount());
 });
 
 test("stationary active workers animate while idle, reduced, hidden and disconnected clocks stop", async () => {
@@ -860,41 +818,4 @@ test("direct rooms picture only direct counts while subtree rooms retain descend
   const displayed = (inventoryScope) => layoutScene({ digest: "scope", nodes: [{ ...node, inventoryScope }] }).rooms[0].contents;
   assert.deepEqual(displayed("direct").map(({ kind, count }) => ({ kind, count })), [{ kind: "source", count: 1 }]);
   assert.equal(displayed("subtree").find((item) => item.kind === "source").count, fileCounts.source);
-});
-
-test("named direct-child bays are bounded and only exact observations occupy them", () => {
-  const node = { ...inventoryTopology.nodes[0], components: Array.from({ length: 8 }, (_, index) => ({ id: `child-${index}`, label: `Child ${index}` })) };
-  const room = layoutScene({ digest: "bays", nodes: [node] }).rooms[0];
-  const bays = room.contents.filter((item) => item.kind === "component");
-  assert.equal(room.arrangement, "hall");
-  assert.ok(bays.length > 0 && bays.length <= 6);
-  assert.deepEqual(bays.map((item) => item.targetId), ["child-0", "child-1", "child-2"]);
-  const exact = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [{ ...workers[0], nodeId: node.id, observedBayId: "child-1" }])[0];
-  const representative = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [{ ...workers[0], nodeId: node.id, observedBayId: "not-pictured" }])[0];
-  assert.equal(exact.bayId, "child-1");
-  assert.equal(representative.bayId, undefined);
-  assert.notDeepEqual({ x: exact.x, y: exact.y }, { x: representative.x, y: representative.y });
-  const occupied = placeWorkers(layoutScene({ digest: "bays", nodes: [node] }), [
-    { ...workers[0], id: "a", nodeId: node.id, observedBayId: "child-0" },
-    { ...workers[0], id: "b", nodeId: node.id, observedBayId: "child-1" },
-    { ...workers[0], id: "c", nodeId: node.id, observedBayId: "child-0" },
-    { ...workers[0], id: "d", nodeId: node.id, observedBayId: "not-pictured" },
-  ]);
-  assert.deepEqual(occupied.map(({ id, area, bayId }) => [id, area, bayId]), [
-    ["a", "room", "child-0"], ["b", "room", "child-1"], ["c", "overflow", undefined], ["d", "room", undefined],
-  ]);
-  assert.notDeepEqual([occupied[0].x, occupied[0].y], [occupied[1].x, occupied[1].y], "distinct child bays have distinct standing points");
-  assert.equal(layoutScene({ digest: "parent", nodes: [{ ...node, id: "parent", parentId: "root" }] }).rooms[0].arrangement, "parent");
-  assert.equal(layoutScene({ digest: "leaf", nodes: [{ ...node, id: "leaf", parentId: "root", components: [] }] }).rooms[0].arrangement, "bench");
-  const hall = layoutScene({ digest: "hall", nodes: [{ ...node, sizeBucket: "large" }] }).rooms[0];
-  const parent = layoutScene({ digest: "parent-bays", nodes: [{ ...node, id: "parent-bays", parentId: "root", sizeBucket: "large" }] }).rooms[0];
-  const leaf = layoutScene({ digest: "leaf-bays", nodes: [{ ...node, id: "leaf-bays", parentId: "root", components: [], sizeBucket: "large" }] }).rooms[0];
-  assert.deepEqual(hall.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - hall.y]), [[184, 40], [184, 68], [184, 96]]);
-  for (let index = 0; index < hall.contents.length; index++) for (const other of hall.contents.slice(index + 1))
-    assert.equal(overlaps(hall.contents[index], other), false, "pictured stations cannot overlap equipment");
-  assert.deepEqual(parent.contents.filter((item) => item.kind === "component").map((item) => [item.width, item.y - parent.y]), [[184, 40]]);
-  assert.equal(leaf.contents.some((item) => item.kind === "component"), false);
-  assert.equal(hall.omittedBayCount, 5);
-  assert.ok(hall.contents.filter((item) => item.kind !== "component" && !item.workSurface).length <= 1, "three bays retain one secondary installation");
-  assert.ok(leaf.contents.filter((item) => item.kind !== "component" && !item.workSurface).length <= 2, "leaf never grows a third support");
 });

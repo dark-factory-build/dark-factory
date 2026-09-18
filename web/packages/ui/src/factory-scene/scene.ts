@@ -41,7 +41,6 @@ export type SceneWorker = Readonly<{
   /** The displayed room contains the more specific observed area. */
   locationWithin?: boolean;
   nodeId?: string;
-  /** Exact observed direct child, retained separately from its displayed parent. */
   observedBayId?: string;
 }>;
 
@@ -50,8 +49,6 @@ export type ScenePoint = Readonly<{ x: number; y: number }>;
 type SceneRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type SceneRoomLayout = SceneRect & Readonly<{
   id: string;
-  arrangement: "hall" | "parent" | "bench";
-  omittedBayCount: number;
   door: ScenePoint;
   contents: readonly RoomContent[];
 }>;
@@ -71,27 +68,18 @@ export type SceneWorkerPlacement = Readonly<{
   id: string;
   area: "room" | "resting" | "staging" | "outside" | "overflow";
   roomId?: string;
-  /** A worker only occupies a named bay when its exact observed child is pictured. */
-  bayId?: string;
-  /** Browser-only common-area pose; never authoritative work or communication. */
-  ambient?: "notice-board" | "break-counter" | "shared-table";
-  ambientSocial?: boolean;
   x: number;
   y: number;
 }>;
 
-// Bounded size buckets leave a fixed grid cell and a common doorway edge.
-const ROOM_WIDTH = 240;
-const ROOM_HEIGHT = 224;
-const FOOTPRINTS = {
-  empty: [128, 152], tiny: [128, 152], small: [160, 184],
-  medium: [192, 216], large: [224, 224],
-} as const;
+// Shared walls and one human-scale workshop footprint keep the floor connected.
+const ROOM_WIDTH = 176;
+const ROOM_HEIGHT = 160;
 const CORRIDOR = 32;
 export const PADDING = 16;
 export const ROOM_LEFT = PADDING + CORRIDOR;
 const FLOOR_TOP = 48;
-const WORKER_GAP = 24;
+const WORKER_GAP = 40;
 
 /** Ordering for the floor: byte order over served fields, never a locale. */
 export function compareText(left: string, right: string) {
@@ -105,9 +93,6 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
     || compareText(left.path, right.path) || compareText(left.id, right.id));
   const groups = new Map<string, SceneNode[]>();
   for (const node of nodes) groups.set(node.project?.id ?? "", [...(groups.get(node.project?.id ?? "") ?? []), node]);
-  // Columns describe the widest project scope. Independent projects should
-  // not reserve empty columns for one another; a single project's children
-  // still retain the established two-column geometry.
   const widestGroup = Math.max(1, ...[...groups.values()].map((group) => group.length));
   const columns = widestGroup <= 4 ? Math.max(1, Math.min(2, widestGroup)) : Math.min(4, Math.ceil(Math.sqrt(widestGroup)));
   const width = ROOM_LEFT + columns * ROOM_WIDTH + PADDING;
@@ -123,28 +108,25 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
     }
     members.forEach((node, index) => {
       const x = ROOM_LEFT + (index % columns) * ROOM_WIDTH;
-      const [width, height] = FOOTPRINTS[node.sizeBucket ?? "small"];
+      const width = ROOM_WIDTH, height = ROOM_HEIGHT;
       const bottom = top + Math.floor(index / columns) * (ROOM_HEIGHT + CORRIDOR) + ROOM_HEIGHT;
       const y = bottom - height;
       const center = x + width / 2;
       const rectangle = { x, y, width, height };
-      const arrangement = node.parentId === undefined || node.parentId === "" ? "hall" : (node.components?.length ?? 0) > 0 ? "parent" : "bench";
-      const contents = composeRoom(node, rectangle, arrangement);
-      rooms.push({ id: node.id, ...rectangle, arrangement, omittedBayCount: Math.max(0, (node.components?.length ?? 0) - contents.filter((item) => item.kind === "component").length), contents,
+      rooms.push({ id: node.id, ...rectangle, contents: composeRoom(node, rectangle),
         door: { x: center, y: bottom } });
       if (index % columns === 0) corridors.push({ x: PADDING, y: bottom, width: CORRIDOR + Math.min(columns, members.length - index) * ROOM_WIDTH, height: CORRIDOR });
     });
-    top += Math.ceil(members.length / columns) * (ROOM_HEIGHT + CORRIDOR) + 16;
+    top += Math.ceil(members.length / columns) * (ROOM_HEIGHT + CORRIDOR);
   }
   // A spine joins each project's corridor and the expandable common area below.
   corridors.push({ x: PADDING, y: FLOOR_TOP, width: CORRIDOR, height: top - FLOOR_TOP + 32 });
-  return { width, height: top + 80, rooms, headings, corridors, restingTop: top + 32 };
+  return { width, height: top + 32, rooms, headings, corridors, restingTop: top + 32 };
 }
 
 export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[]): readonly SceneWorkerPlacement[] {
   const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
   const roomCounts = new Map<string, number>();
-  const outsideColumns = Math.max(1, Math.floor((layout.width - ROOM_LEFT - PADDING - 32) / WORKER_GAP) + 1);
   const sorted = [...workers].sort((left, right) => compareText(left.id, right.id));
   const placed: SceneWorkerPlacement[] = [];
   const areas: Record<"resting" | "staging" | "outside" | "overflow", SceneWorker[]> = { resting: [], staging: [], outside: [], overflow: [] };
@@ -155,84 +137,53 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     }
     const room = worker.nodeId === undefined ? undefined : rooms.get(worker.nodeId);
     if (room === undefined) { areas.outside.push(worker); continue; }
-    const bay = worker.observedBayId !== undefined && room.contents.some((item) => item.targetId === worker.observedBayId)
-      ? worker.observedBayId : undefined;
-    const occupancy = JSON.stringify([room.id, bay ?? null]);
-    const slot = roomCounts.get(occupancy) ?? 0;
-    const positions = workPositions(room, bay);
+    const slot = roomCounts.get(room.id) ?? 0;
+    const positions = workPositions(room);
     if (slot >= positions.length) { areas.overflow.push(worker); continue; }
-    roomCounts.set(occupancy, slot + 1);
-    placed.push({ id: worker.id, area: "room", roomId: room.id, ...(bay === undefined ? {} : { bayId: bay }), ...positions[slot]! });
+    roomCounts.set(room.id, slot + 1);
+    placed.push({ id: worker.id, area: "room", roomId: room.id, ...positions[slot]! });
   }
   let top = layout.restingTop;
   for (const area of ["resting", "staging", "outside", "overflow"] as const) {
-    areas[area].forEach((worker, slot) => placed.push({ id: worker.id, area,
-      x: ROOM_LEFT + 16 + (slot % outsideColumns) * WORKER_GAP,
-      y: top + Math.floor(slot / outsideColumns) * WORKER_GAP }));
-    // Keep a connected resting bay even when empty; populations only grow below buildings.
-    if (area === "resting" || areas[area].length > 0) top += Math.max(1, Math.ceil(areas[area].length / outsideColumns)) * WORKER_GAP + 40;
+    const seats = commonSeats(layout, areas[area].length, top);
+    areas[area].forEach((worker, slot) => placed.push({ id: worker.id, area, ...seats[slot]! }));
+    // Keep a furnished break room even when empty; extra workers grow below it.
+    if (area === "resting" || areas[area].length > 0) top = seats.at(-1)!.y + WORKER_GAP + 48;
   }
   return placed.sort((left, right) => compareText(left.id, right.id));
 }
 
 
+/** Furniture and seated workers use the same positions and person-sized spacing. */
+export function commonSeats(layout: SceneLayout, count: number, top: number): readonly ScenePoint[] {
+  const columns = Math.max(1, Math.floor((layout.width - ROOM_LEFT - PADDING - 48) / WORKER_GAP) + 1);
+  return Array.from({ length: Math.max(Math.min(4, columns), count) }, (_, slot) => ({
+    x: ROOM_LEFT + 24 + (slot % columns) * WORKER_GAP,
+    y: top + Math.floor(slot / columns) * WORKER_GAP,
+  }));
+}
+
 /** Pictured surface slots also determine standing destinations; no parallel workstation map. */
-export function workPositions(room: SceneRoomLayout, bayId?: string): readonly ScenePoint[] {
-  const surface = bayId === undefined ? room.contents.find((item) => item.workSurface) : room.contents.find((item) => item.targetId === bayId);
+export function workPositions(room: SceneRoomLayout): readonly ScenePoint[] {
+  const surface = room.contents.find((item) => item.workSurface);
   if (surface === undefined) return [{ x: room.door.x, y: room.door.y - 32 }];
-  // Component bays share the composition's reserved right-hand approach. This
-  // is the same pictured rectangle used by rendering and hit testing, rather
-  // than a second map of invented workstations.
-  if (bayId !== undefined) return [{ x: Math.min(surface.x + surface.width + 10, room.x + room.width - 12), y: surface.y + surface.height / 2 }];
   const offsets = surface.width >= 120 ? [0, -24, 24, -48, 48] : surface.width >= 88 ? [0, -24, 24] : [0, -24];
   return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + 8 }));
 }
 
-export const inventoryLabels = { source: "Source", tests: "Tests", documentation: "Docs", configuration: "Config", assets: "Assets", unclassified: "Unclassified" } as const;
 export type InventoryKind = keyof typeof inventoryLabels;
-type ContentKind = keyof typeof inventoryLabels | "component";
-export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string; feature?: InventoryKind | "empty" | "unavailable"; workSurface?: boolean }>;
+export const inventoryLabels = { source: "Source", tests: "Tests", documentation: "Docs", configuration: "Config", assets: "Assets", unclassified: "Unclassified" } as const;
+type ContentKind = keyof typeof inventoryLabels;
+export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; workSurface?: boolean }>;
 
-/** Three bounded arrangements: a root hall, parent edge bays, or a leaf bench. */
-function composeRoom(node: SceneNode, room: SceneRect, arrangement: SceneRoomLayout["arrangement"]): readonly RoomContent[] {
+/** Background fittings stay sparse; inventory detail belongs in the tooltip. */
+function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
   const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
-  const kinds = (Object.keys(inventoryLabels) as Array<keyof typeof inventoryLabels>)
-    .filter((kind) => (counts?.[kind] ?? 0) > 0)
-    .sort((left, right) => counts![right] - counts![left] || compareText(left, right));
-  const primary = kinds[0];
-  const contents: RoomContent[] = [];
-  const children = [...(node.components ?? [])].sort((a, b) => compareText(a.label, b.label) || compareText(a.id, b.id));
-  // All pictured rectangles stop before this 20px edge strip. Its centre is
-  // the 8px-clear side approach used for both the bench and direct-child bays.
-  const contentLeft = room.x + 20;
-  const contentWidth = room.width - 40;
-  // The edge has room for three full named stations in a large hall; smaller
-  // rooms show fewer and disclose the omitted children in the inspector.
-  const bayLimit = arrangement === "bench" ? 0 : arrangement === "parent" ? 1 : room.width >= 216 ? 3 : room.width >= 192 ? 2 : 1;
-  const bays = children.slice(0, Math.min(6, bayLimit));
-  const bayWidth = contentWidth;
-  const bayHeight = 24;
-  bays.forEach((child, index) => {
-    contents.push({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id, feature: child.feature ?? "unavailable",
-      x: contentLeft, y: room.y + 40 + index * (bayHeight + 4), width: bayWidth, height: bayHeight,
-    });
-  });
-  if (primary === undefined) return contents;
-  const width = Math.min(contentWidth, Math.max(room.width >= 160 ? 112 : 80, room.width - ({ source: 40, tests: 56, documentation: 72, assets: 64, configuration: 80, unclassified: 80 }[primary])));
-  const height = room.height >= 184 ? 64 : 32;
-  contents.push({ key: primary, kind: primary, label: inventoryLabels[primary], count: counts![primary], workSurface: true,
-    // Keep the doorway and its horizontal approach clear by a full sprite.
-    x: contentLeft, y: room.y + room.height - height - 32, width, height });
-  // Tests retain a supporting place even beside a much larger source installation.
-  const secondary = kinds.filter((kind) => kind !== primary).sort((a, b) => Number(b === "tests") - Number(a === "tests") || compareText(a, b));
-  const slots = arrangement === "bench" ? 2 : bays.length >= 3 ? 1 : 2;
-  const bayBottom = contents.filter((item) => item.kind === "component").reduce((bottom, item) => Math.max(bottom, item.y + item.height), room.y + 32);
-  const supportY = bayBottom + 8;
-  const primaryTop = contents.find((item) => item.workSurface)!.y;
-  const supportCount = supportY + 24 <= primaryTop - 8 ? Math.min(slots, Math.floor(contentWidth / 56)) : 0;
-  secondary.slice(0, supportCount).forEach((kind, index) => contents.push({
-    key: kind, kind, label: inventoryLabels[kind], count: counts![kind],
-    x: contentLeft + index * 56, y: supportY, width: 48, height: 24,
-  }));
-  return contents;
+  if (counts === undefined) return [];
+  const primary = (Object.keys(inventoryLabels) as Array<keyof typeof inventoryLabels>)
+    .filter((kind) => counts[kind] > 0)
+    .sort((a, b) => counts[b] - counts[a] || compareText(a, b))[0];
+  if (primary === undefined) return [];
+  return [{ key: primary, kind: primary, label: inventoryLabels[primary], count: counts[primary], workSurface: true,
+    x: room.x + 24, y: room.y + 72, width: room.width - 48, height: 32 }];
 }

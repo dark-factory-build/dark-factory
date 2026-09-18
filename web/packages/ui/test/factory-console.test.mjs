@@ -90,13 +90,13 @@ test("error banner keeps its centered layout after the paragraph reset", () => {
 
 test("floor appearance is local, field-validated, and available before a connection", () => {
   assert.deepEqual(readFloorAppearance('{"scenery":"off","dependencyLinks":"bad","labels":"names-and-counts","taskProps":false,"animation":"off"}'), {
-    scenery: "off", dependencyLinks: "selected-room", labels: "names-and-counts", taskProps: false, animation: "off", ambientLife: "quiet",
+    scenery: "off", animation: "off",
   });
   assert.deepEqual(readFloorAppearance('{"scenery":"subtle"}'), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "subtle" });
   assert.deepEqual(readFloorAppearance("not json"), DEFAULT_FLOOR_APPEARANCE);
   const markup = render({ status: "closed", settingsOpen: true });
-  for (const text of ["Scenery", "Dependency links", "Labels", "Task props", "Animation", "Ambient life", "Reset floor appearance", "Saved in this browser. Does not change how the factory runs."]) assert.match(markup, new RegExp(text));
-  assert.match(markup, /<option value="selected-room" selected="">Selected room<\/option>/);
+  for (const text of ["Scenery", "Animation", "Reset floor appearance", "Saved in this browser. Does not change how the factory runs."]) assert.match(markup, new RegExp(text));
+  assert.doesNotMatch(markup, /Dependency links|Task props|Ambient life/);
 });
 
 test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
@@ -115,13 +115,11 @@ test("floor appearance waits for storage, changes while disconnected, and resets
     let tree;
     act(() => { tree = create(createElement(FactoryConsole, { status: "closed", state: baseState(), settingsOpen: true })); });
     assert.deepEqual(writes, [], "loading never writes defaults");
-    const selects = tree.root.findAllByType("select").slice(-6);
+    const selects = tree.root.findAllByType("select").slice(-2);
     assert.equal(selects[0].props.value, "subtle");
-    assert.equal(selects[1].props.value, "overview");
-    assert.equal(selects[2].props.value, "names");
-    assert.equal(selects[3].props.value, "on");
+    assert.equal(selects[1].props.value, "off");
     act(() => { selects[0].props.onChange({ currentTarget: { value: "off" } }); });
-    assert.deepEqual(JSON.parse(entries.get("dark-factory.floor-appearance")), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", dependencyLinks: "overview", animation: "off" });
+    assert.deepEqual(JSON.parse(entries.get("dark-factory.floor-appearance")), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "off", animation: "off" });
     act(() => { tree.root.findAllByType("button").find((button) => button.props.children === "Reset floor appearance").props.onClick(); });
     assert.equal(entries.has("dark-factory.floor-appearance"), false);
     assert.equal(entries.get("dark-factory.pairing"), "keep");
@@ -2003,7 +2001,7 @@ test("paging reaches all served siblings and leaf inspection; stale scopes and p
 });
 
 
-test("page controls and dependency links inspect an omitted leaf using the same scope navigation", async () => {
+test("page controls reach every child without the removed room inspector", async () => {
   const root = fixtureTopology.nodes[0];
   const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
   const topology = served({ ...fixtureTopology, nodes: [root, ...children], dependencies: { edges: [{ from: root.id, to: children[29].id, weight: 1 }], omitted: 0 } });
@@ -2014,13 +2012,10 @@ test("page controls and dependency links inspect an omitted leaf using the same 
   const next = () => tree.root.findAllByType("button").find((button) => button.children.join("") === "Next spaces");
   await act(async () => { next().props.onClick(); });
   assert.equal(next().props.disabled, true);
-  assert.ok(tree.root.findAllByType("option").some((option) => option.children.join("") === "Child 29"));
-  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Previous spaces").props.onClick(); });
-  await act(async () => { tree.root.findByProps({ "aria-label": "Inspect room" }).props.onChange({ target: { value: rootID } }); });
-  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Child 29").props.onClick(); });
-  assert.equal(tree.root.findByProps({ "aria-label": "Inspect room" }).props.value, `${ids.project}:${children[29].id}`);
   assert.equal(tree.root.findAllByProps({ "data-room-id": `${ids.project}:${children[29].id}` }).length, 1);
-  assert.equal(tree.root.findAllByProps({ "aria-label": "Floor pages" }).length, 0);
+  assert.equal(tree.root.findAllByType("select").length, 0);
+  await act(async () => { tree.root.findAllByType("button").find((button) => button.children.join("") === "Previous spaces").props.onClick(); });
+  assert.equal(next().props.disabled, false);
   await act(async () => { tree.update(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: served({ ...fixtureTopology, nodes: [root] }), view: "floor" })); });
   assert.equal(tree.root.findAllByProps({ "data-room-id": rootID }).length, 1);
   await act(async () => tree.unmount());

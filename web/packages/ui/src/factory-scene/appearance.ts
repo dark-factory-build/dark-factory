@@ -44,19 +44,19 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion): readon
   const appearance = resolvedAppearance(worker);
   const role = worker.role === "orchestrator" ? "overseer" : "worker";
   const provider = worker.provider === "claude_code" || worker.provider === "codex" ? worker.provider : "shell";
-  const activity = motion?.action === "interacting" ? "idle" : ["busy", "waiting", "needs-you", "idle"].includes(worker.activity) ? worker.activity : "idle";
+  const activity = motion?.action === "interacting" ? "busy" : ["busy", "waiting", "needs-you", "idle"].includes(worker.activity) ? worker.activity : "idle";
+  const bodyActivity = motion?.action === "interacting" && motion.frame === 1 ? "typing" : activity;
   const frames = [
-    `person.skin.${appearance.skin}.${activity}`,
-    `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.${activity}`,
+    `person.skin.${appearance.skin}.${bodyActivity}`,
+    `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.${bodyActivity}`,
     `person.hair.${appearance.hair}.${appearance.hair_colour}.${activity}`,
-    ...(motion?.action === "interacting" ? [] : [`person.face.${appearance.face}.${activity}`]),
+    `person.face.${appearance.face}.${activity}`,
     `person.shoes.${appearance.shoes}.${activity}`,
     ...(motion?.action === "interacting" ? [] : [`person.tool.${appearance.tool}.${activity}`]),
     `person.headwear.${appearance.headwear}.${activity}`,
     `person.system.${role}.${provider}.${activity}`,
   ];
   if (motion?.action === "walking" && motion.direction !== undefined) frames.push(`person.motion.walk.${motion.direction}.${motion.frame}`);
-  if (motion?.action === "interacting") frames.push(`person.motion.interact.${motion.frame}`);
   return frames;
 }
 
