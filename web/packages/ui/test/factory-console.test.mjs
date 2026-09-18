@@ -1202,6 +1202,8 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   const noInstallation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
   assert.match(noInstallation, /INSTALL OR REQUEST GITHUB APP ACCESS/);
   assert.match(noInstallation, /href="https:\/\/github.com\/apps\/factory-maintainer\/installations\/new"/);
+  const pendingInstallationPages = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], next_page: 2, installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
+  assert.doesNotMatch(pendingInstallationPages, /INSTALL OR REQUEST GITHUB APP ACCESS/);
   const unavailableInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://evil.example\/apps\/factory\/installations\/new" } } } });
   assert.doesNotMatch(unavailableInstall, /INSTALL OR REQUEST GITHUB APP ACCESS/);
   const visibleInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
