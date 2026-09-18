@@ -481,11 +481,28 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 			return Task{}, tx.Rollback(ErrConflict)
 		}
 	}
+	accepted, linked, err := intakeAcceptanceForTask(ctx, tx.connection, run.TaskID)
+	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if linked {
+		if accepted.WithdrawnAt != nil || (!spec.RepositoryID.zero() && spec.RepositoryID != accepted.RepositoryID) {
+			return Task{}, tx.Rollback(ErrConflict)
+		}
+		spec.RepositoryID = accepted.RepositoryID
+	}
 	existing, replay, err := taskCreationReplay(ctx, tx.connection, spec)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
 	if replay {
+		binding, found, err := intakeAcceptanceForTask(ctx, tx.connection, existing.ID)
+		if err != nil || linked != found || linked && binding.ID != accepted.ID {
+			if err == nil {
+				err = ErrConflict
+			}
+			return Task{}, tx.Rollback(err)
+		}
 		if err := tx.Rollback(nil); err != nil {
 			return Task{}, err
 		}
@@ -494,6 +511,11 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 	result, err := insertTaskOnConnection(ctx, tx.connection, spec, at)
 	if err != nil {
 		return Task{}, tx.Rollback(err)
+	}
+	if linked {
+		if err := bindIntakeTask(ctx, tx.connection, result.ID, accepted.ID); err != nil {
+			return Task{}, tx.Rollback(err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Task{}, err

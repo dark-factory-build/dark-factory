@@ -59,10 +59,76 @@ func validateDurableEntityControls(ctx context.Context, connection *sql.Conn) (F
 	if err := validateContinuations(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
+	if err := validateIntake(ctx, connection); err != nil {
+		return FactoryState{}, err
+	}
 	if err := validateResourceIdentityCollisions(ctx, connection); err != nil {
 		return FactoryState{}, err
 	}
 	return state, nil
+}
+
+func validateIntake(ctx context.Context, connection *sql.Conn) error {
+	rows, err := connection.QueryContext(ctx, `SELECT `+intakeSourceColumns+` FROM intake_sources ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		source, found, err := scanIntakeSource(rows)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return err
+		}
+		loaded, found, err := intakeSourceByID(ctx, connection, source.ID)
+		if err != nil || !found || loaded.ID != source.ID {
+			return ErrCorruptState
+		}
+		if repository, found, err := repositoryByID(ctx, connection, source.TargetRepositoryID); err != nil || !found || repository.ProjectID != source.ProjectID {
+			return ErrCorruptState
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	acceptances, err := connection.QueryContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer acceptances.Close()
+	for acceptances.Next() {
+		accepted, found, err := scanIntakeAcceptance(acceptances)
+		if err != nil || !found {
+			if err == nil {
+				err = ErrCorruptState
+			}
+			return err
+		}
+		if repository, found, err := repositoryByID(ctx, connection, accepted.RepositoryID); err != nil || !found || repository.ProjectID != accepted.ProjectID {
+			return ErrCorruptState
+		}
+	}
+	if err := acceptances.Err(); err != nil {
+		return err
+	}
+	var invalid int
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM intake_task_bindings b JOIN intake_acceptances a ON a.id = b.acceptance_id
+		JOIN tasks t ON t.id = b.task_id JOIN task_repository_bindings r ON r.task_id = t.id
+		WHERE t.project_id <> a.project_id OR r.repository_id <> a.repository_id
+		UNION ALL
+		SELECT 1 FROM intake_acceptances a JOIN tasks t ON t.id = a.task_id
+		LEFT JOIN intake_task_bindings b ON b.task_id = t.id
+		WHERE b.acceptance_id IS NULL OR b.acceptance_id <> a.id OR t.incarnation_id <> a.incarnation_id
+	)`).Scan(&invalid); err != nil {
+		return err
+	}
+	if invalid != 0 {
+		return ErrCorruptState
+	}
+	return nil
 }
 
 func validateContinuations(ctx context.Context, connection *sql.Conn) error {
