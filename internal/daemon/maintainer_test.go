@@ -127,23 +127,41 @@ func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 	if issue.Number != accepted.Snapshot.IssueNumber || issue.URL != "https://github.com/feed/original/issues/9" || issue.Title != accepted.Snapshot.Title || issue.Body != accepted.Snapshot.Body || len(issue.Labels) != 1 || issue.Labels[0] != "regression" || issue.UpdatedAt != "2026-09-18T20:00:00Z" || issue.State != "closed" || issue.StateReason == nil || *issue.StateReason != "completed" {
 		t.Fatalf("frozen response = %s", response)
 	}
+	for _, malformed := range []json.RawMessage{
+		bytes.Replace(upstream, []byte(`"labels":["regression"]`), []byte(`"labels":[],"labels":["regression"]`), 1),
+		bytes.Replace(upstream, []byte(`"title":"revised instructions"`), []byte(`"title":"\ud800"`), 1),
+	} {
+		if _, err := frozenAcceptedIssueResponse(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, accepted, malformed); err == nil {
+			t.Fatalf("malformed broker response accepted: %s", malformed)
+		}
+	}
 }
 
 func TestMaintainerTransportRejectsAmbiguousRepositoryArguments(t *testing.T) {
 	ctx := context.Background()
-	for _, request := range []json.RawMessage{
-		json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","repository":"foreign/private","issue_number":9}}}`),
-		json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","Repository":"foreign/private","issue_number":9}}}`),
-	} {
-		fixture := newDispatchFixture(t)
-		active := prepareActiveAttemptInProject(t, fixture, 175, testID(175), "orchestrator")
-		done := fixture.serve(t)
-		_, err := active.client.Maintainer(ctx, api.MaintainerInput{Request: request})
-		serverErr := <-done
-		var remote *api.RemoteError
-		if !errors.As(err, &remote) || remote.Code() != api.RemoteInvalidRequest || serverErr == nil {
-			t.Fatalf("ambiguous tool argument = client %v, server %v", err, serverErr)
-		}
+	duplicate := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","repository":"foreign/private","issue_number":9}}}`)
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 175, testID(175), "orchestrator")
+	if _, err := active.client.Maintainer(ctx, api.MaintainerInput{Request: duplicate}); !errors.Is(err, api.ErrInvalidInput) {
+		t.Fatalf("duplicate tool argument = %v", err)
+	}
+
+	mixed := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","Repository":"foreign/private","issue_number":9}}}`)
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatalf("session: %v %v", found, err)
+	}
+	owner := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, nil)
+	owner.agentID, owner.attemptDigest = active.run.AgentID, active.run.CredentialDigest
+	if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+		t.Fatal(err)
+	}
+	defer fixture.daemon.unregisterLiveAttempt(active.run.ID, owner)
+	done := fixture.serve(t)
+	result, err := active.client.Maintainer(ctx, api.MaintainerInput{Request: mixed})
+	waitDispatch(t, done)
+	if err != nil || result.State != "invalid" || len(result.Response) != 0 {
+		t.Fatalf("mixed-case tool argument = %+v %v", result, err)
 	}
 }
 
