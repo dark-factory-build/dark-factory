@@ -33,16 +33,29 @@ func TestOverseerControlMethodsRemainAttemptScoped(t *testing.T) {
 
 func TestOperatorControlsUseOperatorDomainWithoutAttemptAuthority(t *testing.T) {
 	var bearer credential
-	request := []byte(`{"method":"operator_update_agent","params":{"agent_id":"11111111111111111111111111111111","expected_revision":1,"paused":true}}`)
-	call, code := decodeCall(operatorDomain, bearer, request)
-	if code != "" || call.Kind() != CallOperatorUpdateAgent {
-		t.Fatalf("operator control = %v, %v", call.Kind(), code)
-	}
-	if _, ok := call.AttemptDigest(); ok {
-		t.Fatal("operator control acquired attempt authority")
-	}
-	if _, code := decodeCall(attemptDomain, bearer, request); code != RemoteForbidden {
-		t.Fatalf("attempt domain accepted operator control: %v", code)
+	base := `"operation_id":"11111111111111111111111111111111","task_id":"22222222222222222222222222222222","expected_task_revision":1,"run_id":"33333333333333333333333333333333","expected_run_revision":1`
+	for _, test := range []struct {
+		method string
+		params string
+		kind   CallKind
+	}{
+		{"operator_update_agent", `"agent_id":"11111111111111111111111111111111","expected_revision":1,"paused":true`, CallOperatorUpdateAgent},
+		{"operator_stop_run", base, CallOperatorStopRun},
+		{"operator_replace_run", base + `,"successor_task_id":"44444444444444444444444444444444","successor_incarnation_id":"55555555555555555555555555555555","instruction":"continue"`, CallOperatorReplaceRun},
+		{"operator_message_worker", base + `,"message":"continue"`, CallOperatorMessageWorker},
+		{"operator_interrupt_worker", base, CallOperatorInterruptWorker},
+	} {
+		request := []byte(`{"method":"` + test.method + `","params":{` + test.params + `}}`)
+		call, code := decodeCall(operatorDomain, bearer, request)
+		if code != "" || call.Kind() != test.kind {
+			t.Fatalf("%s = %v, %v", test.method, call.Kind(), code)
+		}
+		if _, ok := call.AttemptDigest(); ok {
+			t.Fatalf("%s acquired attempt authority", test.method)
+		}
+		if _, code := decodeCall(attemptDomain, bearer, request); code != RemoteForbidden {
+			t.Fatalf("attempt domain accepted %s: %v", test.method, code)
+		}
 	}
 }
 

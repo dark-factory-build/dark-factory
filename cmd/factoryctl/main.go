@@ -72,6 +72,10 @@ const (
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
   factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N]
   factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION
+  factoryctl worker stop --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
+  factoryctl worker replace --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --successor-task ID --successor-incarnation ID --instruction TEXT
+  factoryctl worker message --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION --message TEXT
+  factoryctl worker interrupt --operation-id ID --task ID --task-revision REVISION --run ID --run-revision REVISION
 
   factoryctl account discover
   factoryctl account list
@@ -334,7 +338,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
-	if command.operatorControl && (command.kind == commandOverseerTaskUpdate || command.kind == commandOverseerAgentUpdate) {
+	if command.operatorControl && (command.kind == commandOverseerTaskUpdate || command.kind == commandOverseerAgentUpdate || command.kind == commandOverseerStopWorker || command.kind == commandOverseerReplaceWorker || command.kind == commandOverseerMessageWorker || command.kind == commandOverseerInterruptWorker) {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList && len(args) > 0 && args[0] == "outcome" {
@@ -579,7 +583,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		command.operatorControl = ok
 		return command, help, ok
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -1326,6 +1330,11 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 }
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
+	if len(args) >= 1 && args[0] == "worker" {
+		command, help, ok := parseOverseer(append([]string{"overseer"}, args...))
+		command.operatorControl = true
+		return command, help, ok
+	}
 	if len(args) >= 2 && args[0] == "content" {
 		return parseContent(args)
 	}
@@ -2193,6 +2202,30 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.UpdateAgent(callContext, input)
 		if callErr != nil {
 			return writeWebFailure(stderr, "agent update", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandOverseerStopWorker:
+		result, callErr := client.StopRun(callContext, api.OverseerRunStopInput{OperationID: command.operationID, TaskID: command.id, ExpectedTaskRevision: command.taskRevision, RunID: command.run, ExpectedRunRevision: command.runRevision})
+		if callErr != nil {
+			return writeWebFailure(stderr, "worker stop", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandOverseerReplaceWorker:
+		result, callErr := client.ReplaceRun(callContext, api.OverseerRunReplaceInput{OverseerRunStopInput: api.OverseerRunStopInput{OperationID: command.operationID, TaskID: command.id, ExpectedTaskRevision: command.taskRevision, RunID: command.run, ExpectedRunRevision: command.runRevision}, SuccessorTaskID: command.project, SuccessorIncarnationID: command.account, Instruction: command.text})
+		if callErr != nil {
+			return writeWebFailure(stderr, "worker replace", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandOverseerMessageWorker:
+		result, callErr := client.MessageWorker(callContext, api.OverseerWorkerMessageInput{OperationID: command.operationID, TaskID: command.id, ExpectedTaskRevision: command.taskRevision, RunID: command.run, ExpectedRunRevision: command.runRevision, Message: command.text})
+		if callErr != nil {
+			return writeWebFailure(stderr, "worker message", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandOverseerInterruptWorker:
+		result, callErr := client.InterruptWorker(callContext, api.OverseerWorkerInterruptInput{OperationID: command.operationID, TaskID: command.id, ExpectedTaskRevision: command.taskRevision, RunID: command.run, ExpectedRunRevision: command.runRevision})
+		if callErr != nil {
+			return writeWebFailure(stderr, "worker interrupt", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandDispatch:

@@ -323,8 +323,8 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 				}
 				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
 			}
-			if handoff.TaskID != expected.TaskID || handoff.ChangeID != expected.ChangeID || handoff.BaseCommit != expected.BaseCommit || handoff.TaskWorkRevision != expected.TaskWorkRevision || handoff.ChangeRevision != expected.ChangeRevision {
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, kernel.ErrConflict)
+			if mismatch := retainedReviewHandoffMismatch(expected, handoff); mismatch != nil {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, mismatch)
 			}
 			receipt, sourceErr := daemon.attemptSourceHandoff(ctx, handoff)
 			if sourceErr != nil {

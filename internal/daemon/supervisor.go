@@ -3,11 +3,29 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 	"github.com/dark-factory-build/dark-factory/internal/runner"
 )
+
+func retainedReviewHandoffMismatch(expected, actual kernel.RetainedChangeHandoff) error {
+	switch {
+	case expected.TaskID != actual.TaskID:
+		return fmt.Errorf("%w: retained review task identity mismatch", kernel.ErrConflict)
+	case expected.ChangeID != actual.ChangeID:
+		return fmt.Errorf("%w: retained review Change identity mismatch", kernel.ErrConflict)
+	case expected.BaseCommit != actual.BaseCommit:
+		return fmt.Errorf("%w: retained review base commit mismatch", kernel.ErrConflict)
+	case expected.TaskWorkRevision != actual.TaskWorkRevision:
+		return fmt.Errorf("%w: retained review task work revision mismatch", kernel.ErrConflict)
+	case expected.ChangeRevision != actual.ChangeRevision:
+		return fmt.Errorf("%w: retained review Change revision mismatch", kernel.ErrConflict)
+	default:
+		return nil
+	}
+}
 
 const (
 	supervisorReconcileAttempts = 3

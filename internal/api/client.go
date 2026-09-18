@@ -213,6 +213,34 @@ func (client *OperatorClient) HumanReply(ctx context.Context, input OverseerHuma
 	return client.client.mutate(ctx, "human_reply", input)
 }
 
+func (client *OperatorClient) StopRun(ctx context.Context, input OverseerRunStopInput) (MutationResult, error) {
+	if !validOverseerRunStopInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_stop_run", input)
+}
+
+func (client *OperatorClient) ReplaceRun(ctx context.Context, input OverseerRunReplaceInput) (MutationResult, error) {
+	if !validOverseerRunReplaceInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_replace_run", input)
+}
+
+func (client *OperatorClient) MessageWorker(ctx context.Context, input OverseerWorkerMessageInput) (MutationResult, error) {
+	if !validOverseerWorkerMessageInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_message_worker", input)
+}
+
+func (client *OperatorClient) InterruptWorker(ctx context.Context, input OverseerWorkerInterruptInput) (MutationResult, error) {
+	if !validOverseerWorkerInterruptInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_interrupt_worker", input)
+}
+
 func (client *OperatorClient) DiscoverAccounts(ctx context.Context) (Accounts, error) {
 	accounts := make([]DiscoveredAccount, 0)
 	for offset := uint32(0); ; {

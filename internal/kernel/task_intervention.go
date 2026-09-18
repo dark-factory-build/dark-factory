@@ -282,6 +282,31 @@ func (store *Store) ReserveTaskInterventionForBrowser(ctx context.Context, clien
 	return result, reserved, nil
 }
 
+// ReserveTaskInterventionForOperator records a local operator intervention in
+// the same idempotent receipt table used by browser and attempt control.
+func (store *Store) ReserveTaskInterventionForOperator(ctx context.Context, request TaskInterventionRequest, at UnixMillis) (TaskIntervention, bool, error) {
+	if request.Actor != 0 || request.ActorRunID != nil || request.ActorBrowserClientID != nil {
+		return TaskIntervention{}, false, fmt.Errorf("%w: invalid operator task intervention", ErrInvalidValue)
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return TaskIntervention{}, false, err
+	}
+	defer tx.Close()
+	request.Actor = TaskInterventionOperator
+	if err := request.valid(); err != nil {
+		return TaskIntervention{}, false, err
+	}
+	result, reserved, err := reserveTaskInterventionTx(ctx, tx, request, at)
+	if err != nil {
+		return TaskIntervention{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TaskIntervention{}, false, err
+	}
+	return result, reserved, nil
+}
+
 // ReserveTaskInterventionForAttempt rechecks a live orchestrator credential in
 // the same write transaction. The caller cannot nominate a different actor.
 func (store *Store) ReserveTaskInterventionForAttempt(ctx context.Context, digest AttemptDigest, request TaskInterventionRequest, at UnixMillis) (TaskIntervention, bool, error) {
