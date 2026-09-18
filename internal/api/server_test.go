@@ -1303,7 +1303,7 @@ func TestReplyConstructorsAndConnectionOrderAreClosed(t *testing.T) {
 	if _, err := NewMutationReply(MutationResult{Head: 1}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("zero revision = %v", err)
 	}
-	if _, err := NewAttemptTaskReply(AttemptTask{Task: strings.Repeat("x", 131073)}); !errors.Is(err, ErrInvalidInput) {
+	if _, err := NewAttemptTaskReply(AttemptTask{Task: strings.Repeat("x", kernel.MaxContinuationTaskBytes+1)}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("oversized attempt task = %v", err)
 	}
 	if _, err := NewErrorReply("private-sentinel"); !errors.Is(err, ErrInvalidInput) {

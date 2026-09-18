@@ -626,7 +626,7 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	task, err := providerTaskWithContinuationContext(authority.Provider, []byte(authority.Task()), authority.ContinuationContexts)
+	task, err := attemptTaskWithContinuationContext(authority.Provider, []byte(authority.Task()), authority.ContinuationContexts)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}

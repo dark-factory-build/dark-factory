@@ -537,7 +537,7 @@ func terminalSafeJSON(dst, encoded []byte) []byte {
 }
 
 func validAttemptTask(task AttemptTask) bool {
-	if !validText(task.Task, 0, 131072) {
+	if !validText(task.Task, 0, kernel.MaxContinuationTaskBytes) {
 		return false
 	}
 	if task.TaskID == "" && task.IncarnationID == "" && task.WorkRevision == 0 && task.ChangeID == "" && task.AdmittedChangeRevision == 0 && task.ChangeRevision == 0 && task.BaseCommit == "" {
