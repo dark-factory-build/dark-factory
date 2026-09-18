@@ -618,7 +618,7 @@ function githubInstallationURL(value: string): boolean {
   try {
     const url = new URL(value);
     const match = /^\/apps\/([A-Za-z0-9._-]{1,100})\/installations\/new$/.exec(url.pathname);
-    return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && match !== null && match[1] !== "." && match[1] !== "..";
+    return url.protocol === "https:" && url.hostname === "github.com" && url.port === "" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && match !== null && match[1] !== "." && match[1] !== "..";
   } catch {
     return false;
   }

@@ -66,6 +66,7 @@ func TestGitHubConnectionResultValidatesNativeInstallationURL(t *testing.T) {
 		"https://github.com/apps/../evil/installations/new",
 		"https://github.com/apps/../installations/new",
 		"https://evil.example/apps/factory/installations/new",
+		"https://github.com:444/apps/factory/installations/new",
 		"javascript:alert(1)",
 	} {
 		value.Installations.InstallationURL = url

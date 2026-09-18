@@ -169,7 +169,7 @@ func validGitHubAuthorizationURL(value string) bool {
 
 func validGitHubInstallationURL(value string) bool {
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "github.com" || parsed.Port() != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return false
 	}
 	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")

@@ -181,7 +181,7 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 
 func nativeGitHubInstallURL(value string) (string, bool) {
 	link, err := url.Parse(value)
-	if err != nil || link.Scheme != "https" || link.Hostname() != "github.com" || link.User != nil || link.RawQuery != "" || link.Fragment != "" || !strings.HasPrefix(link.Path, "/apps/") || !strings.HasSuffix(link.Path, "/installations/new") {
+	if err != nil || link.Scheme != "https" || link.Hostname() != "github.com" || link.Port() != "" || link.User != nil || link.RawQuery != "" || link.Fragment != "" || !strings.HasPrefix(link.Path, "/apps/") || !strings.HasSuffix(link.Path, "/installations/new") {
 		return "", false
 	}
 	parts := strings.Split(strings.TrimPrefix(link.Path, "/"), "/")

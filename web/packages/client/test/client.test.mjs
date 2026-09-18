@@ -71,7 +71,7 @@ test("GitHub settings frames keep the paired admin bridge bounded", () => {
   assert.equal(disconnected.body.repositories.next_page, undefined);
   const nativeInstall = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", installations: { installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } }));
   assert.equal(nativeInstall.body.installations.installation_url, "https://github.com/apps/factory-maintainer/installations/new");
-  for (const url of ["https://evil.example/apps/factory/installations/new", "https://github.com/apps/factory/installations/new?next=evil", "https://github.com/apps/../installations/new", "javascript:alert(1)"]) {
+  for (const url of ["https://evil.example/apps/factory/installations/new", "https://github.com:444/apps/factory/installations/new", "https://github.com/apps/factory/installations/new?next=evil", "https://github.com/apps/../installations/new", "javascript:alert(1)"]) {
     expectMalformed(() => decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", installations: { installations: [], installation_url: url } } })));
   }
   const disconnectPending = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } }));
