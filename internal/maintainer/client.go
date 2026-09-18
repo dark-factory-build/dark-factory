@@ -20,9 +20,10 @@ const Origin = "https://maintainer.darkfactory.build"
 const prefix = "/v1/github/connections"
 
 var (
-	ErrDenied      = errors.New("GitHub connection access expired or was removed; refresh GitHub access")
-	ErrUnavailable = errors.New("GitHub connection unavailable; retry when the Maintainer and GitHub are reachable")
-	ErrInvalid     = errors.New("invalid GitHub connection request or reply")
+	ErrAlreadyConnected = errors.New("GitHub is already connected or pending; check status or disconnect first")
+	ErrDenied           = errors.New("GitHub connection access expired or was removed; refresh GitHub access")
+	ErrUnavailable      = errors.New("GitHub connection unavailable; retry when the Maintainer and GitHub are reachable")
+	ErrInvalid          = errors.New("invalid GitHub connection request or reply")
 )
 
 // Credential is deliberately opaque to operator DTOs, logging and providers.
@@ -34,6 +35,7 @@ func (Credential) GoString() string { return "MaintainerCredential(<redacted>)" 
 type User struct {
 	ID    int64  `json:"id"`
 	Login string `json:"login"`
+	Type  string `json:"type,omitempty"`
 }
 type Delegation struct {
 	InstallationID int64  `json:"installation_id"`
@@ -58,6 +60,7 @@ type Installation struct {
 	RepositorySelection string  `json:"repository_selection"`
 	SuspendedAt         *string `json:"suspended_at"`
 	URL                 string  `json:"html_url,omitempty"`
+	Eligibility         string  `json:"eligibility"`
 }
 type Repository struct {
 	ID          int64  `json:"id"`
@@ -111,10 +114,21 @@ func (client *Client) Status(ctx context.Context, credential Credential) (Status
 	if err != nil {
 		return Status{}, err
 	}
-	if result.ConnectionID != credential.id || (result.State != "connected" && result.State != "pending" && result.State != "disconnected") {
+	if result.ConnectionID != credential.id || (result.State != "connected" && result.State != "pending" && result.State != "awaiting_confirmation" && result.State != "disconnected") {
 		return Status{}, ErrInvalid
 	}
 	return result, nil
+}
+
+// Confirm transfers the one-time code from the GitHub callback browser to the
+// initiating host. An authorization URL by itself cannot activate a factory.
+func (client *Client) Confirm(ctx context.Context, credential Credential, code string) error {
+	if len(code) == 0 || len(code) > 64 {
+		return ErrInvalid
+	}
+	return client.request(ctx, credential, http.MethodPost, prefix+"/"+credential.id+"/confirm", struct {
+		Code string `json:"code"`
+	}{code}, nil)
 }
 func (client *Client) Installations(ctx context.Context, credential Credential, page int) (Installations, error) {
 	var result Installations
