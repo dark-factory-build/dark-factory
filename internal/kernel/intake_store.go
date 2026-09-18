@@ -34,7 +34,8 @@ func scanIntakeSource(scanner rowScanner) (IntakeSource, bool, error) {
 	at, e6 := NewUnixMillis(created)
 	changed, e7 := NewUnixMillis(updated)
 	value := IntakeSource{ID: id, GitHubRepositoryID: uint64(repositoryID), GitHubRepositoryName: name, ProjectID: project, TargetRepositoryID: target, OverseerAgentID: agent, LabelFilter: label, Enabled: enabled == 1, Policy: IntakePolicy(policy), PollSeconds: uint32(poll), AdmissionLimit: uint16(limit), Revision: rev, CreatedAt: at, UpdatedAt: changed}
-	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil || repositoryID < 1 || poll < 0 || limit < 0 || enabled < 0 || enabled > 1 || !validIntakeSource(value) {
+	// The complete source is validated after its trusted-login child rows load.
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil || repositoryID < 1 || poll < 5 || poll > 86400 || limit < 1 || limit > 200 || enabled < 0 || enabled > 1 {
 		return IntakeSource{}, false, ErrCorruptState
 	}
 	return value, true, nil

@@ -316,3 +316,49 @@ func TestPendingIntakeAcceptancesSkipsSupersededWithdrawnAndImportedReceipts(t *
 		t.Fatal("content edit did not create a distinct receipt")
 	}
 }
+
+func TestTrustedIntakeSourcePersistsAndValidatesAuthorsAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	store, path := newTestStore(t)
+	defer store.Close()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 245), Name: "trusted intake", Root: "/trusted-intake"}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{246}, IDBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := NewIntakeSource{ID: id, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), Policy: IntakePolicyTrustedAuthors, TrustedGitHubLogins: []string{"Maintainer"}, PollSeconds: 60, AdmissionLimit: 25}
+	source, err := store.CreateIntakeSource(ctx, spec, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source.TrustedGitHubLogins) != 1 || source.TrustedGitHubLogins[0] != "maintainer" {
+		t.Fatalf("trusted authors: %+v", source)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sources, err := store.ProjectIntakeSources(ctx, project.ID)
+	if err != nil || len(sources) != 1 || sources[0].Policy != IntakePolicyTrustedAuthors || len(sources[0].TrustedGitHubLogins) != 1 {
+		t.Fatalf("reopened trusted source: %+v %v", sources, err)
+	}
+	spec.TrustedGitHubLogins = []string{"reviewer"}
+	source, err = store.UpdateIntakeSource(ctx, id, source.Revision, spec, false, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(source.TrustedGitHubLogins) != 1 || source.TrustedGitHubLogins[0] != "reviewer" {
+		t.Fatalf("changed authors: %+v", source)
+	}
+	corruptSQL(t, store, `DELETE FROM intake_source_trusted_logins WHERE source_id = ?`, id.Bytes())
+	if _, _, err := store.IntakeSource(ctx, id); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("missing trusted authors accepted: %v", err)
+	}
+}
