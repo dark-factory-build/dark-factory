@@ -106,4 +106,11 @@ if __name__ == '__main__':
         deploy(args.sha, args.home)
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
         print('deploy-runtime: ' + str(error), file=sys.stderr)
+        cause = error.__cause__ or error
+        if isinstance(cause, subprocess.SubprocessError):
+            # The failing stage and its output are the only evidence of why. The
+            # stage goes last and the output uncut: the release controller
+            # redacts whole labels and then keeps the tail.
+            print(str(cause.stderr or '') + '\nstage: ' + ' '.join(Path(str(arg)).name for arg in cause.cmd[:5])
+                  + ' exit=' + str(getattr(cause, 'returncode', 'timeout')), file=sys.stderr)
         raise SystemExit(1)

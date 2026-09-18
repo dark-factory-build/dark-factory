@@ -368,6 +368,8 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                     self.assertNotEqual(0, result.returncode)
                     self.assertEqual('', result.stdout)
                     self.assertIn('fixture dispatch refused', result.stderr)
+                    self.assertIn('stage: factoryctl dispatch ' + failing_action + ' --revision', result.stderr)
+                    self.assertIn(' exit=7', result.stderr)
                 else:
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual({'sha': 'a' * 40, 'healthy': True, 'dispatch_enabled': initially_enabled}, json.loads(result.stdout))
@@ -480,6 +482,19 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
             with self.assertRaisesRegex(ValueError, 'dispatch remains off; service_reachable=true'):
                 deploy.deploy('a' * 40)
         receipt.assert_called_once_with('a' * 40, True)
+
+
+class DeployStageEvidence(unittest.TestCase):
+    def test_failed_stage_output_is_passed_up_uncut_with_the_stage_last(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'factory').mkdir()
+            (root / 'deploy-runtime.py').write_text(Path(deploy.__file__).read_text())
+            (root / 'reinstall-service.sh').write_text('printf "first line\\n%03000d\\nlast line\\n" 0 >&2\nexit 3\n')
+            result = subprocess.run([sys.executable, str(root / 'deploy-runtime.py'), '--home', str(root / 'factory'), 'a' * 40], capture_output=True, text=True, timeout=15)
+        self.assertEqual(1, result.returncode)
+        self.assertIn('first line\n', result.stderr)
+        self.assertTrue(result.stderr.endswith('last line\n\nstage: sh reinstall-service.sh --home factory --prepare exit=3\n'), result.stderr[-120:])
 
 
 if __name__ == '__main__':

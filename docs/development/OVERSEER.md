@@ -410,7 +410,9 @@ again. Before review, replace its body under `opid "$change_id"
 "body-$HEAD8"`. Build a fresh body in the repository's shape, including
 what changed and why and verification, and restate its **cumulative**
 production-line delta from the review merge base to `HEAD_SHA`; never append
-only the follow-up commit's delta. Fetch the new head and calculate that base
+only the follow-up commit's delta. Name the full `HEAD_SHA` in the body and
+claim only checks run on it: host intake launches no review while the body
+does not name the exact head, and wakes you to replace it. Fetch the new head and calculate that base
 and numstat directly:
 
 ```sh
@@ -462,7 +464,8 @@ human request, not a retry.
 
 - What changed and why: from the task and the diff, in prose.
 - Production-line delta: added minus deleted outside tests, docs and fixtures,
-  from the numstat, with the largest files named.
+  from the numstat to the full `HEAD_SHA`, which the body must name, with the
+  largest files named.
 - How it was verified: what the worker's result text says it ran, and that
   the merge queue runs the selected `scripts/local-ci.sh` mode on the combined
   tree. Claim nothing you did not see.
@@ -501,12 +504,14 @@ unavailable read-only checks are deferred delivery conditions, not defects.
 - Unresolved: observe the supplied operation and report its concrete host
   infrastructure failure. Do not manufacture a verdict or start another review.
 - ALLOW: `enqueue_pull_request` with `opid "$change_id" enqueue-HEAD8`, the PR number, the head
-  and `base = main`. Then `observe_pull_request_merge`, with the PR number,
-  the head, `base = main` and the enqueue operation id, every 60 s for up to
-  30 minutes;
-  never faster. Merged: done. Still queued after 30 minutes: the change is
-  not finished; raise a human request naming the PR and stop, and the next
-  run observes it again. No longer queued and not merged:
+  and `base = main`. Then `observe_pull_request_merge` once, with the PR number,
+  the head, `base = main` and the enqueue operation id. Merged: done. Still
+  queued: record the PR and enqueue operation in your checkpoint and move on
+  or exit; never sleep or re-observe unchanged CI, queue or deployment state
+  in this run. The overseer slot is single, so a waiting run blocks every
+  queued coordination task. Host intake re-observes the queue each pass and
+  wakes you when the entry drops; delivery wakes you once the merged
+  deployment is verified. No longer queued and not merged:
   the queue's run failed or dropped the entry, and the App cannot read a
   queue run's log or rerun it (`read_pull_request_job_log` and
   `rerun_failed_pull_request_jobs` bind to the pull request's own runs), so

@@ -22,7 +22,11 @@ up the selected home’s `factory.sqlite3` to
 `$HOME/.dark-factory-backups/<utc-timestamp>-<sha>.<unique>/`, then runs
 `factoryctl service uninstall` and `service install` with the new binaries,
 waits (bounded) for the previous daemon to leave and for the new one to accept
-on its socket, and prints service, web and remote status. It refuses to run
+on its socket, and prints service, web and remote status. The service keeps
+its recorded `--tool-path` and `--toolchain-read-roots`; set
+`DARK_FACTORY_TOOL_PATH` and `DARK_FACTORY_TOOLCHAIN_READ_ROOTS` to replace
+them, for example to add `~/.cargo/bin` and `~/.rustup` so workers can run the
+control-plane's Rust gates. It refuses to run
 unless dispatch is off and every non-terminal run is one the new daemon can
 adopt, checked once before the build and again right before the uninstall. A
 run is adoptable when it is `running` and its runner still publishes

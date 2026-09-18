@@ -177,7 +177,7 @@ class ReviewIntakeTest(unittest.TestCase):
                 review.mirror(self.config)
 
     def test_one_launch_per_pass_and_uncertain_result_is_observed_not_replayed(self):
-        prs = [{'number': n, 'headRefOid': SHA, 'body': 'Refs #7'} for n in (9, 10)]
+        prs = [{'number': n, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'} for n in (9, 10)]
         def ready(_config, _path, pr, _issue):
             return dict(self.operation, pr=pr['number'])
         self.observe.return_value = 'missing'
@@ -195,10 +195,31 @@ class ReviewIntakeTest(unittest.TestCase):
         receipts = json.loads(Path(self.config['journal'] + '.reviews.json').read_text())['pulls']
         self.assertTrue(all(v['review_attempted'] and v['review_state'] == 'unresolved' for v in receipts.values()))
 
+    def test_body_naming_a_predecessor_head_wakes_overseer_without_spending_a_review(self):
+        self.observe.return_value = 'missing'
+        prs = [{'number': 9, 'headRefOid': SHA, 'body': 'published head ' + 'b' * 40 + '\nRefs #7'}]
+        with patch.object(review, 'mirror', return_value=Path('/mirror/o/r')), patch.object(review, 'list_prs', return_value=prs), \
+             patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
+             patch.object(review, 'launch_review', return_value=0) as launch, \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'succeeded'}, None, {'status': 'queued'}]), \
+             patch.object(review.intake, 'enqueue') as enqueue:
+            self.assertEqual(['woke PR #9 stale body'], review.run_once(self.config))
+            self.assertEqual([], review.run_once(self.config))
+            prs[0]['body'] = 'rewritten, head still missing\nRefs #7'
+            self.assertEqual(['woke PR #9 stale body'], review.run_once(self.config))
+            self.assertNotEqual(*[call.args[1]['task_id'] for call in enqueue.call_args_list])
+            launch.assert_not_called()
+            prs[0]['body'] = 'published head ' + SHA + '\nRefs #7'
+            review.run_once(self.config)
+        self.assertEqual(1, launch.call_count)
+        self.assertEqual(2, enqueue.call_count)
+        self.assertIn('does not name this exact head', enqueue.call_args.args[1]['body'])
+        self.assertIn(SHA, enqueue.call_args.args[1]['body'])
+
     def test_block_is_completed_review_and_lost_wakeup_does_not_repeat_launch(self):
         self.observe.side_effect = ['missing', 'block', 'block']
         with patch.object(review, 'mirror', return_value=Path('/mirror/o/r')), \
-             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': 'Refs #7'}]), \
+             patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': SHA + '\nRefs #7'}]), \
              patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
              patch.object(review, 'launch_review', return_value=1) as launch, \
              patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}]), \
@@ -212,7 +233,7 @@ class ReviewIntakeTest(unittest.TestCase):
 
     def test_verified_body_update_starts_one_independent_correction(self):
         old_body = 'stale body\nRefs #7\n'
-        new_body = '111+ / 3- production delta\n' + ('x' * 80) + '\nRefs #7\n'
+        new_body = '111+ / 3- production delta to ' + SHA + '\n' + ('x' * 80) + '\nRefs #7\n'
         operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
         receipt = {'version': 2, 'config_fingerprint': review.config_fingerprint(self.config),
                    'pulls': {'9:' + SHA: operation}}

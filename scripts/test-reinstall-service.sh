@@ -421,6 +421,11 @@ before_builds=$(wc -l <"$DARK_FACTORY_TEST_GO_LOG")
 grep -Fqx "service uninstall --home $custom_home --label com.dark-factory.other --plist-dir /private/tmp/custom plists" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" || fail "wrong configured uninstall"
 grep -Fqx "service install --home $custom_home --label com.dark-factory.other --plist-dir /private/tmp/custom plists --relay-origin wss://other.example --tool-path /tools with spaces:/bin --toolchain-read-roots /tool roots:/sdk --development-browser-address 127.0.0.1:4173" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" || fail "configured settings lost"
 rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
+# The operator can replace the recorded toolchain grant, e.g. to add Rust.
+DARK_FACTORY_TOOL_PATH="/cargo/bin:/bin" DARK_FACTORY_TOOLCHAIN_READ_ROOTS="/cargo/bin:/rustup home" "$script" --home "$custom_home" --install-prepared "$sha" >/dev/null 2>"$temporary/stderr" \
+    || fail "toolchain override installation: $(cat "$temporary/stderr")"
+grep -Fq -- "--tool-path /cargo/bin:/bin --toolchain-read-roots /cargo/bin:/rustup home --development-browser-address" "$DARK_FACTORY_TEST_FACTORYCTL_LOG" || fail "toolchain override ignored"
+rm "$DARK_FACTORY_TEST_FACTORYCTL_LOG"
 DARK_FACTORY_TEST_BUILD_ID=wrong "$script" --prepare "$sha" >/dev/null 2>"$temporary/stderr" \
     && fail "incorrect build receipt accepted"
 grep -q 'build receipt mismatch' "$temporary/stderr" || fail "wrong build receipt refusal"
