@@ -380,11 +380,19 @@ func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
+	client := humanQuestionClient(t, store, 241, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
 	first, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(40), QuestionText: "already waiting"}, mustTime(t, 400))
 	if err != nil {
 		t.Fatal(err)
 	}
-	reused, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(41), QuestionText: "turn completed", ReuseExisting: true}, mustTime(t, 401))
+	delivery, err := store.BeginHumanReply(ctx, client.ID, first.ID, first.Revision, humanDeliveryID(t, 42), "acknowledged", mustTime(t, 401))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcknowledgeHumanReply(ctx, first.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(41), QuestionText: "turn completed", ReuseExisting: true}, mustTime(t, 403))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,8 +403,8 @@ func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.HumanRequests) != 1 {
-		t.Fatalf("snapshot requests = %d, want 1", len(snapshot.HumanRequests))
+	if len(snapshot.HumanRequests) != 0 {
+		t.Fatalf("snapshot requests = %d, want no new open request", len(snapshot.HumanRequests))
 	}
 }
 
