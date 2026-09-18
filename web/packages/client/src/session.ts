@@ -1004,6 +1004,12 @@ export class BrowserSession {
         github.reject(new SessionError(frame.body.code, frame.body.retryable));
         return;
       }
+      const intake = this.#intakePending.get(id);
+      if (intake !== undefined) {
+        this.#intakePending.delete(id);
+        intake.reject(new SessionError(frame.body.code, frame.body.retryable));
+        return;
+      }
     }
     if (id !== undefined && this.#anyTerminal((handle) => handle.receiveError(id, new SessionError(frame.body.code, frame.body.retryable)))) return;
     if (id !== undefined) {

@@ -182,3 +182,29 @@ test("project settings discard private content and fence old replies across reco
   await oldRead;
   assert.equal(coordinator.intake.get("project").sources[0].repository, "current/source");
 });
+
+test("failed preview cannot enable and reaccepting clears an older withdrawal receipt", async () => {
+  const source = { id: "01".repeat(16), revision: 2n, repository: "example/source", enabled: false };
+  const oldCandidate = { number: 1n, acceptance_id: "02".repeat(16), reason: "content_changed" };
+  let previewFails = false;
+  const session = { capabilities: 1, clientId: "client", async intake(request) {
+    if (request.action === "list") return { state: "ok", sources: [source] };
+    if (request.action === "preview") return previewFails ? { state: "unavailable" } : { state: "ok", reviewed_revision: 2n, candidates: [oldCandidate] };
+    if (request.action === "accept") return { state: "accepted", acceptance_id: "03".repeat(16) };
+    throw new Error(request.action);
+  } };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish() {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.loadIntake("project");
+  await coordinator.intakeAction("project", { action: "preview", source_id: source.id, page: 1 });
+  assert.equal(coordinator.intake.get("project").reviewed_revision, 2n);
+  previewFails = true;
+  await coordinator.intakeAction("project", { action: "preview", source_id: source.id, page: 1 });
+  assert.equal(coordinator.intake.get("project").reviewed_revision, undefined);
+  assert.equal(coordinator.intake.get("project").candidates, undefined);
+  previewFails = false;
+  await coordinator.intakeAction("project", { action: "preview", source_id: source.id, page: 1 });
+  await coordinator.intakeAction("project", { action: "accept", source_id: source.id, expected_revision: 2n, issue_number: 1n, content_hash: "ab".repeat(32) });
+  assert.equal(coordinator.intake.get("project").candidates, undefined);
+  assert.equal(coordinator.intake.get("project").reviewed_revision, undefined);
+});

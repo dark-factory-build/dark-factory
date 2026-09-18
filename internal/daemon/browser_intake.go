@@ -14,11 +14,27 @@ func (backend *browserBackend) Intake(ctx context.Context, rawClient [browserpro
 	if err != nil {
 		return browserprotocol.IntakeResult{}, err
 	}
-	defer release()
+	// A preview may wait on GitHub. It has no local effect, so let state reads
+	// and revocation proceed while it is in flight. A new preview still needs
+	// fresh authorization; writes retain the gate through their effect.
+	readOnly := request.Action == "list" || request.Action == "preview" || request.Action == "refresh"
+	if readOnly {
+		release()
+	} else {
+		defer release()
+	}
 	if backend.owner == nil {
 		return browserprotocol.IntakeResult{}, fmt.Errorf("intake is unavailable")
 	}
-	return browserIntakeResult(backend.owner.Intake(ctx, browserIntakeInput(request))), nil
+	result := backend.owner.Intake(ctx, browserIntakeInput(request))
+	if readOnly {
+		_, release, _, err = backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+		if err != nil {
+			return browserprotocol.IntakeResult{}, err
+		}
+		release()
+	}
+	return browserIntakeResult(result), nil
 }
 
 func browserIntakeInput(value browserprotocol.Intake) api.IntakeInput {

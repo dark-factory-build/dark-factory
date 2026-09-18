@@ -113,8 +113,8 @@ export class FactorySettingsCoordinator {
         ...prior,
         ...result,
         ...(sources === undefined ? {} : { sources }),
-        ...(result.candidates === undefined && request.action !== "update" ? prior?.candidates === undefined ? {} : { candidates: prior.candidates } : {}),
-        ...(request.action === "update" ? { candidates: undefined, reviewed_revision: undefined } : {}),
+        ...(result.candidates === undefined && !["update", "accept", "preview", "refresh"].includes(request.action) ? prior?.candidates === undefined ? {} : { candidates: prior.candidates } : {}),
+        ...(["update", "accept"].includes(request.action) || (["preview", "refresh"].includes(request.action) && result.state !== "ok") ? { candidates: undefined, reviewed_revision: undefined, next_page: undefined } : {}),
         ...(result.imported_tasks === undefined ? { imported_tasks: [] } : {}),
       }));
       this.#intakeErrors.delete(projectId);

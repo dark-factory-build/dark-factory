@@ -2283,3 +2283,16 @@ test("library numeric bounds match the Go wire contract", () => {
   session.close();
   await assert.rejects(session.intake({ action: "list", project_id: "01".repeat(16) }), (error) => error.code === "closed");
 });
+
+test("a refused intake request stays scoped to that request", async () => {
+  const { session, socket } = await openHumanSession(undefined, CAPABILITIES.observe | CAPABILITIES.administration);
+  const first = session.intake({ action: "list", project_id: "01".repeat(16) });
+  const request = lastFrame(socket, "INTAKE");
+  socket.reply(encodeServerError({ code: "rate_limited", retryable: true }, request.id));
+  await assert.rejects(first, (error) => error.code === "rate_limited" && error.retryable);
+  assert.equal(session.status, "ready");
+  const next = session.intake({ action: "list", project_id: "01".repeat(16) });
+  assert.equal(lastFrame(socket, "INTAKE").type, "INTAKE");
+  session.close();
+  await assert.rejects(next, (error) => error.code === "closed");
+});
