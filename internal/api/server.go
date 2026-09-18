@@ -43,6 +43,7 @@ const (
 	CallPeerAsk
 	CallPeerAnswer
 	CallTerminalObserve
+	CallOperatorTerminalObserve
 	CallSendBack
 	CallSendBackTask
 	CallTaskRecovery
@@ -259,7 +260,7 @@ func (call Call) PeerAnswerInput() (PeerAnswerInput, bool) {
 	return call.peerAnswer, call.kind == CallPeerAnswer
 }
 func (call Call) TerminalObserveInput() (TerminalObserveInput, bool) {
-	return call.terminalObserve, call.kind == CallTerminalObserve
+	return call.terminalObserve, call.kind == CallTerminalObserve || call.kind == CallOperatorTerminalObserve
 }
 func (call Call) PeerStatusPage() (uint64, uint64, uint64, bool, bool) {
 	return call.peerStatusOffset, call.peerTargetOffset, call.peerExpectedHead, call.peerIncludeTargets, call.kind == CallPeerStatus
@@ -854,7 +855,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.peerAnswer); err != nil || !validID(call.peerAnswer.QuestionID) || !validID(call.peerAnswer.IdempotencyKey) || call.peerAnswer.ExpectedRevision == 0 || !validText(call.peerAnswer.Answer, 1, 2048) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallTerminalObserve:
+	case CallTerminalObserve, CallOperatorTerminalObserve:
 		if err := decodeExact(request.Params, &call.terminalObserve); err != nil || !validTerminalObservationInput(call.terminalObserve) {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -1020,6 +1021,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallPeerAnswer, attemptDomain
 	case "terminal_observe":
 		return CallTerminalObserve, attemptDomain
+	case "operator_terminal_observe":
+		return CallOperatorTerminalObserve, operatorDomain
 	case "send_back":
 		return CallSendBack, attemptDomain
 	case "send_back_task":
@@ -1183,6 +1186,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 	case CallTaskRecovery:
 		return reply == replyTaskRecovery
 	case CallTerminalObserve:
+		return reply == replyTerminalObservation
+	case CallOperatorTerminalObserve:
 		return reply == replyTerminalObservation
 	case CallPeerStatus:
 		return reply == replyPeerStatus

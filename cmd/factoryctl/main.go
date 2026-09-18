@@ -128,6 +128,7 @@ const (
 	commandSendBack
 	commandAttemptTask
 	commandTerminalObserve
+	commandOperatorTerminalObserve
 	commandAttemptSource
 	commandWebStatus
 	commandWebListClients
@@ -582,6 +583,13 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 1 && args[0] == "remote" {
 		return parseRemote(args)
+	}
+	if len(args) >= 1 && args[0] == "terminal" {
+		parsed, help, ok := parse(append([]string{"attempt"}, args...))
+		if ok && parsed.kind == commandTerminalObserve {
+			parsed.kind = commandOperatorTerminalObserve
+		}
+		return parsed, help, ok
 	}
 	if len(args) < 2 || args[0] != "attempt" && args[0] != "web" {
 		return attemptCommand{}, false, false
@@ -1850,7 +1858,7 @@ func writeFailure(stderr io.Writer, kind commandKind, err error) {
 		subject = "task request"
 	} else if kind == commandAttemptSource {
 		subject, input = "source request", "source request input"
-	} else if kind == commandTerminalObserve {
+	} else if kind == commandTerminalObserve || kind == commandOperatorTerminalObserve {
 		subject, input = "terminal observation", "terminal observation input"
 	} else if kind == commandRequestHuman {
 		subject, input = "human request", "human request input"
@@ -1918,6 +1926,18 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "status", callErr)
 		}
 		return writeJSON(stdout, snapshot)
+	case commandOperatorTerminalObserve:
+		result, callErr := client.TerminalObserve(callContext, api.TerminalObserveInput{ProjectID: command.project, TaskID: command.id, RunID: command.run, Cursor: command.offset, MaxBytes: command.maxBytes})
+		if callErr != nil {
+			writeFailure(stderr, command.kind, callErr)
+			return exitFailure
+		}
+		encoded, err := result.MarshalDisplayJSON()
+		if err != nil {
+			writeFailure(stderr, command.kind, err)
+			return exitFailure
+		}
+		return writeJSON(stdout, json.RawMessage(encoded))
 	case commandHumanList:
 		result, callErr := client.HumanRequests(callContext)
 		if callErr != nil {

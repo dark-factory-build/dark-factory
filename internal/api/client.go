@@ -110,6 +110,20 @@ func (client *OperatorClient) WebStatus(ctx context.Context) (WebStatus, error) 
 	return result, nil
 }
 
+func (client *OperatorClient) TerminalObserve(ctx context.Context, input TerminalObserveInput) (TerminalObservation, error) {
+	if !validTerminalObservationInput(input) {
+		return TerminalObservation{}, ErrInvalidInput
+	}
+	var result TerminalObservation
+	if err := client.client.call(ctx, "operator_terminal_observe", input, &result); err != nil {
+		return TerminalObservation{}, err
+	}
+	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
+		return TerminalObservation{}, ErrProtocol
+	}
+	return result, nil
+}
+
 func (client *OperatorClient) WebListClients(ctx context.Context, after string) (WebClientPage, error) {
 	if after != "" && !validID(after) {
 		return WebClientPage{}, ErrInvalidInput

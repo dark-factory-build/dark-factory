@@ -234,6 +234,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.peerAnswer(ctx, call)
 	case api.CallTerminalObserve:
 		return daemon.terminalObserve(ctx, call)
+	case api.CallOperatorTerminalObserve:
+		return daemon.operatorTerminalObserve(ctx, call)
 	case api.CallSendBack, api.CallSendBackTask:
 		return daemon.sendBack(ctx, call)
 	case api.CallOverseerSnapshot:

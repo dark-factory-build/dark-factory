@@ -88,14 +88,48 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 	if !found || run.Phase != kernel.RunRunning {
 		return newErrorReply(api.RemoteConflict)
 	}
-	session, found, err := daemon.store.TerminalSessionForRun(ctx, runID)
+	return daemon.readTerminalObservation(ctx, input, run)
+}
+
+func (daemon *Daemon) operatorTerminalObserve(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.TerminalObserveInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	project, err := parseProjectID(input.ProjectID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	task, err := parseTaskID(input.TaskID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	runID, err := parseRunID(input.RunID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	run, found, err := daemon.store.Run(ctx, runID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found || run.ProjectID != project || run.TaskID != task {
+		return newErrorReply(api.RemoteForbidden)
+	}
+	if run.Phase != kernel.RunRunning {
+		return newErrorReply(api.RemoteConflict)
+	}
+	return daemon.readTerminalObservation(ctx, input, run)
+}
+
+func (daemon *Daemon) readTerminalObservation(ctx context.Context, input api.TerminalObserveInput, run kernel.Run) api.Reply {
+	session, found, err := daemon.store.TerminalSessionForRun(ctx, run.ID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	if !found {
 		return newErrorReply(api.RemoteNotFound)
 	}
-	attachment, err := daemon.AttachTerminal(ctx, runID, session.ID, run.Revision, session.Revision, input.Cursor)
+	attachment, err := daemon.AttachTerminal(ctx, run.ID, session.ID, run.Revision, session.Revision, input.Cursor)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
