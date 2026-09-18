@@ -201,15 +201,18 @@ class ReviewIntakeTest(unittest.TestCase):
         with patch.object(review, 'mirror', return_value=Path('/mirror/o/r')), patch.object(review, 'list_prs', return_value=prs), \
              patch.object(review, 'ready', return_value=self.operation), patch.object(review, 'verify_existing'), \
              patch.object(review, 'launch_review', return_value=0) as launch, \
-             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'queued'}, {'status': 'queued'}]), \
+             patch.object(review.intake, 'task_state', side_effect=[None, {'status': 'succeeded'}, None, {'status': 'queued'}]), \
              patch.object(review.intake, 'enqueue') as enqueue:
             self.assertEqual(['woke PR #9 stale body'], review.run_once(self.config))
             self.assertEqual([], review.run_once(self.config))
+            prs[0]['body'] = 'rewritten, head still missing\nRefs #7'
+            self.assertEqual(['woke PR #9 stale body'], review.run_once(self.config))
+            self.assertNotEqual(*[call.args[1]['task_id'] for call in enqueue.call_args_list])
             launch.assert_not_called()
             prs[0]['body'] = 'published head ' + SHA + '\nRefs #7'
             review.run_once(self.config)
         self.assertEqual(1, launch.call_count)
-        self.assertEqual(1, enqueue.call_count)
+        self.assertEqual(2, enqueue.call_count)
         self.assertIn('does not name this exact head', enqueue.call_args.args[1]['body'])
         self.assertIn(SHA, enqueue.call_args.args[1]['body'])
 

@@ -63,7 +63,7 @@ def run(argv, timeout=60, env=None):
     return stdout
 
 
-SECRET = re.compile(r"(?i)(authorization|bearer|api[_-]?key|password|token|secret)(\W{1,4})\S+|\b(gh[pousr]_|github_pat_)\w+")
+SECRET = re.compile(r"(?i)(authorization|bearer|api[_-]?key|password|token|secret)(\W{1,4})(?:bearer\s+)?\S+|\b(gh[pousr]_|github_pat_)\w+")
 
 
 def failure_tail(stderr):

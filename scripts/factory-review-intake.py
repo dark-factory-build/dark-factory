@@ -433,7 +433,7 @@ def review_followup(config, operation, state):
                    "Its outcome is unresolved. Observe that same operation; never replay the write or derive a replacement id. "))
     elif state == "block":
         action = "Read that exact operation and its GitHub review; route blocking findings to the original task. "
-    elif state == "stale-body":
+    elif state.startswith("stale-body:"):
         action = ("No review was launched: the pull request body does not name this exact head, so it describes a predecessor. Replace the body with update_pull_request_body, "
                   "stating this head, the cumulative production-line delta to it and only checks run on it; keep the standalone source-issue footer. Host intake reviews it on its next pass. ")
     else:
@@ -544,7 +544,8 @@ def run_locked(config, path, journal, journal_path):
             if operation["head"] not in pr["body"]:
                 # The body still describes a predecessor head. A review would
                 # only block on it, so wake the overseer and wait for the body.
-                followup = review_followup(config, operation, "stale-body")
+                # One wake per distinct body: a rewrite that still omits the head wakes again.
+                followup = review_followup(config, operation, "stale-body:" + hashlib.sha256(pr["body"].encode()).hexdigest()[:8])
                 if intake.task_state(config, followup) is None:
                     intake.enqueue(config, followup)
                     messages.append("woke PR #" + str(pr["number"]) + " stale body")
