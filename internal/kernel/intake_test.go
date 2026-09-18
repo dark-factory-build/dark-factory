@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -140,6 +141,58 @@ func TestIntakeSourceValidationRejectsUnstableConfiguration(t *testing.T) {
 				t.Fatal("accepted invalid source")
 			}
 		})
+	}
+}
+
+func TestIntakeSourceTrustedAuthorLimit(t *testing.T) {
+	source := intakeSourceForTest(t, IntakePolicyTrustedAuthors)
+	source.TrustedGitHubLogins = make([]string, maxTrustedGitHubLogins)
+	for index := range source.TrustedGitHubLogins {
+		source.TrustedGitHubLogins[index] = fmt.Sprintf("reviewer%02d", index)
+	}
+	if !validIntakeSource(source) {
+		t.Fatal("trusted-author limit rejected")
+	}
+	source.TrustedGitHubLogins = append(source.TrustedGitHubLogins, "reviewer26")
+	if validIntakeSource(source) {
+		t.Fatal("trusted-author overflow accepted")
+	}
+}
+
+func TestCreateIntakeSourceCapsGlobalSourcesAfterExactReplay(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	defer store.Close()
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 247), Name: "source cap", Root: "/source-cap"}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	specification := func(index int) NewIntakeSource {
+		raw := make([]byte, IDBytes)
+		raw[0], raw[1] = byte(index+1), byte((index+1)>>8)
+		id, err := IntakeSourceIDFromBytes(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NewIntakeSource{ID: id, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), LabelFilter: fmt.Sprintf("source-%d", index), Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}
+	}
+	var last NewIntakeSource
+	for index := 0; index < globalMaxIntakeSources; index++ {
+		last = specification(index)
+		if _, err := store.CreateIntakeSource(ctx, last, mustTime(t, int64(index+2))); err != nil {
+			t.Fatalf("source %d: %v", index+1, err)
+		}
+	}
+	replay, err := store.CreateIntakeSource(ctx, last, mustTime(t, 1000))
+	if err != nil || replay.ID != last.ID {
+		t.Fatalf("200th source replay = %+v, %v", replay, err)
+	}
+	if _, err := store.CreateIntakeSource(ctx, specification(globalMaxIntakeSources), mustTime(t, 1001)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("201st source = %v, want conflict", err)
+	}
+	sources, err := store.IntakeSources(ctx)
+	if err != nil || len(sources) != globalMaxIntakeSources {
+		t.Fatalf("source count = %d, %v", len(sources), err)
 	}
 }
 

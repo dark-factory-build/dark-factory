@@ -15,6 +15,8 @@ const (
 	maxIntakeLabelBytes          = 100
 	maxIntakeTitleBytes          = 900
 	maxIntakeBodyBytes           = 5000
+	maxTrustedGitHubLogins       = 25
+	globalMaxIntakeSources       = 200
 )
 
 // IntakePolicy decides whether the first observed content snapshot can enter
@@ -157,6 +159,9 @@ func validIntakeSource(value IntakeSource) bool {
 		return false
 	}
 	if value.LabelFilter != "" && !validBoundedIntakeText(value.LabelFilter, 1, maxIntakeLabelBytes) {
+		return false
+	}
+	if len(value.TrustedGitHubLogins) > maxTrustedGitHubLogins {
 		return false
 	}
 	seen := make(map[string]bool, len(value.TrustedGitHubLogins))

@@ -224,9 +224,24 @@ func (store *Store) CreateIntakeSource(ctx context.Context, spec NewIntakeSource
 		return IntakeSource{}, err
 	}
 	defer tx.Close()
-	if _, found, err := intakeSourceByID(ctx, tx.connection, value.ID); err != nil {
+	existing, found, err := intakeSourceByID(ctx, tx.connection, value.ID)
+	if err != nil {
 		return IntakeSource{}, tx.Rollback(err)
-	} else if found {
+	}
+	if found {
+		if intakeSourceMatchesCreation(existing, value) {
+			if err := tx.Rollback(nil); err != nil {
+				return IntakeSource{}, err
+			}
+			return existing, nil
+		}
+		return IntakeSource{}, tx.Rollback(ErrConflict)
+	}
+	var sourceCount int
+	if err := tx.connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM intake_sources`).Scan(&sourceCount); err != nil {
+		return IntakeSource{}, tx.Rollback(err)
+	}
+	if sourceCount >= globalMaxIntakeSources {
 		return IntakeSource{}, tx.Rollback(ErrConflict)
 	}
 	if err := validateIntakeSourceRoute(ctx, tx.connection, value); err != nil {
@@ -251,6 +266,22 @@ func (store *Store) CreateIntakeSource(ctx context.Context, spec NewIntakeSource
 		return IntakeSource{}, err
 	}
 	return result, nil
+}
+
+func intakeSourceMatchesCreation(existing, value IntakeSource) bool {
+	if existing.GitHubRepositoryID != value.GitHubRepositoryID || existing.GitHubRepositoryName != value.GitHubRepositoryName || existing.ProjectID != value.ProjectID || existing.TargetRepositoryID != value.TargetRepositoryID || existing.OverseerAgentID != value.OverseerAgentID || existing.LabelFilter != value.LabelFilter || existing.Enabled || existing.Policy != value.Policy || existing.PollSeconds != value.PollSeconds || existing.AdmissionLimit != value.AdmissionLimit || existing.Revision.Int64() != 1 || existing.UpdatedAt != existing.CreatedAt || len(existing.TrustedGitHubLogins) != len(value.TrustedGitHubLogins) {
+		return false
+	}
+	seen := make(map[string]bool, len(existing.TrustedGitHubLogins))
+	for _, login := range existing.TrustedGitHubLogins {
+		seen[strings.ToLower(login)] = true
+	}
+	for _, login := range value.TrustedGitHubLogins {
+		if !seen[strings.ToLower(login)] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateIntakeSourceRoute(ctx context.Context, connection *sql.Conn, source IntakeSource) error {
