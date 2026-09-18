@@ -11,11 +11,25 @@ import (
 )
 
 func TestProtectSourceWritesFencesSharedGitAndKeepsPrivateChangeUsable(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		name := "separate-roots"
+		if nested {
+			name = "nested-roots"
+		}
+		t.Run(name, func(t *testing.T) { checkSourceWriteFence(t, nested) })
+	}
+}
+
+func checkSourceWriteFence(t *testing.T, nested bool) {
+	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	repository, changes := filepath.Join(root, "repository"), filepath.Join(root, "changes")
+	if nested {
+		changes = filepath.Join(repository, "changes")
+	}
 	source, sibling := filepath.Join(changes, "a"), filepath.Join(changes, "b")
 	gitDirectory := filepath.Join(repository, ".git", "dark-factory-changes", "a", ".git")
 	lease := filepath.Join(repository, ".git", "dark-factory-local-ci")
@@ -84,12 +98,35 @@ func TestProtectSourceWritesFencesSharedGitAndKeepsPrivateChangeUsable(t *testin
 		"if printf x >\"$1/objects/hostile-object\" 2>/dev/null; then exit 40; fi",
 		"if printf x >\"$1/index\" 2>/dev/null; then exit 40; fi",
 		"if printf x >\"$4/blocked\" 2>/dev/null; then exit 40; fi",
-		"if printf x >\"$3/protected-hardlink\" 2>/dev/null; then exit 40; fi",
+		"if ln \"$1/refs/heads/main\" \"$3/new-hardlink\" 2>/dev/null; then exit 40; fi",
+		"if ln \"$1/refs/heads/main\" \"$5/new-hardlink\" 2>/dev/null; then exit 40; fi",
+		"if ln \"$3/change.txt\" \"$5/own-export\" 2>/dev/null; then exit 40; fi",
+		"if printf x >\"$4/internal-hardlink\" 2>/dev/null; then exit 40; fi",
 		"if printf x >\"$3/protected-symlink\" 2>/dev/null; then exit 40; fi",
 	}, "\n") + "\n"
 	args := []string{"/bin/sh", "-c", script, "sh", canonGit, repository, source, sibling, lease, gitDirectory}
 	spec, err := PrepareCommittedExecSpec(shell, args, []string{"PATH=/usr/bin:/bin", "LANG=C"}, source)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.ProtectSourceWrites(repository, changes, gitDirectory, lease); err == nil {
+		t.Fatal("pre-existing hardlink into writable source was accepted")
+	}
+	if err := os.Remove(filepath.Join(source, "protected-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	outsideAlias := filepath.Join(root, "outside-hardlink")
+	if err := os.Link(filepath.Join(canonGit, "refs", "heads", "main"), outsideAlias); err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.ProtectSourceWrites(repository, changes, gitDirectory, lease); err == nil {
+		t.Fatal("pre-existing hardlink outside protected roots was accepted")
+	}
+	if err := os.Remove(outsideAlias); err != nil {
+		t.Fatal(err)
+	}
+	// Compiler caches may hardlink files wholly inside the protected union.
+	if err := os.Link(filepath.Join(canonGit, "refs", "heads", "main"), filepath.Join(sibling, "internal-hardlink")); err != nil {
 		t.Fatal(err)
 	}
 	if err := spec.ProtectSourceWrites(repository, changes, gitDirectory, lease); err != nil {

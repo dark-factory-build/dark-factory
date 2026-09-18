@@ -186,6 +186,13 @@ their processes. An inherited macOS `sandbox-exec` profile enforces this for
 both Codex and Claude, independent of cwd, Git flags, environment overrides,
 or direct filesystem writes. Only the worker's Change, its private Git admin,
 and the shared local-CI lease are writable within those protected trees.
+Hardlink creation is denied. Before launch, an inode census refuses existing
+hardlinks outside the protected union without changing any file; links wholly
+within protected trees, such as compiler-cache entries, remain intact. This
+metadata scan scales with protected file count. Native Git commits continue
+through Git's ordinary rename fallback. A host writer must not introduce new
+external aliases while workers run; cooperating same-user host processes are
+outside this boundary.
 An orchestrator retains read-only project Git access. Providers receive no Git
 credential helper, SSH command, prompt or `gh` configuration, so nothing in
 the provider can push or publish. This is a source-write boundary, not a
