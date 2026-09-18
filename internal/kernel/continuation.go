@@ -5,7 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf8"
 )
 
 type ContinuationCondition string
@@ -68,6 +72,57 @@ type ContinuationContext struct {
 	ConditionRevision Revision
 	ResolutionDetail  string
 	ResolvedAt        UnixMillis
+}
+
+// ContinuationTaskText frames resolved causal context for a fresh provider
+// authority while preserving the provider's task-size contract.
+func ContinuationTaskText(provider Provider, task string, contexts []ContinuationContext) string {
+	if len(contexts) == 0 {
+		return task
+	}
+	limit := 131072
+	if provider == ProviderCodex {
+		limit = 8192
+	}
+	var builder strings.Builder
+	builder.WriteString(task)
+	builder.WriteString("\n\nFactory continuation context:\n")
+	for _, context := range contexts {
+		builder.WriteString("condition=")
+		builder.WriteString(string(context.ConditionKind))
+		builder.WriteString(" condition_id=")
+		builder.WriteString(hex.EncodeToString(context.ConditionID.Bytes()))
+		builder.WriteString(" condition_revision=")
+		builder.WriteString(strconv.FormatInt(context.ConditionRevision.Int64(), 10))
+		builder.WriteString(" context_digest=")
+		builder.WriteString(hex.EncodeToString(context.ContextDigest[:]))
+		builder.WriteString(" resolution=")
+		resolution := context.ResolutionDetail
+		if builder.Len()+len(resolution)+1 > limit {
+			remaining := limit - builder.Len() - 1
+			if remaining < 0 {
+				remaining = 0
+			}
+			resolution = truncateContinuationUTF8(resolution, remaining)
+		}
+		builder.WriteString(resolution)
+		builder.WriteByte('\n')
+		if builder.Len() >= limit {
+			break
+		}
+	}
+	return builder.String()
+}
+
+func truncateContinuationUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func validateContinuationSpec(spec NewContinuation) error {

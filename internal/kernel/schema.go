@@ -396,7 +396,7 @@ var schemaStatements = []string{
     condition_id BLOB NOT NULL CHECK (length(condition_id) = 16 AND condition_id <> zeroblob(16)),
     condition_revision INTEGER NOT NULL CHECK (condition_revision >= 1),
     state TEXT NOT NULL CHECK (state IN ('waiting', 'queued', 'resolved', 'cancelled')),
-    resolution_detail TEXT CHECK (resolution_detail IS NULL OR length(CAST(resolution_detail AS BLOB)) BETWEEN 1 AND 4096),
+    resolution_detail TEXT CHECK (resolution_detail IS NULL OR length(CAST(resolution_detail AS BLOB)) BETWEEN 1 AND 8192),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),

@@ -625,6 +625,11 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 	if run.Provider != ProviderShell && effectiveTask == "" {
 		effectiveTask = relationships.task.Title
 	}
+	continuationContexts, err := resolvedContinuationContextsForTask(ctx, tx.connection, relationships.task)
+	if err != nil {
+		return AttemptAuthority{}, err
+	}
+	effectiveTask = ContinuationTaskText(run.Provider, effectiveTask, continuationContexts)
 	var currentChangeRevision *Revision
 	var baseCommit []byte
 	if relationships.change != nil {

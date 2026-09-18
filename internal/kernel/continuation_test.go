@@ -4,8 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+func TestContinuationTaskTextCapsCodexAtProviderLimit(t *testing.T) {
+	context := ContinuationContext{ConditionKind: ConditionHumanRequest, ConditionRevision: mustRevision(t, 1), ResolutionDetail: strings.Repeat("答", 4096)}
+	text := ContinuationTaskText(ProviderCodex, strings.Repeat("x", 7168), []ContinuationContext{context})
+	if len(text) > 8192 || !utf8.ValidString(text) {
+		t.Fatalf("bounded continuation task length=%d valid=%v", len(text), utf8.ValidString(text))
+	}
+}
 
 func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
 	ctx := context.Background()
