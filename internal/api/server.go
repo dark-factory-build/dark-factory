@@ -84,6 +84,7 @@ const (
 	CallOutcomeWrite
 	CallOutcomeRead
 	CallOutcomeList
+	CallGitHubConnection
 )
 
 // AttemptDigest is the SHA-256 digest of one raw attempt bearer. The bearer is
@@ -101,6 +102,7 @@ func digestAttemptCredential(bearer credential) AttemptDigest {
 // Call is an immutable decoded request. Only the accessor matching Kind
 // returns true.
 type Call struct {
+	githubConnection    GitHubConnectionInput
 	attempt             bool
 	terminalObserve     TerminalObserveInput
 	peerIncludeTargets  bool
@@ -154,6 +156,10 @@ type Call struct {
 	modelSelection      AgentModelSelectInput
 	text                string
 	sourceTaskID        string
+}
+
+func (call Call) GitHubConnectionInput() (GitHubConnectionInput, bool) {
+	return call.githubConnection, call.kind == CallGitHubConnection
 }
 
 func (call Call) Kind() CallKind { return call.kind }
@@ -783,6 +789,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		call.digest = digestAttemptCredential(bearer)
 	}
 	switch kind {
+	case CallGitHubConnection:
+		if err := decodeExact(request.Params, &call.githubConnection); err != nil || !ValidGitHubConnectionInput(call.githubConnection) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallHealth, CallSnapshot, CallAttemptTask, CallWebStatus, CallRemoteStatus, CallHumanRequests:
 		if err := decodeExact(request.Params, &struct{}{}); err != nil {
 			return Call{}, RemoteInvalidRequest
@@ -1103,6 +1113,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallWebListClients, operatorDomain
 	case "web_revoke_client":
 		return CallWebRevokeClient, operatorDomain
+	case "github_connection":
+		return CallGitHubConnection, operatorDomain
 	case "remote_status":
 		return CallRemoteStatus, operatorDomain
 	case "overseer_snapshot":
@@ -1289,6 +1301,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebClients
 	case CallWebRevokeClient:
 		return reply == replyWebRevoke
+	case CallGitHubConnection:
+		return reply == replyContent
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus
 	case CallContentCreate, CallContentRevise, CallContentDeprecate, CallContentList, CallContentRead, CallContentBody, CallContentEvidence, CallContentAttach, CallContentEvidenceList, CallContentAttachments, CallOutcomeWrite, CallOutcomeRead, CallOutcomeList:

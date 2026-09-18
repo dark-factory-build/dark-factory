@@ -11,8 +11,8 @@ use crate::{
     access::AccessAuthority,
     github_app::{
         AppAuthority, ClosePullRequest, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, MergePullRequestAtHead, ObserveControlPlaneDeploy, ObserveFile,
-        ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
+        EnqueuePullRequest, ListIssues, MergePullRequestAtHead, ObserveControlPlaneDeploy,
+        ObserveFile, ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
         ObservePullRequestWorkflows, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
         ObserveRepository, ObserveTree, OperationError, PublishCommit, PublishReleaseTag,
         ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
@@ -87,10 +87,63 @@ pub(crate) async fn receive(
         Ok(request) => request,
         Err(_) => return json_rpc_error(Value::Null, -32700, "Parse error"),
     };
-    dispatch(request, mcp).await
+    dispatch(request, mcp, false).await
 }
 
-async fn dispatch(request: Value, mcp: &McpState) -> Response {
+/// Called only after the connection DO has verified the host bearer, live
+/// GitHub user and delegated repository. No Access/owner fallback is possible.
+pub(crate) async fn connection_dispatch(
+    request: Value,
+    mcp: &McpState,
+    owner: &str,
+    repository: Option<&str>,
+    grants: std::collections::BTreeMap<String, (i64, i64)>,
+) -> Response {
+    let mut scoped = mcp.clone();
+    scoped.app = mcp.app.for_connection(grants);
+    if let Some(repository) = repository {
+        scoped.journal = match mcp.journal.for_connection(owner, repository) {
+            Ok(journal) => journal,
+            Err(_) => return error_response(StatusCode::UNAUTHORIZED, "unauthorized"),
+        };
+        // Workflow observations reconstruct a remote marker without otherwise
+        // reading the journal. Bind those and every referenced UUID before any
+        // GitHub read, exactly as the mutation/reconciliation paths already do.
+        let name = request
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if let Some(arguments) = request
+            .pointer("/params/arguments")
+            .and_then(Value::as_object)
+        {
+            for (key, value) in arguments {
+                let referenced = key.ends_with("_operation_id")
+                    || (key == "operation_id"
+                        && matches!(
+                            name,
+                            "observe_release_workflow" | "observe_control_plane_deploy"
+                        ));
+                if referenced && !value.is_null() {
+                    let Some(id) = value.as_str() else {
+                        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
+                    };
+                    let mut id = id.to_owned();
+                    if canonical_operation_id(&mut id).is_err()
+                        || !matches!(scoped.journal.observe_operation(&id).await, Ok(Some(_)))
+                    {
+                        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
+                    }
+                }
+            }
+        }
+    } else if request.get("method").and_then(Value::as_str) == Some("tools/call") {
+        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    dispatch(request, &scoped, true).await
+}
+
+async fn dispatch(request: Value, mcp: &McpState, connection: bool) -> Response {
     let Some(request) = request.as_object() else {
         return json_rpc_error(Value::Null, -32600, "Invalid Request");
     };
@@ -113,7 +166,20 @@ async fn dispatch(request: Value, mcp: &McpState) -> Response {
                 "instructions": "Every tool names its `owner/name` repository, and acts only on repositories this App is installed on. Read status before a write. Every write is operation-bound and may fail closed."
             }),
         ),
-        "tools/list" => json_rpc_result(id, tools()),
+        "tools/list" => {
+            let mut list = tools();
+            if connection {
+                if let Some(tool) = list["tools"].as_array_mut().and_then(|tools| {
+                    tools
+                        .iter_mut()
+                        .find(|tool| tool["name"] == "observe_operation")
+                }) {
+                    tool["inputSchema"]["properties"]["repository"] = json!({"type":"string"});
+                    tool["inputSchema"]["required"] = json!(["operation_id", "repository"]);
+                }
+            }
+            json_rpc_result(id, list)
+        }
         "tools/call" => call_tool(id, request, mcp).await,
         _ => json_rpc_error(id, -32601, "Method not found"),
     }
@@ -351,6 +417,41 @@ fn tools() -> Value {
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
+        "name": "list_issues",
+        "title": "List an issue page",
+        "description": "Read one bounded page of open issues, with an optional label filter. Optional issue_number reads that exact open or closed issue (page 1, no label), independently of discovery limits. Follow next_page even for empty pages. This read never accepts work.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"repository": {"type": "string"}, "issue_number": {"type": ["integer", "null"], "minimum": 1}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 50}},
+            "required": ["repository", "page"], "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object", "additionalProperties": false,
+            "required": ["repository_id", "issues", "next_page"],
+            "properties": {
+                "repository_id": {"type": "integer", "minimum": 1},
+                "next_page": {"type": ["integer", "null"], "minimum": 2, "maximum": 1000},
+                "issues": {"type": "array", "maxItems": 25, "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["id", "node_id", "number", "url", "title", "body", "author", "labels", "updated_at", "state"],
+                    "properties": {
+                        "id": {"type": "integer", "minimum": 1},
+                        "node_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "number": {"type": "integer", "minimum": 1},
+                        "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"},
+                        "author": {"type": "object", "additionalProperties": false, "required": ["login", "type"], "properties": {
+                            "login": {"type": "string", "minLength": 1, "maxLength": 100},
+                            "type": {"type": "string", "minLength": 1, "maxLength": 100}
+                        }},
+                        "labels": {"type": "array", "items": {"type": "string"}},
+                        "updated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+                        "state": {"type": "string", "enum": ["open", "closed"]}
+                    }
+                }}
+            }
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
         "name": "observe_issue",
         "title": "Observe one issue",
         "description": "Return the live state of one repository issue. Pull requests are refused.",
@@ -478,6 +579,7 @@ fn tools() -> Value {
                 "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "issue_number": {"type": "integer", "minimum": 1},
+                "source_repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$", "description": "Issue repository; omitted means repository. Cross-repository sources always use Refs, never automatic closure. Private sources cannot be linked into public PRs."},
                 "head": {"type": "string", "minLength": 1, "maxLength": 240},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "base": {"type": "string", "minLength": 1, "maxLength": 240},
@@ -976,6 +1078,15 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
+        Some("list_issues") => {
+            let Ok(arguments) = serde_json::from_value::<ListIssues>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.list_issues(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Issue page was observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
         Some("observe_issue") => {
             let Ok(arguments) = serde_json::from_value::<ObserveIssue>(arguments) else {
                 return json_rpc_error(id, -32602, "Invalid params");
@@ -1363,5 +1474,29 @@ mod tests {
         assert_eq!(request_id(object.get("id")), Some(json!(1)));
         assert_eq!(request_id(Some(&json!({"bad": true}))), Some(Value::Null));
         assert_eq!(tools()["tools"][0]["name"], "maintainer_status");
+        let surface = tools();
+        for tool in surface["tools"].as_array().unwrap() {
+            assert_eq!(
+                tool["outputSchema"]["type"], "object",
+                "{} has no typed output",
+                tool["name"]
+            );
+        }
+        let page = surface["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "list_issues")
+            .unwrap();
+        assert_eq!(
+            page["outputSchema"]["required"],
+            json!(["repository_id", "issues", "next_page"])
+        );
+        let issue = &page["outputSchema"]["properties"]["issues"]["items"];
+        assert_eq!(
+            issue["properties"]["author"]["required"],
+            json!(["login", "type"])
+        );
+        assert_eq!(issue["required"].as_array().unwrap().len(), 10);
     }
 }

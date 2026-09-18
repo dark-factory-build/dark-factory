@@ -363,6 +363,9 @@ func openProcess(ctx context.Context, configuration config) (_ *process, resultE
 	if err != nil {
 		return nil, err
 	}
+	if err := owner.daemon.ConfigureMaintainer(owner.home); err != nil {
+		return nil, err
+	}
 	startupPhase("daemon")
 	// A leftover finalizing worker run with an available Change needs the
 	// Git executable to settle its worktree; publish it before the sweep

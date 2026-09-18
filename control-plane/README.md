@@ -141,15 +141,15 @@ in zeroizing memory and are never returned or journalled. The permanent App may
 have additional installed capabilities; unused App-level authority is never
 copied into an operation token.
 
-The Actions-write, Administration-write, checks-read, contents-write,
-issues-write, merge-queues-write, metadata-read, and pull-requests-write minimum
-is enforced when a token is minted, not at readiness. Administration write is
-downscoped only into direct merge's fixed ruleset reads. The installation check
-is deliberately all-or-nothing so status cannot advertise a partial v4
-surface. Readiness names no repository, so it has no installation to audit; an
-installation that is suspended, is not selected-repository, or lacks one of
-those grants is refused at the operation that needs it, and the refusal names
-the field that failed.
+Each operation's requested Actions, Administration, checks, contents, issues,
+merge-queues, metadata, and pull-requests permission is checked when its
+repository token is minted, not at readiness. Administration write is
+downscoped only into direct merge's fixed ruleset reads. Readiness names no
+repository, so it has no installation to audit; an installation that is
+suspended, is not selected-repository, or lacks the operation's requested grant
+is refused with the field that failed. A repository that cannot merge or deploy
+can still use issue reads and reviewed PR publication when it has those narrower
+grants.
 
 [SQLite storage API]: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 [Durable Object rules]: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
@@ -335,3 +335,61 @@ later use Workflows, but every external GitHub mutation still needs a durable
 operation key and reconciliation state for ambiguous outcomes. Those are
 implemented for the first pull-request operations; each future mutation still
 requires its own reviewed schema, policy, reconciliation query, and tests.
+
+### Issue sources separate from publication repositories
+
+`create_pull_request` accepts optional `source_repository` (`owner/name`). Omit
+it for existing same-repository calls and operation replays. A different source
+is read with its own installation grant and always produces a qualified
+`Refs owner/name#N` footer, never an automatic closure. The source must be open;
+a private or unknown-visibility source cannot be linked into a public PR.
+Cross-repository requests reject unqualified issue references and closing
+footers in the supplied body. The selected base may be any actual branch whose
+exact SHA matches the request; optional merge/deployment policy is unchanged.
+
+This protocol support does not configure intake or accept an issue. Those
+operator operations must supply their reviewed source snapshot and destination.
+
+## Connection receipt ownership foundation
+
+Operation UUIDs now have an immutable owner and repository binding in the
+reviewed `maintainer_operation_authorities` side table. Existing receipt rows
+without a binding belong to the legacy Access operator. Their UUIDs, result
+bytes, and shard names are unchanged. A connection cannot adopt an old UUID,
+read another connection's receipt, or reuse its own UUID at another repository.
+First use binds ownership before an effect can be claimed; a determinate
+refusal releases execution, not ownership. Referenced receipts use the same
+scoped journal as direct observation and replay.
+
+Customer authentication, paginated repository discovery and delegation use the
+same Worker at `/v1/github/connections`. These routes exist only with the three
+optional GitHub user-authorization bindings. The connection ingress verifies
+current user access and delegation before every operation, receipt observation
+and completed replay, then constructs the scoped journal. The existing Access
+owner workflow remains at `/mcp`. See [the connection protocol and activation
+requirements](../docs/development/GITHUB_CONNECTIONS.md), including the
+ownership-aware rollback boundary and separate live second-user proof.
+
+### Issue sources separate from publication repositories
+
+`create_pull_request` accepts optional `source_repository` (`owner/name`). Omit
+it for existing same-repository calls and operation replays. A different source
+is read with its own installation grant and always produces a qualified
+`Refs owner/name#N` footer, never an automatic closure. The source must be open;
+a private or unknown-visibility source cannot be linked into a public PR.
+Cross-repository requests reject unqualified issue references and closing
+footers in the supplied body. The selected base may be any actual branch whose
+exact SHA matches the request; optional merge/deployment policy is unchanged.
+
+This protocol support does not configure intake or accept an issue. Those
+operator operations must supply their reviewed source snapshot and destination.
+
+`list_issues` reads one page of open GitHub Issues through the same delegated
+connection and operation-specific read permission. It returns stable repository
+and issue IDs, author type, exact title/body, labels and a continuation page.
+An optional label is only a filter. Follow continuation even after a page of
+pull requests was filtered out; a traversal bound or GitHub error is unavailable,
+not an empty backlog. This operation does not accept or enqueue work. Oversized
+content remains intact for the host to show as ineligible rather than truncating
+instructions. Existing accepted identities must be reconciled independently of
+new-candidate discovery limits.

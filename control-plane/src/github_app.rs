@@ -68,9 +68,13 @@ const DEPLOY_WORKFLOW: WorkflowRef<'static> = WorkflowRef {
 #[derive(Clone)]
 pub(crate) struct AppAuthority(Arc<Authority>);
 
+#[derive(Clone)]
 struct Authority {
     app_id: i64,
-    private_key: PrivateKey,
+    private_key: Arc<PrivateKey>,
+    // Name -> (installation ID, repository ID), proved by live user access.
+    // None is the legacy Access authority; Some binds every customer token.
+    repository_grants: Option<BTreeMap<String, (i64, i64)>>,
 }
 
 struct PrivateKey(Vec<u8>);
@@ -245,6 +249,10 @@ pub(crate) struct CreatePullRequest {
     pub(crate) repository: String,
     pub(crate) operation_id: String,
     pub(crate) issue_number: i64,
+    /// Omitted means the publication repository, preserving old request digests.
+    /// A different source is referenced, never automatically closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_repository: Option<String>,
     pub(crate) head: String,
     pub(crate) head_sha: String,
     pub(crate) base: String,
@@ -490,6 +498,43 @@ pub(crate) struct RefObservationResult {
 pub(crate) struct ObserveIssue {
     pub(crate) repository: String,
     pub(crate) issue_number: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListIssues {
+    pub(crate) repository: String,
+    pub(crate) issue_number: Option<i64>,
+    pub(crate) page: u32,
+    pub(crate) label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct IssuePage {
+    pub(crate) repository_id: i64,
+    pub(crate) issues: Vec<IssueCandidate>,
+    pub(crate) next_page: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct IssueCandidate {
+    pub(crate) id: i64,
+    pub(crate) node_id: String,
+    pub(crate) number: i64,
+    pub(crate) url: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) author: IssueAuthor,
+    pub(crate) labels: Vec<String>,
+    pub(crate) updated_at: String,
+    pub(crate) state: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct IssueAuthor {
+    pub(crate) login: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -943,6 +988,12 @@ pub(crate) struct ControlPlaneDeployObservationResult {
 }
 
 impl AppAuthority {
+    pub(crate) fn for_connection(&self, grants: BTreeMap<String, (i64, i64)>) -> Self {
+        let mut authority = (*self.0).clone();
+        authority.repository_grants = Some(grants);
+        Self(Arc::new(authority))
+    }
+
     pub(crate) fn new(
         app_id: i64,
         private_key: String,
@@ -960,7 +1011,8 @@ impl AppAuthority {
         }
         Ok(Self(Arc::new(Authority {
             app_id,
-            private_key: PrivateKey(private_key),
+            private_key: Arc::new(PrivateKey(private_key)),
+            repository_grants: None,
         })))
     }
 
@@ -1128,6 +1180,58 @@ impl AppAuthority {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn list_issues(
+        &self,
+        mut request: ListIssues,
+    ) -> Result<IssuePage, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("issues", "read"), ("metadata", "read")]),
+            )
+            .await
+            .map_err(issue_read_error)?;
+        if let Some(number) = request.issue_number {
+            let entry: IssuePageEntry = github_json(
+                &format!(
+                    "https://api.github.com/repos/{}/{}/issues/{number}",
+                    token.repository.owner, token.repository.name
+                ),
+                token.as_str(),
+            )
+            .await
+            .map_err(|error: Error| issue_read_error(error.into()))?;
+            if entry.issue.number != number || !entry.issue.is_real_issue() {
+                return Err(OperationError::Conflict);
+            }
+            return issue_page(token.repository_id, 1, vec![entry]);
+        }
+        let label = request
+            .label
+            .as_deref()
+            // GitHub splits this query parameter on commas, even after decoding.
+            .filter(|label| !label.contains(','))
+            .map(percent_encode)
+            .unwrap_or_default();
+        let issues: Vec<IssuePageEntry> = github_json(&format!(
+            "https://api.github.com/repos/{}/{}/issues?state=open&sort=created&direction=asc&per_page=25&page={}&labels={}",
+            token.repository.owner, token.repository.name, request.page, label), token.as_str()).await.map_err(|error: Error| issue_read_error(error.into()))?;
+        let mut page = issue_page(token.repository_id, request.page, issues)?;
+        if let Some(label) = request.label.as_deref().filter(|label| label.contains(',')) {
+            page.issues.retain(|issue| {
+                issue
+                    .labels
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(label))
+            });
+        }
+        Ok(page)
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn observe_issue(
         &self,
         mut request: ObserveIssue,
@@ -1291,22 +1395,16 @@ impl AppAuthority {
         if let Some(result) = completed_or_conflict::<PullRequestResult>(&state)? {
             return Ok(result);
         }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("contents", "read"),
-                    ("issues", "read"),
-                    ("metadata", "read"),
-                    ("pull_requests", "write"),
-                ]),
-            )
-            .await?;
-        let repository = self.0.repository_metadata(&token).await?;
-        if request.base != repository.default_branch {
-            return Err(OperationError::InvalidInput);
+        let mut permissions = BTreeMap::from([
+            ("contents", "read"),
+            ("metadata", "read"),
+            ("pull_requests", "write"),
+        ]);
+        if request.cross_repository_source().is_none() {
+            permissions.insert("issues", "read");
         }
+        let token = self.0.installation_token(repository, permissions).await?;
+        let repository = self.0.repository_metadata(&token).await?;
         if let Some(result) = self.0.reconcile_pull_request(&token, &request).await? {
             return complete(journal, &operation, result).await;
         }
@@ -1320,7 +1418,24 @@ impl AppAuthority {
                 .map_err(|_| OperationError::Unavailable)?;
             return Err(OperationError::Indeterminate);
         }
-        let issue = self.0.read_issue(&token, request.issue_number).await?;
+        let issue = if let Some(source) = request.cross_repository_source() {
+            let source_token = self
+                .0
+                .installation_token(
+                    RepositoryName::new(source.to_owned())?,
+                    BTreeMap::from([("issues", "read"), ("metadata", "read")]),
+                )
+                .await?;
+            let source_metadata = self.0.repository_metadata(&source_token).await?;
+            // Unknown visibility fails closed. A private backlog cannot be
+            // disclosed by linking it from a public pull request.
+            validate_source_visibility(source_metadata.private, repository.private)?;
+            self.0
+                .read_issue(&source_token, request.issue_number)
+                .await?
+        } else {
+            self.0.read_issue(&token, request.issue_number).await?
+        };
         if !issue.is_real_open_issue() {
             return Err(OperationError::Conflict);
         }
@@ -2938,6 +3053,9 @@ impl AppAuthority {
 impl CreatePullRequest {
     fn validate(&mut self) -> Result<(), OperationError> {
         canonical_operation_id(&mut self.operation_id)?;
+        if let Some(source) = self.source_repository.as_mut() {
+            RepositoryName::requested(source)?;
+        }
         valid_exact_integer(self.issue_number)?;
         valid_ref(&self.head)?;
         valid_ref(&self.base)?;
@@ -2966,7 +3084,10 @@ impl CreatePullRequest {
     }
 
     fn marked_body(&self) -> Result<String, OperationError> {
-        let footer = if self.close_on_merge {
+        let cross_source = self.cross_repository_source();
+        let footer = if let Some(source) = cross_source {
+            format!("Refs {source}#{}", self.issue_number)
+        } else if self.close_on_merge {
             format!("Closes #{}", self.issue_number)
         } else {
             format!("Refs #{}", self.issue_number)
@@ -2975,6 +3096,10 @@ impl CreatePullRequest {
             character == '\n' || character == '\r' || character == ' ' || character == '\t'
         });
         while let Some(line) = body.rsplit('\n').next() {
+            if cross_source.is_some() && line.trim() == footer {
+                body = body[..body.len() - line.len()].trim_end();
+                continue;
+            }
             let Some((kind, issue_number)) = pull_request_footer(line) else {
                 break;
             };
@@ -2983,18 +3108,62 @@ impl CreatePullRequest {
             } else {
                 "Refs"
             };
-            if kind != expected_kind || issue_number != self.issue_number {
+            if cross_source.is_some() || kind != expected_kind || issue_number != self.issue_number
+            {
                 return Err(OperationError::InvalidInput);
             }
             body = body[..body.len() - line.len()].trim_end_matches(|character: char| {
                 character == '\n' || character == '\r' || character == ' ' || character == '\t'
             });
         }
+        if cross_source.is_some() {
+            // Cross-repository source references must be qualified. Reject
+            // automatic-closing prose too, rather than closing a shared source
+            // when only this pull request has finished.
+            let words: Vec<_> = body.split_whitespace().collect();
+            if words.iter().any(|word| {
+                let target = word.trim_start_matches(['(', '[', '*', '_', '`']);
+                target.starts_with('#') && target.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+            }) {
+                return Err(OperationError::InvalidInput);
+            }
+            for pair in words.windows(2) {
+                let keyword = pair[0].trim_matches(|c: char| !c.is_ascii_alphabetic());
+                let target = pair[1].trim_start_matches(['(', '[']);
+                if [
+                    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves",
+                    "resolved",
+                ]
+                .iter()
+                .any(|word| keyword.eq_ignore_ascii_case(word))
+                    && (target.contains('#') || target.contains("/issues/"))
+                {
+                    return Err(OperationError::InvalidInput);
+                }
+            }
+        }
         if body.is_empty() {
             Ok(format!("{}\n\n{}", footer, self.marker()?))
         } else {
             Ok(format!("{}\n\n{}\n\n{}", body, footer, self.marker()?))
         }
+    }
+
+    fn cross_repository_source(&self) -> Option<&str> {
+        self.source_repository
+            .as_deref()
+            .filter(|source| !source.eq_ignore_ascii_case(&self.repository))
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn validate_source_visibility(
+    source_private: Option<bool>,
+    destination_private: Option<bool>,
+) -> Result<(), OperationError> {
+    match (source_private, destination_private) {
+        (Some(false), Some(_)) | (Some(true), Some(true)) => Ok(()),
+        _ => Err(OperationError::InvalidInput),
     }
 }
 
@@ -3424,6 +3593,24 @@ impl ObserveFile {
 impl ObserveTree {
     fn validate(&self) -> Result<(), OperationError> {
         valid_sha(&self.commit_sha)
+    }
+}
+
+impl ListIssues {
+    fn validate(&self) -> Result<(), OperationError> {
+        if !(1..=1000).contains(&self.page) {
+            return Err(OperationError::InvalidInput);
+        }
+        if let Some(label) = &self.label {
+            valid_text(label, 1, MAX_ISSUE_LABEL_BYTES, false)?;
+        }
+        if let Some(number) = self.issue_number {
+            valid_exact_integer(number)?;
+            if self.page != 1 || self.label.is_some() {
+                return Err(OperationError::InvalidInput);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3875,7 +4062,7 @@ async fn refuse<T>(
     Err(OperationError::Refused(reason))
 }
 
-struct RepositoryName {
+pub(crate) struct RepositoryName {
     full_name: String,
     owner: String,
     name: String,
@@ -3897,7 +4084,7 @@ impl RepositoryName {
     /// returns while the caller's spelling is still in hand -- the token
     /// grant's -- is therefore case-insensitive. Afterwards the token carries
     /// GitHub's own spelling, so later comparisons are exact.
-    fn requested(value: &mut str) -> Result<Self, OperationError> {
+    pub(crate) fn requested(value: &mut str) -> Result<Self, OperationError> {
         value.make_ascii_lowercase();
         Self::new(value.to_owned())
     }
@@ -4032,16 +4219,30 @@ impl Authority {
                 }
                 Err(error) => return Err(error.into()),
             };
-        validate_installation(&installation, self.app_id).map_err(|defect| {
+        validate_installation(&installation, self.app_id, &permissions).map_err(|defect| {
             OperationError::Refused(RefusalReason::InstallationRejected(defect))
         })?;
-        // Named, not numbered: the caller supplies `owner/name`, and the numeric
-        // id is what GitHub hands back for it. Requesting by id would need an id
-        // the caller cannot be trusted to supply and this service no longer
-        // stores.
+        // The connection already proved this numeric identity with the user's
+        // live grant. Bind the App token to it so a rename/replacement cannot
+        // turn an authorized name into authority over another repository.
+        let expected_id = match &self.repository_grants {
+            Some(grants) => {
+                let (installation_id, repository_id) = grants
+                    .get(&repository.full_name.to_ascii_lowercase())
+                    .ok_or(OperationError::Unavailable)?;
+                if *installation_id != installation.id {
+                    return Err(OperationError::Unavailable);
+                }
+                Some(*repository_id)
+            }
+            None => None,
+        };
         #[derive(Serialize)]
         struct TokenRequest<'a> {
-            repositories: [&'a str; 1],
+            #[serde(skip_serializing_if = "Option::is_none")]
+            repositories: Option<[&'a str; 1]>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            repository_ids: Option<[i64; 1]>,
             permissions: BTreeMap<&'static str, &'static str>,
         }
         let expected_permissions = permissions
@@ -4061,7 +4262,8 @@ impl Authority {
             &token_url,
             jwt.as_str(),
             Some(&TokenRequest {
-                repositories: [repository.name.as_str()],
+                repositories: expected_id.is_none().then_some([repository.name.as_str()]),
+                repository_ids: expected_id.map(|id| [id]),
                 permissions,
             }),
         )
@@ -4077,10 +4279,12 @@ impl Authority {
             );
             return Err(OperationError::Unavailable);
         };
-        // Three independent conditions. Two of them became caller-reachable
+        // Independent conditions. Some became caller-reachable
         // when the repository stopped being configuration, so a single line
         // reporting a permission count would send the reader to the wrong one.
-        let mismatch = if response.permissions != expected_permissions {
+        let mismatch = if expected_id.is_some_and(|id| granted.id != id) {
+            Some("repository_id")
+        } else if response.permissions != expected_permissions {
             Some("permissions")
         } else if !granted
             .full_name
@@ -6017,6 +6221,80 @@ impl RepositoryMetadata {
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
+struct IssuePageEntry {
+    #[serde(flatten)]
+    issue: Issue,
+    id: i64,
+    node_id: String,
+    user: IssueAuthor,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn issue_read_error(error: OperationError) -> OperationError {
+    // A GitHub read refusal includes ambiguous rate limits and missing data;
+    // it cannot establish an empty backlog or permanently retire a source.
+    match error {
+        OperationError::Refused(_) => OperationError::Unavailable,
+        other => other,
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn issue_page(
+    repository_id: i64,
+    page: u32,
+    entries: Vec<IssuePageEntry>,
+) -> Result<IssuePage, OperationError> {
+    if entries.len() > 25 {
+        return Err(OperationError::Indeterminate);
+    }
+    // A full page remains incomplete even when it contains only pull requests.
+    let next_page = if entries.len() == 25 {
+        if page >= 1000 {
+            return Err(OperationError::Unavailable);
+        }
+        Some(page + 1)
+    } else {
+        None
+    };
+    let mut issues = Vec::new();
+    for entry in entries {
+        let issue = entry.issue;
+        if !issue.is_real_issue() {
+            continue;
+        }
+        valid_exact_integer(entry.id)?;
+        valid_exact_integer(issue.number)?;
+        valid_text(&entry.node_id, 1, 256, false)?;
+        valid_github_url(&issue.html_url)?;
+        valid_text(&entry.user.login, 1, 100, false)?;
+        valid_text(&entry.user.kind, 1, 100, false)?;
+        valid_github_timestamp(&issue.updated_at)?;
+        if !matches!(issue.state.as_str(), "open" | "closed") {
+            return Err(OperationError::Indeterminate);
+        }
+        issues.push(IssueCandidate {
+            id: entry.id,
+            node_id: entry.node_id,
+            number: issue.number,
+            url: issue.html_url,
+            title: issue.title,
+            body: issue.body.unwrap_or_default(),
+            author: entry.user,
+            labels: issue.labels.into_iter().map(|label| label.name).collect(),
+            updated_at: issue.updated_at,
+            state: issue.state,
+        });
+    }
+    Ok(IssuePage {
+        repository_id,
+        issues,
+        next_page,
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
 struct Issue {
     number: i64,
     html_url: String,
@@ -7555,34 +7833,15 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn validate_installation(installation: &Installation, app_id: i64) -> Result<(), &'static str> {
+fn validate_installation(
+    installation: &Installation,
+    app_id: i64,
+    requested_permissions: &BTreeMap<&'static str, &'static str>,
+) -> Result<(), &'static str> {
     let rejected: Vec<&str> = [
         (installation.id <= 0).then_some("id"),
         (installation.app_id != app_id).then_some("app_id"),
         (installation.repository_selection != "selected").then_some("repository_selection"),
-        (!permission_at_least(&installation.permissions, "actions", "write")).then_some("actions"),
-        (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
-        // Permission revisions are all-or-nothing at the installation boundary:
-        // status must not advertise v4 for a repository where direct merge is
-        // unusable. Only direct merge downscopes this grant into its operation
-        // token; every other token still omits it.
-        (!permission_at_least(&installation.permissions, "administration", "write"))
-            .then_some("administration"),
-        // `publish_commit` mints `contents: write`. Accepting a read-only
-        // installation would fail at token mint instead, where GitHub's 422
-        // reaches the caller as an opaque "authority is unavailable". This is
-        // the only place an installation is audited -- readiness names no
-        // repository, so it has none to look up.
-        (!permission_at_least(&installation.permissions, "contents", "write"))
-            .then_some("contents"),
-        (!permission_at_least(&installation.permissions, "issues", "write")).then_some("issues"),
-        (!permission_at_least(&installation.permissions, "metadata", "read")).then_some("metadata"),
-        (!permission_at_least(&installation.permissions, "pull_requests", "write"))
-            .then_some("pull_requests"),
-        // Queue enqueue still needs this authority; direct squash merge is
-        // separately gated by branch protection and exact-head checks.
-        (!permission_at_least(&installation.permissions, "merge_queues", "write"))
-            .then_some("merge_queues"),
         (!installation.events.is_empty()).then_some("events"),
         (installation.suspended_at.is_some()).then_some("suspended_at"),
     ]
@@ -7593,6 +7852,18 @@ fn validate_installation(installation: &Installation, app_id: i64) -> Result<(),
         #[cfg(target_arch = "wasm32")]
         worker::console_error!("installation rejected on: {}", rejected.join(","));
         return Err(first);
+    }
+    if let Some(permission) = requested_permissions
+        .iter()
+        .find_map(|(permission, required)| {
+            (!permission_at_least(&installation.permissions, permission, required))
+                .then_some(*permission)
+        })
+    {
+        // Each caller states the exact token it needs. Checking that same
+        // narrow request here keeps GitHub's token-mint refusal actionable
+        // without making unrelated merge or deployment grants prerequisites.
+        return Err(permission);
     }
     Ok(())
 }
@@ -7817,7 +8088,7 @@ async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn github_json<T: serde::de::DeserializeOwned>(
+pub(crate) async fn github_json<T: serde::de::DeserializeOwned>(
     url: &str,
     credential: &str,
 ) -> Result<T, Error> {
@@ -7933,7 +8204,7 @@ async fn github_request(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn read_github_response(
+pub(crate) async fn read_github_response(
     mut response: worker::Response,
     url: &str,
     limit: usize,
@@ -8168,6 +8439,40 @@ mod tests {
     /// observation, failed-job rerun, release publication/recovery, and the
     /// control-plane deploy dispatch -- returned an opaque "authority is
     /// unavailable".
+    #[test]
+    fn issue_pages_preserve_content_and_pagination_without_admitting_work() {
+        let entry = |pr: bool| -> IssuePageEntry {
+            serde_json::from_value(serde_json::json!({
+                "id": 71, "node_id": "I_fixture", "number": 4,
+                "html_url": "https://github.com/team/repo/issues/4", "title": "title",
+                "body": "x".repeat(6000), "state": "open", "updated_at": "2026-09-18T12:00:00Z",
+                "user": { "login": "outsider", "type": "User" },
+                "pull_request": if pr { Some(serde_json::json!({})) } else { None }
+            }))
+            .unwrap()
+        };
+        let page = issue_page(2, 1, (0..25).map(|_| entry(true)).collect()).unwrap();
+        assert!(page.issues.is_empty());
+        assert_eq!(page.next_page, Some(2));
+        let page = issue_page(2, 2, vec![entry(false)]).unwrap();
+        assert_eq!(page.issues[0].body.len(), 6000);
+        assert_eq!(page.issues[0].author.login, "outsider");
+        assert_eq!(page.next_page, None);
+        assert!(issue_page(2, 1000, (0..25).map(|_| entry(true)).collect()).is_err());
+        for page in [0, 1001] {
+            assert!(
+                ListIssues {
+                    repository: "team/repo".into(),
+                    issue_number: None,
+                    page,
+                    label: None
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn repository_metadata_parses_a_real_body_without_optional_fields() {
         const BODY: &str = include_str!("../tests/fixtures/repository-without-administration.json");
@@ -8515,24 +8820,34 @@ mod tests {
         );
         assert!(RepositoryName::new("baziyer/../dark-factory".into()).is_err());
         assert!(RepositoryName::new("baziyer/dark factory".into()).is_err());
+        let full_permissions = BTreeMap::from([
+            ("actions", "write"),
+            ("administration", "write"),
+            ("checks", "read"),
+            ("contents", "write"),
+            ("issues", "write"),
+            ("merge_queues", "write"),
+            ("metadata", "read"),
+            ("pull_requests", "write"),
+        ]);
         let installation: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
-        assert!(validate_installation(&installation, 4_673_420).is_ok());
+        assert!(validate_installation(&installation, 4_673_420, &full_permissions).is_ok());
 
         let broader: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
-        assert!(validate_installation(&broader, 4_673_420).is_ok());
+        assert!(validate_installation(&broader, 4_673_420, &full_permissions).is_ok());
 
         let no_administration: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_administration, 4_673_420).err(),
+            validate_installation(&no_administration, 4_673_420, &full_permissions).err(),
             Some("administration")
         );
 
@@ -8561,7 +8876,8 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                validate_installation(&with_permissions(permissions), 4_673_420).err(),
+                validate_installation(&with_permissions(permissions), 4_673_420, &full_permissions)
+                    .err(),
                 Some(expected)
             );
         }
@@ -8575,7 +8891,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&read_only, 4_673_420).err(),
+            validate_installation(&read_only, 4_673_420, &full_permissions).err(),
             Some("contents")
         );
 
@@ -8590,7 +8906,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_queue, 4_673_420).err(),
+            validate_installation(&no_queue, 4_673_420, &full_permissions).err(),
             Some("merge_queues")
         );
 
@@ -8600,7 +8916,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&queue_read_only, 4_673_420).err(),
+            validate_installation(&queue_read_only, 4_673_420, &full_permissions).err(),
             Some("merge_queues")
         );
 
@@ -8609,7 +8925,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_issues, 4_673_420).err(),
+            validate_installation(&no_issues, 4_673_420, &full_permissions).err(),
             Some("issues")
         );
 
@@ -8618,14 +8934,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_actions, 4_673_420).err(),
+            validate_installation(&no_actions, 4_673_420, &full_permissions).err(),
             Some("actions")
         );
     }
 
     #[test]
+    fn installation_requires_only_the_permission_each_operation_mints() {
+        let installation: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"contents":"write","issues":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+
+        // Issue reads and reviewed PR publication do not need merge queues,
+        // Actions, or direct-merge ruleset access.
+        assert!(
+            validate_installation(
+                &installation,
+                4_673_420,
+                &BTreeMap::from([("issues", "read"), ("metadata", "read")]),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_installation(
+                &installation,
+                4_673_420,
+                &BTreeMap::from([
+                    ("contents", "write"),
+                    ("metadata", "read"),
+                    ("pull_requests", "write")
+                ]),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_installation(
+                &installation,
+                4_673_420,
+                &BTreeMap::from([("merge_queues", "write"), ("metadata", "read")]),
+            )
+            .err(),
+            Some("merge_queues")
+        );
+    }
+
+    #[test]
     fn operation_tokens_request_administration_only_for_direct_merge() {
-        let source = include_str!("github_app.rs");
+        let source = include_str!("github_app.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
         let needle = ["(", "\"administration\"", ", ", "\"write\"", ")"].concat();
         assert_eq!(source.matches(&needle).count(), 1);
     }
@@ -9962,6 +10321,7 @@ mod tests {
             repository: "dark-factory-build/dark-factory".into(),
             operation_id: "1c8a5c44-7f1f-11f0-952e-acde48001122".into(),
             issue_number: 390,
+            source_repository: None,
             head: "feature/maintainer".into(),
             head_sha: "a".repeat(40),
             base: "main".into(),
@@ -9973,6 +10333,55 @@ mod tests {
         };
         assert!(create.validate().is_ok());
         assert!(create.marked_body().unwrap().contains("Closes #390"));
+        assert!(
+            serde_json::to_value(&create)
+                .unwrap()
+                .get("source_repository")
+                .is_none()
+        );
+        let original_digest = request_digest(&create).unwrap();
+        let decoded: CreatePullRequest =
+            serde_json::from_value(serde_json::to_value(&create).unwrap()).unwrap();
+        assert_eq!(request_digest(&decoded).unwrap(), original_digest);
+        let mut cross = create.clone();
+        cross.source_repository = Some("Team/Backlog".into());
+        cross.base = "develop".into();
+        assert!(cross.validate().is_ok());
+        assert!(
+            cross
+                .marked_body()
+                .unwrap()
+                .contains("Refs team/backlog#390")
+        );
+        assert!(!cross.marked_body().unwrap().contains("Closes"));
+        assert!(!cross.marked_body().unwrap().contains("Refs #390"));
+        for body in [
+            "Refs #390",
+            "Closes #390",
+            "This fixes team/backlog#390",
+            "Closes https://github.com/team/backlog/issues/390",
+        ] {
+            cross.body = body.into();
+            assert!(
+                cross.marked_body().is_err(),
+                "accepted ambiguous or closing source reference: {body}"
+            );
+        }
+        cross.body = "Change.\n\nRefs team/backlog#390\n".into();
+        assert_eq!(
+            cross
+                .marked_body()
+                .unwrap()
+                .matches("Refs team/backlog#390")
+                .count(),
+            1
+        );
+        assert!(validate_source_visibility(Some(false), Some(false)).is_ok());
+        assert!(validate_source_visibility(Some(false), Some(true)).is_ok());
+        assert!(validate_source_visibility(Some(true), Some(true)).is_ok());
+        assert!(validate_source_visibility(Some(true), Some(false)).is_err());
+        assert!(validate_source_visibility(None, Some(false)).is_err());
+        assert!(validate_source_visibility(Some(false), None).is_err());
         let mut supplied_footer = create.clone();
         supplied_footer.body.push_str("\n\nCloses #390\n");
         let rendered = supplied_footer.marked_body().unwrap();

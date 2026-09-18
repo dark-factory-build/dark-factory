@@ -588,7 +588,13 @@ export function SettingsDialog({
           <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
         </details>
         <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} />
-
+        <section className="dfConsoleSidebar__section" aria-label="Help and feedback">
+          <h3>Help and feedback</h3>
+          <p><a href="https://darkfactory.build/feedback?kind=bug" target="_blank" rel="noopener noreferrer">Report a Dark Factory problem</a></p>
+          <p><a href="https://darkfactory.build/feedback?kind=feature" target="_blank" rel="noopener noreferrer">Request a feature</a></p>
+          <p><a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog · Vote on GitHub</a></p>
+          <p>Review and submit reports on GitHub. Reporting and voting do not start factory work.</p>
+        </section>
       </div>
     </dialog>
   );

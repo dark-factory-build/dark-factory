@@ -717,6 +717,10 @@ class ReleaseFixtures(unittest.TestCase):
             self.assertEqual(release.range_sources(cfg, OLD, SHA)[0],
                              [{"pr": 10, "merge_sha": SHA, "issue": 602, "reference": "refs"}])
 
+    def test_qualified_source_footer_preserves_repository(self):
+        self.assertEqual(('refs', 7, 'other/backlog'), release.release_source_footer('Summary\nRefs other/backlog#7'))
+        self.assertEqual(('closes', 7, None), release.release_source_footer('Summary\nCloses #7'))
+
     def test_range_uses_existing_terminal_footer_precedence(self):
         cfg = config(Path("/tmp/release.json"))
         def gh(argv, *unused):
