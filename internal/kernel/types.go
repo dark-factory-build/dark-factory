@@ -68,6 +68,8 @@ type PeerDeliveryID struct{ identifier }
 type ContinuationID struct{ identifier }
 type ContentID struct{ identifier }
 type ContentEvidenceID struct{ identifier }
+type IntakeSourceID struct{ identifier }
+type IntakeAcceptanceID struct{ identifier }
 
 func ProjectIDFromBytes(value []byte) (ProjectID, error) {
 	id, err := identifierFromBytes(value)
@@ -112,6 +114,16 @@ func RunIDFromBytes(value []byte) (RunID, error) {
 func ResourceIDFromBytes(value []byte) (ResourceID, error) {
 	id, err := identifierFromBytes(value)
 	return ResourceID{id}, err
+}
+
+func IntakeSourceIDFromBytes(value []byte) (IntakeSourceID, error) {
+	id, err := identifierFromBytes(value)
+	return IntakeSourceID{id}, err
+}
+
+func IntakeAcceptanceIDFromBytes(value []byte) (IntakeAcceptanceID, error) {
+	id, err := identifierFromBytes(value)
+	return IntakeAcceptanceID{id}, err
 }
 func TerminalSessionIDFromBytes(value []byte) (TerminalSessionID, error) {
 	id, err := identifierFromBytes(value)
