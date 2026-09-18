@@ -737,6 +737,15 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
   }, [repositories, installationID]);
 =======
   const canConnect = status === "disconnected" || status === "denied" || status === "unavailable" || status === "invalid" || status === "already_connected" || github?.error !== undefined;
+  useEffect(() => {
+    if (!connected || connectionID === "") {
+      setSelected({});
+      setInstallationID(undefined);
+      setRepositoryPage(1);
+      return;
+    }
+    setSelected(Object.fromEntries((result?.status?.repositories ?? []).map((item) => [`${item.installation_id}:${item.repository_id}`, item])));
+  }, [connected, connectionID]);
   return <section className="dfConsoleSidebar__section" aria-label="GITHUB SETTINGS">
     <h3>GITHUB</h3>
     <p className="dfConsoleSidebar__inherit">PRIVATE OPERATOR CONNECTION · {status.toUpperCase().replaceAll("_", " ")}</p>
