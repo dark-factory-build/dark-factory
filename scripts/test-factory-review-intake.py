@@ -52,6 +52,19 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual('page=1', command.call_args_list[0].args[0][-1])
         self.assertEqual('page=2', command.call_args_list[1].args[0][-1])
 
+    def test_discovery_uses_github_page_cap_and_progresses_past_100(self):
+        page_one = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 101)]
+        page_two = [{'number': 101, 'head': {'sha': '%040d' % 101}, 'body': 'Refs #7'}]
+        config = dict(self.config, max_issues=200)
+        with patch.object(review.intake, 'command', side_effect=[json.dumps(page_one), json.dumps(page_two)]) as command:
+            self.assertEqual(100, len(review.list_prs(config, 1)))
+            self.assertEqual([{'number': 101, 'headRefOid': '%040d' % 101, 'body': 'Refs #7'}], review.list_prs(config, 2))
+        self.assertEqual('per_page=100', command.call_args_list[0].args[0][-3])
+        self.assertEqual('page=2', command.call_args_list[1].args[0][-1])
+        self.assertEqual(100, review.discovery_batch_size(config))
+        self.assertEqual(2, review.next_discovery_page(config, 1, len(page_one)))
+        self.assertEqual(1, review.next_discovery_page(config, 2, len(page_two)))
+
     def test_only_app_footer_linked_pr_is_woken_once_after_lost_response(self):
         prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
         self.observe.return_value = 'allow'

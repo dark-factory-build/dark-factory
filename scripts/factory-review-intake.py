@@ -141,9 +141,17 @@ def linked_issue(config, pr, journal, existing=None):
     return issue
 
 
+def discovery_batch_size(config):
+    # GitHub's REST pull-request endpoint caps per_page at 100.
+    return min(int(config.get("max_issues", 25)) + 1, 100)
+
+
+def next_discovery_page(config, page, discovered):
+    return 1 if discovered < discovery_batch_size(config) else page + 1
+
+
 def list_prs(config, page=1):
-    limit = int(config.get("max_issues", 25))
-    batch = limit + 1
+    batch = discovery_batch_size(config)
     if type(page) is not int or page < 1:
         raise ReviewError("pull request discovery page is invalid")
     # GitHub's pull-list endpoint gives us a bounded page cursor. Rotating the
@@ -474,8 +482,8 @@ def run_locked(config, path, journal, journal_path):
     if type(page) is not int or page < 1:
         raise ReviewError("review receipt discovery page is invalid")
     discovered = list_prs(config, page)
-    batch = int(config.get("max_issues", 25)) + 1
-    next_page = 1 if len(discovered) < batch else page + 1
+    batch = discovery_batch_size(config)
+    next_page = next_discovery_page(config, page, len(discovered))
     launched = False
     for pr in discovered:
         key = str(pr["number"]) + ":" + pr["headRefOid"]
