@@ -52,7 +52,7 @@ const (
   factoryctl attempt peer ask --task ID --idempotency-key HEX32 --question TEXT
   factoryctl attempt peer answer --question ID --revision REVISION --idempotency-key HEX32 --answer TEXT
   factoryctl attempt terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
-  factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N]
+  factoryctl terminal observe --project ID --task ID --run ID [--cursor N] [--max-bytes N] [--text]
   factoryctl attempt send-back --task ID --note TEXT
   factoryctl overseer status [--task ID] [--offset N --head HEAD] [--text-offset RUNES --head HEAD]
 	factoryctl overseer task add --agent ID|any --title TEXT [--body TEXT] [--priority N] [--prerequisite TASK_ID:WORK_REVISION ...] [--conflict-path PATH ...] [--task-id ID --incarnation-id ID]
@@ -228,6 +228,7 @@ type attemptCommand struct {
 	offset           uint64
 	head             uint64
 	textOffset       uint64
+	terminalText     bool
 	includeTargets   bool
 	enabled          bool
 	operationID      string
@@ -601,9 +602,24 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		return parseRemote(args)
 	}
 	if len(args) >= 1 && args[0] == "terminal" {
-		parsed, help, ok := parse(append([]string{"attempt"}, args...))
+		textMode := false
+		filtered := make([]string, 0, len(args)+1)
+		filtered = append(filtered, "attempt")
+		for _, arg := range args {
+			if arg == "--text" {
+				if textMode {
+					return attemptCommand{}, false, false
+				}
+				textMode = true
+				continue
+			}
+			filtered = append(filtered, arg)
+		}
+		parsed, help, ok := parse(filtered)
 		if ok && parsed.kind == commandTerminalObserve {
 			parsed.kind = commandOperatorTerminalObserve
+			parsed.terminalText = textMode
+			ok = !textMode || parsed.offset == 0
 		}
 		return parsed, help, ok
 	}
@@ -1969,7 +1985,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		return writeJSON(stdout, snapshot)
 	case commandOperatorTerminalObserve:
-		result, callErr := client.TerminalObserve(callContext, api.TerminalObserveInput{ProjectID: command.project, TaskID: command.id, RunID: command.run, Cursor: command.offset, MaxBytes: command.maxBytes})
+		result, callErr := client.TerminalObserve(callContext, api.TerminalObserveInput{ProjectID: command.project, TaskID: command.id, RunID: command.run, Cursor: command.offset, MaxBytes: command.maxBytes, Text: command.terminalText})
 		if callErr != nil {
 			writeFailure(stderr, command.kind, callErr)
 			return exitFailure

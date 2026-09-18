@@ -8,8 +8,37 @@ import (
 	"testing"
 )
 
+func reviewHandoffTask() string {
+	return "review handoff " + strings.Repeat("a", 32) + " " + strings.Repeat("b", 32) + " " + strings.Repeat("c", 40) + " 3 7"
+}
+
+func TestParseRetainedSourceReviewTaskBindsFirstLine(t *testing.T) {
+	want := reviewHandoffTask()
+	parsed, review, err := ParseRetainedSourceReviewTask(" \t" + want + "  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source")
+	if err != nil || !review || parsed.TaskID.String() != strings.Repeat("a", 32) || parsed.ChangeID.String() != strings.Repeat("b", 32) || parsed.BaseCommit != strings.Repeat("c", 40) || parsed.TaskWorkRevision.Int64() != 3 || parsed.ChangeRevision.Int64() != 7 {
+		t.Fatalf("parsed handoff = %+v, review=%v, err=%v", parsed, review, err)
+	}
+	for _, body := range []string{
+		"ordinary worker task",
+		"FACTORY_SOURCE owner/repo#1\nreview handoff is prose below the first line",
+	} {
+		if _, review, err := ParseRetainedSourceReviewTask(body); err != nil || review {
+			t.Fatalf("ordinary task classified as review: %q review=%v err=%v", body, review, err)
+		}
+	}
+	for _, body := range []string{
+		"review handoff " + strings.Repeat("a", 32),
+		strings.Replace(want, strings.Repeat("b", 32), strings.Repeat("B", 32), 1),
+		strings.Replace(want, " 3 7", " 0 7", 1),
+	} {
+		if _, review, err := ParseRetainedSourceReviewTask(body); !review || err == nil {
+			t.Fatalf("invalid handoff accepted: %q review=%v err=%v", body, review, err)
+		}
+	}
+}
+
 func TestRetainedSourceReviewRouteUsesInstalledProviderCapability(t *testing.T) {
-	task := "review handoff " + strings.Repeat("a", 32)
+	task := reviewHandoffTask()
 	for _, test := range []struct {
 		name     string
 		role     AgentRole
@@ -69,7 +98,7 @@ func TestRetainedSourceReviewRouteBlocksNonCodexTaskCreation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := "review handoff " + strings.Repeat("a", 32)
+	body := reviewHandoffTask()
 	if _, err := store.EnqueueTask(ctx, NewTask{
 		ID: taskID(t, 4), ProjectID: project.ID, AssignedAgentID: claude.ID, IncarnationID: incarnationID(t, 4),
 		Title: "task", Body: body, Priority: 0,
@@ -116,7 +145,7 @@ func TestRetainedSourceReviewRouteResolvesLegacyQueuedTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := "review handoff " + strings.Repeat("a", 32)
+	body := reviewHandoffTask()
 	// Bypass insertTaskOnConnection's route guard entirely, simulating a row a
 	// pre-upgrade daemon persisted before validateRetainedSourceReviewRoute
 	// existed: queued, non-Codex, with a review-handoff body.
@@ -197,7 +226,7 @@ func TestRetainedSourceReviewRouteAdmissionRequiresWorkerRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := "review handoff " + strings.Repeat("a", 32)
+	body := reviewHandoffTask()
 	// Bypass the Go-side guard entirely: a task like this could never be
 	// created through insertTaskOnConnection (it requires RoleWorker), so the
 	// only way it reaches the queue is as legacy data.

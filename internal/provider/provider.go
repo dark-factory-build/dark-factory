@@ -207,6 +207,8 @@ type RuntimePaths struct {
 	// environment still has no Git credential helper, SSH or prompt.
 	gitCommonDir         string
 	gitCommonDirWritable bool
+	sourceReviewPath     string
+	sourceReviewGitDir   string
 }
 
 // WithLocalCILeaseDirectory carries daemon-resolved lease storage below the
@@ -227,6 +229,17 @@ func (runtime RuntimePaths) WithGitCommonDirectory(path string, writable bool) (
 		return RuntimePaths{}, ErrInvalid
 	}
 	runtime.gitCommonDir, runtime.gitCommonDirWritable = path, writable
+	return runtime, nil
+}
+
+// WithRetainedSourceReview grants one daemon-resolved retained Change to a
+// reviewer. Both paths come from the authenticated, revision-checked source
+// receipt; local commands may read them but never write them.
+func (runtime RuntimePaths) WithRetainedSourceReview(sourcePath, gitDirectory string) (RuntimePaths, error) {
+	if !validAbsolute(sourcePath, maxPathBytes) || !validAbsolute(gitDirectory, maxPathBytes) || filepath.Base(gitDirectory) != ".git" || sourcePath == runtime.home || sourcePath == runtime.temp {
+		return RuntimePaths{}, ErrInvalid
+	}
+	runtime.sourceReviewPath, runtime.sourceReviewGitDir = sourcePath, gitDirectory
 	return runtime, nil
 }
 
@@ -737,6 +750,14 @@ func codexPermissions(request Request) (string, error) {
 			access = "write"
 		}
 		entries = append(entries, tomlBasicString(request.runtime.gitCommonDir)+`="`+access+`"`)
+	}
+	for _, path := range []string{request.runtime.sourceReviewPath, request.runtime.sourceReviewGitDir} {
+		if path != "" {
+			if path == request.workingDirectory || path == request.runtime.gitCommonDir {
+				continue
+			}
+			entries = append(entries, tomlBasicString(path)+`="read"`)
+		}
 	}
 	// Codex merges profile tables. Use the existing private runtime identity
 	// rather than a shared name that could inherit an account profile.

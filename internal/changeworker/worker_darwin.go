@@ -116,6 +116,14 @@ func runProvider(ctx context.Context) (resultErr error) {
 		_ = cwd.Close()
 		return err
 	}
+	if config.RetainedSourceReview != nil {
+		r := config.RetainedSourceReview
+		runtimePaths, err = runtimePaths.WithRetainedSourceReview(r.SourcePath, r.GitDirectory)
+		if err != nil {
+			_ = cwd.Close()
+			return err
+		}
+	}
 	installation, err := provider.ResolveInstallation(config.Provider, config.ToolPath)
 	if err != nil {
 		_ = cwd.Close()

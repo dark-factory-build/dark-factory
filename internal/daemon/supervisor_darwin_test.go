@@ -930,7 +930,7 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 	}
 	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
 		ID: supervisorTaskID(t, 13), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 14),
-		Title: "review retained Change", Body: fmt.Sprintf("review handoff %s %s %x %d %d", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
+		Title: "review retained Change", Body: fmt.Sprintf(" \treview handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
 	}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}
@@ -954,6 +954,54 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 		t.Fatalf("reviewer receipt = %+v", reviewer)
 	}
 	fixture.assertReleased(t, reviewer)
+}
+
+func TestSupervisorReviewerRefusesMismatchedRetainedIdentityBeforeProvider(t *testing.T) {
+	for _, field := range []string{"change", "base", "work revision", "change revision"} {
+		t.Run(field, func(t *testing.T) {
+			fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+			worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if err != nil {
+				t.Fatalf("source worker RunNext: %v", err)
+			}
+			fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
+			changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
+			if err != nil || !found || changeState.Selection == nil {
+				t.Fatalf("retained source Change = %+v, found=%v, err=%v", changeState, found, err)
+			}
+			changeID, base := changeState.ID.String(), fmt.Sprintf("%x", changeState.Selection.Commit().Bytes())
+			workRevision, changeRevision := worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()
+			switch field {
+			case "change":
+				changeID = strings.Repeat("f", 32)
+			case "base":
+				base = strings.Repeat("f", len(base))
+			case "work revision":
+				workRevision++
+			case "change revision":
+				changeRevision++
+			}
+			reviewerID := supervisorAgentID(t, 12)
+			if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: reviewerID, ProjectID: worker.ProjectID, Name: "reviewer", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 20}, supervisorTime()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+				ID: supervisorTaskID(t, 13), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 14), Title: "review retained Change",
+				Body: fmt.Sprintf("review handoff %s %s %s %d %d", worker.TaskID, changeID, base, workRevision, changeRevision), Priority: 1,
+			}, supervisorTime()); err != nil {
+				t.Fatal(err)
+			}
+			reviewer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if err != nil && !errors.Is(err, kernel.ErrConflict) {
+				t.Fatalf("reviewer RunNext: %v", err)
+			}
+			fixture.assertTerminal(t, reviewer, kernel.OutcomeFailed)
+			if reviewer.Terminal == nil || reviewer.Terminal.Code() != kernel.FailureSource {
+				t.Fatalf("mismatched handoff reached provider: %+v", reviewer.Terminal)
+			}
+			fixture.assertOneWitness(t)
+		})
+	}
 }
 
 // A retry reopens the same worktree: the worker's commit on the Change

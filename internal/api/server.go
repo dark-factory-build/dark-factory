@@ -897,7 +897,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallTerminalObserve, CallOperatorTerminalObserve:
-		if err := decodeExact(request.Params, &call.terminalObserve); err != nil || !validTerminalObservationInput(call.terminalObserve) {
+		if err := decodeExact(request.Params, &call.terminalObserve); err != nil || !validTerminalObservationInput(call.terminalObserve) || kind == CallTerminalObserve && call.terminalObserve.Text {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallSendBack, CallSendBackTask:

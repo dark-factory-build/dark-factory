@@ -335,6 +335,13 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			}
 			return err
 		}},
+		{name: "terminal text", response: successResponse(`{"project_id":"` + id('1') + `","task_id":"` + id('2') + `","run_id":"` + id('3') + `","cursor":0,"next_cursor":0,"floor":0,"head":7,"source":"stored","gap":false,"omitted":0,"payload":null,"text_mode":true,"text":"waiting"}`), request: `{"method":"operator_terminal_observe","params":{"project_id":"` + id('1') + `","task_id":"` + id('2') + `","run_id":"` + id('3') + `","cursor":0,"max_bytes":1024,"text":true}}`, invoke: func(client *OperatorClient) error {
+			result, err := client.TerminalObserve(context.Background(), TerminalObserveInput{ProjectID: id('1'), TaskID: id('2'), RunID: id('3'), MaxBytes: 1024, Text: true})
+			if err == nil && result.Text != "waiting" {
+				return errors.New("terminal text differs")
+			}
+			return err
+		}},
 		{name: "create project", response: mutationResponse(), request: `{"method":"create_project","params":{"id":"` + id('1') + `","name":"project","root":"/private/project"}}`, invoke: func(client *OperatorClient) error {
 			_, err := client.CreateProject(context.Background(), CreateProjectInput{ID: id('1'), Name: "project", Root: "/private/project"})
 			return err
