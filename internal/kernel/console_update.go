@@ -53,6 +53,15 @@ func (store *Store) UpdateAgentForOverseer(ctx context.Context, digest AttemptDi
 	return store.updateAgent(ctx, &digest, id, expected, patch, at)
 }
 
+// UpdateAgentForOperator applies the same bounded lifecycle edit without
+// inventing browser authority for the local operator.
+func (store *Store) UpdateAgentForOperator(ctx context.Context, id AgentID, expected Revision, patch AgentPatch, at UnixMillis) (Agent, error) {
+	if patch.Paused == nil && patch.Archived == nil || patch.Paused != nil && patch.Archived != nil || patch.Model != nil || patch.ReasoningEffort != nil || patch.AccountID != nil || patch.Appearance != nil || patch.IdlePolicy != nil || patch.IdleAfterSeconds != nil || patch.IdleInstruction != nil || patch.IdleRunBudget != nil {
+		return Agent{}, fmt.Errorf("%w: invalid operator agent update", ErrInvalidValue)
+	}
+	return store.updateAgent(ctx, nil, id, expected, patch, at)
+}
+
 func (store *Store) updateAgent(ctx context.Context, digest *AttemptDigest, id AgentID, expected Revision, patch AgentPatch, at UnixMillis) (Agent, error) {
 	if id.zero() || expected.Int64() < 1 {
 		return Agent{}, fmt.Errorf("%w: invalid agent update", ErrInvalidValue)
@@ -191,6 +200,10 @@ func (store *Store) UpdateTask(ctx context.Context, id TaskID, expected Revision
 // orchestrator's project, with authorization checked in the update transaction.
 func (store *Store) UpdateTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, patch TaskPatch, at UnixMillis) (Task, error) {
 	return store.updateTask(ctx, &digest, id, expected, patch, at)
+}
+
+func (store *Store) UpdateTaskForOperator(ctx context.Context, id TaskID, expected Revision, patch TaskPatch, at UnixMillis) (Task, error) {
+	return store.updateTask(ctx, nil, id, expected, patch, at)
 }
 
 // AuthorizeWorkerTaskForOverseer establishes that a live overseer may inspect

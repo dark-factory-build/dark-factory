@@ -44,6 +44,54 @@ func TestRunPathsForAgentWithoutRunIsEmpty(t *testing.T) {
 	if runID != (kernel.RunID{}) || len(paths) != 0 || paths == nil {
 		t.Fatalf("idle agent placed in a room: %v %v", runID, paths)
 	}
+	locationRun, source, runtime, err := daemon.liveRunLocations(ctx, agentID)
+	if err != nil || locationRun != (kernel.RunID{}) || source != "" || runtime != "" {
+		t.Fatalf("idle agent location = %v %q %q, %v", locationRun, source, runtime, err)
+	}
+}
+
+func TestLiveRunLocationsExposeWorkerAndOverseerRoots(t *testing.T) {
+	ctx := context.Background()
+	for _, role := range []kernel.AgentRole{kernel.RoleWorker, kernel.RoleOrchestrator} {
+		fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
+		fixture.pair(t)
+		changeParent := t.TempDir()
+		fixture.daemon.RememberSupervisorAccount(changeParent, "", change.TrustedGitExecutable)
+		run := adapterRunningRoleRun(t, fixture.store, byte(0x90)+byte(role), role)
+		session, found, err := fixture.store.TerminalSessionForRun(ctx, run.ID)
+		if err != nil || !found {
+			t.Fatalf("session: %v %v", found, err)
+		}
+		owner := newLiveAttempt(fixture.daemon, run.ID, session.ID, nil)
+		owner.agentID = run.AgentID
+		wantSource := ""
+		if run.ChangeID != nil {
+			owner.changeID = *run.ChangeID
+			wantSource = filepath.Join(changeParent, run.ChangeID.String())
+		}
+		owner.pathsSince = *run.RunningAt
+		if err := fixture.daemon.registerLiveAttempt(owner); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { fixture.daemon.unregisterLiveAttempt(run.ID, owner) })
+		runID, source, runtime, err := fixture.daemon.liveRunLocations(ctx, run.AgentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resources, err := fixture.store.Resources(ctx, run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantRuntime := ""
+		for _, resource := range resources {
+			if resource.Kind == kernel.ResourceRuntimeRoot {
+				wantRuntime = resource.Path
+			}
+		}
+		if runID != run.ID || source != wantSource || runtime != wantRuntime {
+			t.Fatalf("%s locations = %s %s %s, want %s %s %s", role, runID, source, runtime, run.ID, wantSource, wantRuntime)
+		}
+	}
 }
 
 // The live-run answer end to end, over the same observe-only pairing a console

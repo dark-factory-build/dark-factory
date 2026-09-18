@@ -33,6 +33,7 @@ const (
 	CallAccountLink
 	CallAgentSelectAccount
 	CallAgentSelectModel
+	CallAgentPaths
 	CallAttemptTask
 	CallAttemptSource
 	CallSucceed
@@ -43,9 +44,11 @@ const (
 	CallPeerAsk
 	CallPeerAnswer
 	CallTerminalObserve
+	CallOperatorTerminalObserve
 	CallSendBack
 	CallSendBackTask
 	CallTaskRecovery
+	CallTaskRead
 	CallWebStatus
 	CallWebListClients
 	CallWebRevokeClient
@@ -59,6 +62,8 @@ const (
 	CallOverseerMessageWorker
 	CallOverseerInterruptWorker
 	CallOverseerReplyHuman
+	CallOperatorUpdateTask
+	CallOperatorUpdateAgent
 	CallHumanRequests
 	CallHumanReply
 	CallContentCreate
@@ -100,6 +105,7 @@ type Call struct {
 	projectLimits       ProjectLimitsInput
 	agent               CreateAgentInput
 	agentIdlePolicy     AgentIdlePolicyInput
+	agentPaths          AgentPathsInput
 	task                EnqueueTaskInput
 	humanQuestion       HumanQuestionInput
 	peerQuestion        PeerQuestionInput
@@ -109,6 +115,7 @@ type Call struct {
 	peerExpectedHead    uint64
 	sendBack            SendBackInput
 	taskRecovery        TaskRecoveryInput
+	taskRead            TaskReadInput
 	overseerTask        OverseerTaskCreateInput
 	overseerSnapshot    OverseerSnapshotInput
 	overseerTaskEdit    OverseerTaskUpdateInput
@@ -174,11 +181,11 @@ func (call Call) OverseerSnapshotInput() (OverseerSnapshotInput, bool) {
 }
 
 func (call Call) OverseerTaskUpdateInput() (OverseerTaskUpdateInput, bool) {
-	return call.overseerTaskEdit, call.kind == CallOverseerUpdateTask
+	return call.overseerTaskEdit, call.kind == CallOverseerUpdateTask || call.kind == CallOperatorUpdateTask
 }
 
 func (call Call) OverseerAgentUpdateInput() (OverseerAgentUpdateInput, bool) {
-	return call.overseerAgent, call.kind == CallOverseerUpdateAgent
+	return call.overseerAgent, call.kind == CallOverseerUpdateAgent || call.kind == CallOperatorUpdateAgent
 }
 
 func (call Call) OverseerRunStopInput() (OverseerRunStopInput, bool) {
@@ -221,6 +228,10 @@ func (call Call) AgentIdlePolicyInput() (AgentIdlePolicyInput, bool) {
 	return call.agentIdlePolicy, call.kind == CallAgentIdlePolicy
 }
 
+func (call Call) AgentPathsInput() (AgentPathsInput, bool) {
+	return call.agentPaths, call.kind == CallAgentPaths
+}
+
 func (call Call) EnqueueTaskInput() (EnqueueTaskInput, bool) {
 	return call.task, call.kind == CallEnqueueTask
 }
@@ -259,7 +270,7 @@ func (call Call) PeerAnswerInput() (PeerAnswerInput, bool) {
 	return call.peerAnswer, call.kind == CallPeerAnswer
 }
 func (call Call) TerminalObserveInput() (TerminalObserveInput, bool) {
-	return call.terminalObserve, call.kind == CallTerminalObserve
+	return call.terminalObserve, call.kind == CallTerminalObserve || call.kind == CallOperatorTerminalObserve
 }
 func (call Call) PeerStatusPage() (uint64, uint64, uint64, bool, bool) {
 	return call.peerStatusOffset, call.peerTargetOffset, call.peerExpectedHead, call.peerIncludeTargets, call.kind == CallPeerStatus
@@ -273,6 +284,10 @@ func (call Call) SendBackInput() (SendBackInput, bool) {
 
 func (call Call) TaskRecoveryInput() (TaskRecoveryInput, bool) {
 	return call.taskRecovery, call.kind == CallTaskRecovery
+}
+
+func (call Call) TaskReadInput() (TaskReadInput, bool) {
+	return call.taskRead, call.kind == CallTaskRead
 }
 
 func (call Call) WebClientRevocationInput() (WebClientRevocationInput, bool) {
@@ -321,6 +336,7 @@ type replyKind uint8
 const (
 	replyHealth replyKind = iota + 1
 	replySnapshot
+	replyAgentPaths
 	replyMutation
 	replyAttemptTask
 	replyAttemptSource
@@ -334,6 +350,7 @@ const (
 	replyTerminalObservation
 	replyAccounts
 	replyTaskRecovery
+	replyTaskText
 	replyHumanRequests
 	replyError
 )
@@ -344,6 +361,7 @@ type Reply struct {
 	kind                replyKind
 	health              HealthStatus
 	snapshot            DashboardSnapshot
+	agentPaths          AgentPaths
 	mutation            MutationResult
 	attemptTask         AttemptTask
 	attemptSource       RetainedChangeHandoff
@@ -356,6 +374,7 @@ type Reply struct {
 	content             any
 	accounts            Accounts
 	taskRecovery        TaskRecovery
+	taskText            TaskText
 	humanRequests       HumanRequestList
 	code                RemoteErrorCode
 }
@@ -381,6 +400,14 @@ func NewSnapshotReply(snapshot DashboardSnapshot) (Reply, error) {
 	copy(tasks, snapshot.Tasks)
 	snapshot.Tasks = tasks
 	return Reply{kind: replySnapshot, snapshot: snapshot}, nil
+}
+
+func NewAgentPathsReply(paths AgentPaths) (Reply, error) {
+	if !validAgentPaths(paths) {
+		return Reply{}, ErrInvalidInput
+	}
+	paths.Paths = append([]string{}, paths.Paths...)
+	return Reply{kind: replyAgentPaths, agentPaths: paths}, nil
 }
 
 func NewOverseerSnapshotReply(snapshot OverseerSnapshot) (Reply, error) {
@@ -430,6 +457,13 @@ func NewTaskRecoveryReply(value TaskRecovery) (Reply, error) {
 	}
 	value.ArtifactPaths = append([]string{}, value.ArtifactPaths...)
 	return Reply{kind: replyTaskRecovery, taskRecovery: value}, nil
+}
+
+func NewTaskTextReply(value TaskText) (Reply, error) {
+	if !validID(value.TaskID) || value.Revision == 0 || !validText(value.Instruction, 0, 8192) || !validText(value.Feedback, 0, 8192) || value.Outcome != nil && !validText(*value.Outcome, 0, 8192) || value.NextOffset != nil && *value.NextOffset == 0 {
+		return Reply{}, ErrInvalidInput
+	}
+	return Reply{kind: replyTaskText, taskText: value}, nil
 }
 
 func NewPeerStatusReply(status PeerStatus) (Reply, error) {
@@ -770,12 +804,20 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.agentIdlePolicy); err != nil || !validAgentIdlePolicyInput(call.agentIdlePolicy) {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallAgentPaths:
+		if err := decodeExact(request.Params, &call.agentPaths); err != nil || !validAgentPathsInput(call.agentPaths) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallEnqueueTask:
 		if err := decodeExact(request.Params, &call.task); err != nil || !validID(call.task.ID) || !validID(call.task.ProjectID) || !validOptionalID(call.task.AssignedAgentID) || !validID(call.task.IncarnationID) || !validText(call.task.Title, 1, 1024) || !validText(call.task.Body, 0, 131072) || call.task.Priority < -1_000_000 || call.task.Priority > 1_000_000 {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallTaskRecovery:
 		if err := decodeExact(request.Params, &call.taskRecovery); err != nil || !validID(call.taskRecovery.TaskID) || !validID(call.taskRecovery.IncarnationID) {
+			return Call{}, RemoteInvalidRequest
+		}
+	case CallTaskRead:
+		if err := decodeExact(request.Params, &call.taskRead); err != nil || !validID(call.taskRead.TaskID) || call.taskRead.ExpectedRevision == 0 || call.taskRead.Offset > uint64(^uint64(0)>>1) {
 			return Call{}, RemoteInvalidRequest
 		}
 	case CallSetDispatch:
@@ -854,7 +896,7 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.peerAnswer); err != nil || !validID(call.peerAnswer.QuestionID) || !validID(call.peerAnswer.IdempotencyKey) || call.peerAnswer.ExpectedRevision == 0 || !validText(call.peerAnswer.Answer, 1, 2048) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallTerminalObserve:
+	case CallTerminalObserve, CallOperatorTerminalObserve:
 		if err := decodeExact(request.Params, &call.terminalObserve); err != nil || !validTerminalObservationInput(call.terminalObserve) {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -866,11 +908,11 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.overseerTask); err != nil || !validOverseerTaskCreateInput(call.overseerTask) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerUpdateTask:
+	case CallOverseerUpdateTask, CallOperatorUpdateTask:
 		if err := decodeExact(request.Params, &call.overseerTaskEdit); err != nil || !validOverseerTaskUpdateInput(call.overseerTaskEdit) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerUpdateAgent:
+	case CallOverseerUpdateAgent, CallOperatorUpdateAgent:
 		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -986,6 +1028,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallCreateAgent, operatorDomain
 	case "agent_idle_policy":
 		return CallAgentIdlePolicy, operatorDomain
+	case "agent_paths":
+		return CallAgentPaths, operatorDomain
 	case "enqueue_task":
 		return CallEnqueueTask, operatorDomain
 	case "set_dispatch":
@@ -1020,12 +1064,16 @@ func methodKind(method string) (CallKind, byte) {
 		return CallPeerAnswer, attemptDomain
 	case "terminal_observe":
 		return CallTerminalObserve, attemptDomain
+	case "operator_terminal_observe":
+		return CallOperatorTerminalObserve, operatorDomain
 	case "send_back":
 		return CallSendBack, attemptDomain
 	case "send_back_task":
 		return CallSendBackTask, operatorDomain
 	case "task_recovery":
 		return CallTaskRecovery, operatorDomain
+	case "task_read":
+		return CallTaskRead, operatorDomain
 	case "web_status":
 		return CallWebStatus, operatorDomain
 	case "web_list_clients":
@@ -1052,6 +1100,10 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOverseerInterruptWorker, attemptDomain
 	case "overseer_reply_human":
 		return CallOverseerReplyHuman, attemptDomain
+	case "operator_update_task":
+		return CallOperatorUpdateTask, operatorDomain
+	case "operator_update_agent":
+		return CallOperatorUpdateAgent, operatorDomain
 	case "content_create":
 		return CallContentCreate, operatorDomain
 	case "content_revise":
@@ -1174,6 +1226,8 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyHumanRequests
 	case CallSnapshot:
 		return reply == replySnapshot
+	case CallAgentPaths:
+		return reply == replyAgentPaths
 	case CallAccountsDiscover:
 		return reply == replyAccounts
 	case CallAttemptTask:
@@ -1182,13 +1236,17 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyAttemptSource
 	case CallTaskRecovery:
 		return reply == replyTaskRecovery
+	case CallTaskRead:
+		return reply == replyTaskText
 	case CallTerminalObserve:
+		return reply == replyTerminalObservation
+	case CallOperatorTerminalObserve:
 		return reply == replyTerminalObservation
 	case CallPeerStatus:
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
 		return reply == replyOverseerSnapshot
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallHumanReply:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallHumanReply:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus
@@ -1226,6 +1284,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.health)
 	case replySnapshot:
 		data, err = json.Marshal(reply.snapshot)
+	case replyAgentPaths:
+		data, err = json.Marshal(reply.agentPaths)
 	case replyMutation:
 		data, err = json.Marshal(reply.mutation)
 	case replyAttemptTask:
@@ -1234,6 +1294,8 @@ func (connection *Connection) writeReply(reply Reply) error {
 		data, err = json.Marshal(reply.attemptSource)
 	case replyTaskRecovery:
 		data, err = json.Marshal(reply.taskRecovery)
+	case replyTaskText:
+		data, err = json.Marshal(reply.taskText)
 	case replyWebStatus:
 		data, err = json.Marshal(reply.webStatus)
 	case replyWebClients:

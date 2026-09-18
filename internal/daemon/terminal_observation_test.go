@@ -304,3 +304,104 @@ func TestTerminalObservationTargetAuthorizationMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestOperatorTerminalObservationReadsExactRunningWorkerAndOverseer(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 11, testID(11), "worker")
+	overseer := prepareActiveAttemptInProject(t, fixture, 41, testID(11), "orchestrator")
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	session, found, err := fixture.store.TerminalSessionForRun(ctx, active.run.ID)
+	if err != nil || !found {
+		t.Fatal(err)
+	}
+	controller, peer := readyTerminalEffectController(t)
+	live := newLiveAttempt(fixture.daemon, active.run.ID, session.ID, controller)
+	live.releaseSent, live.readySeen = true, true
+	if err := fixture.daemon.registerLiveAttempt(live); err != nil {
+		t.Fatal(err)
+	}
+	startLiveAttempt(live, ctx)
+	t.Cleanup(func() { _ = live.close(); _ = peer.Close() })
+	data := []byte("worker output\nAuthorization: Bearer secret-value\n")
+	read := func(target activeAttempt) api.TerminalObservation {
+		t.Helper()
+		input := api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: target.run.TaskID.String(), RunID: target.run.ID.String(), MaxBytes: 65536}
+		done := fixture.serve(t)
+		result := make(chan api.TerminalObservation, 1)
+		errs := make(chan error, 1)
+		go func() {
+			value, readErr := operator.TerminalObserve(ctx, input)
+			result <- value
+			errs <- readErr
+		}()
+		attach := readTerminalEffectWire(t, peer)
+		for attach.Kind != string(runner.TerminalAttach) {
+			attach = readTerminalEffectWire(t, peer)
+		}
+		writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalAttached), Correlation: attach.Correlation, Sequence: 0, Head: uint64(len(data)), Status: string(runner.TerminalResultOK)})
+		writeTerminalEffectWire(t, peer, terminalEffectWireFrame{Version: 1, Kind: string(runner.TerminalOutput), Correlation: attach.Correlation, Start: 0, End: uint64(len(data)), Payload: data})
+		value := <-result
+		readErr := <-errs
+		waitDispatch(t, done)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return value
+	}
+	worker := read(active)
+	if !strings.Contains(string(worker.Payload), "worker output") || strings.Contains(string(worker.Payload), "secret-value") {
+		t.Fatalf("worker observation leaked or lost output: %q", worker.Payload)
+	}
+	// The operator may target an exact running overseer too; this fixture has no
+	// attached PTY for it, so the read may be unavailable but must pass identity
+	// authorization rather than return forbidden.
+	overseerInput := api.TerminalObserveInput{ProjectID: overseer.run.ProjectID.String(), TaskID: overseer.run.TaskID.String(), RunID: overseer.run.ID.String(), MaxBytes: 1024}
+	done := fixture.serve(t)
+	_, overseerErr := operator.TerminalObserve(ctx, overseerInput)
+	waitDispatch(t, done)
+	var overseerRemote *api.RemoteError
+	if errors.As(overseerErr, &overseerRemote) && overseerRemote.Code() == api.RemoteForbidden {
+		t.Fatalf("operator overseer identity rejected: %v", overseerErr)
+	}
+	for _, mutation := range []func(*api.TerminalObserveInput){
+		func(value *api.TerminalObserveInput) { value.ProjectID = testID(90) },
+		func(value *api.TerminalObserveInput) { value.TaskID = testID(90) },
+		func(value *api.TerminalObserveInput) { value.RunID = testID(90) },
+	} {
+		input := api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 1024}
+		mutation(&input)
+		done := fixture.serve(t)
+		_, readErr := operator.TerminalObserve(ctx, input)
+		waitDispatch(t, done)
+		var remote *api.RemoteError
+		if !errors.As(readErr, &remote) || remote.Code() != api.RemoteForbidden {
+			t.Fatalf("operator identity mismatch = %v", readErr)
+		}
+	}
+}
+
+func TestOperatorTerminalObservationReadsSettledDiagnostics(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 41, testID(11), "orchestrator")
+	completeAdapterRun(t, fixture.store, active.run, "finished")
+	ctx := context.Background()
+	payload := []byte("finished output\nAuthorization: Bearer private-value\n")
+	if err := fixture.store.SaveTerminalDiagnostics(ctx, kernel.TerminalDiagnostics{RunID: active.run.ID, Head: uint64(len(payload)), Payload: payload, CapturedAt: mustKernelTime(t, 2000)}); err != nil {
+		t.Fatal(err)
+	}
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := fixture.serve(t)
+	observed, err := operator.TerminalObserve(ctx, api.TerminalObserveInput{ProjectID: active.run.ProjectID.String(), TaskID: active.run.TaskID.String(), RunID: active.run.ID.String(), MaxBytes: 1024})
+	waitDispatch(t, done)
+	if err != nil || observed.Source != "stored" || !bytes.Contains(observed.Payload, []byte("finished output")) || bytes.Contains(observed.Payload, []byte("private-value")) {
+		t.Fatalf("settled observation = %+v, %v", observed, err)
+	}
+}

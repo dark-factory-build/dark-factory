@@ -150,56 +150,97 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 		if authority.Role != kernel.RoleOrchestrator || run.Role != kernel.RoleWorker {
 			return newErrorReply(api.RemoteForbidden)
 		}
-		diagnostics, present, err := daemon.store.TerminalDiagnostics(ctx, runID)
-		if err != nil {
-			return newErrorReply(remoteErrorCode(err))
-		}
-		if !present {
-			return newErrorReply(api.RemoteNotFound)
-		}
-		if input.Cursor < diagnostics.Floor {
-			result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: diagnostics.Floor, Floor: diagnostics.Floor, Head: diagnostics.Head, Source: "stored", Gap: true, Omitted: diagnostics.Floor - input.Cursor}
-			reply, err := api.NewTerminalObservationReply(result)
-			if err != nil {
-				return newErrorReply(api.RemoteInternal)
-			}
-			return reply
-		}
-		if input.Cursor > diagnostics.Head {
-			return newErrorReply(api.RemoteConflict)
-		}
-		remaining := min(uint64(input.MaxBytes), diagnostics.Head-input.Cursor)
-		offset := input.Cursor - diagnostics.Floor
-		if offset > uint64(len(diagnostics.Payload)) || remaining > uint64(len(diagnostics.Payload))-offset {
-			return newErrorReply(api.RemoteInternal)
-		}
-		raw := diagnostics.Payload[offset : offset+remaining]
-		var payload []byte
-		var omitted uint64
-		if offset == 0 {
-			payload, omitted = redactTerminalWindow(raw, input.Cursor)
-		} else {
-			contextOffset := offset - min(offset, uint64(512))
-			payload, omitted = redactTerminalWindow(raw, input.Cursor, terminalLookbehind{start: diagnostics.Floor + contextOffset, bytes: diagnostics.Payload[contextOffset:offset]})
-		}
-		result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: input.Cursor + remaining, Floor: diagnostics.Floor, Head: diagnostics.Head, Source: "stored", Omitted: omitted, Payload: payload}
+		return daemon.readStoredTerminalObservation(ctx, input, run.ID)
+	}
+	if run.Phase != kernel.RunRunning {
+		return newErrorReply(api.RemoteConflict)
+	}
+	return daemon.readTerminalObservation(ctx, input, run)
+}
+
+func (daemon *Daemon) operatorTerminalObserve(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.TerminalObserveInput()
+	if !ok {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	project, err := parseProjectID(input.ProjectID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	task, err := parseTaskID(input.TaskID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	runID, err := parseRunID(input.RunID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	run, found, err := daemon.store.Run(ctx, runID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !found || run.ProjectID != project || run.TaskID != task {
+		return newErrorReply(api.RemoteForbidden)
+	}
+	if run.Phase == kernel.RunTerminal {
+		return daemon.readStoredTerminalObservation(ctx, input, run.ID)
+	}
+	if run.Phase != kernel.RunRunning {
+		return newErrorReply(api.RemoteConflict)
+	}
+	return daemon.readTerminalObservation(ctx, input, run)
+}
+
+func (daemon *Daemon) readStoredTerminalObservation(ctx context.Context, input api.TerminalObserveInput, runID kernel.RunID) api.Reply {
+	diagnostics, present, err := daemon.store.TerminalDiagnostics(ctx, runID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	if !present {
+		return newErrorReply(api.RemoteNotFound)
+	}
+	if input.Cursor < diagnostics.Floor {
+		result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: diagnostics.Floor, Floor: diagnostics.Floor, Head: diagnostics.Head, Source: "stored", Gap: true, Omitted: diagnostics.Floor - input.Cursor}
 		reply, err := api.NewTerminalObservationReply(result)
 		if err != nil {
 			return newErrorReply(api.RemoteInternal)
 		}
 		return reply
 	}
-	if run.Phase != kernel.RunRunning {
+	if input.Cursor > diagnostics.Head {
 		return newErrorReply(api.RemoteConflict)
 	}
-	session, found, err := daemon.store.TerminalSessionForRun(ctx, runID)
+	remaining := min(uint64(input.MaxBytes), diagnostics.Head-input.Cursor)
+	offset := input.Cursor - diagnostics.Floor
+	if offset > uint64(len(diagnostics.Payload)) || remaining > uint64(len(diagnostics.Payload))-offset {
+		return newErrorReply(api.RemoteInternal)
+	}
+	raw := diagnostics.Payload[offset : offset+remaining]
+	var payload []byte
+	var omitted uint64
+	if offset == 0 {
+		payload, omitted = redactTerminalWindow(raw, input.Cursor)
+	} else {
+		contextOffset := offset - min(offset, uint64(512))
+		payload, omitted = redactTerminalWindow(raw, input.Cursor, terminalLookbehind{start: diagnostics.Floor + contextOffset, bytes: diagnostics.Payload[contextOffset:offset]})
+	}
+	result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: input.Cursor + remaining, Floor: diagnostics.Floor, Head: diagnostics.Head, Source: "stored", Omitted: omitted, Payload: payload}
+	reply, err := api.NewTerminalObservationReply(result)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	return reply
+}
+
+func (daemon *Daemon) readTerminalObservation(ctx context.Context, input api.TerminalObserveInput, run kernel.Run) api.Reply {
+	session, found, err := daemon.store.TerminalSessionForRun(ctx, run.ID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
 	if !found {
 		return newErrorReply(api.RemoteNotFound)
 	}
-	attachment, err := daemon.AttachTerminal(ctx, runID, session.ID, run.Revision, session.Revision, input.Cursor)
+	attachment, err := daemon.AttachTerminal(ctx, run.ID, session.ID, run.Revision, session.Revision, input.Cursor)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
