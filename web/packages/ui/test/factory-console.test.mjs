@@ -1163,6 +1163,10 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   renderer.unmount();
   const denied = render({ ...settings, github: { pending: false, result: { state: "denied" } } });
   assert.match(denied, /GITHUB ACCESS WAS DENIED OR EXPIRED/);
+  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "denied" } } })); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RESET GITHUB ACCESS").props.onClick(); });
+  assert.equal(calls.at(-1).action, "disconnect");
+  renderer.unmount();
   const unavailable = render({ ...settings, github: { pending: false, result: { state: "unavailable" } } });
   assert.match(unavailable, /GITHUB IS UNAVAILABLE/);
   const disconnectPending = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } } });

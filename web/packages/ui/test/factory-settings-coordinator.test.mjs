@@ -50,3 +50,23 @@ test("pending authorization survives a settings status refresh", async () => {
   assert.deepEqual(calls, ["connect", "status"]);
   assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
 });
+
+test("a failed confirmation keeps its form and does not refresh away the retry", async () => {
+  const calls = [];
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request.action);
+      if (request.action === "connect") return { state: "ok", authorization };
+      if (request.action === "confirm") return { state: "denied" };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "connect" });
+  await coordinator.githubConnection({ action: "confirm", code: "0123456789" });
+  assert.deepEqual(calls, ["connect", "confirm"]);
+  assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
+});
