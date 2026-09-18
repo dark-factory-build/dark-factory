@@ -1099,9 +1099,38 @@ func (daemon *Daemon) projectRepository(ctx context.Context, call api.Call) api.
 		}
 		result := api.ProjectRepositories{Repositories: make([]api.ProjectRepository, 0, len(values))}
 		for _, value := range values {
-			result.Repositories = append(result.Repositories, repositoryDTO(value))
+			view, err := daemon.RepositoryReadiness(ctx, value.ID, false)
+			if err != nil {
+				return newErrorReply(remoteErrorCode(err))
+			}
+			result.Repositories = append(result.Repositories, view)
 		}
 		return api.NewContentReply(result)
+	case "fetch":
+		id, valid := parseRepo()
+		if !valid {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		view, err := daemon.RepositoryReadiness(ctx, id, true)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(view)
+	case "github":
+		id, valid := parseRepo()
+		if !valid {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		if err := daemon.BindProjectRepositoryGitHub(ctx, id); err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		view, err := daemon.RepositoryReadiness(ctx, id, false)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		view.PublicationState = "ready"
+		view.ReadinessMessage = "Repository identity verified through the GitHub connection. Publication permissions are checked for each operation."
+		return api.NewContentReply(view)
 	case "add":
 		id, valid := parseRepo()
 		project, projectValid := parseProject()
