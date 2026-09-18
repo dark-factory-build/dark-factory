@@ -335,3 +335,21 @@ later use Workflows, but every external GitHub mutation still needs a durable
 operation key and reconciliation state for ambiguous outcomes. Those are
 implemented for the first pull-request operations; each future mutation still
 requires its own reviewed schema, policy, reconciliation query, and tests.
+
+## Connection receipt ownership foundation
+
+Operation UUIDs now have an immutable owner and repository binding in the
+reviewed `maintainer_operation_authorities` side table. Existing receipt rows
+without a binding belong to the legacy Access operator. Their UUIDs, result
+bytes, and shard names are unchanged. A connection cannot adopt an old UUID,
+read another connection's receipt, or reuse its own UUID at another repository.
+First use binds ownership before an effect can be claimed; a determinate
+refusal releases execution, not ownership. Referenced receipts use the same
+scoped journal as direct observation and replay.
+
+This foundation exposes no customer authentication or MCP route. A subsequent
+connection ingress must authenticate its server-derived owner, validate live
+GitHub user access and delegation before every operation (including observation
+and completed replay), and then construct the scoped journal. These checks are
+not supplied by receipt isolation alone. Customer traffic must not be enabled
+until the whole deployed path uses this ownership-aware journal.
