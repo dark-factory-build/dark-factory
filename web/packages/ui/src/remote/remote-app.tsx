@@ -43,6 +43,8 @@ export type RemoteAppProps = {
   navigator?: Pick<Navigator, "onLine">;
   /** Turns this device's push subscription on; the browser implementation when the host supplies none. */
   subscribePush?: () => Promise<PushSubscribeBody>;
+  /** Ends this device's push subscription; the browser implementation when the host supplies none. */
+  unsubscribePush?: () => Promise<void>;
   /** Which iOS browser this is when the page is not yet on the Home Screen; read from the browser when the host supplies none. */
   install?: InstallHint;
 };
@@ -84,6 +86,12 @@ async function browserPushSubscription(): Promise<PushSubscribeBody> {
   const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey });
   const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
   return { endpoint: subscription.endpoint, public_key: encode(publicKey), private_key: encode(privateKey) };
+}
+
+/** OFF has to be true here, whatever a factory still holds: the browser's own subscription ends. */
+async function browserPushOff(): Promise<void> {
+  const registration = await globalThis.navigator?.serviceWorker?.ready;
+  await (await registration?.pushManager.getSubscription())?.unsubscribe();
 }
 
 type Pairing =
@@ -299,6 +307,19 @@ export function RemoteApp(props: RemoteAppProps = {}) {
     })();
   };
 
+  const disableAlerts = () => {
+    const target = manager.current;
+    if (target === undefined || alerts.phase === "working") return;
+    setAlerts({ phase: "working" });
+    void (async () => {
+      // The subscription ends first: only then is nothing able to reach this device.
+      try { await (props.unsubscribePush ?? browserPushOff)(); await target.setPush(undefined); } catch { /* the switch shows whatever is still true */ }
+      if (manager.current !== target) return;
+      setAlerts({ phase: "idle" });
+      bump();
+    })();
+  };
+
   const forgetDevice = () => {
     setConfirm(undefined);
     human.current?.clear(true);
@@ -447,7 +468,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               aria-checked={alertsOn}
               className="dfRemote__alertsOn"
               disabled={!online || alerts.phase === "working"}
-              onClick={alertsOn ? () => { void manager.current?.setPush(undefined).then(bump, bump); } : enableAlerts}
+              onClick={alertsOn ? disableAlerts : enableAlerts}
             >
               ALERTS <span>{alerts.phase === "working" ? "…" : alertsOn ? "ON" : "OFF"}</span>
             </button>
@@ -540,10 +561,10 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           <>
             <AgentStrip
               state={selected.state}
-              // Offered only when it could work, like every other control here.
-              onAsk={!actionable(selected.nodeId) || working ? undefined : (agentId) => {
+              // Offered only when it would work: a reachable factory and an open question.
+              ask={(agentId) => {
                 const item = needsYou.find((entry) => entry.nodeId === selected.nodeId && entry.request.agent_id === agentId);
-                if (item !== undefined) open(item.nodeId, item.label, item.request);
+                return item === undefined || !actionable(selected.nodeId) || working ? undefined : () => open(item.nodeId, item.label, item.request);
               }}
             />
             <ProjectsSection state={selected.state} />
@@ -575,7 +596,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
               <>
                 <p className="dfRemote__questionText">{detail.detail.question}</p>
                 <AnswerControls surface="remote" options={detail.detail.options} canReply={detail.detail.canReply} reply={detail.reply} replyMaxBytes={detail.detail.replyMaxBytes} busy={busy(detail)} disabled={!actionable(detail.scope.nodeId)} onReplyChange={changeReply} onReply={reply} submitLabel="REPLY" submittingLabel="REPLYING…" />
-                {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "READ-ONLY: ITS AGENT IS NOT RUNNING." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
+                {detail.detail.canReply ? null : <p className="dfFactoryConsole__empty">{detail.request.status === "open" ? "THIS CANNOT BE ANSWERED RIGHT NOW." : `THIS DECISION IS ${detail.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
                 {detail.detail.cancelRun === null ? null : cancelPhrase === undefined ? (
                   <button
                     type="button"
@@ -649,7 +670,7 @@ function ProjectsSection({ state }: { state: StateView | undefined }) {
     </li>
   );
   return (
-    <section id="dfRemoteWork" className="dfFactoryConsole__section dfRemote__projects" aria-label="Work">
+    <section className="dfFactoryConsole__section dfRemote__projects" aria-label="Work">
       {state === undefined ? <p className="dfFactoryConsole__empty">waiting for the factory</p>
         : groups.length === 0 ? <p className="dfFactoryConsole__empty">no projects yet</p> : (
         <ul className="dfRemote__projectList">

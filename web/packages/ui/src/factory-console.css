@@ -1096,6 +1096,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfRemote__needsYou { max-width: 90rem; margin: 0 auto 1rem; }
 .dfRemote__needsYou > .dfFactoryConsole__empty { margin: 0; }
 .dfRemote__question { border-color: var(--df-console-warning); }
+.dfRemote button.dfConsoleStrip__agent { padding: 0.75rem 0.4rem; }
 .dfRemote__factoryStatus,
 .dfRemote__factoryCount { grid-column: 2; }
 

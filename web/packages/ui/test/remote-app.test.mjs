@@ -337,7 +337,7 @@ test("read-only questions keep their suggested answers disabled", async () => {
     assert.ok(suggested !== undefined);
     assert.equal(suggested.props.disabled, true);
     assert.equal(renderer.root.findAllByProps({ className: "dfRemote__replyText" }).length, 0);
-    assert.match(sectionText(renderer, "dfRemote__detail"), /READ-ONLY: ITS AGENT IS NOT RUNNING\./);
+    assert.match(sectionText(renderer, "dfRemote__detail"), /THIS CANNOT BE ANSWERED RIGHT NOW\./);
   });
 });
 
@@ -577,6 +577,11 @@ test("the asking agent's sprite opens its question, and only while that could wo
   await withApp(props(fakeManager([northFactory({ status: "offline" })])), (renderer) => {
     assert.equal(buttons(renderer, "dfConsoleStrip__agent--needs-you").length, 0);
   });
+  // A question past "open" has nothing to open: its agent still needs you, but the tile is not a control.
+  const stuck = { ...fixtureState, humanRequests: new Map([[northRequest.id, { ...northRequest, status: "delivery_unknown" }]]) };
+  await withApp(props(fakeManager([northFactory({ state: stuck })])), (renderer) => {
+    assert.equal(buttons(renderer, "dfConsoleStrip__agent--needs-you").length, 0);
+  });
 });
 
 test("ANSWER opens one question at a time", async () => {
@@ -796,7 +801,11 @@ test("alerts turn on through the host's subscription and off with the device", a
   const subscription = { endpoint: "https://web.push.apple.com/QGdfl/abc", public_key: "B" + "a".repeat(86), private_key: "MIGH" };
   let attempts = 0;
   const subscribePush = async () => { attempts += 1; if (attempts === 1) throw new Error("ALERTS WERE REFUSED"); return subscription; };
-  await withApp(props(manager, { subscribePush }), async (renderer) => {
+  const order = [];
+  const unsubscribePush = async () => { order.push("unsubscribe"); };
+  const setPush = manager.setPush;
+  manager.setPush = async (value) => { if (value === undefined) order.push("setPush"); return setPush(value); };
+  await withApp(props(manager, { subscribePush, unsubscribePush }), async (renderer) => {
     assert.match(sectionText(renderer, "dfRemote__alerts"), /ALERTS.*OFF/s);
     await act(async () => { button(renderer, "dfRemote__alertsOn").props.onClick(); });
     await settle();
@@ -807,9 +816,10 @@ test("alerts turn on through the host's subscription and off with the device", a
     await settle();
     assert.deepEqual(manager.calls.setPush, [subscription]);
     assert.equal(button(renderer, "dfRemote__alertsOn").props["aria-checked"], true);
-    // The same switch turns them off again.
+    // The same switch turns them off again, ending the browser's subscription first.
     await act(async () => { button(renderer, "dfRemote__alertsOn").props.onClick(); });
     await settle();
+    assert.deepEqual(order, ["unsubscribe", "setPush"]);
     assert.deepEqual(manager.calls.setPush, [subscription, undefined]);
     assert.equal(button(renderer, "dfRemote__alertsOn").props["aria-checked"], false);
 
