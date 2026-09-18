@@ -117,6 +117,34 @@ package_target() {
     package_payload="$staging/.payload-$package_target_name"
     mkdir "$package_payload"
     package_unpacked_bytes=0
+    controller_payload="$package_payload/libexec/dark-factory"
+    mkdir -p "$controller_payload"
+    for controller_asset in \
+        cold-review.sh \
+        factory-autonomy.py \
+        factory-delivery.py \
+        factory-intake.py \
+        factory-publication.py \
+        factory-release.py \
+        factory-review-intake.py \
+        go-gate-environment.sh \
+        verify-adversarial-review.sh \
+        supervision.md
+    do
+        controller_source="$repository_root/scripts/$controller_asset"
+        [ -f "$controller_source" ] && [ ! -L "$controller_source" ] || {
+            echo "release controller asset is missing or symbolic: $controller_asset" >&2
+            exit 1
+        }
+        cp "$controller_source" "$controller_payload/$controller_asset"
+        case "$controller_asset" in
+            supervision.md) chmod 0644 "$controller_payload/$controller_asset" ;;
+            *) chmod 0755 "$controller_payload/$controller_asset" ;;
+        esac
+        TZ=UTC0 touch -t 200001010000.00 "$controller_payload/$controller_asset"
+        controller_size=$(/usr/bin/stat -f '%z' "$controller_payload/$controller_asset")
+        package_unpacked_bytes=$((package_unpacked_bytes + controller_size))
+    done
     package_build_id=
     # The verifier opens each source once without following a final symlink,
     # snapshots from that retained descriptor, and validates the private copy.
@@ -143,7 +171,17 @@ package_target() {
     COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname wheel \
         --no-acls --no-xattrs --no-fflags --options gzip:!timestamp \
         -czf "$staging/$package_archive" -C "$package_payload" \
-        factoryd factory-runner factoryctl
+        factoryd factory-runner factoryctl \
+        libexec/dark-factory/cold-review.sh \
+        libexec/dark-factory/factory-autonomy.py \
+        libexec/dark-factory/factory-delivery.py \
+        libexec/dark-factory/factory-intake.py \
+        libexec/dark-factory/factory-publication.py \
+        libexec/dark-factory/factory-release.py \
+        libexec/dark-factory/factory-review-intake.py \
+        libexec/dark-factory/go-gate-environment.sh \
+        libexec/dark-factory/supervision.md \
+        libexec/dark-factory/verify-adversarial-review.sh
     rm -r "$package_payload"
     package_archive_bytes=$(/usr/bin/stat -f '%z' "$staging/$package_archive")
     "$release_tool" bounds "$package_unpacked_bytes" "$package_archive_bytes"

@@ -51,6 +51,14 @@ run_packaged_smoke() {
     for binary in factoryd factory-runner factoryctl; do
         [ -x "$smoke_bin/$binary" ] || fail "packaged smoke is missing $binary"
     done
+    for controller_asset in \
+        cold-review.sh factory-autonomy.py factory-delivery.py factory-intake.py \
+        factory-publication.py factory-release.py factory-review-intake.py \
+        go-gate-environment.sh verify-adversarial-review.sh supervision.md
+    do
+        [ -f "$smoke_bin/libexec/dark-factory/$controller_asset" ] \
+            || fail "packaged smoke is missing controller asset $controller_asset"
+    done
 
     "$smoke_bin/factoryctl" init --home "$smoke_home" >/dev/null \
         || fail "packaged factoryctl could not initialize a fresh home"
@@ -263,16 +271,51 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
     listing=$(tar -tzf "$archive" | LC_ALL=C sort)
     [ "$listing" = "factory-runner
 factoryctl
-factoryd" ] || fail "$target archive has unexpected contents: $listing"
+factoryd
+libexec/dark-factory/cold-review.sh
+libexec/dark-factory/factory-autonomy.py
+libexec/dark-factory/factory-delivery.py
+libexec/dark-factory/factory-intake.py
+libexec/dark-factory/factory-publication.py
+libexec/dark-factory/factory-release.py
+libexec/dark-factory/factory-review-intake.py
+libexec/dark-factory/go-gate-environment.sh
+libexec/dark-factory/supervision.md
+libexec/dark-factory/verify-adversarial-review.sh" ] || fail "$target archive has unexpected contents: $listing"
     gzip_mtime=$(od -An -tu1 -j4 -N4 "$archive" | tr -d '[:space:]')
     [ "$gzip_mtime" = "0000" ] || fail "$target archive embeds its packaging time"
     LC_ALL=C tar -tvzf "$archive" | awk '
-      $1 != "-rwxr-xr-x" || $2 != 0 || $3 != "root" || $4 != "wheel" ||
-        $6 != "Jan" || $7 != 1 || $8 != 2000 { exit 1 }
-      END { exit NR == 3 ? 0 : 1 }
+      $2 != 0 || $3 != "root" || $4 != "wheel" || $6 != "Jan" || $7 != 1 || $8 != 2000 { exit 1 }
+      ($9 == "libexec/dark-factory/supervision.md" && $1 != "-rw-r--r--") ||
+        ($9 != "libexec/dark-factory/supervision.md" && $1 != "-rwxr-xr-x") { exit 1 }
+      END { exit NR == 13 ? 0 : 1 }
     ' || fail "$target archive metadata is not normalized"
 done
 (cd "$output" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail "release checksums failed"
+
+# Controller imports resolve against the installed directory, even when the
+# archive has been extracted elsewhere and invoked from another working tree.
+controller_root="$output/controller-installed"
+mkdir -p "$controller_root"
+tar -xzf "$output/dark-factory-v1.2.3-$native_archive_target.tar.gz" -C "$controller_root"
+(cd /private/tmp && python3 "$controller_root/libexec/dark-factory/factory-release.py" --help >/dev/null) \
+    || fail "installed release controller could not load relative helpers"
+(cd /private/tmp && python3 "$controller_root/libexec/dark-factory/factory-review-intake.py" --help >/dev/null) \
+    || fail "installed review controller could not load relative helpers"
+(cd /private/tmp && python3 - "$controller_root/libexec/dark-factory/factory-intake.py" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("installed_intake", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+config = {"repository": "example/project", "label": "factory:ready", "allowed_authors": ["maintainer"]}
+issue = {"number": 7, "title": "queue", "body": "inspect", "state": "OPEN", "author": "maintainer", "labels": ["factory:ready"], "updated_at": "2026-09-18T00:00:00Z", "url": "https://github.com/example/project/issues/7"}
+body = module.operation_for(config, issue, "f" * 64)["body"]
+assert "Dark Factory supervision guidance" in body
+assert "docs/development/UNATTENDED.md" not in body
+PY
+) || fail "installed intake did not read its relative guidance"
 
 # Exercise the archive's daemon/API boundary under the process-group
 # supervisor, without starting a provider task.
@@ -326,6 +369,8 @@ if grep -Eq '^[[:space:]]+version ' "$formula"; then
 fi
 grep -Fq 'resource("binaries").stage' "$formula" \
     || fail "formula does not install its selected resource"
+grep -Fq 'libexec.install "libexec/dark-factory"' "$formula" \
+    || fail "formula does not install controller assets"
 grep -Fq 'assert_equal "#{name} #{version}", shell_output("#{bin}/#{name} --version").strip' \
     "$formula" || fail "formula does not test the exact binary version"
 grep -Fq "SOURCE_SHA = \"$source_sha\"" "$formula" || fail "formula omitted the exact source"

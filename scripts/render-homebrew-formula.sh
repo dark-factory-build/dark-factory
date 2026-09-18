@@ -116,14 +116,16 @@ ${version_stanza}  sha256 "$manifest_sha"
   def install
     resource("binaries").stage do
       bin.install "factoryd", "factory-runner", "factoryctl"
+      libexec.install "libexec/dark-factory"
     end
   end
 
   def caveats
     <<~EOS
-      Homebrew installs the three Dark Factory commands; it does not own the
-      running factory. Run \`factoryctl init --home ABSOLUTE\` to create a fresh
-      home. This formula does not install or remove a launchd job; do not use
+      Homebrew installs the three Dark Factory commands and optional host
+      controller assets under libexec/dark-factory; it does not own the running
+      factory. Run \`factoryctl init --home ABSOLUTE\` to create a fresh home.
+      This formula does not install or remove a launchd job; do not use
       \`brew services\` for Dark Factory.
 
       \`brew upgrade\` replaces these commands but never mutates a running home.
