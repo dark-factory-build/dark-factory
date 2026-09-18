@@ -2407,7 +2407,7 @@ impl AppAuthority {
                 let _ = journal
                     .mark_operation(&operation, OperationTransition::Indeterminate)
                     .await;
-                return Err(error.into());
+                return Err(error);
             }
         };
         match revalidate_enqueue_pull(Ok(&pull), &request, reviewed_body_digest) {
