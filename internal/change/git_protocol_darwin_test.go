@@ -150,7 +150,7 @@ func TestGitSignalsOnlyWhileExactLeaderIsUnreaped(t *testing.T) {
 		}
 	}
 	var err error
-	child, err = startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository), hook: hook}, false)
+	child, err = startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository), hook: hook})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ while (1) { sleep 1; }
 func TestGitChildInheritsCurrentRegisteredWrapperGroup(t *testing.T) {
 	repository := fakeRepository(t)
 	git := writeFakeGit(t, "#!/usr/bin/perl\n$SIG{TERM}=sub{exit 0}; while(1){select(undef,undef,undef,1)}\n")
-	child, err := startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository)}, false)
+	child, err := startGitChild(gitCommandSpec{program: git, repository: repository, home: filepath.Dir(repository)})
 	if err != nil {
 		t.Fatal(err)
 	}

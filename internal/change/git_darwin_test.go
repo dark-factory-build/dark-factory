@@ -17,6 +17,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -688,6 +689,32 @@ func TestGitPublicFailuresNeverExposePrivateBoundaryData(t *testing.T) {
 	}
 	if strings.Contains(selectionText, sentinel) || strings.Contains(string(selectionJSON), sentinel) {
 		t.Fatalf("public Selection formatting leaked private locators: %q %q", selectionText, selectionJSON)
+	}
+}
+
+func TestReadGitCapturePreservesBoundedReaderContract(t *testing.T) {
+	wrappedEOF := fmt.Errorf("wrapped: %w", io.EOF)
+	tests := []struct {
+		name     string
+		reader   io.Reader
+		maximum  int
+		data     string
+		overflow bool
+		wantErr  error
+	}{
+		{name: "under limit", reader: strings.NewReader("abc"), maximum: 4, data: "abc"},
+		{name: "exact limit", reader: strings.NewReader("abcd"), maximum: 4, data: "abcd"},
+		{name: "over limit", reader: strings.NewReader("abcde"), maximum: 4, overflow: true},
+		{name: "reader error after data", reader: io.MultiReader(strings.NewReader("abc"), iotest.ErrReader(io.ErrUnexpectedEOF)), maximum: 4, wantErr: io.ErrUnexpectedEOF},
+		{name: "wrapped EOF remains success", reader: io.MultiReader(strings.NewReader("abc"), iotest.ErrReader(wrappedEOF)), maximum: 4, data: "abc"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := readGitCapture(test.reader, test.maximum)
+			if result.overflow != test.overflow || string(result.data) != test.data || !errors.Is(result.err, test.wantErr) {
+				t.Fatalf("result=%+v, want data=%q overflow=%t err=%v", result, test.data, test.overflow, test.wantErr)
+			}
+		})
 	}
 }
 

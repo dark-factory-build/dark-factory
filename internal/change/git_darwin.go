@@ -693,7 +693,6 @@ type gitChild struct {
 	pgid    int
 	kq      int
 	exit    <-chan error
-	stdin   *os.File
 	stdout  *os.File
 	stderr  *os.File
 	hook    gitProcessHook
@@ -708,7 +707,7 @@ type gitReap struct {
 	observerErr  error
 }
 
-func startGitChild(spec gitCommandSpec, withInput bool) (*gitChild, error) {
+func startGitChild(spec gitCommandSpec) (*gitChild, error) {
 	command := spec.command()
 	pgid := unix.Getpgrp()
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
@@ -717,31 +716,20 @@ func startGitChild(spec gitCommandSpec, withInput bool) (*gitChild, error) {
 		return nil, newGitError(gitFailureProcess)
 	}
 	unix.CloseOnExec(kq)
-	var childStdin *os.File
-	var stdin *os.File
-	if withInput {
-		childStdin, stdin, err = os.Pipe()
-		if err != nil {
-			unix.Close(kq)
-			return nil, newGitError(gitFailurePrivateIO)
-		}
-		command.Stdin = childStdin
-	}
 	stdout, childStdout, err := os.Pipe()
 	if err != nil {
-		closeGitFiles(childStdin, stdin)
 		unix.Close(kq)
 		return nil, newGitError(gitFailurePrivateIO)
 	}
 	stderr, childStderr, err := os.Pipe()
 	if err != nil {
-		closeGitFiles(childStdin, stdin, stdout, childStdout)
+		closeGitFiles(stdout, childStdout)
 		unix.Close(kq)
 		return nil, newGitError(gitFailurePrivateIO)
 	}
 	command.Stdout, command.Stderr = childStdout, childStderr
 	if err := command.Start(); err != nil {
-		closeGitFiles(childStdin, stdin, stdout, childStdout, stderr, childStderr)
+		closeGitFiles(stdout, childStdout, stderr, childStderr)
 		unix.Close(kq)
 		return nil, newGitError(gitFailureProcess)
 	}
@@ -750,9 +738,9 @@ func startGitChild(spec gitCommandSpec, withInput bool) (*gitChild, error) {
 	}
 	child := &gitChild{
 		command: command, pid: command.Process.Pid, pgid: pgid, kq: kq,
-		stdin: stdin, stdout: stdout, stderr: stderr, hook: spec.hook, groupOK: true,
+		stdout: stdout, stderr: stderr, hook: spec.hook, groupOK: true,
 	}
-	if closeGitFiles(childStdin, childStdout, childStderr) != nil {
+	if closeGitFiles(childStdout, childStderr) != nil {
 		return nil, child.failStart()
 	}
 	exit := make(chan error, 1)
@@ -780,7 +768,7 @@ func (c *gitChild) failStart() error {
 		}
 		c.waited = true
 	}
-	closeGitFiles(c.stdin, c.stdout, c.stderr)
+	closeGitFiles(c.stdout, c.stderr)
 	_ = unix.Close(c.kq)
 	return newGitCleanupError(gitFailureProcess)
 }
@@ -913,31 +901,11 @@ observedExit:
 	return result
 }
 
-func (c *gitChild) reapObserved(observed error) gitReap {
-	if c.waited {
-		return gitReap{observerErr: errors.New("Git child waited more than once"), cleanup: true}
-	}
-	_ = unix.Close(c.kq)
-	result := gitReap{observerErr: observed, cleanup: observed != nil}
-	if observed != nil {
-		c.signal(unix.SIGKILL)
-	}
-	if !c.checkGroup(true) {
-		result.cleanup = true
-	}
-	result.waitErr = c.command.Wait()
-	c.waited = true
-	if c.hook != nil {
-		c.hook(gitProcessWaited)
-	}
-	return result
-}
-
 func runGitCapture(ctx context.Context, spec gitCommandSpec, maximum int) (gitCapture, error) {
 	if err := ctx.Err(); err != nil {
 		return gitCapture{}, newGitContextError(err, false)
 	}
-	child, err := startGitChild(spec, false)
+	child, err := startGitChild(spec)
 	if err != nil {
 		return gitCapture{}, err
 	}
@@ -1000,23 +968,14 @@ func readGitDiscard(reader io.Reader, maximum int64) gitStreamResult {
 }
 
 func readGitCapture(reader io.Reader, maximum int) gitStreamResult {
-	data := make([]byte, 0, min(maximum, 64<<10))
-	buffer := make([]byte, 32<<10)
-	for {
-		n, err := reader.Read(buffer)
-		if n > 0 {
-			if len(data) > maximum-n {
-				return gitStreamResult{overflow: true}
-			}
-			data = append(data, buffer[:n]...)
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return gitStreamResult{data: data}
-			}
-			return gitStreamResult{err: err}
-		}
+	data, err := io.ReadAll(io.LimitReader(reader, int64(maximum)+1))
+	if len(data) > maximum {
+		return gitStreamResult{overflow: true}
 	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return gitStreamResult{err: err}
+	}
+	return gitStreamResult{data: data}
 }
 
 func isExitError(err error) bool {
