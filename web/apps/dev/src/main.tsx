@@ -1,6 +1,6 @@
 import actualTopology from "./actual-topology.js";
 import { useState } from "react";
-import { SessionError } from "@dark-factory/client";
+import { SessionError, type GitHubConnectionBody } from "@dark-factory/client";
 import { TerminalPanel } from "../../../packages/ui/dist/src/factory-app.js";
 import { createRoot } from "react-dom/client";
 import { FactoryApp, FactoryConsole, type FactoryConsoleProps } from "@dark-factory/ui";
@@ -98,6 +98,19 @@ const fixtureInventoryTopologies = new Map(fixtureHierarchyTopologies).set(fixtu
 });
 const fixtureInventoryState = { ...fixtureFloorState, humanRequests: new Map() };
 
+type GitHubFixtureMode = "disconnected" | "loading" | "empty" | "denied" | "approval" | "expired" | "unavailable" | "connected";
+const githubInstallations = [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }];
+const githubRepositories = [{ id: 101, full_name: "factory-org/worker", permissions: { pull: true, push: true, maintain: true, admin: true } }, { id: 102, full_name: "factory-org/read-only", permissions: { pull: true, push: false, maintain: false, admin: false } }];
+function githubFixture(mode: GitHubFixtureMode): NonNullable<FactoryConsoleProps["github"]> {
+  if (mode === "loading") return { pending: true, result: { state: "pending" } };
+  if (mode === "denied" || mode === "expired") return { pending: false, result: { state: "denied" } };
+  if (mode === "unavailable") return { pending: false, result: { state: "unavailable" } };
+  if (mode === "approval") return { pending: false, result: { state: "ok", authorization: { connection_id: "fixture", authorization_url: "https://github.com/login/oauth/authorize?state=fixture", expires_at: 2_000_000_000n } } };
+  if (mode === "empty") return { pending: false, result: { state: "ok", status: { connection_id: "fixture", state: "connected", repositories: [] }, installations: { installations: [] } } };
+  if (mode === "connected") return { pending: false, result: { state: "ok", status: { connection_id: "fixture", state: "connected", repositories: [] }, installations: { installations: githubInstallations, next_page: 2 } } };
+  return { pending: false, result: { state: "disconnected" } };
+}
+
 // Fixture tour: sample data, no daemon, no authority. Fixture-only state
 // toggles expose production components; no action reports a daemon result.
 function FixtureTour() {
@@ -124,6 +137,17 @@ function FixtureTour() {
   const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>(terminalFixture ? { id: fixtureAgent.id, name: fixtureAgent.name, revision: fixtureAgent.revision } : archiveFixture ? { id: archiveAgent.id, name: archiveAgent.name, revision: archiveAgent.revision } : undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [selectedHumanRequest, setSelectedHumanRequest] = useState<FactoryConsoleProps["selectedHumanRequest"]>();
+  const githubMode = new URLSearchParams(window.location.search).get("github") as GitHubFixtureMode | null;
+  const [github, setGithub] = useState<FactoryConsoleProps["github"]>(() => githubMode === null ? undefined : githubFixture(githubMode));
+  const githubAction = (request: GitHubConnectionBody) => {
+    if (githubMode === null) return;
+    if (request.action === "connect") setGithub(githubFixture("approval"));
+    else if (request.action === "confirm") setGithub(githubFixture("connected"));
+    else if (request.action === "installations") setGithub({ pending: false, result: { state: "ok", status: { connection_id: "fixture", state: "connected", repositories: [] }, installations: { installations: githubInstallations, next_page: request.page === 1 ? 2 : undefined } } });
+    else if (request.action === "repositories") setGithub({ pending: false, result: { state: "ok", status: { connection_id: "fixture", state: "connected", repositories: [] }, installations: { installations: githubInstallations }, repositories: { repositories: githubRepositories } } });
+    else if (request.action === "disconnect") setGithub(githubFixture("disconnected"));
+    else if (request.action === "refresh") setGithub(githubFixture("connected"));
+  };
   return (
     <>
       <p className="devFixtureBanner" role="note">
@@ -204,6 +228,8 @@ function FixtureTour() {
           });
         }}
         onCloseHumanRequest={() => setSelectedHumanRequest(undefined)}
+        github={github}
+        onGitHub={githubAction}
       />
     </>
   );
