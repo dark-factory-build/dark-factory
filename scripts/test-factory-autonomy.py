@@ -26,6 +26,12 @@ deploy = module('deploy-runtime')
 
 
 class AutonomyTest(unittest.TestCase):
+    def test_installed_controller_does_not_refresh_an_archive_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            installed = Path(directory) / 'libexec' / 'dark-factory'
+            installed.mkdir(parents=True)
+            self.assertIsNone(autonomy.controller_checkout(installed))
+
     def test_controller_source_refresh_preserves_edits_and_requires_matching_ancestry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

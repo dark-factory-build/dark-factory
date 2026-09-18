@@ -305,6 +305,7 @@ tar -xzf "$output/dark-factory-v1.2.3-$native_archive_target.tar.gz" -C "$contro
 (cd /private/tmp && python3 - "$controller_root/libexec/dark-factory/factory-intake.py" <<'PY'
 import importlib.util
 import sys
+from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("installed_intake", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
@@ -314,6 +315,10 @@ issue = {"number": 7, "title": "queue", "body": "inspect", "state": "OPEN", "aut
 body = module.operation_for(config, issue, "f" * 64)["body"]
 assert "Dark Factory supervision guidance" in body
 assert "docs/development/UNATTENDED.md" not in body
+auto_spec = importlib.util.spec_from_file_location("installed_autonomy", Path(sys.argv[1]).with_name("factory-autonomy.py"))
+auto = importlib.util.module_from_spec(auto_spec)
+auto_spec.loader.exec_module(auto)
+assert auto.controller_checkout(Path(sys.argv[1]).parent) is None
 PY
 ) || fail "installed intake did not read its relative guidance"
 
