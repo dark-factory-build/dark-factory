@@ -5,6 +5,8 @@ package daemon
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
@@ -94,5 +96,85 @@ func TestIntakeAcceptedContentSurvivesLargeBacklogAndMetadataChanges(t *testing.
 	}
 	if got := fixture.daemon.Intake(ctx, accept); got.State != "conflict" {
 		t.Fatalf("source changed during remote acceptance read: %+v", got)
+	}
+}
+
+func TestIntakePendingCursorPassesOverTwoHundredStaleReceipts(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(180))
+	agent := mustAgentID(t, testID(181))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "test", Root: "/intake-test"}, mustKernelTime(t, 101)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agent, ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderShell, ToolBudgetLimit: 10}, mustKernelTime(t, 102)); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := hex.DecodeString(testID(182))
+	id, _ := kernel.IntakeSourceIDFromBytes(raw)
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: id, ProjectID: project, TargetRepositoryID: kernel.RepositoryID(project), OverseerAgentID: agent, GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1}, mustKernelTime(t, 103))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err = fixture.store.SetIntakeSourceEnabled(ctx, id, source.Revision, true, mustKernelTime(t, 104))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues := map[uint64]maintainer.Issue{}
+	accepted := []kernel.IntakeAcceptance{}
+	for number := uint64(1); number <= 204; number++ {
+		issue := maintainer.Issue{ID: int64(number), NodeID: fmt.Sprintf("I_%d", number), Number: number, Title: "Reviewed", Body: "Approved instructions", State: "open", URL: fmt.Sprintf("https://github.com/team/issues/issues/%d", number)}
+		issue.Author.Login, issue.Author.Type = "human", "User"
+		issues[number] = issue
+		receipt, err := fixture.store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshot(source, issue), mustKernelTime(t, int64(200+number)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted = append(accepted, receipt)
+	}
+	sort.Slice(accepted, func(i, j int) bool { return accepted[i].ID.String() < accepted[j].ID.String() })
+	for _, receipt := range accepted[:202] {
+		issue := issues[receipt.Snapshot.IssueNumber]
+		issue.Body = "Unapproved replacement"
+		issues[issue.Number] = issue
+	}
+	exactReads := 0
+	fixture.daemon.intakeIssues = func(_ context.Context, _ string, _ uint64, page uint32, _ string, number uint64) (maintainer.IssuePage, error) {
+		if number != 0 {
+			exactReads++
+			return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{issues[number]}}, nil
+		}
+		next := page + 1 // Approved issues remain beyond the unaccepted discovery backlog.
+		return maintainer.IssuePage{RepositoryID: 42, Issues: []maintainer.Issue{}, NextPage: &next}, nil
+	}
+	tick := api.IntakeInput{Action: "tick", SourceID: source.ID.String(), Page: 1}
+	imports := map[string]int{}
+	wrapped := false
+	for index := 0; index < 20; index++ {
+		before := exactReads
+		result := fixture.daemon.Intake(ctx, tick)
+		if result.State != "ok" || len(result.ImportedTasks) > 1 || exactReads-before > 25 {
+			t.Fatalf("unbounded or failed tick: %+v, reads=%d", result, exactReads-before)
+		}
+		for _, task := range result.ImportedTasks {
+			imports[task]++
+		}
+		if result.AcceptanceCursor == "" {
+			wrapped = true
+		}
+		tick.AcceptanceCursor, tick.Page = result.AcceptanceCursor, *result.NextPage
+	}
+	if !wrapped || len(imports) != 2 {
+		t.Fatalf("pending receipts starved: wrapped=%v imported=%v", wrapped, imports)
+	}
+	for _, receipt := range accepted[202:] {
+		if imports[receipt.TaskID.String()] != 1 {
+			t.Fatalf("approved receipt not imported exactly once: %v", imports)
+		}
+	}
+	for _, receipt := range accepted[:202] {
+		if _, found, err := fixture.store.Task(ctx, receipt.TaskID); err != nil || found {
+			t.Fatalf("stale receipt imported: %v %v", found, err)
+		}
 	}
 }

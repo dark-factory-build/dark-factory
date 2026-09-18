@@ -197,7 +197,7 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		}
 		return api.IntakeResult{State: "accepted", AcceptanceID: accepted.ID.String(), TaskID: accepted.TaskID.String()}
 	case "preview", "refresh", "tick":
-		return daemon.previewIntake(ctx, source, input.Page, input.Action == "tick")
+		return daemon.previewIntake(ctx, source, input.Page, input.Action == "tick", input.AcceptanceCursor)
 	}
 	return api.IntakeResult{State: "invalid"}
 }
@@ -304,7 +304,7 @@ func (daemon *Daemon) withdrawIntakeTask(ctx context.Context, acceptanceID kerne
 	return kernel.ErrConflict
 }
 
-func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSource, page uint32, tick bool) api.IntakeResult {
+func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSource, page uint32, tick bool, cursor string) api.IntakeResult {
 	result := api.IntakeResult{State: "ok", ReviewedRevision: uint64(source.Revision.Int64()), Candidates: []api.IntakeCandidate{}, ImportedTasks: []string{}}
 	if tick {
 		withdrawals, err := daemon.store.PendingIntakeWithdrawals(ctx, source.ID, source.AdmissionLimit)
@@ -320,18 +320,31 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	if tick && !source.Enabled {
 		return api.IntakeResult{State: "paused"}
 	}
-	// Explicit acceptances bypass discovery pagination and its admission cap.
+	// Keep bounded receipt scanning independent of discovery and admission limits.
+	// The existing controller journal owns progress; an empty cursor wraps.
 	if tick {
-		pending, err := daemon.store.PendingIntakeAcceptances(ctx, source.ID, source.AdmissionLimit)
+		after := kernel.IntakeAcceptanceID{}
+		if cursor != "" {
+			after, _ = browserID(cursor, kernel.IntakeAcceptanceIDFromBytes) // ValidIntakeInput checked it.
+		}
+		const receiptPageSize = 25
+		pending, err := daemon.store.PendingIntakeAcceptancesAfter(ctx, source.ID, receiptPageSize, after)
 		if err != nil {
 			return intakeFailure(err)
 		}
-		for _, accepted := range pending {
+		for index, accepted := range pending {
+			result.AcceptanceCursor = accepted.ID.String()
 			task, err := daemon.importAcceptedIntake(ctx, accepted)
 			if err == nil {
 				result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
 			} else if !errors.Is(err, kernel.ErrConflict) && !errors.Is(err, kernel.ErrRevisionConflict) {
 				return intakeFailure(err)
+			}
+			if index == len(pending)-1 && len(pending) < receiptPageSize {
+				result.AcceptanceCursor = ""
+			}
+			if len(result.ImportedTasks) >= int(source.AdmissionLimit) {
+				break
 			}
 		}
 	}

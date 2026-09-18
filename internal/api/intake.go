@@ -20,6 +20,7 @@ type IntakeConfiguration struct {
 	AdmissionLimit     uint16   `json:"admission_limit"`
 }
 type IntakeInput struct {
+	AcceptanceCursor string               `json:"acceptance_cursor,omitempty"`
 	Action           string               `json:"action"`
 	SourceID         string               `json:"source_id,omitempty"`
 	ProjectID        string               `json:"project_id,omitempty"`
@@ -61,6 +62,7 @@ type IntakeCandidate struct {
 	Truncated    bool     `json:"truncated,omitempty"`
 }
 type IntakeResult struct {
+	AcceptanceCursor string            `json:"acceptance_cursor,omitempty"`
 	State            string            `json:"state"`
 	ImportedTasks    []string          `json:"imported_tasks,omitempty"`
 	Sources          []IntakeSource    `json:"sources,omitempty"`
@@ -91,6 +93,10 @@ func ValidIntakeInput(input IntakeInput) bool {
 	case "preview", "refresh", "tick":
 		allowed.SourceID, allowed.Page = input.SourceID, input.Page
 		valid = validID(input.SourceID) && input.Page > 0
+		if input.Action == "tick" {
+			allowed.AcceptanceCursor = input.AcceptanceCursor
+			valid = valid && (input.AcceptanceCursor == "" || validID(input.AcceptanceCursor))
+		}
 	case "enable", "pause":
 		allowed.SourceID, allowed.ExpectedRevision = input.SourceID, input.ExpectedRevision
 		valid = validID(input.SourceID) && input.ExpectedRevision > 0
