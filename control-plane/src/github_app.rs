@@ -2373,9 +2373,6 @@ impl AppAuthority {
         if pull.base.name != request.base {
             return Err(OperationError::Conflict);
         }
-        if pull.body.as_deref().map(text_digest).as_deref() != Some(reviewed_body_digest) {
-            return Err(OperationError::Conflict);
-        }
         match journal
             .mark_operation(&operation, OperationTransition::Executing)
             .await
@@ -2396,6 +2393,40 @@ impl AppAuthority {
                 return Err(OperationError::Unavailable);
             }
         }
+        // Re-read after the durable claim: the body may have changed while
+        // the journal write was in flight. A known mismatch releases the
+        // claim, so this UUID remains retryable without enqueueing a stale
+        // reviewed body.
+        let pull = match self
+            .0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await
+        {
+            Ok(pull) => pull,
+            Err(error) => {
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                return Err(error.into());
+            }
+        };
+        match revalidate_enqueue_pull(Ok(&pull), &request, reviewed_body_digest) {
+            Ok(()) => {}
+            Err(OperationError::Conflict) => {
+                journal
+                    .mark_operation(&operation, OperationTransition::Refused)
+                    .await
+                    .map_err(|_| OperationError::Unavailable)?;
+                return Err(OperationError::Conflict);
+            }
+            Err(OperationError::Indeterminate) => {
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                return Err(OperationError::Indeterminate);
+            }
+            Err(error) => return Err(error),
+        };
         match self.0.enqueue_entry(&token, &pull.node_id, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
             Err(OperationError::Refused(reason)) => {
@@ -6393,6 +6424,25 @@ struct PullReference {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn revalidate_enqueue_pull(
+    pull: Result<&PullRequest, Error>,
+    request: &EnqueuePullRequest,
+    reviewed_body_digest: &str,
+) -> Result<(), OperationError> {
+    let pull = pull.map_err(|_| {
+        // GitHub exposes no expected-body-digest CAS. An uncertain re-read
+        // therefore cannot safely release the claim or enqueue a stale body.
+        OperationError::Indeterminate
+    })?;
+    if pull.base.name != request.base
+        || pull.body.as_deref().map(text_digest).as_deref() != Some(reviewed_body_digest)
+    {
+        return Err(OperationError::Conflict);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone, Debug, Deserialize)]
 struct BranchSnapshot {
     name: String,
@@ -8765,6 +8815,62 @@ mod tests {
             enqueue_outcome(None, None),
             Err(OperationError::Refused(RefusalReason::NoEffect))
         ));
+    }
+
+    #[test]
+    fn enqueue_revalidation_catches_in_flight_body_changes_without_replaying() {
+        let request = EnqueuePullRequest {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "5c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 848,
+            head_sha: "a".repeat(40),
+            base: "main".into(),
+            reviewed_body_digest: Some(text_digest("reviewed body")),
+        };
+        let pull = |body: Result<&str, Error>| -> Result<PullRequest, Error> {
+            Ok(PullRequest {
+                number: request.pull_number,
+                node_id: "PR_node".into(),
+                html_url: "https://github.com/dark-factory-build/dark-factory/pull/848".into(),
+                title: "Exact-head change".into(),
+                body: body.ok().map(str::to_owned),
+                draft: false,
+                head: PullReference {
+                    name: "feature".into(),
+                    sha: request.head_sha.clone(),
+                },
+                base: PullReference {
+                    name: request.base.clone(),
+                    sha: "b".repeat(40),
+                },
+                state: "open".into(),
+                merged: false,
+            })
+        };
+        let digest = request.reviewed_body_digest.as_deref().unwrap();
+
+        assert_eq!(
+            revalidate_enqueue_pull(
+                pull(Ok("reviewed body")).as_ref().map_err(|error| *error),
+                &request,
+                digest
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            revalidate_enqueue_pull(
+                pull(Ok("edited while claiming"))
+                    .as_ref()
+                    .map_err(|error| *error),
+                &request,
+                digest
+            ),
+            Err(OperationError::Conflict)
+        );
+        assert_eq!(
+            revalidate_enqueue_pull(Err(Error::Unavailable), &request, digest),
+            Err(OperationError::Indeterminate)
+        );
     }
 
     /// The reason must survive to the caller-visible rendering: each refusal
