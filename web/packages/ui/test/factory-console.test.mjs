@@ -1165,6 +1165,8 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.match(denied, /GITHUB ACCESS WAS DENIED OR EXPIRED/);
   const unavailable = render({ ...settings, github: { pending: false, result: { state: "unavailable" } } });
   assert.match(unavailable, /GITHUB IS UNAVAILABLE/);
+  const disconnectPending = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } } });
+  assert.match(disconnectPending, /RETRY DISCONNECT/);
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "unavailable" } } })); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RETRY GITHUB ACCESS").props.onClick(); });
   assert.equal(calls.at(-1).action, "refresh");
@@ -1184,13 +1186,22 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.match(disconnected, /GITHUB/);
 
   const repositoryCalls = [];
-  const repositoryProps = (repositories) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
+  const statusRepositories = [];
+  const repositoryProps = (repositories, delegated = statusRepositories) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
   act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
   act(() => { renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
   await act(async () => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 102, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }))); });
   act(() => { renderer.root.findAllByType("button").find((button) => String(button.props.children).startsWith("DELEGATE SELECTED")).props.onClick(); });
   assert.deepEqual(repositoryCalls.find((request) => request.action === "delegate"), { action: "delegate", repositories: [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }] });
+  renderer.unmount();
+
+  const delegated = [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }];
+  act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
+  act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, []))); });
+  assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);
   renderer.unmount();
 });
 

@@ -30,3 +30,23 @@ test("GitHub settings pages stay scoped to the current connection", async () => 
   await coordinator.githubConnection({ action: "connect" });
   assert.equal(coordinator.github.result.installations, undefined);
 });
+
+test("pending authorization survives a settings status refresh", async () => {
+  const calls = [];
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request.action);
+      if (request.action === "connect") return { state: "ok", authorization };
+      if (request.action === "status") return { state: "ok", status: { connection_id: "new", state: "pending", repositories: [] } };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "connect" });
+  await coordinator.githubConnection({ action: "status" });
+  assert.deepEqual(calls, ["connect", "status"]);
+  assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
+});

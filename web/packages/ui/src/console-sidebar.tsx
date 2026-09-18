@@ -735,28 +735,10 @@ function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGit
     repositorySource.current = repositories;
     setLoadedRepositories(repositories === undefined || installationID === undefined ? undefined : { installationID, value: repositories });
   }, [repositories, installationID]);
-=======
-  const canConnect = status === "disconnected" || status === "denied" || status === "unavailable" || status === "invalid" || status === "already_connected" || github?.error !== undefined;
-  const recoveryAction = status === "disconnected" ? "connect" : "refresh";
-  useEffect(() => {
-    if (connectionID !== previousConnectionID.current) {
-      previousConnectionID.current = connectionID;
-      setInstallationID(undefined);
-      setInstallationPage(1);
-      setRepositoryPage(1);
-    }
-    if (!connected || connectionID === "") {
-      setSelected({});
-      setInstallationID(undefined);
-      setRepositoryPage(1);
-      return;
-    }
-    setSelected(Object.fromEntries((result?.status?.repositories ?? []).map((item) => [`${item.installation_id}:${item.repository_id}`, item])));
-  }, [connected, connectionID]);
   return <section className="dfConsoleSidebar__section" aria-label="GITHUB SETTINGS">
     <h3>GITHUB</h3>
     <p className="dfConsoleSidebar__inherit">PRIVATE OPERATOR CONNECTION · {status.toUpperCase().replaceAll("_", " ")}</p>
-    {status === "legacy_overseers_running" ? <p className="dfFactoryConsole__terminalError" role="alert">STOP EXISTING LEGACY OVERSEERS THROUGH FACTORY CONTROLS BEFORE CONNECTING GITHUB.</p> : null}
+    {status === "legacy_overseers_running" ? <p className="dfFactoryConsole__terminalError" role="alert">STOP EXISTING LEGACY REVIEW OR CONTROLLER ACTIVITY THROUGH FACTORY CONTROLS BEFORE CONNECTING GITHUB.</p> : null}
     {status === "denied" ? <p className="dfFactoryConsole__terminalError" role="alert">GITHUB ACCESS WAS DENIED OR EXPIRED. REFRESH ACCESS.</p> : null}
     {status === "unavailable" ? <p className="dfFactoryConsole__terminalError" role="alert">GITHUB IS UNAVAILABLE. RETRY WHEN THE MAINTAINER IS REACHABLE.</p> : null}
     {github?.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">GITHUB SETTINGS UNAVAILABLE · {github.error.toUpperCase()}</p>}

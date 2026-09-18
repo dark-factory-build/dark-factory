@@ -46,3 +46,12 @@ func TestGitHubConnectionResultUsesDecimalExpiryAndAllowsDisconnectedEmptyID(t *
 		t.Fatalf("expiry was not encoded as a decimal string: %s", encoded)
 	}
 }
+
+func TestGitHubConnectionResultAllowsPendingDisconnectWithoutAnActiveID(t *testing.T) {
+	if _, err := EncodeGitHubConnectionResult("github-1", GitHubConnectionResult{
+		State:  "ok",
+		Status: &GitHubStatus{State: "disconnect_pending", Repositories: []GitHubDelegation{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

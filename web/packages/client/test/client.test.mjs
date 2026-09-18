@@ -69,6 +69,8 @@ test("GitHub settings frames keep the paired admin bridge bounded", () => {
   assert.equal(disconnected.body.status.connection_id, "");
   assert.equal(disconnected.body.installations.next_page, undefined);
   assert.equal(disconnected.body.repositories.next_page, undefined);
+  const disconnectPending = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } }));
+  assert.equal(disconnectPending.body.status.connection_id, "");
   const authorization = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", authorization: { connection_id: "c", authorization_url: "https://github.com/login/oauth/authorize", expires_at: "123" } } }));
   assert.equal(authorization.body.authorization.expires_at, 123n);
   expectMalformed(() => decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", authorization: { connection_id: "c", authorization_url: "javascript:alert(1)", expires_at: "1" } } })));

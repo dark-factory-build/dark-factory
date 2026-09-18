@@ -540,7 +540,7 @@ function githubConnectionResult(body: Record<string, unknown>, wire: boolean): G
     requireKeys(body.status, ["connection_id", "state", "repositories"], wire, ["github_user"]);
     const repositories = githubDelegations(body.status.repositories, wire, 100);
     const state = boundedText(body.status.state, 1, 64);
-    const status: GitHubConnectionResultBody["status"] = { connection_id: boundedText(body.status.connection_id, state === "disconnected" ? 0 : 1, 128), state, repositories };
+    const status: GitHubConnectionResultBody["status"] = { connection_id: boundedText(body.status.connection_id, state === "disconnected" || state === "disconnect_pending" ? 0 : 1, 128), state, repositories };
     if (present(body.status, "github_user")) status.github_user = githubUser(body.status.github_user, wire);
     result.status = status;
   }

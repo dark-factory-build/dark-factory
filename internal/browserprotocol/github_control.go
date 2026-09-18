@@ -114,7 +114,7 @@ func validGitHubConnection(kind MessageType, body any) error {
 		}
 		if value.Status != nil {
 			if validateBoundedText(value.Status.ConnectionID, func() int {
-				if value.Status.State == "disconnected" {
+				if value.Status.State == "disconnected" || value.Status.State == "disconnect_pending" {
 					return 0
 				}
 				return 1
