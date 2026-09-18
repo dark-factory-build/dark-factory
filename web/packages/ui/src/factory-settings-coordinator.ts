@@ -114,6 +114,7 @@ export class FactorySettingsCoordinator {
         ...result,
         ...(sources === undefined ? {} : { sources }),
         ...(result.candidates === undefined && !["update", "accept", "preview", "refresh"].includes(request.action) ? prior?.candidates === undefined ? {} : { candidates: prior.candidates } : {}),
+        ...(request.action === "withdraw" && (result.state === "withdrawn" || result.state === "withdrawal_pending") ? { candidates: prior?.candidates?.map((candidate) => candidate.acceptance_id === request.acceptance_id ? { ...candidate, reason: result.state } : candidate) } : {}),
         ...(["update", "accept"].includes(request.action) || (["preview", "refresh"].includes(request.action) && result.state !== "ok") ? { candidates: undefined, reviewed_revision: undefined, next_page: undefined } : {}),
         ...(result.imported_tasks === undefined ? { imported_tasks: [] } : {}),
       }));

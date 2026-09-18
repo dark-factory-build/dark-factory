@@ -341,15 +341,27 @@ func (backend *browserBackend) GitHubConnection(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.GitHubConnectionResult{}, err
 	}
-	defer release()
 	if client.ID != clientID || backend.owner == nil {
+		release()
 		return browserprotocol.GitHubConnectionResult{}, browser.ErrUnauthorized
 	}
+	// The request was admitted while authorized. Let revocation close the
+	// transport and cancel an in-flight broker call, then check authority again
+	// before returning any private connection or repository metadata.
+	release()
 	input := api.GitHubConnectionInput{Action: request.Action, Code: request.Code, Page: request.Page, InstallationID: request.InstallationID}
 	for _, item := range request.Repositories {
 		input.Repositories = append(input.Repositories, maintainer.Delegation{InstallationID: item.InstallationID, RepositoryID: item.RepositoryID, Repository: item.Repository})
 	}
+	if backend.owner.browserRemote != nil {
+		backend.owner.browserRemote(ctx, "github")
+	}
 	result := backend.owner.GitHubConnection(ctx, input)
+	_, release, _, err = backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.GitHubConnectionResult{}, err
+	}
+	release()
 	return projectGitHubConnection(result), nil
 }
 
@@ -532,7 +544,14 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.RepositoryMutateResult{}, err
 	}
-	defer release()
+	remote := request.Action == "fetch" || request.Action == "github"
+	if remote {
+		// Source inspection and GitHub verification can wait on a remote. A
+		// paired-client revocation must be able to cancel that transport.
+		release()
+	} else {
+		defer release()
+	}
 	at, err := backend.timestamp()
 	if err != nil {
 		return browserprotocol.RepositoryMutateResult{}, mapBrowserError(err)
@@ -558,18 +577,28 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
 	}
-	if request.Action == "fetch" || request.Action == "github" {
+	if remote {
 		if backend.owner == nil {
 			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
 		}
-		if request.Action == "github" {
-			if err := backend.owner.BindProjectRepositoryGitHub(ctx, id); err != nil {
-				return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
-			}
+		if backend.owner.browserRemote != nil {
+			backend.owner.browserRemote(ctx, "repository")
 		}
-		view, err := backend.owner.RepositoryReadiness(ctx, id, request.Action == "fetch")
+		var callErr error
+		if request.Action == "github" {
+			callErr = backend.owner.BindProjectRepositoryGitHub(ctx, id)
+		}
+		var view api.ProjectRepository
+		if callErr == nil {
+			view, callErr = backend.owner.RepositoryReadiness(ctx, id, request.Action == "fetch")
+		}
+		_, release, _, err = backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
 		if err != nil {
-			return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
+			return browserprotocol.RepositoryMutateResult{}, err
+		}
+		release()
+		if callErr != nil {
+			return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(callErr)
 		}
 		if request.Action == "github" {
 			view.PublicationState = "ready"

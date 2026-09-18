@@ -208,3 +208,19 @@ test("failed preview cannot enable and reaccepting clears an older withdrawal re
   assert.equal(coordinator.intake.get("project").candidates, undefined);
   assert.equal(coordinator.intake.get("project").reviewed_revision, undefined);
 });
+
+test("successful withdrawal immediately retires its candidate action", async () => {
+  const source = { id: "01".repeat(16), revision: 2n, repository: "example/source", enabled: true };
+  const acceptanceId = "02".repeat(16);
+  const candidate = { number: 1n, acceptance_id: acceptanceId, reason: "already_accepted" };
+  const session = { capabilities: 1, clientId: "client", async intake(request) {
+    if (request.action === "list") return { state: "ok", sources: [source], candidates: [candidate] };
+    if (request.action === "withdraw") return { state: "withdrawal_pending", acceptance_id: acceptanceId };
+    throw new Error(request.action);
+  } };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish() {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.loadIntake("project");
+  await coordinator.intakeAction("project", { action: "withdraw", acceptance_id: acceptanceId });
+  assert.equal(coordinator.intake.get("project").candidates[0].reason, "withdrawal_pending");
+});

@@ -66,3 +66,43 @@ func TestBrowserIntakePreviewAllowsStateAndRevocationDuringRemoteRead(t *testing
 		t.Fatalf("revoked preview exposed private result: %v", err)
 	}
 }
+
+func TestBrowserRemoteSettingsAllowRevocationAndHideResults(t *testing.T) {
+	for _, call := range []struct {
+		name string
+		run  func(*adapterFixture) error
+	}{
+		{"github", func(f *adapterFixture) error {
+			_, err := f.backend.GitHubConnection(context.Background(), rawBrowserClient(f.client.ID), browserprotocol.GitHubConnection{Action: "status"})
+			return err
+		}},
+		{"repository", func(f *adapterFixture) error {
+			_, err := f.backend.MutateRepository(context.Background(), rawBrowserClient(f.client.ID), browserprotocol.RepositoryMutate{Action: "fetch", ID: kernel.RepositoryID(mustProjectID(t, testID(192))).String()})
+			return err
+		}},
+	} {
+		t.Run(call.name, func(t *testing.T) {
+			f := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityAdministration)
+			connection := f.pair(t)
+			defer connection.CloseNow()
+			started, release := make(chan struct{}), make(chan struct{})
+			f.daemon.browserRemote = func(context.Context, string) { close(started); <-release }
+			result := make(chan error, 1)
+			go func() { result <- call.run(f) }()
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("remote call did not start")
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if _, err := f.daemon.RevokeBrowserClient(ctx, f.client.ID, f.client.Revision); err != nil {
+				t.Fatalf("revocation stalled behind %s: %v", call.name, err)
+			}
+			close(release)
+			if err := <-result; !errors.Is(err, browser.ErrUnauthorized) {
+				t.Fatalf("revoked %s exposed a private result: %v", call.name, err)
+			}
+		})
+	}
+}
