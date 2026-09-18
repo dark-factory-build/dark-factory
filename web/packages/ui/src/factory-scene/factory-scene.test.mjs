@@ -153,13 +153,13 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     assert.ok(room.door.y === room.y + room.height && room.door.x > room.x && room.door.x < room.x + room.width);
     assert.ok(layout.corridors.some((corridor) => room.door.x >= corridor.x && room.door.x <= corridor.x + corridor.width && room.door.y >= corridor.y && room.door.y <= corridor.y + corridor.height), `door ${room.id} reaches a corridor`);
   }
-  for (const count of [1, 4, 24]) {
-    const many = { digest: `${count}`, nodes: Array.from({ length: count }, (_, index) => ({ id: `room-${index}`, parentId: "", path: `room-${index}`, label: `Room ${index}`, kind: "directory", sizeBucket: ["empty", "tiny", "small", "medium", "large"][index % 5] })) };
+  for (const count of [1, 2, 3, 4, 5, 11, 24]) {
+    const many = { digest: `${count}`, nodes: Array.from({ length: count }, (_, index) => ({ id: `room-${index}`, parentId: "", path: `room-${index}`, label: `Room ${index}`, kind: "directory", inventory: inventoryTopology.nodes[0].inventory, sizeBucket: ["empty", "tiny", "small", "medium", "large"][index % 5] })) };
     const connected = layoutScene(many);
     assert.equal(corridorReachability(connected), true, `${count} rooms remain reachable from the spine`);
     for (const room of connected.rooms) {
       const placement = placeWorkers(connected, [{ ...workers[0], nodeId: room.id }])[0];
-      assert.equal(room.contents.length, 0);
+      assert.equal(room.contents.length, 1);
       const route = routeFromSpine(connected, { x: connected.corridors.at(-1).x + connected.corridors.at(-1).width / 2, y: connected.restingTop }, placement);
       assert.ok(route);
       assertRouteGeometry(connected, { x: connected.corridors.at(-1).x + connected.corridors.at(-1).width / 2, y: connected.restingTop }, route, room.id);
@@ -174,8 +174,11 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   const buckets = ["empty", "tiny", "small", "medium", "large"];
   const sized = layoutScene({ digest: "sizes", nodes: buckets.map((sizeBucket) => ({ id: sizeBucket, path: sizeBucket, label: sizeBucket, kind: "directory", sizeBucket })) });
   const areas = buckets.map((bucket) => { const room = sized.rooms.find((room) => room.id === bucket); return room.width * room.height; });
-  assert.equal(areas[0], areas[1], "empty and tiny rooms stay compact");
-  assert.equal(new Set(areas).size, 1, "file volume does not create gaps between workshops");
+  assert.ok(new Set(areas).size > 1, "workshops have varied proportions");
+  const rescanned = layoutScene({ ...sized, digest: "rescanned", nodes: buckets.map((sizeBucket) => ({ id: sizeBucket, path: sizeBucket, label: sizeBucket, kind: "directory", sizeBucket: "large" })) });
+  assert.deepEqual(sized.rooms, rescanned.rooms, "file volume changes do not move walls");
+  const rows = [...new Set(sized.rooms.map((room) => room.y))];
+  assert.notEqual(sized.rooms.find((room) => room.y === rows[0]).width, sized.rooms.find((room) => room.y === rows[1]).width, "row seams stagger");
   for (const room of sized.rooms) {
     const next = sized.rooms.find((other) => other.y === room.y && other.x > room.x);
     if (next) assert.equal(room.x + room.width, next.x, "neighbouring rooms share walls");
@@ -673,28 +676,40 @@ test("queue selection picks the exact task sharing a representative workstation"
 });
 
 
+test("narrow bays truncate full-width titles while retaining their accessible name", () => {
+  for (const glyph of ["界", "😀", "👨‍👩‍👧‍👦", "🇯🇵", "é"]) {
+    const label = glyph.repeat(15);
+    const nodes = ["a", "b"].map((id) => ({ ...inventoryTopology.nodes[0], id, path: ".", label }));
+    const markup = render({ topology: { digest: "wide-titles", nodes }, workers: [] });
+    assert.match(markup, new RegExp(`>${glyph.repeat(6)}…</text>`));
+    assert.match(markup, new RegExp(`aria-label="${label}`), "full title remains accessible");
+    assert.doesNotMatch(markup, new RegExp(`>${label}</text>`));
+  }
+});
+
 test("pictured contents and occupied surface slots leave door routes clear in every footprint", () => {
-  for (const sizeBucket of ["empty", "tiny", "small", "medium", "large"]) {
-    const node = { ...inventoryTopology.nodes[0], sizeBucket };
-    const layout = layoutScene({ digest: "contents", nodes: [node] });
-    const room = layout.rooms[0];
-    assert.equal(corridorReachability(layout), true);
-    const surface = room.contents.find((item) => item.workSurface);
-    assert.ok(surface);
-    const placements = placeWorkers(layout, Array.from({ length: 12 }, (_, index) => ({ ...workers[0], id: `person-${index}`, nodeId: node.id })));
-    const occupied = placements.filter((item) => item.area === "room");
-    assert.ok(occupied.length > 0 && occupied.length < placements.length);
-    assert.equal(occupied[0].x, surface.x + surface.width / 2);
-    assert.equal(occupied[0].y, surface.y + surface.height + 8);
-    for (const person of occupied) {
-      assert.ok(person.x - 8 >= surface.x && person.x + 8 <= surface.x + surface.width);
-      const lane = { x: Math.min(person.x, room.door.x) - 8, y: person.y - 8, width: Math.abs(person.x - room.door.x) + 16, height: 16 };
-      for (const object of room.contents) assert.ok(object.y + object.height <= lane.y || !overlaps(object, lane), "route never crosses pictured content interiors");
-      const route = routeFromSpine(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, person);
-      assert.ok(route);
-      assertRouteGeometry(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, route, sizeBucket);
+  for (const count of [1, 4, 11]) {
+    const nodes = Array.from({ length: count }, (_, index) => ({ ...inventoryTopology.nodes[0], id: `room-${index}`, path: `room-${index}` }));
+    const layout = layoutScene({ digest: "contents", nodes });
+    for (const room of layout.rooms) {
+      assert.equal(corridorReachability(layout), true);
+      const surface = room.contents.find((item) => item.workSurface);
+      assert.ok(surface);
+      const placements = placeWorkers(layout, Array.from({ length: 12 }, (_, index) => ({ ...workers[0], id: `person-${index}`, nodeId: room.id })));
+      const occupied = placements.filter((item) => item.area === "room");
+      assert.ok(occupied.length > 0 && occupied.length < placements.length);
+      assert.equal(occupied[0].x, surface.x + surface.width / 2);
+      assert.equal(occupied[0].y, surface.y + surface.height + 8);
+      for (const person of occupied) {
+        assert.ok(person.x - 8 >= surface.x && person.x + 8 <= surface.x + surface.width);
+        const lane = { x: Math.min(person.x, room.door.x) - 8, y: person.y - 8, width: Math.abs(person.x - room.door.x) + 16, height: 16 };
+        for (const object of room.contents) assert.ok(object.y + object.height <= lane.y || !overlaps(object, lane), "route never crosses pictured content interiors");
+        const route = routeFromSpine(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, person);
+        assert.ok(route);
+        assertRouteGeometry(layout, { x: layout.corridors.at(-1).x + layout.corridors.at(-1).width / 2, y: layout.restingTop }, route, room.id);
+      }
+      for (let index = 0; index < room.contents.length; index++) for (const other of room.contents.slice(index + 1)) assert.equal(overlaps(room.contents[index], other), false);
     }
-    for (let index = 0; index < room.contents.length; index++) for (const other of room.contents.slice(index + 1)) assert.equal(overlaps(room.contents[index], other), false);
   }
 });
 

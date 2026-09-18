@@ -47,10 +47,16 @@ export type AgentSpriteProps = Readonly<{
 }>;
 
 const FRAME = spriteAtlas.frame;
+const LABEL_SEGMENTS = new Intl.Segmenter("en", { granularity: "grapheme" });
 
 function shortLabel(label: string, limit = 18) {
-  const glyphs = [...label];
-  return glyphs.length > limit ? `${glyphs.slice(0, limit - 1).join("")}…` : label;
+  const glyphs = Array.from(LABEL_SEGMENTS.segment(label), ({ segment }) => segment);
+  // Reserve two columns for non-Latin glyphs and the ellipsis; font fallback
+  // can render them full-width even inside a monospace label.
+  const columns = (glyph: string) => /[^\u0000-\u00ff]/u.test(glyph) ? 2 : 1;
+  if (glyphs.reduce((width, glyph) => width + columns(glyph), 0) <= limit) return label;
+  let width = 0;
+  return `${glyphs.filter((glyph) => (width += columns(glyph)) <= limit - 2).join("")}…`;
 }
 
 /** One 16px frame of the sheet, sized and placed in scene coordinates. */
@@ -288,9 +294,9 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
           </symbol>
         ))}
         <pattern id="df-floor" patternUnits="userSpaceOnUse" width="32" height="24">
-          <rect width="32" height="24" fill="#202c30" />
-          <path d="M1 2h13v9H1z M17 1h13v10H17z M-6 14H7v8H-6z M10 14h13v9H10z M26 14h12v8H26z" fill="#263237" stroke="#202b30" strokeWidth="1" />
-          <path d="M3 3h9 M19 2h8 M12 15h8" stroke="#2b383c" strokeWidth="1" />
+          <rect width="32" height="24" fill="#222c2f" />
+          <path d="M1 2h13v9H1z M17 1h13v10H17z M-6 14H7v8H-6z M10 14h13v9H10z M26 14h12v8H26z" fill="#273134" stroke="#242e31" strokeWidth="1" />
+          <path d="M3 3h9 M19 2h8 M12 15h8" stroke="#2a3437" strokeWidth="1" />
         </pattern>
         <pattern id="df-wall" patternUnits="userSpaceOnUse" width="24" height="12">
           <rect width="24" height="12" fill="#41494a" />
@@ -326,10 +332,16 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
             <path data-room-walls="" d={`M${room.door.x - 16},${room.door.y} H${room.x} V${room.y} M${room.x + room.width},${room.y} V${room.door.y} H${room.door.x + 16}`} fill="none" stroke="#465355" strokeWidth="4" />
             <path d={`M${room.x + 4} ${room.y + 10}v${room.height - 14} M${room.x + room.width - 4} ${room.y + 10}v${room.height - 14}`} stroke="#141f23" strokeWidth="2" />
             <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill={operating ? "url(#df-lamplight)" : "#08131d"} opacity={operating ? 1 : .18} pointerEvents="none" />
+            {appearance.scenery === "off" ? null : <g aria-hidden="true" opacity={appearance.scenery === "subtle" ? .35 : .6}>
+              <path d={room.width >= 192
+                ? `M${room.x + room.width - 14} ${room.y + 42}v40h-8 M${room.x + room.width - 17} ${room.y + 48}h6 M${room.x + room.width - 17} ${room.y + 72}h6`
+                : `M${room.x + 12} ${room.y + 44}h20v10h-20z M${room.x + 16} ${room.y + 46}v6 M${room.x + 21} ${room.y + 46}v6 M${room.x + 26} ${room.y + 46}v6`} fill="none" stroke="#728078" strokeWidth="2" />
+              <path d={`M${room.door.x - 12} ${room.door.y - 8}h24 M${room.door.x - 7} ${room.door.y - 14}h14`} stroke="#53615c" strokeWidth="2" />
+            </g>}
             {contents.map((item) => <g key={item.key} data-room-content={item.kind} aria-hidden="true"><Equipment item={item} operating={operating} scenery={appearance.scenery} /></g>)}
             <g tabIndex={0} className="dfFactoryScene__target" data-tooltip={roomInfo(node)} aria-label={roomInfo(node)}>
               <rect className="dfFactoryScene__focus" x={room.x + 8} y={room.y + 12} width={room.width - 44} height="24" rx="2" fill="#182429" />
-              <text x={room.x + 14} y={room.y + 28} fill="#d7ddcf" fontFamily="ui-monospace, monospace" fontSize="10" fontWeight="700">{shortLabel(node.label, 19)}</text>
+              <text x={room.x + 14} y={room.y + 28} fill="#d7ddcf" fontFamily="ui-monospace, monospace" fontSize="10" fontWeight="700">{shortLabel(node.label, Math.floor((room.width - 54) / 6))}</text>
             </g>
             <g data-work-footprint={task === undefined ? undefined : room.id} data-room-operating={operating}
               data-workbench-task-id={task?.id}
@@ -397,6 +409,7 @@ function Area({ label, width, top, bottom }: { label: string; width: number; top
   return (
     <g role="group" aria-label={label}>
       <rect x={ROOM_LEFT} y={top} width={width} height={bottom - top} fill="url(#df-floor)" />
+      <path d={`M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${ROOM_LEFT}v-8`} fill="none" stroke="#465355" strokeWidth="3" />
       <text x={ROOM_LEFT + 6} y={top + 15} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
     </g>
   );
@@ -407,7 +420,7 @@ function Area({ label, width, top, bottom }: { label: string; width: number; top
 function Equipment({ item, operating, scenery }: { item: RoomContent; operating: boolean; scenery: FloorAppearance["scenery"] }) {
   return <g transform={`translate(${item.x} ${item.y})`} opacity={operating ? .9 : .55}>
     <rect x="4" y="27" width={item.width - 8} height="6" fill="#131e22" />
-    <rect y="12" width={item.width} height="16" rx="2" fill="#665f4e" stroke="#8a8067" />
+    <rect y="12" width={item.width} height="16" rx="2" fill={item.furnishing === "console" ? "#455653" : "#665f4e"} stroke="#8a8067" />
     <path d={`M4 29v5 M${item.width - 4} 29v5`} stroke="#424a46" strokeWidth="3" />
     <g transform={`translate(${item.width / 2 - 8} 0)`}>
       <rect width="16" height="12" fill="#3b4948" stroke="#65726b" />
@@ -416,9 +429,11 @@ function Equipment({ item, operating, scenery }: { item: RoomContent; operating:
       <path d="M3 14h10" stroke="#9b9c86" strokeWidth="2" />
     </g>
     {scenery === "off" ? null : <g opacity={scenery === "subtle" ? .6 : 1}>
-    <rect x={item.width - 32} y="15" width="18" height="8" fill="#969480" transform={`rotate(-6 ${item.width - 23} 19)`} />
-    <rect x="0" y="-25" width="44" height="10" fill="#424b46" stroke="#677165" />
-    <path d="M7 -23v6 M13 -23v6 M20 -23v6 M28 -23v6" stroke="#88866d" strokeWidth="3" />
+    {item.furnishing === "drafting" ? <g>
+      <rect x="10" y="15" width="30" height="9" fill="#969480" />
+      <path d="M14 17h14v4H18v-4 M31 18h5" fill="none" stroke="#526b6b" />
+    </g> : item.furnishing === "console" ? <path d="M8 19h12 M8 22h7" stroke="#727e72" strokeWidth="2" /> : <rect x={item.width - 24} y="15" width="16" height="8" fill="#969480" />}
+
     </g>}
   </g>;
 }
