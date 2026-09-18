@@ -733,7 +733,8 @@ fn tools() -> Value {
                 "enqueue_operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base": {"type": "string", "minLength": 1, "maxLength": 240}
+                "base": {"type": "string", "minLength": 1, "maxLength": 240},
+                "reviewed_body_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
             },
             "required": ["repository", "enqueue_operation_id", "pull_number", "head_sha", "base"],
             "additionalProperties": false
@@ -757,7 +758,7 @@ fn tools() -> Value {
     }, {
         "name": "publish_commit",
         "title": "Publish an exact-head commit",
-        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted, so a mode may only be stated alongside content. The .github tree itself, .github/workflows, CODEOWNERS and dependabot config cannot be written. Replays require the same operation UUID and request.",
+        "description": "Publish one commit to a repository branch, but only while that branch still points at the stated commit. A file with no content is deleted, so a mode may only be stated alongside content. With merge_parent_sha the commit is a merge of the branch head and a commit proven to be in the live default branch, and changes are applied to that commit's tree: supply the diff from it, not a copy of it. The .github tree itself, .github/workflows, CODEOWNERS and dependabot config cannot be written. Replays require the same operation UUID and request.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -765,6 +766,7 @@ fn tools() -> Value {
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "branch": {"type": "string", "minLength": 1, "maxLength": 240},
                 "expected_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "merge_parent_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
                 "message": {"type": "string", "minLength": 1, "maxLength": 4096},
                 "changes": {
                     "type": "array",
@@ -807,9 +809,10 @@ fn tools() -> Value {
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
                 "pull_number": {"type": "integer", "minimum": 1},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base": {"type": "string", "minLength": 1, "maxLength": 255}
+                "base": {"type": "string", "minLength": 1, "maxLength": 255},
+                "reviewed_body_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}
             },
-            "required": ["repository", "operation_id", "pull_number", "head_sha", "base"],
+            "required": ["repository", "operation_id", "pull_number", "head_sha", "base", "reviewed_body_digest"],
             "additionalProperties": false
         },
         "outputSchema": {

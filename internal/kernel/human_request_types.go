@@ -172,6 +172,7 @@ type NewHumanQuestion struct {
 	IdempotencyKey [IDBytes]byte
 	QuestionText   string
 	Options        []string
+	ReuseExisting  bool
 }
 
 type HumanDelivery struct {

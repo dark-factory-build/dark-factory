@@ -307,7 +307,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
-			wantArgv: []string{"/usr/bin/true", "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, codexBootstrapPrompt},
+			wantArgv: []string{"/usr/bin/true", "-c", `notify=["<factoryctl>", "attempt", "turn-complete"]`, "--strict-config", "--no-alt-screen", "-c", `tui.resume_cwd="current"`, "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", "projects=<working-directory>", "--model", "codex-model", "-c", `model_reasoning_effort="xhigh"`, codexBootstrapPrompt},
 		},
 	}
 	for _, test := range tests {
@@ -328,6 +328,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 				wantArgv = slices.Insert(slices.Clone(wantArgv), 2, wantClaudeWorkerSessionFlag(t, request)...)
 			}
 			if test.kind == kernel.ProviderCodex {
+				wantArgv[2] = "notify=[" + tomlBasicString(runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
 				permissions, err := codexPermissions(request)
 				if err != nil {
 					t.Fatal(err)
@@ -476,13 +477,30 @@ func TestClaudeWorkerSessionStartsFreshWhenNoTranscriptExists(t *testing.T) {
 	// as a no-op that would never fire.
 }
 
+// The transcript directory name is the CLI's, observed from a real launch,
+// not this package's own function fed back to itself: a daemon home under a
+// dotted directory (`~/.dark-factory-recovered`) produced
+// `-Users-op--dark-factory-recovered-changes-<id>`. A wrong escape relaunches
+// `--session-id` with an id the CLI refuses as already in use (exit 1 before
+// any attempt outcome), which is how every send-back retry on a Claude worker
+// failed on 2026-09-17.
+func TestClaudeProjectPathEscapeMatchesTheCLI(t *testing.T) {
+	if got, want := escapeClaudeProjectPath("/Users/op/.dark-factory-recovered/changes/f01a5315d8e32af9b23058b314368c4f"), "-Users-op--dark-factory-recovered-changes-f01a5315d8e32af9b23058b314368c4f"; got != want {
+		t.Fatalf("escape = %q, want %q", got, want)
+	}
+	if got, want := escapeClaudeProjectPath("/private/tmp/df_dev.X1/factory"), "-private-tmp-df-dev-X1-factory"; got != want {
+		t.Fatalf("escape = %q, want %q", got, want)
+	}
+}
+
 // A worker's retry (send-back on the same task incarnation, reusing the same
 // Change directory: see internal/kernel/change.go) resumes its own
 // conversation once that conversation's transcript exists on disk, instead of
-// starting an unrelated one.
+// starting an unrelated one. The cwd carries a dotted component, the shape of
+// a real daemon home.
 func TestClaudeWorkerSessionResumesWhenTranscriptExistsUnderLimit(t *testing.T) {
 	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
-	cwd := filepath.Join(t.TempDir(), "change")
+	cwd := filepath.Join(t.TempDir(), ".dark-factory", "changes", "change")
 	id, resume, err := claudeSessionSelection(runtime, cwd, testAgentID, testIncarnationID)
 	if err != nil || resume {
 		t.Fatalf("initial selection id=%q resume=%v err=%v", id, resume, err)

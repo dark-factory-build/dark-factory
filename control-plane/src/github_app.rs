@@ -9,9 +9,9 @@ use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(target_arch = "wasm32")]
-use crate::journal::{
-    DeliveryJournal, Operation, OperationObservation, OperationRecord, OperationTransition,
-};
+use crate::journal::{DeliveryJournal, OperationRecord, OperationTransition};
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+use crate::journal::{Operation, OperationObservation};
 use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
@@ -547,6 +547,8 @@ pub(crate) struct ObservePullRequestMerge {
     pub(crate) pull_number: i64,
     pub(crate) head_sha: String,
     pub(crate) base: String,
+    #[serde(default)]
+    pub(crate) reviewed_body_digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -593,6 +595,13 @@ pub(crate) struct PublishCommit {
     /// same branch means the second one's expectation no longer holds and it
     /// fails closed instead of clobbering the first.
     pub(crate) expected_head_sha: String,
+    /// A second parent, when the worker integrated it: the published commit
+    /// is then the merge the worker made and `changes` are applied to this
+    /// commit's tree. Copying an integrated tree onto the branch as a
+    /// single-parent commit reproduced every file but lost the ancestry, so
+    /// GitHub re-merged the same hunks against main and reported a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_parent_sha: Option<String>,
     pub(crate) message: String,
     pub(crate) changes: Vec<FileChange>,
 }
@@ -621,6 +630,11 @@ pub(crate) struct EnqueuePullRequest {
     /// different branch than the caller believes would be enqueued onto that
     /// branch's queue instead.
     pub(crate) base: String,
+    /// Digest of the exact rendered PR body that was independently reviewed.
+    /// Checked after the durable claim, immediately before enqueue. GitHub
+    /// atomically binds only the head; a body edit can race with that write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reviewed_body_digest: Option<String>,
 }
 
 /// Merge one pull request directly, but only after proving every repository,
@@ -1652,7 +1666,10 @@ impl AppAuthority {
         // `verify_publish_precondition` already reports a moved head as a
         // conflict. Rewriting every other failure into one too told the caller
         // to refetch a head that had not moved.
-        let branch_exists = self.0.verify_publish_precondition(&token, &request).await?;
+        let branch_exists = self
+            .0
+            .verify_publish_precondition(&token, &request, &repository.default_branch)
+            .await?;
         match journal
             .mark_operation(&operation, OperationTransition::Executing)
             .await
@@ -2283,13 +2300,26 @@ impl AppAuthority {
         request.validate()?;
         let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("enqueue_pull_request")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
+        // Older completed enqueue operations were intentionally bound without
+        // a body digest. Read those exact rows without beginning a new one;
+        // an omitted digest on a new request must not leave a planned claim
+        // that poisons a corrected retry under the same UUID.
+        let state = if request.reviewed_body_digest.is_some() {
+            journal
+                .begin_operation(&operation)
+                .await
+                .map_err(|_| OperationError::Unavailable)?
+        } else {
+            let observation = journal
+                .observe_operation(&operation.operation_id)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return legacy_completed_result(observation.as_ref(), &operation);
+        };
         if let Some(result) = completed_or_conflict::<EnqueueResult>(&state)? {
             return Ok(result);
         }
+        let reviewed_body_digest = request.reviewed_body_digest.as_deref().unwrap();
         let token = self
             .0
             .installation_token(
@@ -2369,6 +2399,40 @@ impl AppAuthority {
                 return Err(OperationError::Unavailable);
             }
         }
+        // Re-read after the durable claim: the body may have changed while
+        // the journal write was in flight. A known mismatch releases the
+        // claim, so this UUID remains retryable without enqueueing a stale
+        // reviewed body.
+        let pull = match self
+            .0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await
+        {
+            Ok(pull) => pull,
+            Err(error) => {
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                return Err(error);
+            }
+        };
+        match revalidate_enqueue_pull(Ok(&pull), &request, reviewed_body_digest) {
+            Ok(()) => {}
+            Err(OperationError::Conflict) => {
+                journal
+                    .mark_operation(&operation, OperationTransition::Refused)
+                    .await
+                    .map_err(|_| OperationError::Unavailable)?;
+                return Err(OperationError::Conflict);
+            }
+            Err(OperationError::Indeterminate) => {
+                let _ = journal
+                    .mark_operation(&operation, OperationTransition::Indeterminate)
+                    .await;
+                return Err(OperationError::Indeterminate);
+            }
+            Err(error) => return Err(error),
+        };
         match self.0.enqueue_entry(&token, &pull.node_id, &request).await {
             Ok(result) => complete(journal, &operation, result).await,
             Err(OperationError::Refused(reason)) => {
@@ -2754,12 +2818,39 @@ impl AppAuthority {
     ) -> Result<PullRequestMergeResult, OperationError> {
         request.validate()?;
         let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([
+                    ("contents", "read"),
+                    ("merge_queues", "read"),
+                    ("metadata", "read"),
+                    ("pull_requests", "read"),
+                ]),
+            )
+            .await?;
+        let repository = self.0.repository_metadata(&token).await?;
+        if request.base != repository.default_branch {
+            return Err(OperationError::Conflict);
+        }
+        let pull = self
+            .0
+            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
+            .await?;
+        if pull.base.name != request.base {
+            return Err(OperationError::Conflict);
+        }
+        if !matches!(pull.state.as_str(), "open" | "closed") {
+            return Err(OperationError::Unavailable);
+        }
         let mut enqueue_request = EnqueuePullRequest {
             repository: request.repository.clone(),
             operation_id: request.enqueue_operation_id.clone(),
             pull_number: request.pull_number,
             head_sha: request.head_sha.clone(),
             base: request.base.clone(),
+            reviewed_body_digest: request.reviewed_body_digest.clone(),
         };
         enqueue_request.validate()?;
         let enqueue_operation = enqueue_request.operation("enqueue_pull_request")?;
@@ -2786,32 +2877,6 @@ impl AppAuthority {
             || !valid_queue_state(&enqueue.state_when_recorded)
             || valid_text(&enqueue.entry_id, 1, 256, true).is_err()
         {
-            return Err(OperationError::Unavailable);
-        }
-        let token = self
-            .0
-            .installation_token(
-                repository,
-                BTreeMap::from([
-                    ("contents", "read"),
-                    ("merge_queues", "read"),
-                    ("metadata", "read"),
-                    ("pull_requests", "read"),
-                ]),
-            )
-            .await?;
-        let repository = self.0.repository_metadata(&token).await?;
-        if request.base != repository.default_branch {
-            return Err(OperationError::Conflict);
-        }
-        let pull = self
-            .0
-            .verify_pull_request_head(&token, request.pull_number, &request.head_sha)
-            .await?;
-        if pull.base.name != request.base {
-            return Err(OperationError::Conflict);
-        }
-        if !matches!(pull.state.as_str(), "open" | "closed") {
             return Err(OperationError::Unavailable);
         }
         if pull.merged {
@@ -3047,6 +3112,12 @@ impl PublishCommit {
         canonical_operation_id(&mut self.operation_id)?;
         valid_ref(&self.branch)?;
         valid_sha(&self.expected_head_sha)?;
+        if let Some(parent) = self.merge_parent_sha.as_deref() {
+            valid_sha(parent)?;
+            if parent == self.expected_head_sha {
+                return Err(OperationError::InvalidInput);
+            }
+        }
         // Keep caller text to one headline and reserve the body for the
         // operation trailer so the full message is byte-exact and trivial to
         // reconcile.
@@ -3099,6 +3170,21 @@ impl PublishCommit {
         operation(kind, &self.operation_id, self)
     }
 
+    /// The branch head first, so the branch's own history stays first-parent.
+    fn parents(&self) -> Vec<&str> {
+        let mut parents = vec![self.expected_head_sha.as_str()];
+        parents.extend(self.merge_parent_sha.as_deref());
+        parents
+    }
+
+    /// The tree `changes` are applied to: the integrated commit when there is
+    /// one, so the caller supplies the worker's diff from it, not a copy of it.
+    fn tree_base(&self) -> &str {
+        self.merge_parent_sha
+            .as_deref()
+            .unwrap_or(&self.expected_head_sha)
+    }
+
     fn trailer(&self) -> Result<String, OperationError> {
         Ok(format!(
             "{OPERATION_TRAILER_PREFIX} {} {}",
@@ -3120,7 +3206,11 @@ impl EnqueuePullRequest {
         canonical_operation_id(&mut self.operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
-        valid_ref(&self.base)
+        valid_ref(&self.base)?;
+        if let Some(digest) = self.reviewed_body_digest.as_deref() {
+            valid_digest(digest).map_err(|_| OperationError::InvalidInput)?;
+        }
+        Ok(())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3374,7 +3464,11 @@ impl ObservePullRequestMerge {
         canonical_operation_id(&mut self.enqueue_operation_id)?;
         valid_exact_integer(self.pull_number)?;
         valid_sha(&self.head_sha)?;
-        valid_ref(&self.base)
+        valid_ref(&self.base)?;
+        if let Some(digest) = self.reviewed_body_digest.as_deref() {
+            valid_digest(digest)?;
+        }
+        Ok(())
     }
 }
 
@@ -3642,6 +3736,11 @@ fn valid_sha(value: &str) -> Result<(), OperationError> {
     .ok_or(OperationError::InvalidInput)
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn text_digest(value: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(value.as_bytes())))
+}
+
 fn valid_exact_integer(value: i64) -> Result<(), OperationError> {
     (1..=MAX_EXACT_INTEGER)
         .contains(&value)
@@ -3717,6 +3816,30 @@ fn completed_or_conflict<T: serde::de::DeserializeOwned>(
         OperationRecord::Conflict => Err(OperationError::Conflict),
         _ => Ok(None),
     }
+}
+
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+fn legacy_completed_result<T: serde::de::DeserializeOwned>(
+    observation: Option<&OperationObservation>,
+    operation: &Operation,
+) -> Result<T, OperationError> {
+    let Some(observation) = observation else {
+        return Err(OperationError::InvalidInput);
+    };
+    if observation.kind != operation.kind || observation.request_digest != operation.request_digest
+    {
+        return Err(OperationError::Conflict);
+    }
+    if observation.state != "completed" {
+        return Err(OperationError::InvalidInput);
+    }
+    serde_json::from_str(
+        observation
+            .result_json
+            .as_deref()
+            .ok_or(OperationError::Unavailable)?,
+    )
+    .map_err(|_| OperationError::Unavailable)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -4382,8 +4505,9 @@ impl Authority {
         &self,
         token: &RepositoryToken,
         request: &PublishCommit,
+        default_branch: &str,
     ) -> Result<bool, OperationError> {
-        match self.read_ref_optional(token, &request.branch).await? {
+        let branch_exists = match self.read_ref_optional(token, &request.branch).await? {
             Some(reference) => (reference.object.sha == request.expected_head_sha)
                 .then_some(true)
                 .ok_or(OperationError::Conflict),
@@ -4395,17 +4519,42 @@ impl Authority {
             None => {
                 // The parent must still be a real commit, so a typo cannot
                 // create a branch from nothing.
-                let _: GitCommit = github_json(
-                    &format!(
-                        "https://api.github.com/repos/{}/{}/git/commits/{}",
-                        token.repository.owner, token.repository.name, request.expected_head_sha
-                    ),
-                    token.as_str(),
-                )
-                .await?;
+                self.read_commit(token, &request.expected_head_sha).await?;
                 Ok(false)
             }
+        }?;
+        // A mistyped merge parent would otherwise burn the operation id on a
+        // 422 from the commit write; every other input is checked first.
+        if let Some(parent) = request.merge_parent_sha.as_deref() {
+            self.read_commit(token, parent).await?;
+            let default_head = self.read_ref(token, default_branch).await?;
+            if default_head.object.kind != "commit" {
+                return Err(OperationError::Conflict);
+            }
+            self.verify_ancestor(token, parent, &default_head.object.sha)
+                .await?;
         }
+        Ok(branch_exists)
+    }
+
+    async fn verify_ancestor(
+        &self,
+        token: &RepositoryToken,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<(), OperationError> {
+        let comparison: GitComparison = github_json(
+            &format!(
+                "https://api.github.com/repos/{}/{}/compare/{ancestor}...{descendant}",
+                token.repository.owner, token.repository.name
+            ),
+            token.as_str(),
+        )
+        .await?;
+        comparison
+            .proves_ancestor()
+            .then_some(())
+            .ok_or(OperationError::Conflict)
     }
 
     async fn push_commit(
@@ -4425,7 +4574,7 @@ impl Authority {
             Some(&CommitRequest {
                 message: request.marked_message()?,
                 tree: &tree,
-                parents: [&request.expected_head_sha],
+                parents: request.parents(),
             }),
         )
         .await?;
@@ -4482,14 +4631,7 @@ impl Authority {
         token: &RepositoryToken,
         request: &PublishCommit,
     ) -> Result<String, OperationError> {
-        let base: GitCommit = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/commits/{}",
-                token.repository.owner, token.repository.name, request.expected_head_sha
-            ),
-            token.as_str(),
-        )
-        .await?;
+        let base = self.read_commit(token, request.tree_base()).await?;
         valid_sha(&base.tree.sha)?;
         let base_tree: GitTree = github_json(
             &format!(
@@ -4560,21 +4702,18 @@ impl Authority {
         if reference.object.sha == request.expected_head_sha {
             return Ok(None);
         }
-        let head: GitCommit = github_json(
-            &format!(
-                "https://api.github.com/repos/{}/{}/git/commits/{}",
-                token.repository.owner, token.repository.name, reference.object.sha
-            ),
-            token.as_str(),
-        )
-        .await?;
+        let head = self.read_commit(token, &reference.object.sha).await?;
         // The trailer alone is not proof. It travels with the message through a
         // rebase or a cherry-pick, and `validate` is the only thing stopping a
         // caller writing another operation's trailer into its own commit, so
-        // the tip must also still be a direct child of the stated head. That is
-        // what makes the reported `parent_sha` true rather than assumed.
+        // the tip must also still be a direct child of the stated parents. That
+        // is what makes the reported `parent_sha` true rather than assumed.
         if head.message != request.marked_message()?
-            || !matches!(head.parents.as_slice(), [parent] if parent.sha == request.expected_head_sha)
+            || !head
+                .parents
+                .iter()
+                .map(|parent| parent.sha.as_str())
+                .eq(request.parents())
             || valid_sha(&head.tree.sha).is_err()
         {
             // The branch moved for some other reason; this operation did not
@@ -6120,7 +6259,7 @@ struct GitTreeEntry {
 struct CommitRequest<'a> {
     message: String,
     tree: &'a str,
-    parents: [&'a str; 1],
+    parents: Vec<&'a str>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -6150,6 +6289,22 @@ struct GitCommit {
     message: String,
     tree: GitObjectId,
     parents: Vec<GitParent>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
+struct GitComparison {
+    status: String,
+    ahead_by: i64,
+    behind_by: i64,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl GitComparison {
+    fn proves_ancestor(&self) -> bool {
+        (self.status == "ahead" && self.ahead_by >= 1 && self.behind_by == 0)
+            || (self.status == "identical" && self.ahead_by == 0 && self.behind_by == 0)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -6296,6 +6451,25 @@ struct PullReference {
     #[serde(rename = "ref")]
     name: String,
     sha: String,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn revalidate_enqueue_pull(
+    pull: Result<&PullRequest, Error>,
+    request: &EnqueuePullRequest,
+    reviewed_body_digest: &str,
+) -> Result<(), OperationError> {
+    let pull = pull.map_err(|_| {
+        // GitHub exposes no expected-body-digest CAS. An uncertain re-read
+        // therefore cannot safely release the claim or enqueue a stale body.
+        OperationError::Indeterminate
+    })?;
+    if pull.base.name != request.base
+        || pull.body.as_deref().map(text_digest).as_deref() != Some(reviewed_body_digest)
+    {
+        return Err(OperationError::Conflict);
+    }
+    Ok(())
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -8673,6 +8847,119 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn enqueue_revalidation_catches_in_flight_body_changes_without_replaying() {
+        let request = EnqueuePullRequest {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "5c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 848,
+            head_sha: "a".repeat(40),
+            base: "main".into(),
+            reviewed_body_digest: Some(text_digest("reviewed body")),
+        };
+        let pull = |body: Result<&str, Error>| -> Result<PullRequest, Error> {
+            Ok(PullRequest {
+                number: request.pull_number,
+                node_id: "PR_node".into(),
+                html_url: "https://github.com/dark-factory-build/dark-factory/pull/848".into(),
+                title: "Exact-head change".into(),
+                body: body.ok().map(str::to_owned),
+                draft: false,
+                head: PullReference {
+                    name: "feature".into(),
+                    sha: request.head_sha.clone(),
+                },
+                base: PullReference {
+                    name: request.base.clone(),
+                    sha: "b".repeat(40),
+                },
+                state: "open".into(),
+                merged: false,
+            })
+        };
+        let digest = request.reviewed_body_digest.as_deref().unwrap();
+
+        assert_eq!(
+            revalidate_enqueue_pull(
+                pull(Ok("reviewed body")).as_ref().map_err(|error| *error),
+                &request,
+                digest
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            revalidate_enqueue_pull(
+                pull(Ok("edited while claiming"))
+                    .as_ref()
+                    .map_err(|error| *error),
+                &request,
+                digest
+            ),
+            Err(OperationError::Conflict)
+        );
+        assert_eq!(
+            revalidate_enqueue_pull(Err(Error::Unavailable), &request, digest),
+            Err(OperationError::Indeterminate)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "development-sqlite")]
+    fn an_omitted_digest_does_not_claim_a_uuid_before_a_corrected_retry() {
+        let missing_digest = EnqueuePullRequest {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "6c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 848,
+            head_sha: "a".repeat(40),
+            base: "main".into(),
+            reviewed_body_digest: None,
+        };
+        let operation = Operation {
+            operation_id: missing_digest.operation_id.clone(),
+            kind: "enqueue_pull_request".into(),
+            request_digest: request_digest(&missing_digest).unwrap(),
+        };
+        assert!(matches!(
+            legacy_completed_result::<EnqueueResult>(None, &operation),
+            Err(OperationError::InvalidInput)
+        ));
+
+        let mut observed = OperationObservation {
+            kind: operation.kind.clone(),
+            request_digest: operation.request_digest.clone(),
+            state: "planned".into(),
+            result_json: None,
+        };
+        for state in ["planned", "executing", "refused", "indeterminate"] {
+            observed.state = state.into();
+            assert!(matches!(
+                legacy_completed_result::<EnqueueResult>(Some(&observed), &operation),
+                Err(OperationError::InvalidInput)
+            ));
+        }
+        observed.state = "completed".into();
+        observed.result_json = Some("42".into());
+        assert_eq!(
+            legacy_completed_result::<u32>(Some(&observed), &operation).unwrap(),
+            42
+        );
+        observed.request_digest = "f".repeat(64);
+        assert!(matches!(
+            legacy_completed_result::<u32>(Some(&observed), &operation),
+            Err(OperationError::Conflict)
+        ));
+
+        let corrected = EnqueuePullRequest {
+            reviewed_body_digest: Some(text_digest("reviewed body")),
+            ..missing_digest
+        };
+        assert_ne!(
+            request_digest(&corrected).unwrap(),
+            operation.request_digest,
+            "the corrected request must be a new journal binding, not a retry of a poisoned plan"
+        );
+    }
+
     /// The reason must survive to the caller-visible rendering: each refusal
     /// names itself distinctly, and a multi-class rejection carries every
     /// class rather than whichever arrived first (#371).
@@ -8732,6 +9019,7 @@ mod tests {
             pull_number: 329,
             head_sha: head.clone(),
             base: "main".into(),
+            reviewed_body_digest: None,
         };
         assert!(request.validate().is_ok());
 
@@ -8837,6 +9125,7 @@ mod tests {
             operation_id: "11111111-2222-3333-4444-555555555555".into(),
             branch: "agent/work".into(),
             expected_head_sha: "a".repeat(40),
+            merge_parent_sha: None,
             message: "Do the thing".into(),
             changes,
         };
@@ -8987,6 +9276,51 @@ mod tests {
         different_tree.changes[0].content_base64 = Some("ZGlmZmVyZW50".into());
         assert_ne!(trailer, different_tree.trailer().unwrap());
         assert!(forged("Two\nlines").validate().is_err());
+        // A worker that integrated main publishes the merge it made: the
+        // branch head stays first parent, the integrated commit is second, and
+        // the changes are its diff from that commit rather than a copy of it.
+        let mut merge = base(vec![file("README.md")]);
+        assert_eq!(merge.parents(), vec!["a".repeat(40)]);
+        assert_eq!(merge.tree_base(), "a".repeat(40));
+        merge.merge_parent_sha = Some("b".repeat(40));
+        assert!(merge.validate().is_ok());
+        assert_eq!(merge.parents(), vec!["a".repeat(40), "b".repeat(40)]);
+        assert_eq!(merge.tree_base(), "b".repeat(40));
+        assert_ne!(trailer, merge.trailer().unwrap());
+        for refused in ["a".repeat(40), "B".repeat(40), "b".repeat(39)] {
+            merge.merge_parent_sha = Some(refused);
+            assert_eq!(merge.validate().err(), Some(OperationError::InvalidInput));
+        }
+    }
+
+    #[test]
+    fn a_merge_parent_requires_default_branch_ancestry() {
+        assert!(
+            GitComparison {
+                status: "ahead".into(),
+                ahead_by: 1,
+                behind_by: 0,
+            }
+            .proves_ancestor()
+        );
+        assert!(
+            GitComparison {
+                status: "identical".into(),
+                ahead_by: 0,
+                behind_by: 0,
+            }
+            .proves_ancestor()
+        );
+        for status in ["behind", "diverged", "identical"] {
+            assert!(
+                !GitComparison {
+                    status: status.into(),
+                    ahead_by: if status == "identical" { 1 } else { 0 },
+                    behind_by: 1,
+                }
+                .proves_ancestor()
+            );
+        }
     }
 
     #[test]
@@ -9611,6 +9945,7 @@ mod tests {
             pull_number: 390,
             head_sha: "d".repeat(40),
             base: "main".into(),
+            reviewed_body_digest: Some("sha256:".to_owned() + &"d".repeat(64)),
         };
         assert!(merge.validate().is_ok());
         assert!(

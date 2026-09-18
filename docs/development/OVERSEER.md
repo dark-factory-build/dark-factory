@@ -14,6 +14,13 @@ send-back feedback; do not create replacement tasks for each review round.
 Delegate independent work to available qualified workers within the actual
 admission limits. A configured `max_run_seconds: 0` disables the run deadline;
 intake honors that operator choice and does not require a finite duration.
+
+Workers should use `./scripts/go-check.sh` plus focused tests while implementing
+and record the exact head and checks before review. Process-sensitive checks use
+`./scripts/with-local-ci-lease.sh`; reviewers reproduce relevant risks instead
+of rerunning the full suite by default. The protected merge queue selects the
+appropriate fixed gates from its complete combined-tree diff and remains the
+authoritative pre-merge full check.
 The overseer lane is not an extra worker slot. Do not infer
 capacity from the number of visible terminals or raise limits to clear a queue.
 
@@ -24,7 +31,22 @@ Return actionable findings to the responsible worker and review its resulting
 head again. Record the next action and its existing task, Change, PR or operation
 identity in the retained result so a later pass can continue without duplication.
 An unavailable authority or exhausted repair allowance needs a precise escalation,
-not a claim that delegation completed the objective.
+not a claim that delegation completed the objective. A worker run that ended
+`failed` with `provider exited before an attempt outcome` proves nothing about
+effects: a provider can act and then exit before reporting. Read the settled
+run's evidence first: `overseer status --task` gives the failed task's exact
+run detail with its provider exit and how long it ran after activation, its
+retained handoff gives the Change head to compare against the head the worker
+was handed, and its task names any operation receipts. Only a refusal before
+execution is a retry candidate (an exit within seconds of activation, an
+unchanged head, no receipts): retry it once through the same task (`overseer
+task update --retry`, which keeps its worker, or a send-back). Anything else
+is reconciled from its receipts, never replayed, and escalated when uncertain.
+A retry that fails the same way, or an uncertain effect, becomes a human
+request raised in that same pass naming the task, the run and its exit, then
+other work continues. Deferring it to a later wake records no disposition:
+`factoryctl task recovery` shows the task as notification scheduled,
+disposition none, and the operator has no Needs You to answer.
 
 After a verified merge, include housekeeping in that same pass. Pause an obsolete
 worker only after checking that it has neither active nor queued work and is not
@@ -265,13 +287,32 @@ The branch is `factory/<first 12 hex of change_id>`. The task's
   diff against that head, not the base. A branch that does not exist here
   means the earlier publication never happened: treat it as the first.
 
-Set `from` to `base_commit` or `branch_head` accordingly. The published
+Set `from` to `base_commit` or `branch_head` accordingly, and set
+`branch_exists=1` when the publication branch exists or `0` when it does not.
+The published
 `branch_head` is an App-authored commit that is not in the local repository;
-diff the worker's head against the same *content* by fetching it into your
-clone first when `from` is a `branch_head`:
-`git -C repo fetch -q origin "$from"` and then
+fetch it and the worker's head into your clone,
+`git -C repo fetch -q origin main "$from"` and then
 `git -C repo fetch -q "$git_directory" "$head_commit"`, and run the commands
 below against `repo/.git` instead of `$git_directory`.
+
+A worker that integrated a merged prerequisite has main in its head's
+ancestry. Copying that head's files onto `from` reproduces the tree but not
+the ancestry, so GitHub merges main's own hunks against main again and
+reports a conflict that no source correction can clear. Let the script decide
+what the publication's parents are:
+
+```sh
+set -- $(repo/scripts/publication-parents.sh repo/.git "$from" "$head_commit" "$(git -C repo rev-parse origin/main)" "$branch_exists")
+from=$1 diff_from=$2 merge_parent=$3
+```
+
+`diff_from` replaces `from` in every diff below. When the branch does not
+exist yet, `from` becomes the integrated main commit itself, the valid current
+base. When it exists, `merge_parent` names the integrated commit and the first
+`publish_commit` of this publication carries it as `merge_parent_sha`: the
+published commit is then the merge the worker made, with the branch head first
+and its changes applied to the integrated tree. `-` means nothing to carry.
 
 The diff is between two commits in the repository's Git directory; nothing
 is checked out and no index is touched. The worker's own `.gitignore` decides
@@ -280,8 +321,8 @@ generated dependencies, build output, caches, and temporary metadata must be
 absent from the head.
 
 ```sh
-git --git-dir="$git_directory" diff --no-renames --name-status "$from" "$head_commit" > changed.txt   # A / M / D per path, never R
-git --git-dir="$git_directory" diff --no-renames --numstat "$from" "$head_commit"                     # for the delta paragraph
+git --git-dir="$git_directory" diff --no-renames --name-status "$diff_from" "$head_commit" > changed.txt   # A / M / D per path, never R
+git --git-dir="$git_directory" diff --no-renames --numstat "$diff_from" "$head_commit"                     # for the delta paragraph
 git --git-dir="$git_directory" ls-tree -r "$head_commit"                                               # mode and blob per path
 ```
 
@@ -331,10 +372,11 @@ Then, with `branch = factory/<first 12 hex of change_id>`:
 1. `observe_ref` for `main` and keep the answer as `main_head`. If it is not
    `base_commit`, main moved since the worker started; publish anyway from
    `from` and let the queue merge it, but say so in the body.
-2. `publish_commit` with `branch`, `expected_head_sha = from`, `message` =
-   the task title and nothing else (the App takes exactly one line: no blank
-   line, no trailers, no session link; a second line is refused as
-   `invalid_input`), and the first (or only) 50 entries. The operation id is
+2. `publish_commit` with `branch`, `expected_head_sha = from`,
+   `merge_parent_sha = merge_parent` on this first commit unless it is `-`,
+   `message` = the task title and nothing else (the App takes exactly one
+   line: no blank line, no trailers, no session link; a second line is refused
+   as `invalid_input`), and the first (or only) 50 entries. The operation id is
    `opid "$change_id" publish-1` for a first publication and
    `opid "$change_id" publish-<HEAD8 of from>-1` for a follow-up. It returns
    the new head commit; a second commit uses the next number and that head,
@@ -353,8 +395,8 @@ only the follow-up commit's delta. Fetch the new head and calculate that base
 and numstat directly:
 
 ```sh
-git -C repo fetch -q origin "$HEAD_SHA"
-review_base=$(git -C repo merge-base "$base_commit" "$HEAD_SHA")
+git -C repo fetch -q origin main "$HEAD_SHA"
+review_base=$(git -C repo merge-base origin/main "$HEAD_SHA")
 git -C repo diff --numstat "$review_base" "$HEAD_SHA"
 ```
 
@@ -403,7 +445,8 @@ human request, not a retry.
 - Production-line delta: added minus deleted outside tests, docs and fixtures,
   from the numstat, with the largest files named.
 - How it was verified: what the worker's result text says it ran, and that
-  the merge queue runs `scripts/local-ci.sh`. Claim nothing you did not see.
+  the merge queue runs the selected `scripts/local-ci.sh` mode on the combined
+  tree. Claim nothing you did not see.
 - Never an email, an org name, an account id, or a `/Users/<name>` path.
 - End with the repository's generated-with line and nothing after it. You
   have no session link; never invent one.
@@ -413,14 +456,17 @@ Write that body to a file; the review needs it.
 ## 5. Get the cold review, then merge
 
 The existing host `factory-review-intake.py` controller handles independent
-review for published PRs linked to tracked source issues. It pins the observed
+review for published PRs linked to tracked source issues, including the tracking
+issues you create through the App. It pins the observed
 PR head and base in its review journal, runs at most one fresh
 `cold-review.sh` per pass, and sends an idempotent task containing the exact
 Maintainer operation and its result. Intake and release checks run first.
 The reviewer is a separate read-only session, never the author or overseer.
 
-Observe the operation named in that task before acting. Only a completed App
-`submit_pull_request_review` result for the exact head is a verdict. A retained
+Observe the operation named in that task before acting. For this App-managed
+intake, only a completed `submit_pull_request_review` result for the exact head
+settles the operation. Other publishers can record independent reviews through
+the host path in [WORKFLOW.md](WORKFLOW.md); those do not settle an App operation. A retained
 Change review is useful source evidence, not a published-head approval. The
 controller preserves uncertainty after an interrupted launch and observes the
 same operation on later passes; it does not replay the launch automatically.

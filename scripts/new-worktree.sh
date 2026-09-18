@@ -55,7 +55,7 @@ Created $target on branch $branch (from $base).
 
 Next steps:
   cd $target
-  go build ./...
-  ./scripts/local-ci.sh
+  ./scripts/go-check.sh
+  Run focused tests for the changed behavior.
   Publish $branch and open a PR.
 EOF

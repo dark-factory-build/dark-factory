@@ -383,12 +383,20 @@ func claudeSessionSelection(runtime RuntimePaths, cwd, agentID, taskIncarnationI
 	return "", false, ErrInvalid
 }
 
-// escapeClaudeProjectPath mirrors the CLI's own cwd-to-directory-name mapping
-// closely enough for this existence check: worst case an imperfect escape
-// only misses a resumable session and Build starts fresh, exactly as if none
-// existed yet.
+// escapeClaudeProjectPath is the CLI's own cwd-to-directory-name mapping:
+// every character outside [A-Za-z0-9] becomes '-' (observed: a Change under
+// `.dark-factory-recovered/changes/` is recorded under
+// `-dark-factory-recovered-changes-`). It must match exactly, because a miss
+// does not merely start fresh: the retry relaunches `--session-id` with the
+// same derived id, which the CLI refuses as already in use and exits 1 before
+// any attempt outcome.
 func escapeClaudeProjectPath(cwd string) string {
-	return strings.ReplaceAll(cwd, "/", "-")
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, cwd)
 }
 
 // uuidV5 and formatUUID implement RFC 4122 UUID version 5 (SHA-1 name-based)
@@ -652,7 +660,8 @@ func Build(request Request) (Launch, error) {
 		// runtime. The runner's committed cwd is request.workingDirectory, so
 		// select that authorized current directory through Codex's native
 		// resume configuration before any prompt can be shown.
-		argv = append(argv, "-c", "notify=[]", "--strict-config", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
+		notify := "notify=[" + tomlBasicString(request.runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
+		argv = append(argv, "-c", notify, "--strict-config", "--no-alt-screen", "-c", "tui.resume_cwd=\"current\"", "-c", "check_for_update_on_startup=false", "-c", "tool_output_token_limit=32768", "-c", codexUntrustedProjectConfig(request.workingDirectory), "-c", "default_permissions="+tomlBasicString(codexPermissionName(request.runtime)), "-c", `approval_policy="never"`, "-c", permissions, "--disable", "computer_use", "--disable", "browser_use", "--disable", "plugins")
 		attemptServer := codexAttemptServerName(request.runtime)
 		argv = append(argv, "-c", "mcp_servers."+attemptServer+"={command="+tomlBasicString(request.runtime.factoryctl)+`,args=["attempt","mcp"],env_vars=["DARK_FACTORY_SOCKET","DARK_FACTORY_ATTEMPT_TOKEN_FILE"],enabled=true,required=true,tools={factory={approval_mode="approve"}}}`)
 		if browser != "" {
