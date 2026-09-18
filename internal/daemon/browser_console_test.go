@@ -112,6 +112,24 @@ func TestBrowserConsoleUpdatesAdvanceTheExactRevision(t *testing.T) {
 	}
 }
 
+func TestBrowserConsoleAcceptsLegacyZeroStandingInstructionBudget(t *testing.T) {
+	fixture := newConsoleFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityHumanActions, consoleRoot(t))
+	ctx := context.Background()
+	client := rawBrowserClient(fixture.client.ID)
+	policy, after, instruction, budget := "standing_instruction", uint32(1), "inspect worker activity", uint32(0)
+	result, err := fixture.backend.UpdateAgent(ctx, client, browserprotocol.AgentUpdate{
+		AgentID: fixture.agent.ID.String(), ExpectedRevision: decimalRevision(fixture.agent.Revision),
+		IdlePolicy: &policy, IdleAfterSeconds: &after, IdleInstruction: &instruction, IdleRunBudget: &budget,
+	})
+	if err != nil || result.Revision != decimalRevision(fixture.agent.Revision)+1 {
+		t.Fatalf("zero standing budget = %+v, %v", result, err)
+	}
+	stored, found, err := fixture.store.Agent(ctx, fixture.agent.ID)
+	if err != nil || !found || stored.Revision.Int64() != fixture.agent.Revision.Int64()+1 || stored.Idle.Policy != kernel.IdleStandingInstruction || stored.Idle.RunBudget != 0 {
+		t.Fatalf("zero-budget browser edit changed stored policy = %+v, found=%v, err=%v", stored.Idle, found, err)
+	}
+}
+
 // Topology is an observation; the two updates are operator mutations. An
 // observe-only pairing may do the first and none of the second.
 func TestBrowserConsoleGatesUpdatesOnHumanActionsButNotTopology(t *testing.T) {

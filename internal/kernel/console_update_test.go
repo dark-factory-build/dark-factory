@@ -210,6 +210,24 @@ func TestUpdateAgentPausesALegacyAgentItCouldNotRelaunch(t *testing.T) {
 	}
 }
 
+func TestUpdateAgentPausesLegacyZeroBudgetStandingInstruction(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	legacy, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 235), ProjectID: project.ID, Name: "legacy-idle", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.Exec(`UPDATE agents SET idle_policy = 'standing_instruction', idle_after_seconds = 1, idle_instruction = 'legacy scope', idle_run_budget = 0 WHERE id = ?`, legacy.ID.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	paused := true
+	updated, err := store.UpdateAgent(ctx, legacy.ID, legacy.Revision, AgentPatch{Paused: &paused}, mustTime(t, 5))
+	if err != nil || !updated.Paused || updated.Idle.RunBudget != 0 || updated.Idle.Instruction != "legacy scope" {
+		t.Fatalf("pause legacy zero-budget agent = %+v, %v", updated, err)
+	}
+}
+
 func TestUpdateTaskEditsAndCancelsOnlyWhileQueued(t *testing.T) {
 	store, _, project, agent := newAdmissionStore(t, RoleOrchestrator, 2)
 	defer store.Close()

@@ -17,8 +17,8 @@ const (
 	maxIdleInstruction  = 32768
 )
 
-// validateIdleRule mirrors the schema. The retained legacy allowance no
-// longer limits wakeups; the quiet interval still prevents immediate loops.
+// validateIdleRule mirrors the schema. A zero standing budget is retained as
+// legacy configuration and does not create an admission ceiling.
 func validateIdleRule(rule IdleRule) error {
 	if _, err := ParseIdlePolicy(string(rule.Policy)); err != nil {
 		return err
