@@ -84,8 +84,10 @@ Use `block` for an unresolved finding or `note` for evidence without approval.
 A plain GitHub approval without the explicit verdict does not satisfy this
 gate. Pending and dismissed reviews do not count. A block or GitHub
 `CHANGES_REQUESTED` at the same head wins over an allow, regardless of publisher.
-A new head requires fresh review. Existing operation-bound corrections remain
-supported; an ordinary second opinion cannot clear a same-head block.
+A new head requires fresh review. An operation-bound correction must come from
+the original block's publisher and name that exact operation. The publisher
+attests that the finding was resolved or withdrawn; another publisher's
+correction or an ordinary second opinion cannot clear a same-head block.
 The Maintainer App is another publisher of the same record. Its automated
 intake retains its own operation journal and uncertainty handling.
 

@@ -102,13 +102,17 @@ class ReleaseFixtures(unittest.TestCase):
         reviews[:] = [
             {"commit_id": HEAD, "state": "COMMENTED", "user": {"id": 1},
              "body": f"Dark-Factory-Review: block {HEAD} <!-- dark-factory-operation:{operation}:old -->"},
-            {"commit_id": HEAD, "state": "COMMENTED", "user": {"id": 2},
+            {"commit_id": HEAD, "state": "COMMENTED", "user": {"id": 1},
              "body": f"Dark-Factory-Review: allow {HEAD} Dark-Factory-Review-Correction: {operation} <!-- dark-factory-operation:22222222-2222-4222-8222-222222222222:new -->"},
         ]
         self.assertEqual(
             release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA),
             HEAD,
         )
+        reviews[1]["user"]["id"] = 2
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+        reviews[1]["user"]["id"] = 1
         reviews[1]["body"] = f"Dark-Factory-Review: allow {HEAD}"
         with self.assertRaises(release.ReleaseError):
             release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)

@@ -116,6 +116,13 @@ expect_pass 'an exact operation-bound review correction clears a same-head block
 assert_summary '**ALLOWED**'
 
 {
+    record "$head" COMMENTED "$app" "Finding. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$human" "Other publisher. Dark-Factory-Review: allow $head Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_fail 'another publisher cannot correct an existing block'
+assert_summary '**BLOCKED**'
+
+{
     record "$head" COMMENTED "$app" "Finding corrected. Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
     record "$head" COMMENTED "$app" "Metadata was corrected. Dark-Factory-Review: allow $head"
 } >"$reviews"

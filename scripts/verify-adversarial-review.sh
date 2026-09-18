@@ -159,14 +159,13 @@ while IFS= read -r line || [ -n "$line" ]; do
         allow) allowed=$((allowed + 1)) ;;
         block)
             operation_id=$(printf '%s\n' "$field_body" | sed -n 's/.*dark-factory-operation:\([0-9a-f-][0-9a-f-]*\):.*/\1/p' | tail -1)
-            printf '%s\t%s\n' "$head_sha" "$operation_id" >>"$blocked_records"
+            printf '%s\t%s\n' "$field_author" "$operation_id" >>"$blocked_records"
             ;;
     esac
 
     if [ "$verdict" = allow ]; then
-        # An explicit correction names the blocked operation immediately
-        # after its verdict. Ordinary second opinions cannot clear a block.
-        sed -n "s/.*Dark-Factory-Review: allow $head_sha Dark-Factory-Review-Correction: \([0-9a-f-][0-9a-f-]*\) <!-- dark-factory-operation:.*/\1/p" <<EOF >>"$corrections"
+        # Only the original publisher can correct its own blocked operation.
+        sed -n "s/.*Dark-Factory-Review: allow $head_sha Dark-Factory-Review-Correction: \([0-9a-f-][0-9a-f-]*\) <!-- dark-factory-operation:.*/$field_author${tab}\1/p" <<EOF >>"$corrections"
 $field_body
 EOF
     fi
@@ -178,13 +177,12 @@ EOF
     } >>"$findings"
 done <"$reviews"
 
-# A correction is effective only for a block with the exact
-# operation identity it names. Blocks without that identity (including
+# A correction is effective only for its publisher's exact blocked operation.
+# Blocks without that identity (including
 # GitHub-native CHANGES_REQUESTED) remain conservative and cannot be cleared
 # by a second opinion.
-while IFS="${tab}" read -r blocked_head blocked_operation; do
-    [ "$blocked_head" = "$head_sha" ] || continue
-    if [ -z "$blocked_operation" ] || ! grep -F -x -- "$blocked_operation" "$corrections" >/dev/null; then
+while IFS="${tab}" read -r blocked_author blocked_operation; do
+    if [ -z "$blocked_operation" ] || ! grep -F -x -- "$blocked_author${tab}$blocked_operation" "$corrections" >/dev/null; then
         blocked=$((blocked + 1))
     fi
 done <"$blocked_records"
