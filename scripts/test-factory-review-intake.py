@@ -70,7 +70,7 @@ class ReviewIntakeTest(unittest.TestCase):
         pull = {'number':9,'body':'Reviewed publication '+SHA+'\n\nRefs o/r#7','head_sha':SHA,'base_sha':'b'*40,'base_ref':'release+candidate'}
         def api(_binary, _home, _args, value):
             if value['action']=='legacy_lineage':
-                return {'state':'not_found'}  # Verified pre-cutover historical work.
+                return {'state':'legacy_existing_work','task_id':'d'*32}  # Daemon-proven historical work.
             self.assertEqual('b'*32,value['configuration']['target_repository_id'])
             item=value['review']; tool=item['tool']; calls.append(tool)
             if tool=='configuration':
@@ -184,6 +184,38 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertFalse(review.enqueue_followup(self.config,followup,pr,journal,managed))
             enqueue.assert_not_called()
             exact.assert_not_called()  # An App-created source cannot bypass withdrawal.
+
+    def test_managed_stale_body_followup_uses_frozen_route_and_rechecks_withdrawal(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        pr = {'number':9, 'headRefOid':SHA, 'body':'Old description\nRefs o/r#7'}
+        controller = Mock()
+        managed = controller, {'request': {'source_id':'a'*32, 'configuration':{'target_repository_id':'b'*32}}}, Path('/installed/factoryctl')
+        for state in ('imported', 'withdrawn'):
+            with self.subTest(state=state):
+                receipt = Path(self.temp.name) / (state + '.reviews.json')
+                controller.managed_api.side_effect = [{'state':'imported','task_id':'d'*32}, {'state':state,'task_id':'d'*32}]
+                with patch.object(review,'list_prs',return_value=[pr]), patch.object(review,'ready',return_value=dict(self.operation)), patch.object(review,'observe_review',return_value='missing'), patch.object(review.intake,'task_state',return_value=None), patch.object(review.intake,'enqueue') as enqueue:
+                    messages = review.run_locked(self.config,Path('/mirror'),journal,receipt,managed)
+                    if state == 'withdrawn':
+                        enqueue.assert_not_called()
+                        self.assertEqual([],messages)
+                    else:
+                        self.assertEqual('b'*32,enqueue.call_args.args[1]['repository_id'])
+                        self.assertEqual(['woke PR #9 stale body'],messages)
+                self.assertEqual(2,controller.managed_api.call_count)
+                controller.reset_mock()
+
+    def test_legacy_journal_alone_cannot_authorize_managed_followup(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        pr = {'number':9,'body':'Refs o/r#7'}
+        controller = Mock()
+        managed = controller, {'request': {'source_id':'a'*32,'configuration':{'target_repository_id':'b'*32}}}, Path('/installed/factoryctl')
+        followup = review.review_followup(self.config,dict(self.operation,review_operation='e'*32),'block')
+        for state in ('not_found','legacy_existing_work','imported'):
+            controller.managed_api.return_value = {'state':state,'task_id':'d'*32}
+            with patch.object(review.intake,'enqueue') as enqueue:
+                self.assertEqual(state != 'not_found',review.enqueue_followup(self.config,followup,pr,journal,managed))
+                self.assertEqual(state != 'not_found',enqueue.called)
 
     def test_discovery_processes_one_bounded_overflow_pr_instead_of_starving_it(self):
         prs = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 11)]

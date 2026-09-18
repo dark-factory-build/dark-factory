@@ -66,25 +66,8 @@ func (daemon *Daemon) intakeReview(ctx context.Context, input api.IntakeInput) a
 			return api.IntakeResult{State: "denied"}
 		}
 		lineage := daemon.legacyIntakeLineage(ctx, input)
-		if lineage.State != "imported" {
-			if lineage.State != "not_found" {
-				return lineage
-			}
-			page, err := daemon.readIntakeIssues(ctx, input.Configuration.Repository, receipt.RepositoryID, 1, "", input.IssueNumber)
-			if err != nil {
-				return intakeFailure(err)
-			}
-			if page.RepositoryID != receipt.RepositoryID || len(page.Issues) != 1 || page.Issues[0].Number != input.IssueNumber {
-				return api.IntakeResult{State: "denied"}
-			}
-			source := kernel.IntakeSource{ProjectID: project, TargetRepositoryID: target, GitHubRepositoryID: receipt.RepositoryID}
-			old, found, err := daemon.store.LegacyIntakeSuppression(ctx, source, intakeSnapshot(source, page.Issues[0]))
-			if err != nil {
-				return intakeFailure(err)
-			}
-			if !found || old.TaskID == (kernel.TaskID{}) {
-				return api.IntakeResult{State: "denied"}
-			}
+		if lineage.State != "imported" && lineage.State != "legacy_existing_work" {
+			return lineage
 		}
 	}
 	encoded, _ := json.Marshal(input.Review)

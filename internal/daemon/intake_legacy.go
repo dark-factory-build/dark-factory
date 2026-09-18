@@ -304,6 +304,14 @@ func (daemon *Daemon) legacyIntakeLineage(ctx context.Context, input api.IntakeI
 		return intakeFailure(err)
 	}
 	if !found {
+		source := kernel.IntakeSource{ProjectID: projectID, TargetRepositoryID: targetID, GitHubRepositoryID: receipt.RepositoryID}
+		old, retained, err := daemon.store.LegacyIntakeSuppression(ctx, source, intakeSnapshot(source, page.Issues[0]))
+		if err != nil {
+			return intakeFailure(err)
+		}
+		if retained && old.TaskID != (kernel.TaskID{}) {
+			return api.IntakeResult{State: "legacy_existing_work", TaskID: old.TaskID.String()}
+		}
 		return api.IntakeResult{State: "not_found"}
 	}
 	if accepted.WithdrawnAt != nil {

@@ -202,6 +202,15 @@ func TestLegacyCutoverLivePlanHistorySuppressionAndPriority(t *testing.T) {
 	if reply := fixture.daemon.Intake(ctx, lineage); reply.State != "not_found" {
 		t.Fatalf("unimported acceptance counted as managed work: %+v", reply)
 	}
+	lineage.IssueNumber = 1
+	if reply := fixture.daemon.Intake(ctx, lineage); reply.State != "legacy_existing_work" || reply.TaskID != old.ID.String() {
+		t.Fatalf("verified historical task lineage: %+v", reply)
+	}
+	lineage.IssueNumber = 3
+	if reply := fixture.daemon.Intake(ctx, lineage); reply.State != "not_found" {
+		t.Fatalf("unresolved journal authorized lineage: %+v", reply)
+	}
+	lineage.IssueNumber = 2
 	if reply := fixture.daemon.Intake(ctx, api.IntakeInput{Action: "import", AcceptanceID: baselineOnly.AcceptanceID}); reply.State != "imported" {
 		t.Fatalf("baseline explicit import: %+v", reply)
 	}

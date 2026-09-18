@@ -131,7 +131,7 @@ def linked_issue(config, pr, journal, existing=None, managed=None):
             controller, receipt, factoryctl = managed
             request = dict(receipt['request'], action='legacy_lineage', issue_number=issue)
             reply = controller.managed_api(factoryctl, Path(config['factory_home']), ['legacy_lineage'], request)
-            if reply.get('state') not in {'imported', 'not_found'}:
+            if reply.get('state') not in {'imported', 'legacy_existing_work'} or not isinstance(reply.get('task_id'), str) or not intake.ID_RE.fullmatch(reply['task_id']):
                 raise Unproven('retained source lineage is unavailable for footer #' + str(issue))
         return issue
     if matched:
@@ -151,8 +151,7 @@ def linked_issue(config, pr, journal, existing=None, managed=None):
             return issue
         if reply.get('state') != 'not_found':
             raise Unproven('managed source lineage is unavailable for footer #' + str(issue))
-        if CUSTOMER_REVIEW is not None:
-            raise Unproven('source has no imported acceptance; review and accept it before publication')
+        raise Unproven('source has no imported acceptance; review and accept it before publication')
     try:
         source = intake.exact_issue(config, issue)
     except intake.IssueBodyTooLarge as exc:
@@ -704,8 +703,7 @@ def run_locked(config, path, journal, journal_path, managed=None):
                 # only block on it, so wake the overseer and wait for the body.
                 # One wake per distinct body: a rewrite that still omits the head wakes again.
                 followup = review_followup(config, operation, "stale-body:" + hashlib.sha256(pr["body"].encode()).hexdigest())
-                if intake.task_state(config, followup) is None:
-                    intake.enqueue(config, followup)
+                if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                     messages.append("woke PR #" + str(pr["number"]) + " stale body")
                 continue
             if launched:
