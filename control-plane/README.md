@@ -355,6 +355,7 @@ and completed replay, then constructs the scoped journal. The existing Access
 owner workflow remains at `/mcp`. See [the connection protocol and activation
 requirements](../docs/development/GITHUB_CONNECTIONS.md), including the
 ownership-aware rollback boundary and separate live second-user proof.
+
 ### Issue sources separate from publication repositories
 
 `create_pull_request` accepts optional `source_repository` (`owner/name`). Omit

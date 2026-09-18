@@ -807,7 +807,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 }
 
 .dfFactoryFloor__map { overflow: auto; max-height: 70vh; scrollbar-color: #638095 #17252f; }
-.dfFactoryFloor__mapHint { color: #9db1be; font-size: .75rem; margin: .5rem 0; }
 
 .dfRecentWorkDialog { width: min(70rem, calc(100% - 2rem)); }
 .dfRecentWorkLayout { font-family: inherit; display: grid; grid-template-columns: minmax(14rem, 1fr) minmax(0, 2fr); gap: 1.5rem; margin-top: 1rem; }
@@ -849,6 +848,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 .dfFactoryFloor__navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin: 0 0 0.5rem; font: 0.75rem/1.4 system-ui, sans-serif; }
 .dfFactoryFloor__navigation button { min-height: 2rem; padding: 0.25rem 0.5rem; font: inherit; letter-spacing: normal; text-transform: none; }
+.dfFactoryFloor__spaceCount { color: var(--df-console-muted); margin-left: auto; white-space: nowrap; }
 .dfFactoryFloor__scopeSummary { margin: 0 0 0.75rem; color: var(--df-console-muted); font: 0.8rem/1.5 system-ui, sans-serif; }
 .dfFactoryFloor [role="button"]:focus-visible { outline: 2px solid var(--df-console-accent); outline-offset: 2px; }
 .dfConsoleSidebar__section[aria-label="FLOOR APPEARANCE"] { display: grid; gap: .65rem; }
