@@ -632,6 +632,11 @@ func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest Attem
 	if run.Provider != ProviderShell && effectiveTask == "" {
 		effectiveTask = relationships.task.Title
 	}
+	continuationContexts, err := resolvedContinuationContextsForTask(ctx, connection, relationships.task)
+	if err != nil {
+		return AttemptAuthority{}, err
+	}
+	effectiveTask = ContinuationTaskText(run.Provider, effectiveTask, continuationContexts)
 	var currentChangeRevision *Revision
 	var baseCommit []byte
 	if relationships.change != nil {
@@ -642,5 +647,9 @@ func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest Attem
 		}
 		baseCommit = relationships.change.Selection.Commit().Bytes()
 	}
-	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, AdmittedTaskWorkRevision: run.AdmittedTaskWorkRevision, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, AdmittedChangeRevision: run.AdmittedChangeRevision, CurrentChangeRevision: currentChangeRevision, BaseCommit: baseCommit, task: effectiveTask}, nil
+	contexts, err := resolvedContinuationContextsForTask(ctx, connection, relationships.task)
+	if err != nil {
+		return AttemptAuthority{}, err
+	}
+	return AttemptAuthority{RunID: run.ID, ProjectID: run.ProjectID, AgentID: run.AgentID, TaskID: run.TaskID, TaskIncarnation: run.TaskIncarnationID, AdmittedTaskWorkRevision: run.AdmittedTaskWorkRevision, Role: run.Role, Provider: run.Provider, ChangeID: run.ChangeID, AdmittedChangeRevision: run.AdmittedChangeRevision, CurrentChangeRevision: currentChangeRevision, BaseCommit: baseCommit, ContinuationContexts: contexts, task: effectiveTask}, nil
 }
