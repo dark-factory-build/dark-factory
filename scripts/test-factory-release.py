@@ -673,7 +673,7 @@ class ReleaseFixtures(unittest.TestCase):
         with mock.patch.object(release, "run", side_effect=gh):
             self.assertEqual(release.range_sources(cfg, OLD, SHA)[0][0]["issue"], 602)
 
-    def test_range_rejects_missing_source_footer(self):
+    def test_range_skips_source_less_pull_request(self):
         cfg = config(Path("/tmp/release.json"))
         def gh(argv, *unused):
             command = " ".join(argv)
@@ -682,8 +682,36 @@ class ReleaseFixtures(unittest.TestCase):
             if "/pulls" in command:
                 return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
             return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA}, "body": "No source"})
-        with mock.patch.object(release, "run", side_effect=gh), self.assertRaisesRegex(release.ReleaseError, "exactly one"):
-            release.range_sources(cfg, OLD, SHA)
+        with mock.patch.object(release, "run", side_effect=gh):
+            self.assertEqual(release.range_sources(cfg, OLD, SHA), ([], "range"))
+
+    def test_range_accepts_unique_footer_with_generator_trailer_and_deduplicates(self):
+        cfg = config(Path("/tmp/release.json"))
+        def gh(argv, *unused):
+            command = " ".join(argv)
+            if "/compare/" in command:
+                return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
+            if "/pulls" in command:
+                return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA},
+                               "body": "Refs #602\n\nRefs #602\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"})
+        with mock.patch.object(release, "run", side_effect=gh):
+            self.assertEqual(release.range_sources(cfg, OLD, SHA)[0],
+                             [{"pr": 10, "merge_sha": SHA, "issue": 602, "reference": "refs"}])
+
+    def test_range_uses_existing_terminal_footer_precedence(self):
+        cfg = config(Path("/tmp/release.json"))
+        def gh(argv, *unused):
+            command = " ".join(argv)
+            if "/compare/" in command:
+                return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
+            if "/pulls" in command:
+                return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA},
+                               "body": "Refs #602\n\nCloses #603\n"})
+        with mock.patch.object(release, "run", side_effect=gh):
+            self.assertEqual(release.range_sources(cfg, OLD, SHA)[0],
+                             [{"pr": 10, "merge_sha": SHA, "issue": 603, "reference": "closes"}])
 
     def test_range_rejects_source_reference_that_is_not_a_footer(self):
         cfg = config(Path("/tmp/release.json"))
