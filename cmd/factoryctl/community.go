@@ -18,6 +18,10 @@ import (
 
 const publicBacklogURL = "https://darkfactory.build/api/backlog"
 
+func publicBacklogClient() *http.Client {
+	return &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
 func runBacklog(ctx context.Context, args []string, stdout, stderr io.Writer, opener browserOpener) int {
 	if len(args) == 1 && args[0] == "--open" {
 		link := "https://darkfactory.build/backlog"
@@ -32,8 +36,7 @@ func runBacklog(ctx context.Context, args []string, stdout, stderr io.Writer, op
 		_, _ = fmt.Fprintln(stderr, "usage: factoryctl backlog [--open]")
 		return exitUsage
 	}
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	if err := readPublicBacklog(ctx, client, stdout); err != nil {
+	if err := readPublicBacklog(ctx, publicBacklogClient(), stdout); err != nil {
 		_, _ = fmt.Fprintln(stderr, "Public backlog unavailable. Retry or visit https://github.com/dark-factory-build/dark-factory/issues")
 		return exitFailure
 	}

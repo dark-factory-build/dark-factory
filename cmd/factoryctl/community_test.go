@@ -5,11 +5,41 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 )
+
+func TestPublicBacklogDoesNotUseAmbientProxy(t *testing.T) {
+	proxyCalls := 0
+	proxy := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { proxyCalls++ }))
+	defer proxy.Close()
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("ALL_PROXY", proxy.URL)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(out http.ResponseWriter, request *http.Request) {
+		if request.Host != "darkfactory.build" || request.URL.Path != "/api/backlog" || request.Header.Get("Proxy-Authorization") != "" {
+			t.Errorf("unexpected public request: %s %s", request.Host, request.URL.Path)
+		}
+		_, _ = io.WriteString(out, `{"status":"ok","repository":"dark-factory-build/dark-factory","issues":[]}`)
+	}))
+	defer server.Close()
+	client := publicBacklogClient()
+	transport := client.Transport.(*http.Transport)
+	defer transport.CloseIdleConnections()
+	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	transport.TLSClientConfig.ServerName = "example.com"
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	var out bytes.Buffer
+	if err := readPublicBacklog(context.Background(), client, &out); err != nil || proxyCalls != 0 {
+		t.Fatalf("public read used ambient proxy or failed: calls=%d error=%v", proxyCalls, err)
+	}
+}
 
 type publicBacklogTransport func(*http.Request) (*http.Response, error)
 
