@@ -463,8 +463,10 @@ PR head and base in its review journal, runs at most one fresh
 Maintainer operation and its result. Intake and release checks run first.
 The reviewer is a separate read-only session, never the author or overseer.
 
-Observe the operation named in that task before acting. Only a completed App
-`submit_pull_request_review` result for the exact head is a verdict. A retained
+Observe the operation named in that task before acting. For this App-managed
+intake, only a completed `submit_pull_request_review` result for the exact head
+settles the operation. Other publishers can record independent reviews through
+the host path in [WORKFLOW.md](WORKFLOW.md); those do not settle an App operation. A retained
 Change review is useful source evidence, not a published-head approval. The
 controller preserves uncertainty after an interrupted launch and observes the
 same operation on later passes; it does not replay the launch automatically.

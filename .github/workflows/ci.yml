@@ -339,7 +339,7 @@ jobs:
         run: |
           echo "no adversarial review verdict at the head being merged (review=${{ needs.review.result }})" >&2
           echo "  A reviewer that did not write the change records:" >&2
-          echo "  submit_pull_request_review, event: ALLOW, head_sha: <this exact head>" >&2
+          echo "  Publish a GitHub review at this exact commit with Dark-Factory-Review: allow <head_sha>" >&2
           exit 1
 
       # This is diagnostic defence against repository-setting drift. The

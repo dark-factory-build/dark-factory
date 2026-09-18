@@ -57,6 +57,8 @@ const inventory = {
     "factory-settings-coordinator.d.ts", "factory-settings-coordinator.js",
     "factory-app-controller.d.ts", "factory-app-controller.js", "factory-app.d.ts", "factory-app.js",
     "factory-console.css", "factory-console.d.ts", "factory-console.js",
+    "floor-appearance.d.ts", "floor-appearance.js",
+    "factory-scene/ambient.d.ts", "factory-scene/ambient.js",
     "factory-scene/appearance.d.ts", "factory-scene/appearance.js",
     "factory-scene/factory-scene.d.ts", "factory-scene/factory-scene.js",
     "factory-scene/movement.d.ts", "factory-scene/movement.js",

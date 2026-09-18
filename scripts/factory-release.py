@@ -188,8 +188,9 @@ def reviewed_merge_gate(pr, reviews, checks, config, expected):
         raise ReleaseError("pull request head is invalid")
     if not check_runs_ok(checks):
         raise ReleaseError("pull request checks are incomplete or failing")
-    if not any(f"Dark-Factory-Review: allow {head}" in str(item.get("body", "")) and str(item.get("commit_id")) == head and str((item.get("user") or {}).get("id", "")) == "319516570" for item in reviews):
-        raise ReleaseError("no exact independent Maintainer ALLOW review at the pull request head")
+    # Keep the shared exact-head verifier inside this gate so every caller
+    # proves the independent review before delivery proceeds.
+    review_gate(config, head, reviews)
     return head
 
 
@@ -473,7 +474,6 @@ def once(config, number, retry=False):
         merge_gate(pr, default, reviews, checks, config, sha)
         if entry and entry.get("sha") != sha:
             raise ReleaseError("journal has a different SHA for this pull request")
-        review_gate(config, pr["headRefOid"], reviews)
         entry = entry or {"pr": number, "sha": sha, "state": "planned"}
         entry.update({"sha": sha, "state": "planned", "phase": "predeploy",
                       "config_fingerprint": fingerprint, "updated_at": int(time.time())})
@@ -588,7 +588,6 @@ def reconcile(config, number, expected):
         target_is_ancestor(config, sha, default)
         if entry and entry.get("sha") != sha:
             raise ReleaseError("journal has a different SHA for this pull request")
-        review_gate(config, pr["headRefOid"], reviews)
         value = probe(config, expected)
         if value.get("sha") != expected or value.get("healthy") is not True:
             raise ReleaseError("live probe did not prove the expected healthy SHA")

@@ -63,6 +63,34 @@ check is a delivery condition, not by itself a source-review defect. Reviewers
 still block concrete defects and false verification claims; neither local test
 evidence nor an ALLOW verdict bypasses the protected gates.
 
+Any account that can submit a GitHub pull-request review may publish an
+independent assessment. There is no publisher allowlist. The assessment must
+come from a separate reviewer; identify that reviewer, the examined head,
+findings and checks in the review body. The publisher attests to that work.
+GitHub authenticates the publisher, but neither the account identity nor the
+verdict marker proves reviewer independence.
+
+To publish through host credentials, put the independent findings in
+`review.md`, set `repository`, `pr` and the full reviewed `head`, then submit a
+formal review bound to that commit:
+
+```sh
+jq -n --arg head "$head" --rawfile report review.md \
+  '{commit_id: $head, event: "COMMENT", body: ($report + "\n\nDark-Factory-Review: allow " + $head)}' > review.json
+gh api "repos/$repository/pulls/$pr/reviews" --input review.json
+```
+
+Use `block` for an unresolved finding or `note` for evidence without approval.
+A plain GitHub approval without the explicit verdict does not satisfy this
+gate. Pending and dismissed reviews do not count. A block or GitHub
+`CHANGES_REQUESTED` at the same head wins over an allow, regardless of publisher.
+A new head requires fresh review. An operation-bound correction must come from
+the original block's publisher and name that exact operation. The publisher
+attests that the finding was resolved or withdrawn; another publisher's
+correction or an ordinary second opinion cannot clear a same-head block.
+The Maintainer App is another publisher of the same record. Its automated
+intake retains its own operation journal and uncertainty handling.
+
 ## Operator human requests
 
 With the existing operator socket and token-file environment configured,

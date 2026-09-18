@@ -4,9 +4,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -201,5 +203,155 @@ func TestPageContentBodyContinuesFromGitSizedOffsets(t *testing.T) {
 	second, err := pageContentBody(content, body, first.NextOffset, 64*1024)
 	if err != nil || !second.Complete || second.Body != "£tail" {
 		t.Fatalf("second page = %+v, %v", second, err)
+	}
+}
+
+// This uses the same committed-Git fixture as the operator content tests so
+// worker authority is exercised through the public daemon/API boundary.
+func TestAttemptContentRejectsCrossProjectAndWrongTaskWithoutMutation(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerProject, foreignProject := testID(70), testID(71)
+	ownerRoot, foreignRoot := contentRepositoryFixture(t), contentRepositoryFixture(t)
+	for _, project := range []api.CreateProjectInput{
+		{ID: ownerProject, Name: "owner", Root: ownerRoot},
+		{ID: foreignProject, Name: "foreign", Root: foreignRoot},
+	} {
+		done := fixture.serve(t)
+		if _, err := operator.CreateProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	create := func(id, project string) {
+		done := fixture.serve(t)
+		if _, err := operator.ContentCreate(ctx, api.ContentInput{ID: id, ProjectID: project, Kind: "custom", Title: "content", Body: "body", SourceReferences: "source"}); err != nil {
+			t.Fatal(err)
+		}
+		waitDispatch(t, done)
+	}
+	ownerContent, foreignContent := testID(72), testID(73)
+	create(ownerContent, ownerProject)
+	create(foreignContent, foreignProject)
+	active := prepareActiveAttemptInProject(t, fixture, 70, ownerProject, "worker")
+	ownerID, err := parseProjectID(ownerProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerContentID, err := contentID(ownerContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refsBefore, err := fixture.store.TaskContentReferences(ctx, ownerID, active.run.TaskID, active.run.AdmittedTaskWorkRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceBefore, err := fixture.store.ListContentEvidence(ctx, ownerID, ownerContentID, mustRevision(t, 1), 0, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignID, err := parseProjectID(foreignProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignContentID, err := contentID(foreignContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignLatestBefore, err := fixture.store.ListContent(ctx, foreignID, "", 0, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRevisionBefore, err := fixture.store.Content(ctx, foreignContentID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignEvidenceBefore, err := fixture.store.ListContentEvidence(ctx, foreignID, foreignContentID, mustRevision(t, 1), 0, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeTaskForeignRefsBefore, err := fixture.store.TaskContentReferences(ctx, foreignID, active.run.TaskID, active.run.AdmittedTaskWorkRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTaskID, err := taskID(testID(75))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTaskRefsBefore, err := fixture.store.TaskContentReferences(ctx, ownerID, wrongTaskID, active.run.AdmittedTaskWorkRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		invoke func() error
+	}{
+		{"cross-project read", func() error {
+			_, err := active.client.ContentRead(ctx, api.ContentReadInput{ID: foreignContent, Revision: 1})
+			return err
+		}},
+		{"cross-project revise", func() error {
+			_, err := active.client.ContentRevise(ctx, api.ContentInput{ID: foreignContent, ProjectID: foreignProject, Kind: "custom", Title: "forged", ExpectedRevision: 1})
+			return err
+		}},
+		{"cross-project evidence", func() error {
+			_, err := active.client.ContentEvidence(ctx, api.ContentEvidenceInput{ID: testID(74), ProjectID: foreignProject, ContentID: foreignContent, ContentRevision: 1, TestedSource: "forged", Result: "passed"})
+			return err
+		}},
+		{"cross-project attach", func() error {
+			return active.client.ContentAttach(ctx, api.ContentAttachInput{TaskID: active.run.TaskID.String(), ProjectID: foreignProject, ContentID: foreignContent, ContentRevision: 1})
+		}},
+		{"wrong-task attach", func() error {
+			return active.client.ContentAttach(ctx, api.ContentAttachInput{TaskID: testID(75), ProjectID: ownerProject, ContentID: ownerContent, ContentRevision: 1})
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			done := fixture.serve(t)
+			err := test.invoke()
+			var remote *api.RemoteError
+			if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+				t.Fatalf("refusal = %v", err)
+			}
+			waitDispatch(t, done)
+		})
+	}
+	refsAfter, err := fixture.store.TaskContentReferences(ctx, ownerID, active.run.TaskID, active.run.AdmittedTaskWorkRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceAfter, err := fixture.store.ListContentEvidence(ctx, ownerID, ownerContentID, mustRevision(t, 1), 0, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refsBefore) != len(refsAfter) || len(evidenceBefore.Items) != len(evidenceAfter.Items) {
+		t.Fatalf("refused requests mutated references/evidence")
+	}
+	foreignLatestAfter, err := fixture.store.ListContent(ctx, foreignID, "", 0, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignRevisionAfter, err := fixture.store.Content(ctx, foreignContentID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignEvidenceAfter, err := fixture.store.ListContentEvidence(ctx, foreignID, foreignContentID, mustRevision(t, 1), 0, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeTaskForeignRefsAfter, err := fixture.store.TaskContentReferences(ctx, foreignID, active.run.TaskID, active.run.AdmittedTaskWorkRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTaskRefsAfter, err := fixture.store.TaskContentReferences(ctx, ownerID, wrongTaskID, active.run.AdmittedTaskWorkRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(foreignLatestBefore, foreignLatestAfter) || !reflect.DeepEqual(foreignRevisionBefore, foreignRevisionAfter) || !reflect.DeepEqual(foreignEvidenceBefore, foreignEvidenceAfter) || !reflect.DeepEqual(activeTaskForeignRefsBefore, activeTaskForeignRefsAfter) || !reflect.DeepEqual(wrongTaskRefsBefore, wrongTaskRefsAfter) {
+		t.Fatalf("refused requests mutated foreign content, evidence, or references")
 	}
 }

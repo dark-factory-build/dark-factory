@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -22,14 +23,52 @@ func TestOverseerSnapshotIsProjectScopedAndTaskSelected(t *testing.T) {
 	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 243), ProjectID: other.ID, AssignedAgentID: otherAgent.ID, IncarnationID: incarnationID(t, 244), Title: "foreign", Body: "must not appear"}, mustTime(t, 42)); err != nil {
 		t.Fatal(err)
 	}
+	secondAgent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 245), ProjectID: run.ProjectID, Name: "second", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 1}, mustTime(t, 43))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTask, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 246), ProjectID: run.ProjectID, AssignedAgentID: secondAgent.ID, IncarnationID: incarnationID(t, 247), Title: "second"}, mustTime(t, 44))
+	if err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := store.OverseerSnapshotForAttempt(ctx, run.CredentialDigest, OverseerSnapshotRequest{})
-	if err != nil || snapshot.ProjectID != run.ProjectID || len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != run.TaskID {
+	if err != nil || snapshot.ProjectID != run.ProjectID || len(snapshot.Tasks) < 1 {
 		t.Fatalf("scoped snapshot = %+v, %v", snapshot, err)
+	}
+	var selectedOverview OverseerTask
+	for _, task := range snapshot.Tasks {
+		if task.ID == run.TaskID {
+			selectedOverview = task
+			break
+		}
+	}
+	if selectedOverview.ID != run.TaskID {
+		t.Fatalf("scoped snapshot omitted running task = %+v", snapshot.Tasks)
 	}
 	selected := run.TaskID
 	detail, err := store.OverseerSnapshotForAttempt(ctx, run.CredentialDigest, OverseerSnapshotRequest{TaskID: &selected})
-	if err != nil || len(detail.Tasks) != 1 || detail.Tasks[0].ID != selected || detail.Tasks[0].ObjectiveTruncated || detail.Tasks[0].ResultTruncated {
+	if err != nil || len(detail.Tasks) != 1 || detail.Tasks[0].ID != selected || detail.Tasks[0].ObjectiveTruncated || detail.Tasks[0].ResultTruncated || len(detail.Agents) != 1 || detail.Agents[0].ID != run.AgentID {
 		t.Fatalf("selected snapshot = %+v, %v", detail, err)
+	}
+	fullBytes, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailBytes, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detailBytes) >= len(fullBytes) || detail.Tasks[0].Objective != selectedOverview.Objective {
+		t.Fatalf("real Store snapshot bytes full=%d targeted=%d", len(fullBytes), len(detailBytes))
+	}
+	secondDetail, err := store.OverseerSnapshotForAttempt(ctx, run.CredentialDigest, OverseerSnapshotRequest{TaskID: &secondTask.ID})
+	if err != nil || len(secondDetail.Agents) != 1 || secondDetail.Agents[0].ID != secondAgent.ID {
+		t.Fatalf("second selected snapshot = %+v, %v", secondDetail, err)
+	}
+	corruptSQL(t, store, `UPDATE tasks SET assigned_agent_id = NULL WHERE id = ?`, secondTask.ID.Bytes())
+	pooledDetail, err := store.OverseerSnapshotForAttempt(ctx, run.CredentialDigest, OverseerSnapshotRequest{TaskID: &secondTask.ID})
+	if err != nil || len(pooledDetail.Agents) == 0 || pooledDetail.Agents[0].ID != run.AgentID {
+		t.Fatalf("pooled selected snapshot = %+v, %v", pooledDetail, err)
 	}
 	foreign := taskID(t, 243)
 	if _, err := store.OverseerSnapshotForAttempt(ctx, run.CredentialDigest, OverseerSnapshotRequest{TaskID: &foreign}); !errors.Is(err, ErrNotFound) {
