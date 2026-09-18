@@ -187,6 +187,19 @@ func TestAcceptedAttemptContextAndRestrictionsSurviveSourceSettingsChanges(t *te
 	if err != nil || assignment.Task != accepted.Snapshot.Body || assignment.Intake == nil || assignment.Intake.AcceptanceID != accepted.ID.String() || assignment.Intake.Repository != "feed/original" || assignment.Intake.RepositoryID != 42 || assignment.Intake.IssueNumber != 9 || assignment.Intake.TargetRepositoryID != accepted.RepositoryID.String() {
 		t.Fatalf("frozen accepted assignment: %+v %v", assignment, err)
 	}
+	// No customer host is installed. A denied result therefore proves the
+	// accepted-receipt guard ran before any broker path could be reached.
+	for _, request := range []api.MaintainerInput{
+		{Request: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"publish/destination","issue_number":9}}}`)},
+		{Request: json.RawMessage(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":10}}}`)},
+	} {
+		done := fixture.serve(t)
+		result, err := active.client.Maintainer(ctx, request)
+		waitDispatch(t, done)
+		if err != nil || result.State != "denied" || len(result.Response) != 0 {
+			t.Fatalf("unaccepted issue observation: %+v %v", result, err)
+		}
+	}
 	// An offline customer connection exercises local rejection without any
 	// remote request or private credential in the fixture.
 	if err := fixture.home.WriteMaintainerCredential([]byte(`{"disabled":true}`)); err != nil {
