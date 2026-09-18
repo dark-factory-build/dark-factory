@@ -188,6 +188,7 @@ type attemptCommand struct {
 	kind             commandKind
 	home             string
 	idempotencyKey   string
+	turnID           string
 	text             string
 	options          []string
 	id               string
@@ -247,6 +248,47 @@ type attemptCommand struct {
 	documentFile     string
 	prerequisites    []api.TaskPrerequisiteInput
 	conflictPaths    []string
+}
+
+type turnCompletionState struct {
+	Pending       bool   `json:"pending"`
+	HandledTurnID string `json:"handled_turn_id,omitempty"`
+}
+
+func turnCompletionStatePath(getenv func(string) string) string {
+	token := getenv("DARK_FACTORY_ATTEMPT_TOKEN_FILE")
+	if !filepath.IsAbs(token) || filepath.Base(token) != "attempt.token" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(token), ".factory-turn-state.json")
+}
+
+func readTurnCompletionState(getenv func(string) string) turnCompletionState {
+	path := turnCompletionStatePath(getenv)
+	if path == "" {
+		return turnCompletionState{}
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil || len(encoded) > 512 {
+		return turnCompletionState{}
+	}
+	var state turnCompletionState
+	if json.Unmarshal(encoded, &state) != nil || len(state.HandledTurnID) > 256 {
+		return turnCompletionState{}
+	}
+	return state
+}
+
+func writeTurnCompletionState(getenv func(string) string, state turnCompletionState) {
+	path := turnCompletionStatePath(getenv)
+	if path == "" {
+		return
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil || len(encoded) > 512 {
+		return
+	}
+	_ = os.WriteFile(path, encoded, 0o600)
 }
 
 func main() {
@@ -339,11 +381,22 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		_, _ = io.WriteString(stderr, "factoryctl: attempt client configuration is invalid\nfactoryctl: DARK_FACTORY_SOCKET is not set in this shell; a Codex session runs attempt commands through its factory tool\n")
 		return exitFailure
 	}
+	if command.kind == commandTurnComplete {
+		state := readTurnCompletionState(getenv)
+		if state.HandledTurnID == command.turnID {
+			return 0
+		}
+		if state.Pending {
+			writeTurnCompletionState(getenv, turnCompletionState{HandledTurnID: command.turnID})
+			return 0
+		}
+	}
 	client, err := api.NewAttemptClientFromEnvironment(socket)
 	if err != nil {
 		if command.kind == commandTurnComplete {
 			var remote *api.RemoteError
 			if errors.As(err, &remote) && remote.Code() == api.RemoteConflict {
+				writeTurnCompletionState(getenv, turnCompletionState{HandledTurnID: command.turnID})
 				return 0
 			}
 		}
@@ -434,11 +487,17 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		if command.kind == commandTurnComplete {
 			var remote *api.RemoteError
 			if errors.As(err, &remote) && remote.Code() == api.RemoteConflict {
+				writeTurnCompletionState(getenv, turnCompletionState{HandledTurnID: command.turnID})
 				return 0
 			}
 		}
 		writeFailure(stderr, command.kind, err)
 		return exitFailure
+	}
+	if command.kind == commandRequestHuman {
+		writeTurnCompletionState(getenv, turnCompletionState{Pending: true})
+	} else if command.kind == commandTurnComplete {
+		writeTurnCompletionState(getenv, turnCompletionState{HandledTurnID: command.turnID})
 	}
 	if command.kind == commandTurnComplete {
 		return 0
@@ -662,7 +721,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 			}
 			if json.Unmarshal([]byte(args[2]), &notification) == nil && notification.Type == "agent-turn-complete" && validOperatorText(notification.ThreadID, 1, 256) && validOperatorText(notification.TurnID, 1, 256) && validOperatorText(notification.CWD, 1, 4096) {
 				digest := sha256.Sum256([]byte(notification.ThreadID + "\x00" + notification.TurnID + "\x00" + notification.CWD))
-				return attemptCommand{kind: commandTurnComplete, idempotencyKey: hex.EncodeToString(digest[:16]), text: "Codex turn completed without a durable attempt outcome; resume this session and record succeed, block, or fail."}, false, true
+				return attemptCommand{kind: commandTurnComplete, idempotencyKey: hex.EncodeToString(digest[:16]), turnID: notification.TurnID, text: "Codex turn completed without a durable attempt outcome; resume this session and record succeed, block, or fail."}, false, true
 			}
 		}
 	case "peer":

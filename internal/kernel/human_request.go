@@ -171,7 +171,7 @@ func (store *Store) createHumanQuestionForAttempt(ctx context.Context, digest At
 	}
 	if input.ReuseExisting {
 		var existingOpen HumanRequest
-		existingOpen, existingFound, err = scanHumanRequest(tx.connection.QueryRowContext(ctx, `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id = ? ORDER BY created_at_ms DESC, id DESC LIMIT 1`, run.ID.Bytes()))
+		existingOpen, existingFound, err = scanHumanRequest(tx.connection.QueryRowContext(ctx, `SELECT `+humanRequestColumns+` FROM human_requests WHERE run_id = ? AND status IN ('open', 'delivering', 'delivery_unknown') ORDER BY id LIMIT 1`, run.ID.Bytes()))
 		if err != nil {
 			return HumanRequest{}, tx.Rollback(err)
 		}

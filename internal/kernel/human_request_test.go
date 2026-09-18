@@ -396,15 +396,15 @@ func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reused.ID != first.ID || reused.QuestionText != first.QuestionText {
-		t.Fatalf("reused request = %+v, first = %+v", reused, first)
+	if reused.ID == first.ID || reused.QuestionText != "turn completed" {
+		t.Fatalf("new request = %+v, first = %+v", reused, first)
 	}
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.HumanRequests) != 0 {
-		t.Fatalf("snapshot requests = %d, want no new open request", len(snapshot.HumanRequests))
+	if len(snapshot.HumanRequests) != 1 {
+		t.Fatalf("snapshot requests = %d, want one new open request", len(snapshot.HumanRequests))
 	}
 }
 
