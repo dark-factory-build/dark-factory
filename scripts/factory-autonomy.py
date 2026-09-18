@@ -37,6 +37,13 @@ class ControllerSourceError(ValueError):
     pass
 
 
+def controller_checkout(scripts):
+    # A release archive is immutable and has no source checkout to refresh.
+    # Only the developer/release tree's conventional scripts directory owns
+    # the post-release fast-forward described by the controller contract.
+    return scripts.parent if scripts.name == 'scripts' and (scripts.parent / '.git').exists() else None
+
+
 def refresh_controller(checkout, release_config, receipt):
     """Advance this existing checkout only after an exact verified release."""
     sha = receipt.get('sha', '')
@@ -97,7 +104,9 @@ def tick(config_path, config, release_only=False):
                     refresh_lock = Path(str(Path(config['factory_home']).resolve()) + '.autonomy.lock')
                     with refresh_lock.open('a+') as lock:
                         fcntl.flock(lock, fcntl.LOCK_EX)
-                        refresh_controller(scripts.parent, release_config, receipt)
+                        checkout = controller_checkout(scripts)
+                        if checkout is not None:
+                            refresh_controller(checkout, release_config, receipt)
 
         except ControllerSourceError as error:
             result.update({'ok': False, 'error': str(error)})
