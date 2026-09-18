@@ -547,11 +547,11 @@ func inspectOperationalHome(ctx context.Context, home *os.File) error {
 }
 
 func readOperationalCensus(home *os.File) (map[string]bool, error) {
-	names, err := home.Readdirnames(memberCount + 4)
+	names, err := home.Readdirnames(memberCount + 6)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("enumerate operational home: %w", err)
 	}
-	if len(names) < memberCount || len(names) > memberCount+3 {
+	if len(names) < memberCount || len(names) > memberCount+5 {
 		return nil, fmt.Errorf("%w: operational home census has %d entries", ErrInvalidHome, len(names))
 	}
 	seen := make(map[string]bool, len(names))
@@ -563,7 +563,8 @@ func readOperationalCensus(home *os.File) (map[string]bool, error) {
 		// Written by the relay connector after this home first opened, so a
 		// daemon that has ever carried --relay-origin must still be able to
 		// reopen its own home.
-		RelayDirectoryName: true,
+		RelayDirectoryName:       true,
+		maintainerCredentialName: true, maintainerCredentialStage: true,
 	}
 	for _, name := range names {
 		if seen[name] {
