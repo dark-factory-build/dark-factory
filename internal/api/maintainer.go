@@ -31,7 +31,7 @@ func (client *AttemptClient) Maintainer(ctx context.Context, input MaintainerInp
 		if !json.Valid(result.Response) {
 			return MaintainerResult{}, ErrProtocol
 		}
-	case "denied", "unavailable", "invalid", "repository_unbound":
+	case "denied", "unavailable", "invalid", "repository_unbound", "accepted_snapshot_required":
 	default:
 		return MaintainerResult{}, ErrProtocol
 	}

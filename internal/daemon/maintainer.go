@@ -44,6 +44,7 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		return failure("invalid")
 	}
 	repositories := map[string]uint64{}
+	var observedAcceptance *kernel.IntakeAcceptance
 	switch request.Method {
 	case "initialize", "ping", "tools/list":
 	case "tools/call":
@@ -67,11 +68,54 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		if err != nil {
 			return failure("unavailable")
 		}
+		accepted, found, err := daemon.store.IntakeAcceptanceForTask(ctx, authority.TaskID)
+		if err != nil {
+			return failure("unavailable")
+		}
+		if found {
+			if accepted.WithdrawnAt != nil {
+				return failure("denied")
+			}
+			if params.Name == "list_issues" {
+				return failure("accepted_snapshot_required")
+			}
+			if params.Name == "observe_issue" && strings.EqualFold(repository, accepted.SourceRepository) {
+				var number uint64
+				if json.Unmarshal(params.Arguments["issue_number"], &number) != nil || number != accepted.Snapshot.IssueNumber {
+					return failure("denied")
+				}
+				observedAcceptance = &accepted
+			}
+			if params.Name == "create_pull_request" {
+				var number uint64
+				if json.Unmarshal(params.Arguments["issue_number"], &number) != nil || number != accepted.Snapshot.IssueNumber {
+					return failure("denied")
+				}
+				if source == "" {
+					source = repository
+				}
+				if !strings.EqualFold(source, accepted.SourceRepository) {
+					return failure("denied")
+				}
+			}
+			// Accepted work keeps its exact destination, including after a default
+			// change or disabling the binding for new work.
+			target, verified, readErr := daemon.store.RepositorySourceIdentity(ctx, accepted.RepositoryID)
+			if readErr != nil || !verified || target.PublicationRepository == "" {
+				return failure("repository_unbound")
+			}
+			id, pinned, readErr := daemon.store.RepositoryGitHubID(ctx, accepted.RepositoryID)
+			if readErr != nil || !pinned {
+				return failure("repository_unbound")
+			}
+			targets = map[string]uint64{strings.ToLower(target.PublicationRepository): id}
+			sources = map[string]uint64{strings.ToLower(accepted.SourceRepository): accepted.Snapshot.GitHubRepositoryID}
+		}
 		name := strings.ToLower(repository)
 		id := targets[name]
 		if id == 0 {
 			switch params.Name {
-			case "list_issues", "observe_issue", "create_issue", "close_issue", "observe_operation":
+			case "list_issues", "observe_issue", "observe_operation":
 				id = sources[name]
 			}
 		}
@@ -114,6 +158,9 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 		}
 		return failure("unavailable")
 	}
+	if observedAcceptance != nil && !observedAcceptedContent(response, *observedAcceptance) {
+		return failure("accepted_snapshot_required")
+	}
 	return api.NewContentReply(api.MaintainerResult{State: "ok", Response: response})
 }
 
@@ -155,4 +202,24 @@ func (daemon *Daemon) projectMaintainerRepositories(ctx context.Context, project
 		}
 	}
 	return targets, sources, unbound, nil
+}
+
+// Never return revised issue text as execution instructions, including the MCP
+// text duplicate. The attempt task already carries the reviewed snapshot.
+func observedAcceptedContent(response json.RawMessage, accepted kernel.IntakeAcceptance) bool {
+	var reply struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Issue   *struct {
+				Number uint64 `json:"number"`
+				Title  string `json:"title"`
+				Body   string `json:"body"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(response, &reply) != nil || reply.Result.IsError || reply.Result.Issue == nil {
+		return false
+	}
+	issue := reply.Result.Issue
+	return issue.Number == accepted.Snapshot.IssueNumber && issue.Title == accepted.Snapshot.Title && issue.Body == accepted.Snapshot.Body
 }
