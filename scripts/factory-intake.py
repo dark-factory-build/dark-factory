@@ -25,6 +25,10 @@ class IntakeError(Exception):
     pass
 
 
+class IssueBodyTooLarge(IntakeError):
+    pass
+
+
 def sha_id(*parts: str) -> str:
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()[:32]
 
@@ -162,7 +166,7 @@ def issue_from_json(value: object) -> dict:
         raise IntakeError("GitHub issue has invalid source fields")
     body = body or ""
     if len(body.encode()) > MAX_ISSUE_BODY:
-        raise IntakeError(f"issue #{value['number']} body exceeds the intake limit")
+        raise IssueBodyTooLarge(f"issue #{value['number']} body exceeds the intake limit")
     return {"number": value["number"], "author": author["login"], "labels": sorted({label["name"] for label in labels}), "state": state, "title": title, "body": body, "updated_at": updated, "url": url}
 
 

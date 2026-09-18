@@ -995,6 +995,52 @@ func retryQueuedWorker(t *testing.T, taskUpdatedAt int64) (*Store, Run, AgentID,
 	return store, terminal, agentID, keys
 }
 
+// runningOverseerKeys creates an orchestrator in the project and brings one
+// run of its own task to running, from the given base time, returning that
+// run's admission keys and the running run.
+func runningOverseerKeys(t *testing.T, store *Store, projectID ProjectID, base int64) (AdmissionKeys, Run) {
+	t.Helper()
+	ctx := context.Background()
+	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 245), ProjectID: projectID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 246), ProjectID: projectID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 247), Title: "oversee"}, mustTime(t, base+1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overseerKeys := admissionKeys(t, 248, nil)
+	overseerAdmission, err := store.AdmitNext(ctx, overseerKeys, mustTime(t, base+2))
+	if err != nil || !overseerAdmission.Admitted() {
+		t.Fatalf("overseer admission = %+v, %v", overseerAdmission, err)
+	}
+	runningOverseer := activateAllResourcesUnique(t, store, *overseerAdmission.Run, base+3, base)
+	session := terminalSessionForRunTest(t, store, runningOverseer.ID)
+	runningOverseer, err = store.ActivateRun(ctx, runningOverseer.ID, session.ID, runningOverseer.Revision, session.Revision, mustTime(t, base+7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return overseerKeys, runningOverseer
+}
+
+// A retry that names no replacement keeps the settled task's current worker:
+// the ordinary recovery of a run that ended without an attempt outcome needs
+// no second agent.
+func TestRetryTaskForOverseerKeepsCurrentWorkerWithoutReplacement(t *testing.T) {
+	ctx := context.Background()
+	store, terminal, _ := terminalPreRunningWorker(t)
+	defer store.Close()
+	overseerKeys, _ := runningOverseerKeys(t, store, terminal.ProjectID, 35)
+	before, found, err := store.Task(ctx, terminal.TaskID)
+	if err != nil || !found {
+		t.Fatalf("terminal task = %+v, found=%v, err=%v", before, found, err)
+	}
+	retried, err := store.RetryTaskForOverseer(ctx, overseerKeys.AttemptDigest, terminal.TaskID, before.Revision, AgentID{}, mustTime(t, 43))
+	if err != nil || retried.AssignedAgentID != terminal.AgentID || retried.Status != TaskQueued || retried.WorkRevision.Int64() != before.WorkRevision.Int64()+1 {
+		t.Fatalf("retry without replacement = %+v, %v", retried, err)
+	}
+}
+
 func TestRetryTaskForOverseerAtomicallyReassignsSettledTask(t *testing.T) {
 	ctx := context.Background()
 	store, terminal, _ := terminalPreRunningWorker(t)
@@ -1008,25 +1054,7 @@ func TestRetryTaskForOverseerAtomicallyReassignsSettledTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	overseer, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 245), ProjectID: project.ID, Name: "overseer", Role: RoleOrchestrator, Provider: ProviderCodex, ToolBudgetLimit: 4}, mustTime(t, 35))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = store.EnqueueTask(ctx, NewTask{ID: taskID(t, 246), ProjectID: project.ID, AssignedAgentID: overseer.ID, IncarnationID: incarnationID(t, 247), Title: "oversee"}, mustTime(t, 36))
-	if err != nil {
-		t.Fatal(err)
-	}
-	overseerKeys := admissionKeys(t, 248, nil)
-	overseerAdmission, err := store.AdmitNext(ctx, overseerKeys, mustTime(t, 37))
-	if err != nil || !overseerAdmission.Admitted() {
-		t.Fatalf("overseer admission = %+v, %v", overseerAdmission, err)
-	}
-	_, runningOverseer := activateAllResources(t, store, *overseerAdmission.Run, overseerKeys, 38)
-	session := terminalSessionForRunTest(t, store, runningOverseer.ID)
-	runningOverseer, err = store.ActivateRun(ctx, runningOverseer.ID, session.ID, runningOverseer.Revision, session.Revision, mustTime(t, 42))
-	if err != nil {
-		t.Fatal(err)
-	}
+	overseerKeys, _ := runningOverseerKeys(t, store, project.ID, 35)
 
 	beforeTask, found, err := store.Task(ctx, terminal.TaskID)
 	if err != nil || !found {

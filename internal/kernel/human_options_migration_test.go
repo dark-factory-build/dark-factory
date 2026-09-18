@@ -37,6 +37,11 @@ func TestV8PendingQuestionSurvivesOptionsMigration(t *testing.T) {
 		"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
 		t.Fatal(err)
 	}
+	for _, statement := range []string{"DROP TABLE project_outcome_revisions", "DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites", "DROP TABLE task_conflict_paths"} {
+		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
 		t.Fatal(err)
 	}

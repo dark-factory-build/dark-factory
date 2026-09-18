@@ -93,6 +93,19 @@ func (daemon *Daemon) RecoverAbandonedRuns(ctx context.Context, parent *RuntimeP
 	return dispositions, nil
 }
 
+// RecoverHumanDeliveries marks replies a previous daemon process left
+// mid-delivery as delivery-unknown. It runs at startup before any listener,
+// when this process is the store's only writer and no delivery is in flight;
+// a run transition would make the same move later, so this only makes the
+// uncertainty visible now for an adopted live run. It never replays a reply.
+func (daemon *Daemon) RecoverHumanDeliveries(ctx context.Context) (int, error) {
+	at, err := daemon.timestamp()
+	if err != nil {
+		return 0, err
+	}
+	return daemon.store.RecoverHumanDeliveries(ctx, at)
+}
+
 // recoverReturnedRun applies the restart recovery grammar to one exact run
 // after RunNext has joined every owner and closed its runtime handles. It is
 // intentionally narrower than RecoverAbandonedRuns: a scheduler may have

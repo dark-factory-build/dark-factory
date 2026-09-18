@@ -161,6 +161,34 @@ func taskCreationReplay(ctx context.Context, connection *sql.Conn, spec NewTask)
 	if !taskMatchesCreation(existing, spec) {
 		return Task{}, false, ErrConflict
 	}
+	var prerequisiteCount, conflictPathCount int
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_prerequisites WHERE task_id = ?`, spec.ID.Bytes()).Scan(&prerequisiteCount); err != nil {
+		return Task{}, false, err
+	}
+	if err := connection.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_conflict_paths WHERE task_id = ?`, spec.ID.Bytes()).Scan(&conflictPathCount); err != nil {
+		return Task{}, false, err
+	}
+	if prerequisiteCount != len(spec.Prerequisites) || conflictPathCount != len(spec.ConflictPaths) {
+		return Task{}, false, ErrConflict
+	}
+	for _, prerequisite := range spec.Prerequisites {
+		var found int
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_prerequisites WHERE task_id = ? AND upstream_task_id = ? AND upstream_work_revision = ?)`, spec.ID.Bytes(), prerequisite.TaskID.Bytes(), prerequisite.WorkRevision.Int64()).Scan(&found); err != nil || found == 0 {
+			if err == nil {
+				err = ErrConflict
+			}
+			return Task{}, false, err
+		}
+	}
+	for _, path := range spec.ConflictPaths {
+		var found int
+		if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_conflict_paths WHERE task_id = ? AND path = ?)`, spec.ID.Bytes(), path).Scan(&found); err != nil || found == 0 {
+			if err == nil {
+				err = ErrConflict
+			}
+			return Task{}, false, err
+		}
+	}
 	return existing, true, nil
 }
 
@@ -193,6 +221,23 @@ func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewT
 	    ) VALUES(?, ?, ?, ?, 1, ?, ?, NULL, 'queued', ?, NULL, NULL, NULL, 1, ?, ?)`,
 		spec.ID.Bytes(), spec.ProjectID.Bytes(), nullableAgentID(spec.AssignedAgentID), spec.IncarnationID.Bytes(), spec.Title, spec.Body, spec.Priority, at.Int64(), at.Int64()); err != nil {
 		return Task{}, err
+	}
+	for _, prerequisite := range spec.Prerequisites {
+		upstream, found, err := taskByID(ctx, connection, prerequisite.TaskID)
+		if err != nil {
+			return Task{}, err
+		}
+		if !found || upstream.ProjectID != spec.ProjectID {
+			return Task{}, ErrConflict
+		}
+		if _, err := connection.ExecContext(ctx, `INSERT INTO task_prerequisites(task_id, upstream_task_id, upstream_work_revision, consumed_run_id) VALUES(?, ?, ?, NULL)`, spec.ID.Bytes(), prerequisite.TaskID.Bytes(), prerequisite.WorkRevision.Int64()); err != nil {
+			return Task{}, err
+		}
+	}
+	for _, path := range spec.ConflictPaths {
+		if _, err := connection.ExecContext(ctx, `INSERT INTO task_conflict_paths(task_id, path) VALUES(?, ?)`, spec.ID.Bytes(), path); err != nil {
+			return Task{}, err
+		}
 	}
 	if err := appendInvalidations(ctx, connection, at, []pendingInvalidation{{kind: EntityTask, id: spec.ID.Bytes(), revision: 1}}); err != nil {
 		return Task{}, err
@@ -353,6 +398,20 @@ func validateNewTask(spec NewTask) error {
 	if spec.ID.zero() || spec.ProjectID.zero() || spec.IncarnationID.zero() || byteLen(spec.Title) < 1 || byteLen(spec.Title) > 1024 || byteLen(spec.Body) > 131072 || spec.Priority < -1_000_000 || spec.Priority > 1_000_000 {
 		return fmt.Errorf("%w: invalid task", ErrInvalidValue)
 	}
+	seenPrerequisites := make(map[TaskID]bool, len(spec.Prerequisites))
+	for _, prerequisite := range spec.Prerequisites {
+		if prerequisite.TaskID.zero() || prerequisite.TaskID == spec.ID || prerequisite.WorkRevision.Int64() < 1 || seenPrerequisites[prerequisite.TaskID] {
+			return fmt.Errorf("%w: invalid task prerequisite", ErrInvalidValue)
+		}
+		seenPrerequisites[prerequisite.TaskID] = true
+	}
+	seenPaths := make(map[string]bool, len(spec.ConflictPaths))
+	for _, path := range spec.ConflictPaths {
+		if path == "" || len(path) > 4096 || strings.HasPrefix(path, "/") || strings.Contains(path, "\x00") || seenPaths[path] {
+			return fmt.Errorf("%w: invalid task conflict path", ErrInvalidValue)
+		}
+		seenPaths[path] = true
+	}
 	return nil
 }
 
@@ -438,12 +497,14 @@ func validateAccountFields(provider Provider, home, label string) error {
 
 // LinkAccount registers one CLI login that already exists on this machine.
 // (provider, home) is the login's identity, so relinking the same directory
-// returns the row that is already there instead of making a second one.
+// returns the row that is already there instead of making a second one. These
+// ordinary account writes validate the affected row and references in the
+// transaction; broad unrelated corruption remains for open/recovery checks.
 func (store *Store) LinkAccount(ctx context.Context, spec NewAccount, at UnixMillis) (Account, error) {
 	if spec.ID.zero() || validateAccountFields(spec.Provider, spec.Home, spec.Label) != nil {
 		return Account{}, fmt.Errorf("%w: invalid account", ErrInvalidValue)
 	}
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return Account{}, err
 	}
@@ -495,7 +556,7 @@ func (store *Store) UpdateAccount(ctx context.Context, id AccountID, expected Re
 	if id.zero() || expected.Int64() < 1 || (label == nil) != remove {
 		return Account{}, fmt.Errorf("%w: invalid account update", ErrInvalidValue)
 	}
-	tx, err := store.beginValidatedWrite(ctx)
+	tx, err := store.beginUncheckedWrite(ctx)
 	if err != nil {
 		return Account{}, err
 	}
