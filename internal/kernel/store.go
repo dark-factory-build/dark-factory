@@ -225,8 +225,23 @@ func taskCreationReplay(ctx context.Context, connection *sql.Conn, spec NewTask)
 	return existing, true, nil
 }
 
-func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewTask, at UnixMillis) (Task, error) {
-	repository, err := resolveTaskRepository(ctx, connection, spec.ProjectID, spec.RepositoryID)
+func insertTaskOnConnection(ctx context.Context, connection *sql.Conn, spec NewTask, at UnixMillis, retainedFrom ...TaskID) (Task, error) {
+	var repository ProjectRepository
+	var err error
+	if len(retainedFrom) > 1 {
+		return Task{}, ErrInvalidValue
+	}
+	if len(retainedFrom) == 1 {
+		// Replacement continues existing work, including its copied base and
+		// a repository disabled for new work. Never resolve today's default.
+		var found bool
+		repository, found, err = taskRepository(ctx, connection, retainedFrom[0])
+		if err == nil && (!found || repository.ProjectID != spec.ProjectID || !spec.RepositoryID.zero() && spec.RepositoryID != repository.ID) {
+			err = ErrConflict
+		}
+	} else {
+		repository, err = resolveTaskRepository(ctx, connection, spec.ProjectID, spec.RepositoryID)
+	}
 	if err != nil {
 		return Task{}, err
 	}

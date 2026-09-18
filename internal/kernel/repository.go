@@ -117,7 +117,11 @@ func (store *Store) TaskRepository(ctx context.Context, taskID TaskID) (ProjectR
 		return ProjectRepository{}, false, err
 	}
 	defer read.Close()
-	return scanProjectRepository(read.connection.QueryRowContext(ctx, `SELECT r.id, r.project_id, r.name, r.root, b.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms FROM project_repositories AS r JOIN task_repository_bindings AS b ON b.repository_id = r.id JOIN tasks AS t ON t.id = b.task_id AND t.project_id = r.project_id WHERE b.task_id = ?`, taskID.Bytes()))
+	return taskRepository(ctx, read.connection, taskID)
+}
+
+func taskRepository(ctx context.Context, connection *sql.Conn, taskID TaskID) (ProjectRepository, bool, error) {
+	return scanProjectRepository(connection.QueryRowContext(ctx, `SELECT r.id, r.project_id, r.name, r.root, b.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms FROM project_repositories AS r JOIN task_repository_bindings AS b ON b.repository_id = r.id JOIN tasks AS t ON t.id = b.task_id AND t.project_id = r.project_id WHERE b.task_id = ?`, taskID.Bytes()))
 }
 
 func (store *Store) ContentRepository(ctx context.Context, id ContentID, revision Revision) (ProjectRepository, bool, error) {
