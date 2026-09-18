@@ -26,6 +26,9 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_RANGE_COMMITS = 100
 MAX_RANGE_PULLS = 100
 MAX_SUPERSEDED_PRS = 100
+GENERATOR_TRAILER = re.compile(
+    r"(?mi)^[ \t]*(?:Generated with Codex\.?|🤖 Generated with \[Claude Code\]\(https://claude\.com/claude-code\))[ \t]*$"
+)
 
 
 class ReleaseError(Exception):
@@ -261,6 +264,27 @@ def latest_pr(config):
     return None
 
 
+def release_source_footer(body):
+    """Return one unambiguous source footer, or None for a source-less PR."""
+    footer = publication.terminal_footer(body)
+    marker = publication.APP_MARKER_TRAILER.search(body)
+    if marker is not None:
+        body = body[:marker.start()]
+    while True:
+        stripped = body.rstrip()
+        lines = stripped.splitlines()
+        if not lines or GENERATOR_TRAILER.fullmatch(lines[-1]) is None:
+            body = stripped
+            break
+        body = "\n".join(lines[:-1])
+    footer = footer or publication.terminal_footer(body)
+    if footer is None and re.search(r"(?mi)^(?:Refs|Closes)[ \t]+#", body):
+        raise ReleaseError("merged pull request has an invalid source-footer trailer")
+    if footer is None:
+        return None
+    return footer.group(1).lower(), int(footer.group(2))
+
+
 def range_sources(config, previous, target):
     """Return every factory PR and explicit source issue between two live tips."""
     repo = config["repository"]
@@ -301,6 +325,7 @@ def range_sources(config, previous, target):
                 raise ReleaseError("deployment pull request has ambiguous merge commits")
             by_number[number] = merge
     sources = []
+    processed = set()
     for sha in shas:
         for number, merge in sorted(by_number.items()):
             if merge != sha:
@@ -309,12 +334,13 @@ def range_sources(config, previous, target):
             actual = (detail.get("mergeCommit") or {}).get("oid") if isinstance(detail, dict) else None
             if not isinstance(detail, dict) or detail.get("state") != "MERGED" or detail.get("baseRefName") != config["base"] or actual != merge or not isinstance(detail.get("body"), str):
                 raise ReleaseError("deployment pull request changed or is malformed")
-            terminal_footer = publication.terminal_footer(detail["body"])
-            if terminal_footer is None:
-                raise ReleaseError(f"merged PR #{number} must contain exactly one terminal Refs #N or Closes #N footer")
-            kind, issue = terminal_footer.groups()
+            processed.add(number)
+            footer = release_source_footer(detail["body"])
+            if footer is None:
+                continue
+            kind, issue = footer
             sources.append({"pr": number, "merge_sha": merge, "issue": int(issue), "reference": kind.lower()})
-    if len(sources) != len(by_number):
+    if processed != set(by_number):
         raise ReleaseError("deployment pull-request lookup did not cover every merged PR")
     return sources, "range"
 
