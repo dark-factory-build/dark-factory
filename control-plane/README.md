@@ -347,9 +347,11 @@ First use binds ownership before an effect can be claimed; a determinate
 refusal releases execution, not ownership. Referenced receipts use the same
 scoped journal as direct observation and replay.
 
-This foundation exposes no customer authentication or MCP route. A subsequent
-connection ingress must authenticate its server-derived owner, validate live
-GitHub user access and delegation before every operation (including observation
-and completed replay), and then construct the scoped journal. These checks are
-not supplied by receipt isolation alone. Customer traffic must not be enabled
-until the whole deployed path uses this ownership-aware journal.
+Customer authentication, paginated repository discovery and delegation use the
+same Worker at `/v1/github/connections`. These routes exist only with the three
+optional GitHub user-authorization bindings. The connection ingress verifies
+current user access and delegation before every operation, receipt observation
+and completed replay, then constructs the scoped journal. The existing Access
+owner workflow remains at `/mcp`. See [the connection protocol and activation
+requirements](../docs/development/GITHUB_CONNECTIONS.md), including the
+ownership-aware rollback boundary and separate live second-user proof.

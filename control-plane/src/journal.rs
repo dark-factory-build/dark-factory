@@ -217,7 +217,6 @@ impl DeliveryJournal {
 
     /// The owner comes from broker authentication, never from tool arguments.
     #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // Customer ingress follows separately.
     pub(crate) fn for_connection(&self, owner: &str, repository: &str) -> Result<Self, Error> {
         if owner.len() != 64
             || !owner
@@ -496,16 +495,31 @@ fn operation_shard_name(app_id: i64, operation_id: &str) -> String {
 #[durable_object]
 pub struct MaintainerDeliveryJournal {
     sql: SqlStorage,
+    state: State,
+    env: Env,
+    connection_lock: futures_util::lock::Mutex<()>,
 }
 
 #[cfg(target_arch = "wasm32")]
 impl DurableObject for MaintainerDeliveryJournal {
-    fn new(state: State, _env: Env) -> Self {
+    fn new(state: State, env: Env) -> Self {
         let sql = state.storage().sql();
-        Self { sql }
+        Self {
+            sql,
+            state,
+            env,
+            connection_lock: futures_util::lock::Mutex::new(()),
+        }
     }
 
     async fn fetch(&self, mut request: Request) -> worker::Result<Response> {
+        if request.path().starts_with(crate::connection::PREFIX) {
+            // ponytail: one in-flight request per connection, including GitHub
+            // I/O. This serializes refresh/disconnect/publication; use a durable
+            // generation/claim protocol if one host needs parallel operations.
+            let _guard = self.connection_lock.lock().await;
+            return crate::connection::durable(&self.state.storage(), &self.env, request).await;
+        }
         if initialize_cloudflare_schema(&self.sql).is_err() {
             return Response::error("journal unavailable", 503);
         }

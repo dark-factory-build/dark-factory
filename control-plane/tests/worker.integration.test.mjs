@@ -87,6 +87,7 @@ test('the built Worker enforces the journal contract in workerd', async () => {
       404,
     );
 
+    assert.equal((await fetch(`${worker.origin}/v1/github/connections`, { method: 'POST', body: '{}' })).status, 404);
     await worker.stop();
     worker = await startWorker(persistence, true);
     assert.equal(

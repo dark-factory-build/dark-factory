@@ -3875,7 +3875,7 @@ async fn refuse<T>(
     Err(OperationError::Refused(reason))
 }
 
-struct RepositoryName {
+pub(crate) struct RepositoryName {
     full_name: String,
     owner: String,
     name: String,
@@ -3897,7 +3897,7 @@ impl RepositoryName {
     /// returns while the caller's spelling is still in hand -- the token
     /// grant's -- is therefore case-insensitive. Afterwards the token carries
     /// GitHub's own spelling, so later comparisons are exact.
-    fn requested(value: &mut str) -> Result<Self, OperationError> {
+    pub(crate) fn requested(value: &mut str) -> Result<Self, OperationError> {
         value.make_ascii_lowercase();
         Self::new(value.to_owned())
     }
@@ -7817,7 +7817,7 @@ async fn github_graphql<T: serde::de::DeserializeOwned, V: Serialize>(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn github_json<T: serde::de::DeserializeOwned>(
+pub(crate) async fn github_json<T: serde::de::DeserializeOwned>(
     url: &str,
     credential: &str,
 ) -> Result<T, Error> {
@@ -7933,7 +7933,7 @@ async fn github_request(
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn read_github_response(
+pub(crate) async fn read_github_response(
     mut response: worker::Response,
     url: &str,
     limit: usize,

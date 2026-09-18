@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test:worker": "node --test tests/worker.integration.test.mjs"
+    "test:worker": "node --test tests/worker.integration.test.mjs tests/connections.integration.test.mjs"
   },
   "devDependencies": {
     "wrangler": "4.125.0"

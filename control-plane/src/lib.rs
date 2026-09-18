@@ -20,6 +20,8 @@ use tower::ServiceExt as _;
 #[cfg(any(target_arch = "wasm32", test))]
 mod access;
 #[cfg(any(target_arch = "wasm32", test))]
+mod connection;
+#[cfg(any(target_arch = "wasm32", test))]
 mod github_app;
 mod journal;
 pub mod maintainer;
@@ -46,6 +48,8 @@ pub struct BrokerState {
     pub(crate) maintainer: Option<MaintainerState>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) mcp: Option<mcp::McpState>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) connection_env: Option<worker::Env>,
     deployment: Deployment,
 }
 
@@ -56,6 +60,8 @@ impl BrokerState {
             maintainer: None,
             #[cfg(target_arch = "wasm32")]
             mcp: None,
+            #[cfg(target_arch = "wasm32")]
+            connection_env: None,
             deployment: Deployment::Inactive,
         }
     }
@@ -79,6 +85,8 @@ impl BrokerState {
                 journal.clone(),
                 operation_authority.as_ref().map(|(_, app)| app.clone()),
             )),
+            connection_env: (operation_authority.is_some() && connection::configured(env))
+                .then(|| env.clone()),
             mcp: operation_authority.map(|(access, app)| mcp::McpState::new(access, app, journal)),
             deployment: Deployment::Cloudflare,
         })
@@ -104,6 +112,8 @@ impl BrokerState {
             )),
             #[cfg(target_arch = "wasm32")]
             mcp: None,
+            #[cfg(target_arch = "wasm32")]
+            connection_env: None,
             deployment: Deployment::Development,
         })
     }
@@ -247,6 +257,39 @@ pub fn app(state: BrokerState) -> Router {
             // MCP. The old global webhook cap drifted below that contract.
             axum::routing::post(mcp::receive).layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES)),
         )
+    } else {
+        router
+    };
+    #[cfg(target_arch = "wasm32")]
+    let router = if state.connection_env.is_some() {
+        router
+            .route(
+                connection::PREFIX,
+                axum::routing::post(connection::receive).layer(DefaultBodyLimit::max(4096)),
+            )
+            .route(
+                "/v1/github/connections/callback",
+                axum::routing::get(connection::receive),
+            )
+            .route(
+                "/v1/github/connections/{id}",
+                axum::routing::get(connection::receive).delete(connection::receive),
+            )
+            .route(
+                "/v1/github/connections/{id}/installations",
+                axum::routing::get(connection::receive),
+            )
+            .route(
+                "/v1/github/connections/{id}/repositories",
+                axum::routing::get(connection::receive)
+                    .put(connection::receive)
+                    .layer(DefaultBodyLimit::max(65536)),
+            )
+            .route(
+                "/v1/github/connections/{id}/mcp",
+                axum::routing::post(connection::receive)
+                    .layer(DefaultBodyLimit::max(mcp::MAX_BODY_BYTES)),
+            )
     } else {
         router
     };
