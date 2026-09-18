@@ -58,8 +58,10 @@ case "$plist_path" in
     *) echo "service receipt has no matching absolute plist path" >&2; exit 1 ;;
 esac
 relay_origin=$(receipt_field relay_origin)
-tool_path=$(receipt_field tool_path)
-toolchain_read_roots=$(receipt_field toolchain_read_roots)
+# The receipt otherwise carries its toolchain grant forward forever; the
+# operator replaces it here, e.g. to add ~/.cargo/bin and ~/.rustup.
+tool_path=${DARK_FACTORY_TOOL_PATH:-$(receipt_field tool_path)}
+toolchain_read_roots=${DARK_FACTORY_TOOLCHAIN_READ_ROOTS:-$(receipt_field toolchain_read_roots)}
 development_browser_address=$(receipt_field development_browser_address)
 
 # Dispatch must stay off while the script builds and replaces the service, so

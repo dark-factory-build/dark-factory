@@ -368,6 +368,8 @@ print(json.dumps({'enabled': bool(target), 'revision': revision}))
                     self.assertNotEqual(0, result.returncode)
                     self.assertEqual('', result.stdout)
                     self.assertIn('fixture dispatch refused', result.stderr)
+                    self.assertIn('stage: factoryctl dispatch ' + failing_action + ' --revision', result.stderr)
+                    self.assertIn(' exit=7', result.stderr)
                 else:
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual({'sha': 'a' * 40, 'healthy': True, 'dispatch_enabled': initially_enabled}, json.loads(result.stdout))

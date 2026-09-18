@@ -433,6 +433,9 @@ def review_followup(config, operation, state):
                    "Its outcome is unresolved. Observe that same operation; never replay the write or derive a replacement id. "))
     elif state == "block":
         action = "Read that exact operation and its GitHub review; route blocking findings to the original task. "
+    elif state == "stale-body":
+        action = ("No review was launched: the pull request body does not name this exact head, so it describes a predecessor. Replace the body with update_pull_request_body, "
+                  "stating this head, the cumulative production-line delta to it and only checks run on it; keep the standalone source-issue footer. Host intake reviews it on its next pass. ")
     else:
         action = "The launch or submission is unresolved. Observe this operation; do not start another reviewer or invent a verdict. Report the concrete infrastructure blocker. "
     task["body"] = ("Resume publication for " + operation["source_marker"] + ". Host independent review for PR #" + str(operation["pr"]) +
@@ -538,6 +541,14 @@ def run_locked(config, path, journal, journal_path):
                 intake.atomic_json(journal_path, receipts)
                 state = observe_review(config, operation)
         if state == "missing" and not operation.get("review_attempted"):
+            if operation["head"] not in pr["body"]:
+                # The body still describes a predecessor head. A review would
+                # only block on it, so wake the overseer and wait for the body.
+                followup = review_followup(config, operation, "stale-body")
+                if intake.task_state(config, followup) is None:
+                    intake.enqueue(config, followup)
+                    messages.append("woke PR #" + str(pr["number"]) + " stale body")
+                continue
             if launched:
                 continue
             # Persist before launching: a crash cannot authorize a second model

@@ -501,12 +501,14 @@ unavailable read-only checks are deferred delivery conditions, not defects.
 - Unresolved: observe the supplied operation and report its concrete host
   infrastructure failure. Do not manufacture a verdict or start another review.
 - ALLOW: `enqueue_pull_request` with `opid "$change_id" enqueue-HEAD8`, the PR number, the head
-  and `base = main`. Then `observe_pull_request_merge`, with the PR number,
-  the head, `base = main` and the enqueue operation id, every 60 s for up to
-  30 minutes;
-  never faster. Merged: done. Still queued after 30 minutes: the change is
-  not finished; raise a human request naming the PR and stop, and the next
-  run observes it again. No longer queued and not merged:
+  and `base = main`. Then `observe_pull_request_merge` once, with the PR number,
+  the head, `base = main` and the enqueue operation id. Merged: done. Still
+  queued: record the PR and enqueue operation in your checkpoint and move on
+  or exit; never sleep or re-observe unchanged CI, queue or deployment state
+  in this run. The overseer slot is single, so a waiting run blocks every
+  queued coordination task. Host intake re-observes the queue each pass and
+  wakes you with a follow-up task when it merges or drops. No longer queued
+  and not merged:
   the queue's run failed or dropped the entry, and the App cannot read a
   queue run's log or rerun it (`read_pull_request_job_log` and
   `rerun_failed_pull_request_jobs` bind to the pull request's own runs), so

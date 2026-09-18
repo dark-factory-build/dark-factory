@@ -43,7 +43,7 @@ class ReleaseError(Exception):
 def run(argv, timeout=60, env=None):
     try:
         process = subprocess.Popen(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
-        stdout, _ = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         # The fixed operator hook owns this fresh process group. Killing the
         # group prevents a timed-out wrapper from leaving its installer alive.
@@ -57,12 +57,21 @@ def run(argv, timeout=60, env=None):
             pass
         raise ReleaseError(f"command timed out: {argv[0]}") from exc
     except OSError as exc:
-        # Hooks may write credentials or private task text to stderr.  Receipts
-        # are durable and launcher output is public to the local operator.
-        raise ReleaseError(f"command failed: {argv[0]}") from exc
+        raise ReleaseError(f"command failed: {argv[0]}: {exc.strerror}") from exc
     if process.returncode:
-        raise ReleaseError(f"command failed: {argv[0]}")
+        raise ReleaseError(f"command failed: {' '.join(Path(arg).name for arg in argv[:2])} exit={process.returncode}: {failure_tail(stderr)}")
     return stdout
+
+
+SECRET = re.compile(r"(?i)(authorization|bearer|api[_-]?key|password|token|secret)(\W{1,4})\S+|\b(gh[pousr]_|github_pat_)\w+")
+
+
+def failure_tail(stderr):
+    # Hooks may write credentials or private task text to stderr, and receipts
+    # are durable: keep only a bounded, single-line tail with labelled values
+    # and GitHub tokens starred and the operator's home shortened.
+    text = SECRET.sub(lambda match: (match.group(1) or "") + (match.group(2) or "") + "***", stderr.replace(str(Path.home()), "~"))
+    return " ".join(re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text).split())[-2000:]
 
 
 def valid_argv(value, name):

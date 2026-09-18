@@ -106,4 +106,9 @@ if __name__ == '__main__':
         deploy(args.sha, args.home)
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
         print('deploy-runtime: ' + str(error), file=sys.stderr)
+        cause = error.__cause__ or error
+        if isinstance(cause, subprocess.SubprocessError):
+            # The failing stage and its last output are the only evidence of why.
+            print('stage: ' + ' '.join(Path(str(arg)).name for arg in cause.cmd[:5]) + ' exit=' + str(getattr(cause, 'returncode', 'timeout'))
+                  + '\n' + str(cause.stderr or '')[-2000:], file=sys.stderr)
         raise SystemExit(1)

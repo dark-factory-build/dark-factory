@@ -791,6 +791,17 @@ class ReleaseFixtures(unittest.TestCase):
             else:
                 self.fail("timed-out hook left its child running")
 
+    def test_failed_hook_keeps_stage_exit_and_redacted_bounded_stderr(self):
+        code = "import sys; sys.stderr.write('x' * 5000 + '\\nstage: reinstall-service.sh --install-prepared exit=1\\ntoken=hunter2 ghs_abc123 in " + str(Path.home()) + "/private\\x1b[0m\\n'); sys.exit(7)"
+        with self.assertRaises(release.ReleaseError) as raised:
+            release.run([sys.executable, "-c", code])
+        error = str(raised.exception)
+        self.assertIn("-c exit=7: ", error)
+        self.assertIn("stage: reinstall-service.sh --install-prepared exit=1 token=*** *** in ~/private", error)
+        for leaked in ("hunter2", "ghs_abc123", str(Path.home()), "\x1b", "\n"):
+            self.assertNotIn(leaked, error)
+        self.assertLess(len(error), 2100)
+
     def test_nonancestor_range_requires_explicit_baseline_setting(self):
         cfg = config(Path("/tmp/release.json"))
         with mock.patch.object(release, "run", return_value=json.dumps({"status": "diverged"})), self.assertRaisesRegex(release.ReleaseError, "not an ancestor"):
