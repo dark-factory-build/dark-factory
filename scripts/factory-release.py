@@ -366,7 +366,7 @@ def predeploy_blocked(receipt):
 def superseded_recovered(receipt, journal):
     """Return whether reconciliation safely settled this old blocked receipt."""
     marker = receipt.get("superseded_by")
-    if not isinstance(marker, dict) or not isinstance(marker.get("pr"), int) or marker.get("pr") < 1:
+    if not isinstance(marker, dict) or type(marker.get("pr")) is not int or marker.get("pr") < 1:
         return False
     if (type(marker.get("source_pr")) is not int or marker.get("source_pr") != receipt.get("pr")
             or not SHA.fullmatch(str(marker.get("sha", "")))
@@ -383,6 +383,8 @@ def superseded_recovered(receipt, journal):
             and isinstance(reconciliation, dict)
             and reconciliation.get("mode") == "operator_observed"
             and reconciliation.get("observed_sha") == marker["sha"]
+            and isinstance(reconciliation.get("superseded_prs"), list)
+            and len(reconciliation["superseded_prs"]) <= MAX_SUPERSEDED_PRS
             and {"pr": marker["source_pr"], "sha": marker["source_sha"]}
             in reconciliation.get("superseded_prs", []))
 
