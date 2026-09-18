@@ -46,6 +46,19 @@ type ProjectLimitsResult struct {
 	Revision  Decimal `json:"revision"`
 }
 
+// ProjectCreate is an administration-only private bootstrap operation. Root
+// never appears in its result or in STATE; creation makes the legacy root the
+// initial default repository inside the Store transaction.
+type ProjectCreate struct {
+	ProjectID string `json:"project_id"`
+	Name      string `json:"name"`
+	Root      string `json:"root"`
+}
+type ProjectCreateResult struct {
+	ProjectID string  `json:"project_id"`
+	Revision  Decimal `json:"revision"`
+}
+
 // RepositoriesGet and RepositoryMutate are administration-only private
 // settings controls. They never appear in STATE snapshots.
 type RepositoriesGet struct {
@@ -305,6 +318,9 @@ func EncodeAgentUpdateResult(id string, value AgentUpdateResult) ([]byte, error)
 func EncodeProjectLimitsResult(id string, value ProjectLimitsResult) ([]byte, error) {
 	return encodeControl(TypeProjectLimitsResult, id, value)
 }
+func EncodeProjectCreateResult(id string, value ProjectCreateResult) ([]byte, error) {
+	return encodeControl(TypeProjectCreateResult, id, value)
+}
 func EncodeRepositories(id string, value Repositories) ([]byte, error) {
 	return encodeControl(TypeRepositories, id, value)
 }
@@ -386,6 +402,14 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case ProjectLimitsResult:
+		if validateDynamicID(value.ProjectID) != nil || value.Revision == 0 {
+			return bad()
+		}
+	case ProjectCreate:
+		if validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Name, 1, 128) != nil || validateBoundedText(value.Root, 1, 4096) != nil {
+			return bad()
+		}
+	case ProjectCreateResult:
 		if validateDynamicID(value.ProjectID) != nil || value.Revision == 0 {
 			return bad()
 		}

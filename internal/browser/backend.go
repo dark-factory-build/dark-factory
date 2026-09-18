@@ -212,6 +212,7 @@ type ConsoleBackend interface {
 	Backend
 	UpdateAgent(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.AgentUpdate) (browserprotocol.AgentUpdateResult, error)
 	SetProjectLimits(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.ProjectLimits) (browserprotocol.ProjectLimitsResult, error)
+	CreateProject(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.ProjectCreate) (browserprotocol.ProjectCreateResult, error)
 	Repositories(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RepositoriesGet) (browserprotocol.Repositories, error)
 	MutateRepository(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RepositoryMutate) (browserprotocol.RepositoryMutateResult, error)
 	UpdateTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error)

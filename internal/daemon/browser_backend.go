@@ -294,6 +294,13 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
 	}
+	var repositoryID kernel.RepositoryID
+	if request.RepositoryID != "" {
+		repositoryID, err = browserID(request.RepositoryID, kernel.RepositoryIDFromBytes)
+		if err != nil {
+			return browserprotocol.TaskEnqueueResult{}, browser.ErrStale
+		}
+	}
 	at, err := backend.timestamp()
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
@@ -312,7 +319,7 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	} else if err := backend.prepareAgentInstruction(ctx, agentID, request.Instruction); err != nil {
 		return browserprotocol.TaskEnqueueResult{}, err
 	}
-	result, err := backend.store.EnqueueTaskForBrowserAgentMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, request.Instruction, mode, at)
+	result, err := backend.store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, repositoryID, request.Instruction, mode, at)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
 	}
@@ -412,6 +419,27 @@ func (backend *browserBackend) SetProjectLimits(ctx context.Context, rawClient [
 		backend.owner.notifyScheduler()
 	}
 	return browserprotocol.ProjectLimitsResult{ProjectID: project.ID.String(), Revision: decimalRevision(project.Revision)}, nil
+}
+
+func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.ProjectCreate) (browserprotocol.ProjectCreateResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.ProjectCreateResult{}, err
+	}
+	defer release()
+	projectID, err := browserID(request.ProjectID, kernel.ProjectIDFromBytes)
+	if err != nil {
+		return browserprotocol.ProjectCreateResult{}, browser.ErrStale
+	}
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.ProjectCreateResult{}, mapBrowserError(err)
+	}
+	project, err := backend.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: request.Name, Root: request.Root, VerificationPolicy: kernel.VerificationNone}, at)
+	if err != nil {
+		return browserprotocol.ProjectCreateResult{}, consoleUpdateError(err)
+	}
+	return browserprotocol.ProjectCreateResult{ProjectID: project.ID.String(), Revision: decimalRevision(project.Revision)}, nil
 }
 
 func browserRepository(value kernel.ProjectRepository) browserprotocol.Repository {

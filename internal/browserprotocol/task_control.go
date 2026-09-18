@@ -11,9 +11,12 @@ const MaxTaskInstructionBytes = 32768
 // it on that agent, "queue" queues it for that agent, and "any" queues it for
 // any eligible worker in that agent's project.
 type TaskEnqueue struct {
-	TaskID                string  `json:"task_id"`
-	IncarnationID         string  `json:"incarnation_id"`
-	AgentID               string  `json:"agent_id"`
+	TaskID        string `json:"task_id"`
+	IncarnationID string `json:"incarnation_id"`
+	AgentID       string `json:"agent_id"`
+	// RepositoryID is optional only when the project has a default repository.
+	// It is private routing configuration, never a STATE member.
+	RepositoryID          string  `json:"repository_id,omitempty"`
 	ExpectedAgentRevision Decimal `json:"expected_agent_revision"`
 	Instruction           string  `json:"instruction"`
 	Mode                  string  `json:"mode,omitempty"`
@@ -51,7 +54,7 @@ func validTaskControl(kind MessageType, body any) error {
 	positive := func(value Decimal) bool { return value > 0 }
 	switch value := body.(type) {
 	case TaskEnqueue:
-		if value.Mode != "" && value.Mode != "now" && value.Mode != "queue" && value.Mode != "any" || !id(value.TaskID) || !id(value.IncarnationID) || !id(value.AgentID) || !positive(value.ExpectedAgentRevision) || !utf8.ValidString(value.Instruction) || len(value.Instruction) == 0 || len([]byte(value.Instruction)) > MaxTaskInstructionBytes {
+		if value.Mode != "" && value.Mode != "now" && value.Mode != "queue" && value.Mode != "any" || !id(value.TaskID) || !id(value.IncarnationID) || !id(value.AgentID) || value.RepositoryID != "" && !id(value.RepositoryID) || !positive(value.ExpectedAgentRevision) || !utf8.ValidString(value.Instruction) || len(value.Instruction) == 0 || len([]byte(value.Instruction)) > MaxTaskInstructionBytes {
 			return bad()
 		}
 	case TaskEnqueueResult:

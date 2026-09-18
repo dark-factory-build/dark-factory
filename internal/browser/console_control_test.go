@@ -80,6 +80,12 @@ func (backend *consoleDispatchBackend) SetProjectLimits(_ context.Context, clien
 	}
 	return backend.limits, nil
 }
+func (backend *consoleDispatchBackend) CreateProject(_ context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.ProjectCreate) (browserprotocol.ProjectCreateResult, error) {
+	if err := backend.record(client); err != nil {
+		return browserprotocol.ProjectCreateResult{}, err
+	}
+	return browserprotocol.ProjectCreateResult{ProjectID: request.ProjectID, Revision: 1}, nil
+}
 
 func (backend *consoleDispatchBackend) Repositories(_ context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.RepositoriesGet) (browserprotocol.Repositories, error) {
 	if err := backend.record(client); err != nil {

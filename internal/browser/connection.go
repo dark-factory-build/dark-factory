@@ -553,6 +553,21 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			return false
 		}
 		payload, err = browserprotocol.EncodeProjectLimitsResult(frame.ID, result)
+	case browserprotocol.ProjectCreate:
+		if current.server.consoleBackend == nil {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := current.server.consoleBackend.CreateProject(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.ProjectID != body.ProjectID || result.Revision == 0 {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeProjectCreateResult(frame.ID, result)
 	case browserprotocol.RepositoriesGet:
 		if current.server.consoleBackend == nil {
 			err = ErrUnauthorized

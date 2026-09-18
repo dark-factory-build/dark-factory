@@ -39,6 +39,13 @@ func (store *Store) EnqueueTaskForBrowserAgent(ctx context.Context, clientID Bro
 // direct instructions still require an empty, unpaused agent. Any-worker
 // work is queued with no assigned agent; admission claims it.
 func (store *Store) EnqueueTaskForBrowserAgentMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, instruction string, mode BrowserEnqueueMode, at UnixMillis) (BrowserTaskEnqueue, error) {
+	return store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, RepositoryID{}, instruction, mode, at)
+}
+
+// EnqueueTaskForBrowserAgentRepositoryMode retains the agent-derived project
+// while letting an administrator choose one enabled repository for this task.
+// A zero repository selects that project's durable default.
+func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, repositoryID RepositoryID, instruction string, mode BrowserEnqueueMode, at UnixMillis) (BrowserTaskEnqueue, error) {
 	queue := mode != BrowserEnqueueNow
 	if clientID.zero() || taskID.zero() || incarnationID.zero() || agentID.zero() || expectedAgentRevision.Int64() < 1 || strings.Trim(instruction, " \t\r\n") == "" || !utf8.ValidString(instruction) || byteLen(instruction) > 32768 {
 		return BrowserTaskEnqueue{}, fmt.Errorf("%w: invalid browser task enqueue", ErrInvalidValue)
@@ -65,7 +72,11 @@ func (store *Store) EnqueueTaskForBrowserAgentMode(ctx context.Context, clientID
 	if agent.Revision != expectedAgentRevision || agent.Archived || agent.Paused && !queue {
 		return BrowserTaskEnqueue{}, tx.Rollback(ErrRevisionConflict)
 	}
-	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Direct instruction", Body: instruction, Priority: 0}
+	repository, err := resolveTaskRepository(ctx, tx.connection, agent.ProjectID, repositoryID)
+	if err != nil {
+		return BrowserTaskEnqueue{}, tx.Rollback(err)
+	}
+	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, RepositoryID: repository.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Direct instruction", Body: instruction, Priority: 0}
 	if mode == BrowserEnqueueAnyWorker {
 		spec.AssignedAgentID = AgentID{}
 	}
