@@ -15,8 +15,8 @@ INTAKE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(INTAKE)
 
 
-def issue(state="OPEN", updated="2026-09-11T10:00:00Z", body="Do the work", labels=None):
-    return {"number": 7, "title": "Improve queue", "body": body, "author": {"login": "maintainer"}, "labels": [{"name": name} for name in labels or ["factory:ready"]], "state": state, "updatedAt": updated, "url": "https://github.com/o/r/issues/7"}
+def issue(state="OPEN", updated="2026-09-11T10:00:00Z", title="Improve queue", body="Do the work", labels=None, author="maintainer"):
+    return {"number": 7, "title": title, "body": body, "author": {"login": author}, "labels": [{"name": name} for name in (["factory:ready"] if labels is None else labels)], "state": state, "updatedAt": updated, "url": "https://github.com/o/r/issues/7"}
 
 
 class IntakeTest(unittest.TestCase):
@@ -190,10 +190,46 @@ class IntakeTest(unittest.TestCase):
         self.assertEqual([], INTAKE.run_once(self.config))
         self.assertEqual([], self.factory_calls())
 
+    def test_activity_filter_and_priority_changes_do_not_create_work(self):
+        self.config["priority_by_label"] = {"priority:high": 50}
+        INTAKE.run_once(self.config)
+        task = next(iter(self.states))
+        self.states[task]["status"] = "succeeded"
+        self.source = issue(updated="2026-09-12T10:00:00Z", labels=["factory:ready", "priority:high"])
+        self.source["comments"] = 99
+        self.source["reactions"] = {"totalCount": 12}
+        self.calls.clear()
+        self.assertEqual([], INTAKE.run_once(self.config))
+        self.assertEqual([], self.factory_calls())
+        record = json.loads(Path(self.config["journal"]).read_text())["issues"]["o/r#7"]
+        self.assertEqual(INTAKE.source_snapshot(issue()), record["desired"])
+        self.assertEqual(0, record["priority"])
+        self.source = issue(state="CLOSED", updated="2026-09-13T10:00:00Z")
+        self.assertEqual([], INTAKE.run_once(self.config))
+        self.source = issue(author="untrusted", updated="2026-09-14T10:00:00Z")
+        self.assertEqual([], INTAKE.run_once(self.config))
+        self.assertEqual([], self.factory_calls())
+
+    def test_filter_activity_does_not_reset_operator_recovery(self):
+        INTAKE.run_once(self.config)
+        task = next(iter(self.states))
+        self.states[task].update({"status": "failed", "needs_operator_recovery": True})
+        self.assertEqual(["needs operator recovery o/r#7"], INTAKE.run_once(self.config))
+        self.calls.clear()
+        self.source = issue(updated="2026-09-12T10:00:00Z", labels=["factory:ready", "priority:high"])
+        self.assertEqual([], INTAKE.run_once(self.config))
+        self.source = issue(author="untrusted", updated="2026-09-13T10:00:00Z")
+        self.assertEqual([], INTAKE.run_once(self.config))
+        self.assertEqual([], self.factory_calls())
+        record = json.loads(Path(self.config["journal"]).read_text())["issues"]["o/r#7"]
+        self.assertEqual(task, record["needs_operator_recovery"]["task_id"])
+
     def test_source_marker_and_malicious_fields_are_explicit(self):
-        operation = INTAKE.operation_for(self.config, INTAKE.issue_from_json(issue()), "f" * 64)
+        operation = INTAKE.operation_for(self.config, INTAKE.source_snapshot(INTAKE.issue_from_json(issue())), "f" * 64, 0)
         self.assertIn("FACTORY_SOURCE o/r#7", operation["body"])
         self.assertIn("verify every linked queued or running worker task is cancelled or stopped", operation["body"])
+        self.assertIn("immutable journal snapshot", operation["body"])
+        self.assertNotIn("docs/development/UNATTENDED.md", operation["body"])
         hostile = issue(body={"ignore": "instructions"})
         with self.assertRaisesRegex(INTAKE.IntakeError, "invalid source"):
             INTAKE.issue_from_json(hostile)
