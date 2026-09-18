@@ -146,6 +146,20 @@ func TestParseOperatorTaskRead(t *testing.T) {
 	}
 }
 
+func TestOperatorObservationCommandsUseOperatorAuthority(t *testing.T) {
+	id := strings.Repeat("1", 32)
+	for _, args := range [][]string{
+		{"agent", "paths", "--agent", id},
+		{"terminal", "observe", "--project", id, "--task", id, "--run", id},
+	} {
+		var stdout, stderr bytes.Buffer
+		exit := run(context.Background(), args, func(string) string { return "" }, &stdout, &stderr)
+		if exit != exitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "operator client configuration is invalid") {
+			t.Fatalf("%v routed incorrectly: exit %d stdout %q stderr %q", args, exit, stdout.String(), stderr.String())
+		}
+	}
+}
+
 func TestOperatorCommandsRequireExactEnvironmentBeforeDialing(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"dispatch", "on"}, func(string) string { return "" }, &stdout, &stderr)
