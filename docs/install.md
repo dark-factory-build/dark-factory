@@ -23,7 +23,8 @@ The archive also contains optional host controller assets under
 configuration to schedule intake, review, and delivery; the companion scripts
 and `supervision.md` stay together there so the controller works after the
 archive is moved away from the source checkout. Homebrew installs the same
-directory under its formula `libexec` path.
+directory under its formula `libexec` path. The controller scripts require
+Python 3 on `PATH`; they do not require a Dark Factory source checkout.
 
 Create and install one managed home. Those two commands are the whole terminal
 side of setup: an install that starts a fresh service loads the launchd job,
