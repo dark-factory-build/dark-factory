@@ -1,6 +1,5 @@
 import { RemoteDaemonMismatchError } from "@dark-factory/client";
 import type {
-  HumanRequestItem,
   RemoteFactoryStatus,
   StateView,
   TaskItem,
@@ -142,16 +141,6 @@ export function remoteProjectGroups(state: StateView): readonly RemoteProjectGro
     name: state.projects.get(id)?.name ?? `project ${id.slice(0, 8)}`,
     tasks: Object.freeze(tasks),
   }));
-}
-
-/** The factory's own open questions, ordered oldest first like the aggregate. */
-export function remoteOpenRequests(state: StateView | undefined): readonly HumanRequestItem[] {
-  if (state === undefined) return [];
-  const open = [...state.humanRequests.values()].filter((request) => request.status === "open");
-  open.sort((left, right) => left.created_at === right.created_at
-    ? (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
-    : left.created_at < right.created_at ? -1 : 1);
-  return Object.freeze(open);
 }
 
 export function shortRemoteID(value: string): string {
