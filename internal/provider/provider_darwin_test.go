@@ -1368,7 +1368,7 @@ func TestCodexToolchainSandbox(t *testing.T) {
 	if out, err := run("/bin/sh", "-c", script, "proof", software, secret); err != nil {
 		t.Fatalf("sandbox isolation: %v\n%s", err, out)
 	}
-	gitDirectory := filepath.Join(root, "repository.git")
+	gitDirectory := filepath.Join(root, "repository", ".git")
 	leaseDirectory := filepath.Join(gitDirectory, "dark-factory-local-ci")
 	if err := os.MkdirAll(leaseDirectory, 0700); err != nil {
 		t.Fatal(err)
