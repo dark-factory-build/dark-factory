@@ -10,7 +10,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(target_arch = "wasm32")]
 use crate::journal::{DeliveryJournal, OperationRecord, OperationTransition};
-#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+#[cfg(any(target_arch = "wasm32", test))]
 use crate::journal::{Operation, OperationObservation};
 use crate::maintainer::MAX_EXACT_INTEGER;
 

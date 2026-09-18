@@ -5,7 +5,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 #[cfg(feature = "development-sqlite")]
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
-#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite", test))]
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 use sha2::{Digest as _, Sha256};
@@ -108,7 +108,7 @@ impl Default for OperationScope {
     }
 }
 
-#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite", test))]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Operation {
     pub(crate) operation_id: String,
@@ -116,7 +116,7 @@ pub(crate) struct Operation {
     pub(crate) request_digest: String,
 }
 
-#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite", test))]
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct OperationObservation {
     pub(crate) kind: String,
