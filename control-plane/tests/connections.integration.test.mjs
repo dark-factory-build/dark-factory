@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -12,6 +12,14 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 test('two principals: callback, pagination, refresh, replay, grants and revocation', async () => {
   const persistence = await mkdtemp(join(tmpdir(), 'df-connections-'));
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const accessKeys = generateKeyPairSync('rsa', {modulusLength: 2048});
+  const accessKid = 'c'.repeat(64), operatorEmail = 'operator@fixture.example';
+  const accessHeaders = (email = operatorEmail) => {
+    const now = Math.floor(Date.now()/1000);
+    const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const unsigned = `${encode({alg:'RS256',typ:'JWT',kid:accessKid})}.${encode({aud:'b'.repeat(64),email,iss:'https://fixture.cloudflareaccess.com',type:'app',iat:now,exp:now+600})}`;
+    return {'cf-access-authenticated-user-email':email,'cf-access-jwt-assertion':`${unsigned}.${sign('RSA-SHA256',Buffer.from(unsigned),accessKeys.privateKey).toString('base64url')}`};
+  };
   let wrongApp = false;
   let revoked = false, removed = false, push = true, bobWrite = false, refreshed = 0, exchanged = 0;
   let unavailable = '', unavailableStatus = 503, sourceVisible = true, wrongGrant = false, wrongInstallation = false, replacedPath = false, repositoryReads = 0, sourceReads = 0;
@@ -24,6 +32,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     durableObjects: { DARK_FACTORY_MAINTAINER_DELIVERIES: { className: 'MaintainerDeliveryJournal', useSQLite: true } },
     outboundService: async request => {
       const url = new URL(request.url);
+      if (url.hostname === 'fixture.cloudflareaccess.com' && url.pathname === '/cdn-cgi/access/certs') return json({keys:[{...accessKeys.publicKey.export({format:'jwk'}),kid:accessKid,alg:'RS256',use:'sig'}]});
       assert.ok(['github.com', 'api.github.com'].includes(url.hostname));
       if (url.pathname === unavailable) return json({}, unavailableStatus);
       if (url.pathname === '/app') return json({ id: wrongApp ? 999 : 5678, slug: 'fixture-maintainer' });
@@ -84,15 +93,15 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
       DARK_FACTORY_MAINTAINER_WEBHOOK_SECRET_REVISION: 'fixture-v1', DARK_FACTORY_MAINTAINER_APP_ID: '5678',
       DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8: privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
       DARK_FACTORY_MAINTAINER_PERMISSION_REVISION: 'maintainer-operations-v6',
-      DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256: 'a'.repeat(64),
+      DARK_FACTORY_MAINTAINER_OPERATOR_EMAIL_SHA256: hash(operatorEmail),
       DARK_FACTORY_CLOUDFLARE_ACCESS_TEAM_DOMAIN: 'https://fixture.cloudflareaccess.com',
       DARK_FACTORY_CLOUDFLARE_ACCESS_AUD: 'b'.repeat(64), DARK_FACTORY_MAINTAINER_CLIENT_ID: 'Iv1.fixture',
       DARK_FACTORY_MAINTAINER_CLIENT_SECRET: 'fixture-client-secret-value',
       DARK_FACTORY_MAINTAINER_CALLBACK_URL: `https://broker.example${prefix}/callback`,
     },
   }));
-  const send = (path, method = 'GET', body, credential) => mf.dispatchFetch(`https://broker.example${path}`, {
-    method, headers: { 'content-type': 'application/json', ...(credential ? { authorization: `Bearer ${credential}` } : {}) },
+  const send = (path, method = 'GET', body, credential, extraHeaders = {}) => mf.dispatchFetch(`https://broker.example${path}`, {
+    method, headers: { 'content-type': 'application/json', ...(credential ? { authorization: `Bearer ${credential}` } : {}), ...extraHeaders },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const connect = async (who, confirm = true) => {
@@ -161,6 +170,28 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     for (const [path, extra] of [['begin', {}], ['mark', { transition: { completed: JSON.stringify({ number: 123, url: 'https://github.com/team/shared/issues/123' }) } }]])
       assert.equal((await shard.fetch(`https://journal.internal/operation/${path}`, { method: 'POST', body: JSON.stringify({ operation, scope, ...extra }) })).status, 200);
     const call = (c, name, arguments_) => send(`${c.path}/mcp`, 'POST', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: arguments_ } }, c.credential);
+    const legacyArgs = {repository:'team/shared',operation_id:'ad1f0f8e-7f1f-11f0-952e-acde48001122',title:'legacy work',body:'retained original body'};
+    const legacyOperation = {operation_id:legacyArgs.operation_id,kind:'create_issue',request_digest:hash(JSON.stringify(legacyArgs))};
+    const legacyShard = namespace.get(namespace.idFromName(`maintainer:5678:operation:${hash(legacyArgs.operation_id).slice(0,2)}`));
+    const legacyResult = JSON.stringify({number:321,url:'https://github.com/team/shared/issues/321'});
+    for (const [path,extra] of [['begin',{}],['mark',{transition:{completed:legacyResult}}]]) assert.equal((await legacyShard.fetch(`https://journal.internal/operation/${path}`,{method:'POST',body:JSON.stringify({operation:legacyOperation,...extra})})).status,200);
+    const migrate = (c,args=legacyArgs,headers=accessHeaders()) => send(`/v1/github/maintainer/connections/${c.connection_id}/legacy-receipt`,'POST',{kind:'create_issue',arguments:args},c.credential,headers);
+    assert.equal((await send(`${alice.path}/legacy-receipt`,'POST',{},alice.credential,accessHeaders())).status,404,'customer prefix never exposes the administrative migration route');
+    assert.equal((await migrate(alice,legacyArgs,{})).status,401,'connection alone cannot adopt legacy history');
+    assert.equal((await migrate(alice,legacyArgs,{'x-legacy-receipt-migration':'verified'})).status,401,'public headers cannot forge the internal Access proof');
+    assert.equal((await migrate(alice,legacyArgs,accessHeaders('outsider@fixture.example'))).status,401,'wrong Access principal cannot migrate');
+    assert.equal((await migrate({...alice,credential:bob.credential})).status,401,'Access alone cannot supply another connection id');
+    assert.equal((await migrate(bob)).status,401,'read-only collaborator cannot acquire legacy write receipts');
+    assert.equal((await migrate(alice,{...legacyArgs,body:'changed'})).status,409,'supplied content must prove the original digest');
+    assert.equal((await migrate(alice)).status,200);
+    assert.equal((await migrate(alice)).status,200,'same owner transfer is idempotent');
+    const legacyObserve = {repository:'team/shared',operation_id:legacyArgs.operation_id};
+    assert.deepEqual((await (await call(alice,'observe_operation',legacyObserve)).json()).result.structuredContent.result,JSON.parse(legacyResult));
+    assert.equal((await (await call(alice,'create_issue',legacyArgs)).json()).result.structuredContent.number,321,'the original typed request still replays without a new remote write');
+    bobWrite=true;
+    assert.equal((await migrate(bob)).status,409,'even Access cannot reassign another customer receipt');
+    bobWrite=false;
+    assert.equal((await (await call(bob,'observe_operation',legacyObserve)).json()).result.structuredContent.state,'missing');
     const issuePage = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'needs triage' })).json()).result.structuredContent;
     assert.equal(issuePage.repository_id, 2);
     assert.equal(issuePage.issues[0].body, 'exact content');
@@ -231,12 +262,14 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     push = false;
     assert.equal((await call(alice, 'create_issue', args)).status, 401, 'write loss blocks completed replay');
     push = true; removed = true;
+    assert.equal((await call(alice,'observe_operation',legacyObserve)).status,401,'migrated receipts still require live repository access');
     assert.equal((await call(alice, 'observe_operation', observe)).status, 401, 'installation loss blocks receipt');
     removed = false; revoked = true;
     assert.equal((await call(alice, 'observe_operation', observe)).status, 401, 'authorization revocation blocks receipt');
     revoked = false;
     assert.equal((await send(alice.path, 'DELETE', undefined, alice.credential)).status, 200);
     assert.equal((await call(alice, 'observe_operation', observe)).status, 401, 'disconnect has no owner fallback');
+    assert.equal((await call(alice,'observe_operation',legacyObserve)).status,401,'disconnect also blocks migrated receipts');
     const awaitingRefresh = await connect('bob', false);
     unavailable = '/login/oauth/access_token';
     assert.equal((await send(`${awaitingRefresh.path}/confirm`, 'POST', { code: awaitingRefresh.code }, awaitingRefresh.credential)).status, 503, 'refresh outage is unavailable and does not activate staged tokens');

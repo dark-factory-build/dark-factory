@@ -3991,6 +3991,45 @@ fn operation<T: Serialize>(
     })
 }
 
+/// Reconstruct exactly the typed request used for a legacy receipt. A digest
+/// supplied by a client alone cannot prove which repository owned that work.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn legacy_receipt_request(
+    kind: &str,
+    arguments: serde_json::Value,
+) -> Result<(Operation, String), OperationError> {
+    macro_rules! proof {
+        ($ty:ty) => {{
+            let mut request: $ty =
+                serde_json::from_value(arguments).map_err(|_| OperationError::InvalidInput)?;
+            request.validate()?;
+            RepositoryName::requested(&mut request.repository)?;
+            let proof = Operation {
+                operation_id: request.operation_id.clone(),
+                kind: kind.into(),
+                request_digest: request_digest(&request)?,
+            };
+            Ok((proof, request.repository))
+        }};
+    }
+    match kind {
+        "create_issue" => proof!(CreateIssue),
+        "resolve_issue" => proof!(ResolveIssue),
+        "create_pull_request" => proof!(CreatePullRequest),
+        "update_pull_request_body" => proof!(UpdatePullRequestBody),
+        "close_pull_request" => proof!(ClosePullRequest),
+        "submit_pull_request_review" => proof!(SubmitPullRequestReview),
+        "publish_commit" => proof!(PublishCommit),
+        "publish_release_tag" => proof!(PublishReleaseTag),
+        "recover_release" => proof!(RecoverRelease),
+        "dispatch_control_plane_deploy" => proof!(DispatchControlPlaneDeploy),
+        "enqueue_pull_request" => proof!(EnqueuePullRequest),
+        "merge_pull_request_at_head" => proof!(MergePullRequestAtHead),
+        "rerun_failed_pull_request_jobs" => proof!(RerunFailedPullRequestJobs),
+        _ => Err(OperationError::InvalidInput),
+    }
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn request_digest<T: Serialize>(request: &T) -> Result<String, OperationError> {
     let canonical = serde_json::to_vec(request).map_err(|_| OperationError::InvalidInput)?;
@@ -8495,6 +8534,30 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn legacy_transfer_proof_uses_exact_typed_request_serialization() {
+        let args = serde_json::json!({"body":"preserve me","title":"work","operation_id":"6D1F0F8E-7F1F-11F0-952E-ACDE48001122","repository":"team/code"});
+        let (proof, repository) = legacy_receipt_request("create_issue", args.clone()).unwrap();
+        let mut typed: CreateIssue = serde_json::from_value(args.clone()).unwrap();
+        typed.validate().unwrap();
+        assert_eq!(proof.request_digest, request_digest(&typed).unwrap());
+        assert_eq!(proof.operation_id, "6d1f0f8e-7f1f-11f0-952e-acde48001122");
+        assert_eq!(repository, "team/code");
+        let mut unknown = args.clone();
+        unknown["repository_id"] = serde_json::json!(42);
+        assert!(legacy_receipt_request("create_issue", unknown).is_err());
+        assert!(legacy_receipt_request("observe_operation", args.clone()).is_err());
+        let mut moved = args;
+        moved["repository"] = serde_json::json!("team/other");
+        assert_ne!(
+            proof.request_digest,
+            legacy_receipt_request("create_issue", moved)
+                .unwrap()
+                .0
+                .request_digest
+        );
     }
 
     #[test]

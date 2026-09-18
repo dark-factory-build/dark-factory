@@ -241,6 +241,23 @@ impl DeliveryJournal {
         Ok(journal)
     }
 
+    /// Only called by the Access-authenticated migration route after it also
+    /// verifies the destination connection, live write grant and typed proof.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn transfer_legacy_receipt(
+        &self,
+        operation: &Operation,
+    ) -> Result<bool, Error> {
+        match self {
+            Self::Cloudflare(journal) => Ok(matches!(
+                journal
+                    .operation_request("/operation/transfer-legacy", operation, None)
+                    .await?,
+                OperationRecord::New
+            )),
+        }
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn ready(&self) -> Result<(), Error> {
         match self {
@@ -573,6 +590,23 @@ impl DurableObject for MaintainerDeliveryJournal {
                 .await;
                 match result {
                     Ok(record) => Response::from_json(&record),
+                    Err(_) => Response::error("journal unavailable", 503),
+                }
+            }
+            (Method::Post, "/operation/transfer-legacy") => {
+                #[derive(Deserialize)]
+                struct Message {
+                    operation: Operation,
+                    scope: OperationScope,
+                }
+                let result = async {
+                    let message: Message = request.json().await?;
+                    transfer_legacy_cloudflare(&self.sql, &message.operation, &message.scope)
+                }
+                .await;
+                match result {
+                    Ok(true) => Response::from_json(&OperationRecord::New),
+                    Ok(false) => Response::from_json(&OperationRecord::Conflict),
                     Err(_) => Response::error("journal unavailable", 503),
                 }
             }
@@ -1383,7 +1417,7 @@ fn observe_operation_sqlite(
         .map_err(Error::from)
 }
 
-// No receipt rewrite: every pre-connection UUID remains owned by the legacy
+// No automatic receipt adoption: every pre-connection UUID remains owned by the legacy
 // operator. The binding is immutable even when a determinate refusal releases
 // an execution claim. A shared repository never implies shared receipt access.
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
@@ -1393,6 +1427,66 @@ const AUTHORITY_LOOKUP: &str =
     AND NOT EXISTS (SELECT 1 FROM maintainer_operation_authorities WHERE operation_id = ?)";
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const AUTHORITY_INSERT: &str = "INSERT INTO maintainer_operation_authorities (operation_id, owner, repository) VALUES (?, ?, ?)";
+
+// The receipt and its UUID are untouched. One atomic statement can move only
+// an implicit/explicit legacy authority, with a matching typed request digest.
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const TRANSFER_LEGACY: &str = "INSERT INTO maintainer_operation_authorities (operation_id, owner, repository)
+    SELECT operation_id, ?1, ?2 FROM maintainer_operations
+    WHERE operation_id = ?3 AND kind = ?4 AND request_digest = ?5
+    ON CONFLICT(operation_id) DO UPDATE SET owner = excluded.owner, repository = excluded.repository
+    WHERE maintainer_operation_authorities.owner = 'legacy' AND maintainer_operation_authorities.repository = ''";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const TRANSFERRED: &str = "SELECT a.owner, a.repository FROM maintainer_operation_authorities a
+    JOIN maintainer_operations o USING (operation_id)
+    WHERE o.operation_id = ? AND o.kind = ? AND o.request_digest = ?";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+fn valid_transfer_scope(scope: &OperationScope) -> bool {
+    scope.owner.len() == 64
+        && scope
+            .owner
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && scope
+            .repository
+            .strip_prefix("github:")
+            .and_then(|id| id.parse::<i64>().ok())
+            .is_some_and(|id| id > 0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn transfer_legacy_cloudflare(
+    sql: &SqlStorage,
+    operation: &Operation,
+    scope: &OperationScope,
+) -> Result<bool, Error> {
+    if !valid_transfer_scope(scope) {
+        return Ok(false);
+    }
+    sql.exec(
+        TRANSFER_LEGACY,
+        vec![
+            scope.owner.as_str().into(),
+            scope.repository.as_str().into(),
+            operation.operation_id.as_str().into(),
+            operation.kind.as_str().into(),
+            operation.request_digest.as_str().into(),
+        ],
+    )?;
+    let rows = sql
+        .exec(
+            TRANSFERRED,
+            vec![
+                operation.operation_id.as_str().into(),
+                operation.kind.as_str().into(),
+                operation.request_digest.as_str().into(),
+            ],
+        )?
+        .to_array::<OperationScope>()?;
+    Ok(
+        matches!(rows.as_slice(), [stored] if stored.owner == scope.owner && stored.repository == scope.repository),
+    )
+}
 
 #[cfg(target_arch = "wasm32")]
 fn authorize_operation_cloudflare(
@@ -1450,6 +1544,47 @@ fn authorize_operation_sqlite(
 #[cfg(all(test, feature = "development-sqlite"))]
 mod operation_tests {
     use super::*;
+
+    #[test]
+    fn explicit_legacy_transfer_preserves_receipt_and_cannot_claim_another_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        DeliveryJournal::open_development(&database).unwrap();
+        let db = Connection::open(&database).unwrap();
+        let id = "6d1f0f8e-7f1f-11f0-952e-acde48001122";
+        let digest = "d".repeat(64);
+        db.execute("INSERT INTO maintainer_operations(operation_id,kind,request_digest,state,result_json) VALUES (?1,'create_issue',?2,'completed','{\"number\":123}')", params![id,digest]).unwrap();
+        let transfer = |owner: &str, repo: &str, proof: &str| {
+            db.execute(
+                TRANSFER_LEGACY,
+                params![owner, repo, id, "create_issue", proof],
+            )
+            .unwrap();
+            db.query_row(TRANSFERRED, params![id, "create_issue", proof], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .optional()
+            .unwrap()
+                == Some((owner.into(), repo.into()))
+        };
+        let alice = "a".repeat(64);
+        let bob = "b".repeat(64);
+        assert!(!transfer(&alice, "github:2", &"e".repeat(64)));
+        assert!(transfer(&alice, "github:2", &digest));
+        assert!(transfer(&alice, "github:2", &digest));
+        assert!(!transfer(&bob, "github:2", &digest));
+        assert!(!transfer(&alice, "github:3", &digest));
+        let receipt: (String,String,String) = db.query_row("SELECT kind,request_digest,result_json FROM maintainer_operations WHERE operation_id=?",[id],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(
+            receipt,
+            ("create_issue".into(), digest, "{\"number\":123}".into())
+        );
+        assert!(valid_transfer_scope(&OperationScope {
+            owner: alice,
+            repository: "github:2".into()
+        }));
+        assert!(!valid_transfer_scope(&OperationScope::default()));
+    }
 
     #[tokio::test]
     async fn receipt_ownership_is_immutable_for_two_connections_and_legacy() {
