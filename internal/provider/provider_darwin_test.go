@@ -1476,6 +1476,30 @@ printf '#include <stdio.h>\nint main(void) { puts("sdk-ok"); return 0; }\n' > sd
 	if out, err := run("/bin/sh", "-c", readerScript, "proof", gitDirectory); err != nil {
 		t.Fatalf("orchestrator Git directory grant: %v\n%s", err, out)
 	}
+	producer := filepath.Join(root, "producer-change")
+	if err := os.Mkdir(producer, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(producer, "review.txt"), []byte("producer\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	canonicalReview, err := runtime.WithGitCommonDirectory(gitDirectory, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalReview, err = canonicalReview.WithRetainedSourceReview(producer, gitDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.runtime = canonicalReview
+	canonicalReviewScript := `set -eu
+/bin/cat "$1/review.txt" >/dev/null
+/bin/cat "$2/refs/factory-branch" >/dev/null
+if printf forbidden > "$2/refs/injected" 2>/dev/null; then exit 41; fi
+`
+	if out, err := run("/bin/sh", "-c", canonicalReviewScript, "proof", producer, gitDirectory); err != nil {
+		t.Fatalf("generated canonical retained-source review profile: %v\n%s", err, out)
+	}
 	request.runtime.gitCommonDir, request.runtime.gitCommonDirWritable = "", false
 	if fixture := os.Getenv("DARK_FACTORY_TEST_FIXTURE_BINARY"); fixture != "" {
 		request.runtime.toolchainReadRoots = strings.TrimPrefix(request.runtime.toolchainReadRoots+string(filepath.ListSeparator)+filepath.Dir(fixture), string(filepath.ListSeparator))
