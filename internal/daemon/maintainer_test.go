@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -90,7 +91,11 @@ func TestConnectRefusesLegacyOverseerBeforeCredentialActivation(t *testing.T) {
 }
 
 func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
-	accepted := kernel.IntakeAcceptance{Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "reviewed", Body: "safe snapshot"}}
+	acceptedAt, err := kernel.NewUnixMillis(1_700_000_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := kernel.IntakeAcceptance{SourceRepository: "feed/original", CreatedAt: acceptedAt, Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "reviewed", Body: "safe snapshot"}}
 	// A broker response can carry revised instructions in content even when
 	// structuredContent still happens to resemble the accepted issue.
 	upstream := []byte(`{"result":{"structuredContent":{"number":9,"title":"reviewed","body":"safe snapshot"},"content":[{"type":"text","text":"revised untrusted instructions"}]}}`)
@@ -101,25 +106,49 @@ func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(response, []byte("revised untrusted instructions")) || bytes.Contains(response, []byte(`"content"`)) {
+	if bytes.Contains(response, []byte("revised untrusted instructions")) {
 		t.Fatalf("frozen response exposed broker content: %s", response)
 	}
 	var reply struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`
 		Result  struct {
-			Issue struct {
-				Number uint64 `json:"number"`
-				Title  string `json:"title"`
-				Body   string `json:"body"`
-			} `json:"structuredContent"`
+			Issue   frozenIssue `json:"structuredContent"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(response, &reply); err != nil {
 		t.Fatal(err)
 	}
-	if reply.JSONRPC != "2.0" || string(reply.ID) != "1" || reply.Result.Issue.Number != accepted.Snapshot.IssueNumber || reply.Result.Issue.Title != accepted.Snapshot.Title || reply.Result.Issue.Body != accepted.Snapshot.Body {
+	if reply.JSONRPC != "2.0" || string(reply.ID) != "1" || reply.Result.IsError || len(reply.Result.Content) != 1 || reply.Result.Content[0].Type != "text" || reply.Result.Content[0].Text != "Issue state was observed." {
+		t.Fatalf("frozen envelope = %s", response)
+	}
+	issue := reply.Result.Issue
+	if issue.Number != accepted.Snapshot.IssueNumber || issue.URL != "https://github.com/feed/original/issues/9" || issue.Title != accepted.Snapshot.Title || issue.Body != accepted.Snapshot.Body || len(issue.Labels) != 0 || issue.UpdatedAt != time.UnixMilli(accepted.CreatedAt.Int64()).UTC().Format(time.RFC3339) || issue.State != "open" || issue.StateReason != nil {
 		t.Fatalf("frozen response = %s", response)
+	}
+}
+
+func TestMaintainerToolCallRejectsAmbiguousRepositoryArguments(t *testing.T) {
+	valid := json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9}}`)
+	call, canonical, err := decodeMaintainerToolCall(valid)
+	if err != nil || call.Name != "observe_issue" || string(call.Arguments["repository"]) != `"feed/original"` || !bytes.Contains(canonical, []byte(`"repository":"feed/original"`)) || bytes.Contains(canonical, []byte(`"Repository"`)) {
+		t.Fatalf("canonical call: %s %+v %v", canonical, call, err)
+	}
+	for _, input := range []json.RawMessage{
+		json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","Repository":"foreign/private","issue_number":9}}`),
+		json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9,"issue_Number":10}}`),
+		json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","repository":"foreign/private","issue_number":9}}`),
+		json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9,"meta":{"scope":"accepted","scope":"foreign"}}}`),
+		json.RawMessage(`{"Name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9}}`),
+	} {
+		if _, _, err := decodeMaintainerToolCall(input); err == nil {
+			t.Fatalf("accepted ambiguous tool call %s", input)
+		}
 	}
 }
 
