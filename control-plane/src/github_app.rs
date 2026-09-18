@@ -9,9 +9,9 @@ use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(target_arch = "wasm32")]
-use crate::journal::{
-    DeliveryJournal, Operation, OperationObservation, OperationRecord, OperationTransition,
-};
+use crate::journal::{DeliveryJournal, OperationRecord, OperationTransition};
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+use crate::journal::{Operation, OperationObservation};
 use crate::maintainer::MAX_EXACT_INTEGER;
 
 pub(crate) const PRIVATE_KEY_BINDING: &str = "DARK_FACTORY_MAINTAINER_PRIVATE_KEY_PKCS8";
@@ -3817,7 +3817,7 @@ fn completed_or_conflict<T: serde::de::DeserializeOwned>(
     }
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
 fn legacy_completed_result<T: serde::de::DeserializeOwned>(
     observation: Option<&OperationObservation>,
     operation: &Operation,
@@ -3825,8 +3825,7 @@ fn legacy_completed_result<T: serde::de::DeserializeOwned>(
     let Some(observation) = observation else {
         return Err(OperationError::InvalidInput);
     };
-    if observation.kind != operation.kind
-        || observation.request_digest != operation.request_digest
+    if observation.kind != operation.kind || observation.request_digest != operation.request_digest
     {
         return Err(OperationError::Conflict);
     }
@@ -8904,6 +8903,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "development-sqlite")]
     fn an_omitted_digest_does_not_claim_a_uuid_before_a_corrected_retry() {
         let missing_digest = EnqueuePullRequest {
             repository: "dark-factory-build/dark-factory".into(),
@@ -8923,15 +8923,29 @@ mod tests {
             Err(OperationError::InvalidInput)
         ));
 
-        let planned = OperationObservation {
+        let mut observed = OperationObservation {
             kind: operation.kind.clone(),
             request_digest: operation.request_digest.clone(),
             state: "planned".into(),
             result_json: None,
         };
+        for state in ["planned", "executing", "refused", "indeterminate"] {
+            observed.state = state.into();
+            assert!(matches!(
+                legacy_completed_result::<EnqueueResult>(Some(&observed), &operation),
+                Err(OperationError::InvalidInput)
+            ));
+        }
+        observed.state = "completed".into();
+        observed.result_json = Some("42".into());
+        assert_eq!(
+            legacy_completed_result::<u32>(Some(&observed), &operation).unwrap(),
+            42
+        );
+        observed.request_digest = "f".repeat(64);
         assert!(matches!(
-            legacy_completed_result::<EnqueueResult>(Some(&planned), &operation),
-            Err(OperationError::InvalidInput)
+            legacy_completed_result::<u32>(Some(&observed), &operation),
+            Err(OperationError::Conflict)
         ));
 
         let corrected = EnqueuePullRequest {
