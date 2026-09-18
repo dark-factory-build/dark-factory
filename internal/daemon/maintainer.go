@@ -270,6 +270,9 @@ func frozenAcceptedIssueResponse(request maintainerRequest, accepted kernel.Inta
 }
 
 func currentAcceptedIssueMetadata(request maintainerRequest, accepted kernel.IntakeAcceptance, response json.RawMessage) (frozenIssue, error) {
+	if !api.ValidMaintainerJSON(response) {
+		return frozenIssue{}, errors.New("invalid observed issue response")
+	}
 	var live struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`
