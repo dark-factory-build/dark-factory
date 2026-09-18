@@ -118,7 +118,8 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   const [confirm, setConfirm] = useState<Confirm | undefined>(undefined);
   const [cancelPhrase, setCancelPhrase] = useState<string | undefined>(undefined);
   const [alerts, setAlerts] = useState<{ phase: "idle" | "working" | "failed"; copy?: string }>({ phase: "idle" });
-  const [online, setOnline] = useState(() => (props.navigator ?? globalThis.navigator)?.onLine !== false);
+  // Like the install hint, the browser's own answer is read after mount.
+  const [online, setOnline] = useState(props.navigator?.onLine !== false);
   const manager = useRef<RemoteManager | undefined>(undefined);
   // Read and cleared once per mount, not once per effect run.
   const arrival = useRef<{ attempted: boolean; link: string; invitation: RemoteInvitation | null } | undefined>(undefined);

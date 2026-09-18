@@ -745,15 +745,21 @@ test("a name typed for one factory never renames the next one selected", async (
   });
 });
 
-test("the first render never reads the browser, so a server and an iPhone hydrate alike", () => {
+test("the first render never reads the browser, so a server and an offline iPhone hydrate alike", async () => {
   const agent = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { userAgent: "iPhone", onLine: true } });
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { userAgent: "iPhone", onLine: false } });
   globalThis.matchMedia = () => ({ matches: false });
+  globalThis.addEventListener = globalThis.removeEventListener = () => {};
   try {
-    const { install: _unset, ...bare } = props(fakeManager([]));
-    assert.doesNotMatch(renderToString(createElement(RemoteApp, bare)), /INSTALL THE APP/);
+    const { navigator: _browser, ...bare } = props(fakeManager([]));
+    const first = renderToString(createElement(RemoteApp, bare));
+    assert.doesNotMatch(first, /INSTALL THE APP|DEVICE OFFLINE/);
+    // Once mounted, the same browser is believed.
+    await withApp(bare, (renderer) => assert.match(textOf(renderer), /DEVICE OFFLINE.*INSTALL THE APP/s));
   } finally {
     delete globalThis.matchMedia;
+    delete globalThis.addEventListener;
+    delete globalThis.removeEventListener;
     if (agent === undefined) delete globalThis.navigator; else Object.defineProperty(globalThis, "navigator", agent);
   }
 });
