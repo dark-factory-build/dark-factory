@@ -67,6 +67,10 @@ const (
 	TypeAgentUpdateResult           MessageType = "AGENT_UPDATE_RESULT"
 	TypeProjectLimits               MessageType = "PROJECT_LIMITS"
 	TypeProjectLimitsResult         MessageType = "PROJECT_LIMITS_RESULT"
+	TypeRepositoriesGet             MessageType = "REPOSITORIES_GET"
+	TypeRepositories                MessageType = "REPOSITORIES"
+	TypeRepositoryMutate            MessageType = "REPOSITORY_MUTATE"
+	TypeRepositoryMutateResult      MessageType = "REPOSITORY_MUTATE_RESULT"
 	TypeTaskUpdate                  MessageType = "TASK_UPDATE"
 	TypeTaskUpdateResult            MessageType = "TASK_UPDATE_RESULT"
 	TypeTopologyGet                 MessageType = "TOPOLOGY_GET"
@@ -410,6 +414,14 @@ func decodeControl(data []byte, role senderRole) (ControlFrame, error) {
 		body = new(ProjectLimits)
 	case TypeProjectLimitsResult:
 		body = new(ProjectLimitsResult)
+	case TypeRepositoriesGet:
+		body = new(RepositoriesGet)
+	case TypeRepositories:
+		body = new(Repositories)
+	case TypeRepositoryMutate:
+		body = new(RepositoryMutate)
+	case TypeRepositoryMutateResult:
+		body = new(RepositoryMutateResult)
 	case TypeTaskUpdate:
 		body = new(TaskUpdate)
 	case TypeTaskUpdateResult:

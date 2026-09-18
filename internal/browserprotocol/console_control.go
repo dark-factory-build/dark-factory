@@ -46,6 +46,39 @@ type ProjectLimitsResult struct {
 	Revision  Decimal `json:"revision"`
 }
 
+// RepositoriesGet and RepositoryMutate are administration-only private
+// settings controls. They never appear in STATE snapshots.
+type RepositoriesGet struct {
+	ProjectID string `json:"project_id"`
+}
+type Repository struct {
+	ID        string  `json:"id"`
+	ProjectID string  `json:"project_id"`
+	Name      string  `json:"name"`
+	Root      string  `json:"root"`
+	BaseRef   string  `json:"base_ref"`
+	Enabled   Bool    `json:"enabled"`
+	Default   Bool    `json:"default"`
+	Revision  Decimal `json:"revision"`
+}
+type Repositories struct {
+	ProjectID string       `json:"project_id"`
+	Items     []Repository `json:"items"`
+}
+type RepositoryMutate struct {
+	Action           string  `json:"action"`
+	ID               string  `json:"id,omitempty"`
+	ProjectID        string  `json:"project_id,omitempty"`
+	Name             string  `json:"name,omitempty"`
+	Root             string  `json:"root,omitempty"`
+	BaseRef          string  `json:"base_ref,omitempty"`
+	ExpectedRevision Decimal `json:"expected_revision,omitempty"`
+	Enabled          *Bool   `json:"enabled,omitempty"`
+}
+type RepositoryMutateResult struct {
+	Repository *Repository `json:"repository,omitempty"`
+}
+
 // TaskUpdate edits one still-queued task. Status is the only member that is
 // not free: it may say "cancelled" and nothing else.
 type TaskUpdate struct {
@@ -272,6 +305,12 @@ func EncodeAgentUpdateResult(id string, value AgentUpdateResult) ([]byte, error)
 func EncodeProjectLimitsResult(id string, value ProjectLimitsResult) ([]byte, error) {
 	return encodeControl(TypeProjectLimitsResult, id, value)
 }
+func EncodeRepositories(id string, value Repositories) ([]byte, error) {
+	return encodeControl(TypeRepositories, id, value)
+}
+func EncodeRepositoryMutateResult(id string, value RepositoryMutateResult) ([]byte, error) {
+	return encodeControl(TypeRepositoryMutateResult, id, value)
+}
 
 func EncodeTaskUpdateResult(id string, value TaskUpdateResult) ([]byte, error) {
 	return encodeControl(TypeTaskUpdateResult, id, value)
@@ -349,6 +388,37 @@ func validConsoleControl(kind MessageType, body any) error {
 	case ProjectLimitsResult:
 		if validateDynamicID(value.ProjectID) != nil || value.Revision == 0 {
 			return bad()
+		}
+	case RepositoriesGet:
+		if validateDynamicID(value.ProjectID) != nil {
+			return bad()
+		}
+	case Repositories:
+		if validateDynamicID(value.ProjectID) != nil || value.Items == nil || len(value.Items) > MaxSnapshotEntities {
+			return bad()
+		}
+		for _, item := range value.Items {
+			if validateDynamicID(item.ID) != nil || item.ProjectID != value.ProjectID || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 256) != nil || item.Revision == 0 {
+				return bad()
+			}
+		}
+	case RepositoryMutate:
+		if value.Action != "add" && value.Action != "name" && value.Action != "base" && value.Action != "default" && value.Action != "enabled" && value.Action != "remove" {
+			return bad()
+		}
+		if value.Action == "add" {
+			if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Name, 1, 128) != nil || validateBoundedText(value.Root, 1, 4096) != nil || validateBoundedText(value.BaseRef, 1, 256) != nil {
+				return bad()
+			}
+		} else if validateDynamicID(value.ID) != nil || value.ExpectedRevision == 0 || value.Action == "enabled" && value.Enabled == nil {
+			return bad()
+		}
+	case RepositoryMutateResult:
+		if value.Repository != nil {
+			item := *value.Repository
+			if validateDynamicID(item.ID) != nil || validateDynamicID(item.ProjectID) != nil || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 256) != nil || item.Revision == 0 {
+				return bad()
+			}
 		}
 	case TaskUpdate:
 		if validateDynamicID(value.TaskID) != nil || value.ExpectedRevision == 0 ||
