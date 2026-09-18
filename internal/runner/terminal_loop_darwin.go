@@ -761,7 +761,20 @@ func (o *terminalOwner) attach(c TerminalCommand) error {
 	if len(o.replay) >= terminalReplayRequestCapacity {
 		return errors.Join(ErrUnresolved, errors.New("runner: terminal replay request queue is full"))
 	}
-	if err := o.send(TerminalFrame{Kind: TerminalAttached, Correlation: c.Correlation, Sequence: c.Sequence, Floor: o.ring.Floor(), Head: head, Status: TerminalResultOK}); err != nil {
+	contextStart := o.ring.Floor()
+	var contextBytes []byte
+	if c.Sequence > o.ring.Floor() {
+		if c.Sequence-o.ring.Floor() > maxTerminalLookbehind {
+			contextStart = c.Sequence - maxTerminalLookbehind
+		}
+		var readErr error
+		contextBytes, _, readErr = o.ring.Read(contextStart)
+		if readErr != nil {
+			return readErr
+		}
+		contextBytes = contextBytes[:int(c.Sequence-contextStart)]
+	}
+	if err := o.send(TerminalFrame{Kind: TerminalAttached, Correlation: c.Correlation, Sequence: c.Sequence, Floor: o.ring.Floor(), Head: head, Status: TerminalResultOK, ContextStart: contextStart, Context: contextBytes}); err != nil {
 		return err
 	}
 	// The first observer owns the live cursor. Its historical bytes are routed

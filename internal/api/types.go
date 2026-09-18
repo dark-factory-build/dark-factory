@@ -311,7 +311,7 @@ func validTerminalObservationInput(input TerminalObserveInput) bool {
 }
 
 func validTerminalObservation(value TerminalObservation) bool {
-	return validID(value.ProjectID) && validID(value.TaskID) && validID(value.RunID) && value.NextCursor >= value.Cursor && value.Floor <= value.Head && value.NextCursor <= value.Head && (value.Source == "stored" || value.Source == "none") && len(value.Payload) <= 65536 && value.Omitted <= value.NextCursor-value.Cursor && uint64(len(value.Payload)) == value.NextCursor-value.Cursor-value.Omitted
+	return validID(value.ProjectID) && validID(value.TaskID) && validID(value.RunID) && value.NextCursor >= value.Cursor && value.Floor <= value.Head && value.NextCursor <= value.Head && (value.Source == "stored" || value.Source == "live" || value.Source == "none") && len(value.Payload) <= 65536 && value.Omitted <= value.NextCursor-value.Cursor && uint64(len(value.Payload)) == value.NextCursor-value.Cursor-value.Omitted
 }
 
 // Project content is deliberately a small wire DTO. Bodies are never placed

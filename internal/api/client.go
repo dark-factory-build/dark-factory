@@ -467,7 +467,8 @@ func (client *AttemptClient) TerminalObserve(ctx context.Context, input Terminal
 	if err := client.client.call(ctx, "terminal_observe", input, &result); err != nil {
 		return TerminalObservation{}, err
 	}
-	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
+	futureCursorReset := result.Gap && input.Cursor > result.Head && result.Cursor == result.Head
+	if !validTerminalObservation(result) || result.ProjectID != input.ProjectID || result.TaskID != input.TaskID || result.RunID != input.RunID || result.Cursor != input.Cursor && !futureCursorReset || len(result.Payload) > int(input.MaxBytes) || (!result.Gap && result.NextCursor-input.Cursor > uint64(input.MaxBytes)) {
 		return TerminalObservation{}, ErrProtocol
 	}
 	return result, nil
