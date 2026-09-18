@@ -161,19 +161,19 @@ def managed_paths(home):
     return home, state, [proof.st_dev, proof.st_ino]
 
 
-def managed_read(path, default=None, maximum=1 << 20):
+def managed_read(path, default=None, maximum=1 << 20, private=True, decode=json.loads):
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return default
     with os.fdopen(descriptor, 'rb') as stream:
         value = os.fstat(stream.fileno())
-        if not stat.S_ISREG(value.st_mode) or value.st_uid != os.geteuid() or stat.S_IMODE(value.st_mode) != 0o600 or value.st_nlink != 1 or value.st_size > maximum:
+        if not stat.S_ISREG(value.st_mode) or value.st_uid != os.geteuid() or (stat.S_IMODE(value.st_mode) != 0o600 if private else value.st_mode & 0o022) or value.st_nlink != 1 or value.st_size > maximum:
             raise ValueError('managed intake file is not private or is oversized')
         data = stream.read(maximum + 1)
         if len(data) > maximum:
             raise ValueError('managed intake file grew past its bound')
-        return json.loads(data)
+        return decode(data)
 
 
 @contextlib.contextmanager
@@ -310,8 +310,53 @@ def managed_launchctl(*arguments):
     return subprocess.run(['/bin/launchctl', *arguments], capture_output=True, text=True, timeout=30)
 
 
+def refuse_legacy_intake_service(home):
+    # The per-pass lock only serializes controllers; independent schedules
+    # still create different task IDs from the same issue on successive ticks.
+    paths = set(managed_plist_root().glob('*.plist'))
+    loaded_paths = set()
+    loaded = managed_launchctl('list')
+    if loaded.returncode != 0 or len(loaded.stdout) > 1 << 20:
+        raise ValueError('legacy intake service discovery unavailable; refusing install')
+    for line in loaded.stdout.splitlines():
+        fields = line.split()
+        if not fields or not fields[-1].startswith('build.darkfactory.autonomy.') or fields[-1].endswith('.release'):
+            continue
+        job = managed_launchctl('print', 'gui/' + str(os.geteuid()) + '/' + fields[-1])
+        locations = [line.strip()[7:] for line in job.stdout.splitlines() if line.strip().startswith('path = ')]
+        if job.returncode != 0 or len(locations) != 1 or not Path(locations[0]).is_absolute():
+            raise ValueError('legacy intake service ownership unavailable; refusing install')
+        loaded_paths.add(Path(locations[0]))
+    paths.update(loaded_paths)
+    # ponytail: native schedule discovery is bounded to 200 plists; larger
+    # installations need explicit indexed service ownership before expansion.
+    if len(paths) > 200:
+        raise ValueError('intake service discovery exceeds 200 plists; refusing install')
+    for path in paths:
+        try:
+            job = managed_read(path, maximum=64 << 10, private=False, decode=plistlib.loads)
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            if path in loaded_paths or path.name.startswith('build.darkfactory.autonomy.'):
+                raise ValueError('legacy intake service ownership unavailable; refusing install')
+            continue
+        args = job.get('ProgramArguments', []) if isinstance(job, dict) else []
+        if path in loaded_paths and (not isinstance(args, list) or len(args) < 3 or not all(isinstance(arg, str) for arg in args)):
+            raise ValueError('legacy intake service arguments unavailable; refusing install')
+        if not isinstance(args, list) or len(args) < 3 or not all(isinstance(arg, str) for arg in args) or Path(args[1]).name not in ('factory-autonomy.py', 'factory-intake.py') or '--release-only' in args or '--managed' in args:
+            continue
+        if not Path(args[2]).is_absolute():
+            raise ValueError('legacy intake configuration identity unavailable; refusing install')
+        config = managed_read(Path(args[2]), maximum=64 << 10, private=False)
+        if not isinstance(config, dict) or not isinstance(config.get('factory_home'), str) or not Path(config['factory_home']).is_absolute():
+            raise ValueError('legacy intake configuration identity unavailable; refusing install')
+        if Path(config['factory_home']).resolve() == home:
+            raise ValueError('legacy intake already schedules this factory; migrate its configuration and journal before installing managed intake')
+
+
 def managed_service(home, factoryctl, action):
     home, state, identity = managed_paths(home)
+    if action == 'install':
+        refuse_legacy_intake_service(home)
     label = 'com.dark-factory.intake.' + hashlib.sha256(str(home).encode()).hexdigest()[:12]
     domain = 'gui/' + str(os.geteuid())
     target = domain + '/' + label

@@ -270,3 +270,6 @@ release does not reinterpret their fingerprints as new acceptance receipts or
 silently start importing their old backlog. Keep an existing controller and its
 journal together; do not run a second source over the same live queue as an
 implicit migration. Review an explicit cutover before replacing it.
+Managed service installation refuses an existing legacy intake schedule for the
+same factory home. It leaves that schedule, its configuration and its journal
+untouched; release-only schedules and other factory homes remain independent.
