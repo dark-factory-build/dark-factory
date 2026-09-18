@@ -35,6 +35,8 @@ const OPERATION_MIGRATION_SQL: &str = include_str!("../migrations/0004_maintaine
 const OPERATION_LEGACY_TABLES: [&str; 2] =
     ["maintainer_operations_legacy", "maintainer_operations_0002"];
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const AUTHORITY_MIGRATION_SQL: &str = include_str!("../migrations/0005_operation_authorities.sql");
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
 const MIGRATION_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS control_plane_migrations (
     component TEXT PRIMARY KEY,
     revision TEXT NOT NULL,
@@ -87,6 +89,23 @@ pub(crate) enum Record {
     New,
     Replay(Disposition),
     Conflict,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct OperationScope {
+    owner: String,
+    repository: String,
+}
+
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+impl Default for OperationScope {
+    fn default() -> Self {
+        Self {
+            owner: "legacy".into(),
+            repository: String::new(),
+        }
+    }
 }
 
 #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
@@ -183,13 +202,44 @@ impl StoredDelivery {
 
 impl DeliveryJournal {
     #[cfg(target_arch = "wasm32")]
-    pub(crate) const fn cloudflare(namespace: ObjectNamespace, app_id: i64) -> Self {
-        Self::Cloudflare(CloudflareJournal { namespace, app_id })
+    pub(crate) fn cloudflare(namespace: ObjectNamespace, app_id: i64) -> Self {
+        Self::Cloudflare(CloudflareJournal {
+            namespace,
+            app_id,
+            scope: OperationScope::default(),
+        })
     }
 
     #[cfg(feature = "development-sqlite")]
     pub(crate) fn open_development(database: &Path) -> Result<Self, Error> {
         Ok(Self::Sqlite(SqliteJournal::open(database)?))
+    }
+
+    /// The owner comes from broker authentication, never from tool arguments.
+    #[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // Customer ingress follows separately.
+    pub(crate) fn for_connection(&self, owner: &str, repository: &str) -> Result<Self, Error> {
+        if owner.len() != 64
+            || !owner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            || repository.is_empty()
+            || repository.len() > 256
+        {
+            return Err(Error::InvalidSchema);
+        }
+        let scope = OperationScope {
+            owner: owner.into(),
+            repository: repository.to_ascii_lowercase(),
+        };
+        let mut journal = self.clone();
+        match &mut journal {
+            #[cfg(target_arch = "wasm32")]
+            Self::Cloudflare(journal) => journal.scope = scope,
+            #[cfg(feature = "development-sqlite")]
+            Self::Sqlite(journal) => journal.scope = scope,
+        }
+        Ok(journal)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -314,6 +364,7 @@ fn expected_stored_sql(sql: &str) -> String {
 pub(crate) struct CloudflareJournal {
     namespace: ObjectNamespace,
     app_id: i64,
+    scope: OperationScope,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -373,13 +424,18 @@ impl CloudflareJournal {
         #[derive(Serialize)]
         struct Message<'a> {
             operation_id: &'a str,
+            scope: &'a OperationScope,
         }
         let stub = self
             .namespace
             .get_by_name(&operation_shard_name(self.app_id, operation_id))?;
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_body(Some(
-            serde_json::to_string(&Message { operation_id })?.into(),
+            serde_json::to_string(&Message {
+                operation_id,
+                scope: &self.scope,
+            })?
+            .into(),
         ));
         let request = Request::new_with_init("https://journal.internal/operation/observe", &init)?;
         let mut response = stub.fetch_with_request(request).await?;
@@ -398,6 +454,7 @@ impl CloudflareJournal {
         #[derive(Serialize)]
         struct Message<'a> {
             operation: &'a Operation,
+            scope: &'a OperationScope,
             transition: Option<OperationTransition>,
         }
         let stub = self
@@ -407,6 +464,7 @@ impl CloudflareJournal {
         init.with_method(Method::Post).with_body(Some(
             serde_json::to_string(&Message {
                 operation,
+                scope: &self.scope,
                 transition,
             })?
             .into(),
@@ -468,10 +526,12 @@ impl DurableObject for MaintainerDeliveryJournal {
                 #[derive(Deserialize)]
                 struct Message {
                     operation: Operation,
+                    #[serde(default)]
+                    scope: OperationScope,
                 }
                 let result = async {
                     let message: Message = request.json().await?;
-                    begin_operation_cloudflare(&self.sql, &message.operation)
+                    begin_operation_cloudflare(&self.sql, &message.operation, &message.scope)
                 }
                 .await;
                 match result {
@@ -483,11 +543,18 @@ impl DurableObject for MaintainerDeliveryJournal {
                 #[derive(Deserialize)]
                 struct Message {
                     operation: Operation,
+                    #[serde(default)]
+                    scope: OperationScope,
                     transition: OperationTransition,
                 }
                 let result = async {
                     let message: Message = request.json().await?;
-                    mark_operation_cloudflare(&self.sql, &message.operation, message.transition)
+                    mark_operation_cloudflare(
+                        &self.sql,
+                        &message.operation,
+                        message.transition,
+                        &message.scope,
+                    )
                 }
                 .await;
                 match result {
@@ -499,10 +566,12 @@ impl DurableObject for MaintainerDeliveryJournal {
                 #[derive(Deserialize)]
                 struct Message {
                     operation_id: String,
+                    #[serde(default)]
+                    scope: OperationScope,
                 }
                 let result = async {
                     let message: Message = request.json().await?;
-                    observe_operation_cloudflare(&self.sql, &message.operation_id)
+                    observe_operation_cloudflare(&self.sql, &message.operation_id, &message.scope)
                 }
                 .await;
                 match result {
@@ -698,6 +767,7 @@ fn initialize_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
     sql.exec(DELIVERY_MIGRATION_SQL, None)?;
     migrate_operations(sql)?;
     sql.exec(OPERATION_MIGRATION_SQL, None)?;
+    sql.exec(AUTHORITY_MIGRATION_SQL, None)?;
     sql.exec(
         "INSERT INTO control_plane_migrations (component, revision, digest)
          VALUES (?, ?, ?) ON CONFLICT(component) DO NOTHING",
@@ -768,7 +838,10 @@ fn audit_cloudflare_schema(sql: &SqlStorage) -> Result<(), Error> {
             vec![OPERATION_MIGRATION_COMPONENT.into()],
         )?
         .to_array::<MigrationRow>()?;
-    let exact = delivery_schema.len() == 1
+    let authority_schema = sql.exec("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'maintainer_operation_authorities'", None)?.to_array::<SchemaRow>()?;
+    let exact = authority_schema.len() == 1
+        && normalized_sql(&authority_schema[0].sql) == expected_stored_sql(AUTHORITY_MIGRATION_SQL)
+        && delivery_schema.len() == 1
         && normalized_sql(&delivery_schema[0].sql) == expected_stored_sql(DELIVERY_MIGRATION_SQL)
         && operation_schema.len() == 1
         && normalized_sql(&operation_schema[0].sql) == expected_stored_sql(OPERATION_MIGRATION_SQL)
@@ -824,7 +897,11 @@ fn record_cloudflare(sql: &SqlStorage, delivery: &Delivery) -> Result<Record, Er
 fn begin_operation_cloudflare(
     sql: &SqlStorage,
     operation: &Operation,
+    scope: &OperationScope,
 ) -> Result<OperationRecord, Error> {
+    if !authorize_operation_cloudflare(sql, &operation.operation_id, scope, true)? {
+        return Ok(OperationRecord::Conflict);
+    }
     let insert = sql.exec(
         "INSERT INTO maintainer_operations (operation_id, kind, request_digest, state)
          VALUES (?, ?, ?, 'planned') ON CONFLICT(operation_id) DO NOTHING",
@@ -862,7 +939,11 @@ fn stored_operation_cloudflare(
 fn observe_operation_cloudflare(
     sql: &SqlStorage,
     operation_id: &str,
+    scope: &OperationScope,
 ) -> Result<Option<OperationObservation>, Error> {
+    if !authorize_operation_cloudflare(sql, operation_id, scope, false)? {
+        return Ok(None);
+    }
     let stored = sql
         .exec(
             "SELECT kind, request_digest, state, result_json
@@ -880,7 +961,11 @@ fn mark_operation_cloudflare(
     sql: &SqlStorage,
     operation: &Operation,
     transition: OperationTransition,
+    scope: &OperationScope,
 ) -> Result<OperationRecord, Error> {
+    if !authorize_operation_cloudflare(sql, &operation.operation_id, scope, false)? {
+        return Ok(OperationRecord::Conflict);
+    }
     let (state, result, allowed) = transition_parts(&transition)?;
     let update = sql.exec(
         &format!(
@@ -938,6 +1023,7 @@ fn transition_parts(
 #[derive(Clone)]
 pub(crate) struct SqliteJournal {
     database: Arc<Path>,
+    scope: OperationScope,
 }
 
 #[cfg(feature = "development-sqlite")]
@@ -945,12 +1031,14 @@ impl SqliteJournal {
     fn open(database: &Path) -> Result<Self, Error> {
         let journal = Self {
             database: Arc::from(database),
+            scope: OperationScope::default(),
         };
         let connection = journal.connection()?;
         connection.execute_batch(MIGRATION_TABLE_SQL)?;
         connection.execute_batch(DELIVERY_MIGRATION_SQL)?;
         migrate_operations_sqlite(&connection)?;
         connection.execute_batch(OPERATION_MIGRATION_SQL)?;
+        connection.execute_batch(AUTHORITY_MIGRATION_SQL)?;
         connection.execute(
             "INSERT INTO control_plane_migrations (component, revision, digest)
              VALUES (?1, ?2, ?3) ON CONFLICT(component) DO NOTHING",
@@ -1028,6 +1116,9 @@ impl SqliteJournal {
         let mut connection = self.connection()?;
         audit_sqlite_schema(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !authorize_operation_sqlite(&transaction, &operation.operation_id, &self.scope, true)? {
+            return Ok(OperationRecord::Conflict);
+        }
         let changed = transaction.execute(
             "INSERT INTO maintainer_operations (operation_id, kind, request_digest, state)
              VALUES (?1, ?2, ?3, 'planned') ON CONFLICT(operation_id) DO NOTHING",
@@ -1054,6 +1145,9 @@ impl SqliteJournal {
         let mut connection = self.connection()?;
         audit_sqlite_schema(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !authorize_operation_sqlite(&transaction, &operation.operation_id, &self.scope, false)? {
+            return Ok(OperationRecord::Conflict);
+        }
         let (state, result, allowed) = transition_parts(&transition)?;
         let sql = format!(
             "UPDATE maintainer_operations SET state = ?1, result_json = ?2, updated_at = unixepoch()
@@ -1081,6 +1175,9 @@ impl SqliteJournal {
     fn observe_operation(&self, operation_id: &str) -> Result<Option<OperationObservation>, Error> {
         let connection = self.connection()?;
         audit_sqlite_schema(&connection)?;
+        if !authorize_operation_sqlite(&connection, operation_id, &self.scope, false)? {
+            return Ok(None);
+        }
         observe_operation_sqlite(&connection, operation_id)
     }
 
@@ -1208,8 +1305,10 @@ fn audit_sqlite_schema(connection: &Connection) -> Result<(), Error> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let exact = schema("maintainer_deliveries")?
-        .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(DELIVERY_MIGRATION_SQL))
+    let exact = schema("maintainer_operation_authorities")?
+        .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(AUTHORITY_MIGRATION_SQL))
+        && schema("maintainer_deliveries")?
+            .is_some_and(|sql| normalized_sql(&sql) == expected_stored_sql(DELIVERY_MIGRATION_SQL))
         && schema("maintainer_operations")?.is_some_and(|sql| {
             normalized_sql(&sql) == expected_stored_sql(OPERATION_MIGRATION_SQL)
         })
@@ -1270,9 +1369,164 @@ fn observe_operation_sqlite(
         .map_err(Error::from)
 }
 
+// No receipt rewrite: every pre-connection UUID remains owned by the legacy
+// operator. The binding is immutable even when a determinate refusal releases
+// an execution claim. A shared repository never implies shared receipt access.
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const AUTHORITY_LOOKUP: &str =
+    "SELECT owner, repository FROM maintainer_operation_authorities WHERE operation_id = ?
+    UNION ALL SELECT 'legacy', '' FROM maintainer_operations WHERE operation_id = ?
+    AND NOT EXISTS (SELECT 1 FROM maintainer_operation_authorities WHERE operation_id = ?)";
+#[cfg(any(target_arch = "wasm32", feature = "development-sqlite"))]
+const AUTHORITY_INSERT: &str = "INSERT INTO maintainer_operation_authorities (operation_id, owner, repository) VALUES (?, ?, ?)";
+
+#[cfg(target_arch = "wasm32")]
+fn authorize_operation_cloudflare(
+    sql: &SqlStorage,
+    id: &str,
+    scope: &OperationScope,
+    claim: bool,
+) -> Result<bool, Error> {
+    let bindings = sql
+        .exec(AUTHORITY_LOOKUP, vec![id.into(), id.into(), id.into()])?
+        .to_array::<OperationScope>()?;
+    match bindings.as_slice() {
+        [stored] => Ok(stored.owner == scope.owner && stored.repository == scope.repository),
+        [] if claim => {
+            sql.exec(
+                AUTHORITY_INSERT,
+                vec![
+                    id.into(),
+                    scope.owner.as_str().into(),
+                    scope.repository.as_str().into(),
+                ],
+            )?;
+            Ok(true)
+        }
+        [] => Ok(false),
+        _ => Err(Error::InvalidSchema),
+    }
+}
+
+#[cfg(feature = "development-sqlite")]
+fn authorize_operation_sqlite(
+    connection: &Connection,
+    id: &str,
+    scope: &OperationScope,
+    claim: bool,
+) -> Result<bool, Error> {
+    let stored = connection
+        .query_row(AUTHORITY_LOOKUP, [id, id, id], |row| {
+            Ok(OperationScope {
+                owner: row.get(0)?,
+                repository: row.get(1)?,
+            })
+        })
+        .optional()?;
+    match stored {
+        Some(stored) => Ok(stored.owner == scope.owner && stored.repository == scope.repository),
+        None if claim => {
+            connection.execute(AUTHORITY_INSERT, params![id, scope.owner, scope.repository])?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 #[cfg(all(test, feature = "development-sqlite"))]
 mod operation_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn receipt_ownership_is_immutable_for_two_connections_and_legacy() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("journal.db");
+        let legacy = DeliveryJournal::open_development(&database).unwrap();
+        let alice = legacy
+            .for_connection(&"a".repeat(64), "team/shared")
+            .unwrap();
+        let bob = legacy
+            .for_connection(&"b".repeat(64), "team/shared")
+            .unwrap();
+        let other_repo = legacy
+            .for_connection(&"a".repeat(64), "team/other")
+            .unwrap();
+        let operation = Operation {
+            operation_id: "6d1f0f8e-7f1f-11f0-952e-acde48001122".into(),
+            kind: "create_issue".into(),
+            request_digest: "b".repeat(64),
+        };
+        assert!(matches!(
+            alice.begin_operation(&operation).await.unwrap(),
+            OperationRecord::New
+        ));
+        for denied in [&bob, &legacy, &other_repo] {
+            assert!(matches!(
+                denied.begin_operation(&operation).await.unwrap(),
+                OperationRecord::Conflict
+            ));
+            assert!(matches!(
+                denied
+                    .mark_operation(&operation, OperationTransition::Executing)
+                    .await
+                    .unwrap(),
+                OperationRecord::Conflict
+            ));
+            assert!(
+                denied
+                    .observe_operation(&operation.operation_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        alice
+            .mark_operation(
+                &operation,
+                OperationTransition::Completed("{\"private\":true}".into()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            alice.begin_operation(&operation).await.unwrap(),
+            OperationRecord::Completed(_)
+        ));
+        assert!(
+            bob.observe_operation(&operation.operation_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Old rows have no authority record. Restart/migration keeps their UUID,
+        // receipt, and implicit legacy owner; customers cannot adopt that UUID.
+        let old_id = "7d1f0f8e-7f1f-11f0-952e-acde48001122";
+        Connection::open(&database).unwrap().execute(
+            "INSERT INTO maintainer_operations(operation_id, kind, request_digest, state) VALUES (?1, 'create_issue', ?2, 'planned')",
+            params![old_id, "b".repeat(64)],
+        ).unwrap();
+        let reopened = DeliveryJournal::open_development(&database).unwrap();
+        assert!(reopened.observe_operation(old_id).await.unwrap().is_some());
+        let old = Operation {
+            operation_id: old_id.into(),
+            ..operation.clone()
+        };
+        assert!(matches!(
+            alice.begin_operation(&old).await.unwrap(),
+            OperationRecord::Conflict
+        ));
+        assert!(alice.observe_operation(old_id).await.unwrap().is_none());
+        // Concurrent first use has exactly one owner, even at the same repo.
+        let fresh = Operation {
+            operation_id: "8d1f0f8e-7f1f-11f0-952e-acde48001122".into(),
+            ..operation
+        };
+        let (a, b) = tokio::join!(alice.begin_operation(&fresh), bob.begin_operation(&fresh));
+        assert!(matches!(
+            (a.unwrap(), b.unwrap()),
+            (OperationRecord::New, OperationRecord::Conflict)
+                | (OperationRecord::Conflict, OperationRecord::New)
+        ));
+    }
 
     #[tokio::test]
     async fn a_refused_operation_releases_its_claim_for_the_same_request() {

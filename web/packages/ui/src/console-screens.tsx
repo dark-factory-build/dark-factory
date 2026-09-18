@@ -155,6 +155,7 @@ export function FactoryFloor({
         <button type="button" aria-current={index === scene.navigation.breadcrumbs.length - 1 ? "page" : undefined} disabled={index === scene.navigation.breadcrumbs.length - 1} onClick={() => setScopeId(crumb.id)}>{crumb.label}</button>
       </span>)}
       {scene.navigation.scopeId === undefined ? null : <button type="button" onClick={() => setScopeId(scene.navigation.backScopeId)}>BACK</button>}
+      <span className="dfFactoryFloor__spaceCount" aria-live="polite">{scene.topology.nodes.length} {scene.topology.nodes.length === 1 ? "space" : "spaces"}</span>
     </nav>
     {inventoryOmitted === 0 ? null : <p role="status">{inventoryOmitted} room inventories omitted from the served projects; those rooms show inventory unavailable.</p>}
     {scene.navigation.pageCount <= 1 ? null : <nav aria-label="Floor pages">

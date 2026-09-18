@@ -85,6 +85,30 @@ factoryctl remote status
 The CLI cannot delete origin-scoped browser storage; pairing afresh from the
 pair page makes that manual browser action unnecessary.
 
+## Feedback and public backlog
+
+Settings → Help and feedback opens the public reporting and backlog pages,
+including while the factory is disconnected. From the CLI:
+
+```sh
+factoryctl feedback bug --open
+factoryctl feedback feature --agent-assisted --factory-name "My workshop"
+factoryctl backlog
+factoryctl backlog --open
+```
+
+Without `--open`, feedback prints its preparation link. Only bounded build
+identity and explicitly supplied context are included; no factory settings,
+repository names, paths or logs are read. Factory names and agent assistance
+are self-reported context. Review the report and submit it under your own GitHub
+account. Opening a page does not submit an issue. The reporting page provides
+copyable text when a report is too long for a prefilled URL.
+
+`backlog` returns the fixed public backlog as JSON, with its observation time
+and truncation indicator. It needs no running daemon, GitHub connection or local
+execution subscription. Use the issue's native GitHub thumbs-up reaction to
+endorse it. Reports and votes do not accept work or start a local agent.
+
 Create each agent with an explicit provider. `shell` needs no external tool;
 `claude_code` and `codex` require the corresponding `claude` or `codex` CLI to
 be installed and already signed in through its normal account workflow:
