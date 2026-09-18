@@ -61,6 +61,7 @@ func (store *Store) AdmitNext(ctx context.Context, keys AdmissionKeys, at UnixMi
 			JOIN agents AS a ON a.project_id = t.project_id AND (a.id = t.assigned_agent_id OR t.assigned_agent_id IS NULL AND a.role = 'worker')
 			LEFT JOIN delivered_successors AS d ON d.successor_task_id = t.id
 			WHERE t.status = 'queued'
+              AND NOT EXISTS (SELECT 1 FROM intake_acceptances AS acceptance WHERE acceptance.task_id = t.id AND acceptance.withdrawn_at_ms IS NOT NULL)
 			  AND a.paused = 0 AND a.archived = 0
 			  AND (a.role = 'orchestrator' OR a.tool_calls_used < a.tool_budget_limit)
 			  AND EXISTS (SELECT 1 FROM projects AS p WHERE p.id = t.project_id AND (p.run_budget_limit = 0 OR p.runs_used < p.run_budget_limit))

@@ -91,16 +91,17 @@ const (
 // import receipt. TaskID and IncarnationID are derived without source config
 // identity, so overlapping feeds cannot duplicate the same accepted work.
 type IntakeAcceptance struct {
-	ID              IntakeAcceptanceID
-	Snapshot        IntakeIssueSnapshot
-	BodyHash        [DigestBytes]byte
-	ProjectID       ProjectID
-	RepositoryID    RepositoryID
-	OverseerAgentID AgentID
-	TaskID          TaskID
-	IncarnationID   IncarnationID
-	WithdrawnAt     *UnixMillis
-	CreatedAt       UnixMillis
+	SourceRepository string
+	ID               IntakeAcceptanceID
+	Snapshot         IntakeIssueSnapshot
+	BodyHash         [DigestBytes]byte
+	ProjectID        ProjectID
+	RepositoryID     RepositoryID
+	OverseerAgentID  AgentID
+	TaskID           TaskID
+	IncarnationID    IncarnationID
+	WithdrawnAt      *UnixMillis
+	CreatedAt        UnixMillis
 }
 
 type IntakeEligibility string

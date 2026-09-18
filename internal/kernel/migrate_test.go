@@ -679,8 +679,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "2e059356fabc74b840ff13e9d26f83b942c38ce2945347b86da2b6a5be7652d8"},
-		{"v24", v24SchemaStatements(), "d2ea4948d7098b5a91b7759db2c17c94152c4336ddbc62ce30f2a8a8a16cf905"},
+		{"current", schemaStatements, "e8cdef707932d0ebea85b73fbb2b3205fa91e29c31ae8ffd9bdd97f1b09321ca"},
+		{"v24", v24SchemaStatements(), "c041303fb9f3e726a4a6f3dd12abe0bb367531e2efd2627195d3f9275e3ba133"},
 		{"v23", v23SchemaStatements(), "301b6c8046552e1c5fb669c92001a449d215315c1a565e6526826b7fc5b0fa12"},
 		{"v22", v22SchemaStatements(), "3dd09f64e28fcb94ba6999129defe92286a10907e8ae5b6e4be4b37fb3281478"},
 		{"v21", v21SchemaStatements(), "17306bf8a7cae30e75dc0e3d85574a1ef96a45c3abfd63d2ca902fbb79c10092"},
