@@ -623,6 +623,12 @@ func resolveHumanContinuationOnConnection(ctx context.Context, tx *writeTx, requ
 			return err
 		}
 	}
+	var deliveryCollision int
+	if err := tx.connection.QueryRowContext(ctx, `SELECT 1 FROM human_requests WHERE delivery_id = ?`, deliveryID.Bytes()).Scan(&deliveryCollision); err == nil {
+		return ErrConflict
+	} else if err != sql.ErrNoRows {
+		return err
+	}
 	updated, err := tx.connection.ExecContext(ctx, `UPDATE human_requests SET status='resolved', delivery_id=?, delivery_started_at_ms=?, resolution_kind='reply', closed_at_ms=?, revision=revision+1, updated_at_ms=? WHERE id=? AND status='open' AND revision=?`, deliveryID.Bytes(), at.Int64(), at.Int64(), at.Int64(), request.ID.Bytes(), request.Revision.Int64())
 	if err := requireOneRow(updated, err); err != nil {
 		return err

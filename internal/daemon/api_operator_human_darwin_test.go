@@ -26,6 +26,21 @@ type operatorAPITestFixture struct {
 func TestOperatorHumanReplyResolvesYieldedContinuation(t *testing.T) {
 	adapter := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	run := adapterRunningRun(t, adapter.store, 40)
+	ctx := context.Background()
+	var priorKey [kernel.IDBytes]byte
+	copy(priorKey[:], adapterID(t, 63))
+	prior, err := adapter.store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: priorKey, QuestionText: "prior decision"}, adapterTime(t, 450))
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorOperation, _ := kernel.HumanRequestDeliveryIDFromBytes(adapterID(t, 62))
+	delivery, err := adapter.store.BeginHumanReplyForOperator(ctx, prior.ID, prior.Revision, priorOperation, "answered", adapterTime(t, 451))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.store.AcknowledgeHumanReply(ctx, prior.ID, priorOperation, delivery.Revision, adapterTime(t, 452)); err != nil {
+		t.Fatal(err)
+	}
 	var key [kernel.IDBytes]byte
 	copy(key[:], adapterID(t, 60))
 	request, err := adapter.store.CreateHumanQuestionForAttempt(context.Background(), run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "continue?"}, adapterTime(t, 500))
@@ -38,6 +53,17 @@ func TestOperatorHumanReplyResolvesYieldedContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	completeYieldedOperatorRun(t, adapter.store, run)
+	before, err := adapter.store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.store.ResolveHumanContinuationForOperator(ctx, request.ID, request.Revision, priorOperation, "collision", adapterTime(t, 506)); !errors.Is(err, kernel.ErrConflict) {
+		t.Fatalf("cross-request operation collision = %v", err)
+	}
+	after, err := adapter.store.Snapshot(ctx)
+	if err != nil || after.Head != before.Head {
+		t.Fatalf("collision mutated durable state: %v -> %v, %v", before.Head, after.Head, err)
+	}
 	operator := newOperatorAPITestFixture(t, adapter.daemon)
 	done := operator.serve(t)
 	result, err := operator.client.HumanReply(context.Background(), api.OverseerHumanReplyInput{OperationID: hex.EncodeToString(adapterID(t, 61)), RequestID: request.ID.String(), ExpectedRevision: uint64(request.Revision.Int64()), Reply: "continue"})
@@ -45,6 +71,18 @@ func TestOperatorHumanReplyResolvesYieldedContinuation(t *testing.T) {
 		t.Fatalf("yielded operator reply = %+v, %v", result, err)
 	}
 	waitOperatorAPI(t, done)
+	resolved, err := adapter.store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, _ := kernel.HumanRequestDeliveryIDFromBytes(adapterID(t, 61))
+	if _, err := adapter.store.ResolveHumanContinuationForOperator(ctx, request.ID, request.Revision, operation, "continue", adapterTime(t, 507)); !errors.Is(err, kernel.ErrRevisionConflict) {
+		t.Fatalf("stale resolved-request replay = %v", err)
+	}
+	replayed, err := adapter.store.Snapshot(ctx)
+	if err != nil || replayed.Head != resolved.Head {
+		t.Fatalf("replay promoted again: %v -> %v, %v", resolved.Head, replayed.Head, err)
+	}
 }
 
 func completeYieldedOperatorRun(t *testing.T, store *kernel.Store, run kernel.Run) {
