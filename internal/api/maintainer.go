@@ -11,13 +11,65 @@ import (
 type MaintainerInput struct {
 	Request json.RawMessage `json:"request"`
 }
+
 type MaintainerResult struct {
 	Response json.RawMessage `json:"response,omitempty"`
 	State    string          `json:"state"`
 }
 
+// MarshalJSON keeps the foreign MCP document opaque to the local protocol's
+// lower-snake-case member rule while retaining its exact JSON bytes.
+func (input MaintainerInput) MarshalJSON() ([]byte, error) {
+	if err := validateJSON(input.Request, false); err != nil {
+		return nil, err
+	}
+	return json.Marshal(struct {
+		Request string `json:"request"`
+	}{Request: string(input.Request)})
+}
+
+func (input *MaintainerInput) UnmarshalJSON(encoded []byte) error {
+	var value struct {
+		Request string `json:"request"`
+	}
+	if err := json.Unmarshal(encoded, &value); err != nil || validateJSON([]byte(value.Request), false) != nil {
+		return ErrProtocol
+	}
+	input.Request = json.RawMessage(value.Request)
+	return nil
+}
+
+// MarshalJSON keeps the broker's MCP response opaque for the same reason as
+// MaintainerInput. The daemon sanitizes accepted observations before reply.
+func (result MaintainerResult) MarshalJSON() ([]byte, error) {
+	if result.State == "ok" {
+		if err := validateJSON(result.Response, false); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(struct {
+		Response string `json:"response,omitempty"`
+		State    string `json:"state"`
+	}{Response: string(result.Response), State: result.State})
+}
+
+func (result *MaintainerResult) UnmarshalJSON(encoded []byte) error {
+	var value struct {
+		Response string `json:"response,omitempty"`
+		State    string `json:"state"`
+	}
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return err
+	}
+	if value.State == "ok" && validateJSON([]byte(value.Response), false) != nil {
+		return ErrProtocol
+	}
+	result.Response, result.State = json.RawMessage(value.Response), value.State
+	return nil
+}
+
 func (client *AttemptClient) Maintainer(ctx context.Context, input MaintainerInput) (MaintainerResult, error) {
-	if len(input.Request) == 0 || len(input.Request) > 512<<10 || !json.Valid(input.Request) {
+	if len(input.Request) == 0 || len(input.Request) > 512<<10 || validateJSON(input.Request, false) != nil {
 		return MaintainerResult{}, ErrInvalidInput
 	}
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
@@ -28,7 +80,7 @@ func (client *AttemptClient) Maintainer(ctx context.Context, input MaintainerInp
 	}
 	switch result.State {
 	case "ok":
-		if !json.Valid(result.Response) {
+		if validateJSON(result.Response, false) != nil {
 			return MaintainerResult{}, ErrProtocol
 		}
 	case "denied", "unavailable", "invalid", "repository_unbound", "accepted_snapshot_required":
