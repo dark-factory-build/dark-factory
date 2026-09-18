@@ -632,7 +632,7 @@ func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest Attem
 	if run.Provider != ProviderShell && effectiveTask == "" {
 		effectiveTask = relationships.task.Title
 	}
-	continuationContexts, err := resolvedContinuationContextsForTask(ctx, tx.connection, relationships.task)
+	continuationContexts, err := resolvedContinuationContextsForTask(ctx, connection, relationships.task)
 	if err != nil {
 		return AttemptAuthority{}, err
 	}
