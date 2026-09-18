@@ -130,6 +130,14 @@ test("status changes reach the host with finite closed reasons", () => {
   context.emitError(new SessionError("pairing_required"));
   context.emitStatus("closed");
   assert.deepEqual(context.statusChanges, [{ status: "ready" }, { status: "closed", reason: "pairing_required" }]);
+
+  // A retryable close (a call budget the store outran) is one the client
+  // reconnects on by itself, so the host sees the same transient reason as
+  // transport loss rather than a permanent failure to act on.
+  context.emitStatus("ready");
+  context.emitError(new SessionError("rate_limited", true));
+  context.emitStatus("closed");
+  assert.deepEqual(context.statusChanges.slice(2), [{ status: "ready" }, { status: "closed", reason: "connection" }]);
 });
 
 test("status changes are deduplicated without affecting snapshot updates", () => {
