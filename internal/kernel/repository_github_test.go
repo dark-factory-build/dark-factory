@@ -55,6 +55,9 @@ func TestV24MigrationPreservesSourceProofWithoutInventingGitHubID(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.writer.Exec("DROP TABLE intake_acceptance_reviews"); err != nil {
+		t.Fatal(err)
+	}
 	old := expectedSchemaOf(v24SchemaStatements())["repository_source_identities"].sql
 	columns := "repository_id, " + repositorySourceColumns
 	for _, statement := range []string{

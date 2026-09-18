@@ -464,3 +464,96 @@ func TestBotAuthorMetadataNeverGrantsAutomaticAcceptance(t *testing.T) {
 		t.Fatal("bot spelling leaked into human authority or invalid metadata")
 	}
 }
+
+func TestIntakeReacceptsRestoredContentWithoutDuplicatingWork(t *testing.T) {
+	for _, imported := range []bool{false, true} {
+		t.Run(fmt.Sprint(imported), func(t *testing.T) {
+			ctx := context.Background()
+			store, path := newTestStore(t)
+			project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 240), Name: "restored", Root: "/restored"}, mustTime(t, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := intakeSourceForTest(t, IntakePolicyManual)
+			source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: spec.ID, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err = store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, true, mustTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := intakeSnapshotForTest()
+			first, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 4))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if imported {
+				if _, err := store.ImportIntakeAcceptance(ctx, first.ID, mustTime(t, 5)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			changed := snapshot
+			changed.Body = "Different reviewed instructions"
+			second, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 6))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Restoring A is a new explicit review, not a rewrite of its receipt.
+			restored, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 7))
+			if err != nil || restored.ID != first.ID || restored.TaskID != first.TaskID || restored.CreatedAt != first.CreatedAt {
+				t.Fatalf("restored receipt: %+v %v", restored, err)
+			}
+			if retry, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 5)); err != nil || retry.ID != first.ID {
+				t.Fatalf("retry: %+v %v", retry, err)
+			}
+			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 7)); !errors.Is(err, ErrRevisionConflict) {
+				t.Fatalf("nonincreasing review: %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err = Open(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			latest, found, err := store.LatestIntakeAcceptance(ctx, 42, snapshot.IssueNumber, snapshot.NodeID, project.ID, source.TargetRepositoryID)
+			if err != nil || !found || latest.ID != first.ID {
+				t.Fatalf("latest after restart: %+v %v", latest, err)
+			}
+			pending, err := store.PendingIntakeAcceptances(ctx, source.ID, 25)
+			expected := 1
+			if imported {
+				expected = 0
+			}
+			if err != nil || len(pending) != expected || expected == 1 && pending[0].ID != first.ID {
+				t.Fatalf("pending: %+v %v", pending, err)
+			}
+			if _, err := store.ImportIntakeAcceptance(ctx, second.ID, mustTime(t, 8)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("superseded B imported: %v", err)
+			}
+			task, err := store.ImportIntakeAcceptance(ctx, first.ID, mustTime(t, 8))
+			if err != nil || task.ID != first.TaskID {
+				t.Fatalf("A task: %+v %v", task, err)
+			}
+			var tasks, reviews int
+			if err := store.readers.QueryRow(`SELECT (SELECT COUNT(*) FROM tasks), (SELECT COUNT(*) FROM intake_acceptance_reviews)`).Scan(&tasks, &reviews); err != nil || tasks != 1 || reviews != 1 {
+				t.Fatalf("dedup: tasks=%d reviews=%d err=%v", tasks, reviews, err)
+			}
+			if _, err := store.WithdrawIntakeAcceptance(ctx, first.ID, mustTime(t, 9)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.AcceptIntakeSnapshot(ctx, source.ID, changed, mustTime(t, 10)); err != nil {
+				t.Fatal(err)
+			}
+			if withdrawn, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 11)); err != nil || withdrawn.WithdrawnAt == nil {
+				t.Fatalf("withdrawal revived: %+v %v", withdrawn, err)
+			}
+			latest, _, err = store.LatestIntakeAcceptance(ctx, 42, snapshot.IssueNumber, snapshot.NodeID, project.ID, source.TargetRepositoryID)
+			if err != nil || latest.ID != second.ID {
+				t.Fatalf("withdrawn review promoted: %+v %v", latest, err)
+			}
+		})
+	}
+}

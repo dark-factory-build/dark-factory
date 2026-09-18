@@ -373,8 +373,14 @@ func (store *Store) LatestIntakeAcceptance(ctx context.Context, repositoryID, nu
 	return latestIntakeAcceptance(ctx, read.connection, repositoryID, number, nodeID, projectID, targetRepositoryID)
 }
 
+// Review events promote previously accepted content without changing its receipt
+// or task identity. Historical content cannot become duplicate executable work.
+func intakeReviewTime(alias string) string {
+	return "COALESCE((SELECT MAX(reviewed_at_ms) FROM intake_acceptance_reviews WHERE acceptance_id = " + alias + ".id), " + alias + ".created_at_ms)"
+}
+
 func latestIntakeAcceptance(ctx context.Context, connection *sql.Conn, repositoryID, number uint64, nodeID string, projectID ProjectID, targetRepositoryID RepositoryID) (IntakeAcceptance, bool, error) {
-	return scanIntakeAcceptance(connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE github_repository_id = ? AND issue_number = ? AND issue_node_id = ? AND project_id = ? AND repository_id = ? ORDER BY created_at_ms DESC, id DESC LIMIT 1`, int64(repositoryID), int64(number), nodeID, projectID.Bytes(), targetRepositoryID.Bytes()))
+	return scanIntakeAcceptance(connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE github_repository_id = ? AND issue_number = ? AND issue_node_id = ? AND project_id = ? AND repository_id = ? ORDER BY `+intakeReviewTime("intake_acceptances")+` DESC, id DESC LIMIT 1`, int64(repositoryID), int64(number), nodeID, projectID.Bytes(), targetRepositoryID.Bytes()))
 }
 
 // PendingIntakeAcceptances returns receipts that still need their first task
@@ -419,7 +425,7 @@ func (store *Store) PendingIntakeAcceptancesAfter(ctx context.Context, sourceID 
 					AND newer.issue_node_id = accepted.issue_node_id
 					AND newer.project_id = accepted.project_id
 					AND newer.repository_id = accepted.repository_id
-					AND (newer.created_at_ms > accepted.created_at_ms OR newer.created_at_ms = accepted.created_at_ms AND newer.id > accepted.id)
+					AND (`+intakeReviewTime("newer")+` > `+intakeReviewTime("accepted")+` OR `+intakeReviewTime("newer")+` = `+intakeReviewTime("accepted")+` AND newer.id > accepted.id)
 			)
 		ORDER BY accepted.id LIMIT ?`, int64(source.GitHubRepositoryID), source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), after.Bytes(), int64(limit))
 	if err != nil {
@@ -466,22 +472,39 @@ func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSou
 	if err != nil {
 		return IntakeAcceptance{}, tx.Rollback(err)
 	}
-	if existing, found, err := intakeAcceptanceByID(ctx, tx.connection, id); err != nil {
+	latest, latestFound, err := latestIntakeAcceptance(ctx, tx.connection, snapshot.GitHubRepositoryID, snapshot.IssueNumber, snapshot.NodeID, source.ProjectID, source.TargetRepositoryID)
+	if err != nil {
 		return IntakeAcceptance{}, tx.Rollback(err)
-	} else if found {
+	}
+	existing, exists, err := intakeAcceptanceByID(ctx, tx.connection, id)
+	if err != nil {
+		return IntakeAcceptance{}, tx.Rollback(err)
+	}
+	// Exact retries remain stable, including withdrawn receipts: explicit
+	// acceptance never revives work withdrawn from this receipt.
+	if exists && (existing.WithdrawnAt != nil || latestFound && latest.ID == existing.ID) {
 		if err := tx.Rollback(nil); err != nil {
 			return IntakeAcceptance{}, err
 		}
 		return existing, nil
 	}
-	// Distinct receipts need an unambiguous order. Exact-content retries above
-	// replay even after clock rollback; a new snapshot waits for a later tick.
-	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, snapshot.GitHubRepositoryID, snapshot.IssueNumber, snapshot.NodeID, source.ProjectID, source.TargetRepositoryID)
-	if err != nil {
-		return IntakeAcceptance{}, tx.Rollback(err)
+	if latestFound {
+		var reviewedAt int64
+		if err := tx.connection.QueryRowContext(ctx, `SELECT `+intakeReviewTime("intake_acceptances")+` FROM intake_acceptances WHERE id = ?`, latest.ID.Bytes()).Scan(&reviewedAt); err != nil {
+			return IntakeAcceptance{}, tx.Rollback(err)
+		}
+		if at.Int64() <= reviewedAt {
+			return IntakeAcceptance{}, tx.Rollback(ErrRevisionConflict)
+		}
 	}
-	if found && at.Int64() <= latest.CreatedAt.Int64() {
-		return IntakeAcceptance{}, tx.Rollback(ErrRevisionConflict)
+	if exists {
+		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_acceptance_reviews(acceptance_id, reviewed_at_ms) VALUES(?, ?)`, existing.ID.Bytes(), at.Int64()); err != nil {
+			return IntakeAcceptance{}, tx.Rollback(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return IntakeAcceptance{}, err
+		}
+		return existing, nil
 	}
 	bodyHash := snapshot.BodyHash()
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_acceptances(`+intakeAcceptanceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`, source.GitHubRepositoryName, id.Bytes(), int64(snapshot.GitHubRepositoryID), int64(snapshot.IssueNumber), snapshot.NodeID, snapshot.Title, snapshot.Body, bodyHash[:], source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), nullableAgentID(source.OverseerAgentID), task.Bytes(), incarnation.Bytes(), at.Int64()); err != nil {
