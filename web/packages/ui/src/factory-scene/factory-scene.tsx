@@ -4,7 +4,8 @@ import {
   PADDING,
   ROOM_LEFT,
   layoutScene,
-  commonSeats,
+  commonSeating,
+  WORKER_SIZE,
   placeWorkers,
   inventoryLabels,
   type RoomContent,
@@ -222,7 +223,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
             <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.area === "resting" ? worker.paused ? "Paused · taking a break" : "Taking a break" : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
-              <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
+              <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               {!seated ? null : <g aria-hidden="true">
                 <path d="M-5 4h4v3h-5 M2 4h4v3H2" stroke="#838574" strokeWidth="2" fill="#4f5d59" />
                 {placement.area === "resting" || !connected ? null : <g data-planning-light="" ><circle cx="12" cy="-14" r="12" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}
@@ -261,10 +262,12 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
   const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
   const resting = placements.filter((placement) => placement.area === "resting");
-  const staging = placements.filter((placement) => placement.area === "staging");
-  const overflow = placements.filter((placement) => placement.area === "overflow");
-  const outside = placements.filter((placement) => placement.area === "outside");
-  const boardTop = Math.max(layout.height, ...placements.map((placement) => placement.y + 24)) + PADDING;
+  const planning = placements.filter((placement) => placement.area !== "room" && placement.area !== "resting");
+  const seating = commonSeating(layout, resting.length, planning.length);
+  const seats = [...seating.resting, ...seating.planning];
+  const commonBottom = Math.max(...seats.map(({ y }) => y)) + 24;
+  const commonWidth = Math.max(...seats.map(({ x }) => x)) + 24 - ROOM_LEFT;
+  const boardTop = Math.max(layout.height, commonBottom, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneHeight = boardTop + (tasks.some((task) => task.status === "queued") ? 48 : 0) + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
@@ -362,23 +365,23 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
 
 
+      <Area width={commonWidth} top={layout.restingTop - 40} bottom={commonBottom} />
       {[
-        { label: "Break room", people: resting, top: layout.restingTop, planning: false },
-        ...[staging, outside, overflow].filter((people) => people.length > 0).map((people) => ({ label: "Planning", people, top: people[0]!.y, planning: true })),
-      ].map(({ label, people, top, planning }) => {
-        const seats = commonSeats(layout, people.length, top);
+        { label: "Break room", seats: seating.resting, planning: false },
+        { label: "Planning", seats: seating.planning, planning: true },
+      ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning }) => {
+        const top = seats[0]!.y;
         const columns = seats.filter((seat) => seat.y === top).length;
-        const width = Math.max(...seats.map((seat) => seat.x)) - ROOM_LEFT + 24;
-        return <g key={top}>
-          <Area label={label} width={width} top={top - 40} bottom={seats.at(-1)!.y + 24} />
+        return <g key={label} role="group" aria-label={label}>
+          <text x={seats[0]!.x - 18} y={top - 25} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
           {seats.map((seat, index) => <g key={index} aria-hidden="true" data-common-seat={planning ? "planning" : "resting"} transform={`translate(${seat.x} ${seat.y})`}>
             <rect x="-7" y="3" width="14" height="6" rx="2" fill="#655948" stroke="#897c61" />
             <path d="M-5 9v3 M5 9v3" stroke="#3f4540" strokeWidth="3" />
             {index > 0 && seats[index - 1]!.y === seat.y && index % columns % 2 === 1 ? null : <>
-              <rect x="-18" y="-19" width={seats[index + 1]?.y === seat.y ? 76 : 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
-              {planning ? <g><rect x="-12" y="-17" width="24" height="6" fill="#9fae9e" /><path d="M-9 -15h12v3H-3v-3 M5 -14h4" fill="none" stroke="#536e70" />
+              <rect x="-18" y="-21" width={seats[index + 1]?.y === seat.y ? 76 : 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
+              {planning ? <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" />
                 <path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path data-planning-light={connected} d="M4 -20h6" stroke={connected ? "#dfc38f" : "#626c64"} strokeWidth="3" />
-              </g> : <g><rect x="5" y="-17" width="4" height="4" rx="1" fill="#cbc4a6" /><path d="M9 -16h2v2H9" fill="none" stroke="#cbc4a6" /></g>}
+              </g> : <g><rect x="5" y="-19" width="4" height="4" rx="1" fill="#cbc4a6" /><path d="M9 -18h2v2H9" fill="none" stroke="#cbc4a6" /></g>}
             </>}
           </g>)}
         </g>;
@@ -405,12 +408,11 @@ function sceneAction(select: (() => void) | undefined) {
   } };
 }
 
-function Area({ label, width, top, bottom }: { label: string; width: number; top: number; bottom: number }) {
+function Area({ width, top, bottom }: { width: number; top: number; bottom: number }) {
   return (
-    <g role="group" aria-label={label}>
+    <g role="group" aria-label="Common room">
       <rect x={ROOM_LEFT} y={top} width={width} height={bottom - top} fill="url(#df-floor)" />
       <path d={`M${ROOM_LEFT} ${top + 24}v-24h${width}v${bottom - top}H${ROOM_LEFT}v-8`} fill="none" stroke="#465355" strokeWidth="3" />
-      <text x={ROOM_LEFT + 6} y={top + 15} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
     </g>
   );
 }

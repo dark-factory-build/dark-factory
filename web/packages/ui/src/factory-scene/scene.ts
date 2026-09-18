@@ -78,6 +78,7 @@ export const PADDING = 16;
 export const ROOM_LEFT = PADDING + CORRIDOR;
 const FLOOR_TOP = 48;
 const WORKER_GAP = 40;
+export const WORKER_SIZE = 20;
 
 /** Ordering for the floor: byte order over served fields, never a locale. */
 export function compareText(left: string, right: string) {
@@ -108,7 +109,7 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
     for (let start = 0; start < members.length; start += columns) {
       const row = Math.floor(start / columns);
       const widths = row % 2 === 0 ? bays : [...bays.slice(1), bays[0]!];
-      const height = row % 2 === 0 ? 128 : 144;
+      const height = row % 2 === 0 ? 112 : 128;
       let x = ROOM_LEFT;
       for (const [index, node] of members.slice(start, start + columns).entries()) {
         const width = widths[index]!;
@@ -145,32 +146,36 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
     roomCounts.set(room.id, slot + 1);
     placed.push({ id: worker.id, area: "room", roomId: room.id, ...positions[slot]! });
   }
-  let top = layout.restingTop;
-  for (const area of ["resting", "staging", "outside", "overflow"] as const) {
-    const seats = commonSeats(layout, areas[area].length, top);
-    areas[area].forEach((worker, slot) => placed.push({ id: worker.id, area, ...seats[slot]! }));
-    // Keep a furnished break room even when empty; extra workers grow below it.
-    if (area === "resting" || areas[area].length > 0) top = seats.at(-1)!.y + WORKER_GAP + 48;
-  }
+  const planning = (["staging", "outside", "overflow"] as const).flatMap((area) => areas[area].map((worker) => ({ worker, area })));
+  const seats = commonSeating(layout, areas.resting.length, planning.length);
+  areas.resting.forEach((worker, slot) => placed.push({ id: worker.id, area: "resting", ...seats.resting[slot]! }));
+  planning.forEach(({ worker, area }, slot) => placed.push({ id: worker.id, area, ...seats.planning[slot]! }));
   return placed.sort((left, right) => compareText(left.id, right.id));
 }
 
-
-/** Furniture and seated workers use the same positions and person-sized spacing. */
-export function commonSeats(layout: SceneLayout, count: number, top: number): readonly ScenePoint[] {
-  const columns = Math.max(1, Math.floor((layout.width - ROOM_LEFT - PADDING - 48) / WORKER_GAP) + 1);
-  return Array.from({ length: Math.max(Math.min(4, columns), count) }, (_, slot) => ({
-    x: ROOM_LEFT + 24 + (slot % columns) * WORKER_GAP,
+/** Two compact seating sections share one bay, growing down only when crowded. */
+export function commonSeating(layout: SceneLayout, restingCount: number, planningCount: number) {
+  const available = layout.width - ROOM_LEFT - PADDING;
+  const capacity = (available - 16) / 2;
+  const columns = Math.max(2, Math.min(Math.floor((capacity - 48) / WORKER_GAP) + 1, Math.max(restingCount, planningCount)));
+  const width = (columns - 1) * WORKER_GAP + 48;
+  const seats = (count: number, left: number, top: number) => Array.from({ length: Math.max(2, count) }, (_, slot) => ({
+    x: left + 24 + (slot % columns) * WORKER_GAP,
     y: top + Math.floor(slot / columns) * WORKER_GAP,
   }));
+  const resting = seats(restingCount, ROOM_LEFT, layout.restingTop);
+  const planning = planningCount === 0 ? [] : seats(planningCount,
+    ROOM_LEFT + width + 16, layout.restingTop);
+  return { resting, planning };
 }
+
 
 /** Pictured surface slots also determine standing destinations; no parallel workstation map. */
 export function workPositions(room: SceneRoomLayout): readonly ScenePoint[] {
   const surface = room.contents.find((item) => item.workSurface);
   if (surface === undefined) return [{ x: room.door.x, y: room.door.y - 32 }];
   const offsets = surface.width >= 120 ? [0, -24, 24, -48, 48] : surface.width >= 88 ? [0, -24, 24] : [0, -24];
-  return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + 8 }));
+  return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + WORKER_SIZE / 2 }));
 }
 
 export type InventoryKind = keyof typeof inventoryLabels;
@@ -187,8 +192,8 @@ function composeRoom(node: SceneNode, room: SceneRect): readonly RoomContent[] {
     .sort((a, b) => counts[b] - counts[a] || compareText(a, b))[0];
   if (primary === undefined) return [];
   const furnishing = room.width < 160 ? "console" : room.width < 192 ? "bench" : "drafting";
-  const width = furnishing === "console" ? 80 : furnishing === "bench" ? 104 : 128;
+  const width = furnishing === "console" ? 72 : furnishing === "bench" ? 88 : 104;
   const x = furnishing === "console" ? room.x + 24 : furnishing === "bench" ? room.x + room.width - width - 24 : room.x + (room.width - width) / 2;
   return [{ key: primary, kind: primary, label: inventoryLabels[primary], count: counts[primary], workSurface: true, furnishing,
-    x, y: room.y + (room.height === 128 ? 48 : 64), width, height: 32 }];
+    x, y: room.y + 48, width, height: 32 }];
 }
