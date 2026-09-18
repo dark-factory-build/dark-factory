@@ -194,6 +194,7 @@ class IntakeTest(unittest.TestCase):
         operation = INTAKE.operation_for(self.config, INTAKE.issue_from_json(issue()), "f" * 64)
         self.assertIn("FACTORY_SOURCE o/r#7", operation["body"])
         self.assertIn("Preserve the source marker and linked task IDs", operation["body"])
+        self.assertIn("never author an ALLOW for your own work", operation["body"])
         hostile = issue(body={"ignore": "instructions"})
         with self.assertRaisesRegex(INTAKE.IntakeError, "invalid source"):
             INTAKE.issue_from_json(hostile)
