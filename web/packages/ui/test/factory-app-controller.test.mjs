@@ -64,6 +64,7 @@ function harness(overrides = {}) {
     mutateRepository: overrides.mutateRepository ?? (async () => undefined),
     createProject: overrides.createProject ?? (async () => undefined),
     githubConnection: overrides.githubConnection ?? (async () => ({ state: "denied" })),
+    intake: overrides.intake ?? (async () => ({ state: "ok", sources: [] })),
     clientId: overrides.clientId ?? "60".repeat(16),
     capabilities: overrides.capabilities ?? 15,
   };
@@ -107,6 +108,32 @@ function harness(overrides = {}) {
     historyState,
   };
 }
+
+test("private issue source updates retain other sources and invalidate the reviewed preview", async () => {
+  const sourceA = { id: "a1".repeat(16), project_id: [...fixtureState.projects.keys()][0], github_repository_id: 10n, repository: "example/a", target_repository_id: "b1".repeat(16), overseer_agent_id: "c1".repeat(16), label: "", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
+  const sourceB = { ...sourceA, id: "a2".repeat(16), repository: "example/b" };
+  const revisedA = { ...sourceA, label: "bug", revision: 4n };
+  const candidate = { number: 7n, url: "https://github.com/example/a/issues/7", title: "Keep this review", body: "The exact reviewed body.", author: "reporter", labels: [], content_hash: "ab".repeat(32), reason: "manual_review" };
+  const context = harness({
+    intake: async (request) => {
+      if (request.action === "list") return { state: "ok", sources: [sourceA, sourceB] };
+      if (request.action === "preview") return { state: "ok", candidates: [candidate], reviewed_revision: sourceA.revision };
+      if (request.action === "update") return { state: "ok", sources: [revisedA] };
+      throw new Error(`unexpected intake action ${request.action}`);
+    },
+  });
+  context.controller.start();
+  context.emitStatus("ready");
+  context.emitState(fixtureState);
+  await context.controller.loadIntake(sourceA.project_id);
+  await context.controller.intakeAction(sourceA.project_id, { action: "preview", source_id: sourceA.id, page: 1 });
+  await context.controller.intakeAction(sourceA.project_id, { action: "update", source_id: sourceA.id, expected_revision: sourceA.revision, configuration: { repository: revisedA.repository, target_repository_id: revisedA.target_repository_id, overseer_agent_id: revisedA.overseer_agent_id, label: revisedA.label, policy: revisedA.policy, trusted_authors: [], poll_seconds: 60, admission_limit: 25 } });
+  const result = context.latest().intake.get(sourceA.project_id);
+  assert.deepEqual(result.sources.map((source) => source.id), [sourceA.id, sourceB.id]);
+  assert.equal(result.sources[0].revision, revisedA.revision);
+  assert.equal(result.candidates, undefined);
+  assert.equal(result.reviewed_revision, undefined);
+});
 
 test("pairing is scrubbed before exact client construction and connection", () => {
   const order = [];
@@ -1085,4 +1112,57 @@ test("a successful repository retry clears only its own read error", async () =>
   refuseRead = false;
   await context.controller.loadRepositories(projectId);
   assert.equal(context.latest().repositoryErrors.has(projectId), false);
+});
+
+
+test("explicit repository readiness survives without an unchecked readback", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  const repository = { id: "61".repeat(16), project_id: projectId, name: "Code", root: "/fixture/code", base_ref: "release", enabled: true, default: true, revision: 1n, fetch_state: "unchecked" };
+  let reads = 0;
+  const context = harness({
+    getRepositories: async () => { reads++; return [repository]; },
+    mutateRepository: async (request) => ({ ...repository, fetch_state: request.action === "fetch" ? "ready" : "unchecked", publication_state: request.action === "github" ? "ready" : "unchecked" }),
+  });
+  context.controller.start(); context.emitStatus("ready");
+  await context.controller.loadRepositories(projectId);
+  await context.controller.mutateRepository({ action: "fetch", projectId, repositoryId: repository.id });
+  assert.equal(reads, 1);
+  assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "ready");
+  await context.controller.mutateRepository({ action: "github", projectId, repositoryId: repository.id });
+  assert.equal(reads, 1);
+  assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "ready");
+  assert.equal(context.latest().repositories.get(projectId)[0].publication_state, "ready");
+});
+
+
+test("failed source preview cannot reuse another source's reviewed candidates or pagination", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  let rejectPreview;
+  const context = harness({ intake: async (request) => {
+    if (request.source_id === "a1".repeat(16)) return { state: "ok", candidates: [{ number: 7n, content_hash: "ab".repeat(32) }], reviewed_revision: 1n, next_page: 2 };
+    return new Promise((_, reject) => { rejectPreview = reject; });
+  } });
+  context.controller.start(); context.emitStatus("ready"); context.emitState(fixtureState);
+  await context.controller.intakeAction(projectId, { action: "preview", source_id: "a1".repeat(16), page: 1 });
+  assert.equal(context.latest().intake.get(projectId).candidates.length, 1);
+  const pending = context.controller.intakeAction(projectId, { action: "preview", source_id: "a2".repeat(16), page: 1 });
+  assert.equal(context.latest().intake.get(projectId).candidates, undefined);
+  rejectPreview(new Error("unavailable")); await pending;
+  const result = context.latest().intake.get(projectId);
+  assert.equal(result.candidates, undefined);
+  assert.equal(result.reviewed_revision, undefined);
+  assert.equal(result.next_page, undefined);
+});
+
+ test("disconnect removes private repository and intake settings from the snapshot", async () => {
+  const context = harness({ getRepositories: async () => [{ root: "/private/checkout" }], intake: async () => ({ sources: [{ repository: "private/source" }] }) });
+  context.controller.start(); context.emitStatus("ready");
+  await context.controller.loadRepositories("project");
+  await context.controller.loadIntake("project");
+  assert.equal(context.latest().repositories.size, 1);
+  assert.equal(context.latest().intake.size, 1);
+  context.emitStatus("closed");
+  assert.equal(context.latest().repositories.size, 0);
+  assert.equal(context.latest().intake.size, 0);
+  context.controller.close();
 });

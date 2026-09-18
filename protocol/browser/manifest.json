@@ -321,6 +321,18 @@
       "fixture": "repository_mutate_result.json"
     },
     {
+      "type": "INTAKE",
+      "direction": "client",
+      "id": "required",
+      "fixture": "intake.json"
+    },
+    {
+      "type": "INTAKE_RESULT",
+      "direction": "server",
+      "id": "required",
+      "fixture": "intake_result.json"
+    },
+    {
       "type": "TASK_UPDATE",
       "direction": "client",
       "id": "required",

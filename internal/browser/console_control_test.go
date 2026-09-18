@@ -26,6 +26,7 @@ type consoleDispatchBackend struct {
 	revoked       browserprotocol.BrowserClientRevoke
 	err           error
 	calls         int
+	intake        *browserprotocol.IntakeResult
 	walking       chan struct{} // when set, Topology and RunPaths block until it is closed, whatever the context says
 	budgets       []time.Time   // each walk's context deadline, in the order the walks started
 }
@@ -98,6 +99,18 @@ func (backend *consoleDispatchBackend) MutateRepository(_ context.Context, clien
 		return browserprotocol.RepositoryMutateResult{}, err
 	}
 	return browserprotocol.RepositoryMutateResult{}, nil
+}
+func (backend *consoleDispatchBackend) Intake(ctx context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.Intake) (browserprotocol.IntakeResult, error) {
+	if err := backend.record(client); err != nil {
+		return browserprotocol.IntakeResult{}, err
+	}
+	if err := backend.walk(ctx); err != nil {
+		return browserprotocol.IntakeResult{}, err
+	}
+	if backend.intake != nil {
+		return *backend.intake, nil
+	}
+	return browserprotocol.IntakeResult{State: "ok", ImportedTasks: []string{}}, nil
 }
 
 func (backend *consoleDispatchBackend) Topology(ctx context.Context, client [browserprotocol.ClientIDSize]byte, _ browserprotocol.TopologyGet) (browserprotocol.Topology, error) {
@@ -206,6 +219,8 @@ var consoleRequests = []struct {
 		`{"type":"AGENT_UPDATE","id":"console-agent","body":{"agent_id":"` + consoleAgentID + `","expected_revision":"7","paused":true}}`},
 	{browserprotocol.TypeProjectLimits, browserprotocol.TypeProjectLimitsResult,
 		`{"type":"PROJECT_LIMITS","id":"console-limits","body":{"project_id":"` + consoleProjectID + `","expected_revision":"7","run_budget":"12","max_run_seconds":900}}`},
+	{browserprotocol.TypeIntake, browserprotocol.TypeIntakeResult,
+		`{"type":"INTAKE","id":"console-intake","body":{"action":"preview","source_id":"` + consoleAgentID + `","page":1}}`},
 	{browserprotocol.TypeTaskUpdate, browserprotocol.TypeTaskUpdateResult,
 		`{"type":"TASK_UPDATE","id":"console-task","body":{"task_id":"` + consoleTaskID + `","expected_revision":"3","status":"cancelled"}}`},
 	{browserprotocol.TypeTopologyGet, browserprotocol.TypeTopology,
@@ -317,6 +332,54 @@ func consoleFrame(t *testing.T, kind browserprotocol.MessageType) string {
 // TOPOLOGY_GET and RUN_PATHS_GET may walk a tree under the call budget. The
 // connection keeps serving while they do, and a refusal from that path still
 // ends it the way dispatch would.
+func TestIntakePreviewKeepsConnectionLiveAndUsesSnapshotBound(t *testing.T) {
+	backend := newConsoleDispatchBackend()
+	blocked := make(chan struct{})
+	backend.walking = blocked
+	released := false
+	defer func() {
+		if !released {
+			close(blocked)
+		}
+	}()
+	backend.intake = &browserprotocol.IntakeResult{State: "ok"}
+	for i := 1; i <= 20; i++ {
+		backend.intake.Candidates = append(backend.intake.Candidates, browserprotocol.IntakeCandidate{Number: browserprotocol.Decimal(i), URL: "https://github.com/example/source/issues/1", Title: "Review", Body: strings.Repeat("x", 5000), Author: "reporter", Labels: []string{}, ContentHash: strings.Repeat("ab", 32), Reason: "manual_review"})
+	}
+	server, _ := startHeldClockServer(t, backend)
+	connection, _ := dialServer(t, server, testOrigin)
+	connection.SetReadLimit(browserprotocol.MaxSnapshotBytes)
+	authenticate(t, connection)
+	writeClientFrame(t, connection, []byte(consoleFrame(t, browserprotocol.TypeIntake)))
+	state, _ := browserprotocol.EncodeStateGet("during-intake", browserprotocol.StateGet{})
+	writeClientFrame(t, connection, state)
+	if frame := readServerFrame(t, connection); frame.Type != browserprotocol.TypeStateSnapshot {
+		t.Fatalf("state stalled behind intake: %+v", frame)
+	}
+	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+		backend.mu.Lock()
+		budgets := append([]time.Time(nil), backend.budgets...)
+		backend.mu.Unlock()
+		if len(budgets) > 0 {
+			if time.Until(budgets[0]) < time.Minute {
+				t.Fatal("intake retained the local3s deadline")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("intake did not start")
+		}
+	}
+	close(blocked)
+	released = true
+	frame := readServerFrame(t, connection)
+	result, ok := frame.Body.(browserprotocol.IntakeResult)
+	if !ok || len(result.Candidates) != 20 || len(result.Candidates[19].Body) != 5000 {
+		t.Fatalf("large complete preview lost: %s", frame.Type)
+	}
+	connection.CloseNow()
+}
+
 func TestTreeWalksDoNotStallTheConnection(t *testing.T) {
 	backend := newConsoleDispatchBackend()
 	first := make(chan struct{})

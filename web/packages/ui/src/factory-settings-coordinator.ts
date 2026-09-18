@@ -3,9 +3,10 @@ import {
   type BrowserClientsView,
   type BrowserSession,
   type DiscoveredAccountView,
-  type GitHubConnectionResult,
   type RepositoryMutation,
   type RepositoryView,
+  type IntakeView,
+  type GitHubConnectionResult,
 } from "@dark-factory/client";
 
 const LOOPBACK_GRANT = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
@@ -18,7 +19,7 @@ export type FactoryRemoteInvite = Readonly<{
 
 export type FactoryGitHubView = Readonly<{ result?: GitHubConnectionResult; pending: boolean; error?: string }>;
 
-type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
+type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "intake" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
 
 type SettingsOwner = Readonly<{
   session(): SettingsSession | undefined;
@@ -44,6 +45,9 @@ export class FactorySettingsCoordinator {
   #repositories = new Map<string, readonly RepositoryView[]>();
   #repositoryPending = new Set<string>();
   #repositoryErrors = new Map<string, string>();
+  #intake = new Map<string, IntakeView>();
+  #intakePending = new Set<string>();
+  #intakeErrors = new Map<string, string>();
   #repositoryMutationErrors = new Set<string>();
   #github: GitHubConnectionResult | undefined;
   #githubPending = false;
@@ -69,8 +73,57 @@ export class FactorySettingsCoordinator {
   get repositories(): ReadonlyMap<string, readonly RepositoryView[]> { return this.#repositories; }
   get repositoryPending(): ReadonlySet<string> { return this.#repositoryPending; }
   get repositoryErrors(): ReadonlyMap<string, string> { return this.#repositoryErrors; }
-  get github(): FactoryGitHubView { return { result: this.#github, pending: this.#githubPending, error: this.#githubError }; }
+  get intake(): ReadonlyMap<string, IntakeView> { return this.#intake; }
+  get intakePending(): ReadonlySet<string> { return this.#intakePending; }
+  get intakeErrors(): ReadonlyMap<string, string> { return this.#intakeErrors; }
 
+  /** Private checkout paths and issue text belong to the current session. */
+  clearProjectSettings(): void {
+    this.#repositories.clear(); this.#repositoryPending.clear(); this.#repositoryErrors.clear(); this.#repositoryMutationErrors.clear();
+    this.#intake.clear(); this.#intakePending.clear(); this.#intakeErrors.clear();
+  }
+
+  #current(generation: number, session: SettingsSession): boolean {
+    return this.#owner.current(generation) && this.#owner.ready() && this.#owner.session() === session;
+  }
+
+  async loadIntake(projectId: string): Promise<void> {
+    const session = this.#owner.session(); if (!this.#owner.ready() || session === undefined || this.#intakePending.has(projectId)) return;
+    const generation = this.#owner.generation(); this.#intakePending.add(projectId); this.#owner.publish();
+    try { const result = await session.intake({ action: "list", project_id: projectId }); if (!this.#current(generation, session)) return; this.#intake.set(projectId, result); this.#intakeErrors.delete(projectId); }
+    catch (error) { if (this.#current(generation, session)) this.#intakeErrors.set(projectId, this.#owner.errorCode(error)); }
+    finally { if (this.#current(generation, session)) this.#intakePending.delete(projectId); }
+    this.#owner.publish();
+  }
+
+  async intakeAction(projectId: string, request: Parameters<BrowserSession["intake"]>[0]): Promise<void> {
+    const session = this.#owner.session(); if (!this.#owner.ready() || session === undefined) return;
+    const generation = this.#owner.generation();
+    if (request.action === "preview" || request.action === "refresh") {
+      const prior = this.#intake.get(projectId);
+      if (prior !== undefined) this.#intake.set(projectId, { ...prior, candidates: undefined, reviewed_revision: undefined, next_page: undefined });
+    }
+    this.#intakePending.add(projectId); this.#owner.publish();
+    try {
+      const result = await session.intake(request);
+      if (!this.#current(generation, session)) return;
+      const prior = this.#intake.get(projectId);
+      const sources = result.sources === undefined ? prior?.sources : request.action === "list" || prior?.sources === undefined ? result.sources : mergeIntakeSources(prior.sources, result.sources);
+      this.#intake.set(projectId, Object.freeze({
+        ...prior,
+        ...result,
+        ...(sources === undefined ? {} : { sources }),
+        ...(result.candidates === undefined && request.action !== "update" ? prior?.candidates === undefined ? {} : { candidates: prior.candidates } : {}),
+        ...(request.action === "update" ? { candidates: undefined, reviewed_revision: undefined } : {}),
+        ...(result.imported_tasks === undefined ? { imported_tasks: [] } : {}),
+      }));
+      this.#intakeErrors.delete(projectId);
+    }
+    catch (error) { if (this.#current(generation, session)) this.#intakeErrors.set(projectId, this.#owner.errorCode(error)); }
+    finally { if (this.#current(generation, session)) this.#intakePending.delete(projectId); }
+    this.#owner.publish();
+  }
+  get github(): FactoryGitHubView { return { result: this.#github, pending: this.#githubPending, error: this.#githubError }; }
   /** A replacement browser session must rediscover private GitHub state. */
   clearGitHub(): void {
     if (this.#github === undefined && this.#githubError === undefined) return;
@@ -168,11 +221,11 @@ export class FactorySettingsCoordinator {
     this.#owner.publish();
     try {
       const repositories = await session.getRepositories(projectId);
-      if (!this.#owner.current(generation)) return;
+      if (!this.#current(generation, session)) return;
       this.#repositories.set(projectId, repositories);
       if (!this.#repositoryMutationErrors.has(projectId)) this.#repositoryErrors.delete(projectId);
     } catch (error) {
-      if (!this.#owner.current(generation)) return;
+      if (!this.#current(generation, session)) return;
       this.#repositoryErrors.set(projectId, this.#owner.errorCode(error));
     } finally {
       this.#repositoryPending.delete(projectId);
@@ -187,19 +240,24 @@ export class FactorySettingsCoordinator {
     this.#repositoryPending.add(request.projectId);
     this.#owner.publish();
     try {
-      await session.mutateRepository(request);
-      if (!this.#owner.current(generation)) return;
+      const result = await session.mutateRepository(request);
+      if (!this.#current(generation, session)) return;
+      if (result !== undefined && (request.action === "fetch" || request.action === "github")) {
+        this.#repositories.set(request.projectId, (this.#repositories.get(request.projectId) ?? []).map((item) => item.id !== result.id ? item : item.revision !== result.revision ? result : { ...result,
+          ...(request.action === "fetch" ? { publication_state: item.publication_state } : { fetch_state: item.fetch_state }),
+        }));
+      }
       this.#repositoryMutationErrors.delete(request.projectId);
       this.#repositoryErrors.delete(request.projectId);
     } catch (error) {
-      if (!this.#owner.current(generation)) return;
+      if (!this.#current(generation, session)) return;
       this.#repositoryMutationErrors.add(request.projectId);
       this.#repositoryErrors.set(request.projectId, this.#owner.errorCode(error));
     } finally {
       this.#repositoryPending.delete(request.projectId);
     }
     this.#owner.publish();
-    await this.loadRepositories(request.projectId);
+    if (request.action !== "fetch" && request.action !== "github") await this.loadRepositories(request.projectId);
   }
 
   async createProject(request: { name: string; root: string }): Promise<void> {
@@ -208,10 +266,10 @@ export class FactorySettingsCoordinator {
     const generation = this.#owner.generation();
     try {
       await session.createProject(request);
-      if (!this.#owner.current(generation)) return;
+      if (!this.#current(generation, session)) return;
       this.#repositoryErrors.delete("create");
     } catch (error) {
-      if (!this.#owner.current(generation)) return;
+      if (!this.#current(generation, session)) return;
       this.#repositoryErrors.set("create", this.#owner.errorCode(error));
     }
     this.#owner.publish();
@@ -306,4 +364,9 @@ export class FactorySettingsCoordinator {
     this.#remoteInviteError = undefined;
     this.#owner.publish();
   }
+}
+
+function mergeIntakeSources(current: readonly import("@dark-factory/client").IntakeSource[], changed: readonly import("@dark-factory/client").IntakeSource[]): import("@dark-factory/client").IntakeSource[] {
+  const replacement = new Map(changed.map((source) => [source.id, source]));
+  return [...current.map((source) => replacement.get(source.id) ?? source), ...changed.filter((source) => !current.some((existing) => existing.id === source.id))];
 }

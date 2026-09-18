@@ -90,6 +90,8 @@ export const CONTROL_MANIFEST = [
   { type: "REPOSITORIES", direction: "server", id: "required", fixture: "repositories.json" },
   { type: "REPOSITORY_MUTATE", direction: "client", id: "required", fixture: "repository_mutate.json" },
   { type: "REPOSITORY_MUTATE_RESULT", direction: "server", id: "required", fixture: "repository_mutate_result.json" },
+  { type: "INTAKE", direction: "client", id: "required", fixture: "intake.json" },
+  { type: "INTAKE_RESULT", direction: "server", id: "required", fixture: "intake_result.json" },
   { type: "TASK_UPDATE", direction: "client", id: "required", fixture: "task_update.json" },
   { type: "TASK_UPDATE_RESULT", direction: "server", id: "required", fixture: "task_update_result.json" },
   { type: "TOPOLOGY_GET", direction: "client", id: "required", fixture: "topology_get.json" },

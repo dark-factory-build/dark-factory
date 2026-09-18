@@ -160,3 +160,25 @@ test("reopening settings queues status behind a pending installation page", asyn
   ]);
   assert.equal(coordinator.github.result.installations.installations[0].account.login, "page-one");
 });
+
+test("project settings discard private content and fence old replies across reconnect", async () => {
+  let finishOld;
+  let session = { async getRepositories() { return [{ root: "/private/checkout" }]; }, async intake() { return { sources: [{ repository: "private/source" }] }; } };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish() {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.loadRepositories("project");
+  await coordinator.loadIntake("project");
+  assert.equal(coordinator.repositories.size, 1);
+  assert.equal(coordinator.intake.size, 1);
+  session.intake = () => new Promise((resolve) => { finishOld = resolve; });
+  const oldRead = coordinator.loadIntake("project");
+  coordinator.clearProjectSettings();
+  assert.equal(coordinator.repositories.size, 0);
+  assert.equal(coordinator.intake.size, 0);
+  assert.equal(coordinator.intakePending.size, 0);
+  session = { async intake() { return { sources: [{ repository: "current/source" }] }; } };
+  await coordinator.loadIntake("project");
+  finishOld({ sources: [{ repository: "private/source" }] });
+  await oldRead;
+  assert.equal(coordinator.intake.get("project").sources[0].repository, "current/source");
+});

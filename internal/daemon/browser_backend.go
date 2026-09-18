@@ -492,8 +492,13 @@ func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [bro
 	return browserprotocol.ProjectCreateResult{ProjectID: project.ID.String(), Revision: decimalRevision(project.Revision)}, nil
 }
 
-func browserRepository(value kernel.ProjectRepository) browserprotocol.Repository {
-	return browserprotocol.Repository{ID: value.ID.String(), ProjectID: value.ProjectID.String(), Name: value.Name, Root: value.Root, BaseRef: value.BaseRef, Enabled: browserprotocol.Bool(value.Enabled), Default: browserprotocol.Bool(value.Default), Revision: decimalRevision(value.Revision)}
+func browserRepository(value api.ProjectRepository) browserprotocol.Repository {
+	result := browserprotocol.Repository{ID: value.ID, ProjectID: value.ProjectID, Name: value.Name, Root: value.Root, BaseRef: value.BaseRef, Enabled: browserprotocol.Bool(value.Enabled), Default: browserprotocol.Bool(value.Default), Revision: browserprotocol.Decimal(value.Revision), FetchState: value.FetchState, PublicationState: value.PublicationState, ReadinessMessage: value.ReadinessMessage}
+	if value.GitHubRepositoryID != 0 {
+		id := browserprotocol.Decimal(value.GitHubRepositoryID)
+		result.GitHubRepositoryID = &id
+	}
+	return result
 }
 func (backend *browserBackend) Repositories(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.RepositoriesGet) (browserprotocol.Repositories, error) {
 	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
@@ -511,7 +516,14 @@ func (backend *browserBackend) Repositories(ctx context.Context, rawClient [brow
 	}
 	result := browserprotocol.Repositories{ProjectID: request.ProjectID, Items: make([]browserprotocol.Repository, 0, len(values))}
 	for _, value := range values {
-		result.Items = append(result.Items, browserRepository(value))
+		view := repositoryDTO(value)
+		if backend.owner != nil {
+			view, err = backend.owner.RepositoryReadiness(ctx, value.ID, false)
+			if err != nil {
+				return browserprotocol.Repositories{}, mapBrowserError(err)
+			}
+		}
+		result.Items = append(result.Items, browserRepository(view))
 	}
 	return result, nil
 }
@@ -539,12 +551,32 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 		if err != nil {
 			return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
 		}
-		item := browserRepository(value)
+		item := browserRepository(repositoryDTO(value))
 		return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
 	}
 	id, err := parse()
 	if err != nil {
 		return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+	}
+	if request.Action == "fetch" || request.Action == "github" {
+		if backend.owner == nil {
+			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+		}
+		if request.Action == "github" {
+			if err := backend.owner.BindProjectRepositoryGitHub(ctx, id); err != nil {
+				return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
+			}
+		}
+		view, err := backend.owner.RepositoryReadiness(ctx, id, request.Action == "fetch")
+		if err != nil {
+			return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
+		}
+		if request.Action == "github" {
+			view.PublicationState = "ready"
+			view.ReadinessMessage = "Repository identity verified through the GitHub connection. Publication permissions are checked for each operation."
+		}
+		item := browserRepository(view)
+		return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
 	}
 	expected, err := browserDecimal(request.ExpectedRevision)
 	if err != nil {
@@ -574,7 +606,7 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	if request.Action == "remove" {
 		return browserprotocol.RepositoryMutateResult{}, nil
 	}
-	item := browserRepository(value)
+	item := browserRepository(repositoryDTO(value))
 	return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
 }
 

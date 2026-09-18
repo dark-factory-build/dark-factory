@@ -65,13 +65,25 @@ const fixtureChangedTopologies = new Map(fixtureHierarchyTopologies).set(fixture
   nodes: [...fixtureTopologies.values().next().value!.nodes, { id: "e5".repeat(32), parent_id: "a1".repeat(32), kind: "directory", path: "docs", label: "docs", language: "markdown", size_bucket: "tiny" }],
 });
 const fixtureRepositoryProjectID = fixtureFloorState.projects.keys().next().value!;
+const fixtureIntakeOverseer = { ...fixtureFloorState.agents.values().next().value!, id: "4d".repeat(16), name: "Intake Overseer", project_id: fixtureRepositoryProjectID, role: "orchestrator" as const };
+const fixtureIntakeState = { ...fixtureFloorState, agents: new Map(fixtureFloorState.agents).set(fixtureIntakeOverseer.id, fixtureIntakeOverseer) };
 const fixtureRepositories = new Map([[fixtureRepositoryProjectID, [{
   id: "5a".repeat(16), project_id: fixtureRepositoryProjectID, name: "Primary checkout",
   root: "/Users/operator/dark-factory", base_ref: "HEAD", enabled: true, default: true, revision: 1n,
+  fetch_state: "ready" as const, publication_state: "ready" as const, github_repository_id: 4201n, readiness_message: "Repository identity verified. Publication permissions are checked for each operation.",
 }, {
   id: "6b".repeat(16), project_id: fixtureRepositoryProjectID, name: "Release checkout",
   root: "/Users/operator/dark-factory-release", base_ref: "origin/release", enabled: true, default: false, revision: 1n,
+  fetch_state: "setup_required" as const, publication_state: "unbound" as const, readiness_message: "Configure repository-local Git authentication, then retry the fetch check.",
 }]]]);
+const fixtureIntakeSource = {
+  id: "7c".repeat(16), project_id: fixtureRepositoryProjectID, github_repository_id: 4201n,
+  repository: "example/widgets", target_repository_id: "5a".repeat(16), overseer_agent_id: fixtureIntakeOverseer.id, label: "bug",
+  policy: "manual" as const, trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n,
+  sync: { last_attempt_at: 1720000200n, last_success_at: 1720000100n, imported_tasks: 1, state: "error" as const, error: "unavailable" },
+};
+const fixtureIntakeCandidate = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Repair parser recovery", body: "Preserve exact review text before accepting this issue.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "content_changed", acceptance_id: "8d".repeat(16), task_id: "9e".repeat(16) };
+const fixtureIntake = new Map([[fixtureRepositoryProjectID, { state: "withdrawal_pending", task_id: fixtureIntakeCandidate.task_id, imported_tasks: ["af".repeat(16)], reviewed_revision: 3n, sources: [fixtureIntakeSource], candidates: [fixtureIntakeCandidate] }], [[...fixtureFloorState.projects.keys()][1]!, { state: "ok", sources: [] }]]);
 
 const fixturePagedTopologies = new Map(fixtureHierarchyTopologies).set(fixtureObservedRun.projectId, {
   ...fixtureTopologies.get(fixtureObservedRun.projectId)!, digest: "paging-fixture",
@@ -120,6 +132,7 @@ function FixtureTour() {
   const inventoryFixture = actual || fixture === "inventory" || fixture === "inventory-idle" || fixture === "inventory-crowded";
   const terminalFixture = fixture === "terminal";
   const repositoryFixture = fixture === "repositories";
+  const intakeFixture = fixture === "intake" || fixture === "intake-empty" || fixture === "intake-error" || fixture === "intake-loading";
   const archiveFixture = fixture === "archive" || fixture === "archived";
   const [inputRefused, setInputRefused] = useState(true);
   const fixtureAgent = fixtureFloorState.agents.values().next().value!;
@@ -133,7 +146,7 @@ function FixtureTour() {
   const [changedTopology, setChangedTopology] = useState(false);
   const [view, setView] = useState<FactoryConsoleProps["view"]>("floor");
   const [detail, setDetail] = useState<NonNullable<FactoryConsoleProps["detail"]>>(inventoryFixture ? "floor" : terminalFixture || archiveFixture ? "agent" : "needs-you");
-  const [settingsOpen, setSettingsOpen] = useState(repositoryFixture);
+  const [settingsOpen, setSettingsOpen] = useState(repositoryFixture || intakeFixture);
   const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>(terminalFixture ? { id: fixtureAgent.id, name: fixtureAgent.name, revision: fixtureAgent.revision } : archiveFixture ? { id: archiveAgent.id, name: archiveAgent.name, revision: archiveAgent.revision } : undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [selectedHumanRequest, setSelectedHumanRequest] = useState<FactoryConsoleProps["selectedHumanRequest"]>();
@@ -174,7 +187,7 @@ function FixtureTour() {
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
-        state={actual ? { ...fixtureInventoryState, projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
+        state={actual ? { ...fixtureInventoryState, projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : intakeFixture ? fixtureIntakeState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
         topologies={actual ? new Map([[actualTopology.projectId, actualTopology]]) : inventoryFixture ? fixtureInventoryTopologies : fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
         runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
@@ -183,10 +196,15 @@ function FixtureTour() {
         onDetail={setDetail}
         settingsOpen={settingsOpen}
         onToggleSettings={() => setSettingsOpen((open) => !open)}
-        repositories={repositoryFixture ? fixtureRepositories : undefined}
-        onLoadRepositories={repositoryFixture ? () => {} : undefined}
-        onMutateRepository={repositoryFixture ? () => {} : undefined}
+        repositories={repositoryFixture || intakeFixture ? fixtureRepositories : undefined}
+        onLoadRepositories={repositoryFixture || intakeFixture ? () => {} : undefined}
+        onMutateRepository={repositoryFixture || intakeFixture ? () => {} : undefined}
         onCreateProject={repositoryFixture ? () => {} : undefined}
+        intake={fixture === "intake" ? fixtureIntake : fixture === "intake-empty" ? new Map([[fixtureRepositoryProjectID, { state: "ok", sources: [] }]]) : undefined}
+        intakePending={fixture === "intake-loading" ? new Set([fixtureRepositoryProjectID]) : undefined}
+        intakeErrors={fixture === "intake-error" ? new Map([[fixtureRepositoryProjectID, "unauthorized"]]) : undefined}
+        onLoadIntake={intakeFixture ? () => {} : undefined}
+        onIntakeAction={intakeFixture ? () => {} : undefined}
         agentPanel={archiveFixture ? "config" : undefined}
         terminalContent={!terminalFixture ? undefined : <TerminalPanel terminal={{
           agentId: fixtureAgent.id, agentName: fixtureAgent.name, agentRevision: fixtureAgent.revision,

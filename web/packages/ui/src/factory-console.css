@@ -80,6 +80,9 @@
 .dfFactoryConsole__card p,
 .dfFactoryConsole__card small,
 .dfFactoryConsole__status,
+.dfConsoleDialog a,
+.dfConsoleSidebar a { color: var(--df-console-accent); }
+
 .dfFactoryConsole button,
 .dfFactoryConsole__terminalPanel button,
 .dfConsoleDialog button,
@@ -159,8 +162,8 @@
 .dfFactoryConsole textarea:focus-visible,
 .dfFactoryConsole__terminalPanel button:focus-visible,
 .dfFactoryConsole__terminalPanel textarea:focus-visible,
-.dfConsoleDialog :where(button, textarea, input, select):focus-visible,
-.dfConsoleSidebar :where(button, textarea, input, select):focus-visible {
+.dfConsoleDialog :where(a, button, textarea, input, select):focus-visible,
+.dfConsoleSidebar :where(a, button, textarea, input, select):focus-visible {
   outline: 2px solid var(--df-console-accent);
   outline-offset: 3px;
 }

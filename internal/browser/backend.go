@@ -215,6 +215,7 @@ type ConsoleBackend interface {
 	CreateProject(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.ProjectCreate) (browserprotocol.ProjectCreateResult, error)
 	Repositories(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RepositoriesGet) (browserprotocol.Repositories, error)
 	MutateRepository(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RepositoryMutate) (browserprotocol.RepositoryMutateResult, error)
+	Intake(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.Intake) (browserprotocol.IntakeResult, error)
 	UpdateTask(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TaskUpdate) (browserprotocol.TaskUpdateResult, error)
 	Topology(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.TopologyGet) (browserprotocol.Topology, error)
 	RunPaths(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.RunPathsGet) (browserprotocol.RunPaths, error)
