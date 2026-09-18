@@ -49,22 +49,6 @@ export function primaryAgent(state: StateView): AgentItem | undefined {
       || compareText(left.id, right.id))[0];
 }
 
-/**
- * The glyph derives from durable facts only: the orchestrator role and the
- * served provider identity. C is Claude, X is Codex, s is the shell provider.
- */
-export function agentGlyph(agent: AgentItem): string {
-  if (agent.role === "orchestrator") return "◆";
-  switch (agent.provider) {
-    case "claude_code":
-      return "C";
-    case "codex":
-      return "X";
-    case "shell":
-      return "s";
-  }
-}
-
 export type FactoryCounters = Readonly<{
   queued: number | undefined;
   needsYou: number | undefined;

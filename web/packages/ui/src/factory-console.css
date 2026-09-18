@@ -487,21 +487,11 @@
 .dfConsoleRow__title { font-size: 0.875rem; }
 .dfFactoryConsole__empty { font-size: 0.8rem; }
 
-.dfConsoleStrip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  max-width: 90rem;
-  margin: 0 auto 1.5rem;
-  padding: 0.6rem 1rem;
-  background: var(--df-console-surface);
-  border: 1px solid var(--df-console-rule);
-}
+.dfConsoleStrip { max-width: 90rem; margin: 0 auto 1.5rem; }
 
 .dfConsoleStrip__agents {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(6.5rem, 1fr));
   gap: 0.5rem;
   margin: 0;
   padding: 0;
@@ -509,39 +499,23 @@
 }
 
 .dfConsoleStrip__agent {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  font-size: 0.8rem;
-  text-transform: none;
-  letter-spacing: 0.02em;
+  display: grid;
+  justify-items: center;
+  gap: 0.25rem;
+  padding: 0.75rem 0.4rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+  background: var(--df-console-surface);
+  border: 1px solid var(--df-console-rule);
 }
 
+.dfConsoleStrip__agent > .dfAgentSprite { width: 3rem; height: 3rem; }
 .dfConsoleStrip__agent--needs-you { border-color: var(--df-console-warning); }
-.dfConsoleStrip__agent[aria-pressed="true"] { border-color: var(--df-console-accent); }
-.dfConsoleStrip__glyph { color: var(--df-console-accent); }
-.dfConsoleStrip__agent--paused .dfConsoleStrip__glyph { color: var(--df-console-muted); }
-.dfConsoleStrip__agentPhase { color: var(--df-console-muted); font-size: 0.75rem; }
+.dfConsoleStrip__agent--paused > .dfAgentSprite { opacity: 0.45; }
+.dfConsoleStrip__agentPhase { color: var(--df-console-muted); }
+.dfConsoleStrip__agent--working .dfConsoleStrip__agentPhase { color: var(--df-console-accent); }
 .dfConsoleStrip__agent--needs-you .dfConsoleStrip__agentPhase { color: var(--df-console-warning); }
 .dfConsoleStrip__empty { color: var(--df-console-muted); font-size: 0.8rem; list-style: none; }
-
-.dfConsoleStrip__counters {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.dfConsoleStrip__counter {
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--df-console-rule);
-  color: var(--df-console-text);
-  font-size: 0.8rem;
-  text-transform: none;
-  letter-spacing: 0.02em;
-}
-
-.dfConsoleStrip__counter--alert { border-color: var(--df-console-warning); color: var(--df-console-warning); }
 
 .dfStageMeter {
   display: inline-flex;
@@ -587,10 +561,6 @@
 .dfConsoleRow__glyph { flex: 0 0 auto; color: var(--df-console-accent); }
 .dfConsoleRow__title { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .dfConsoleRow__agent { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--df-console-muted); font-size: 0.8rem; }
-
-@media (max-width: 960px) {
-  .dfConsoleStrip { flex-direction: column; align-items: flex-start; }
-}
 
 /* single screen ------------------------------------------------------------
    One screen: the floor or the agent list on the left, what needs you on the
@@ -867,7 +837,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 }
 
 .dfRemote__main {
-  padding: clamp(0.75rem, 3vw, 2.5rem);
+  --df-remote-pad: clamp(0.75rem, 3vw, 2.5rem);
+  padding: 0 var(--df-remote-pad) var(--df-remote-pad);
   font-size: 0.9rem;
 }
 
@@ -884,7 +855,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfRemote .dfFactoryConsole__empty,
 .dfRemote .dfConsoleStrip__agent,
 .dfRemote .dfConsoleStrip__agentPhase,
-.dfRemote .dfConsoleStrip__counter,
 .dfRemote .dfConsoleStrip__empty,
 .dfRemote .dfConsoleRow,
 .dfRemote .dfConsoleRow__title,
@@ -897,8 +867,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfRemote h2 { font-size: 0.9rem; letter-spacing: 0.1em; }
 
 /* Every control is a thumb target first. */
-.dfRemote button,
-.dfRemote .dfConsoleStrip__counter {
+.dfRemote button {
   min-height: 44px;
   padding: 0.7rem 0.9rem;
 }
@@ -952,6 +921,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 }
 
 .dfRemote__paste,
+.dfRemote__rename,
 .dfRemote__reply,
 .dfRemote__cancel {
   display: grid;
@@ -960,6 +930,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 .dfRemote__link,
 .dfRemote__replyText,
+.dfRemote__nameText,
 .dfRemote__cancelText {
   width: 100%;
   padding: 0.75rem;
@@ -973,6 +944,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 .dfRemote__link,
 .dfRemote__replyText { min-height: 6rem; resize: vertical; }
+.dfRemote__nameText,
 .dfRemote__cancelText { min-height: 44px; }
 
 .dfRemote__actions {
@@ -1029,8 +1001,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   overflow-wrap: anywhere;
 }
 
-.dfRemote__detail { border-color: var(--df-console-accent); }
-
 .dfRemote__questionText {
   margin: 0 0 1rem;
   color: var(--df-console-text);
@@ -1046,8 +1016,8 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfRemote .dfRemote__forgetFactory--confirm,
 .dfRemote .dfRemote__forgetDevice--confirm { border-color: var(--df-console-alert); color: var(--df-console-alert); }
 
-.dfRemote__cancel,
-.dfRemote__close { margin-top: 1rem; }
+.dfRemote__cancel { margin-top: 1rem; }
+.dfRemote__close { float: right; margin: 0 0 0.5rem 0.75rem; }
 
 .dfRemote__projectList {
   display: grid;
@@ -1068,16 +1038,61 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfRemote__projectHeading strong { overflow-wrap: anywhere; font-weight: 500; }
 .dfRemote__projectHeading span { color: var(--df-console-muted); font-size: 0.85rem; }
 
-.dfRemote__factoryFooter {
-  max-width: 90rem;
-  margin: 0 auto 1.5rem;
+/* The bar is the whole navigation: where you are, what needs you, and two jumps. */
+.dfRemote__bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0 calc(-1 * var(--df-remote-pad)) 1rem;
+  padding: env(safe-area-inset-top, 0) var(--df-remote-pad) 0;
+  background: var(--df-console-background);
+  border-bottom: 1px solid var(--df-console-rule);
 }
 
-.dfRemote .dfConsoleStrip { flex-direction: column; align-items: flex-start; }
+.dfRemote__bar a,
+.dfRemote__openSafari {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0.6rem;
+  color: var(--df-console-muted);
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+}
+
+.dfRemote__bar .dfRemote__barName { flex: 1 1 auto; min-width: 0; padding-left: 0; gap: 0.5rem; color: var(--df-console-text); overflow-wrap: anywhere; }
+.dfRemote__barName span { color: var(--df-console-accent); }
+.dfRemote__bar .dfRemote__barAlert { color: var(--df-console-warning); }
+.dfRemote__openSafari { color: var(--df-console-text); border: 1px solid var(--df-console-rule); }
+.dfRemote__main section,
+.dfRemote__setup { scroll-margin-top: 4rem; }
+.dfRemote__install { border-color: var(--df-console-accent); }
+.dfRemote__setup > button,
+.dfRemote__setup > .dfRemote__actions { margin-bottom: 1rem; }
+
+/* A question takes the whole phone: nothing opens off-screen, nothing competes. */
+.dfRemote__detail {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  max-width: none;
+  margin: 0;
+  padding: calc(env(safe-area-inset-top, 0px) + 1rem) 1rem calc(env(safe-area-inset-bottom, 0px) + 1rem);
+  overflow-y: auto;
+  background: var(--df-console-background);
+}
+
+.dfRemote__finished { margin-top: 0.75rem; }
+.dfRemote__finished summary { min-height: 44px; color: var(--df-console-muted); font-size: 0.85rem; cursor: pointer; }
+.dfRemote__factoryStatus,
+.dfRemote__factoryCount { grid-column: 2; }
 
 @media (min-width: 721px) {
   .dfRemote__factories { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .dfRemote .dfConsoleStrip { flex-direction: row; align-items: center; }
 }
 
 .dfRoomDetails { margin-top: 1rem; padding: .75rem; border-top: 1px solid var(--df-border, #293c37); overflow-wrap: anywhere; font-size: .875rem; }

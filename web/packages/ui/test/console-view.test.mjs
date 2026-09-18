@@ -4,7 +4,6 @@ import {
   agentActivity,
   agentStatus,
   agentCurrentTask,
-  agentGlyph,
   factoryCounters,
   orderTasksForHome,
   primaryAgent,
@@ -73,14 +72,4 @@ test("counters count only store-backed facts", () => {
 test("home ordering puts active work first and finished work last", () => {
   const ordered = orderTasksForHome(fixtureState).map((item) => item.status);
   assert.deepEqual(ordered, ["running", "queued", "succeeded", "failed"]);
-});
-
-test("agent glyphs derive only from the served role and provider", () => {
-  const worker = fixtureState.agents.get(agentID);
-  const orchestrator = fixtureState.agents.get(pausedAgentID);
-  assert.equal(worker.provider, "claude_code");
-  assert.equal(agentGlyph(worker), "C");
-  assert.equal(agentGlyph({ ...worker, provider: "codex" }), "X");
-  assert.equal(agentGlyph({ ...worker, provider: "shell" }), "s");
-  assert.equal(agentGlyph({ ...orchestrator, provider: "codex" }), "◆");
 });
