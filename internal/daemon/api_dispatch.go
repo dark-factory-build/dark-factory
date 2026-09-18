@@ -28,7 +28,10 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	github       *maintainer.Host
+	github               *maintainer.Host
+	intakeControllerHome string
+	// intakeIssues is a package-test-only remote failure/race seam.
+	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
 	maintainerMu sync.Mutex
 	store        *kernel.Store
 	now          func() time.Time
@@ -314,6 +317,12 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return reply
 	case api.CallMaintainer:
 		return daemon.attemptMaintainer(ctx, call)
+	case api.CallIntake:
+		input, ok := call.IntakeInput()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		return api.NewContentReply(daemon.Intake(ctx, input))
 	case api.CallGitHubConnection:
 		input, ok := call.GitHubConnectionInput()
 		if !ok {
