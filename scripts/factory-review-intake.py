@@ -173,10 +173,10 @@ def next_discovery_page(config, page, discovered):
 def list_prs(config, page=1):
     if CUSTOMER_REVIEW is not None:
         value = bridge_call("list_pull_requests", {"page": page}).get("structuredContent")
-        if not isinstance(value, dict) or not isinstance(value.get("pulls"), list) or len(value["pulls"]) > 2:
+        if not isinstance(value, dict) or not isinstance(value.get("pull_requests"), list) or len(value["pull_requests"]) > 2:
             raise ReviewError("customer pull request page is invalid")
         normalized = []
-        for item in value['pulls']:
+        for item in value['pull_requests']:
             if not isinstance(item, dict) or type(item.get('number')) is not int or item['number'] < 1 or not isinstance(item.get('body'), str) or not isinstance(item.get('head_sha'), str) or not SHA.fullmatch(item['head_sha']) or not isinstance(item.get('base_sha'), str) or not SHA.fullmatch(item['base_sha']) or not isinstance(item.get('base_ref'), str):
                 raise ReviewError('customer pull request is invalid')
             normalized.append({'number': item['number'], 'body': item['body'], 'headRefOid': item['head_sha'], 'baseRefName': item['base_ref'], 'baseRefOid': item['base_sha']})
@@ -484,7 +484,7 @@ def review_body_path(config, pr, operation):
 def verify_review_body(config, pr, operation):
     try:
         if CUSTOMER_REVIEW is not None:
-            pulls = bridge_call("list_pull_requests", {"page": 1, "pull_number": pr["number"]}).get("structuredContent", {}).get("pulls")
+            pulls = bridge_call("list_pull_requests", {"page": 1, "pull_number": pr["number"]}).get("structuredContent", {}).get("pull_requests")
             if not isinstance(pulls, list) or len(pulls) != 1 or pulls[0].get("number") != pr["number"]:
                 raise ReviewError("exact customer pull request is unavailable")
             body, head = pulls[0]["body"], pulls[0]["head_sha"]

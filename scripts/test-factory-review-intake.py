@@ -75,7 +75,7 @@ class ReviewIntakeTest(unittest.TestCase):
             item=value['review']; tool=item['tool']; calls.append(tool)
             if tool=='configuration':
                 return {'state':'ok','review':{'repository':'delivery/target','repository_id':42}}
-            if tool=='list_pull_requests': result={'pulls':[pull],'repository_id':42,'next_page':None}
+            if tool=='list_pull_requests': result={'pull_requests':[pull],'repository_id':42,'next_page':None}
             elif tool=='observe_operation': result=operations.get(item['operation_id'],{'operation_id':item['operation_id'],'state':'missing'})
             elif tool=='submit_pull_request_review':
                 self.assertEqual(7,value['issue_number'])
