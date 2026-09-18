@@ -13,6 +13,9 @@ import {
   encodeStateGet,
   encodeStateWatch,
   encodeTaskEnqueue,
+  encodeProjectCreate,
+  encodeRepositoriesGet,
+  encodeRepositoryMutate,
   encodeTaskDetailGet,
   encodeTaskHistoryGet,
   encodeTerminalTargetGet,
@@ -21,6 +24,8 @@ import {
   type AccountsBody,
   type AgentUpdateBody,
   type ProjectLimitsBody,
+  type RepositoryItem,
+  type RepositoryMutateBody,
   type AgentControlAction,
   type AgentControlResultBody,
   type IdlePolicy,
@@ -182,7 +187,7 @@ export type RunPathsView = Readonly<{ agentId: string; runId: string; paths: rea
 export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigint; tasks: readonly TaskItem[]; hasMore: boolean }>;
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
-type AccountPending = { operation?: ProjectContentOperation; kind: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT"; accountId?: string; expectedRevision?: bigint; resolve: (value: never) => void; reject: (error: unknown) => void };
+type AccountPending = { operation?: ProjectContentOperation; kind: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
 
 /** One identity the factory has granted and not revoked. */
 export type BrowserClientView = Readonly<{ clientId: string; capabilities: CapabilityMask; revision: bigint; createdAtMs: bigint }>;
@@ -192,6 +197,14 @@ export type BrowserClientsView = Readonly<{ clients: readonly BrowserClientView[
 export type DiscoveredAccountView = AccountsBody["accounts"][number];
 export type AccountLinkResult = Readonly<{ accountId: string; revision: bigint }>;
 export type AccountUpdateResult = Readonly<{ accountId: string; revision: bigint }>;
+export type RepositoryView = Readonly<RepositoryItem>;
+export type ProjectCreateResult = Readonly<{ projectId: string; revision: bigint }>;
+export type RepositoryMutation =
+  | Readonly<{ projectId: string; action: "add"; name: string; root: string; baseRef: string }>
+  | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "name"; name: string }>
+  | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "base"; baseRef: string }>
+  | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "default" | "remove" }>
+  | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "enabled"; enabled: boolean }>;
 
 /** One minted remote pairing invitation and the code that carries it. */
 export type RemoteInvite = Readonly<{ link: string; expiresAtMs: bigint; svg: string }>;
@@ -287,11 +300,11 @@ export class BrowserSession {
   get pairingBlocked(): boolean { return this.#pairingBlocked; }
   get authAttempted(): boolean { return this.#authAttempted; }
 
-  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; instruction: string; mode?: "now" | "queue" | "any" }): Promise<{ taskId: string; revision: bigint }> {
+  enqueueAgentTask(request: { agentId: string; expectedAgentRevision: bigint; repositoryId?: string; instruction: string; mode?: "now" | "queue" | "any" }): Promise<{ taskId: string; revision: bigint }> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (!validDynamicID(request.agentId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.mode !== undefined && request.mode !== "now" && request.mode !== "queue" && request.mode !== "any") return Promise.reject(new SessionError("invalid_request"));
+    if (!validDynamicID(request.agentId) || request.repositoryId !== undefined && !validDynamicID(request.repositoryId) || request.expectedAgentRevision < 1n || request.expectedAgentRevision > MAX_SQLITE_INTEGER || request.mode !== undefined && request.mode !== "now" && request.mode !== "queue" && request.mode !== "any") return Promise.reject(new SessionError("invalid_request"));
     const bytes = new TextEncoder().encode(request.instruction).length;
     if (bytes < 1 || bytes > MAX_TASK_INSTRUCTION_BYTES || /^[ \t\r\n]*$/.test(request.instruction)) return Promise.reject(new SessionError("invalid_request"));
     if (this.#taskPending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
@@ -299,7 +312,7 @@ export class BrowserSession {
     try { taskId = this.#randomID(); incarnationId = this.#randomID(); } catch (error) { return Promise.reject(error); }
     const id = this.#nextID("task-enqueue");
     let payload: string;
-    try { payload = encodeTaskEnqueue(id, { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}) }); } catch (error) { return Promise.reject(error); }
+    try { payload = encodeTaskEnqueue(id, { task_id: taskId, incarnation_id: incarnationId, agent_id: request.agentId, ...(request.repositoryId === undefined ? {} : { repository_id: request.repositoryId }), expected_agent_revision: request.expectedAgentRevision, instruction: request.instruction, ...(request.mode === "queue" || request.mode === "any" ? { mode: request.mode } : {}) }); } catch (error) { return Promise.reject(error); }
     const result = new Promise<{ taskId: string; revision: bigint }>((resolve, reject) => this.#taskPending.set(id, { taskId, expectedAgentRevision: request.expectedAgentRevision, resolve, reject }));
     try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
     return result;
@@ -375,6 +388,37 @@ export class BrowserSession {
     if (request.runBudget < 0n || request.runBudget > MAX_SQLITE_INTEGER || !Number.isSafeInteger(request.maxRunSeconds) || request.maxRunSeconds < 0 || request.maxRunSeconds > 86400) return Promise.reject(new SessionError("invalid_request"));
     if ((this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
     return this.#consoleRequest("PROJECT_LIMITS_RESULT", request.projectId, request.expectedRevision, "project-limits", (id) => encodeClientControl({ type: "PROJECT_LIMITS", id, body }));
+  }
+
+  createProject(request: { name: string; root: string }): Promise<ProjectCreateResult> {
+    if (bounded(request.name, MAX_AGENT_NAME_BYTES) || bounded(request.root, 4096) || !request.root.startsWith("/")) return Promise.reject(new SessionError("invalid_request"));
+    let projectId: string;
+    try { projectId = this.#randomID(); } catch (error) { return Promise.reject(error); }
+    return this.#accountRequest("PROJECT_CREATE_RESULT", CAPABILITIES.administration, "project-create", (id) => encodeProjectCreate(id, { project_id: projectId, name: request.name, root: request.root }), { entityId: projectId });
+  }
+
+  getRepositories(projectId: string): Promise<readonly RepositoryView[]> {
+    if (!validDynamicID(projectId)) return Promise.reject(new SessionError("invalid_request"));
+    return this.#accountRequest("REPOSITORIES", CAPABILITIES.administration, "repositories", (id) => encodeRepositoriesGet(id, { project_id: projectId }), { entityId: projectId });
+  }
+
+  mutateRepository(request: RepositoryMutation): Promise<RepositoryView | undefined> {
+    if (!validDynamicID(request.projectId)) return Promise.reject(new SessionError("invalid_request"));
+    let body: RepositoryMutateBody;
+    let repositoryId: string | undefined;
+    if (request.action === "add") {
+      if (bounded(request.name, MAX_AGENT_NAME_BYTES) || bounded(request.root, 4096) || bounded(request.baseRef, 4096) || !request.root.startsWith("/")) return Promise.reject(new SessionError("invalid_request"));
+      try { repositoryId = this.#randomID(); } catch (error) { return Promise.reject(error); }
+      body = { action: "add", id: repositoryId, project_id: request.projectId, name: request.name, root: request.root, base_ref: request.baseRef };
+    } else {
+      if (!validDynamicID(request.repositoryId) || request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
+      repositoryId = request.repositoryId;
+      body = { action: request.action, id: repositoryId, expected_revision: request.expectedRevision };
+      if (request.action === "name") { if (bounded(request.name, MAX_AGENT_NAME_BYTES)) return Promise.reject(new SessionError("invalid_request")); body.name = request.name; }
+      if (request.action === "base") { if (bounded(request.baseRef, 4096)) return Promise.reject(new SessionError("invalid_request")); body.base_ref = request.baseRef; }
+      if (request.action === "enabled") body.enabled = request.enabled;
+    }
+    return this.#accountRequest("REPOSITORY_MUTATE_RESULT", CAPABILITIES.administration, "repository-mutate", (id) => encodeRepositoryMutate(id, body), { entityId: repositoryId, expectedRevision: request.action === "add" ? undefined : request.expectedRevision, action: request.action });
   }
 
   /** Edit one still-queued task: its brief, priority, assignment, or cancel it. */
@@ -796,7 +840,7 @@ export class BrowserSession {
       pending.resolve();
       return;
     }
-    if (frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT") {
+    if (frame.type === "PROJECT_CONTENT_RESULT" || frame.type === "ACCOUNTS" || frame.type === "ACCOUNT_LINK_RESULT" || frame.type === "ACCOUNT_UPDATE_RESULT" || frame.type === "BROWSER_CLIENTS" || frame.type === "BROWSER_CLIENT_REVOKE_RESULT" || frame.type === "PROJECT_CREATE_RESULT" || frame.type === "REPOSITORIES" || frame.type === "REPOSITORY_MUTATE_RESULT") {
       this.#accountResult(frame);
       return;
     }
@@ -1160,7 +1204,7 @@ export class BrowserSession {
 
 
   /** One shape for account requests; updates also correlate the returned revision. */
-  #accountRequest<T>(kind: AccountPending["kind"], capability: number, prefix: string, encode: (id: string) => string, correlation?: Pick<AccountPending, "accountId" | "expectedRevision" | "operation">): Promise<T> {
+  #accountRequest<T>(kind: AccountPending["kind"], capability: number, prefix: string, encode: (id: string) => string, correlation?: Pick<AccountPending, "accountId" | "entityId" | "expectedRevision" | "operation" | "action">): Promise<T> {
     try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
     if (!this.#authenticated) return Promise.reject(new SessionError("unauthorized"));
     if ((this.#capabilities & capability) === 0) return Promise.reject(new SessionError("unauthorized"));
@@ -1173,7 +1217,7 @@ export class BrowserSession {
     return result;
   }
 
-  #accountResult(frame: Extract<ServerControlFrame, { type: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" }>): void {
+  #accountResult(frame: Extract<ServerControlFrame, { type: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT" }>): void {
     const pending = this.#accountPending.get(frame.id);
     if (pending === undefined || pending.kind !== frame.type) throw new ProtocolError("malformed");
     if (frame.type === "PROJECT_CONTENT_RESULT") {
@@ -1183,6 +1227,26 @@ export class BrowserSession {
       return;
     }
     if (frame.type === "BROWSER_CLIENTS") { this.#accountPending.delete(frame.id); pending.resolve(Object.freeze({ clients: Object.freeze(frame.body.clients.map((client) => Object.freeze({ clientId: client.client_id, capabilities: client.capabilities, revision: client.revision, createdAtMs: client.created_at_ms }))), more: frame.body.more }) as never); return; }
+    if (frame.type === "PROJECT_CREATE_RESULT") {
+      if (pending.entityId !== frame.body.project_id || frame.body.revision !== 1n) throw new ProtocolError("malformed");
+      this.#accountPending.delete(frame.id);
+      pending.resolve(Object.freeze({ projectId: frame.body.project_id, revision: frame.body.revision }) as never);
+      return;
+    }
+    if (frame.type === "REPOSITORIES") {
+      if (pending.entityId !== frame.body.project_id) throw new ProtocolError("malformed");
+      this.#accountPending.delete(frame.id);
+      pending.resolve(Object.freeze(frame.body.items.map((item) => Object.freeze({ ...item }))) as never);
+      return;
+    }
+    if (frame.type === "REPOSITORY_MUTATE_RESULT") {
+      const item = frame.body.repository;
+      if (pending.action === "remove") { if (item !== undefined) throw new ProtocolError("malformed"); }
+      else if (item === undefined || item.id !== pending.entityId || pending.expectedRevision !== undefined && item.revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
+      this.#accountPending.delete(frame.id);
+      pending.resolve(item === undefined ? undefined as never : Object.freeze({ ...item }) as never);
+      return;
+    }
     if (frame.type === "BROWSER_CLIENT_REVOKE_RESULT") {
       if (pending.accountId !== frame.body.client_id || pending.expectedRevision === undefined || frame.body.revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
       this.#accountPending.delete(frame.id);

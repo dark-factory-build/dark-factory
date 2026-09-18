@@ -23,11 +23,11 @@ const (
 )
 
 // controlLimit is the exact encoded bound for one message type. Client-to-
-// server control stays at 64 KiB; the bounded server snapshots, topology and
-// account discovery observations may reach 1 MiB.
+// server control stays at 64 KiB; the bounded server snapshots, topology,
+// account discovery, and repository observations may reach 1 MiB.
 func controlLimit(kind MessageType) int {
 	switch kind {
-	case TypeStateSnapshot, TypeTopology, TypeAccounts:
+	case TypeStateSnapshot, TypeTopology, TypeAccounts, TypeRepositories:
 		return MaxSnapshotBytes
 	}
 	return MaxControlBytes
@@ -813,7 +813,7 @@ func validateBody(kind MessageType, body any) error {
 		return validProjectContent(kind, body)
 	case TypeTaskEnqueue, TypeTaskEnqueueResult:
 		return validTaskControl(kind, body)
-	case TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeTopologyGet, TypeTopology,
+	case TypeAgentUpdate, TypeAgentUpdateResult, TypeProjectLimits, TypeProjectLimitsResult, TypeProjectCreate, TypeProjectCreateResult, TypeRepositoriesGet, TypeRepositories, TypeRepositoryMutate, TypeRepositoryMutateResult, TypeTaskUpdate, TypeTaskUpdateResult, TypeTopologyGet, TypeTopology,
 		TypeRunPathsGet, TypeRunPaths, TypeAccountsDiscover, TypeAccounts, TypeAccountLink, TypeAccountLinkResult, TypeAccountUpdate, TypeAccountUpdateResult,
 		TypeBrowserClientsGet, TypeBrowserClients, TypeBrowserClientRevoke, TypeBrowserClientRevokeResult:
 		return validConsoleControl(kind, body)

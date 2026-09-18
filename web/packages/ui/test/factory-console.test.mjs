@@ -90,6 +90,17 @@ test("floor appearance is local, field-validated, and available before a connect
   assert.match(markup, /<option value="selected-room" selected="">Selected room<\/option>/);
 });
 
+test("repository roots stay inside private settings", () => {
+  const project = fixtureState.projects.get(ids.project);
+  const root = "/private/operator/checkout";
+  const repositories = new Map([[project.id, [{ id: "ad".repeat(16), project_id: project.id, name: "Checkout", root, base_ref: "main", enabled: true, default: true, revision: 1n }]]]);
+  assert.equal(render({ repositories }).includes(root), false);
+  const settings = render({ settingsOpen: true, repositories });
+  assert.match(settings, /Repositories/);
+  assert.match(settings, new RegExp(root));
+  assert.match(settings, /ADD CHECKOUT/);
+});
+
 test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
   const priorWindow = globalThis.window;
   const entries = new Map([

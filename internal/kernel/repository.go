@@ -89,7 +89,7 @@ func scanProjectRepository(scanner rowScanner) (ProjectRepository, bool, error) 
 	rev, revErr := NewRevision(revision)
 	createdAt, createdErr := NewUnixMillis(created)
 	updatedAt, updatedErr := NewUnixMillis(updated)
-	if idErr != nil || projectErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || !validRepositoryBase(base) || (enabled != 0 && enabled != 1) || (defaultValue != 0 && defaultValue != 1) || updated < created {
+	if idErr != nil || projectErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || base != inheritedRepositoryBase && !validRepositoryBase(base) || (enabled != 0 && enabled != 1) || (defaultValue != 0 && defaultValue != 1) || updated < created {
 		return ProjectRepository{}, false, fmt.Errorf("%w: invalid project repository", ErrCorruptState)
 	}
 	return ProjectRepository{ID: id, ProjectID: projectID, Name: name, Root: root, BaseRef: base, Enabled: enabled == 1, Default: defaultValue == 1, Revision: rev, CreatedAt: createdAt, UpdatedAt: updatedAt}, true, nil

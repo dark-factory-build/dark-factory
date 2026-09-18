@@ -3,6 +3,8 @@ import {
   type BrowserClientsView,
   type BrowserSession,
   type DiscoveredAccountView,
+  type RepositoryMutation,
+  type RepositoryView,
 } from "@dark-factory/client";
 
 const LOOPBACK_GRANT = CAPABILITIES.human_actions | CAPABILITIES.terminal_input;
@@ -13,7 +15,7 @@ export type FactoryRemoteInvite = Readonly<{
   expiresAtMs: bigint;
 }>;
 
-type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "capabilities" | "clientId">;
+type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
 
 type SettingsOwner = Readonly<{
   session(): SettingsSession | undefined;
@@ -36,6 +38,9 @@ export class FactorySettingsCoordinator {
   #devices: BrowserClientsView | undefined;
   #devicesPending = false;
   #devicesError: string | undefined;
+  #repositories = new Map<string, readonly RepositoryView[]>();
+  #repositoryPending = new Set<string>();
+  #repositoryErrors = new Map<string, string>();
 
   constructor(owner: SettingsOwner) {
     this.#owner = owner;
@@ -53,6 +58,9 @@ export class FactorySettingsCoordinator {
   get devices(): BrowserClientsView | undefined { return this.#devices; }
   get devicesError(): string | undefined { return this.#devicesError; }
   get ownClientId(): string | undefined { return this.#owner.session()?.clientId; }
+  get repositories(): ReadonlyMap<string, readonly RepositoryView[]> { return this.#repositories; }
+  get repositoryPending(): ReadonlySet<string> { return this.#repositoryPending; }
+  get repositoryErrors(): ReadonlyMap<string, string> { return this.#repositoryErrors; }
 
   clearRemoteInvite(): void {
     this.#remoteInvite = undefined;
@@ -84,6 +92,61 @@ export class FactorySettingsCoordinator {
 
   updateAccount(request: Parameters<BrowserSession["updateAccount"]>[0]): Promise<void> {
     return this.#changeAccount(request);
+  }
+
+  async loadRepositories(projectId: string): Promise<void> {
+    const session = this.#owner.session();
+    if (!this.#owner.ready() || session === undefined || this.#repositoryPending.has(projectId)) return;
+    const generation = this.#owner.generation();
+    this.#repositoryPending.add(projectId);
+    this.#owner.publish();
+    try {
+      const repositories = await session.getRepositories(projectId);
+      if (!this.#owner.current(generation)) return;
+      this.#repositories.set(projectId, repositories);
+      this.#repositoryErrors.delete(projectId);
+    } catch (error) {
+      if (!this.#owner.current(generation)) return;
+      this.#repositoryErrors.set(projectId, this.#owner.errorCode(error));
+    } finally {
+      this.#repositoryPending.delete(projectId);
+    }
+    this.#owner.publish();
+  }
+
+  async mutateRepository(request: RepositoryMutation): Promise<void> {
+    const session = this.#owner.session();
+    if (!this.#owner.ready() || session === undefined || this.#repositoryPending.has(request.projectId)) return;
+    const generation = this.#owner.generation();
+    this.#repositoryPending.add(request.projectId);
+    this.#owner.publish();
+    try {
+      await session.mutateRepository(request);
+      if (!this.#owner.current(generation)) return;
+      this.#repositoryErrors.delete(request.projectId);
+    } catch (error) {
+      if (!this.#owner.current(generation)) return;
+      this.#repositoryErrors.set(request.projectId, this.#owner.errorCode(error));
+    } finally {
+      this.#repositoryPending.delete(request.projectId);
+    }
+    this.#owner.publish();
+    await this.loadRepositories(request.projectId);
+  }
+
+  async createProject(request: { name: string; root: string }): Promise<void> {
+    const session = this.#owner.session();
+    if (!this.#owner.ready() || session === undefined) return;
+    const generation = this.#owner.generation();
+    try {
+      await session.createProject(request);
+      if (!this.#owner.current(generation)) return;
+      this.#repositoryErrors.delete("create");
+    } catch (error) {
+      if (!this.#owner.current(generation)) return;
+      this.#repositoryErrors.set("create", this.#owner.errorCode(error));
+    }
+    this.#owner.publish();
   }
 
   async #changeAccount(request: Parameters<BrowserSession["linkAccount"]>[0] | Parameters<BrowserSession["updateAccount"]>[0]): Promise<void> {

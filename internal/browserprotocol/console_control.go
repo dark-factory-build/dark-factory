@@ -422,7 +422,7 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 		for _, item := range value.Items {
-			if validateDynamicID(item.ID) != nil || item.ProjectID != value.ProjectID || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 256) != nil || item.Revision == 0 {
+			if validateDynamicID(item.ID) != nil || item.ProjectID != value.ProjectID || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 4096) != nil || item.Revision == 0 {
 				return bad()
 			}
 		}
@@ -431,16 +431,16 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 		if value.Action == "add" {
-			if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Name, 1, 128) != nil || validateBoundedText(value.Root, 1, 4096) != nil || validateBoundedText(value.BaseRef, 1, 256) != nil {
+			if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Name, 1, 128) != nil || validateBoundedText(value.Root, 1, 4096) != nil || validateBoundedText(value.BaseRef, 1, 4096) != nil {
 				return bad()
 			}
-		} else if validateDynamicID(value.ID) != nil || value.ExpectedRevision == 0 || value.Action == "enabled" && value.Enabled == nil {
+		} else if validateDynamicID(value.ID) != nil || value.ExpectedRevision == 0 || value.Action == "base" && validateBoundedText(value.BaseRef, 1, 4096) != nil || value.Action == "enabled" && value.Enabled == nil {
 			return bad()
 		}
 	case RepositoryMutateResult:
 		if value.Repository != nil {
 			item := *value.Repository
-			if validateDynamicID(item.ID) != nil || validateDynamicID(item.ProjectID) != nil || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 256) != nil || item.Revision == 0 {
+			if validateDynamicID(item.ID) != nil || validateDynamicID(item.ProjectID) != nil || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 4096) != nil || item.Revision == 0 {
 				return bad()
 			}
 		}
