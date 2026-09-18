@@ -106,6 +106,8 @@ export const CONTROL_MANIFEST = [
   { type: "BROWSER_CLIENTS", direction: "server", id: "required", fixture: "browser_clients.json" },
   { type: "BROWSER_CLIENT_REVOKE", direction: "client", id: "required", fixture: "browser_client_revoke.json" },
   { type: "BROWSER_CLIENT_REVOKE_RESULT", direction: "server", id: "required", fixture: "browser_client_revoke_result.json" },
+  { type: "GITHUB_CONNECTION", direction: "client", id: "required", fixture: "github_connection.json" },
+  { type: "GITHUB_CONNECTION_RESULT", direction: "server", id: "required", fixture: "github_connection_result.json" },
   { type: "REMOTE_INVITE", direction: "client", id: "required", fixture: "remote_invite.json" },
   { type: "REMOTE_INVITE_RESULT", direction: "server", id: "required", fixture: "remote_invite_result.json" },
   { type: "PUSH_SUBSCRIBE", direction: "client", id: "required", fixture: "push_subscribe.json" },

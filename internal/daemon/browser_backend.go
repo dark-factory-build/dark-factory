@@ -14,9 +14,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/topology"
 )
 
@@ -333,6 +335,53 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 // The transport discovers the console half by type assertion, so a signature
 // that drifts would silently answer unauthorized instead of failing to build.
 var _ browser.ConsoleBackend = (*browserBackend)(nil)
+
+func (backend *browserBackend) GitHubConnection(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.GitHubConnection) (browserprotocol.GitHubConnectionResult, error) {
+	clientID, release, client, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.GitHubConnectionResult{}, err
+	}
+	defer release()
+	if client.ID != clientID || backend.owner == nil {
+		return browserprotocol.GitHubConnectionResult{}, browser.ErrUnauthorized
+	}
+	input := api.GitHubConnectionInput{Action: request.Action, Code: request.Code, Page: request.Page, InstallationID: request.InstallationID}
+	for _, item := range request.Repositories {
+		input.Repositories = append(input.Repositories, maintainer.Delegation{InstallationID: item.InstallationID, RepositoryID: item.RepositoryID, Repository: item.Repository})
+	}
+	result := backend.owner.GitHubConnection(ctx, input)
+	return projectGitHubConnection(result), nil
+}
+
+func projectGitHubConnection(result api.GitHubConnectionResult) browserprotocol.GitHubConnectionResult {
+	value := browserprotocol.GitHubConnectionResult{State: result.State}
+	if result.Authorization != nil {
+		value.Authorization = &browserprotocol.GitHubAuthorization{ConnectionID: result.Authorization.ConnectionID, URL: result.Authorization.URL, ExpiresAt: result.Authorization.ExpiresAt}
+	}
+	if result.Status != nil {
+		value.Status = &browserprotocol.GitHubStatus{ConnectionID: result.Status.ConnectionID, State: result.Status.State, Repositories: make([]browserprotocol.GitHubDelegation, len(result.Status.Repositories))}
+		if result.Status.User != nil {
+			value.Status.User = &browserprotocol.GitHubUser{ID: result.Status.User.ID, Login: result.Status.User.Login, Type: result.Status.User.Type}
+		}
+		for i, item := range result.Status.Repositories {
+			value.Status.Repositories[i] = browserprotocol.GitHubDelegation{InstallationID: item.InstallationID, RepositoryID: item.RepositoryID, Repository: item.Repository}
+		}
+	}
+	if result.Installations != nil {
+		value.Installations = &browserprotocol.GitHubInstallations{Items: make([]browserprotocol.GitHubInstallation, len(result.Installations.Items)), NextPage: result.Installations.NextPage}
+		for i, item := range result.Installations.Items {
+			value.Installations.Items[i] = browserprotocol.GitHubInstallation{ID: item.ID, Account: browserprotocol.GitHubUser{ID: item.Account.ID, Login: item.Account.Login, Type: item.Account.Type}, SuspendedAt: item.SuspendedAt, URL: item.URL, Eligibility: item.Eligibility}
+		}
+	}
+	if result.Repositories != nil {
+		value.Repositories = &browserprotocol.GitHubRepositories{Items: make([]browserprotocol.GitHubRepository, len(result.Repositories.Items)), NextPage: result.Repositories.NextPage}
+		for i, item := range result.Repositories.Items {
+			value.Repositories.Items[i].ID, value.Repositories.Items[i].Name = item.ID, item.Name
+			value.Repositories.Items[i].Permissions.Pull, value.Repositories.Items[i].Permissions.Push, value.Repositories.Items[i].Permissions.Maintain, value.Repositories.Items[i].Permissions.Admin = item.Permissions.Pull, item.Permissions.Push, item.Permissions.Maintain, item.Permissions.Admin
+		}
+	}
+	return value
+}
 
 func (backend *browserBackend) UpdateAgent(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.AgentUpdate) (browserprotocol.AgentUpdateResult, error) {
 	_, release, client, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)

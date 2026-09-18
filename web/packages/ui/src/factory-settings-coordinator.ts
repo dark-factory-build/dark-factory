@@ -3,6 +3,7 @@ import {
   type BrowserClientsView,
   type BrowserSession,
   type DiscoveredAccountView,
+  type GitHubConnectionResult,
   type RepositoryMutation,
   type RepositoryView,
 } from "@dark-factory/client";
@@ -15,7 +16,9 @@ export type FactoryRemoteInvite = Readonly<{
   expiresAtMs: bigint;
 }>;
 
-type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
+export type FactoryGitHubView = Readonly<{ result?: GitHubConnectionResult; pending: boolean; error?: string }>;
+
+type SettingsSession = Pick<BrowserSession, "discoverAccounts" | "linkAccount" | "updateAccount" | "inviteRemote" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "getRepositories" | "mutateRepository" | "createProject" | "capabilities" | "clientId">;
 
 type SettingsOwner = Readonly<{
   session(): SettingsSession | undefined;
@@ -42,6 +45,9 @@ export class FactorySettingsCoordinator {
   #repositoryPending = new Set<string>();
   #repositoryErrors = new Map<string, string>();
   #repositoryMutationErrors = new Set<string>();
+  #github: GitHubConnectionResult | undefined;
+  #githubPending = false;
+  #githubError: string | undefined;
 
   constructor(owner: SettingsOwner) {
     this.#owner = owner;
@@ -62,6 +68,55 @@ export class FactorySettingsCoordinator {
   get repositories(): ReadonlyMap<string, readonly RepositoryView[]> { return this.#repositories; }
   get repositoryPending(): ReadonlySet<string> { return this.#repositoryPending; }
   get repositoryErrors(): ReadonlyMap<string, string> { return this.#repositoryErrors; }
+  get github(): FactoryGitHubView { return { result: this.#github, pending: this.#githubPending, error: this.#githubError }; }
+
+  /** A replacement browser session must rediscover private GitHub state. */
+  clearGitHub(): void {
+    if (this.#github === undefined && this.#githubError === undefined) return;
+    this.#github = undefined;
+    this.#githubError = undefined;
+    this.#owner.publish();
+  }
+
+  async githubConnection(request: Parameters<BrowserSession["githubConnection"]>[0]): Promise<void> {
+    const session = this.#owner.session();
+    if (!this.#owner.ready() || session === undefined || this.#githubPending) return;
+    const generation = this.#owner.generation();
+    this.#githubPending = true;
+    this.#owner.publish();
+    try {
+      const result = await session.githubConnection(request);
+      if (!this.#owner.current(generation)) return;
+      if (request.action === "disconnect" && result.state === "ok") {
+        this.#github = { state: "disconnected" };
+      } else if (request.action === "connect" || result.state !== "ok" || this.#github === undefined) {
+        const previousAuthorization = this.#github?.authorization;
+        const preserveAuthorization = (request.action === "confirm" || request.action === "status" || request.action === "refresh") && previousAuthorization !== undefined;
+        this.#github = !preserveAuthorization ? result : { ...result, authorization: previousAuthorization };
+      } else if (result.state === "ok" && this.#github !== undefined) {
+        const sameConnection = result.status === undefined || this.#github.status?.connection_id === result.status.connection_id;
+        this.#github = {
+          ...this.#github,
+          ...result,
+          authorization: result.authorization ?? (result.status?.state === "pending" || result.status?.state === "awaiting_confirmation" ? this.#github.authorization : undefined),
+          status: result.status ?? this.#github.status,
+          installations: request.action === "refresh" ? result.installations : sameConnection ? result.installations ?? this.#github.installations : result.installations,
+          repositories: request.action === "refresh" ? result.repositories : sameConnection ? result.repositories ?? this.#github.repositories : result.repositories,
+        };
+      }
+      this.#githubError = undefined;
+    } catch (error) {
+      if (!this.#owner.current(generation)) return;
+      this.#githubError = this.#owner.errorCode(error);
+    } finally {
+      if (this.#owner.current(generation)) this.#githubPending = false;
+    }
+    this.#owner.publish();
+    if (request.action === "confirm" && this.#github?.state === "ok" || request.action === "refresh" && this.#github?.status?.state === "connected") {
+      if (request.action === "confirm") await this.githubConnection({ action: "refresh" });
+      else await this.githubConnection({ action: "installations", page: 1 });
+    }
+  }
 
   clearRemoteInvite(): void {
     this.#remoteInvite = undefined;

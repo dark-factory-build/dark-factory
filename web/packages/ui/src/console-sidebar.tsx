@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { MAX_TASK_PRIORITY, type DiscoveredAccount, type AccountItem, type AgentItem, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
+import { MAX_TASK_PRIORITY, type DiscoveredAccount, type AccountItem, type AgentItem, type GitHubConnectionBody, type GitHubDelegationBody, type ProjectItem, type RepositoryMutation, type RepositoryView, type StateView, type TaskHistoryView, type TaskItem, type TaskListView, type TaskPeerQuestion } from "@dark-factory/client";
 import type { FactoryEditView, FactoryHumanRequestView } from "./factory-app-controller.js";
+import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { rankLabel } from "./console-screens.js";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import { agentStatus, agentCurrentTask, agentActivity } from "./console-view.js";
@@ -525,6 +526,8 @@ export function SettingsDialog({
   accounts,
   accountsPending,
   accountsError,
+  github,
+  onGitHub,
   onLoadAccounts,
   onLinkAccount,
   onUpdateAccount,
@@ -549,6 +552,8 @@ export function SettingsDialog({
   accounts?: readonly DiscoveredAccount[];
   accountsPending?: boolean;
   accountsError?: string;
+  github?: FactoryGitHubView;
+  onGitHub?: (request: GitHubConnectionBody) => void;
   onLoadAccounts?: () => void;
   onLinkAccount?: (login: DiscoveredAccount, label: string) => void;
   onUpdateAccount?: (account: AccountItem, change: { label?: string; remove?: boolean }) => void;
@@ -569,6 +574,9 @@ export function SettingsDialog({
   const load = useRef(onLoadAccounts);
   load.current = onLoadAccounts;
   useEffect(() => { load.current?.(); }, []);
+  const loadGitHub = useRef(onGitHub);
+  loadGitHub.current = onGitHub;
+  useEffect(() => { if (ready) loadGitHub.current?.({ action: "status" }); }, [ready]);
   const close = () => dialog.current?.close();
   return (
     <dialog
@@ -595,6 +603,7 @@ export function SettingsDialog({
           onUpdate={onUpdateAccount}
           onRefresh={onLoadAccounts}
         />
+        <GitHubSection github={github} onGitHub={onGitHub} />
         <RepositoriesSection state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
         <details className="dfConsoleSidebar__section" aria-label="Run limits">
           <summary>Run limits</summary>
@@ -674,6 +683,76 @@ function RepositoryRow({ project, item, pending, onMutate }: { project: ProjectI
     <label>Base<input value={baseRef} disabled={pending} onChange={(event) => setBaseRef(event.currentTarget.value)} /></label><button type="button" disabled={pending || !baseRef.trim() || baseRef === item.base_ref} onClick={() => request("base")}>SAVE BASE</button>
     <button type="button" disabled={pending || item.default} onClick={() => request("default")}>MAKE DEFAULT</button><button type="button" disabled={pending || item.default} onClick={() => request("enabled", { enabled: !item.enabled })}>{item.enabled ? "DISABLE" : "ENABLE"}</button><button type="button" disabled={pending || item.default} onClick={() => request("remove")}>REMOVE</button>
   </li>;
+}
+
+function nativeManageURL(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const url = new URL(value);
+    const path = /^\/settings\/installations\/[1-9][0-9]*$/.test(url.pathname) || /^\/organizations\/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/settings\/installations\/[1-9][0-9]*$/.test(url.pathname);
+    return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && path ? url.href : undefined;
+  } catch { return undefined; }
+}
+
+function GitHubSection({ github, onGitHub }: { github?: FactoryGitHubView; onGitHub?: (request: GitHubConnectionBody) => void }) {
+  const result = github?.result;
+  const [code, setCode] = useState("");
+  const [installationID, setInstallationID] = useState<number>();
+  const [selected, setSelected] = useState<Record<string, GitHubDelegationBody>>({});
+  const [installationPage, setInstallationPage] = useState(1);
+  const [repositoryPage, setRepositoryPage] = useState(1);
+  const [loadedRepositories, setLoadedRepositories] = useState<{ installationID: number; value: NonNullable<NonNullable<FactoryGitHubView["result"]>["repositories"]> }>();
+  const previousConnectionID = useRef("");
+  const busy = github?.pending === true;
+  const status = result?.status?.state ?? (result?.authorization !== undefined && result.state === "ok" ? "pending" : result?.state ?? "disconnected");
+  const connectionID = result?.status?.connection_id ?? result?.authorization?.connection_id ?? "";
+  const installations = result?.installations;
+  const repositories = result?.repositories;
+  const repositorySource = useRef(repositories);
+  const selectedItems = Object.values(selected);
+  const visibleRepositories = loadedRepositories !== undefined && loadedRepositories.installationID === installationID ? loadedRepositories.value : undefined;
+  const load = (request: GitHubConnectionBody) => { if (!busy) onGitHub?.(request); };
+  const connected = status === "connected";
+  const canConnect = status === "disconnected" || status === "pending" || status === "awaiting_confirmation" || status === "disconnect_pending" || status === "denied" || status === "unavailable" || status === "invalid" || status === "already_connected" || status === "legacy_overseers_running" || github?.error !== undefined;
+  const recoveryAction = status === "disconnected" ? connectionID === "" ? "connect" : "disconnect" : status === "pending" || status === "awaiting_confirmation" || status === "disconnect_pending" || status === "denied" || status === "legacy_overseers_running" && connectionID !== "" ? "disconnect" : status === "legacy_overseers_running" ? "connect" : "refresh";
+  useEffect(() => {
+    if (connectionID !== previousConnectionID.current) {
+      previousConnectionID.current = connectionID;
+      setInstallationID(undefined);
+      setInstallationPage(1);
+      setRepositoryPage(1);
+    }
+    if (!connected || connectionID === "") {
+      setSelected({});
+      setInstallationID(undefined);
+      setRepositoryPage(1);
+      return;
+    }
+    setSelected(Object.fromEntries((result?.status?.repositories ?? []).map((item) => [`${item.installation_id}:${item.repository_id}`, item])));
+  }, [connected, connectionID, result?.status?.repositories]);
+  useEffect(() => {
+    if (repositories === repositorySource.current) return;
+    repositorySource.current = repositories;
+    setLoadedRepositories(repositories === undefined || installationID === undefined ? undefined : { installationID, value: repositories });
+  }, [repositories, installationID]);
+  return <section className="dfConsoleSidebar__section" aria-label="GITHUB SETTINGS">
+    <h3>GITHUB</h3>
+    <p className="dfConsoleSidebar__inherit">PRIVATE OPERATOR CONNECTION · {status.toUpperCase().replaceAll("_", " ")}</p>
+    {status === "legacy_overseers_running" ? <p className="dfFactoryConsole__terminalError" role="alert">STOP EXISTING LEGACY OVERSEERS THROUGH FACTORY CONTROLS BEFORE CONNECTING GITHUB.</p> : null}
+    {status === "denied" ? <p className="dfFactoryConsole__terminalError" role="alert">GITHUB ACCESS WAS DENIED OR EXPIRED. REFRESH ACCESS.</p> : null}
+    {status === "unavailable" ? <p className="dfFactoryConsole__terminalError" role="alert">GITHUB IS UNAVAILABLE. RETRY WHEN THE MAINTAINER IS REACHABLE.</p> : null}
+    {github?.error === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">GITHUB SETTINGS UNAVAILABLE · {github.error.toUpperCase()}</p>}
+    {canConnect ? <button type="button" disabled={busy || onGitHub === undefined} onClick={() => load({ action: recoveryAction })}>{status === "disconnected" && connectionID === "" ? "CONNECT GITHUB" : status === "disconnect_pending" ? "RETRY DISCONNECT" : status === "pending" || status === "awaiting_confirmation" || status === "denied" || status === "disconnected" ? "RESET GITHUB ACCESS" : "RETRY GITHUB ACCESS"}</button> : null}
+    {result?.authorization?.authorization_url === undefined ? null : <p><a href={result.authorization.authorization_url} target="_blank" rel="noreferrer">AUTHORIZE ON GITHUB</a></p>}
+    {result?.authorization !== undefined ? <form onSubmit={(event) => { event.preventDefault(); if (/^[0-9A-F]{10}$/.test(code)) load({ action: "confirm", code }); }}><label htmlFor="df-github-code">CALLBACK CODE</label><input id="df-github-code" value={code} maxLength={10} inputMode="text" onChange={(event) => setCode(event.currentTarget.value.toUpperCase())} /><button type="submit" disabled={busy || code.length !== 10}>CONFIRM</button></form> : null}
+    {connected ? <div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => { setInstallationPage(1); load({ action: "refresh" }); }}>REFRESH ACCESS</button><button type="button" disabled={busy} onClick={() => load({ action: "disconnect" })}>DISCONNECT</button></div> : null}
+    {!connected ? null : <>
+      <h4>INSTALLATIONS</h4>
+      {installations === undefined ? <p className="dfFactoryConsole__empty">REFRESH TO LIST INSTALLATIONS</p> : installations.installations.length === 0 ? <p className="dfFactoryConsole__empty">NO INSTALLATIONS AVAILABLE · AN ORGANIZATION OWNER MAY NEED TO APPROVE THE DARK FACTORY APP IN GITHUB SETTINGS.</p> : <ul className="dfFactoryConsole__list">{installations.installations.map((item) => { const manage = nativeManageURL(item.html_url); return <li key={item.id} className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.account.login} · {item.eligibility || "available"}</p>{item.suspended_at !== null ? <p className="dfConsoleSidebar__inherit">SUSPENDED · ASK GITHUB TO RESTORE THIS INSTALLATION.</p> : null}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy || item.suspended_at !== null} onClick={() => { setInstallationID(item.id); setLoadedRepositories(undefined); setRepositoryPage(1); load({ action: "repositories", installation_id: item.id, page: 1 }); }}>CHOOSE REPOSITORIES</button>{manage === undefined ? null : <a href={manage} target="_blank" rel="noreferrer">MANAGE ON GITHUB</a>}</div></li>; })}</ul>}
+      <div className="dfConsoleSidebar__taskActions">{installationPage > 1 ? <button type="button" disabled={busy} onClick={() => { const page = installationPage - 1; setInstallationPage(page); load({ action: "installations", page }); }}>PREVIOUS INSTALLATIONS</button> : null}{installations?.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = installations.next_page!; setInstallationPage(page); load({ action: "installations", page }); }}>MORE INSTALLATIONS</button>}</div>
+      {installationID === undefined || visibleRepositories === undefined ? null : <><h4>REPOSITORIES · PAGE {repositoryPage}</h4>{visibleRepositories.repositories.length === 0 ? <p className="dfFactoryConsole__empty">NO REPOSITORIES AVAILABLE</p> : <ul className="dfConsoleSidebar__list">{visibleRepositories.repositories.map((item) => { const key = `${installationID}:${item.id}`; const chosen = selected[key]; return <li key={item.id}><label><input type="checkbox" checked={chosen !== undefined} disabled={busy || selectedItems.length >= 100 && chosen === undefined} onChange={(event) => setSelected((current) => { const next = { ...current }; if (event.currentTarget.checked) next[key] = { installation_id: installationID, repository_id: item.id, repository: item.full_name }; else delete next[key]; return next; })} /> {item.full_name}{item.permissions.push ? "" : " · READ ONLY"}</label></li>; })}</ul>}<div className="dfConsoleSidebar__taskActions"><button type="button" disabled={busy} onClick={() => load({ action: "delegate", repositories: selectedItems })}>DELEGATE SELECTED ({selectedItems.length}/100)</button>{visibleRepositories.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => { const page = visibleRepositories.next_page!; setRepositoryPage(page); load({ action: "repositories", installation_id: installationID, page }); }}>MORE REPOSITORIES</button>}</div></>}
+    </>}
+  </section>;
 }
 
 function FloorAppearanceSection({ appearance, onChange, onReset }: {

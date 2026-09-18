@@ -58,6 +58,7 @@ type Server struct {
 	terminalBackend    TerminalBackend
 	taskBackend        TaskBackend
 	consoleBackend     ConsoleBackend
+	githubBackend      GitHubBackend
 	pairBackend        PairBackend
 	pairPolicy         string
 	host               string
@@ -109,6 +110,7 @@ func start(backend Backend, origins map[string]struct{}, listener net.Listener, 
 		terminalBackend:    func() TerminalBackend { value, _ := backend.(TerminalBackend); return value }(),
 		taskBackend:        func() TaskBackend { value, _ := backend.(TaskBackend); return value }(),
 		consoleBackend:     func() ConsoleBackend { value, _ := backend.(ConsoleBackend); return value }(),
+		githubBackend:      func() GitHubBackend { value, _ := backend.(GitHubBackend); return value }(),
 		pairBackend:        func() PairBackend { value, _ := backend.(PairBackend); return value }(),
 		pairPolicy:         pairPolicy(origins),
 		host:               listener.Addr().String(),

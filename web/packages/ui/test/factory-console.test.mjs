@@ -1149,6 +1149,47 @@ test("the settings modal keeps actionable settings compact", () => {
   assert.match(both, /aria-label="Agent Builder One"/);
 });
 
+test("private GitHub settings stays behind the paired admin surface", async () => {
+  const calls = [];
+  const settings = { settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => calls.push(request) };
+  const disconnected = render(settings);
+  assert.match(disconnected, /aria-label="GITHUB SETTINGS"/);
+  assert.match(disconnected, />PRIVATE OPERATOR CONNECTION · DISCONNECTED</);
+  assert.match(disconnected, />CONNECT GITHUB<\/button>/);
+  let renderer;
+  act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings })); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CONNECT GITHUB").props.onClick(); });
+  assert.ok(calls.some((request) => request.action === "connect"));
+  renderer.unmount();
+  const denied = render({ ...settings, github: { pending: false, result: { state: "denied" } } });
+  assert.match(denied, /GITHUB ACCESS WAS DENIED OR EXPIRED/);
+  const unavailable = render({ ...settings, github: { pending: false, result: { state: "unavailable" } } });
+  assert.match(unavailable, /GITHUB IS UNAVAILABLE/);
+  const connected = render({ ...settings, github: { pending: false, result: {
+    state: "ok",
+    status: { connection_id: "c", state: "connected", repositories: [] },
+    installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 },
+  } } });
+  assert.match(connected, /REFRESH ACCESS/);
+  assert.match(connected, /DISCONNECT/);
+  assert.match(connected, /factory-org · available/);
+  assert.match(connected, /href="https:\/\/github.com\/settings\/installations\/7"/);
+  assert.match(connected, /MORE INSTALLATIONS/);
+  assert.equal(connected.includes("javascript:"), false);
+  assert.equal(connected.includes("evil.example"), false);
+  assert.match(disconnected, /GITHUB/);
+
+  const repositoryCalls = [];
+  const repositoryProps = (repositories) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
+  act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
+  act(() => { renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
+  await act(async () => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 102, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => String(button.props.children).startsWith("DELEGATE SELECTED")).props.onClick(); });
+  assert.deepEqual(repositoryCalls.find((request) => request.action === "delegate"), { action: "delegate", repositories: [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }] });
+  renderer.unmount();
+});
+
 test("settings edits project limits as future runs with an explicit unlimited choice", () => {
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, onSaveProjectLimits: () => {} });
   assert.match(markup, /aria-label="Project limits"/);
