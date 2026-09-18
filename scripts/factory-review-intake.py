@@ -143,7 +143,7 @@ def linked_issue(config, pr, journal, existing=None):
 
 def discovery_batch_size(config):
     # GitHub's REST pull-request endpoint caps per_page at 100.
-    return min(int(config.get("max_issues", 25)) + 1, 100)
+    return min(int(config.get("max_issues", 25)), 100)
 
 
 def next_discovery_page(config, page, discovered):

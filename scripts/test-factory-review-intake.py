@@ -37,18 +37,18 @@ class ReviewIntakeTest(unittest.TestCase):
         self.temp.cleanup()
 
     def test_discovery_processes_one_bounded_overflow_pr_instead_of_starving_it(self):
-        prs = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 12)]
+        prs = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 11)]
         with patch.object(review.intake, 'command', return_value=json.dumps(prs)) as command:
             discovered = review.list_prs(dict(self.config, max_issues=10))
-        self.assertEqual([{'number': number, 'headRefOid': ('%040d' % number), 'body': 'Refs #7'} for number in range(1, 12)], discovered)
+        self.assertEqual([{'number': number, 'headRefOid': ('%040d' % number), 'body': 'Refs #7'} for number in range(1, 11)], discovered)
         self.assertEqual(['--field', 'page=1'], command.call_args.args[0][-2:])
 
     def test_discovery_cursor_reaches_prs_beyond_first_bounded_page(self):
-        page_one = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 12)]
-        page_two = [{'number': 12, 'head': {'sha': '%040d' % 12}, 'body': 'Refs #7'}]
+        page_one = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 11)]
+        page_two = [{'number': 11, 'head': {'sha': '%040d' % 11}, 'body': 'Refs #7'}]
         with patch.object(review.intake, 'command', side_effect=[json.dumps(page_one), json.dumps(page_two)]) as command:
-            self.assertEqual(11, len(review.list_prs(dict(self.config, max_issues=10), 1)))
-            self.assertEqual([{'number': 12, 'headRefOid': '%040d' % 12, 'body': 'Refs #7'}], review.list_prs(dict(self.config, max_issues=10), 2))
+            self.assertEqual(10, len(review.list_prs(dict(self.config, max_issues=10), 1)))
+            self.assertEqual([{'number': 11, 'headRefOid': '%040d' % 11, 'body': 'Refs #7'}], review.list_prs(dict(self.config, max_issues=10), 2))
         self.assertEqual('page=1', command.call_args_list[0].args[0][-1])
         self.assertEqual('page=2', command.call_args_list[1].args[0][-1])
 
@@ -64,6 +64,12 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertEqual(100, review.discovery_batch_size(config))
         self.assertEqual(2, review.next_discovery_page(config, 1, len(page_one)))
         self.assertEqual(1, review.next_discovery_page(config, 2, len(page_two)))
+
+    def test_discovery_rejects_page_over_configured_per_pass_cap(self):
+        prs = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 27)]
+        with patch.object(review.intake, 'command', return_value=json.dumps(prs)):
+            with self.assertRaisesRegex(review.ReviewError, 'bounded discovery batch'):
+                review.list_prs(dict(self.config, max_issues=25), 1)
 
     def test_only_app_footer_linked_pr_is_woken_once_after_lost_response(self):
         prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
