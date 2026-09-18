@@ -161,7 +161,10 @@ func (store *Store) createHumanQuestionForAttempt(ctx context.Context, digest At
 		return HumanRequest{}, tx.Rollback(err)
 	}
 	if existingFound {
-		if existing.QuestionText != input.QuestionText || !slices.Equal(existing.Options, input.Options) {
+		// A completion callback replays its own durable callback key. The key
+		// may have been promoted onto an already-open provider question, whose
+		// text is intentionally different from the callback's fixed prompt.
+		if !input.ReuseExisting && (existing.QuestionText != input.QuestionText || !slices.Equal(existing.Options, input.Options)) {
 			return HumanRequest{}, tx.Rollback(ErrConflict)
 		}
 		if err := tx.Rollback(nil); err != nil {
@@ -176,7 +179,21 @@ func (store *Store) createHumanQuestionForAttempt(ctx context.Context, digest At
 			return HumanRequest{}, tx.Rollback(err)
 		}
 		if existingFound {
-			if err := tx.Rollback(nil); err != nil {
+			updated, updateErr := tx.connection.ExecContext(ctx, `UPDATE human_requests SET idempotency_key = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND status IN ('open', 'delivering', 'delivery_unknown')`, input.IdempotencyKey[:], at.Int64(), existingOpen.ID.Bytes())
+			if err := requireOneRow(updated, updateErr); err != nil {
+				return HumanRequest{}, tx.Rollback(err)
+			}
+			if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityHumanRequest, id: existingOpen.ID.Bytes(), revision: existingOpen.Revision.Int64() + 1}}); err != nil {
+				return HumanRequest{}, tx.Rollback(err)
+			}
+			existingOpen, existingFound, err = humanRequestByID(ctx, tx.connection, existingOpen.ID)
+			if err != nil || !existingFound {
+				if err == nil {
+					err = ErrCorruptState
+				}
+				return HumanRequest{}, tx.Rollback(err)
+			}
+			if err := tx.Commit(ctx); err != nil {
 				return HumanRequest{}, err
 			}
 			return existingOpen, nil

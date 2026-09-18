@@ -380,24 +380,31 @@ func TestHumanQuestionReuseExistingDoesNotOpenSecondRequest(t *testing.T) {
 	ctx := context.Background()
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
-	client := humanQuestionClient(t, store, 241, BrowserCapabilityObserve|BrowserCapabilityHumanActions)
 	first, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(40), QuestionText: "already waiting"}, mustTime(t, 400))
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, err := store.BeginHumanReply(ctx, client.ID, first.ID, first.Revision, humanDeliveryID(t, 42), "acknowledged", mustTime(t, 401))
+	reused, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(41), QuestionText: "turn completed", ReuseExisting: true}, mustTime(t, 401))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AcknowledgeHumanReply(ctx, first.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 402)); err != nil {
-		t.Fatal(err)
+	if reused.ID != first.ID || reused.QuestionText != first.QuestionText {
+		t.Fatalf("open request reuse = %+v, first = %+v", reused, first)
 	}
-	reused, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(41), QuestionText: "turn completed", ReuseExisting: true}, mustTime(t, 403))
+	delivery, err := store.BeginHumanReplyForOperator(ctx, reused.ID, reused.Revision, humanDeliveryID(t, 42), "acknowledged", mustTime(t, 402))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("begin reused=%+v: %v", reused, err)
 	}
-	if reused.ID == first.ID || reused.QuestionText != "turn completed" {
-		t.Fatalf("new request = %+v, first = %+v", reused, first)
+	if err := store.AcknowledgeHumanReply(ctx, first.ID, delivery.DeliveryID, delivery.Revision, mustTime(t, 403)); err != nil {
+		t.Fatalf("ack delivery=%+v reused=%+v: %v", delivery, reused, err)
+	}
+	replayed, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(41), QuestionText: "turn completed", ReuseExisting: true}, mustTime(t, 404))
+	if err != nil || replayed.ID != reused.ID {
+		t.Fatalf("duplicate callback = %+v, err=%v", replayed, err)
+	}
+	later, err := store.CreateHumanQuestionForAttempt(ctx, run.CredentialDigest, NewHumanQuestion{IdempotencyKey: humanKey(43), QuestionText: "next turn", ReuseExisting: true}, mustTime(t, 404))
+	if err != nil || later.ID == reused.ID || later.QuestionText != "next turn" {
+		t.Fatalf("later callback = %+v, err=%v", later, err)
 	}
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
