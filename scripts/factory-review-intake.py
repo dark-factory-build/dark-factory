@@ -76,10 +76,8 @@ def app_receipt(body, kinds, number, repository, object_path):
         return False
     if not isinstance(result, dict) or result.get("number") != number or not isinstance(result.get("url"), str):
         return False
-    parsed = urlparse(result["url"])
-    expected = "/" + repository + "/" + object_path + "/" + str(number)
-    return parsed.scheme == "https" and parsed.netloc == "github.com" and not parsed.params \
-        and not parsed.query and not parsed.fragment and parsed.path.casefold() == expected.casefold()
+    expected = "https://github.com/" + repository + "/" + object_path + "/" + str(number)
+    return result["url"].casefold() == expected.casefold()
 
 
 def app_update_receipt(body, number, repository):
@@ -93,10 +91,8 @@ def app_update_receipt(body, number, repository):
             or value.get("request_digest") != marker.group(2) or not isinstance(result, dict) \
             or result.get("number") != number or not isinstance(result.get("url"), str):
         return False
-    parsed = urlparse(result["url"])
-    expected = "/" + repository + "/pull/" + str(number)
-    if parsed.scheme != "https" or parsed.netloc != "github.com" or parsed.params or parsed.query or parsed.fragment \
-            or parsed.path.casefold() != expected.casefold():
+    expected = "https://github.com/" + repository + "/pull/" + str(number)
+    if result["url"].casefold() != expected.casefold():
         return False
     prefix = body[:marker.start()]
     if prefix == "":

@@ -151,11 +151,8 @@ else
         exit $?
     fi
     git -C "$repository_root" fetch -q origin
-    # An empty hooksPath, as new-worktree.sh: the repository's configured hooks
-    # must not run inside the worktree the live service is built from.
-    empty_hooks=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-empty-hooks.XXXXXX")
-    trap 'rmdir "$empty_hooks" 2>/dev/null || true' EXIT
-    [ -d "$worktree" ] || git -C "$repository_root" -c core.hooksPath="$empty_hooks" \
+    # Configured hooks must not run where the live service is built.
+    [ -d "$worktree" ] || git -C "$repository_root" -c core.hooksPath=/dev/null \
         worktree add -q --detach "$worktree" "$sha"
     [ -z "$(git -C "$worktree" status --porcelain=v1 --untracked-files=all)" ] \
         || { echo "worktree not clean: $worktree" >&2; exit 1; }

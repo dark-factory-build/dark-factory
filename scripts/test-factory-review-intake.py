@@ -251,6 +251,28 @@ class ReviewIntakeTest(unittest.TestCase):
             self.assertTrue(review.app_update_receipt(body, 9, 'o/r'))
             self.assertFalse(review.app_update_receipt('changed\n\n' + body, 9, 'o/r'))
 
+    def test_app_receipt_urls_match_only_the_canonical_object(self):
+        operation_id = '22222222-2222-4222-8222-222222222222'
+        request = {'repository': 'o/r', 'operation_id': operation_id, 'pull_number': 9, 'body': 'verified'}
+        digest = review.hashlib.sha256(json.dumps(request, separators=(',', ':')).encode()).hexdigest()
+        body = 'verified\n\n<!-- dark-factory-operation:%s:%s -->' % (operation_id, digest)
+        canonical = 'https://github.com/o/r/pull/9'
+        cases = [(canonical, True), (canonical.upper(), True)] + [(url, False) for url in (
+            canonical + suffix for suffix in ('?x=1', '#fragment', ';params', '/', '?', '#'))]
+        cases += [(url, False) for url in (
+            'http://github.com/o/r/pull/9', 'https://github.com/other/repo/pull/9',
+            'https://user@github.com/o/r/pull/9', 'https://github.com:443/o/r/pull/9',
+            'https://github.com.evil/o/r/pull/9', 'https://[github.com/o/r/pull/9',
+            'https://github.com/o/r/pull/%39', 'https://github.com/o/r/issues/9',
+            '\n' + canonical, canonical.replace('github', 'git\nhub'), None)]
+        for url, accepted in cases:
+            with self.subTest(url=url):
+                value = {'state': 'completed', 'kind': 'update_pull_request_body', 'request_digest': digest,
+                         'result': {'number': 9, 'url': url}}
+                with patch.object(review, 'observe_operation', return_value=value):
+                    self.assertEqual(accepted, review.app_receipt(body, {'update_pull_request_body'}, 9, 'o/r', 'pull'))
+                    self.assertEqual(accepted, review.app_update_receipt(body, 9, 'o/r'))
+
     def test_launch_uses_host_boundary_exact_receipt_and_owned_group(self):
         operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
         with patch.object(review.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
