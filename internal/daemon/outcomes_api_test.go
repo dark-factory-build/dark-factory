@@ -4,7 +4,6 @@ package daemon
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -21,7 +20,7 @@ func TestOperatorOutcomeWriteReadListRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	projectID := testID(250)
 	done := fixture.serve(t)
-	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "outcomes", Root: filepath.Join(t.TempDir(), "source")}); err != nil {
+	if _, err := client.CreateProject(ctx, api.CreateProjectInput{ID: projectID, Name: "outcomes", Root: contentRepositoryFixture(t)}); err != nil {
 		t.Fatal(err)
 	}
 	waitDispatch(t, done)

@@ -1038,7 +1038,7 @@ func (daemon *Daemon) createProject(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	project, err := daemon.store.CreateProject(ctx, kernel.NewProject{
+	project, err := registerProject(ctx, daemon.store, kernel.NewProject{
 		ID: id, Name: input.Name, Root: input.Root, VerificationPolicy: kernel.VerificationNone,
 	}, at)
 	if err != nil {
@@ -1092,7 +1092,7 @@ func (daemon *Daemon) projectRepository(ctx context.Context, call api.Call) api.
 		if !valid || !projectValid {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
-		value, err := daemon.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: id, ProjectID: project, Name: input.Name, Root: input.Root, BaseRef: input.BaseRef}, at)
+		value, err := registerProjectRepository(ctx, daemon.store, kernel.NewProjectRepository{ID: id, ProjectID: project, Name: input.Name, Root: input.Root, BaseRef: input.BaseRef}, at)
 		if err != nil {
 			return newErrorReply(remoteErrorCode(err))
 		}
@@ -1108,7 +1108,7 @@ func (daemon *Daemon) projectRepository(ctx context.Context, call api.Call) api.
 		case "name":
 			value, err = daemon.store.UpdateProjectRepositoryName(ctx, id, expected, input.Name, at)
 		case "base":
-			value, err = daemon.store.UpdateProjectRepositoryBase(ctx, id, expected, input.BaseRef, at)
+			value, err = updateRepositoryBase(ctx, daemon.store, id, expected, input.BaseRef, at)
 		case "default":
 			value, err = daemon.store.SetProjectRepositoryDefault(ctx, id, expected, at)
 		case "enabled":

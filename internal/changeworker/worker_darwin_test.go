@@ -601,7 +601,11 @@ func newWorkerFixtureWithFactoryctlAndInput(t *testing.T, factoryctl string, inp
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := changeworker.Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, AgentID: "agent-fixture", TaskIncarnationID: "incarnation-fixture", RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, AccountHome: filepath.Join(root, "account"), RepositoryRoot: repository, RepositoryIdentity: repositoryID, GitCommonDir: filepath.Join(repository, ".git"), Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", ProviderTask: providerTask}
+	source, err := change.InspectRepositorySource(context.Background(), git, repository, "HEAD", repositoryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := changeworker.Config{Provider: kernel.ProviderShell, Role: kernel.RoleWorker, AgentID: "agent-fixture", TaskIncarnationID: "incarnation-fixture", RuntimePath: runtimePath, RuntimeIdentity: runtimeID, GitExecutable: git, FactoryctlExecutable: factoryctl, ToolPath: toolPath, AccountHome: filepath.Join(root, "account"), RepositoryRoot: repository, RepositoryIdentity: repositoryID, RepositoryGitIdentity: source.Git, RepositoryOriginDigest: source.OriginDigest, GitCommonDir: filepath.Join(repository, ".git"), Revision: "HEAD", ChangeParent: changeParent, FinalName: "published", AttemptSocket: "/private/tmp/dark-factory-worker-api.sock", ProviderTask: providerTask}
 	workerConfig, err := changeworker.EncodeConfig(config)
 	if err != nil {
 		t.Fatal(err)

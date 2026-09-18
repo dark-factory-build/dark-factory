@@ -30,7 +30,7 @@ const (
 	maxGitStderrBytes     = 64 << 10
 	maxGitConfigBytes     = 1 << 20
 	maxGitExecutableBytes = 64 << 20
-	maxRevisionBytes      = 255
+	maxRevisionBytes      = 4096
 	gitLockRetries        = 5
 	gitLockRetryDelay     = 200 * time.Millisecond
 	gitTerminateGrace     = 250 * time.Millisecond
@@ -64,6 +64,12 @@ func SelectGit(ctx context.Context, gitExecutable, repositoryRoot, revision stri
 	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected, nil, true)
 }
 
+// SelectRegisteredGit retains the registered Git administration and origin
+// boundary across the host/worker handoff before source selection or refresh.
+func SelectRegisteredGit(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositorySourceIdentity) (Selection, error) {
+	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected.Root, nil, true, expected)
+}
+
 // VerifyRepositoryRoot rechecks the exact repository-root identity without
 // resolving a revision or selecting source content.
 func VerifyRepositoryRoot(repositoryRoot string, expected RepositoryIdentity) error {
@@ -80,7 +86,7 @@ func selectGit(ctx context.Context, gitExecutable, repositoryRoot, revision stri
 	return selectGitWithTrust(ctx, gitExecutable, repositoryRoot, revision, expected, hook, false)
 }
 
-func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity, hook gitProcessHook, trusted bool) (Selection, error) {
+func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revision string, expected RepositoryIdentity, hook gitProcessHook, trusted bool, bound ...RepositorySourceIdentity) (Selection, error) {
 	if err := validateRevision(revision); err != nil {
 		return Selection{}, err
 	}
@@ -97,6 +103,17 @@ func selectGitWithTrust(ctx context.Context, gitExecutable, repositoryRoot, revi
 		return Selection{}, err
 	}
 	defer cleanupGitHome(home)
+	if len(bound) > 0 {
+		authority := gitAuthority{repositoryRoot: repositoryRoot, repository: repository, gitExecutable: gitExecutable, gitIdentity: gitIdentity, home: home, hook: hook}
+		actual, err := authority.sourceIdentity(ctx)
+		expectedSource := bound[0]
+		if err != nil {
+			return Selection{}, err
+		}
+		if !expectedSource.Valid() || actual.Root != expectedSource.Root || actual.Git != expectedSource.Git || actual.OriginDigest != expectedSource.OriginDigest {
+			return Selection{}, &ValidationError{Reason: "registered checkout identity changed"}
+		}
+	}
 	spec := gitCommandSpec{program: gitExecutable, repository: repositoryRoot, home: home, hook: hook}
 
 	spec.arguments = []string{"-C", repositoryRoot, "config", "--local", "--null", "--get-regexp", `^(extensions\.partialclone|remote\..*\.promisor)$`}

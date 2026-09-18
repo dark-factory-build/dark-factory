@@ -435,7 +435,7 @@ func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [bro
 	if err != nil {
 		return browserprotocol.ProjectCreateResult{}, mapBrowserError(err)
 	}
-	project, err := backend.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: request.Name, Root: request.Root, VerificationPolicy: kernel.VerificationNone}, at)
+	project, err := registerProject(ctx, backend.store, kernel.NewProject{ID: projectID, Name: request.Name, Root: request.Root, VerificationPolicy: kernel.VerificationNone}, at)
 	if err != nil {
 		return browserprotocol.ProjectCreateResult{}, consoleUpdateError(err)
 	}
@@ -485,7 +485,7 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 		if err != nil {
 			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
 		}
-		value, err := backend.store.AddProjectRepository(ctx, kernel.NewProjectRepository{ID: id, ProjectID: project, Name: request.Name, Root: request.Root, BaseRef: request.BaseRef}, at)
+		value, err := registerProjectRepository(ctx, backend.store, kernel.NewProjectRepository{ID: id, ProjectID: project, Name: request.Name, Root: request.Root, BaseRef: request.BaseRef}, at)
 		if err != nil {
 			return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
 		}
@@ -505,7 +505,7 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	case "name":
 		value, err = backend.store.UpdateProjectRepositoryName(ctx, id, expected, request.Name, at)
 	case "base":
-		value, err = backend.store.UpdateProjectRepositoryBase(ctx, id, expected, request.BaseRef, at)
+		value, err = updateRepositoryBase(ctx, backend.store, id, expected, request.BaseRef, at)
 	case "default":
 		value, err = backend.store.SetProjectRepositoryDefault(ctx, id, expected, at)
 	case "enabled":
