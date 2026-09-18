@@ -389,8 +389,10 @@ if grep -Eq 'factory-tui|factoryctl update|rollback binaries' "$formula"; then
     fail "formula retained deleted TUI/updater behavior"
 fi
 grep -Fq '`brew services` for Dark Factory.' "$formula" || fail "formula permits competing service ownership"
-grep -Fq '`brew uninstall dark-factory` removes only the commands' "$formula" \
-    || fail "formula hides command-only uninstall behavior"
+grep -Fq '`brew uninstall dark-factory` removes commands and optional controller' "$formula" \
+    || fail "formula hides controller uninstall behavior"
+grep -Fq 'Stop or unload any daemon or controller job first' "$formula" \
+    || fail "formula does not warn before controller uninstall"
 if grep -Eq 'factoryctl service|service uninstall operation' "$formula"; then
     fail "formula advertises a nonexistent service command"
 fi
