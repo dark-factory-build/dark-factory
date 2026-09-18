@@ -733,25 +733,12 @@ fn github_refusals_stay_determinate() {
     // A failed read is never reported as a refusal of the operation it was
     // reconciling.
     assert!(github_app.contains("if failure.is_some() {"));
-    // The installation boundary requires every permission an operation may
-    // mint. Readiness names no repository; a missing grant is refused when a
-    // repository operation resolves its installation.
-    assert!(
-        github_app
-            .contains(r#"permission_at_least(&installation.permissions, "merge_queues", "write")"#)
-    );
-    assert!(
-        github_app.contains(r#"permission_at_least(&installation.permissions, "issues", "write")"#)
-    );
-    assert!(
-        github_app
-            .contains(r#"permission_at_least(&installation.permissions, "actions", "write")"#)
-    );
-    assert!(
-        github_app.contains(
-            r#"permission_at_least(&installation.permissions, "administration", "write")"#,
-        )
-    );
+    // The installation boundary checks the exact per-operation token request.
+    // A repository without merge or deploy permissions can still use its
+    // narrower issue and publication operations; one that invokes either
+    // privileged operation gets the specific missing-grant refusal.
+    assert!(github_app.contains("validate_installation(&installation, self.app_id, &permissions)"));
+    assert!(github_app.contains("installation_requires_only_the_permission_each_operation_mints"));
     // Direct merge is now an exact-head, exact-review operation; the schema
     // and dispatch checks above ensure it cannot become an untyped shortcut.
     assert!(github_app.contains("MergePullRequestAtHead"));

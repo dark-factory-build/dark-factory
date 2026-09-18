@@ -4032,7 +4032,7 @@ impl Authority {
                 }
                 Err(error) => return Err(error.into()),
             };
-        validate_installation(&installation, self.app_id).map_err(|defect| {
+        validate_installation(&installation, self.app_id, &permissions).map_err(|defect| {
             OperationError::Refused(RefusalReason::InstallationRejected(defect))
         })?;
         // Named, not numbered: the caller supplies `owner/name`, and the numeric
@@ -7555,34 +7555,15 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn validate_installation(installation: &Installation, app_id: i64) -> Result<(), &'static str> {
+fn validate_installation(
+    installation: &Installation,
+    app_id: i64,
+    requested_permissions: &BTreeMap<&'static str, &'static str>,
+) -> Result<(), &'static str> {
     let rejected: Vec<&str> = [
         (installation.id <= 0).then_some("id"),
         (installation.app_id != app_id).then_some("app_id"),
         (installation.repository_selection != "selected").then_some("repository_selection"),
-        (!permission_at_least(&installation.permissions, "actions", "write")).then_some("actions"),
-        (!permission_at_least(&installation.permissions, "checks", "read")).then_some("checks"),
-        // Permission revisions are all-or-nothing at the installation boundary:
-        // status must not advertise v4 for a repository where direct merge is
-        // unusable. Only direct merge downscopes this grant into its operation
-        // token; every other token still omits it.
-        (!permission_at_least(&installation.permissions, "administration", "write"))
-            .then_some("administration"),
-        // `publish_commit` mints `contents: write`. Accepting a read-only
-        // installation would fail at token mint instead, where GitHub's 422
-        // reaches the caller as an opaque "authority is unavailable". This is
-        // the only place an installation is audited -- readiness names no
-        // repository, so it has none to look up.
-        (!permission_at_least(&installation.permissions, "contents", "write"))
-            .then_some("contents"),
-        (!permission_at_least(&installation.permissions, "issues", "write")).then_some("issues"),
-        (!permission_at_least(&installation.permissions, "metadata", "read")).then_some("metadata"),
-        (!permission_at_least(&installation.permissions, "pull_requests", "write"))
-            .then_some("pull_requests"),
-        // Queue enqueue still needs this authority; direct squash merge is
-        // separately gated by branch protection and exact-head checks.
-        (!permission_at_least(&installation.permissions, "merge_queues", "write"))
-            .then_some("merge_queues"),
         (!installation.events.is_empty()).then_some("events"),
         (installation.suspended_at.is_some()).then_some("suspended_at"),
     ]
@@ -7593,6 +7574,18 @@ fn validate_installation(installation: &Installation, app_id: i64) -> Result<(),
         #[cfg(target_arch = "wasm32")]
         worker::console_error!("installation rejected on: {}", rejected.join(","));
         return Err(first);
+    }
+    if let Some(permission) = requested_permissions
+        .iter()
+        .find_map(|(permission, required)| {
+            (!permission_at_least(&installation.permissions, permission, required))
+                .then_some(*permission)
+        })
+    {
+        // Each caller states the exact token it needs. Checking that same
+        // narrow request here keeps GitHub's token-mint refusal actionable
+        // without making unrelated merge or deployment grants prerequisites.
+        return Err(permission);
     }
     Ok(())
 }
@@ -8515,24 +8508,34 @@ mod tests {
         );
         assert!(RepositoryName::new("baziyer/../dark-factory".into()).is_err());
         assert!(RepositoryName::new("baziyer/dark factory".into()).is_err());
+        let full_permissions = BTreeMap::from([
+            ("actions", "write"),
+            ("administration", "write"),
+            ("checks", "read"),
+            ("contents", "write"),
+            ("issues", "write"),
+            ("merge_queues", "write"),
+            ("metadata", "read"),
+            ("pull_requests", "write"),
+        ]);
         let installation: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
-        assert!(validate_installation(&installation, 4_673_420).is_ok());
+        assert!(validate_installation(&installation, 4_673_420, &full_permissions).is_ok());
 
         let broader: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","administration":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
-        assert!(validate_installation(&broader, 4_673_420).is_ok());
+        assert!(validate_installation(&broader, 4_673_420, &full_permissions).is_ok());
 
         let no_administration: Installation = serde_json::from_str(
             r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"actions":"write","checks":"read","contents":"write","issues":"write","merge_queues":"write","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_administration, 4_673_420).err(),
+            validate_installation(&no_administration, 4_673_420, &full_permissions).err(),
             Some("administration")
         );
 
@@ -8561,7 +8564,8 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                validate_installation(&with_permissions(permissions), 4_673_420).err(),
+                validate_installation(&with_permissions(permissions), 4_673_420, &full_permissions)
+                    .err(),
                 Some(expected)
             );
         }
@@ -8575,7 +8579,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&read_only, 4_673_420).err(),
+            validate_installation(&read_only, 4_673_420, &full_permissions).err(),
             Some("contents")
         );
 
@@ -8590,7 +8594,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_queue, 4_673_420).err(),
+            validate_installation(&no_queue, 4_673_420, &full_permissions).err(),
             Some("merge_queues")
         );
 
@@ -8600,7 +8604,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&queue_read_only, 4_673_420).err(),
+            validate_installation(&queue_read_only, 4_673_420, &full_permissions).err(),
             Some("merge_queues")
         );
 
@@ -8609,7 +8613,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_issues, 4_673_420).err(),
+            validate_installation(&no_issues, 4_673_420, &full_permissions).err(),
             Some("issues")
         );
 
@@ -8618,14 +8622,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            validate_installation(&no_actions, 4_673_420).err(),
+            validate_installation(&no_actions, 4_673_420, &full_permissions).err(),
             Some("actions")
         );
     }
 
     #[test]
+    fn installation_requires_only_the_permission_each_operation_mints() {
+        let installation: Installation = serde_json::from_str(
+            r#"{"id":17,"app_id":4673420,"account":{"id":109233175},"repository_selection":"selected","permissions":{"contents":"write","issues":"read","metadata":"read","pull_requests":"write"},"events":[],"suspended_at":null}"#,
+        )
+        .unwrap();
+
+        // Issue reads and reviewed PR publication do not need merge queues,
+        // Actions, or direct-merge ruleset access.
+        assert!(
+            validate_installation(
+                &installation,
+                4_673_420,
+                &BTreeMap::from([("issues", "read"), ("metadata", "read")]),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_installation(
+                &installation,
+                4_673_420,
+                &BTreeMap::from([
+                    ("contents", "write"),
+                    ("metadata", "read"),
+                    ("pull_requests", "write")
+                ]),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_installation(
+                &installation,
+                4_673_420,
+                &BTreeMap::from([("merge_queues", "write"), ("metadata", "read")]),
+            )
+            .err(),
+            Some("merge_queues")
+        );
+    }
+
+    #[test]
     fn operation_tokens_request_administration_only_for_direct_merge() {
-        let source = include_str!("github_app.rs");
+        let source = include_str!("github_app.rs")
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .unwrap();
         let needle = ["(", "\"administration\"", ", ", "\"write\"", ")"].concat();
         assert_eq!(source.matches(&needle).count(), 1);
     }
