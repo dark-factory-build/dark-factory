@@ -1199,6 +1199,14 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.equal(connected.includes("evil.example"), false);
   assert.match(disconnected, /GITHUB/);
 
+  const noInstallation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
+  assert.match(noInstallation, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  assert.match(noInstallation, /href="https:\/\/github.com\/apps\/factory-maintainer\/installations\/new"/);
+  const unavailableInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://evil.example\/apps\/factory\/installations\/new" } } } });
+  assert.doesNotMatch(unavailableInstall, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  const visibleInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
+  assert.doesNotMatch(visibleInstall, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+
   const pagerCalls = [];
   const pageProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => pagerCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "pager", state: "connected", repositories: [] }, installations } } });
   act(() => { renderer = create(createElement(FactoryConsole, pageProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 }))); });

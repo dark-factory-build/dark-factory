@@ -41,6 +41,27 @@ func TestGitHubCLIUsesOperatorConnection(t *testing.T) {
 	}
 }
 
+func TestGitHubCLIPrintsVerifiedNativeInstallURL(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.GitHubConnectionInput()
+		if !ok || input.Action != "installations" || input.Page != 1 {
+			return mustWebErrorReply(t, api.RemoteInvalidRequest)
+		}
+		return api.NewContentReply(api.GitHubConnectionResult{State: "ok", Installations: &maintainer.Installations{InstallationURL: "https://github.com/apps/factory-maintainer/installations/new"}})
+	})
+	var out, diagnostic bytes.Buffer
+	var opened string
+	exit := runWithOpener(context.Background(), []string{"github", "install", "--open"}, webEnvironment(fixture), &out, &diagnostic, func(_ context.Context, link string) error { opened = link; return nil })
+	if result := awaitServer(t, done); result.err != nil {
+		t.Fatal(result.err)
+	}
+	if exit != 0 || strings.TrimSpace(out.String()) != "https://github.com/apps/factory-maintainer/installations/new" || opened != strings.TrimSpace(out.String()) || diagnostic.Len() != 0 {
+		t.Fatalf("native install URL was not surfaced safely: exit=%d out=%q diagnostic=%q opened=%q", exit, out.String(), diagnostic.String(), opened)
+	}
+}
+
 func TestGitHubAttemptCannotBorrowOperatorCredentials(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)

@@ -73,8 +73,9 @@ type Repository struct {
 	} `json:"permissions"`
 }
 type Installations struct {
-	Items    []Installation `json:"installations"`
-	NextPage *int           `json:"next_page"`
+	Items           []Installation `json:"installations"`
+	NextPage        *int           `json:"next_page"`
+	InstallationURL string         `json:"installation_url,omitempty"`
 }
 type Repositories struct {
 	Items    []Repository `json:"repositories"`

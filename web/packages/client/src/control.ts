@@ -138,7 +138,7 @@ export type BrowserClientRevokeBody = { client_id: string; expected_revision: bi
 export type BrowserClientRevokeResultBody = { client_id: string; revision: bigint };
 export type GitHubDelegationBody = { installation_id: number; repository_id: number; repository: string };
 export type GitHubConnectionBody = { action: "connect" | "confirm" | "status" | "refresh" | "disconnect" | "installations" | "repositories" | "delegate"; code?: string; page?: number; installation_id?: number; repositories?: GitHubDelegationBody[] };
-export type GitHubConnectionResultBody = { state: string; authorization?: { connection_id: string; authorization_url: string; expires_at: bigint }; status?: { connection_id: string; state: string; github_user?: { id: number; login: string; type?: string }; repositories: GitHubDelegationBody[] }; installations?: { installations: { id: number; account: { id: number; login: string; type?: string }; suspended_at: string | null; html_url?: string; eligibility: string }[]; next_page?: number }; repositories?: { repositories: { id: number; full_name: string; permissions: { pull: boolean; push: boolean; maintain: boolean; admin: boolean } }[]; next_page?: number } };
+export type GitHubConnectionResultBody = { state: string; authorization?: { connection_id: string; authorization_url: string; expires_at: bigint }; status?: { connection_id: string; state: string; github_user?: { id: number; login: string; type?: string }; repositories: GitHubDelegationBody[] }; installations?: { installations: { id: number; account: { id: number; login: string; type?: string }; suspended_at: string | null; html_url?: string; eligibility: string }[]; next_page?: number; installation_url?: string }; repositories?: { repositories: { id: number; full_name: string; permissions: { pull: boolean; push: boolean; maintain: boolean; admin: boolean } }[]; next_page?: number } };
 export type TerminalTargetGetBody = { agent_id: string; expected_agent_revision: bigint; expected_head: bigint };
 export type TerminalTargetDescriptor = { run_id: string; session_id: string; run_revision: bigint; session_revision: bigint };
 export type TerminalTargetBody = { agent_id: string; agent_revision: bigint; head: bigint; target: TerminalTargetDescriptor | null };
@@ -546,10 +546,12 @@ function githubConnectionResult(body: Record<string, unknown>, wire: boolean): G
   }
   if (present(body, "installations")) {
     if (!isObject(body.installations)) malformed();
-    requireKeys(body.installations, ["installations"], wire, ["next_page"]);
+    requireKeys(body.installations, ["installations"], wire, ["next_page", "installation_url"]);
     if (!Array.isArray(body.installations.installations) || body.installations.installations.length > MAX_ARRAY_ITEMS) malformed();
     const next_page = present(body.installations, "next_page") && body.installations.next_page !== null ? integer(body.installations.next_page, 1, 1000) : undefined;
-    result.installations = { installations: body.installations.installations.map((item) => githubInstallation(item, wire)), ...(next_page === undefined ? {} : { next_page }) };
+    const installation_url = present(body.installations, "installation_url") ? boundedText(body.installations.installation_url, 1, 2048) : undefined;
+    if (installation_url !== undefined && !githubInstallationURL(installation_url)) malformed();
+    result.installations = { installations: body.installations.installations.map((item) => githubInstallation(item, wire)), ...(next_page === undefined ? {} : { next_page }), ...(installation_url === undefined ? {} : { installation_url }) };
   }
   if (present(body, "repositories")) {
     if (!isObject(body.repositories)) malformed();
@@ -607,6 +609,16 @@ function githubAuthorizationURL(value: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.pathname === "/login/oauth/authorize";
+  } catch {
+    return false;
+  }
+}
+
+function githubInstallationURL(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const match = /^\/apps\/([A-Za-z0-9._-]{1,100})\/installations\/new$/.exec(url.pathname);
+    return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && match !== null && match[1] !== "." && match[1] !== "..";
   } catch {
     return false;
   }

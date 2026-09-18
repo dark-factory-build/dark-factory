@@ -69,6 +69,11 @@ test("GitHub settings frames keep the paired admin bridge bounded", () => {
   assert.equal(disconnected.body.status.connection_id, "");
   assert.equal(disconnected.body.installations.next_page, undefined);
   assert.equal(disconnected.body.repositories.next_page, undefined);
+  const nativeInstall = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", installations: { installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } }));
+  assert.equal(nativeInstall.body.installations.installation_url, "https://github.com/apps/factory-maintainer/installations/new");
+  for (const url of ["https://evil.example/apps/factory/installations/new", "https://github.com/apps/factory/installations/new?next=evil", "https://github.com/apps/../installations/new", "javascript:alert(1)"]) {
+    expectMalformed(() => decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", installations: { installations: [], installation_url: url } } })));
+  }
   const disconnectPending = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } }));
   assert.equal(disconnectPending.body.status.connection_id, "");
   const authorization = decodeServerControl(JSON.stringify({ type: "GITHUB_CONNECTION_RESULT", id: "github-1", body: { state: "ok", authorization: { connection_id: "c", authorization_url: "https://github.com/login/oauth/authorize", expires_at: "123" } } }));

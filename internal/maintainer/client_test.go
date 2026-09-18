@@ -39,7 +39,7 @@ func TestConnectionFlowAndDeniedData(t *testing.T) {
 		}
 		switch {
 		case strings.HasSuffix(request.URL.Path, "/installations"):
-			_, _ = out.Write([]byte(`{"installations":[],"next_page":2}`))
+			_, _ = out.Write([]byte(`{"installations":[],"next_page":2,"installation_url":"https://github.com/apps/factory-maintainer/installations/new"}`))
 		case strings.HasSuffix(request.URL.Path, "/repositories") && request.Method == http.MethodGet:
 			_, _ = out.Write([]byte(`{"repositories":[{"id":7,"full_name":"org/repo","permissions":{"pull":true}}],"next_page":null}`))
 		default:
@@ -65,7 +65,7 @@ func TestConnectionFlowAndDeniedData(t *testing.T) {
 		t.Fatal(err)
 	}
 	installations, err := client.Installations(ctx, credential, 1)
-	if err != nil || installations.NextPage == nil || *installations.NextPage != 2 {
+	if err != nil || installations.NextPage == nil || *installations.NextPage != 2 || installations.InstallationURL != "https://github.com/apps/factory-maintainer/installations/new" {
 		t.Fatal("lost filtered page continuation")
 	}
 	repositories, err := client.Repositories(ctx, credential, 3, 2)
