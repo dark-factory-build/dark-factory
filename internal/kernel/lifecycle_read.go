@@ -607,17 +607,24 @@ func (store *Store) AuthenticateAttempt(ctx context.Context, digest AttemptDiges
 		return AttemptAuthority{}, err
 	}
 	defer tx.Close()
-	run, found, err := runByDigest(ctx, tx.connection, digest)
+	return authenticateAttempt(ctx, tx.connection, digest)
+}
+
+// authenticateAttempt performs all credential and relationship checks on the
+// caller's existing read connection. Read routes use it to keep authorization
+// and the authorized row read in one transaction snapshot.
+func authenticateAttempt(ctx context.Context, connection *sql.Conn, digest AttemptDigest) (AttemptAuthority, error) {
+	run, found, err := runByDigest(ctx, connection, digest)
 	if err != nil {
 		return AttemptAuthority{}, err
 	}
 	if !found || run.Phase != RunRunning || run.CredentialRevokedAt != nil || !bytes.Equal(run.CredentialDigest.Bytes(), digest.Bytes()) {
 		return AttemptAuthority{}, ErrUnauthorized
 	}
-	if err := validateOwnershipLocators(ctx, tx.connection); err != nil {
+	if err := validateOwnershipLocators(ctx, connection); err != nil {
 		return AttemptAuthority{}, err
 	}
-	relationships, err := loadRunRelationships(ctx, tx.connection, run)
+	relationships, err := loadRunRelationships(ctx, connection, run)
 	if err != nil {
 		return AttemptAuthority{}, err
 	}

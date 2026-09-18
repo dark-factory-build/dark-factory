@@ -841,9 +841,10 @@ func TestContinueUnsettledRunFinishesBoundedRuntimeRemoval(t *testing.T) {
 	}
 	fixture.writeArtifact(t, body)
 	root := filepath.Join(fixture.parentPath, fixture.run.ID.String())
-	// Each pass removes at most 256 entries and yields for 25ms. This tree
-	// necessarily exceeds two four-second passes even on a fast filesystem.
-	for i := 0; i < 110000; i++ {
+	// A four-second pass makes at most 162 calls of 256 effects (including
+	// the exact-deadline case). 85,000 files exceed TWO passes, so both the
+	// initial sweep yields and ContinueUnsettledRun must retry pending cleanup.
+	for i := 0; i < 85000; i++ {
 		if err := os.WriteFile(filepath.Join(root, runtimeHomeName, fmt.Sprintf("file-%05d", i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}

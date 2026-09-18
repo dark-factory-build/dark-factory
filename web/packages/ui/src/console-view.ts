@@ -1,5 +1,5 @@
 import { MAX_SNAPSHOT_ENTITIES, type AgentItem, type StateView, type TaskItem, type TopologyView } from "@dark-factory/client";
-import { compareText, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
+import { compareText, inventoryLabels, type InventoryKind, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
@@ -262,6 +262,11 @@ export function projectFloor(state: StateView | undefined, selected: ReturnType<
     const display = work?.displayRoomId;
     const displayedObservation = display === undefined || visibleAncestor(live) === display ? live
       : work?.roomIds.find((id) => visibleAncestor(id) === display);
+    let observedBayId: string | undefined;
+    if (selected.navigation.scopeId !== undefined && display !== undefined && displayedObservation !== undefined) {
+      const pictured = roomByID.get(displayedObservation);
+      if (pictured?.parentId === display) observedBayId = pictured.id;
+    }
     if (live !== undefined) liveRooms.add(display ?? live);
     const location: SceneWorker["location"] = task === undefined ? last === undefined ? "resting" : "last-observed" : live !== undefined ? "working" : "unobserved";
     const room = location === "working" ? roomByID.get(displayedObservation!) : location === "last-observed" ? roomByID.get(last!) : undefined;
@@ -275,7 +280,15 @@ export function projectFloor(state: StateView | undefined, selected: ReturnType<
       paused: agent.paused,
       location,
       ...(room === undefined ? {} : { locationLabel: room.label }),
-      ...(location === "working" && live !== undefined ? { nodeId: display ?? live, locationWithin: display !== undefined && display !== displayedObservation } : {}),
+      ...(location === "working" && live !== undefined ? {
+        nodeId: display ?? live,
+        locationWithin: display !== undefined && display !== displayedObservation,
+        // An ancestor summary is not evidence that an arbitrary descendant is
+        // pictured. Only its exact direct child may receive a named bay.
+        // The all-projects overview is a subtree preview, not a second child
+        // hierarchy. Named bays begin only after entering a served scope.
+        ...(observedBayId === undefined ? {} : { observedBayId }),
+      } : {}),
     };
   });
   const observedTasks = tasks.filter((task) => task.status === "running" && task.roomIds.length > 0);
@@ -358,8 +371,13 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
   if (roots.length !== 1) return { project, projectRoom: fallback, nodes: [fallback] };
   const root = roots[0]!;
   const componentLabel = (node: typeof root) => node.kind === "package" && node.label === "main" && node.path !== "." ? node.path.split("/").at(-1)! : node.label;
-  const components = new Map<string, Array<{ id: string; label: string }>>();
-  for (const node of served) if (node.parent_id !== "") components.set(node.parent_id, [...(components.get(node.parent_id) ?? []), { id: `${project.id}:${node.id}`, label: componentLabel(node) }]);
+  const components = new Map<string, NonNullable<SceneNode["components"]>[number][]>();
+  for (const node of served) if (node.parent_id !== "") {
+    const feature = node.inventory === undefined ? "unavailable" : (Object.keys(inventoryLabels) as InventoryKind[])
+      .filter((kind) => node.inventory!.total[kind] > 0)
+      .sort((left, right) => node.inventory!.total[right] - node.inventory!.total[left] || compareText(left, right))[0] ?? "empty";
+    components.set(node.parent_id, [...(components.get(node.parent_id) ?? []), { id: `${project.id}:${node.id}`, label: componentLabel(node), feature }]);
+  }
   for (const children of components.values()) children.sort((a, b) => compareText(a.id, b.id));
   const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number][]>();
   for (const edge of topology?.dependencies?.edges ?? []) {

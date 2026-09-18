@@ -53,14 +53,10 @@ func NewDatabaseImage(ctx context.Context, config FactoryConfig, at UnixMillis) 
 	if err != nil {
 		return nil, err
 	}
-	image, err := buildDatabaseImage(ctx, bootstrapIdentity{config: config, at: at, daemonID: daemonID})
-	if err != nil {
-		return nil, err
-	}
-	if err := InspectPristine(ctx, bytes.NewReader(image), int64(len(image))); err != nil {
-		return nil, fmt.Errorf("validate fresh sqlite image: %w", err)
-	}
-	return image, nil
+	// Creation already uses an exclusive private file, one initialization
+	// transaction, and full snapshot/header validation before returning bytes.
+	// InspectPristine is for an existing image whose origin is not this call.
+	return buildDatabaseImage(ctx, bootstrapIdentity{config: config, at: at, daemonID: daemonID})
 }
 
 // InspectImmutable validates an already-open, sidecar-free SQLite main file

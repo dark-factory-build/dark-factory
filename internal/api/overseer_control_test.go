@@ -75,6 +75,49 @@ func TestOverseerSnapshotPagesFitTheResponseFrameAfterEscaping(t *testing.T) {
 	}
 }
 
+func TestTargetedOverseerSnapshotSerializationOmitsRosterEnvelope(t *testing.T) {
+	project := strings.Repeat("1", 32)
+	base := OverseerSnapshot{ProjectID: project, Head: 7, Agents: []AgentSummary{}, Tasks: []OverseerTask{}, Runs: []OverseerRun{}, Questions: []OverseerQuestion{}, PeerQuestions: []PeerQuestion{}, History: []OverseerIntervention{}, Handoffs: []RetainedChangeHandoff{}}
+	for index := 0; index < 4; index++ {
+		id := fmt.Sprintf("%032x", index+2)
+		base.Agents = append(base.Agents, AgentSummary{ID: id, ProjectID: project, Name: "worker", Role: "worker", Provider: "codex", Revision: 1})
+	}
+	base.Tasks = append(base.Tasks, OverseerTask{ID: strings.Repeat("2", 32), ProjectID: project, AssignedAgentID: base.Agents[0].ID, Title: "Review", Objective: "same next action", Status: "queued", Revision: 1})
+	var bearer credential
+	request := []byte(`{"method":"overseer_snapshot","params":{"task_id":"22222222222222222222222222222222"}}`)
+	call, code := decodeCall(attemptDomain, bearer, request)
+	input, ok := call.OverseerSnapshotInput()
+	if code != "" || !ok || input.TaskID != base.Tasks[0].ID {
+		t.Fatalf("targeted API request = %#v, code=%q", input, code)
+	}
+	full, err := NewOverseerSnapshotReply(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetedSnapshot := base
+	targetedSnapshot.Agents = append([]AgentSummary(nil), base.Agents[:1]...)
+	targeted, err := NewOverseerSnapshotReply(targetedSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullBytes, err := json.Marshal(full.overseer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetedBytes, err := json.Marshal(targeted.overseer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed OverseerSnapshot
+	if err := json.Unmarshal(targetedBytes, &parsed); err != nil || !validOverseerSnapshot(parsed) || len(parsed.Agents) != 1 || parsed.Tasks[0].Objective != "same next action" {
+		t.Fatalf("targeted API response round trip = %#v, %v", parsed, err)
+	}
+	if len(targetedBytes) >= len(fullBytes) || !bytes.Contains(targetedBytes, []byte("same next action")) || bytes.Contains(targetedBytes, []byte(base.Agents[1].ID)) {
+		t.Fatalf("targeted serialization = %d, full = %d", len(targetedBytes), len(fullBytes))
+	}
+	t.Logf("deterministic overseer response bytes: full=%d targeted=%d saved=%d; calls full=1 targeted=1", len(fullBytes), len(targetedBytes), len(fullBytes)-len(targetedBytes))
+}
+
 func TestOverseerSnapshotReplyKeepsEmptyCollections(t *testing.T) {
 	snapshot := OverseerSnapshot{
 		ProjectID: strings.Repeat("1", 32), Head: 1,

@@ -48,9 +48,12 @@ type browserBackend struct {
 	inviteMints [4]time.Time
 	inviteNext  int
 
-	subMu   sync.Mutex
-	closing bool
-	subs    map[*browserStateWatch]struct{}
+	subMu          sync.Mutex
+	closing        bool
+	subs           map[*browserStateWatch]struct{}
+	observerCancel context.CancelFunc
+	observerDone   chan struct{}
+	observerWake   chan struct{}
 
 	// package-test-only seam for a task-detail read that races a durable edit.
 	afterTaskDetailTaskRead func()
