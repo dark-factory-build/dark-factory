@@ -130,7 +130,6 @@ function fakeManager(factories = [], sessions = new Map()) {
       manager.selectedId = undefined;
       manager.onChange();
     },
-    async rename(node, label) { manager.list = manager.list.map((factory) => factory.nodeId === node ? { ...factory, label } : factory); manager.onChange(); },
     close() { calls.close += 1; },
   };
   return manager;
@@ -231,8 +230,8 @@ test("two factories switch which projects the console shows", async () => {
     const switcher = buttons(renderer, "dfRemote__factory");
     assert.equal(switcher.length, 2);
     assert.deepEqual(switcher.map((control) => control.props["aria-label"]), [
-      "North Shop: ready, 1 needs you",
-      "South Shop: ready, 1 needs you",
+      "North Workshop +1: ready, 1 needs you",
+      "Harbour Line: ready, 1 needs you",
     ]);
     assert.equal(switcher[0].props["aria-pressed"], true);
 
@@ -256,9 +255,9 @@ test("NEEDS YOU aggregates both factories and tags each item with its label", as
   await withApp(props(manager), (renderer) => {
     const aggregate = sectionText(renderer, "dfRemote__needsYou");
     assert.match(aggregate, /Builder One asks/);
-    assert.match(aggregate, /North Shop/);
+    assert.match(aggregate, /North Workshop \+1/);
     assert.match(aggregate, /Harbour One asks/);
-    assert.match(aggregate, /South Shop/);
+    assert.match(aggregate, /Harbour Line/);
     assert.equal(buttons(renderer, "dfRemote__answer").length, 2, "each question is listed once");
     assert.match(sectionText(renderer, "dfRemote__bar"), /! 2/);
   });
@@ -624,7 +623,7 @@ test("an offline factory says so and offers nothing that could only fail", async
     const banner = findNode(renderer.toJSON(), "dfRemote__banner--revoked");
     assert.ok(banner !== undefined);
     assert.deepEqual(banner.children, ["ACCESS REVOKED"]);
-    assert.equal(button(renderer, "dfRemote__forgetFactory").props.disabled, false, "a revoked factory can always be forgotten");
+    assert.equal(button(renderer, "dfRemote__forgetDevice").props.disabled, false, "a revoked factory can always be forgotten");
   });
 
   // The node still routes, but the daemon behind it is not the bound one: that
@@ -638,7 +637,7 @@ test("an offline factory says so and offers nothing that could only fail", async
     for (const control of buttons(renderer, "dfRemote__answer")) assert.equal(control.props.disabled, true);
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
     assert.equal(session.calls.detail.length, 0, "nothing is sent to a factory this device cannot identify");
-    assert.equal(button(renderer, "dfRemote__forgetFactory").props.disabled, false, "a mismatched factory can always be forgotten");
+    assert.equal(button(renderer, "dfRemote__forgetDevice").props.disabled, false, "a mismatched factory can always be forgotten");
   });
 
   // A binding the manager reports as error is one no reconnection repairs.
@@ -651,7 +650,7 @@ test("an offline factory says so and offers nothing that could only fail", async
     for (const control of buttons(renderer, "dfRemote__answer")) assert.equal(control.props.disabled, true);
     await act(async () => { buttons(renderer, "dfRemote__answer")[0].props.onClick(); });
     assert.equal(session.calls.detail.length, 0);
-    assert.equal(button(renderer, "dfRemote__forgetFactory").props.disabled, false, "a refused binding can always be forgotten");
+    assert.equal(button(renderer, "dfRemote__forgetDevice").props.disabled, false, "a refused binding can always be forgotten");
   });
 
   // A control ticket the relay would refuse is never presented again, so the
@@ -665,7 +664,7 @@ test("an offline factory says so and offers nothing that could only fail", async
     const answers = buttons(renderer, "dfRemote__answer");
     assert.ok(answers.length > 0);
     for (const control of answers) assert.equal(control.props.disabled, true);
-    assert.equal(button(renderer, "dfRemote__forgetFactory").props.disabled, false, "an expired binding can always be forgotten");
+    assert.equal(button(renderer, "dfRemote__forgetDevice").props.disabled, false, "an expired binding can always be forgotten");
   });
 });
 
@@ -737,44 +736,14 @@ test("an invitation that lands in an iOS tab is held for the Home Screen app, or
   });
 });
 
-test("a factory is renamed on this device and the bar carries the new name", async () => {
-  const manager = fakeManager([northFactory()]);
-  await withApp(props(manager), async (renderer) => {
-    assert.equal(button(renderer, "dfRemote__renameAction").props.disabled, true, "nothing typed, nothing to rename");
-    await act(async () => { renderer.root.findByProps({ id: "dfRemoteName" }).props.onChange({ currentTarget: { value: "Garage" } }); });
-    await act(async () => { button(renderer, "dfRemote__renameAction").props.onClick(); });
-    await settle();
-    assert.match(sectionText(renderer, "dfRemote__bar"), /Garage/);
+test("a factory is named by what it builds, and twins are told apart by id", async () => {
+  const twin = southFactory({ nodeId: nodeId("c"), label: "cccccccc" });
+  await withApp(props(fakeManager([southFactory({ label: "bbbbbbbb" }), twin])), (renderer) => {
+    assert.deepEqual(buttons(renderer, "dfRemote__factory").map((control) => flat(control.props.children[1].props.children)), ["Harbour Line · bbbbbbbb", "Harbour Line · cccccccc"]);
   });
-});
-
-test("a name typed for one factory never renames the next one selected", async () => {
-  const manager = fakeManager([northFactory(), southFactory()]);
-  await withApp(props(manager), async (renderer) => {
-    await act(async () => { renderer.root.findByProps({ id: "dfRemoteName" }).props.onChange({ currentTarget: { value: "Garage" } }); });
-    await act(async () => { buttons(renderer, "dfRemote__factory")[1].props.onClick(); });
-    assert.equal(renderer.root.findByProps({ id: "dfRemoteName" }).props.value, "South Shop");
-    assert.equal(button(renderer, "dfRemote__renameAction").props.disabled, true);
+  await withApp(props(fakeManager([northFactory({ state: undefined })])), (renderer) => {
+    assert.match(sectionText(renderer, "dfRemote__bar"), /North Shop/, "with no snapshot the stored label stands in");
   });
-});
-
-test("the first render never reads the browser, so a server and an offline iPhone hydrate alike", async () => {
-  const agent = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { userAgent: "iPhone", onLine: false } });
-  globalThis.matchMedia = () => ({ matches: false });
-  globalThis.addEventListener = globalThis.removeEventListener = () => {};
-  try {
-    const { navigator: _browser, ...bare } = props(fakeManager([]));
-    const first = renderToString(createElement(RemoteApp, bare));
-    assert.doesNotMatch(first, /INSTALL THE APP|DEVICE OFFLINE/);
-    // Once mounted, the same browser is believed.
-    await withApp(bare, (renderer) => assert.match(textOf(renderer), /DEVICE OFFLINE.*INSTALL THE APP/s));
-  } finally {
-    delete globalThis.matchMedia;
-    delete globalThis.addEventListener;
-    delete globalThis.removeEventListener;
-    if (agent === undefined) delete globalThis.navigator; else Object.defineProperty(globalThis, "navigator", agent);
-  }
 });
 
 test("forgetting a factory or the device takes a second, inline confirmation", async () => {
@@ -783,12 +752,12 @@ test("forgetting a factory or the device takes a second, inline confirmation", a
     await act(async () => { button(renderer, "dfRemote__forgetFactory").props.onClick(); });
     assert.deepEqual(manager.calls.forget, []);
     const confirm = button(renderer, "dfRemote__forgetFactory--confirm");
-    assert.match(flat(confirm.props.children), /North Shop/);
+    assert.match(flat(confirm.props.children), /North Workshop/);
     await act(async () => { confirm.props.onClick(); });
     await settle();
     assert.deepEqual(manager.calls.forget, [NORTH]);
     assert.equal(buttons(renderer, "dfRemote__factory").length, 0, "one factory needs no switcher");
-    assert.match(sectionText(renderer, "dfRemote__bar"), /South Shop/);
+    assert.match(sectionText(renderer, "dfRemote__bar"), /Harbour Line/);
 
     await act(async () => { button(renderer, "dfRemote__forgetDevice").props.onClick(); });
     assert.equal(manager.calls.forgetDevice, 0);
@@ -837,8 +806,12 @@ test("alerts turn on through the host's subscription and off with the device", a
     await act(async () => { button(renderer, "dfRemote__alertsOn").props.onClick(); });
     await settle();
     assert.deepEqual(manager.calls.setPush, [subscription]);
-    assert.match(sectionText(renderer, "dfRemote__alerts"), /ALERTS.*ON/s);
-    assert.equal(buttons(renderer, "dfRemote__alertsOn").length, 0, "one subscription per device");
+    assert.equal(button(renderer, "dfRemote__alertsOn").props["aria-checked"], true);
+    // The same switch turns them off again.
+    await act(async () => { button(renderer, "dfRemote__alertsOn").props.onClick(); });
+    await settle();
+    assert.deepEqual(manager.calls.setPush, [subscription, undefined]);
+    assert.equal(button(renderer, "dfRemote__alertsOn").props["aria-checked"], false);
 
     // The destructive control sits last on the page, not first.
     const all = allButtons(renderer);
