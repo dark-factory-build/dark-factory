@@ -28,9 +28,10 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	github *maintainer.Host
-	store  *kernel.Store
-	now    func() time.Time
+	github       *maintainer.Host
+	maintainerMu sync.Mutex
+	store        *kernel.Store
+	now          func() time.Time
 
 	// Cleanup survives caller cancellation but remains interruptible by daemon shutdown.
 	cleanupCtx    context.Context
@@ -148,6 +149,11 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	}
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
+	if call.Kind() == api.CallMaintainer {
+		cancel()
+		dispatchContext, cancel = context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+	}
 	if call.Kind() == api.CallAttemptSource {
 		cancel()
 		dispatchContext, cancel = context.WithTimeout(ctx, retainedSourceDispatchTimeout)
@@ -306,6 +312,8 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(api.RemoteInternal)
 		}
 		return reply
+	case api.CallMaintainer:
+		return daemon.attemptMaintainer(ctx, call)
 	case api.CallGitHubConnection:
 		input, ok := call.GitHubConnectionInput()
 		if !ok {
