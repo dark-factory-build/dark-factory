@@ -1,5 +1,5 @@
 import { MAX_SNAPSHOT_ENTITIES, type AgentItem, type StateView, type TaskItem, type TopologyView } from "@dark-factory/client";
-import { compareText, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
+import { compareText, inventoryLabels, type InventoryKind, type SceneNode, type SceneTopology, type SceneWorker } from "./factory-scene/scene.js";
 
 export type AgentActivity = "busy" | "waiting" | "needs-you" | "idle";
 /** The operator-facing state has one name for each actionable condition. */
@@ -371,8 +371,13 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
   if (roots.length !== 1) return { project, projectRoom: fallback, nodes: [fallback] };
   const root = roots[0]!;
   const componentLabel = (node: typeof root) => node.kind === "package" && node.label === "main" && node.path !== "." ? node.path.split("/").at(-1)! : node.label;
-  const components = new Map<string, Array<{ id: string; label: string }>>();
-  for (const node of served) if (node.parent_id !== "") components.set(node.parent_id, [...(components.get(node.parent_id) ?? []), { id: `${project.id}:${node.id}`, label: componentLabel(node) }]);
+  const components = new Map<string, NonNullable<SceneNode["components"]>[number][]>();
+  for (const node of served) if (node.parent_id !== "") {
+    const feature = node.inventory === undefined ? "unavailable" : (Object.keys(inventoryLabels) as InventoryKind[])
+      .filter((kind) => node.inventory!.total[kind] > 0)
+      .sort((left, right) => node.inventory!.total[right] - node.inventory!.total[left] || compareText(left, right))[0] ?? "empty";
+    components.set(node.parent_id, [...(components.get(node.parent_id) ?? []), { id: `${project.id}:${node.id}`, label: componentLabel(node), feature }]);
+  }
   for (const children of components.values()) children.sort((a, b) => compareText(a.id, b.id));
   const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number][]>();
   for (const edge of topology?.dependencies?.edges ?? []) {
