@@ -327,6 +327,11 @@ func (daemon *Daemon) agentPaths(ctx context.Context, call api.Call) api.Reply {
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	if _, found, err := daemon.store.Agent(ctx, agentID); err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	} else if !found {
+		return newErrorReply(api.RemoteNotFound)
+	}
 	runID, paths, err := daemon.RunPaths(ctx, agentID)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
