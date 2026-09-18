@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -312,28 +311,26 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	var retained *changeworker.Result
 	var retainedSourceReview *changeworker.SourceReview
 	if run.Provider == kernel.ProviderCodex && run.Role == kernel.RoleWorker {
-		if target, ok := strings.CutPrefix(task.Body, "review handoff "); ok {
-			fields := strings.Fields(target)
-			if len(fields) == 0 {
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, kernel.ErrConflict)
-			}
-			targetID, parseErr := parseTaskID(fields[0])
-			if parseErr != nil {
-				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, parseErr)
-			}
-			handoff, found, sourceErr := daemon.store.RetainedChangeHandoffForTask(ctx, run.ProjectID, targetID)
+		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(task.Body)
+		if parseErr != nil {
+			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, parseErr)
+		}
+		if review {
+			handoff, found, sourceErr := daemon.store.RetainedChangeHandoffForTask(ctx, run.ProjectID, expected.TaskID)
 			if sourceErr != nil || !found {
 				if sourceErr == nil {
 					sourceErr = kernel.ErrConflict
 				}
 				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
 			}
+			if handoff.TaskID != expected.TaskID || handoff.ChangeID != expected.ChangeID || handoff.BaseCommit != expected.BaseCommit || handoff.TaskWorkRevision != expected.TaskWorkRevision || handoff.ChangeRevision != expected.ChangeRevision {
+				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, kernel.ErrConflict)
+			}
 			receipt, sourceErr := daemon.attemptSourceHandoff(ctx, handoff)
 			if sourceErr != nil {
 				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, sourceErr)
 			}
-			targetTask, sourceErr := parseTaskID(receipt.TaskID)
-			if sourceErr != nil || targetTask != targetID {
+			if receipt.TaskID != expected.TaskID.String() || receipt.ChangeID != expected.ChangeID.String() || receipt.BaseCommit != expected.BaseCommit || receipt.TaskWorkRevision != uint64(expected.TaskWorkRevision.Int64()) || receipt.ChangeRevision != uint64(expected.ChangeRevision.Int64()) {
 				return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, kernel.ErrConflict)
 			}
 			reviewID := receipt.ChangeID
