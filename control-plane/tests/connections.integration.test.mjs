@@ -50,10 +50,13 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
         if (replacedPath) { assert.equal(request.headers.get('authorization'), 'Bearer app-2-fixture-installation-token'); return json({}, 404); }
         if (url.pathname.includes('/git/ref/')) return json({ ref: 'refs/heads/main', object: { type: 'commit', sha: 'a'.repeat(40) } });
         if (url.pathname.endsWith('/pulls')) return json([]);
-        if (url.pathname === '/repos/team/shared/issues') {
-          assert.equal(url.searchParams.get('per_page'), '25');
-          assert.equal(url.searchParams.get('labels'), 'needs triage');
-          return json([{ id: 81, node_id: 'I_fixture', number: 9, html_url: 'https://github.com/team/shared/issues/9', title: 'review me', body: 'exact content', user: { login: 'outsider', type: 'User' }, state: 'open', updated_at: '2026-09-18T12:00:00Z', labels: [{ name: 'needs triage' }] }]);
+        if (url.pathname === '/repos/team/shared/issues' || url.pathname === '/repos/team/shared/issues/9') {
+          if (url.pathname.endsWith('/issues')) {
+            assert.equal(url.searchParams.get('per_page'), '25');
+            assert.equal(url.searchParams.get('labels'), 'needs triage');
+          }
+          const issue = { id: 81, node_id: 'I_fixture', number: 9, html_url: 'https://github.com/team/shared/issues/9', title: 'review me', body: 'exact content', user: { login: 'outsider', type: 'User' }, state: 'open', updated_at: '2026-09-18T12:00:00Z', labels: [{ name: 'needs triage' }] };
+          return json(url.pathname.endsWith('/9') ? {...issue, state: 'closed'} : [issue]);
         }
         if (url.pathname === '/repos/team/backlog/issues/1') {
           assert.equal(request.headers.get('authorization'), 'Bearer app-3-fixture-installation-token'); sourceReads++;
@@ -156,6 +159,9 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(issuePage.issues[0].body, 'exact content');
     assert.equal(issuePage.issues[0].author.login, 'outsider');
     assert.equal(issuePage.next_page, null);
+    const exact = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, issue_number: 9 })).json()).result.structuredContent;
+    assert.equal(exact.issues[0].state, 'closed');
+    assert.equal(exact.issues[0].node_id, 'I_fixture');
     assert.equal((await call(bob, 'list_issues', { repository: 'team/guessed', page: 1 })).status, 401);
     const observe = { repository: 'team/shared', operation_id: id };
     assert.equal((await (await call(alice, 'observe_operation', observe)).json()).result.structuredContent.state, 'completed');

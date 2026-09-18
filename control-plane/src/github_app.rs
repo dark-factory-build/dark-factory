@@ -504,6 +504,7 @@ pub(crate) struct ObserveIssue {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListIssues {
     pub(crate) repository: String,
+    pub(crate) issue_number: Option<i64>,
     pub(crate) page: u32,
     pub(crate) label: Option<String>,
 }
@@ -1192,6 +1193,20 @@ impl AppAuthority {
                 BTreeMap::from([("issues", "read"), ("metadata", "read")]),
             )
             .await?;
+        if let Some(number) = request.issue_number {
+            let entry: IssuePageEntry = github_json(
+                &format!(
+                    "https://api.github.com/repos/{}/{}/issues/{number}",
+                    token.repository.owner, token.repository.name
+                ),
+                token.as_str(),
+            )
+            .await?;
+            if entry.issue.number != number || !entry.issue.is_real_issue() {
+                return Err(OperationError::Conflict);
+            }
+            return issue_page(token.repository_id, 1, vec![entry]);
+        }
         let label = request
             .label
             .as_deref()
@@ -3575,6 +3590,12 @@ impl ListIssues {
         }
         if let Some(label) = &self.label {
             valid_text(label, 1, MAX_ISSUE_LABEL_BYTES, false)?;
+        }
+        if let Some(number) = self.issue_number {
+            valid_exact_integer(number)?;
+            if self.page != 1 || self.label.is_some() {
+                return Err(OperationError::InvalidInput);
+            }
         }
         Ok(())
     }
@@ -6226,7 +6247,7 @@ fn issue_page(
         valid_text(&entry.user.login, 1, 100, false)?;
         valid_text(&entry.user.kind, 1, 100, false)?;
         valid_github_timestamp(&issue.updated_at)?;
-        if issue.state != "open" {
+        if !matches!(issue.state.as_str(), "open" | "closed") {
             return Err(OperationError::Indeterminate);
         }
         issues.push(IssueCandidate {
@@ -8419,6 +8440,7 @@ mod tests {
             assert!(
                 ListIssues {
                     repository: "team/repo".into(),
+                    issue_number: None,
                     page,
                     label: None
                 }

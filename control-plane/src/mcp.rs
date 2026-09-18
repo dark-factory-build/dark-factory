@@ -419,10 +419,10 @@ fn tools() -> Value {
     }, {
         "name": "list_issues",
         "title": "List an issue page",
-        "description": "Read one bounded page of open issues, with an optional label filter. next_page must be followed even when this page has no issues. This read never accepts work.",
+        "description": "Read one bounded page of open issues, with an optional label filter. Optional issue_number reads that exact open or closed issue (page 1, no label), independently of discovery limits. Follow next_page even for empty pages. This read never accepts work.",
         "inputSchema": {
             "type": "object",
-            "properties": {"repository": {"type": "string"}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 50}},
+            "properties": {"repository": {"type": "string"}, "issue_number": {"type": ["integer", "null"], "minimum": 1}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 50}},
             "required": ["repository", "page"], "additionalProperties": false
         },
         "outputSchema": {
@@ -445,7 +445,7 @@ fn tools() -> Value {
                         }},
                         "labels": {"type": "array", "items": {"type": "string"}},
                         "updated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
-                        "state": {"type": "string", "enum": ["open"]}
+                        "state": {"type": "string", "enum": ["open", "closed"]}
                     }
                 }}
             }
