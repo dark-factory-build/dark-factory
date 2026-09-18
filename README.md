@@ -9,7 +9,8 @@ results, and step in when decisions need you.
   <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory floor demo with an open Needs You request">
 </picture>
 
-*Demo: a live codebase topology rendered with sample workers and a synthetic Needs You request; no daemon is connected.*
+*Demo: the current floor with populated sample topology, named sample workers, and
+a synthetic Needs You decision; no daemon is connected.*
 
 Dark Factory keeps work in a durable queue and starts each task’s configured
 local provider. An overseer directs follow-up work, workers leave reviewable
@@ -41,13 +42,12 @@ them back, or let the Maintainer publish them.
 ## Requirements and quick start
 
 Use the **next release containing this CLI**; its version is not selected.
-It needs macOS, Git, and `factoryd`, `factory-runner`, and `factoryctl` on
-`PATH`. A Codex worker needs a signed-in `codex` CLI on Dark Factory’s tool
-path. Providers receive repository and task material; read [provider support](docs/providers.md)
-before connecting an account.
+It requires macOS, Git, and `factoryd`, `factory-runner`, and `factoryctl` on
+`PATH`. A Codex worker requires a signed-in `codex` CLI on `PATH`. Providers
+receive repository and task material; read [provider support](docs/providers.md).
 
 Install that release with the [installation guide](docs/install.md), initialise
-one private home, and start its managed service. These commands use its socket
+a home, and start its service. These commands use its socket
 and token:
 
 ```sh
@@ -61,16 +61,17 @@ factoryctl web status
 factoryctl web open
 ```
 
-`project create` prints `PROJECT_ID`; `agent create` prints `AGENT_ID`. Give the
-worker a complete outcome, then inspect it on the floor or paired console:
+From an existing committed Git checkout, `project create` prints `PROJECT_ID`;
+`agent create` prints `AGENT_ID`. Give the worker a bounded first outcome, then
+inspect it on the floor or paired console:
 
 ```sh
 factoryctl project create --name "My project" --root "$PWD"
 factoryctl agent create --project PROJECT_ID --name builder \
   --provider codex --tool-budget 100
 factoryctl task add --project PROJECT_ID --agent AGENT_ID \
-  --title "Describe the next change" \
-  --body "Inspect this repository, implement the next small change, run its focused checks, and report the outcome."
+  --title "Improve one documented setup step" \
+  --body "Read README.md and the project layout. Correct one concise setup or contributor instruction supported by the code, run git diff --check, and report the files changed."
 ```
 
 Use `factoryctl account discover` or `account list` to inspect a Codex login.
