@@ -1717,11 +1717,7 @@ func finishAttemptFailure(child *OwnedChild, dir *os.File, cfg attemptConfig, re
 }
 
 func finishAttemptWithExit(child *OwnedChild, dir *os.File, cfg attemptConfig, reads *attemptReadSet, daemon *os.File, daemonOpen bool, cause error) error {
-	var filterErr error
-	if reads != nil {
-		filterErr = reads.processOnly()
-	}
-	cause = errors.Join(cause, filterErr)
+	cause = errors.Join(cause, reads.processOnly())
 	if child != nil && child.state == stateActivated && child.ptyMaster != nil {
 		// Pre-exec refusals need the same controlling-terminal drain as a
 		// running provider's stop: Darwin can otherwise hold exit behind the

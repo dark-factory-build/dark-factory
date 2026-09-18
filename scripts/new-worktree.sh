@@ -41,13 +41,8 @@ else
     base="main"
 fi
 
-empty_hooks=$(mktemp -d "${TMPDIR:-/tmp}/dark-factory-empty-hooks.XXXXXX")
-trap 'rmdir "$empty_hooks" 2>/dev/null || true' EXIT HUP INT TERM
-chmod 700 "$empty_hooks"
-git -C "$repository_root" -c core.hooksPath="$empty_hooks" \
+git -C "$repository_root" -c core.hooksPath=/dev/null \
     worktree add -b "$branch" "$target" "$base"
-rmdir "$empty_hooks"
-trap - EXIT HUP INT TERM
 
 cat <<EOF
 
