@@ -70,6 +70,7 @@ const (
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
   factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N]
+  factoryctl agent pause|resume|archive|restore --agent ID --revision REVISION
 
   factoryctl account discover
   factoryctl account list
@@ -81,6 +82,7 @@ const (
     --agent any queues the task for any eligible worker in the project; the first worker admitted keeps it.
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
+  factoryctl task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
   factoryctl task recovery --task ID --incarnation ID
   factoryctl dispatch on|off [--revision REVISION]
   factoryctl capacity --workers N --revision REVISION
@@ -189,6 +191,7 @@ type attemptCommand struct {
 	toolPath, toolchainReadRoots string
 
 	kind             commandKind
+	operatorControl  bool
 	home             string
 	idempotencyKey   string
 	text             string
@@ -325,6 +328,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
+		return runOperator(ctx, command, getenv, stdout, stderr)
+	}
+	if command.operatorControl && (command.kind == commandOverseerTaskUpdate || command.kind == commandOverseerAgentUpdate) {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandOutcomeWrite && command.kind <= commandOutcomeList && len(args) > 0 && args[0] == "outcome" {
@@ -563,6 +569,11 @@ func parse(args []string) (attemptCommand, bool, bool) {
 	}
 	if len(args) >= 1 && args[0] == "service" {
 		return parseServiceCommand(args)
+	}
+	if len(args) >= 2 && (args[0] == "agent" && (args[1] == "pause" || args[1] == "resume" || args[1] == "archive" || args[1] == "restore") || args[0] == "task" && args[1] == "update") {
+		command, help, ok := parseOverseer(append([]string{"overseer"}, args...))
+		command.operatorControl = ok
+		return command, help, ok
 	}
 	if len(args) >= 1 && (args[0] == "status" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "dispatch" || args[0] == "capacity") {
 		return parseOperator(args)
@@ -2108,6 +2119,37 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			return writeWebFailure(stderr, "task recovery", callErr)
 		}
 		return writeJSON(stdout, recovery)
+	case commandOverseerTaskUpdate:
+		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry}
+		if command.title != "" {
+			input.Title = &command.title
+		}
+		if command.bodySet {
+			input.Body = &command.body
+		}
+		if command.prioritySet {
+			input.Priority = &command.priority
+		}
+		if command.agent != "" {
+			input.AssignedAgentID = &command.agent
+		}
+		result, callErr := client.UpdateTask(callContext, input)
+		if callErr != nil {
+			return writeWebFailure(stderr, "task update", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandOverseerAgentUpdate:
+		input := api.OverseerAgentUpdateInput{AgentID: command.agent, ExpectedRevision: command.expectedRevision}
+		if command.archiveSet {
+			input.Archived = &command.archived
+		} else {
+			input.Paused = &command.paused
+		}
+		result, callErr := client.UpdateAgent(callContext, input)
+		if callErr != nil {
+			return writeWebFailure(stderr, "agent update", callErr)
+		}
+		return writeJSON(stdout, result)
 	case commandDispatch:
 		revision := command.expectedRevision
 		if revision == 0 {

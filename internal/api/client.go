@@ -307,6 +307,48 @@ func (client *OperatorClient) EnqueueTask(ctx context.Context, input EnqueueTask
 	return client.client.mutate(ctx, "enqueue_task", input)
 }
 
+func (client *OperatorClient) UpdateTask(ctx context.Context, input OverseerTaskUpdateInput) (MutationResult, error) {
+	if !validOverseerTaskUpdateInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_update_task", input)
+}
+
+func (client *OperatorClient) UpdateAgent(ctx context.Context, input OverseerAgentUpdateInput) (MutationResult, error) {
+	if !validID(input.AgentID) || input.ExpectedRevision == 0 {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_update_agent", input)
+}
+
+func (client *OperatorClient) StopRun(ctx context.Context, input OverseerRunStopInput) (MutationResult, error) {
+	if !validOverseerRunStopInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_stop_run", input)
+}
+
+func (client *OperatorClient) ReplaceRun(ctx context.Context, input OverseerRunReplaceInput) (MutationResult, error) {
+	if !validOverseerRunReplaceInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_replace_run", input)
+}
+
+func (client *OperatorClient) MessageWorker(ctx context.Context, input OverseerWorkerMessageInput) (MutationResult, error) {
+	if !validOverseerWorkerMessageInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_message_worker", input)
+}
+
+func (client *OperatorClient) InterruptWorker(ctx context.Context, input OverseerWorkerInterruptInput) (MutationResult, error) {
+	if !validOverseerWorkerInterruptInput(input) {
+		return MutationResult{}, ErrInvalidInput
+	}
+	return client.client.mutate(ctx, "operator_interrupt_worker", input)
+}
+
 func (client *OperatorClient) SetDispatch(ctx context.Context, expectedRevision uint64, enabled bool) (MutationResult, error) {
 	if expectedRevision == 0 {
 		return MutationResult{}, ErrInvalidInput

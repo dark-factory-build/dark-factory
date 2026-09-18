@@ -126,6 +126,18 @@ func TestParseExactOperatorCommands(t *testing.T) {
 	}
 }
 
+func TestParseOperatorTaskAndAgentControls(t *testing.T) {
+	id := strings.Repeat("1", 32)
+	task, help, ok := parse([]string{"task", "update", "--task", id, "--revision", "7", "--retry"})
+	if !ok || help || !task.operatorControl || task.kind != commandOverseerTaskUpdate || !task.retry {
+		t.Fatalf("task control = %+v, help=%t ok=%t", task, help, ok)
+	}
+	agent, help, ok := parse([]string{"agent", "pause", "--agent", id, "--revision", "8"})
+	if !ok || help || !agent.operatorControl || agent.kind != commandOverseerAgentUpdate || !agent.paused {
+		t.Fatalf("agent control = %+v, help=%t ok=%t", agent, help, ok)
+	}
+}
+
 func TestOperatorCommandsRequireExactEnvironmentBeforeDialing(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	exit := run(context.Background(), []string{"dispatch", "on"}, func(string) string { return "" }, &stdout, &stderr)

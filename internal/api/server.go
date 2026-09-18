@@ -61,6 +61,12 @@ const (
 	CallOverseerMessageWorker
 	CallOverseerInterruptWorker
 	CallOverseerReplyHuman
+	CallOperatorUpdateTask
+	CallOperatorUpdateAgent
+	CallOperatorStopRun
+	CallOperatorReplaceRun
+	CallOperatorMessageWorker
+	CallOperatorInterruptWorker
 	CallHumanRequests
 	CallHumanReply
 	CallContentCreate
@@ -177,27 +183,27 @@ func (call Call) OverseerSnapshotInput() (OverseerSnapshotInput, bool) {
 }
 
 func (call Call) OverseerTaskUpdateInput() (OverseerTaskUpdateInput, bool) {
-	return call.overseerTaskEdit, call.kind == CallOverseerUpdateTask
+	return call.overseerTaskEdit, call.kind == CallOverseerUpdateTask || call.kind == CallOperatorUpdateTask
 }
 
 func (call Call) OverseerAgentUpdateInput() (OverseerAgentUpdateInput, bool) {
-	return call.overseerAgent, call.kind == CallOverseerUpdateAgent
+	return call.overseerAgent, call.kind == CallOverseerUpdateAgent || call.kind == CallOperatorUpdateAgent
 }
 
 func (call Call) OverseerRunStopInput() (OverseerRunStopInput, bool) {
-	return call.overseerRun, call.kind == CallOverseerStopRun
+	return call.overseerRun, call.kind == CallOverseerStopRun || call.kind == CallOperatorStopRun
 }
 
 func (call Call) OverseerRunReplaceInput() (OverseerRunReplaceInput, bool) {
-	return call.overseerReplace, call.kind == CallOverseerReplaceRun
+	return call.overseerReplace, call.kind == CallOverseerReplaceRun || call.kind == CallOperatorReplaceRun
 }
 
 func (call Call) OverseerWorkerMessageInput() (OverseerWorkerMessageInput, bool) {
-	return call.overseerMessage, call.kind == CallOverseerMessageWorker
+	return call.overseerMessage, call.kind == CallOverseerMessageWorker || call.kind == CallOperatorMessageWorker
 }
 
 func (call Call) OverseerWorkerInterruptInput() (OverseerWorkerInterruptInput, bool) {
-	return call.overseerInterrupt, call.kind == CallOverseerInterruptWorker
+	return call.overseerInterrupt, call.kind == CallOverseerInterruptWorker || call.kind == CallOperatorInterruptWorker
 }
 
 func (call Call) OverseerHumanReplyInput() (OverseerHumanReplyInput, bool) {
@@ -887,27 +893,27 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.overseerTask); err != nil || !validOverseerTaskCreateInput(call.overseerTask) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerUpdateTask:
+	case CallOverseerUpdateTask, CallOperatorUpdateTask:
 		if err := decodeExact(request.Params, &call.overseerTaskEdit); err != nil || !validOverseerTaskUpdateInput(call.overseerTaskEdit) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerUpdateAgent:
+	case CallOverseerUpdateAgent, CallOperatorUpdateAgent:
 		if err := decodeExact(request.Params, &call.overseerAgent); err != nil || !validID(call.overseerAgent.AgentID) || call.overseerAgent.ExpectedRevision == 0 {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerStopRun:
+	case CallOverseerStopRun, CallOperatorStopRun:
 		if err := decodeExact(request.Params, &call.overseerRun); err != nil || !validOverseerRunStopInput(call.overseerRun) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerReplaceRun:
+	case CallOverseerReplaceRun, CallOperatorReplaceRun:
 		if err := decodeExact(request.Params, &call.overseerReplace); err != nil || !validOverseerRunReplaceInput(call.overseerReplace) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerMessageWorker:
+	case CallOverseerMessageWorker, CallOperatorMessageWorker:
 		if err := decodeExact(request.Params, &call.overseerMessage); err != nil || !validOverseerWorkerMessageInput(call.overseerMessage) {
 			return Call{}, RemoteInvalidRequest
 		}
-	case CallOverseerInterruptWorker:
+	case CallOverseerInterruptWorker, CallOperatorInterruptWorker:
 		if err := decodeExact(request.Params, &call.overseerInterrupt); err != nil || !validOverseerWorkerInterruptInput(call.overseerInterrupt) {
 			return Call{}, RemoteInvalidRequest
 		}
@@ -1077,6 +1083,18 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOverseerInterruptWorker, attemptDomain
 	case "overseer_reply_human":
 		return CallOverseerReplyHuman, attemptDomain
+	case "operator_update_task":
+		return CallOperatorUpdateTask, operatorDomain
+	case "operator_update_agent":
+		return CallOperatorUpdateAgent, operatorDomain
+	case "operator_stop_run":
+		return CallOperatorStopRun, operatorDomain
+	case "operator_replace_run":
+		return CallOperatorReplaceRun, operatorDomain
+	case "operator_message_worker":
+		return CallOperatorMessageWorker, operatorDomain
+	case "operator_interrupt_worker":
+		return CallOperatorInterruptWorker, operatorDomain
 	case "content_create":
 		return CallContentCreate, operatorDomain
 	case "content_revise":
@@ -1217,7 +1235,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyPeerStatus
 	case CallOverseerSnapshot:
 		return reply == replyOverseerSnapshot
-	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallHumanReply:
+	case CallCreateProject, CallProjectLimits, CallCreateAgent, CallAgentIdlePolicy, CallAccountLink, CallAgentSelectAccount, CallAgentSelectModel, CallEnqueueTask, CallSetDispatch, CallSetCapacity, CallSucceed, CallBlock, CallFail, CallRequestHuman, CallPeerAsk, CallPeerAnswer, CallSendBack, CallSendBackTask, CallOverseerEnqueueTask, CallOverseerUpdateTask, CallOverseerUpdateAgent, CallOverseerStopRun, CallOverseerReplaceRun, CallOverseerMessageWorker, CallOverseerInterruptWorker, CallOverseerReplyHuman, CallOperatorUpdateTask, CallOperatorUpdateAgent, CallOperatorStopRun, CallOperatorReplaceRun, CallOperatorMessageWorker, CallOperatorInterruptWorker, CallHumanReply:
 		return reply == replyMutation
 	case CallWebStatus:
 		return reply == replyWebStatus

@@ -31,6 +31,21 @@ func TestOverseerControlMethodsRemainAttemptScoped(t *testing.T) {
 	}
 }
 
+func TestOperatorControlsUseOperatorDomainWithoutAttemptAuthority(t *testing.T) {
+	var bearer credential
+	request := []byte(`{"method":"operator_update_agent","params":{"agent_id":"11111111111111111111111111111111","expected_revision":1,"paused":true}}`)
+	call, code := decodeCall(operatorDomain, bearer, request)
+	if code != "" || call.Kind() != CallOperatorUpdateAgent {
+		t.Fatalf("operator control = %v, %v", call.Kind(), code)
+	}
+	if _, ok := call.AttemptDigest(); ok {
+		t.Fatal("operator control acquired attempt authority")
+	}
+	if _, code := decodeCall(attemptDomain, bearer, request); code != RemoteForbidden {
+		t.Fatalf("attempt domain accepted operator control: %v", code)
+	}
+}
+
 func TestMutationReplyValidatesOverseerHumanReplyState(t *testing.T) {
 	valid := MutationResult{Head: 3, Revision: 2, HumanReply: &OverseerHumanReplyResult{RequestID: "11111111111111111111111111111111", State: "delivery_unknown"}}
 	if _, err := NewMutationReply(valid); err != nil {

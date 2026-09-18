@@ -256,6 +256,10 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.overseerMessageWorker(ctx, call)
 	case api.CallOverseerInterruptWorker:
 		return daemon.overseerInterruptWorker(ctx, call)
+	case api.CallOperatorUpdateTask:
+		return daemon.operatorUpdateTask(ctx, call)
+	case api.CallOperatorUpdateAgent:
+		return daemon.operatorUpdateAgent(ctx, call)
 	case api.CallOverseerReplyHuman:
 		return daemon.overseerReplyHuman(ctx, call)
 	case api.CallContentCreate, api.CallContentRevise, api.CallContentDeprecate, api.CallContentList, api.CallContentRead, api.CallContentBody, api.CallContentEvidence, api.CallContentAttach, api.CallContentEvidenceList, api.CallContentAttachments:
@@ -1545,6 +1549,87 @@ func (daemon *Daemon) overseerUpdateAgent(ctx context.Context, call api.Call) ap
 		return newErrorReply(api.RemoteInternal)
 	}
 	agent, err := daemon.store.UpdateAgentForOverseer(ctx, digest, id, expected, kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	daemon.notifyScheduler()
+	return daemon.mutation(ctx, agent.Revision)
+}
+
+func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.OverseerTaskUpdateInput()
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseTaskID(input.TaskID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	var assigned *kernel.AgentID
+	if input.AssignedAgentID != nil {
+		value, err := parseAgentID(*input.AssignedAgentID)
+		if err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		assigned = &value
+	}
+	if input.Retry {
+		var value kernel.AgentID
+		if assigned != nil {
+			value = *assigned
+		}
+		if err := prepareTaskRetry(ctx, daemon.store, id, expected, value); err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		at, err := daemon.timestamp()
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		task, err := daemon.store.RetryTaskForOperator(ctx, id, expected, value, at)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		daemon.notifyScheduler()
+		return daemon.mutation(ctx, task.Revision)
+	}
+	patch := kernel.TaskPatch{Title: input.Title, Body: input.Body, Priority: input.Priority, AssignedAgentID: assigned, Cancel: input.Cancel}
+	if err := prepareQueuedTaskPatch(ctx, daemon.store, id, expected, patch); err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	task, err := daemon.store.UpdateTaskForOperator(ctx, id, expected, patch, at)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	daemon.notifyScheduler()
+	return daemon.mutation(ctx, task.Revision)
+}
+
+func (daemon *Daemon) operatorUpdateAgent(ctx context.Context, call api.Call) api.Reply {
+	input, ok := call.OverseerAgentUpdateInput()
+	if !ok || input.ExpectedRevision > uint64(^uint64(0)>>1) || input.Paused == nil && input.Archived == nil || input.Paused != nil && input.Archived != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	id, err := parseAgentID(input.AgentID)
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
+	if err != nil {
+		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	agent, err := daemon.store.UpdateAgentForOperator(ctx, id, expected, kernel.AgentPatch{Paused: input.Paused, Archived: input.Archived}, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
