@@ -49,8 +49,9 @@ type GitHubInstallation struct {
 }
 
 type GitHubInstallations struct {
-	Items    []GitHubInstallation `json:"installations"`
-	NextPage *int                 `json:"next_page"`
+	Items           []GitHubInstallation `json:"installations"`
+	NextPage        *int                 `json:"next_page"`
+	InstallationURL string               `json:"installation_url,omitempty"`
 }
 
 type GitHubRepository struct {
@@ -134,6 +135,9 @@ func validGitHubConnection(kind MessageType, body any) error {
 			if len(value.Installations.Items) > MaxJSONArray || !validGitHubPage(value.Installations.NextPage) {
 				return bad()
 			}
+			if value.Installations.InstallationURL != "" && (validateBoundedText(value.Installations.InstallationURL, 1, 2048) != nil || !validGitHubInstallationURL(value.Installations.InstallationURL)) {
+				return bad()
+			}
 			for _, item := range value.Installations.Items {
 				if item.ID < 1 || !validGitHubUser(item.Account) || item.SuspendedAt != nil && validateBoundedText(*item.SuspendedAt, 1, 128) != nil || item.URL != "" && validateBoundedText(item.URL, 1, 2048) != nil || validateBoundedText(item.Eligibility, 0, 64) != nil {
 					return bad()
@@ -161,6 +165,27 @@ func validGitHubPage(value *int) bool {
 func validGitHubAuthorizationURL(value string) bool {
 	parsed, err := url.Parse(value)
 	return err == nil && parsed.Scheme == "https" && parsed.Hostname() == "github.com" && parsed.User == nil && parsed.Path == "/login/oauth/authorize"
+}
+
+func validGitHubInstallationURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "github.com" || parsed.Port() != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.Path, "/"), "/")
+	return len(parts) == 4 && parts[0] == "apps" && validGitHubPathSegment(parts[1], 100) && parts[2] == "installations" && parts[3] == "new"
+}
+
+func validGitHubPathSegment(value string, maximum int) bool {
+	if len(value) < 1 || len(value) > maximum || value == "." || value == ".." {
+		return false
+	}
+	for _, character := range value {
+		if character != '-' && character != '_' && character != '.' && !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') && !(character >= '0' && character <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func validGitHubUser(value GitHubUser) bool {

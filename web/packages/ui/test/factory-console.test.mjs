@@ -1199,6 +1199,16 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.equal(connected.includes("evil.example"), false);
   assert.match(disconnected, /GITHUB/);
 
+  const noInstallation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
+  assert.match(noInstallation, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  assert.match(noInstallation, /href="https:\/\/github.com\/apps\/factory-maintainer\/installations\/new"/);
+  const pendingInstallationPages = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], next_page: 2, installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
+  assert.doesNotMatch(pendingInstallationPages, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  const unavailableInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [], installation_url: "https://evil.example\/apps\/factory\/installations\/new" } } } });
+  assert.doesNotMatch(unavailableInstall, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+  const visibleInstall = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: [] }, installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], installation_url: "https://github.com/apps/factory-maintainer/installations/new" } } } });
+  assert.doesNotMatch(visibleInstall, /INSTALL OR REQUEST GITHUB APP ACCESS/);
+
   const pagerCalls = [];
   const pageProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => pagerCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "pager", state: "connected", repositories: [] }, installations } } });
   act(() => { renderer = create(createElement(FactoryConsole, pageProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 }))); });
@@ -1209,6 +1219,21 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "REFRESH ACCESS").props.onClick(); });
   assert.deepEqual(pagerCalls, [{ action: "installations", page: 2 }, { action: "refresh" }]);
   assert.equal(renderer.root.findAllByType("button").some((button) => button.props.children === "PREVIOUS INSTALLATIONS"), false);
+  renderer.unmount();
+
+  const retainedInstallations = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: () => {}, github: { pending: false, result: { state: "ok", status: { connection_id: "retained", state: "connected", repositories: [] }, installations } } });
+  act(() => { renderer = create(createElement(FactoryConsole, retainedInstallations({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], next_page: 2, installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
+  act(() => { renderer.update(createElement(FactoryConsole, retainedInstallations({ installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
+  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("INSTALL OR REQUEST GITHUB APP ACCESS")), false);
+  renderer.unmount();
+
+  const refreshCalls = [];
+  const refreshProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => refreshCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "refresh-link", state: "connected", repositories: [] }, installations } } });
+  act(() => { renderer = create(createElement(FactoryConsole, refreshProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }] }))); });
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "REFRESH ACCESS").props.onClick(); });
+  act(() => { renderer.update(createElement(FactoryConsole, refreshProps({ installations: [], installation_url: "https://github.com/apps/factory-maintainer/installations/new" }))); });
+  assert.equal(refreshCalls.at(-1).action, "refresh");
+  assert.equal(renderer.root.findAllByType("a").some((anchor) => String(anchor.props.children).includes("INSTALL OR REQUEST GITHUB APP ACCESS")), true);
   renderer.unmount();
 
   const repositoryCalls = [];

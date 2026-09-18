@@ -55,3 +55,23 @@ func TestGitHubConnectionResultAllowsPendingDisconnectWithoutAnActiveID(t *testi
 		t.Fatal(err)
 	}
 }
+
+func TestGitHubConnectionResultValidatesNativeInstallationURL(t *testing.T) {
+	value := GitHubConnectionResult{State: "ok", Installations: &GitHubInstallations{InstallationURL: "https://github.com/apps/factory-maintainer/installations/new"}}
+	if _, err := EncodeGitHubConnectionResult("github-1", value); err != nil {
+		t.Fatal(err)
+	}
+	for _, url := range []string{
+		"https://github.com/apps/factory-maintainer/installations/new?next=evil",
+		"https://github.com/apps/../evil/installations/new",
+		"https://github.com/apps/../installations/new",
+		"https://evil.example/apps/factory/installations/new",
+		"https://github.com:444/apps/factory/installations/new",
+		"javascript:alert(1)",
+	} {
+		value.Installations.InstallationURL = url
+		if _, err := EncodeGitHubConnectionResult("github-1", value); err != ErrMalformed {
+			t.Fatalf("invalid native installation URL accepted: %q (%v)", url, err)
+		}
+	}
+}

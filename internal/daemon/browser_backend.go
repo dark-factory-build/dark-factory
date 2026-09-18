@@ -368,7 +368,7 @@ func projectGitHubConnection(result api.GitHubConnectionResult) browserprotocol.
 		}
 	}
 	if result.Installations != nil {
-		value.Installations = &browserprotocol.GitHubInstallations{Items: make([]browserprotocol.GitHubInstallation, len(result.Installations.Items)), NextPage: result.Installations.NextPage}
+		value.Installations = &browserprotocol.GitHubInstallations{Items: make([]browserprotocol.GitHubInstallation, len(result.Installations.Items)), NextPage: result.Installations.NextPage, InstallationURL: result.Installations.InstallationURL}
 		for i, item := range result.Installations.Items {
 			value.Installations.Items[i] = browserprotocol.GitHubInstallation{ID: item.ID, Account: browserprotocol.GitHubUser{ID: item.Account.ID, Login: item.Account.Login, Type: item.Account.Type}, SuspendedAt: item.SuspendedAt, URL: item.URL, Eligibility: item.Eligibility}
 		}

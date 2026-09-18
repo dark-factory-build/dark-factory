@@ -14,7 +14,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 )
 
-const githubUsage = "factoryctl github connect [--open] | confirm CODE | status | refresh | disconnect | installations [--page N] | repositories --installation ID [--page N] | manage --installation ID [--open] | delegate --repositories FILE\n"
+const githubUsage = "factoryctl github connect [--open] | confirm CODE | status | refresh | disconnect | installations [--page N] | install [--open] | repositories --installation ID [--page N] | manage --installation ID [--open] | delegate --repositories FILE\n"
 
 func runGitHub(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
 	if len(args) == 0 {
@@ -27,6 +27,7 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 	var open bool
 	var path string
 	var manageInstallation int64
+	var installApp bool
 	switch input.Action {
 	case "connect":
 		flags.BoolVar(&open, "open", false, "open GitHub authorization")
@@ -39,6 +40,9 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 		args = args[:1]
 	case "installations":
 		flags.IntVar(&input.Page, "page", 1, "GitHub result page")
+	case "install":
+		flags.BoolVar(&open, "open", false, "open native GitHub App installation settings")
+		installApp = true
 	case "repositories":
 		flags.IntVar(&input.Page, "page", 1, "GitHub result page")
 		flags.Int64Var(&input.InstallationID, "installation", 0, "GitHub installation ID")
@@ -59,6 +63,10 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 		if manageInstallation <= 0 {
 			return exitUsage
 		}
+		input.Action = "installations"
+		input.Page = 1
+	}
+	if installApp {
 		input.Action = "installations"
 		input.Page = 1
 	}
@@ -140,6 +148,47 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 		_, _ = fmt.Fprintf(stderr, "GitHub connection: %s. Check connection status; refresh access or retry when GitHub is available.\n", result.State)
 		return exitFailure
 	}
+	if installApp {
+		for {
+			if result.Installations == nil {
+				_, _ = io.WriteString(stderr, "Native GitHub App installation settings are unavailable; refresh your connection\n")
+				return exitFailure
+			}
+			if len(result.Installations.Items) != 0 {
+				_, _ = io.WriteString(stderr, "GitHub App installation is already visible; use factoryctl github installations to choose it\n")
+				return exitFailure
+			}
+			if result.Installations.NextPage == nil {
+				break
+			}
+			next := *result.Installations.NextPage
+			if next <= input.Page || next > 1000 {
+				_, _ = io.WriteString(stderr, "GitHub installation pages are invalid; refresh your connection\n")
+				return exitFailure
+			}
+			input.Page = next
+			result, err = client.GitHubConnection(requestContext, input)
+			if err != nil {
+				return writeWebFailure(stderr, "GitHub installation settings", err)
+			}
+			if result.State != "ok" {
+				_, _ = io.WriteString(stderr, "GitHub installation access unavailable; refresh your connection\n")
+				return exitFailure
+			}
+		}
+		link, ok := nativeGitHubInstallURL(result.Installations.InstallationURL)
+		if !ok {
+			_, _ = io.WriteString(stderr, "Native GitHub App installation settings are unavailable; refresh your connection\n")
+			return exitFailure
+		}
+		_, _ = fmt.Fprintln(stdout, link)
+		if open {
+			if err := opener(ctx, link); err != nil {
+				return exitFailure
+			}
+		}
+		return 0
+	}
 	if result.Authorization != nil {
 		_, _ = io.WriteString(stderr, "Authorize GitHub, then enter the callback confirmation code on this factory with factoryctl github confirm CODE.\n")
 		if open {
@@ -151,4 +200,18 @@ func runGitHub(ctx context.Context, args []string, getenv func(string) string, s
 		}
 	}
 	return writeJSON(stdout, result)
+}
+
+func nativeGitHubInstallURL(value string) (string, bool) {
+	link, err := url.Parse(value)
+	if err != nil || link.Scheme != "https" || link.Hostname() != "github.com" || link.Port() != "" || link.User != nil || link.RawQuery != "" || link.Fragment != "" || !strings.HasPrefix(link.Path, "/apps/") || !strings.HasSuffix(link.Path, "/installations/new") {
+		return "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(link.Path, "/"), "/")
+	if len(parts) != 4 || parts[0] != "apps" || parts[1] == "" || parts[1] == "." || parts[1] == ".." || len(parts[1]) > 100 || strings.IndexFunc(parts[1], func(r rune) bool {
+		return !(r == '-' || r == '_' || r == '.' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	}) >= 0 || parts[2] != "installations" || parts[3] != "new" {
+		return "", false
+	}
+	return link.String(), true
 }
