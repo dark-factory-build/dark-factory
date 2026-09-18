@@ -381,7 +381,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
             >
               <title>{task!.title}</title>
               <Frame name="prop.book" x={room.x + 8} y={room.door.y - 22} />
-              <text x={room.x + 26} y={room.door.y - 10} fill="#f0c777" fontSize="7" fontFamily="ui-monospace, monospace">{task!.id.slice(0, 8)}</text>
+              <text x={room.x + 26} y={room.door.y - 10} fill="#f0c777" fontSize="7" fontFamily="ui-monospace, monospace">{task!.title.slice(0, 18)}</text>
             </g>}
             {contents.map((item) => <g key={item.key} data-room-content={item.kind} {...sceneAction(item.targetId !== undefined && !nodes.has(item.targetId) && onEnterRoom === undefined ? undefined : () => { setSelectedRoomId(item.targetId ?? room.id); if (item.targetId !== undefined) onEnterRoom?.(item.targetId); })}
               aria-label={item.kind === "component" ? `Open component ${item.label}` : `Inspect ${item.count} ${item.label.toLowerCase()} files in ${node.label}`}>

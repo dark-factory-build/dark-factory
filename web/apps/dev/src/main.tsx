@@ -89,6 +89,15 @@ const fixtureInventoryTopologies = new Map(fixtureHierarchyTopologies).set(fixtu
   ],
 });
 const fixtureInventoryState = { ...fixtureFloorState, humanRequests: new Map() };
+const actualAgentNames = ["Build lead", "UI engineer", "Test runner"];
+const actualFixtureState = {
+  ...fixtureInventoryState,
+  projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]),
+  agents: new Map([...fixtureFloorState.agents].map(([id, agent], index) => [id, { ...agent, project_id: actualTopology.projectId, name: actualAgentNames[index] ?? agent.name }])),
+  tasks: new Map([...fixtureFloorState.tasks].map(([id, task], index) => [id, { ...task, project_id: actualTopology.projectId, status: "running" as const, title: ["Harden repository intake", "Render the operator settings", "Run the release checks"][index] ?? task.title }])),
+  humanRequests: new Map([...fixtureFloorState.humanRequests].map(([id, request]) => [id, { ...request, project_id: actualTopology.projectId }])),
+};
+const actualRequest = actualFixtureState.humanRequests.values().next().value!;
 
 // Fixture tour: sample data, no daemon, no authority. Fixture-only state
 // toggles expose production components; no action reports a daemon result.
@@ -115,11 +124,13 @@ function FixtureTour() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<FactoryConsoleProps["selectedAgent"]>(terminalFixture ? { id: fixtureAgent.id, name: fixtureAgent.name, revision: fixtureAgent.revision } : archiveFixture ? { id: archiveAgent.id, name: archiveAgent.name, revision: archiveAgent.revision } : undefined);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
-  const [selectedHumanRequest, setSelectedHumanRequest] = useState<FactoryConsoleProps["selectedHumanRequest"]>();
+  const [selectedHumanRequest, setSelectedHumanRequest] = useState<FactoryConsoleProps["selectedHumanRequest"]>(actualNeedsYou ? {
+    request: actualRequest, phase: "ready", question: "Should the intake source accept this reviewed migration report, or wait for an operator decision?", options: ["Accept the reviewed report", "Keep it for manual review"], canReply: false, canCancel: false, replyMaxBytes: actualRequest.reply_max_bytes, reply: "",
+  } : undefined);
   return (
     <>
       <p className="devFixtureBanner" role="note">
-        {actual ? `ACTUAL CODEBASE SCAN · ${actualTopology.sourceRevision.slice(0, 8)} · sample workers, no daemon.` : "FIXTURE TOUR — sample data, no daemon. Actions that need the factory are inert here."}
+        {actual ? `ACTUAL CODEBASE SCAN · ${actualTopology.sourceRevision.slice(0, 8)} · Build lead, UI engineer, Test runner · demo only, no daemon.` : "FIXTURE TOUR — sample data, no daemon. Actions that need the factory are inert here."}
       </p>
       {!hierarchy ? null : <p className="devFixtureBanner" role="note">
         HIERARCHY FIXTURE — North and South use different served nesting; labels and paths are deliberately misleading.
@@ -139,7 +150,7 @@ function FixtureTour() {
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
         status={connected ? "ready" : "closed"}
-        state={actual ? { ...fixtureInventoryState, projects: new Map([[actualTopology.projectId, { ...fixtureInventoryState.projects.get(actualTopology.projectId)!, name: "dark-factory" }]]), ...(actualNeedsYou ? { humanRequests: fixtureFloorState.humanRequests } : {}), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
+        state={actual ? { ...actualFixtureState, ...(actualNeedsYou ? {} : { humanRequests: new Map() }), ...(fixture === "actual-idle" ? { tasks: new Map(), agents: new Map() } : {}) } : inventoryFixture ? fixture === "inventory-idle" ? { ...fixtureInventoryState, tasks: new Map(), agents: new Map() } : crowded ? { ...fixtureCrowdedState, humanRequests: new Map() } : fixtureInventoryState : archiveFixture ? archiveFixtureState(archivedWorker) : returned ? fixtureReturnedState : crowded ? fixtureCrowdedState : fixtureFloorState}
         topologies={actual ? new Map([[actualTopology.projectId, actualTopology]]) : inventoryFixture ? fixtureInventoryTopologies : fixture === "paging" ? fixturePagedTopologies : changedTopology ? fixtureChangedTopologies : hierarchy ? fixtureHierarchyTopologies : fixtureTopologies}
         runPaths={returned ? fixtureRunPaths : crowded ? routeStep === 0 ? fixtureTourCrowdedRunPaths : fixtureMovementCrowdedRunPaths : fixtureRapidRunPaths[routeStep]!}
         view={view}
