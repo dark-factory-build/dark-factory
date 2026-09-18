@@ -77,3 +77,38 @@ func (state *operationalHomeState) writeMaintainerCredential(data []byte) error 
 	}
 	return syncFile(int(state.home.Fd()))
 }
+
+func (state *operationalHomeState) lockLegacyController() (io.Closer, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed {
+		return nil, ErrClosed
+	}
+	if err := recheckOperationalCoreIdentityByState(state); err != nil {
+		return nil, err
+	}
+	name := state.homeName + ".autonomy.lock"
+	fd, err := unix.Openat(int(state.parent.file.Fd()), name, unix.O_CREAT|unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Close(fd); err != nil {
+		return nil, err
+	}
+	file, proof, err := openMember(state.parent.file, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, ErrBusy
+		}
+		return nil, err
+	}
+	if err := recheckBinding(state.parent.file, name, proof); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}

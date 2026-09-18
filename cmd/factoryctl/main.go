@@ -307,6 +307,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 type browserOpener func(context.Context, string) error
 
 func runWithOpener(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener) int {
+	if len(args) == 2 && args[0] == "intake" && (args[1] == "legacy_preview" || args[1] == "legacy_commit" || args[1] == "legacy_lineage") {
+		return runLegacyIntakeProtocol(ctx, args[1], os.Stdin, getenv, stdout)
+	}
 	if len(args) >= 2 && args[0] == "intake" && args[1] == "service" {
 		return runIntakeService(ctx, args[2:], getenv, stdout, stderr)
 	}

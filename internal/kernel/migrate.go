@@ -50,6 +50,7 @@ const (
 	v23UserVersion      = 23
 	v24UserVersion      = 24
 	v25UserVersion      = 25
+	v26UserVersion      = 26
 	// v13Changes is the changes table before managed Git worktrees. It bound a
 	// Git-free published tree by a manifest digest, its entry and byte counts
 	// and its root inode. v14 names the tree's own branch head instead and
@@ -576,9 +577,20 @@ func v24SchemaStatements() []string {
 
 func v25SchemaStatements() []string {
 	statements := make([]string, 0, len(schemaStatements)-1)
-	for _, statement := range schemaStatements {
+	for _, statement := range v26SchemaStatements() {
 		_, name := schemaObjectIdentity(statement)
 		if name != "intake_acceptance_reviews" {
+			statements = append(statements, statement)
+		}
+	}
+	return statements
+}
+
+func v26SchemaStatements() []string {
+	statements := make([]string, 0, len(schemaStatements)-3)
+	for _, statement := range schemaStatements {
+		_, name := schemaObjectIdentity(statement)
+		if name != "intake_legacy_migrations" && name != "intake_legacy_suppressions" && name != "intake_source_priorities" {
 			statements = append(statements, statement)
 		}
 	}
@@ -709,6 +721,8 @@ func migratableSchema(version int) ([]string, bool) {
 		return v24SchemaStatements(), true
 	case v25UserVersion:
 		return v25SchemaStatements(), true
+	case v26UserVersion:
+		return v26SchemaStatements(), true
 	}
 	return nil, false
 }
@@ -734,7 +748,7 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		releaseUncertainConnection(connection)
 		return err
 	}
-	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction, migrateV25Transaction}
+	all := []func(context.Context, *sql.Conn) error{migrateLegacyTransaction, migratePreviousTransaction, migratePriorTransaction, migrateV4Transaction, migrateV5Transaction, migrateV6Transaction, migrateV7Transaction, migrateV8Transaction, migrateV9Transaction, migrateV10Transaction, migrateV11Transaction, migrateV12Transaction, migrateV13Transaction, migrateV14Transaction, migrateV15Transaction, migrateV16Transaction, migrateV17Transaction, migrateV18Transaction, migrateV19Transaction, migrateV20Transaction, migrateV21Transaction, migrateV22Transaction, migrateV23Transaction, migrateV24Transaction, migrateV25Transaction, migrateV26Transaction}
 	var steps []func(context.Context, *sql.Conn) error
 	switch version {
 	case legacyUserVersion:
@@ -787,6 +801,8 @@ func (store *Store) migrateLegacy(ctx context.Context) error {
 		steps = all[23:]
 	case v25UserVersion:
 		steps = all[24:]
+	case v26UserVersion:
+		steps = all[25:]
 	default:
 		return connection.Close()
 	}
@@ -1350,6 +1366,22 @@ func migrateV25Transaction(ctx context.Context, connection *sql.Conn) error {
 	}
 	target := expectedSchemaOf(schemaStatements)
 	for _, name := range []string{"intake_acceptance_reviews"} {
+		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
+			return err
+		}
+	}
+	if _, err := connection.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v26UserVersion)); err != nil {
+		return err
+	}
+	return validateSchemaVersion(ctx, connection, v26UserVersion, v26SchemaStatements())
+}
+
+func migrateV26Transaction(ctx context.Context, connection *sql.Conn) error {
+	if err := validateSchemaVersion(ctx, connection, v26UserVersion, v26SchemaStatements()); err != nil {
+		return err
+	}
+	target := expectedSchemaOf(schemaStatements)
+	for _, name := range []string{"intake_legacy_migrations", "intake_legacy_suppressions", "intake_source_priorities"} {
 		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
 			return err
 		}
