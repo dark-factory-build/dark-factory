@@ -25,9 +25,22 @@ fn valid_id(value: &str) -> bool {
 struct Connection {
     id: String,
     pending: Option<Pending>,
+    #[serde(default)]
+    confirmation: Option<Confirmation>,
     tokens: Option<Tokens>,
     user: Option<User>,
     repositories: Vec<Delegation>,
+}
+#[derive(Deserialize, Serialize)]
+struct Confirmation {
+    code_digest: String,
+    expires_at: u64,
+    attempts: u8,
+}
+impl Confirmation {
+    fn expired(&self, now: u64) -> bool {
+        self.expires_at <= now || self.attempts >= 5
+    }
 }
 #[derive(Deserialize, Serialize)]
 struct Pending {
@@ -75,6 +88,8 @@ impl Tokens {
 struct User {
     id: i64,
     login: String,
+    #[serde(default, rename = "type")]
+    account_type: String,
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -118,6 +133,8 @@ struct Installation {
     repository_selection: String,
     suspended_at: Option<String>,
     account: User,
+    #[serde(default)]
+    html_url: String,
 }
 impl Installation {
     fn active(&self, app_id: i64) -> bool {
@@ -168,7 +185,7 @@ mod cloudflare {
     use super::*;
     use crate::{
         BrokerState,
-        github_app::{RepositoryName, github_json, read_github_response},
+        github_app::{Error as GitHubError, RepositoryName, github_json, read_github_response},
     };
     use axum::{
         body::Bytes,
@@ -220,34 +237,53 @@ mod cloudflare {
                 app_id,
             })
         }
-        async fn exchange(&self, fields: Value) -> Result<Tokens, ()> {
+        async fn exchange(&self, fields: Value) -> Result<Tokens, GitHubError> {
             let mut body = fields;
             body["client_id"] = json!(self.client_id);
             body["client_secret"] = json!(self.client_secret);
             let headers = worker::Headers::new();
-            headers.set("accept", "application/json").map_err(|_| ())?;
+            headers
+                .set("accept", "application/json")
+                .map_err(|_| GitHubError::Unavailable)?;
             headers
                 .set("content-type", "application/json")
-                .map_err(|_| ())?;
-            let serialized = zeroize::Zeroizing::new(serde_json::to_string(&body).map_err(|_| ())?);
+                .map_err(|_| GitHubError::Unavailable)?;
+            let serialized = zeroize::Zeroizing::new(
+                serde_json::to_string(&body).map_err(|_| GitHubError::Unavailable)?,
+            );
             let mut init = RequestInit::new();
             init.with_method(Method::Post)
                 .with_redirect(worker::RequestRedirect::Manual)
                 .with_headers(headers)
                 .with_body(Some(serialized.as_str().into()));
             let url = "https://github.com/login/oauth/access_token";
-            let request = Request::new_with_init(url, &init).map_err(|_| ())?;
+            let request =
+                Request::new_with_init(url, &init).map_err(|_| GitHubError::Unavailable)?;
             let response = worker::Fetch::Request(request)
                 .send()
                 .await
-                .map_err(|_| ())?;
-            let bytes = zeroize::Zeroizing::new(
-                read_github_response(response, url, 16384)
-                    .await
-                    .map_err(|_| ())?,
-            );
-            let mut tokens: Tokens = serde_json::from_slice(&bytes).map_err(|_| ())?;
-            tokens.validate()?;
+                .map_err(|_| GitHubError::Unavailable)?;
+            let bytes = zeroize::Zeroizing::new(read_github_response(response, url, 16384).await?);
+            let payload: Value =
+                serde_json::from_slice(&bytes).map_err(|_| GitHubError::Unavailable)?;
+            if let Some(error) = payload.get("error").and_then(Value::as_str) {
+                return Err(
+                    if matches!(
+                        error,
+                        "bad_verification_code"
+                            | "bad_refresh_token"
+                            | "expired_token"
+                            | "invalid_grant"
+                    ) {
+                        GitHubError::Rejected(401)
+                    } else {
+                        GitHubError::Unavailable
+                    },
+                );
+            }
+            let mut tokens: Tokens =
+                serde_json::from_slice(&bytes).map_err(|_| GitHubError::Unavailable)?;
+            tokens.validate().map_err(|_| GitHubError::Unavailable)?;
             tokens.issued_at = now();
             Ok(tokens)
         }
@@ -279,6 +315,14 @@ mod cloudflare {
     }
     fn denied() -> worker::Result<Response> {
         reply(json!({"error":"unauthorized"}), 401)
+    }
+    fn github_failure(error: GitHubError) -> worker::Result<Response> {
+        match error {
+            GitHubError::Rejected(401 | 404) => denied(),
+            // GitHub also uses 403 for rate limits. Without the response
+            // headers it cannot prove revocation; retain the connection.
+            _ => reply(json!({"error":"github_unavailable"}), 503),
+        }
     }
 
     // Only the route dispatcher can address these DOs. All public requests are
@@ -415,6 +459,7 @@ mod cloudflare {
                     verifier,
                     expires_at,
                 }),
+                confirmation: None,
                 tokens: None,
                 user: None,
                 repositories: vec![],
@@ -450,20 +495,29 @@ mod cloudflare {
             }
             // Consume before network I/O. Failed exchange requires a fresh flow.
             storage.put(SESSION_KEY, &connection).await?;
-            let tokens = match oauth.exchange(json!({"code":code,"redirect_uri":oauth.callback,"code_verifier":pending.verifier})).await { Ok(tokens) => tokens, Err(_) => return denied() };
+            let tokens = match oauth.exchange(json!({"code":code,"redirect_uri":oauth.callback,"code_verifier":pending.verifier})).await { Ok(tokens) => tokens, Err(error) => return github_failure(error) };
             let user: User =
                 match github_json("https://api.github.com/user", &tokens.access_token).await {
                     Ok(user) => user,
-                    Err(_) => return denied(),
+                    Err(error) => return github_failure(error),
                 };
             if user.id <= 0 {
                 return denied();
             }
+            let code = random()
+                .map_err(|_| worker::Error::RustError("random unavailable".into()))?[..10]
+                .to_ascii_uppercase();
+            connection.confirmation = Some(Confirmation {
+                code_digest: digest(&code),
+                expires_at: now() + 600,
+                attempts: 0,
+            });
             connection.user = Some(user);
             connection.tokens = Some(tokens);
             storage.put(SESSION_KEY, &connection).await?;
-            let mut response =
-                Response::ok("GitHub connected. Return to Dark Factory to select repositories.")?;
+            let mut response = Response::ok(format!(
+                "Confirmation code: {code}\n\nEnter this code only in the Dark Factory console or CLI on the host where you initiated this connection. Do not send this code to another person. The code expires in 10 minutes."
+            ))?;
             response.headers_mut().set("cache-control", "no-store")?;
             response
                 .headers_mut()
@@ -481,10 +535,46 @@ mod cloudflare {
         if path == base && request.method() == Method::Delete {
             connection.tokens = None;
             connection.pending = None;
+            connection.confirmation = None;
             connection.user = None;
             connection.repositories.clear();
             storage.put(SESSION_KEY, &connection).await?;
             return reply(json!({"state":"disconnected"}), 200);
+        }
+        if let Some(confirmation) = connection.confirmation.as_mut() {
+            if confirmation.expired(now()) {
+                connection.confirmation = None;
+                connection.tokens = None;
+                connection.user = None;
+                storage.put(SESSION_KEY, &connection).await?;
+                return denied();
+            }
+            if path == format!("{base}/confirm") && request.method() == Method::Post {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Confirm {
+                    code: String,
+                }
+                let supplied = request.json::<Confirm>().await.ok();
+                confirmation.attempts += 1;
+                if supplied.is_none_or(|value| digest(&value.code) != confirmation.code_digest) {
+                    storage.put(SESSION_KEY, &connection).await?;
+                    return denied();
+                }
+                if let Err(error) = refresh_and_verify(storage, &oauth, &mut connection).await {
+                    return github_failure(error);
+                }
+                connection.confirmation = None;
+                storage.put(SESSION_KEY, &connection).await?;
+                return reply(json!({"state":"connected"}), 200);
+            }
+            if path == base && request.method() == Method::Get {
+                return reply(
+                    json!({"state":"awaiting_confirmation","connection_id":connection.id,"repositories":[]}),
+                    200,
+                );
+            }
+            return denied();
         }
         if connection.tokens.is_none() {
             if path == base && request.method() == Method::Get {
@@ -495,11 +585,8 @@ mod cloudflare {
             }
             return denied();
         }
-        if refresh_and_verify(storage, &oauth, &mut connection)
-            .await
-            .is_err()
-        {
-            return denied();
+        if let Err(error) = refresh_and_verify(storage, &oauth, &mut connection).await {
+            return github_failure(error);
         }
         let token = &connection
             .tokens
@@ -510,11 +597,8 @@ mod cloudflare {
             // Status contains private delegation metadata, so access loss is
             // checked here too, not only before repository operations.
             for delegated in &connection.repositories {
-                if authorize(token, oauth.app_id, delegated, false)
-                    .await
-                    .is_err()
-                {
-                    return denied();
+                if let Err(error) = authorize(token, oauth.app_id, delegated, false).await {
+                    return github_failure(error);
                 }
             }
             return reply(
@@ -556,14 +640,19 @@ mod cloudflare {
                 .await
                 {
                     Ok(v) => v,
-                    Err(_) => return denied(),
+                    Err(error) => return github_failure(error),
                 };
                 if page == 1000 && response.installations.len() == 100 {
                     return reply(json!({"error":"pagination_limit"}), 503);
                 }
                 let next_page = (response.installations.len() == 100).then_some(page + 1);
                 return reply(
-                    json!({"installations":response.installations.into_iter().filter(|i| i.active(oauth.app_id)).collect::<Vec<_>>(),"next_page":next_page}),
+                    json!({"installations":response.installations.into_iter().filter(|i| i.app_id == oauth.app_id && i.id > 0).map(|i| {
+                        let eligibility = if i.suspended_at.is_some() { "suspended" } else if i.repository_selection != "selected" { "all_repositories_unsupported" } else { "available" };
+                        let mut value = serde_json::to_value(&i).expect("installation serialization");
+                        value["eligibility"] = json!(eligibility);
+                        value
+                    }).collect::<Vec<_>>(),"next_page":next_page}),
                     200,
                 );
             }
@@ -574,13 +663,10 @@ mod cloudflare {
             else {
                 return reply(json!({"error":"invalid_installation"}), 400);
             };
-            if installation(token, oauth.app_id, installation_id)
-                .await
-                .is_err()
-            {
-                return denied();
+            if let Err(error) = installation(token, oauth.app_id, installation_id).await {
+                return github_failure(error);
             }
-            let response: RepositoryPage = match github_json(&format!("https://api.github.com/user/installations/{installation_id}/repositories?per_page=100&page={page}"),token).await { Ok(v) => v, Err(_) => return denied() };
+            let response: RepositoryPage = match github_json(&format!("https://api.github.com/user/installations/{installation_id}/repositories?per_page=100&page={page}"),token).await { Ok(v) => v, Err(error) => return github_failure(error) };
             if page == 1000 && response.repositories.len() == 100 {
                 return reply(json!({"error":"pagination_limit"}), 503);
             }
@@ -606,11 +692,11 @@ mod cloudflare {
             for delegated in &mut selection.repositories {
                 if RepositoryName::requested(&mut delegated.repository).is_err()
                     || !ids.insert(delegated.repository_id)
-                    || authorize(token, oauth.app_id, delegated, false)
-                        .await
-                        .is_err()
                 {
                     return denied();
+                }
+                if let Err(error) = authorize(token, oauth.app_id, delegated, false).await {
+                    return github_failure(error);
                 }
             }
             connection.repositories = selection.repositories;
@@ -623,6 +709,7 @@ mod cloudflare {
             };
             let method = rpc.get("method").and_then(Value::as_str).unwrap_or("");
             let mut repository = None;
+            let mut grants = BTreeMap::new();
             if method == "tools/call" {
                 let name = rpc
                     .pointer("/params/name")
@@ -644,12 +731,13 @@ mod cloudflare {
                 else {
                     return denied();
                 };
-                if authorize(token, oauth.app_id, delegated, write)
-                    .await
-                    .is_err()
-                {
-                    return denied();
+                if let Err(error) = authorize(token, oauth.app_id, delegated, write).await {
+                    return github_failure(error);
                 }
+                grants.insert(
+                    delegated.repository.to_ascii_lowercase(),
+                    (delegated.installation_id, delegated.repository_id),
+                );
                 if let Some(source) = rpc.pointer("/params/arguments/source_repository") {
                     let Some(source) = source.as_str() else {
                         return denied();
@@ -661,12 +749,18 @@ mod cloudflare {
                     else {
                         return denied();
                     };
-                    if authorize(token, oauth.app_id, delegated_source, false)
-                        .await
-                        .is_err()
+                    if let Err(error) =
+                        authorize(token, oauth.app_id, delegated_source, false).await
                     {
-                        return denied();
+                        return github_failure(error);
                     }
+                    grants.insert(
+                        delegated_source.repository.to_ascii_lowercase(),
+                        (
+                            delegated_source.installation_id,
+                            delegated_source.repository_id,
+                        ),
+                    );
                 }
                 repository = Some(format!("github:{}", delegated.repository_id));
                 // Legacy observation's request shape remains unchanged.
@@ -681,9 +775,14 @@ mod cloudflare {
             let Some(mcp) = state.mcp else {
                 return denied();
             };
-            let response =
-                crate::mcp::connection_dispatch(rpc, &mcp, &connection.id, repository.as_deref())
-                    .await;
+            let response = crate::mcp::connection_dispatch(
+                rpc,
+                &mcp,
+                &connection.id,
+                repository.as_deref(),
+                grants,
+            )
+            .await;
             return response.try_into();
         }
         reply(json!({"error":"not_found"}), 404)
@@ -692,15 +791,18 @@ mod cloudflare {
         storage: &Storage,
         oauth: &OAuth,
         connection: &mut Connection,
-    ) -> Result<(), ()> {
-        let tokens = connection.tokens.as_ref().ok_or(())?;
+    ) -> Result<(), GitHubError> {
+        let tokens = connection
+            .tokens
+            .as_ref()
+            .ok_or(GitHubError::Rejected(401))?;
         if tokens.issued_at.saturating_add(tokens.expires_in) <= now() + 60 {
             if tokens
                 .issued_at
                 .saturating_add(tokens.refresh_token_expires_in)
                 <= now()
             {
-                return Err(());
+                return Err(GitHubError::Rejected(401));
             }
             let replacement = oauth
                 .exchange(
@@ -711,14 +813,15 @@ mod cloudflare {
             storage
                 .put(SESSION_KEY, &*connection)
                 .await
-                .map_err(|_| ())?;
+                .map_err(|_| GitHubError::Unavailable)?;
         }
-        let tokens = connection.tokens.as_ref().ok_or(())?;
-        let user: User = github_json("https://api.github.com/user", &tokens.access_token)
-            .await
-            .map_err(|_| ())?;
+        let tokens = connection
+            .tokens
+            .as_ref()
+            .ok_or(GitHubError::Rejected(401))?;
+        let user: User = github_json("https://api.github.com/user", &tokens.access_token).await?;
         if connection.user.as_ref().map(|u| u.id) != Some(user.id) {
-            return Err(());
+            return Err(GitHubError::Rejected(401));
         }
         Ok(())
     }
@@ -730,7 +833,7 @@ mod cloudflare {
     struct RepositoryPage {
         repositories: Vec<Repository>,
     }
-    async fn installation(token: &str, app_id: i64, id: i64) -> Result<(), ()> {
+    async fn installation(token: &str, app_id: i64, id: i64) -> Result<(), GitHubError> {
         // ponytail: scan at most 100,000 installations; beyond that refuse,
         // then replace with a GitHub direct user-installation lookup if added.
         for page in 1..=1000 {
@@ -738,8 +841,7 @@ mod cloudflare {
                 &format!("https://api.github.com/user/installations?per_page=100&page={page}"),
                 token,
             )
-            .await
-            .map_err(|_| ())?;
+            .await?;
             if response
                 .installations
                 .iter()
@@ -751,37 +853,54 @@ mod cloudflare {
                 break;
             }
         }
-        Err(())
+        Err(GitHubError::Rejected(401))
     }
     async fn authorize(
         token: &str,
         app_id: i64,
         delegated: &Delegation,
         write: bool,
-    ) -> Result<(), ()> {
+    ) -> Result<(), GitHubError> {
         installation(token, app_id, delegated.installation_id).await?;
         // The intersection endpoint proves this precise repository still belongs
         // to this user's installation. A repository-visible App token cannot.
         for page in 1..=1000 {
-            let response: RepositoryPage = github_json(&format!("https://api.github.com/user/installations/{}/repositories?per_page=100&page={page}",delegated.installation_id),token).await.map_err(|_| ())?;
+            let response: RepositoryPage = github_json(&format!("https://api.github.com/user/installations/{}/repositories?per_page=100&page={page}",delegated.installation_id),token).await?;
             if let Some(repository) = response
                 .repositories
                 .iter()
                 .find(|r| r.id == delegated.repository_id)
             {
-                return repository.allows(delegated, write).then_some(()).ok_or(());
+                return repository
+                    .allows(delegated, write)
+                    .then_some(())
+                    .ok_or(GitHubError::Rejected(401));
             }
             if response.repositories.len() < 100 {
                 break;
             }
         }
-        Err(())
+        Err(GitHubError::Rejected(401))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmation_expiry_and_attempt_limit_are_closed_boundaries() {
+        let mut confirmation = Confirmation {
+            code_digest: digest("0123456789"),
+            expires_at: 600,
+            attempts: 0,
+        };
+        assert!(!confirmation.expired(599));
+        assert!(confirmation.expired(600));
+        confirmation.attempts = 4;
+        assert!(!confirmation.expired(0));
+        confirmation.attempts = 5;
+        assert!(confirmation.expired(0));
+    }
     #[test]
     fn read_only_visibility_never_grants_publication_and_repository_ids_bind_access() {
         let delegation = Delegation {
@@ -810,9 +929,11 @@ mod tests {
             app_id: 4,
             repository_selection: "selected".into(),
             suspended_at: None,
+            html_url: "https://github.com/settings/installations/1".into(),
             account: User {
                 id: 5,
                 login: "alice".into(),
+                account_type: "User".into(),
             },
         };
         assert!(installation.active(4));

@@ -276,6 +276,10 @@ pub fn app(state: BrokerState) -> Router {
                 axum::routing::get(connection::receive).delete(connection::receive),
             )
             .route(
+                "/v1/github/connections/{id}/confirm",
+                axum::routing::post(connection::receive).layer(DefaultBodyLimit::max(4096)),
+            )
+            .route(
                 "/v1/github/connections/{id}/installations",
                 axum::routing::get(connection::receive),
             )

@@ -13,6 +13,9 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
   const persistence = await mkdtemp(join(tmpdir(), 'df-connections-'));
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   let revoked = false, removed = false, push = true, bobWrite = false, refreshed = 0, exchanged = 0;
+  let unavailable = '', unavailableStatus = 503, sourceVisible = true, wrongGrant = false, wrongInstallation = false, replacedPath = false, repositoryReads = 0, sourceReads = 0;
+  const permissionSet = { contents: 'write', issues: 'write', metadata: 'read', pull_requests: 'write' };
+  const grants = [];
   const repository = name => ({ id: 2, full_name: 'team/shared', permissions: { pull: true, push: name === 'alice' ? push : bobWrite } });
   const mf = new Miniflare(convertV4MiniflareOptions({ durableObjectsPersist: persistence, name: "fixture",
     modules: [{ type: 'ESModule', path: resolve('build/index.js'), contents: await readFile('build/index.js', 'utf8') }, { type: 'CompiledWasm', path: resolve('build/index_bg.wasm'), contents: await readFile('build/index_bg.wasm') }],
@@ -21,6 +24,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     outboundService: async request => {
       const url = new URL(request.url);
       assert.ok(['github.com', 'api.github.com'].includes(url.hostname));
+      if (url.pathname === unavailable) return json({}, unavailableStatus);
       if (url.pathname === '/login/oauth/access_token') {
         assert.equal(request.headers.get('accept'), 'application/json');
         const body = await request.json();
@@ -31,16 +35,38 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
         else { exchanged++; assert.match(body.code_verifier, /^[0-9a-f]{64}$/); }
         return json({ access_token: `${who}-access`, refresh_token: `${who}-refresh`, token_type: 'bearer', expires_in: who === 'bob' && !body.grant_type ? 30 : 3600, refresh_token_expires_in: 86400 });
       }
+      if (url.pathname.endsWith('/installation')) return json({ id: wrongInstallation ? 8 : 7, app_id: 5678, account: { id: 1 }, repository_selection: 'selected', permissions: permissionSet, events: [], suspended_at: null });
+      if (url.pathname === '/app/installations/7/access_tokens') {
+        const body = await request.json();
+        assert.equal(body.repositories, undefined, 'customer tokens cannot select by mutable name');
+        assert.equal(body.repository_ids.length, 1);
+        const id = body.repository_ids[0];
+        assert.ok([2, 3].includes(id));
+        grants.push(id);
+        return json({ token: `app-${id}-fixture-installation-token`, permissions: body.permissions, repositories: [{ id: wrongGrant ? 999 : id, full_name: id === 2 ? 'team/shared' : 'team/backlog', owner: { id: 1 } }] });
+      }
+      if (request.headers.get('authorization')?.startsWith('Bearer app-')) {
+        repositoryReads++;
+        if (replacedPath) { assert.equal(request.headers.get('authorization'), 'Bearer app-2-fixture-installation-token'); return json({}, 404); }
+        if (url.pathname.includes('/git/ref/')) return json({ ref: 'refs/heads/main', object: { type: 'commit', sha: 'a'.repeat(40) } });
+        if (url.pathname.endsWith('/pulls')) return json([]);
+        if (url.pathname === '/repos/team/backlog/issues/1') {
+          assert.equal(request.headers.get('authorization'), 'Bearer app-3-fixture-installation-token'); sourceReads++;
+          return json({ number: 1, html_url: 'https://github.com/team/backlog/issues/1', title: 'source', body: 'source', state: 'closed' });
+        }
+        if (['/repos/team/shared', '/repos/team/backlog'].includes(url.pathname)) return json({ id: url.pathname.endsWith('/backlog') ? 3 : 2, full_name: url.pathname.slice(7), default_branch: 'main', private: true });
+        throw new Error(`unexpected installation-token request ${url.pathname}`);
+      }
       const who = request.headers.get('authorization')?.replace('Bearer ', '').split('-')[0];
       assert.ok(['alice', 'bob'].includes(who), 'only broker-held user tokens leave for GitHub');
       if (revoked && who === 'alice') return json({}, 401);
       if (url.pathname === '/user') return json({ id: who === 'alice' ? 10 : 20, login: who });
       if (url.pathname === '/user/installations') return json({ installations: url.searchParams.get('page') === '1'
         ? Array.from({ length: 100 }, (_, i) => ({ id: i + 100, app_id: 999, repository_selection: 'selected', suspended_at: null, account: { id: 1, login: 'other' } }))
-        : [{ id: 7, app_id: 5678, repository_selection: 'selected', suspended_at: null, account: { id: 1, login: 'team' } }] });
+        : [{ id: 7, app_id: 5678, repository_selection: 'selected', suspended_at: null, account: { id: 1, login: 'team', type: 'Organization' }, html_url: 'https://github.com/organizations/team/settings/installations/7' }, { id: 8, app_id: 5678, repository_selection: 'selected', suspended_at: '2026-09-18', account: { id: 1, login: 'team' } }, { id: 9, app_id: 5678, repository_selection: 'all', suspended_at: null, account: { id: 1, login: 'team' } }] });
       if (url.pathname === '/user/installations/7/repositories') return json({ repositories: url.searchParams.get('page') === '1'
         ? Array.from({ length: 100 }, (_, i) => ({ id: i + 100, full_name: `team/other-${i}`, permissions: { pull: true } }))
-        : removed ? [] : [repository(who)] });
+        : removed ? [] : [repository(who), ...(sourceVisible ? [{ id: 3, full_name: 'team/backlog', permissions: { pull: true } }] : [])] });
       throw new Error(`unexpected GitHub request ${request.method} ${url.pathname}`);
     },
     bindings: {
@@ -59,7 +85,7 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     method, headers: { 'content-type': 'application/json', ...(credential ? { authorization: `Bearer ${credential}` } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  const connect = async who => {
+  const connect = async (who, confirm = true) => {
     const started = await send(prefix, 'POST', {});
     assert.equal(started.status, 201);
     assert.equal(started.headers.get('cache-control'), 'no-store');
@@ -69,13 +95,28 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
     const callback = `${prefix}/callback?state=${url.searchParams.get('state')}&code=${who}`;
     assert.equal((await send(`${prefix}/callback?state=${c.connection_id}.wrong&code=${who}`)).status, 401);
-    assert.equal((await send(callback)).status, 200);
+    const completed = await send(callback);
+    assert.equal(completed.status, 200);
+    const code = (await completed.text()).match(/Confirmation code: ([0-9A-F]{10})/)[1];
+    const path = `${prefix}/${c.connection_id}`;
+    assert.deepEqual(await (await send(path, 'GET', undefined, c.credential)).json(), { state: 'awaiting_confirmation', connection_id: c.connection_id, repositories: [] });
+    assert.equal((await send(`${path}/installations`, 'GET', undefined, c.credential)).status, 401);
+    assert.equal((await send(`${path}/mcp`, 'POST', { jsonrpc: '2.0', id: 1, method: 'tools/list' }, c.credential)).status, 401);
+    if (confirm) {
+      assert.equal((await send(`${path}/confirm`, 'POST', { code }, c.credential)).status, 200);
+      assert.equal((await send(`${path}/confirm`, 'POST', { code }, c.credential)).status, 404, 'confirmation is one-use');
+    }
     assert.equal((await send(callback)).status, 401);
-    return { ...c, path: `${prefix}/${c.connection_id}` };
+    return { ...c, path, code };
   };
   try {
+    // An attacker owns the start credential but forwards the OAuth link to
+    // the victim. Only the victim's callback browser receives the second code.
+    const forwarded = await connect('alice', false);
+    for (let attempt = 0; attempt < 5; attempt++) assert.equal((await send(`${forwarded.path}/confirm`, 'POST', { code: 'wrong' }, forwarded.credential)).status, 401);
+    assert.equal((await send(`${forwarded.path}/confirm`, 'POST', { code: forwarded.code }, forwarded.credential)).status, 401, 'five guesses invalidate even the correct code');
     const alice = await connect('alice'), bob = await connect('bob');
-    assert.equal(exchanged, 2);
+    assert.equal(exchanged, 3);
     await Promise.all([send(bob.path, 'GET', undefined, bob.credential), send(bob.path, 'GET', undefined, bob.credential)]);
     assert.equal(refreshed, 1, 'concurrent requests serialize one refresh');
     assert.equal((await send(`${alice.path}/mcp`, 'POST', {}, bob.credential)).status, 401);
@@ -83,6 +124,11 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.deepEqual(await (await send(`${alice.path}/installations`, 'GET', undefined, alice.credential)).json(), { installations: [], next_page: 2 });
     const second = await (await send(`${alice.path}/installations?page=2`, 'GET', undefined, alice.credential)).json();
     assert.equal(second.installations[0].id, 7);
+    assert.equal(second.installations[0].account.type, 'Organization');
+    assert.equal(second.installations[0].html_url, 'https://github.com/organizations/team/settings/installations/7');
+    assert.deepEqual(second.installations.map(i => i.eligibility), ['available', 'suspended', 'all_repositories_unsupported']);
+    assert.equal((await send(`${alice.path}/repositories?installation_id=8`, 'GET', undefined, alice.credential)).status, 401);
+    assert.equal((await send(`${alice.path}/repositories?installation_id=9`, 'GET', undefined, alice.credential)).status, 401);
     assert.equal((await send(`${alice.path}/installations?page=invalid`, 'GET', undefined, alice.credential)).status, 400);
     assert.equal((await send(`${alice.path}/installations?page=1&page=2`, 'GET', undefined, alice.credential)).status, 400);
     const listed = await (await send(`${alice.path}/mcp`, 'POST', { jsonrpc:'2.0', id:1, method:'tools/list' }, alice.credential)).json();
@@ -107,7 +153,43 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     bobWrite = true;
     assert.equal((await (await call(bob, 'create_issue', args)).json()).result.isError, true, 'second writer cannot replay first owner');
     bobWrite = false;
-    assert.equal((await call(alice, 'create_issue', { ...args, source_repository: 'other/private' })).status, 401, 'source repository requires its own delegation');
+    const cross = { repository: 'team/shared', operation_id: '6d1f0f8e-7f1f-11f0-952e-acde48001123', issue_number: 1, source_repository: 'team/backlog', head: 'topic', head_sha: 'b'.repeat(40), base: 'main', base_sha: 'a'.repeat(40), title: 'cross repository', body: 'accepted bytes', draft: true };
+    assert.ok(listed.result.tools.find(tool => tool.name === 'create_pull_request').inputSchema.properties.source_repository);
+    assert.equal((await call(alice, 'create_pull_request', cross)).status, 401, 'supported source repository requires its own delegation');
+    assert.equal((await send(`${alice.path}/repositories`, 'PUT', { repositories: [{ installation_id: 7, repository_id: 2, repository: 'team/shared' }, { installation_id: 7, repository_id: 3, repository: 'team/backlog' }] }, alice.credential)).status, 200);
+    const crossReply = await (await call(alice, 'create_pull_request', cross)).json();
+    assert.equal(crossReply.result.isError, true, 'closed source issue refuses publication');
+    assert.equal(sourceReads, 1, JSON.stringify({ crossReply, grants, repositoryReads }));
+    assert.deepEqual(grants.slice(-2), [2, 3]);
+    const crossOperation = { operation_id: cross.operation_id, kind: 'create_pull_request', request_digest: hash(JSON.stringify(cross)) };
+    const crossShard = namespace.get(namespace.idFromName(`maintainer:5678:operation:${hash(cross.operation_id).slice(0, 2)}`));
+    const crossResult = { number: 456, url: 'https://github.com/team/shared/pull/456', head_sha: cross.head_sha, base_sha: cross.base_sha };
+    assert.equal((await crossShard.fetch('https://journal.internal/operation/mark', { method: 'POST', body: JSON.stringify({ operation: crossOperation, scope, transition: { completed: JSON.stringify(crossResult) } }) })).status, 200);
+    assert.equal((await (await call(alice, 'create_pull_request', cross)).json()).result.structuredContent.number, 456, 'typed cross-repository completed replay succeeds while both grants hold');
+    sourceVisible = false;
+    assert.equal((await call(alice, 'create_pull_request', cross)).status, 401, 'lost source access refuses replay before App authority');
+    sourceVisible = true;
+    const readArgs = { repository: 'team/shared', branch: 'main' };
+    assert.equal((await (await call(alice, 'observe_ref', readArgs)).json()).result.structuredContent.head_sha, 'a'.repeat(40));
+    wrongGrant = true;
+    const beforeWrongGrant = repositoryReads;
+    assert.equal((await (await call(alice, 'observe_ref', readArgs)).json()).result.isError, true);
+    assert.equal(repositoryReads, beforeWrongGrant, 'replacement ID refused before private repository read');
+    wrongGrant = false; wrongInstallation = true;
+    const beforeWrongInstallation = grants.length;
+    assert.equal((await (await call(alice, 'observe_ref', readArgs)).json()).result.isError, true);
+    assert.equal(grants.length, beforeWrongInstallation, 'changed installation is refused before token mint');
+    wrongInstallation = false; replacedPath = true;
+    const replaced = await (await call(alice, 'observe_ref', readArgs)).json();
+    assert.equal(replaced.result.structuredContent.head_sha, null, 'old numeric token cannot read replacement name');
+    replacedPath = false;
+    for (const endpoint of ['/user', '/user/installations', '/user/installations/7/repositories']) {
+      unavailable = endpoint;
+      assert.equal((await call(alice, 'observe_operation', observe)).status, 503, 'GitHub outage is unavailable, never revocation or empty success');
+    }
+    unavailable = '/user'; unavailableStatus = 403;
+    assert.equal((await call(alice, 'observe_operation', observe)).status, 503, 'ambiguous 403 rate limit must not revoke the connection');
+    unavailableStatus = 503; unavailable = '';
     assert.equal((await call(bob, 'observe_release_workflow', observe)).status, 401, 'remote receipt markers require their owner');
     assert.equal((await (await call(alice, 'create_issue', args)).json()).result.structuredContent.number, 123);
     push = false;
@@ -119,5 +201,11 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     revoked = false;
     assert.equal((await send(alice.path, 'DELETE', undefined, alice.credential)).status, 200);
     assert.equal((await call(alice, 'observe_operation', observe)).status, 401, 'disconnect has no owner fallback');
+    const awaitingRefresh = await connect('bob', false);
+    unavailable = '/login/oauth/access_token';
+    assert.equal((await send(`${awaitingRefresh.path}/confirm`, 'POST', { code: awaitingRefresh.code }, awaitingRefresh.credential)).status, 503, 'refresh outage is unavailable and does not activate staged tokens');
+    assert.equal((await (await send(awaitingRefresh.path, 'GET', undefined, awaitingRefresh.credential)).json()).state, 'awaiting_confirmation');
+    unavailable = '';
+    assert.equal((await send(`${awaitingRefresh.path}/confirm`, 'POST', { code: awaitingRefresh.code }, awaitingRefresh.credential)).status, 200, 'confirmation can retry a temporary refresh failure');
   } finally { await mf.dispose(); await rm(persistence, { recursive: true, force: true }); }
 });

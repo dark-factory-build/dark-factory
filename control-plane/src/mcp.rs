@@ -97,8 +97,10 @@ pub(crate) async fn connection_dispatch(
     mcp: &McpState,
     owner: &str,
     repository: Option<&str>,
+    grants: std::collections::BTreeMap<String, (i64, i64)>,
 ) -> Response {
     let mut scoped = mcp.clone();
+    scoped.app = mcp.app.for_connection(grants);
     if let Some(repository) = repository {
         scoped.journal = match mcp.journal.for_connection(owner, repository) {
             Ok(journal) => journal,

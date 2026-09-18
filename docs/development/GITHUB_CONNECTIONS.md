@@ -15,8 +15,9 @@ credential is never a URL parameter, browser cookie, snapshot, or MCP argument.
 | Request | Reply / effect |
 | --- | --- |
 | `POST /v1/github/connections` with `{}` | 201 `{connection_id, credential, authorization_url, expires_at}`. Persist the credential privately before opening the URL. |
-| `GET /v1/github/connections/callback?state=…&code=…` | Browser-only GitHub callback; consumes state and displays a return-to-host message. No credential is returned. |
-| `GET /v1/github/connections/{id}` | `{connection_id, state, github_user?, repositories}`; state is `pending`, `connected`, or `disconnected`. |
+| `GET /v1/github/connections/callback?state=…&code=…` | Browser-only GitHub callback; consumes state and displays a one-time 10-character confirmation code. No host credential or GitHub metadata is returned. |
+| `GET /v1/github/connections/{id}` | `{connection_id, state, github_user?, repositories}`; state is `pending`, `awaiting_confirmation`, `connected`, or `disconnected`. Before confirmation only state, connection ID and empty repositories are returned. |
+| `POST …/{id}/confirm` with `{code:"0123456789"}` | `{state:"connected"}` after the host supplies the code shown only in the callback browser. |
 | `GET …/{id}/installations?page=1` | `{installations, next_page}`; follow `next_page` even when the filtered page is empty. |
 | `GET …/{id}/repositories?installation_id=7&page=1` | `{repositories, next_page}` with numeric IDs, names and current user permissions. |
 | `PUT …/{id}/repositories` | `{repositories:[{installation_id,repository_id,repository}]}` replaces the delegation after live validation of every entry; at most 100 repositories. |
@@ -33,21 +34,37 @@ legacy operator path.
 The browser flow uses GitHub App authorization code and S256 PKCE. State is
 random, expires after ten minutes, belongs to the initiating host connection,
 and is consumed durably before code exchange. Callback replay and changed state
-are rejected. Expiring user authorization is mandatory. The broker rotates
+are rejected. The callback stages authorization but grants the host no GitHub
+access until it submits the browser-only confirmation code. This prevents a
+forwarded OAuth link from authorizing the sender's credential. The random code
+has 40 bits of entropy, expires in ten minutes, allows five attempts, and is
+never exposed through status. Enter it only into the Dark Factory host where
+the connection was initiated; never send it to another person.
+Expiring user authorization is mandatory. GitHub documents the [user-token lifecycle and error responses](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app). The broker rotates
 refresh credentials before access-token expiry and verifies the numeric GitHub
-user ID on every authenticated request; an error fails closed. Disconnect is
+user ID on confirmation and every connected request; an error fails closed.
+GitHub transport failures, malformed replies and server failures return 503
+`github_unavailable`; known authentication/repository refusal returns 401 `unauthorized`. An
+ambiguous GitHub 403 remains unavailable because rate limits also use 403. Neither
+case is an empty successful discovery response. Disconnect is
 irreversible for that connection; a fresh connection is a different receipt
 owner, including when the same GitHub user authorizes it.
 
 GitHub's native installation settings remain the repository-access editor.
 Discovery and access checks paginate both user installations and installation
-repositories. Only active selected-repository installations of this App are
-eligible. Every remote operation rechecks the current user, installation,
+repositories. Discovery returns this App's installations including suspended
+and unsupported all-repository selections, their `eligibility`, native
+`html_url`, and account `type`. Only active selected-repository installations
+are eligible. Pending organization approval that GitHub does not expose cannot
+be inferred from an empty list; the native GitHub settings remain authoritative. Every remote operation rechecks the current user, installation,
 repository ID and user permissions. Mutations additionally require the user's
 push, maintain or admin grant. Read visibility alone never permits publication.
 A cross-repository publication also requires live read access and delegation to
 its source. The installation token still receives each operation's specific
-permission set; user authorization is an additional ceiling.
+permission set; user authorization is an additional ceiling. Customer App
+tokens are requested by the server-verified repository ID, require the verified
+installation ID, and verify the returned ID/name/owner/permissions. A renamed
+or replaced name cannot mint a token for another numeric repository.
 
 ## Receipt ownership and concurrency
 
