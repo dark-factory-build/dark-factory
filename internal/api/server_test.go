@@ -201,6 +201,10 @@ func replyForCall(call Call) Reply {
 			Projects: []ProjectSummary{}, Agents: []AgentSummary{}, Tasks: []TaskSummary{},
 		})
 		return reply
+	case CallAgentPaths:
+		input, _ := call.AgentPathsInput()
+		reply, _ := NewAgentPathsReply(AgentPaths{AgentID: input.AgentID, Paths: []string{}})
+		return reply
 	case CallAttemptTask:
 		reply, _ := NewAttemptTaskReply(AttemptTask{Task: "private-attempt-task"})
 		return reply
@@ -356,6 +360,8 @@ func TestServerDecodesClosedMethodMatrix(t *testing.T) {
 				output = &HealthStatus{}
 			case CallSnapshot:
 				output = &DashboardSnapshot{}
+			case CallAgentPaths:
+				output = &AgentPaths{}
 			case CallAttemptTask:
 				output = &AttemptTask{}
 			default:
