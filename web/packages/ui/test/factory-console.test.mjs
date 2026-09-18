@@ -1833,7 +1833,9 @@ test("dependency projection keeps served identity, hidden endpoints and project 
 test("floor omits the global evidence essay", () => {
   const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, view: "floor" }));
   assert.doesNotMatch(markup, /Floor evidence|Rooms describe a repository snapshot/);
+  assert.doesNotMatch(markup, /Scroll the floor to explore/);
   assert.match(markup, /Floor hierarchy/);
+  assert.match(markup, /dfFactoryFloor__spaceCount/);
 });
 
 

@@ -314,7 +314,6 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
   return (
     <>
-    <p className="dfFactoryFloor__mapHint">Scroll the floor to explore · choose a room below for details</p>
     <div className="dfFactoryFloor__map" role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
       viewBox={`0 0 ${layout.width} ${sceneHeight}`}
@@ -340,10 +339,6 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
         </pattern>
       </defs>
       <rect width={layout.width} height={sceneHeight} fill="#08131d" />
-      <text x={PADDING} y="20" fill="#b9cad5" fontFamily="ui-monospace, monospace" fontSize="10" fontWeight="700">
-        {layout.rooms.length} SPACES
-      </text>
-
       {layout.corridors.map((corridor, index) => <rect key={index} data-corridor="" {...corridor} fill={floorFill} />)}
       <rect x={PADDING} y={layout.restingTop - 32} width={ROOM_LEFT - PADDING} height={boardTop - layout.restingTop + 32} fill={floorFill} />
       {layout.headings.map((heading) => (
