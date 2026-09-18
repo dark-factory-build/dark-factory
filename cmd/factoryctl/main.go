@@ -72,6 +72,11 @@ const (
   factoryctl human list
   factoryctl human reply --operation-id ID --request ID --revision REVISION --reply TEXT
   factoryctl project create --name TEXT --root ABSOLUTE
+  factoryctl project repository list --project ID
+  factoryctl project repository add --id HEX32 --project ID --name TEXT --root ABSOLUTE --base REF
+  factoryctl project repository name --id ID --revision REVISION --name TEXT
+  factoryctl project repository base --id ID --revision REVISION --base REF
+  factoryctl project repository default|enable|disable|remove --id ID --revision REVISION
   factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
