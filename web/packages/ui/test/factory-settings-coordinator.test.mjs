@@ -74,3 +74,27 @@ test("a failed confirmation keeps its form and does not refresh away the retry",
   assert.deepEqual(calls, ["connect", "confirm", "status"]);
   assert.equal(coordinator.github.result.authorization.authorization_url, authorization.authorization_url);
 });
+
+test("a connected refresh drops discovery pages before reloading installations", async () => {
+  const calls = [];
+  let refreshes = 0;
+  const session = {
+    capabilities: 1,
+    clientId: "client",
+    async githubConnection(request) {
+      calls.push(request.action);
+      if (request.action === "refresh") { refreshes += 1; return { state: "ok", status: { connection_id: "new", state: "connected", repositories: [] } }; }
+      if (request.action === "installations") return refreshes === 1 ? { state: "ok", installations: { installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }] } } : { state: "ok", installations: { installations: [] } };
+      if (request.action === "repositories") return { state: "ok", repositories: { repositories: [{ id: 9, full_name: "factory-org/worker", permissions: { pull: true, push: true, maintain: true, admin: true } }] } };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish: () => {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.githubConnection({ action: "refresh" });
+  await coordinator.githubConnection({ action: "repositories", installation_id: 7, page: 1 });
+  await coordinator.githubConnection({ action: "refresh" });
+  assert.deepEqual(calls, ["refresh", "installations", "repositories", "refresh", "installations"]);
+  assert.equal(coordinator.github.result.installations.installations.length, 0);
+  assert.equal(coordinator.github.result.repositories, undefined);
+});

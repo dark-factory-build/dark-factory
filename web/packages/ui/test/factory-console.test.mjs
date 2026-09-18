@@ -1173,6 +1173,8 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.match(disconnectPending, /RETRY DISCONNECT/);
   const awaitingConfirmation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "awaiting_confirmation", repositories: [] } } } });
   assert.match(awaitingConfirmation, /RESET GITHUB ACCESS/);
+  const connecting = render({ ...settings, github: { pending: false, result: { state: "ok", authorization: { connection_id: "c", authorization_url: "https://github.com/login/oauth/authorize", expires_at: 123n } } } });
+  assert.match(connecting, /RESET GITHUB ACCESS/);
   const expired = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } });
   assert.match(expired, /RESET GITHUB ACCESS/);
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "disconnected", repositories: [] } } } })); });
