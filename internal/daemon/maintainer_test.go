@@ -6,8 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
-	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -91,18 +91,14 @@ func TestConnectRefusesLegacyOverseerBeforeCredentialActivation(t *testing.T) {
 }
 
 func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
-	acceptedAt, err := kernel.NewUnixMillis(1_700_000_000_000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	accepted := kernel.IntakeAcceptance{SourceRepository: "feed/original", CreatedAt: acceptedAt, Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "reviewed", Body: "safe snapshot"}}
+	accepted := kernel.IntakeAcceptance{SourceRepository: "feed/original", Snapshot: kernel.IntakeIssueSnapshot{IssueNumber: 9, Title: "reviewed", Body: "safe snapshot"}}
 	// A broker response can carry revised instructions in content even when
 	// structuredContent still happens to resemble the accepted issue.
-	upstream := []byte(`{"result":{"structuredContent":{"number":9,"title":"reviewed","body":"safe snapshot"},"content":[{"type":"text","text":"revised untrusted instructions"}]}}`)
+	upstream := []byte(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"number":9,"url":"https://github.com/feed/original/issues/9","title":"revised instructions","body":"revised untrusted instructions","labels":["regression"],"updated_at":"2026-09-18T20:00:00Z","state":"closed","state_reason":"completed"},"content":[{"type":"text","text":"revised untrusted instructions"}],"isError":false}}`)
 	if !bytes.Contains(upstream, []byte("revised untrusted instructions")) {
 		t.Fatal("divergent broker fixture lost its untrusted content")
 	}
-	response, err := frozenAcceptedIssueResponse(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, accepted)
+	response, err := frozenAcceptedIssueResponse(maintainerRequest{JSONRPC: "2.0", ID: json.RawMessage(`1`)}, accepted, upstream)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,30 +120,29 @@ func TestAcceptedIssueObservationReturnsOnlyFrozenSnapshot(t *testing.T) {
 	if err := json.Unmarshal(response, &reply); err != nil {
 		t.Fatal(err)
 	}
-	if reply.JSONRPC != "2.0" || string(reply.ID) != "1" || reply.Result.IsError || len(reply.Result.Content) != 1 || reply.Result.Content[0].Type != "text" || reply.Result.Content[0].Text != "Issue state was observed." {
+	if reply.JSONRPC != "2.0" || string(reply.ID) != "1" || reply.Result.IsError || len(reply.Result.Content) != 1 || reply.Result.Content[0].Type != "text" || reply.Result.Content[0].Text != "Accepted issue snapshot and current issue metadata were observed." {
 		t.Fatalf("frozen envelope = %s", response)
 	}
 	issue := reply.Result.Issue
-	if issue.Number != accepted.Snapshot.IssueNumber || issue.URL != "https://github.com/feed/original/issues/9" || issue.Title != accepted.Snapshot.Title || issue.Body != accepted.Snapshot.Body || len(issue.Labels) != 0 || issue.UpdatedAt != time.UnixMilli(accepted.CreatedAt.Int64()).UTC().Format(time.RFC3339) || issue.State != "open" || issue.StateReason != nil {
+	if issue.Number != accepted.Snapshot.IssueNumber || issue.URL != "https://github.com/feed/original/issues/9" || issue.Title != accepted.Snapshot.Title || issue.Body != accepted.Snapshot.Body || len(issue.Labels) != 1 || issue.Labels[0] != "regression" || issue.UpdatedAt != "2026-09-18T20:00:00Z" || issue.State != "closed" || issue.StateReason == nil || *issue.StateReason != "completed" {
 		t.Fatalf("frozen response = %s", response)
 	}
 }
 
-func TestMaintainerToolCallRejectsAmbiguousRepositoryArguments(t *testing.T) {
-	valid := json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9}}`)
-	call, canonical, err := decodeMaintainerToolCall(valid)
-	if err != nil || call.Name != "observe_issue" || string(call.Arguments["repository"]) != `"feed/original"` || !bytes.Contains(canonical, []byte(`"repository":"feed/original"`)) || bytes.Contains(canonical, []byte(`"Repository"`)) {
-		t.Fatalf("canonical call: %s %+v %v", canonical, call, err)
-	}
-	for _, input := range []json.RawMessage{
-		json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","Repository":"foreign/private","issue_number":9}}`),
-		json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9,"issue_Number":10}}`),
-		json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","repository":"foreign/private","issue_number":9}}`),
-		json.RawMessage(`{"name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9,"meta":{"scope":"accepted","scope":"foreign"}}}`),
-		json.RawMessage(`{"Name":"observe_issue","arguments":{"repository":"feed/original","issue_number":9}}`),
+func TestMaintainerTransportRejectsAmbiguousRepositoryArguments(t *testing.T) {
+	ctx := context.Background()
+	for _, request := range []json.RawMessage{
+		json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","repository":"foreign/private","issue_number":9}}}`),
+		json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"observe_issue","arguments":{"repository":"feed/original","Repository":"foreign/private","issue_number":9}}}`),
 	} {
-		if _, _, err := decodeMaintainerToolCall(input); err == nil {
-			t.Fatalf("accepted ambiguous tool call %s", input)
+		fixture := newDispatchFixture(t)
+		active := prepareActiveAttemptInProject(t, fixture, 175, testID(175), "orchestrator")
+		done := fixture.serve(t)
+		_, err := active.client.Maintainer(ctx, api.MaintainerInput{Request: request})
+		serverErr := <-done
+		var remote *api.RemoteError
+		if !errors.As(err, &remote) || remote.Code() != api.RemoteInvalidRequest || serverErr == nil {
+			t.Fatalf("ambiguous tool argument = client %v, server %v", err, serverErr)
 		}
 	}
 }
