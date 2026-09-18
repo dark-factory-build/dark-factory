@@ -7,7 +7,22 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
+
+func TestContinuationTaskTextCapsCodexAtProviderLimit(t *testing.T) {
+	context := ContinuationContext{ConditionKind: ConditionHumanRequest, ConditionRevision: mustRevision(t, 1), ResolutionDetail: strings.Repeat("答", 4096)}
+	text := ContinuationTaskText(ProviderCodex, strings.Repeat("x", 7168), []ContinuationContext{context})
+	if ContinuationTaskFits(ProviderCodex, strings.Repeat("x", 8192), []ContinuationContext{context}) {
+		t.Fatal("exact-limit Codex task was admitted without room for causal context")
+	}
+	if !ContinuationTaskCanUseFetchFallback(ProviderCodex, []ContinuationContext{context}) {
+		t.Fatal("oversized Codex continuation lost its bounded fetch fallback")
+	}
+	if len(text) > 8192 || !utf8.ValidString(text) {
+		t.Fatalf("bounded continuation task length=%d valid=%v", len(text), utf8.ValidString(text))
+	}
+}
 
 func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
 	ctx := context.Background()
@@ -32,6 +47,29 @@ func TestQuestionYieldCannotBeStrandedByImmediateResolution(t *testing.T) {
 	read, found, err := store.Continuation(ctx, continuation)
 	if err != nil || !found || read.State != ContinuationWaiting || read.ConditionRevision != request.Revision {
 		t.Fatalf("atomic question/yield continuation: %+v found=%v err=%v", read, found, err)
+	}
+}
+
+func TestOrchestratorHumanQuestionYieldsAndRevokesBearer(t *testing.T) {
+	ctx := context.Background()
+	store, run, keys := runningOrchestratorRun(t)
+	defer store.Close()
+	request, err := store.CreateHumanQuestionAndYieldForAttempt(ctx, keys.AttemptDigest, NewHumanQuestion{
+		IdempotencyKey: humanKey(234), QuestionText: "choose the deployment target",
+	}, mustTime(t, 40))
+	if err != nil {
+		t.Fatalf("orchestrator question yield: %v", err)
+	}
+	if _, err := store.AuthenticateAttempt(ctx, keys.AttemptDigest); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("old overseer bearer after yield: %v", err)
+	}
+	terminal, found, err := store.Run(ctx, run.ID)
+	if err != nil || !found || terminal.Phase != RunFinalizing {
+		t.Fatalf("yielded overseer run = %+v found=%v err=%v", terminal, found, err)
+	}
+	projection, found, err := store.HumanRequest(ctx, request.ID)
+	if err != nil || !found || !projection.CanReply {
+		t.Fatalf("yielded overseer request = %+v found=%v err=%v", projection, found, err)
 	}
 }
 
@@ -225,6 +263,10 @@ func TestResolvedContinuationPromotesThenReentersProviderAdmission(t *testing.T)
 	promoted, err := store.PromoteQueuedContinuations(ctx, mustTime(t, 100))
 	if err != nil || len(promoted) != 1 || promoted[0].ID != run.TaskID || promoted[0].Status != TaskQueued {
 		t.Fatalf("promoted continuation: %+v, %v", promoted, err)
+	}
+	oversizedBody := strings.Repeat("x", 8192)
+	if _, err := store.UpdateTask(ctx, promoted[0].ID, promoted[0].Revision, TaskPatch{Body: &oversizedBody}, mustTime(t, 100)); err != nil {
+		t.Fatalf("oversized resumed Codex task remains admissible for fetch fallback: %v", err)
 	}
 	admission, err := store.AdmitNext(ctx, admissionKeys(t, 228, nil), mustTime(t, 101))
 	if err != nil || !admission.Admitted() || admission.Run.TaskID != run.TaskID || admission.Run.Provider != ProviderCodex {

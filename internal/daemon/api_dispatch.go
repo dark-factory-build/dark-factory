@@ -1466,7 +1466,7 @@ func (daemon *Daemon) requestHuman(ctx context.Context, call api.Call) api.Reply
 		ReuseExisting:  input.ReuseExisting,
 	}
 	var request kernel.HumanRequest
-	if authority.Role == kernel.RoleWorker && authority.Provider != kernel.ProviderShell {
+	if authority.Provider != kernel.ProviderShell {
 		request, err = daemon.store.CreateHumanQuestionAndYieldForAttempt(ctx, kDigest, question, at)
 	} else {
 		request, err = daemon.store.CreateHumanQuestionForAttempt(ctx, kDigest, question, at)

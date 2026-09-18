@@ -83,8 +83,9 @@ factoryctl attempt request-human --idempotency-key HEX32 \
 The first suggestion is recommended, never submitted automatically. The user
 can select a suggestion, edit it, or write another answer, then select Answer.
 Needs You opens a sole request once; collapsing the row stays respected.
-Stop task ends its originating task. Keep the provider attempt alive for its
-answer. Ordinary terminal prose is not a human request.
+Stop task ends its originating task. Non-shell provider questions yield and
+release their lane until the answer; shell questions remain live. Ordinary
+terminal prose is not a human request.
 
 ## Recovery and completion
 

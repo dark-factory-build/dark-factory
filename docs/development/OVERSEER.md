@@ -180,9 +180,10 @@ eligible same-project handoffs can be read in one attempt.
   back to its worker with the findings (`attempt send-back`, section 5) and
   the worker's next run continues from the tree it left.
 - When a step needs a decision you are not sure of, or a publication is
-  blocked twice, raise it with `attempt request-human` and keep the native
-  attempt alive for the reply (section 6). The request is the NEEDS YOU card
-  on the operator's console while the run lives.
+  blocked twice, raise it with `attempt request-human` (section 6). A
+  non-shell overseer request atomically yields the run, releases its lane and
+  revokes its bearer; the next fresh-authority run resumes after the reply.
+  Shell overseers retain their live-request behavior.
 
 For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 
@@ -578,14 +579,14 @@ change id, PR number, and merged commit or the reason it stopped.
 "$DARK_FACTORY_FACTORYCTL" attempt succeed --result "..."    # after the reply resolves the work
 ```
 
-After `request-human`, leave the native attempt running at its prompt; do not
-call `attempt block` or `attempt succeed` until the answer arrives. The
-console delivers and submits a Codex answer, then you continue from it. The
-operator can cancel the existing NEEDS YOU card if waiting is no longer useful.
-Once the reply resolves the work, end with `attempt succeed` or, for an
-ordinary non-human failure, `attempt block` (detail cut to its 4 KiB bound;
-the question allows 8 KiB). The next standing-instruction run picks up where
-the journal says you stopped.
+For a non-shell overseer, `request-human` yields the native attempt and
+returns; do not keep the provider alive or submit a second request while the
+NEEDS YOU card is open. The console reply resolves the durable continuation,
+and the next standing-instruction run resumes with fresh authority. Shell
+overseers keep the existing live-request behavior. The operator can cancel the
+NEEDS YOU card if waiting is no longer useful. Once the resumed work resolves,
+end with `attempt succeed` or, for an ordinary non-human failure, `attempt
+block` (detail cut to its 4 KiB bound; the question allows 8 KiB).
 
 ### Peer collaboration
 

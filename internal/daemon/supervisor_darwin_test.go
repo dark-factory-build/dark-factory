@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,8 +146,7 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	task := bytes.Repeat([]byte{'x'}, runner.MaxCodexTaskBytes)
 	contexts := []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}}
 	framed, err := providerTaskWithContinuationContext(kernel.ProviderCodex, task, contexts)
-	metadata := []byte("condition=human_request condition_id=" + hex.EncodeToString(condition.Bytes()) + " condition_revision=1 context_digest=" + strings.Repeat("0", 64) + " resolution=continue")
-	if err != nil || len(framed) <= len(task) || !bytes.Equal(framed[:len(task)], task) || bytes.Count(framed, []byte("Factory continuation context:")) != 1 || !bytes.Contains(framed, metadata) {
+	if err == nil || framed != nil {
 		t.Fatalf("maximum Codex API continuation framing: bytes=%d err=%v", len(framed), err)
 	}
 	launchTask, err := providerTaskForContinuationLaunch(kernel.ProviderCodex, task, contexts)
@@ -170,6 +168,17 @@ func TestCodexContinuationContextPreservesMaximumOriginalTask(t *testing.T) {
 	shell, err := providerTaskForContinuationLaunch(kernel.ProviderShell, []byte("printf ok"), contexts)
 	if err != nil || !bytes.Contains(shell, []byte("# Factory continuation context:")) || !bytes.Contains(shell, []byte("# condition=")) {
 		t.Fatalf("shell continuation comments = %q, %v", shell, err)
+	}
+}
+
+func TestProviderContinuationContextPreservesMaximumProviderTask(t *testing.T) {
+	var condition kernel.ContinuationConditionID
+	copy(condition[:], supervisorIDBytes(241))
+	revision, _ := kernel.NewRevision(1)
+	task := bytes.Repeat([]byte{'x'}, runner.MaxProviderTaskBytes)
+	framed, err := providerTaskWithContinuationContext(kernel.ProviderClaudeCode, task, []kernel.ContinuationContext{{ConditionKind: kernel.ConditionHumanRequest, ConditionID: condition, ConditionRevision: revision, ResolutionDetail: "continue"}})
+	if err == nil || framed != nil {
+		t.Fatalf("maximum provider continuation framing: bytes=%d err=%v", len(framed), err)
 	}
 }
 

@@ -5,7 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf8"
 )
 
 type ContinuationCondition string
@@ -68,6 +72,82 @@ type ContinuationContext struct {
 	ConditionRevision Revision
 	ResolutionDetail  string
 	ResolvedAt        UnixMillis
+}
+
+// ContinuationTaskText frames resolved causal context for a fresh provider
+// authority while preserving the provider's task-size contract.
+func ContinuationTaskText(provider Provider, task string, contexts []ContinuationContext) string {
+	if len(contexts) == 0 {
+		return task
+	}
+	limit := 131072
+	if provider == ProviderCodex {
+		limit = 8192
+	}
+	if len(task) >= limit {
+		return task
+	}
+	full := continuationTaskTextFull(task, contexts)
+	return truncateContinuationUTF8(full, limit)
+}
+
+func continuationTaskTextFull(task string, contexts []ContinuationContext) string {
+	var builder strings.Builder
+	builder.WriteString(task)
+	builder.WriteString("\n\nFactory continuation context:\n")
+	for _, context := range contexts {
+		builder.WriteString("condition=")
+		builder.WriteString(string(context.ConditionKind))
+		builder.WriteString(" condition_id=")
+		builder.WriteString(hex.EncodeToString(context.ConditionID.Bytes()))
+		builder.WriteString(" condition_revision=")
+		builder.WriteString(strconv.FormatInt(context.ConditionRevision.Int64(), 10))
+		builder.WriteString(" context_digest=")
+		builder.WriteString(hex.EncodeToString(context.ContextDigest[:]))
+		builder.WriteString(" resolution=")
+		builder.WriteString(context.ResolutionDetail)
+		builder.WriteByte('\n')
+	}
+	return builder.String()
+}
+
+// ContinuationTaskFits reports whether a fresh provider can receive the full
+// causal envelope without dropping any task or condition data. Admission uses
+// this before consuming a queued task; an unfit resumed task is refused.
+func ContinuationTaskFits(provider Provider, task string, contexts []ContinuationContext) bool {
+	if len(contexts) == 0 {
+		return true
+	}
+	limit := 131072
+	if provider == ProviderCodex {
+		limit = 8192
+	}
+	if len(task) >= limit {
+		return false
+	}
+	return len(continuationTaskTextFull(task, contexts)) <= limit
+}
+
+// ContinuationTaskCanUseFetchFallback reports whether admission can preserve
+// progress when the causal envelope cannot fit inline. The daemon then starts
+// a fresh provider authority with a bounded instruction to fetch the durable
+// task and continuation context; no causal field is discarded.
+func ContinuationTaskCanUseFetchFallback(provider Provider, contexts []ContinuationContext) bool {
+	if len(contexts) == 0 {
+		return false
+	}
+	return provider == ProviderClaudeCode || provider == ProviderCodex
+}
+
+func truncateContinuationUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func validateContinuationSpec(spec NewContinuation) error {

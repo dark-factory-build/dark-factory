@@ -17,6 +17,13 @@ func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, cont
 	if len(contexts) == 0 {
 		return task, nil
 	}
+	limit := runner.MaxProviderTaskBytes
+	if kind == kernel.ProviderCodex {
+		limit = runner.MaxCodexTaskBytes
+	}
+	if len(task) >= limit {
+		return nil, fmt.Errorf("%w: continuation context exceeds task delivery bound", kernel.ErrInvalidValue)
+	}
 	var builder strings.Builder
 	builder.Grow(len(task) + len(contexts)*128)
 	builder.Write(task)
@@ -41,7 +48,7 @@ func providerTaskWithContinuationContext(kind kernel.Provider, task []byte, cont
 		builder.WriteString(continuation.ResolutionDetail)
 		builder.WriteByte('\n')
 	}
-	if builder.Len() > runner.MaxProviderTaskBytes {
+	if builder.Len() > limit {
 		return nil, fmt.Errorf("%w: continuation context exceeds task delivery bound", kernel.ErrInvalidValue)
 	}
 	return []byte(builder.String()), nil
