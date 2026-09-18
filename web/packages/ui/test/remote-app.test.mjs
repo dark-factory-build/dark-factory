@@ -714,7 +714,8 @@ test("an invitation that lands in an iOS tab is held for the Home Screen app, or
     const card = sectionText(renderer, "dfRemote__install");
     assert.match(card, /Add to Home Screen/);
     assert.match(card, /COPY INVITATION/);
-    assert.match(findNode(renderer.toJSON(), "dfRemote__openSafari").props.href, /^x-safari-https:\/\/app\.darkfactory\.build\/remote#df_remote&/);
+    assert.equal(findNode(renderer.toJSON(), "dfRemote__openSafari").props.href, "x-safari-https://app.darkfactory.build/remote");
+    assert.doesNotMatch(JSON.stringify(renderer.toJSON()), /challenge=|ticket=/, "a held invitation is never rendered");
     await act(async () => { button(renderer, "dfRemote__pairHere").props.onClick(); });
     await settle();
     assert.equal(manager.calls.pair.length, 1);
@@ -730,6 +731,16 @@ test("a factory is renamed on this device and the bar carries the new name", asy
     await act(async () => { button(renderer, "dfRemote__renameAction").props.onClick(); });
     await settle();
     assert.match(sectionText(renderer, "dfRemote__bar"), /Garage/);
+  });
+});
+
+test("a name typed for one factory never renames the next one selected", async () => {
+  const manager = fakeManager([northFactory(), southFactory()]);
+  await withApp(props(manager), async (renderer) => {
+    await act(async () => { renderer.root.findByProps({ id: "dfRemoteName" }).props.onChange({ currentTarget: { value: "Garage" } }); });
+    await act(async () => { buttons(renderer, "dfRemote__factory")[1].props.onClick(); });
+    assert.equal(renderer.root.findByProps({ id: "dfRemoteName" }).props.value, "South Shop");
+    assert.equal(button(renderer, "dfRemote__renameAction").props.disabled, true);
   });
 });
 

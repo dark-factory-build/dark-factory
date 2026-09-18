@@ -147,7 +147,7 @@ export class RemoteManager {
   /** The name is this device's own: it is stored here and told to no factory. */
   async rename(nodeId: string, label: string): Promise<void> {
     const entry = this.#entries.get(nodeId);
-    const name = label.trim().slice(0, 32);
+    const name = [...label.trim()].slice(0, 32).join("");
     if (this.#closed || entry === undefined || name.length === 0) throw new SessionError("invalid_request");
     entry.binding.label = name;
     if (entry.binding.key !== undefined) await this.#store.put(entry.binding);

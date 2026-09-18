@@ -53,9 +53,11 @@ type InstallHint = "safari" | "other" | undefined;
  * storage apart from every browser tab, and alerts work nowhere else.
  */
 function browserInstallHint(): InstallHint {
-  const scope = globalThis as { matchMedia?: (query: string) => { matches: boolean }; navigator?: { userAgent?: string; standalone?: boolean } };
+  const scope = globalThis as { matchMedia?: (query: string) => { matches: boolean }; navigator?: { userAgent?: string; standalone?: boolean; platform?: string; maxTouchPoints?: number } };
   const agent = scope.navigator?.userAgent ?? "";
-  if (scope.matchMedia === undefined || !/iPhone|iPad|iPod/.test(agent)) return undefined;
+  // An iPad calls itself a Mac; only a Mac with a touch screen is one.
+  const ios = /iPhone|iPad|iPod/.test(agent) || (scope.navigator?.platform === "MacIntel" && (scope.navigator.maxTouchPoints ?? 0) > 1);
+  if (scope.matchMedia === undefined || !ios) return undefined;
   if (scope.navigator?.standalone === true || scope.matchMedia("(display-mode: standalone)").matches) return undefined;
   return /CriOS|FxiOS|EdgiOS/.test(agent) ? "other" : "safari";
 }
@@ -238,6 +240,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   };
 
   const select = (nodeId: string) => {
+    setName(undefined);
     try { manager.current?.select(nodeId); } catch { /* a binding can be forgotten between render and tap */ }
     bump();
   };
@@ -257,6 +260,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
 
   const forget = (nodeId: string) => {
     setConfirm(undefined);
+    setName(undefined);
     if (detail?.scope.nodeId === nodeId) human.current?.clear(true);
     void (async () => {
       try { await manager.current?.forget(nodeId); } catch { /* the binding is gone either way */ }
@@ -302,7 +306,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
       </p>
       {held === undefined ? null : (
         <p className="dfRemote__prose">
-          Your invitation is waiting and lasts five minutes. Copy it, install, then paste it under SETUP in the app.
+          Your invitation is waiting and lasts five minutes. Copy it first, install, then paste it under SETUP in the app.
         </p>
       )}
       <div className="dfRemote__actions">
@@ -310,18 +314,23 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           <button
             type="button"
             className="dfRemote__copyInvitation"
-            onClick={() => { void globalThis.navigator.clipboard.writeText(held.link).then(() => setHeld({ ...held, copied: true }), () => { /* a refused clipboard leaves PAIR IN THIS TAB */ }); }}
+            onClick={() => { void globalThis.navigator.clipboard.writeText(held.link).then(() => setHeld((current) => current === undefined ? current : { ...current, copied: true }), () => { /* a refused clipboard leaves PAIR IN THIS TAB */ }); }}
           >
             {held.copied ? "COPIED" : "COPY INVITATION"}
           </button>
         )}
-        {install === "safari" ? null : <a className="dfRemote__openSafari" href={`x-safari-${held?.link ?? "https://app.darkfactory.build/remote"}`}>OPEN IN SAFARI</a>}
+        {install === "safari" ? null : <a className="dfRemote__openSafari" href="x-safari-https://app.darkfactory.build/remote">OPEN IN SAFARI</a>}
         {held === undefined ? null : (
           <button
             type="button"
             className="dfRemote__pairHere"
             disabled={!online || pairing.phase === "pairing"}
-            onClick={() => { const target = manager.current; setHeld(undefined); if (target !== undefined) void pairWith(target, held.invitation); }}
+            onClick={() => {
+              const target = manager.current;
+              setHeld(undefined);
+              if (held.invitation.expires <= Date.now() / 1000) setPairing({ phase: "failed", copy: INVITATION_SPENT });
+              else if (target !== undefined) void pairWith(target, held.invitation);
+            }}
           >
             PAIR IN THIS TAB
           </button>
@@ -489,6 +498,7 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   return (
     <div className="dfConsoleShell dfRemote">
       <main id="dfRemoteTop" className="dfFactoryConsole dfRemote__main" aria-label="Factory remote console">
+        <div inert={detail !== undefined}>
         <nav className="dfRemote__bar" aria-label="Remote console">
           <a className="dfRemote__barName" href="#dfRemoteTop">
             <span aria-hidden="true">{selected === undefined ? "·" : REMOTE_STATUS_GLYPH[selected.status]}</span> {selected?.label ?? "DARK FACTORY"}
@@ -540,11 +550,22 @@ export function RemoteApp(props: RemoteAppProps = {}) {
           </section>
         )}
 
+        {selected === undefined ? null : (
+          <>
+            <AgentStrip state={selected.state} />
+            <ProjectsSection state={selected.state} />
+          </>
+        )}
+
+        {factories.length === 0 ? null : setup}
+        </div>
+
         {detail === undefined ? null : (
           <article className="dfFactoryConsole__section dfRemote__detail" role="dialog" aria-modal="true" aria-label="Selected question" aria-live="polite">
             <button
               type="button"
               className="dfRemote__close"
+              autoFocus
               disabled={busy(detail)}
               onClick={() => { setCancelPhrase(undefined); human.current?.clear(true); }}
             >
@@ -606,15 +627,6 @@ export function RemoteApp(props: RemoteAppProps = {}) {
             )}
           </article>
         )}
-
-        {selected === undefined ? null : (
-          <>
-            <AgentStrip state={selected.state} />
-            <ProjectsSection state={selected.state} />
-          </>
-        )}
-
-        {factories.length === 0 ? null : setup}
       </main>
     </div>
   );
