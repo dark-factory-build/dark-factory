@@ -105,7 +105,7 @@ func TestV6MigrationPreservesSendBackAndSupervision(t *testing.T) {
 	if err := rebuildTable(ctx, connection, target, "tasks", testTaskColumnsV5, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{"DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE terminal_diagnostics", "DROP TABLE project_outcome_revisions", "DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites", "DROP TABLE task_conflict_paths"} {
+	for _, statement := range []string{"DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE terminal_diagnostics", "DROP TABLE project_outcome_revisions", "DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites", "DROP TABLE task_conflict_paths"} {
 		if _, err := connection.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}

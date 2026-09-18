@@ -523,6 +523,13 @@ func (store *Store) ImportIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		return Task{}, tx.Rollback(err)
 	}
 	if replay {
+		binding, found, err := intakeAcceptanceForTask(ctx, tx.connection, existing.ID)
+		if err != nil || !found || binding.ID != accepted.ID {
+			if err == nil {
+				err = ErrConflict
+			}
+			return Task{}, tx.Rollback(err)
+		}
 		if err := tx.Rollback(nil); err != nil {
 			return Task{}, err
 		}
@@ -530,6 +537,9 @@ func (store *Store) ImportIntakeAcceptance(ctx context.Context, id IntakeAccepta
 	}
 	value, err := insertTaskOnConnection(ctx, tx.connection, spec, at)
 	if err != nil {
+		return Task{}, tx.Rollback(err)
+	}
+	if err := bindIntakeTask(ctx, tx.connection, value.ID, accepted.ID); err != nil {
 		return Task{}, tx.Rollback(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -561,6 +571,7 @@ func intakeTaskReplay(ctx context.Context, connection *sql.Conn, spec NewTask) (
 
 // PendingIntakeWithdrawals lets the existing controller finish an interrupted
 // stop through the normal task/run controls, including while intake is paused.
+// Reconciliation is global: editing a source cannot orphan retained withdrawals.
 func (store *Store) PendingIntakeWithdrawals(ctx context.Context, id IntakeSourceID, limit uint16) ([]IntakeAcceptance, error) {
 	if limit < 1 || limit > 200 {
 		return nil, ErrInvalidValue
@@ -570,14 +581,14 @@ func (store *Store) PendingIntakeWithdrawals(ctx context.Context, id IntakeSourc
 		return nil, err
 	}
 	defer tx.Close()
-	source, found, err := intakeSourceByID(ctx, tx.connection, id)
+	_, found, err := intakeSourceByID(ctx, tx.connection, id)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
 		return nil, ErrNotFound
 	}
-	rows, err := tx.connection.QueryContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE github_repository_id = ? AND project_id = ? AND repository_id = ? AND withdrawn_at_ms IS NOT NULL AND task_id IN (SELECT id FROM tasks WHERE status IN ('queued','running')) ORDER BY created_at_ms,id LIMIT ?`, int64(source.GitHubRepositoryID), source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), int(limit))
+	rows, err := tx.connection.QueryContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE withdrawn_at_ms IS NOT NULL AND id IN (SELECT binding.acceptance_id FROM intake_task_bindings AS binding JOIN tasks AS task ON task.id = binding.task_id WHERE task.status IN ('queued','running')) ORDER BY created_at_ms,id LIMIT ?`, int(limit))
 	if err != nil {
 		return nil, err
 	}
@@ -593,12 +604,48 @@ func (store *Store) PendingIntakeWithdrawals(ctx context.Context, id IntakeSourc
 	return result, rows.Err()
 }
 
-// IntakeAcceptanceForTask is the immutable source context of an imported task.
+// IntakeAcceptanceForTask returns the immutable source of imported or delegated work.
 func (store *Store) IntakeAcceptanceForTask(ctx context.Context, id TaskID) (IntakeAcceptance, bool, error) {
 	tx, err := store.beginRead(ctx)
 	if err != nil {
 		return IntakeAcceptance{}, false, err
 	}
 	defer tx.Close()
-	return scanIntakeAcceptance(tx.connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE task_id = ?`, id.Bytes()))
+	return intakeAcceptanceForTask(ctx, tx.connection, id)
+}
+
+func intakeAcceptanceForTask(ctx context.Context, connection *sql.Conn, id TaskID) (IntakeAcceptance, bool, error) {
+	return scanIntakeAcceptance(connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE id = (SELECT acceptance_id FROM intake_task_bindings WHERE task_id = ?)`, id.Bytes()))
+}
+
+func bindIntakeTask(ctx context.Context, connection *sql.Conn, task TaskID, acceptance IntakeAcceptanceID) error {
+	_, err := connection.ExecContext(ctx, `INSERT INTO intake_task_bindings(task_id, acceptance_id) VALUES(?, ?)`, task.Bytes(), acceptance.Bytes())
+	return err
+}
+
+// IntakeTasksForAcceptance includes the source supervisor and every delegated
+// or replacement task, including terminal tasks, for withdrawal reconciliation.
+func (store *Store) IntakeTasksForAcceptance(ctx context.Context, id IntakeAcceptanceID) ([]Task, error) {
+	if id.zero() {
+		return nil, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Close()
+	rows, err := tx.connection.QueryContext(ctx, `SELECT `+taskSelectColumns+` FROM tasks WHERE id IN (SELECT task_id FROM intake_task_bindings WHERE acceptance_id = ?) ORDER BY created_at_ms, id`, id.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tasks := []Task{}
+	for rows.Next() {
+		task, _, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
 }

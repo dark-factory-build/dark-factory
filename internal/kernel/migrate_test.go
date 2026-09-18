@@ -466,7 +466,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	downgrade := []string{"DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	downgrade := []string{"DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
 	if version < v19UserVersion {
 		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
 	}
@@ -679,8 +679,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "e8cdef707932d0ebea85b73fbb2b3205fa91e29c31ae8ffd9bdd97f1b09321ca"},
-		{"v24", v24SchemaStatements(), "c041303fb9f3e726a4a6f3dd12abe0bb367531e2efd2627195d3f9275e3ba133"},
+		{"current", schemaStatements, "eeb13a93e6195caed12237d22d706fd176a1964734d3a25b6eebcfe386bf2fb4"},
+		{"v24", v24SchemaStatements(), "063bf2d0c978fc630bf929104a8def8f4abca76fd17fbdaf44d130a397a77c48"},
 		{"v23", v23SchemaStatements(), "301b6c8046552e1c5fb669c92001a449d215315c1a565e6526826b7fc5b0fa12"},
 		{"v22", v22SchemaStatements(), "3dd09f64e28fcb94ba6999129defe92286a10907e8ae5b6e4be4b37fb3281478"},
 		{"v21", v21SchemaStatements(), "17306bf8a7cae30e75dc0e3d85574a1ef96a45c3abfd63d2ca902fbb79c10092"},

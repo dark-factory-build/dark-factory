@@ -522,7 +522,7 @@ func v20SchemaStatements() []string {
 	for _, statement := range schemaStatements {
 		_, name := schemaObjectIdentity(statement)
 		switch name {
-		case "repository_source_identities", "project_repositories", "project_repositories_root_unique", "project_repositories_one_default", "task_repository_bindings", "content_repository_bindings", "intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances":
+		case "repository_source_identities", "project_repositories", "project_repositories_root_unique", "project_repositories_one_default", "task_repository_bindings", "content_repository_bindings", "intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances", "intake_task_bindings", "intake_task_bindings_acceptance":
 			continue
 		}
 		statements = append(statements, statement)
@@ -543,7 +543,7 @@ func v21SchemaStatements() []string {
 func v22SchemaStatements() []string {
 	statements := make([]string, 0, len(schemaStatements)-1)
 	for _, statement := range schemaStatements {
-		if _, name := schemaObjectIdentity(statement); name != "repository_source_identities" && name != "intake_sources" && name != "intake_sources_repository_destination" && name != "intake_source_trusted_logins" && name != "intake_acceptances" {
+		if _, name := schemaObjectIdentity(statement); name != "repository_source_identities" && name != "intake_sources" && name != "intake_sources_repository_destination" && name != "intake_source_trusted_logins" && name != "intake_acceptances" && name != "intake_task_bindings" && name != "intake_task_bindings_acceptance" {
 			statements = append(statements, statement)
 		}
 	}
@@ -555,7 +555,7 @@ func v23SchemaStatements() []string {
 	for _, statement := range v24SchemaStatements() {
 		_, name := schemaObjectIdentity(statement)
 		switch name {
-		case "intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances":
+		case "intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances", "intake_task_bindings", "intake_task_bindings_acceptance":
 			continue
 		}
 		statements = append(statements, statement)
@@ -1294,7 +1294,7 @@ func migrateV23Transaction(ctx context.Context, connection *sql.Conn) error {
 		return err
 	}
 	target := expectedSchemaOf(v24SchemaStatements())
-	for _, name := range []string{"intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances"} {
+	for _, name := range []string{"intake_sources", "intake_sources_repository_destination", "intake_source_trusted_logins", "intake_acceptances", "intake_task_bindings", "intake_task_bindings_acceptance"} {
 		if _, err := connection.ExecContext(ctx, target[name].sql); err != nil {
 			return fmt.Errorf("create %s: %w", name, err)
 		}

@@ -97,6 +97,11 @@ var schemaStatements = []string{
     UNIQUE(github_repository_id, issue_number, issue_node_id, title, body_hash, project_id, repository_id),
     CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= created_at_ms)
 ) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE intake_task_bindings (
+    task_id BLOB PRIMARY KEY CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    acceptance_id BLOB NOT NULL CHECK (length(acceptance_id) = 16) REFERENCES intake_acceptances(id)
+) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX intake_task_bindings_acceptance ON intake_task_bindings(acceptance_id, task_id)`,
 	`CREATE UNIQUE INDEX project_repositories_root_unique ON project_repositories(root)`,
 	`CREATE UNIQUE INDEX project_repositories_one_default ON project_repositories(project_id) WHERE is_default = 1`,
 	`CREATE TABLE repository_source_identities (
