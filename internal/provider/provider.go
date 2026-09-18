@@ -746,7 +746,7 @@ func codexPermissions(request Request) (string, error) {
 	}
 	if request.runtime.gitCommonDir != "" {
 		access := "read"
-		if request.runtime.gitCommonDirWritable {
+		if request.runtime.gitCommonDirWritable && request.runtime.gitCommonDir != request.runtime.sourceReviewGitDir {
 			access = "write"
 		}
 		entries = append(entries, tomlBasicString(request.runtime.gitCommonDir)+`="`+access+`"`)

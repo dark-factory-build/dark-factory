@@ -1590,6 +1590,9 @@ func TestCodexLaunchGrantsOnlyAuthenticatedRetainedReviewPathsReadOnly(t *testin
 			t.Fatalf("retained review path %q writable: %q", path, policy)
 		}
 	}
+	if !strings.Contains(policy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
+		t.Fatalf("reviewer's distinct Git directory lost its write grant: %q", policy)
+	}
 	for _, path := range []string{"/private/producer-repo", "/private/dark-factory/changes"} {
 		if strings.Contains(policy, tomlBasicString(path)+`="`) {
 			t.Fatalf("retained review grant widened to %q: %q", path, policy)
@@ -1602,8 +1605,19 @@ func TestCodexLaunchGrantsOnlyAuthenticatedRetainedReviewPathsReadOnly(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Build(requestFor(t, kernel.ProviderCodex, installation, shared, "", "")); err != nil {
+	sharedLaunch, err := Build(requestFor(t, kernel.ProviderCodex, installation, shared, "", ""))
+	if err != nil {
 		t.Fatalf("shared canonical Git directory rejected: %v", err)
+	}
+	sharedPolicy := ""
+	for _, argument := range sharedLaunch.Argv() {
+		if strings.HasPrefix(argument, "permissions."+codexPermissionName(shared)+"=") {
+			sharedPolicy = argument
+			break
+		}
+	}
+	if !strings.Contains(sharedPolicy, tomlBasicString("/private/reviewer/.git")+`="read"`) || strings.Contains(sharedPolicy, tomlBasicString("/private/reviewer/.git")+`="write"`) {
+		t.Fatalf("canonical shared Git grant is not read-only: %q", sharedPolicy)
 	}
 }
 
