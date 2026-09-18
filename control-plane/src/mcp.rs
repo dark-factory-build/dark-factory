@@ -11,8 +11,8 @@ use crate::{
     access::AccessAuthority,
     github_app::{
         AppAuthority, ClosePullRequest, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, MergePullRequestAtHead, ObserveControlPlaneDeploy, ObserveFile,
-        ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
+        EnqueuePullRequest, ListIssues, MergePullRequestAtHead, ObserveControlPlaneDeploy,
+        ObserveFile, ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
         ObservePullRequestWorkflows, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
         ObserveRepository, ObserveTree, OperationError, PublishCommit, PublishReleaseTag,
         ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
@@ -414,6 +414,16 @@ fn tools() -> Value {
             },
             "required": ["branch", "head_sha"],
             "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "list_issues",
+        "title": "List an issue page",
+        "description": "Read one bounded page of open issues, with an optional label filter. next_page must be followed even when this page has no issues. This read never accepts work.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"repository": {"type": "string"}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 50}},
+            "required": ["repository", "page"], "additionalProperties": false
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
@@ -1040,6 +1050,15 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             };
             match mcp.app.observe_ref(arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Branch head is observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("list_issues") => {
+            let Ok(arguments) = serde_json::from_value::<ListIssues>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.list_issues(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Issue page was observed."),
                 Err(error) => operation_error(id, error),
             }
         }

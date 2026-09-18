@@ -383,3 +383,13 @@ exact SHA matches the request; optional merge/deployment policy is unchanged.
 
 This protocol support does not configure intake or accept an issue. Those
 operator operations must supply their reviewed source snapshot and destination.
+
+`list_issues` reads one page of open GitHub Issues through the same delegated
+connection and operation-specific read permission. It returns stable repository
+and issue IDs, author type, exact title/body, labels and a continuation page.
+An optional label is only a filter. Follow continuation even after a page of
+pull requests was filtered out; a traversal bound or GitHub error is unavailable,
+not an empty backlog. This operation does not accept or enqueue work. Oversized
+content remains intact for the host to show as ineligible rather than truncating
+instructions. Existing accepted identities must be reconciled independently of
+new-candidate discovery limits.
