@@ -232,6 +232,11 @@ test('two principals: callback, pagination, refresh, replay, grants and revocati
     assert.equal(issuePage.issues[0].author.login, 'outsider');
     assert.equal(issuePage.next_page, null);
     assert.equal((await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'é'.repeat(50) })).json()).result.isError, false, 'configured100-byte Unicode source filter reaches GitHub');
+    const beforeOversizedLabel = grants.length;
+    const oversizedLabel = await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'é'.repeat(51) })).json();
+    assert.equal(oversizedLabel.result.isError, true);
+    assert.match(oversizedLabel.result.content[0].text, /invalid_input/);
+    assert.equal(grants.length, beforeOversizedLabel, 'advertised100-byte bound is enforced before minting a repository token');
     const commaPage = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'bug, urgent' })).json()).result.structuredContent;
     assert.equal(commaPage.issues[0].number, 9);
     const noMatch = (await (await call(bob, 'list_issues', { repository: 'team/shared', page: 1, label: 'different, label' })).json()).result.structuredContent;

@@ -446,7 +446,7 @@ fn tools() -> Value {
         "description": "Read one bounded page of open issues, with an optional label filter. Optional issue_number reads that exact open or closed issue (page 1, no label), independently of discovery limits. Follow next_page even for empty pages. This read never accepts work.",
         "inputSchema": {
             "type": "object",
-            "properties": {"repository": {"type": "string"}, "issue_number": {"type": ["integer", "null"], "minimum": 1}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 100}},
+            "properties": {"repository": {"type": "string"}, "issue_number": {"type": ["integer", "null"], "minimum": 1}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 100, "description": "At most 100 UTF-8 bytes; the character limit alone does not bound multibyte labels."}},
             "required": ["repository", "page"], "additionalProperties": false
         },
         "outputSchema": {
@@ -464,8 +464,8 @@ fn tools() -> Value {
                         "number": {"type": "integer", "minimum": 1},
                         "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"},
                         "author": {"type": "object", "additionalProperties": false, "required": ["login", "type"], "properties": {
-                            "login": {"type": "string", "minLength": 1, "maxLength": 100},
-                            "type": {"type": "string", "minLength": 1, "maxLength": 100}
+                            "login": {"type": "string", "minLength": 1, "maxLength": 100, "description": "At most 100 UTF-8 bytes; the character limit alone does not bound multibyte labels."},
+                            "type": {"type": "string", "minLength": 1, "maxLength": 100, "description": "At most 100 UTF-8 bytes; the character limit alone does not bound multibyte labels."}
                         }},
                         "labels": {"type": "array", "items": {"type": "string"}},
                         "updated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
