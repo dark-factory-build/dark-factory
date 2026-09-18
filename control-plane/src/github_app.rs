@@ -3898,7 +3898,7 @@ fn completed_or_conflict<T: serde::de::DeserializeOwned>(
     }
 }
 
-#[cfg(any(target_arch = "wasm32", all(test, feature = "development-sqlite")))]
+#[cfg(any(target_arch = "wasm32", test))]
 fn legacy_completed_result<T: serde::de::DeserializeOwned>(
     observation: Option<&OperationObservation>,
     operation: &Operation,
@@ -9048,7 +9048,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "development-sqlite")]
     fn an_omitted_digest_does_not_claim_a_uuid_before_a_corrected_retry() {
         let missing_digest = EnqueuePullRequest {
             repository: "dark-factory-build/dark-factory".into(),
