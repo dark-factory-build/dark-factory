@@ -446,7 +446,7 @@ fn tools() -> Value {
         "description": "Read one bounded page of open issues, with an optional label filter. Optional issue_number reads that exact open or closed issue (page 1, no label), independently of discovery limits. Follow next_page even for empty pages. This read never accepts work.",
         "inputSchema": {
             "type": "object",
-            "properties": {"repository": {"type": "string"}, "issue_number": {"type": ["integer", "null"], "minimum": 1}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 50}},
+            "properties": {"repository": {"type": "string"}, "issue_number": {"type": ["integer", "null"], "minimum": 1}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 100}},
             "required": ["repository", "page"], "additionalProperties": false
         },
         "outputSchema": {
