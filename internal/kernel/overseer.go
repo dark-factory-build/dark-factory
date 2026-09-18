@@ -338,8 +338,19 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 		if err != nil {
 			return OverseerSnapshot{}, err
 		}
-		if !found || run.ProjectID != authority.ProjectID || run.Phase == RunTerminal || request.TaskID != nil && run.TaskID != *request.TaskID {
+		if !found || run.ProjectID != authority.ProjectID || request.TaskID != nil && run.TaskID != *request.TaskID {
 			return OverseerSnapshot{}, ErrCorruptState
+		}
+		// A yielded run is terminal while its question stays replyable; only
+		// the waiting or queued continuation makes that state valid.
+		if run.Phase == RunTerminal {
+			continuation, yielded, err := humanRequestContinuation(ctx, read.connection, humanRequest, run)
+			if err != nil {
+				return OverseerSnapshot{}, err
+			}
+			if !yielded || continuation.State != ContinuationWaiting && continuation.State != ContinuationQueued {
+				return OverseerSnapshot{}, ErrCorruptState
+			}
 		}
 		result.Questions = append(result.Questions, OverseerQuestion{ID: humanRequest.ID, AgentID: run.AgentID, TaskID: run.TaskID, Status: humanRequest.Status, Revision: humanRequest.Revision, Question: humanRequest.QuestionText})
 	}
