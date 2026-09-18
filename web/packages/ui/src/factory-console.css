@@ -499,6 +499,11 @@
 }
 
 .dfConsoleStrip__agent {
+  width: 100%;
+  height: 100%;
+  font: inherit;
+  color: inherit;
+  text-transform: none;
   display: grid;
   justify-items: center;
   gap: 0.25rem;
@@ -926,7 +931,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 }
 
 .dfRemote__paste,
-.dfRemote__rename,
 .dfRemote__reply,
 .dfRemote__cancel {
   display: grid;
@@ -935,7 +939,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 .dfRemote__link,
 .dfRemote__replyText,
-.dfRemote__nameText,
 .dfRemote__cancelText {
   width: 100%;
   padding: 0.75rem;
@@ -949,7 +952,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 
 .dfRemote__link,
 .dfRemote__replyText { min-height: 6rem; resize: vertical; }
-.dfRemote__nameText,
 .dfRemote__cancelText { min-height: 44px; }
 
 .dfRemote__actions {
@@ -1069,7 +1071,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   text-decoration: none;
 }
 
-.dfRemote__bar .dfRemote__barName { flex: 1 1 auto; min-width: 0; padding-left: 0; gap: 0.5rem; color: var(--df-console-text); overflow-wrap: anywhere; }
+.dfRemote__bar .dfRemote__barName { flex: 1 1 auto; min-width: 0; padding-left: 0; gap: 0.5rem; color: var(--df-console-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dfRemote__barName span { color: var(--df-console-accent); }
 .dfRemote__bar .dfRemote__barAlert { color: var(--df-console-warning); }
 .dfRemote__openSafari { color: var(--df-console-text); border: 1px solid var(--df-console-rule); }
@@ -1091,8 +1093,15 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   background: var(--df-console-background);
 }
 
-.dfRemote__finished { margin-top: 0.75rem; }
-.dfRemote__finished summary { min-height: 44px; color: var(--df-console-muted); font-size: 0.85rem; cursor: pointer; }
+.dfRemote__pair,
+.dfRemote__alerts { margin-bottom: 1rem; }
+.dfRemote__alertsOn { display: flex; justify-content: space-between; width: 100%; }
+.dfRemote__alertsOn span { color: var(--df-console-muted); }
+.dfRemote__alertsOn[aria-checked="true"] span { color: var(--df-console-accent); }
+.dfRemote__needsYou { max-width: 90rem; margin: 0 auto 1rem; }
+.dfRemote__needsYou > .dfFactoryConsole__empty { margin: 0; }
+.dfRemote__question { border-color: var(--df-console-warning); }
+.dfRemote button.dfConsoleStrip__agent { padding: 0.75rem 0.4rem; }
 .dfRemote__factoryStatus,
 .dfRemote__factoryCount { grid-column: 2; }
 
