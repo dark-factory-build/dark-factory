@@ -234,6 +234,17 @@ reviewer is not an overseer and cannot use `overseer status` to discover a
 Change. No receipt or a changed identity is a refusal, not a candidate for
 path reconstruction.
 
+Delegate that reviewer with this exact first line, using the values from the
+current authenticated `retained_change_handoffs` entry:
+
+```text
+review handoff TASK_ID CHANGE_ID BASE_COMMIT TASK_WORK_REVISION CHANGE_REVISION
+```
+
+Reviewer instructions, including a `FACTORY_SOURCE` marker, may follow on later
+lines. The daemon grants the retained source only when every first-line value
+still matches the current handoff; prose or an older identity grants nothing.
+
 A change is finished when its `enqueue-HEAD8`
 operation (step 5) for its current head is `completed` in the App journal
 and the merge was observed; anything short of that is resumed at the first
