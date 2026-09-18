@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { StrictMode, createElement } from "react";
 import { act, create } from "react-test-renderer";
+import { renderToString } from "react-dom/server";
 import { MemoryRemoteStore, ProtocolError, RemoteDaemonMismatchError, SessionError } from "@dark-factory/client";
 import { RemoteApp } from "../dist/src/index.js";
 import { fixtureState } from "../../../fixtures/state.mjs";
@@ -742,6 +743,19 @@ test("a name typed for one factory never renames the next one selected", async (
     assert.equal(renderer.root.findByProps({ id: "dfRemoteName" }).props.value, "South Shop");
     assert.equal(button(renderer, "dfRemote__renameAction").props.disabled, true);
   });
+});
+
+test("the first render never reads the browser, so a server and an iPhone hydrate alike", () => {
+  const agent = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { userAgent: "iPhone", onLine: true } });
+  globalThis.matchMedia = () => ({ matches: false });
+  try {
+    const { install: _unset, ...bare } = props(fakeManager([]));
+    assert.doesNotMatch(renderToString(createElement(RemoteApp, bare)), /INSTALL THE APP/);
+  } finally {
+    delete globalThis.matchMedia;
+    if (agent === undefined) delete globalThis.navigator; else Object.defineProperty(globalThis, "navigator", agent);
+  }
 });
 
 test("forgetting a factory or the device takes a second, inline confirmation", async () => {
