@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 23
+	userVersion   = 24
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -55,6 +55,46 @@ var schemaStatements = []string{
     revision INTEGER NOT NULL CHECK (revision >= 1),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE intake_sources (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
+    github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
+    github_repository_name TEXT NOT NULL CHECK (length(CAST(github_repository_name AS BLOB)) BETWEEN 3 AND 140),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    target_repository_id BLOB NOT NULL CHECK (length(target_repository_id) = 16) REFERENCES project_repositories(id),
+    overseer_agent_id BLOB CHECK (overseer_agent_id IS NULL OR length(overseer_agent_id) = 16) REFERENCES agents(id),
+    label_filter TEXT NOT NULL CHECK (length(CAST(label_filter AS BLOB)) <= 100),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    policy TEXT NOT NULL CHECK (policy IN ('manual', 'trusted_authors')),
+    poll_seconds INTEGER NOT NULL CHECK (poll_seconds BETWEEN 5 AND 86400),
+    admission_limit INTEGER NOT NULL CHECK (admission_limit BETWEEN 1 AND 200),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
+) STRICT, WITHOUT ROWID`,
+	`CREATE UNIQUE INDEX intake_sources_repository_destination ON intake_sources(github_repository_id, project_id, target_repository_id, label_filter)`,
+	`CREATE TABLE intake_source_trusted_logins (
+    source_id BLOB NOT NULL CHECK (length(source_id) = 16) REFERENCES intake_sources(id),
+    login TEXT NOT NULL CHECK (length(CAST(login AS BLOB)) BETWEEN 1 AND 39),
+    PRIMARY KEY(source_id, login)
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE intake_acceptances (
+    id BLOB PRIMARY KEY CHECK (length(id) = 16 AND id <> zeroblob(16)),
+    github_repository_id INTEGER NOT NULL CHECK (github_repository_id > 0),
+    issue_number INTEGER NOT NULL CHECK (issue_number > 0),
+    issue_node_id TEXT NOT NULL CHECK (length(CAST(issue_node_id AS BLOB)) BETWEEN 1 AND 256),
+    title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) BETWEEN 1 AND 900),
+    body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 5000),
+    body_hash BLOB NOT NULL CHECK (length(body_hash) = 32),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    repository_id BLOB NOT NULL CHECK (length(repository_id) = 16) REFERENCES project_repositories(id),
+    overseer_agent_id BLOB CHECK (overseer_agent_id IS NULL OR length(overseer_agent_id) = 16) REFERENCES agents(id),
+    task_id BLOB NOT NULL UNIQUE CHECK (length(task_id) = 16 AND task_id <> zeroblob(16)),
+    incarnation_id BLOB NOT NULL UNIQUE CHECK (length(incarnation_id) = 16 AND incarnation_id <> zeroblob(16)),
+    withdrawn_at_ms INTEGER CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= 0),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    UNIQUE(github_repository_id, issue_number, issue_node_id, title, body_hash, project_id, repository_id),
+    CHECK (withdrawn_at_ms IS NULL OR withdrawn_at_ms >= created_at_ms)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE UNIQUE INDEX project_repositories_root_unique ON project_repositories(root)`,
 	`CREATE UNIQUE INDEX project_repositories_one_default ON project_repositories(project_id) WHERE is_default = 1`,
