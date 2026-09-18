@@ -761,10 +761,12 @@ func (o *terminalOwner) attach(c TerminalCommand) error {
 	if len(o.replay) >= terminalReplayRequestCapacity {
 		return errors.Join(ErrUnresolved, errors.New("runner: terminal replay request queue is full"))
 	}
-	contextStart := c.Sequence
+	contextStart := o.ring.Floor()
 	var contextBytes []byte
 	if c.Sequence > o.ring.Floor() {
-		contextStart = max(o.ring.Floor(), c.Sequence-maxTerminalLookbehind)
+		if c.Sequence-o.ring.Floor() > maxTerminalLookbehind {
+			contextStart = c.Sequence - maxTerminalLookbehind
+		}
 		var readErr error
 		contextBytes, _, readErr = o.ring.Read(contextStart)
 		if readErr != nil {
