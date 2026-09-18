@@ -170,6 +170,13 @@ assert_summary '**BLOCKED**'
 expect_fail 'CHANGES_REQUESTED outranks an allow'
 assert_summary '**BLOCKED**'
 
+{
+    record "$head" CHANGES_REQUESTED "$human" "Dark-Factory-Review: block $head <!-- dark-factory-operation:$block_operation:old-digest -->"
+    record "$head" COMMENTED "$human" "Dark-Factory-Review: allow $head Dark-Factory-Review-Correction: $block_operation <!-- dark-factory-operation:$correction_operation:new-digest -->"
+} >"$reviews"
+expect_fail 'an operation marker cannot make native CHANGES_REQUESTED correctable'
+assert_summary '**BLOCKED**'
+
 # A review with no body at all is a real shape: GitHub returns `body: null`
 # and the projection emits a trailing tab, so the record has an empty fourth
 # field. It must neither crash the loop nor mask a valid verdict beside it.

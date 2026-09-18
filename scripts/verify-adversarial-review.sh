@@ -158,7 +158,10 @@ while IFS= read -r line || [ -n "$line" ]; do
     case $verdict in
         allow) allowed=$((allowed + 1)) ;;
         block)
-            operation_id=$(printf '%s\n' "$field_body" | sed -n 's/.*dark-factory-operation:\([0-9a-f-][0-9a-f-]*\):.*/\1/p' | tail -1)
+            operation_id=
+            if [ "$field_state" != CHANGES_REQUESTED ]; then
+                operation_id=$(printf '%s\n' "$field_body" | sed -n 's/.*dark-factory-operation:\([0-9a-f-][0-9a-f-]*\):.*/\1/p' | tail -1)
+            fi
             printf '%s\t%s\n' "$field_author" "$operation_id" >>"$blocked_records"
             ;;
     esac
