@@ -275,6 +275,9 @@ type attemptCommand struct {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "attempt" && os.Args[2] == "maintainer-mcp" {
+		os.Exit(runMaintainerMCP(context.Background(), os.Stdin, os.Stdout, os.Getenv))
+	}
 	if len(os.Args) == 3 && os.Args[1] == "attempt" && os.Args[2] == "mcp" {
 		os.Exit(runAttemptMCP(context.Background(), os.Stdin, os.Stdout, os.Getenv))
 	}
