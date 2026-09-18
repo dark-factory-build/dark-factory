@@ -1379,6 +1379,13 @@ test("close clears a pending reconnect timer and manual connect can schedule a n
   client.close();
 });
 
+test("a closed session rejects GitHub settings before registering a pending request", async () => {
+  const { session, socket } = await openControlledStateSession();
+  session.close();
+  await assert.rejects(session.githubConnection({ action: "status" }), { code: "closed" });
+  assert.equal(socket.sent.map((wire) => decodeClientControl(wire)).some((frame) => frame.type === "GITHUB_CONNECTION"), false);
+});
+
 test("close fences deferred load, sign, and pairing persistence completions", async () => {
   let releaseLoad;
   let loadStarted;

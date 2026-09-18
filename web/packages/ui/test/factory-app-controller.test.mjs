@@ -63,6 +63,7 @@ function harness(overrides = {}) {
     getRepositories: overrides.getRepositories ?? (async () => []),
     mutateRepository: overrides.mutateRepository ?? (async () => undefined),
     createProject: overrides.createProject ?? (async () => undefined),
+    githubConnection: overrides.githubConnection ?? (async () => ({ state: "denied" })),
     clientId: overrides.clientId ?? "60".repeat(16),
     capabilities: overrides.capabilities ?? 15,
   };
@@ -141,6 +142,17 @@ test("status changes reach the host with finite closed reasons", () => {
   context.emitError(new SessionError("rate_limited", true));
   context.emitStatus("closed");
   assert.deepEqual(context.statusChanges.slice(2), [{ status: "ready" }, { status: "closed", reason: "connection" }]);
+});
+
+test("a browser reconnect clears private GitHub observations", async () => {
+  const authorization = { connection_id: "github", authorization_url: "https://github.com/login/oauth/authorize", expires_at: 123n };
+  const context = harness({ githubConnection: async (request) => request.action === "connect" ? { state: "ok", authorization } : { state: "ok", status: { connection_id: "github", state: "connected", repositories: [] } } });
+  context.controller.start();
+  context.emitStatus("ready");
+  await context.controller.githubConnection({ action: "connect" });
+  assert.equal(context.latest().github.result.authorization.connection_id, "github");
+  context.emitStatus("connecting");
+  assert.equal(context.latest().github.result, undefined);
 });
 
 test("status changes are deduplicated without affecting snapshot updates", () => {
