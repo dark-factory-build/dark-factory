@@ -820,6 +820,11 @@ func (daemon *Daemon) attemptResultTail(
 	if err != nil {
 		return kernel.Run{}, err
 	}
+	if floor, head, payload := live.diagnosticSnapshot(); len(payload) > 0 {
+		if capturedAt, timestampErr := daemon.timestamp(); timestampErr == nil {
+			_ = daemon.store.SaveTerminalDiagnostics(daemon.cleanupCtx, kernel.TerminalDiagnostics{RunID: run.ID, Floor: floor, Head: head, Payload: payload, CapturedAt: capturedAt})
+		}
+	}
 	exitEvent, err := terminalExitEvent(record)
 	if err != nil {
 		return run, err

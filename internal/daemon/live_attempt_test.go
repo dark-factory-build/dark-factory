@@ -54,6 +54,21 @@ func TestLiveAttemptRegistryIsBoundedAndRejectsDuplicateRuns(t *testing.T) {
 	}
 }
 
+func TestLiveAttemptDiagnosticResetRebasesAndClearsRetainedOutput(t *testing.T) {
+	attempt := newLiveAttempt(nil, kernel.RunID{}, kernel.TerminalSessionID{}, nil)
+	attempt.retainDiagnosticOutput(0, 12, []byte("stale output"))
+	attempt.resetDiagnosticOutput(12, 12)
+	floor, head, payload := attempt.diagnosticSnapshot()
+	if floor != 12 || head != 12 || len(payload) != 0 {
+		t.Fatalf("diagnostic reset = floor %d head %d payload %q, want 12/12/empty", floor, head, payload)
+	}
+	attempt.retainDiagnosticOutput(12, 18, []byte("fresh\n"))
+	floor, head, payload = attempt.diagnosticSnapshot()
+	if floor != 12 || head != 18 || string(payload) != "fresh\n" {
+		t.Fatalf("post-reset diagnostics = floor %d head %d payload %q, want 12/18/fresh", floor, head, payload)
+	}
+}
+
 func TestLiveAttemptDigestWakeTargetsOnlyExactOwner(t *testing.T) {
 	daemon := &Daemon{attempts: make(map[kernel.RunID]*liveAttempt)}
 	firstRun, firstSession := liveTestIDs(t, 11000)

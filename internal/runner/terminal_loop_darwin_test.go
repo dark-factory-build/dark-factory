@@ -93,6 +93,25 @@ func TestTerminalOwnerReplayUsesCorrelationWithoutMovingLiveCursor(t *testing.T)
 	}
 }
 
+func TestTerminalOwnerAttachNearRingStartIncludesLookbehind(t *testing.T) {
+	daemon, peer, err := newControlPair("terminal-owner-early", "terminal-peer-early")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	defer daemon.Close()
+	owner := &terminalOwner{daemon: daemon, daemonOpen: true, ring: &terminalByteRing{}}
+	if err := owner.ring.Append([]byte("ab")); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.attach(TerminalCommand{Kind: TerminalAttach, Correlation: 12, Sequence: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readOwnerFrame(t, peer); got.Kind != TerminalAttached || got.ContextStart != 0 || string(got.Context) != "a" {
+		t.Fatalf("early attach = %+v", got)
+	}
+}
+
 func TestTerminalOwnerReplaysRetainedOutputAfterPTYEOF(t *testing.T) {
 	daemon, peer, err := newControlPair("terminal-owner-eof", "terminal-peer-eof")
 	if err != nil {

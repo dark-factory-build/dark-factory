@@ -611,6 +611,16 @@ omitted so an arbitrary cursor cannot reveal a fragment of a redacted line.
 `omitted` counts skipped raw bytes. This is a bounded observation of available
 output, not a complete transcript or a guarantee that output is secret-free.
 
+When a worker run reaches terminal, the overseer may continue the same command
+against the retained bounded diagnostic window. The daemon stores at most 1 MiB
+of uncorrelated runner output, with raw-byte floor and head cursors. A cursor
+below floor returns an explicit gap and rebases to that floor; missing history
+returns not found, never invented output. Only an authorized project overseer
+may read this settled window, and the same credential/path redaction and
+complete-line boundaries apply after restart. Saving the window occurs only
+after the authenticated runner result is durably consumed, so a diagnostic-write
+failure cannot turn an accepted outcome into an ambiguous settlement.
+
 Operator supervision can use `factoryctl task recovery --task TASK_ID --incarnation INCARNATION_ID` for current result and blocker text without
 opening runtime files. `result_truncated` explicitly marks a UTF-8-safe 65536-byte
 excerpt; existing overseer or browser task-detail paging retrieves the full

@@ -18,7 +18,7 @@ import (
 )
 
 func TestLegacyHomeMigratesAndKeepsEveryRow(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion, v17UserVersion, v18UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion, v17UserVersion, v18UserVersion, v19UserVersion} {
 		for _, persistWAL := range []bool{false, true} {
 			t.Run(fmt.Sprintf("v%d/wal=%v", version, persistWAL), func(t *testing.T) {
 				testLegacyHomeMigratesAndKeepsEveryRow(t, version, persistWAL)
@@ -460,6 +460,9 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		}
 	}
 	downgrade := []string{"DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	if version < v19UserVersion {
+		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
+	}
 	if version < v17UserVersion {
 		downgrade = append([]string{"DROP TABLE project_outcome_revisions"}, downgrade...)
 	}
@@ -669,7 +672,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "516bf1f61a63d684406af6a98a3e554c743139db85604131091d13de1486c9f8"},
+		{"current", schemaStatements, "10aa165088aac80247babe53d6e098c213fc5dc66968f1bc8427b88ebc52626a"},
+		{"v19", v19SchemaStatements(), "d0334df36c119ed0311c1728656742999f4583366075dc78dc9a7b76dee4c35d"},
 		{"v18", v18SchemaStatements(), "a3af3c17a532d6b7b324507554a00080ec1c26d61831e3c51f1f1a6ac5279457"},
 		{"v17", v17SchemaStatements(), "8e566e2483f36de3f9b9d13722bbab6fb58293787b77f201ab16d98c7084ff54"},
 		{"v16", v16SchemaStatements(), "2547d01bcfd2878245cb3e6d27c0116cb6ebb9a032bf4816834b2138892d8705"},
@@ -698,7 +702,7 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 // that reaches inside the migration transaction: the two above are rejected by
 // the preflight, on its disposable copy, before any pool exists.
 func TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion, v17UserVersion, v18UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion, v17UserVersion, v18UserVersion, v19UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t, version)
 		})
