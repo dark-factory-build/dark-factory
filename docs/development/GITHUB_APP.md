@@ -207,14 +207,18 @@ Workflow and CODEOWNERS publication is outside the maintainer broker's typed
 surface. It can proceed through another repository authority without widening
 the broker.
 
-When the maintainer App also authored the PR — which is every PR it reviews —
+When the maintainer App also authored the PR,
 GitHub refuses a self-review that takes a side, `APPROVE` and `REQUEST_CHANGES`
 alike. So the formal review is always submitted as a `COMMENT` and carries its
 bounded findings plus one App-written verdict line, which is what the required
 `review` check reads; the GitHub review state never carries the verdict. The
 review is not an independent GitHub approval and cannot satisfy a
-distinct-reviewer requirement. The status check consumes a cold review from a
-separate agent or person.
+distinct-reviewer requirement. The status check consumes an attestation of a
+cold review from a separate agent or person. Any GitHub review publisher may
+record that attestation; the App identity has no special status in the
+repository gate. Host publication uses the same exact-head verdict format
+described in [WORKFLOW.md](WORKFLOW.md). The App's operation journal still
+governs its own submission and recovery path.
 
 The two typed merge operations are mutually exclusive; neither silently falls
 back to the other. Before queue enqueue, the broker re-reads the PR and requires

@@ -107,7 +107,14 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	offset := int64(request.Offset)
 	nextOffset := uint64(offset + OverseerSnapshotPageSize)
 	hasMore := false
-	agents, err := read.connection.QueryContext(ctx, agentSummarySelect+` WHERE a.project_id = ? ORDER BY a.id LIMIT ? OFFSET ?`, authority.ProjectID.Bytes(), OverseerSnapshotPageSize+1, offset)
+	agentQuery, agentArgs := agentSummarySelect+` WHERE a.project_id = ? ORDER BY a.id LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), OverseerSnapshotPageSize + 1, offset}
+	if request.TaskID != nil {
+		// A targeted read already carries the task's assigned-agent identity.
+		// Repeating every project agent is routine envelope noise; the full
+		// project page remains the explicit roster read.
+		agentQuery, agentArgs = agentSummarySelect+` WHERE a.project_id = ? AND a.id = (SELECT assigned_agent_id FROM tasks WHERE project_id = ? AND id = ?)`, []any{authority.ProjectID.Bytes(), authority.ProjectID.Bytes(), request.TaskID.Bytes()}
+	}
+	agents, err := read.connection.QueryContext(ctx, agentQuery, agentArgs...)
 	if err != nil {
 		return OverseerSnapshot{}, err
 	}
@@ -129,6 +136,34 @@ func (store *Store) OverseerSnapshotForAttempt(ctx context.Context, digest Attem
 	}
 	if err := agents.Close(); err != nil {
 		return OverseerSnapshot{}, err
+	}
+	if request.TaskID != nil && len(result.Agents) == 0 {
+		// A pooled or otherwise not-yet-assigned task has no agent to target;
+		// preserve the existing paged roster so the overseer can decide what
+		// owns it without a second management read.
+		agents, err = read.connection.QueryContext(ctx, agentSummarySelect+` WHERE a.project_id = ? ORDER BY a.id LIMIT ? OFFSET ?`, authority.ProjectID.Bytes(), OverseerSnapshotPageSize+1, offset)
+		if err != nil {
+			return OverseerSnapshot{}, err
+		}
+		for agents.Next() {
+			agent, err := scanAgentSummary(agents)
+			if err != nil {
+				agents.Close()
+				return OverseerSnapshot{}, err
+			}
+			if len(result.Agents) == OverseerSnapshotPageSize {
+				hasMore = true
+				break
+			}
+			result.Agents = append(result.Agents, agent)
+		}
+		if err := agents.Err(); err != nil {
+			agents.Close()
+			return OverseerSnapshot{}, err
+		}
+		if err := agents.Close(); err != nil {
+			return OverseerSnapshot{}, err
+		}
 	}
 	taskQuery, taskArgs := `SELECT id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body, sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision, created_at_ms, updated_at_ms FROM tasks WHERE project_id = ? AND (status IN ('queued', 'running', 'blocked', 'failed') OR id IN (SELECT id FROM tasks WHERE project_id = ? AND status IN ('succeeded', 'cancelled') ORDER BY updated_at_ms DESC, id DESC LIMIT 32)) ORDER BY priority DESC, created_at_ms ASC, id ASC LIMIT ? OFFSET ?`, []any{authority.ProjectID.Bytes(), authority.ProjectID.Bytes(), OverseerSnapshotPageSize + 1, offset}
 	if request.TaskID != nil {

@@ -16,7 +16,7 @@ export type SceneNode = Readonly<{
   sizeBucket?: "empty" | "tiny" | "small" | "medium" | "large";
   language?: string;
   childCount?: number;
-  components?: readonly Readonly<{ id: string; label: string }>[];
+  components?: readonly Readonly<{ id: string; label: string; feature?: InventoryKind | "empty" | "unavailable" }>[];
   inventoryScope: "direct" | "subtree";
   inventory?: TopologyView["nodes"][number]["inventory"];
   dependencies?: Readonly<{
@@ -73,6 +73,9 @@ export type SceneWorkerPlacement = Readonly<{
   roomId?: string;
   /** A worker only occupies a named bay when its exact observed child is pictured. */
   bayId?: string;
+  /** Browser-only common-area pose; never authoritative work or communication. */
+  ambient?: "notice-board" | "break-counter" | "shared-table";
+  ambientSocial?: boolean;
   x: number;
   y: number;
 }>;
@@ -100,12 +103,14 @@ export function layoutScene(topology: SceneTopology): SceneLayout {
   const nodes = [...topology.nodes].sort((left, right) =>
     compareText(left.project?.name ?? "", right.project?.name ?? "") || compareText(left.project?.id ?? "", right.project?.id ?? "")
     || compareText(left.path, right.path) || compareText(left.id, right.id));
-  // Keep the established one-to-three-room geometry when one local child is
-  // added; larger scopes retain the existing bounded deterministic grid.
-  const columns = nodes.length <= 4 ? Math.max(1, Math.min(2, nodes.length)) : Math.min(4, Math.ceil(Math.sqrt(nodes.length)));
-  const width = ROOM_LEFT + columns * ROOM_WIDTH + PADDING;
   const groups = new Map<string, SceneNode[]>();
   for (const node of nodes) groups.set(node.project?.id ?? "", [...(groups.get(node.project?.id ?? "") ?? []), node]);
+  // Columns describe the widest project scope. Independent projects should
+  // not reserve empty columns for one another; a single project's children
+  // still retain the established two-column geometry.
+  const widestGroup = Math.max(1, ...[...groups.values()].map((group) => group.length));
+  const columns = widestGroup <= 4 ? Math.max(1, Math.min(2, widestGroup)) : Math.min(4, Math.ceil(Math.sqrt(widestGroup)));
+  const width = ROOM_LEFT + columns * ROOM_WIDTH + PADDING;
   const rooms: SceneRoomLayout[] = [];
   const headings: SceneHeading[] = [];
   const corridors: SceneRect[] = [];
@@ -178,14 +183,15 @@ export function workPositions(room: SceneRoomLayout, bayId?: string): readonly S
   // Component bays share the composition's reserved right-hand approach. This
   // is the same pictured rectangle used by rendering and hit testing, rather
   // than a second map of invented workstations.
-  if (bayId !== undefined) return [{ x: room.x + room.width - 12, y: surface.y + surface.height / 2 }];
+  if (bayId !== undefined) return [{ x: Math.min(surface.x + surface.width + 10, room.x + room.width - 12), y: surface.y + surface.height / 2 }];
   const offsets = surface.width >= 120 ? [0, -24, 24, -48, 48] : surface.width >= 88 ? [0, -24, 24] : [0, -24];
   return offsets.map((offset) => ({ x: surface.x + surface.width / 2 + offset, y: surface.y + surface.height + 8 }));
 }
 
 export const inventoryLabels = { source: "Source", tests: "Tests", documentation: "Docs", configuration: "Config", assets: "Assets", unclassified: "Unclassified" } as const;
+export type InventoryKind = keyof typeof inventoryLabels;
 type ContentKind = keyof typeof inventoryLabels | "component";
-export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string; workSurface?: boolean }>;
+export type RoomContent = SceneRect & Readonly<{ key: string; kind: ContentKind; label: string; count: number; targetId?: string; feature?: InventoryKind | "empty" | "unavailable"; workSurface?: boolean }>;
 
 /** Three bounded arrangements: a root hall, parent edge bays, or a leaf bench. */
 function composeRoom(node: SceneNode, room: SceneRect, arrangement: SceneRoomLayout["arrangement"]): readonly RoomContent[] {
@@ -200,13 +206,15 @@ function composeRoom(node: SceneNode, room: SceneRect, arrangement: SceneRoomLay
   // the 8px-clear side approach used for both the bench and direct-child bays.
   const contentLeft = room.x + 20;
   const contentWidth = room.width - 40;
-  // Full-width stations keep each worker beside its own pictured child bay.
+  // The edge has room for three full named stations in a large hall; smaller
+  // rooms show fewer and disclose the omitted children in the inspector.
   const bayLimit = arrangement === "bench" ? 0 : arrangement === "parent" ? 1 : room.width >= 216 ? 3 : room.width >= 192 ? 2 : 1;
   const bays = children.slice(0, Math.min(6, bayLimit));
+  const bayWidth = contentWidth;
   const bayHeight = 24;
   bays.forEach((child, index) => {
-    contents.push({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id,
-      x: contentLeft, y: room.y + 40 + index * (bayHeight + 4), width: contentWidth, height: bayHeight,
+    contents.push({ key: child.id, kind: "component", label: child.label, count: 1, targetId: child.id, feature: child.feature ?? "unavailable",
+      x: contentLeft, y: room.y + 40 + index * (bayHeight + 4), width: bayWidth, height: bayHeight,
     });
   });
   if (primary === undefined) return contents;

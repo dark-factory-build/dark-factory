@@ -12,6 +12,7 @@ import {
   type RunPathSample,
 } from "./console-view.js";
 import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
+import type { FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
   return value.slice(0, 8);
@@ -121,7 +122,7 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
 /** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
   state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenQueue, connected = true, floorAppearance,
 }: {
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
@@ -134,6 +135,7 @@ export function FactoryFloor({
   onSelectTask?: (taskId: string) => void;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
+  floorAppearance: FloorAppearance;
 }) {
   const [{ scopeId, page }, setView] = useState<{ scopeId?: string; page: number }>({ page: 0 });
   const setScopeId = (scopeId: string | undefined) => setView({ scopeId, page: 0 });
@@ -166,6 +168,7 @@ export function FactoryFloor({
     </p>}
     <div className="dfFactoryFloor__scene">
     <FactoryScene
+      appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       topology={scene.topology}

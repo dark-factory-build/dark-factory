@@ -18,16 +18,14 @@ try {
   await page.goto('https://app.darkfactory.build/factory', { waitUntil: 'domcontentloaded' });
   const consoleView = page.getByRole('group', { name: 'Left view', exact: true });
   const pairLink = page.getByRole('link', { name: 'PAIR THIS BROWSER', exact: true });
-  const ready = page.locator('.dfFactoryConsole__status');
-  const needsYou = page.getByRole('group', { name: 'Right panel', exact: true }).getByRole('button', { name: /^Needs you\s+\d+$/ });
-  await expect.poll(async () => await pairLink.isVisible() || (await ready.textContent())?.trim() === 'READY', { timeout: 45000 }).toBe(true);
+  const floorButton = consoleView.getByRole('button', { name: 'Floor', exact: true });
+  await expect.poll(async () => await pairLink.isVisible() || (await floorButton.isVisible() && await floorButton.isEnabled()), { timeout: 45000 }).toBe(true);
   if (await pairLink.isVisible()) {
     await pairLink.click();
     await page.getByRole('button', { name: 'PAIR THIS BROWSER', exact: true }).click();
   }
   await consoleView.waitFor({ state: 'visible', timeout: 45000 });
-  await expect(ready).toHaveText('READY', { timeout: 45000 });
-  await expect(needsYou).toHaveText(/^Needs you\s+\d+$/, { timeout: 45000 });
+  await expect(floorButton).toBeEnabled({ timeout: 45000 });
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('dialog', { name: 'Settings', exact: true }).getByRole('button', { name: 'REFRESH ACCOUNTS', exact: true }).waitFor({ state: 'visible' });
   if (pageFailed) throw new Error('browser error');
