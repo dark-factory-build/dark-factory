@@ -1,96 +1,88 @@
 # Dark Factory
 
-Dark Factory is a macOS-local runtime for supervised coding-agent work on
-your own machine. `factoryd` owns the durable queue, attempts, provider
-processes, and cleanup. `factoryctl` is the operator CLI. A hosted web console
-pairs with the daemon through the daemon's own pair page at
-<http://127.0.0.1:43123/pair>, which installation opens, and connects to the
-paired daemon's authenticated loopback API.
+**An autonomous software factory you can see and steer.** Give your coding
+agents work. Let an overseer coordinate them. Watch the live floor, inspect
+results, and step in when decisions need you.
 
-The runtime is not a hosted coding service, a coding model, or a general agent
-framework. It keeps work running when the CLI or browser closes, and provides
-no commit, push, pull-request, or repository-publication operation.
+<picture>
+  <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
+  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory demo floor with sample workers, two workshops and a Needs You decision">
+</picture>
 
-## Current support
+*Demo data in the actual console: sample workers on the floor and a synthetic
+Needs You decision. No daemon is connected.*
 
-- macOS only.
-- The `shell` and `codex` providers are proven end to end. The `claude_code`
-  launch path is fixture-proven for an existing local CLI and signed-in account;
-  its real-provider smoke remains outstanding. See the [provider
-  contract](docs/providers.md).
-- The browser opens on the overseer, with agent selection in either the factory
-  floor or roster. Needs You, Queue, and the selected agent's controls share the
-  right panel. Needs You and Queue expand rows in place. Send an
-  instruction in a ready agent's terminal pane to create a durable
-  task. Type in a live terminal to work with that session, or use Message for
-  a recorded intervention. Codex Interrupt stops generation while preserving the
-  task; Stop ends it; Start new preserves its history and queues a replacement.
-  Completed output stays visible. Add to queue accepts later work while busy.
-  Queues are grouped by agent and follow its admission order; numeric priority can be raised or
-  lowered explicitly. A task targets one worker or any eligible worker in its
-  project: ANY WORKER in an agent's pane, or `factoryctl task add --agent any`,
-  queues it under the project's Any eligible worker group until the first free
-  worker claims it at admission. Workers take their own assigned work first,
-  then shared work. The claim writes that worker into the task, which stays
-  with it through send-back corrections unless the queue row reassigns it to
-  another worker. Recent Work stays collapsed without reading private details. Opening it loads
-  authorized details for the newest ten completed or blocked tasks, showing
-  instruction and outcome excerpts; Show more loads the next ten. Expand a row
-  for the full outcome, reported PR links, instruction, and review feedback,
-  and to load its intervention history. Private prose stays out of public state.
-  Project and agent setup stays in `factoryctl`.
-- Agent status is Ready, Working, Needs you, or Paused. Working means a task
-  is running, including startup and cleanup. Queued work alone is Ready with
-  a queue/capacity hint. Pausing stops future tasks; an already-running task
-  keeps Working with its queue marked paused.
-- Workers may be archived only when drained. Archive removes them from the
-  active floor and admission while retaining identity and history; Show
-  archived exposes their recent work, and Restore leaves them paused.
-- The overseer can inspect and control its project's workers through scoped
-  `factoryctl overseer` commands, using its own attempt credential. Worker
-  events and explicit interventions trigger bounded standing instructions,
-  including events received while the overseer was busy. Factory capacity
-  counts workers; one overseer can run alongside them.
-- Optional [operator-owned GitHub intake and release scheduling](docs/development/UNATTENDED.md) runs on the host. There is no public HTTP intake or in-runtime updater.
+Keep work moving across projects: queue and prioritize tasks, let an overseer
+follow up, inspect results, and decide when work needs your judgment. Workers
+leave reviewable results, the Maintainer publishes approved work through the
+configured GitHub route, and the paired browser and `factoryctl` steer the
+same factory.
 
-Each project has agents and durable tasks. An admitted attempt gets a fresh
-provider process and a daemon-owned Change: a linked Git worktree of the
-project on its own branch. The browser and CLI remain clients of the same
-local API; neither owns lifecycle or policy.
+[Website](https://www.darkfactory.build) · [Console](https://app.darkfactory.build) ·
+[Backlog](https://github.com/dark-factory-build/dark-factory/issues) ·
+[Install](docs/install.md) · [Providers](docs/providers.md) ·
+[Architecture](ARCHITECTURE.md) · [Security](SECURITY.md)
 
-Fresh Changes use `factoryd --base-revision HEAD` by default: a branch with a
-configured remote upstream is fetched before its exact commit is selected.
-The registered checkout is not moved. Use `--base-revision
-refs/remotes/upstream/main` to select another remote branch. Explicit local
-refs or commit IDs, detached HEAD, and branches without an upstream stay local.
-A failed configured fetch fails source preparation; cached source is not a
-fallback. Retained Changes preserve their original source and edits until an
-explicit integration. Runtime build identity and Change source identity remain
-separate. Fetching adds only the pinned objects, without updating tracking refs
-or `FETCH_HEAD`, so parallel starts and custom upstream mappings cannot overwrite
-operator branches. Git runs noninteractively with a private HOME and
-global/system Git configuration disabled. Private remotes need
-working authentication through their repository-local transport configuration;
-missing credentials fail preparation rather than borrowing a worker account.
+## What you can do
 
-## Installation
+- Close the browser and the factory keeps its queue and running work alive while the host Mac stays awake.
+- Give a task to a named worker or let the next available worker take it.
+- Let an overseer turn a goal into follow-up work and coordinate the workers.
+- Open a live terminal, read a Needs You request, and decide when to step in.
+- Inspect a completed result, send it back with feedback, or take it forward for review.
+- Pair a phone to watch and direct the same factory away from the Mac.
 
-The [installation guide](docs/install.md) covers the three binaries, managed
-service, and paired browser console.
+## How work moves
 
-## Development
+Choose a checkout, describe the outcome, add workers with accounts on the
+machine, then queue work. Dark Factory makes an isolated worktree and starts
+the selected provider. The floor shows workers and tasks. Needs You requests
+decisions; otherwise the overseer continues. Review completed changes, send
+them back, or let the Maintainer publish them.
 
-The [development workflow](docs/development/WORKFLOW.md) documents worktree,
-temporary-home, test, and deterministic shell-provider helpers.
+## Requirements and quick start
 
-## Learn more
+Use the **next release containing this CLI**; its version is not selected.
+It requires macOS, Git, and `factoryd`, `factory-runner`, and `factoryctl` on
+`PATH`. A Codex worker requires a signed-in `codex` CLI on `PATH`. Providers
+receive repository and task material; read [provider support](docs/providers.md).
 
-- [Installation](docs/install.md)
-- [Provider contract](docs/providers.md)
-- [Architecture](ARCHITECTURE.md)
-- [Security](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
-- [Development workflow](docs/development/WORKFLOW.md)
-- [Deploying the site and the live service](docs/development/DEPLOY.md)
+Install that release with the [installation guide](docs/install.md), initialise
+a home, and start its service. These commands use its socket
+and token:
+
+```sh
+factoryctl init --home "$HOME/.dark-factory"
+factoryctl service install --home "$HOME/.dark-factory"
+factoryctl service status --home "$HOME/.dark-factory"
+export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
+export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
+factoryctl dispatch on
+factoryctl web status
+factoryctl web open
+```
+
+From an existing committed Git checkout, `project create` prints `PROJECT_ID`;
+`agent create` prints `AGENT_ID`. Give the worker a bounded first outcome, then
+inspect it on the floor or paired console:
+
+```sh
+factoryctl project create --name "My project" --root "$PWD"
+factoryctl agent create --project PROJECT_ID --name builder \
+  --provider codex --tool-budget 100
+factoryctl task add --project PROJECT_ID --agent AGENT_ID \
+  --title "Improve one documented setup step" \
+  --body "Read README.md and the project layout. Correct one concise setup or contributor instruction supported by the code, run git diff --check, and report the files changed."
+```
+
+Use `factoryctl account discover` or `account list` to inspect a Codex login.
+For another checkout, `project repository add --id HEX32 --project PROJECT_ID
+--name NAME --root ABSOLUTE --base REF` returns the revision needed to set its
+default; a named task keeps its explicit repository.
+
+The local candidate checked packaging, a shell attempt, routing, and restart
+recovery. Live Codex, GitHub access, and publication remain release gates.
+Issue intake and managed setup ship with the same next release. More
+in the [development workflow](docs/development/WORKFLOW.md).
 
 Dark Factory is MIT licensed.
