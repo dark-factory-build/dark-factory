@@ -40,15 +40,15 @@ them back, or let the Maintainer publish them.
 
 ## Requirements and quick start
 
-Dark Factory **v0.3.5** runs on macOS with Git. Install and sign in to the
-Codex CLI (`codex`) before using Codex. Shell and Codex are proven end to end;
-Claude Code launches in fixtures, but a live Claude run is unproven. Providers
-may receive source and task material; read [provider support](docs/providers.md)
+Use the **next release containing this CLI**; its version is not selected.
+It needs macOS, Git, and `factoryd`, `factory-runner`, and `factoryctl` on
+`PATH`. A Codex worker needs a signed-in `codex` CLI on Dark Factory’s tool
+path. Providers receive repository and task material; read [provider support](docs/providers.md)
 before connecting an account.
 
-Install the v0.3.5 binaries with the [installation guide](docs/install.md),
-then initialise a private home, install the service, and set the operator
-environment used by `factoryctl`:
+Install that release with the [installation guide](docs/install.md), initialise
+one private home, and start its managed service. These commands use its socket
+and token:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"
@@ -56,23 +56,31 @@ factoryctl service install --home "$HOME/.dark-factory"
 factoryctl service status --home "$HOME/.dark-factory"
 export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
 export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
+factoryctl dispatch on
 factoryctl web status
 factoryctl web open
 ```
 
-`project create` prints a JSON `id`; use it as `PROJECT_ID`. `agent create`
-creates a shell worker and prints another JSON `id`; use it as `AGENT_ID`.
+`project create` prints `PROJECT_ID`; `agent create` prints `AGENT_ID`. Give the
+worker a complete outcome, then inspect it on the floor or paired console:
 
 ```sh
 factoryctl project create --name "My project" --root "$PWD"
-factoryctl agent create --project PROJECT_ID --name builder --tool-budget 100
+factoryctl agent create --project PROJECT_ID --name builder \
+  --provider codex --tool-budget 100
 factoryctl task add --project PROJECT_ID --agent AGENT_ID \
-  --title "Describe the next change"
+  --title "Describe the next change" \
+  --body "Inspect this repository, implement the next small change, run its focused checks, and report the outcome."
 ```
 
-`factoryctl web open` opens the paired console for the installed host. Update
-that host if a current control is unavailable. Keep the CLI for repeatable
-operations. Issue intake and its managed setup are coordinated for the next
-release. More detail is in the [development workflow](docs/development/WORKFLOW.md).
+Use `factoryctl account discover` or `account list` to inspect a Codex login.
+For another checkout, `project repository add --id HEX32 --project PROJECT_ID
+--name NAME --root ABSOLUTE --base REF` returns the revision needed to set its
+default; a named task keeps its explicit repository.
+
+The local candidate checked packaging, a shell attempt, routing, and restart
+recovery. Live Codex, GitHub access, and publication remain release gates.
+Issue intake and managed setup ship with the same next release. More
+in the [development workflow](docs/development/WORKFLOW.md).
 
 Dark Factory is MIT licensed.
