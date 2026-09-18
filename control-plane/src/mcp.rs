@@ -11,12 +11,13 @@ use crate::{
     access::AccessAuthority,
     github_app::{
         AppAuthority, ClosePullRequest, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, ListIssues, MergePullRequestAtHead, ObserveControlPlaneDeploy,
-        ObserveFile, ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
-        ObservePullRequestWorkflows, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
-        ObserveRepository, ObserveTree, OperationError, PublishCommit, PublishReleaseTag,
-        ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
-        SubmitPullRequestReview, UpdatePullRequestBody, canonical_operation_id,
+        EnqueuePullRequest, ListIssues, ListPullRequests, MergePullRequestAtHead,
+        ObserveControlPlaneDeploy, ObserveFile, ObserveIssue, ObservePullRequestChecks,
+        ObservePullRequestMerge, ObservePullRequestReview, ObservePullRequestWorkflows, ObserveRef,
+        ObserveRelease, ObserveReleaseWorkflow, ObserveRepository, ObserveTree, OperationError,
+        PublishCommit, PublishReleaseTag, ReadPullRequestJobLog, RecoverRelease,
+        RerunFailedPullRequestJobs, ResolveIssue, SubmitPullRequestReview, UpdatePullRequestBody,
+        canonical_operation_id,
     },
     journal::DeliveryJournal,
 };
@@ -472,6 +473,40 @@ fn tools() -> Value {
                     }
                 }}
             }
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "list_pull_requests",
+        "title": "Read a pull request page",
+        "description": "Read a bounded page of open pull requests. Optional pull_number reads exactly one open or closed PR at page 1. Follow next_page; this read never schedules work.",
+        "inputSchema": {
+            "type": "object", "additionalProperties": false,
+            "properties": {"repository": {"type": "string"}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "per_page": {"type": "integer", "minimum": 1, "maximum": 100}, "pull_number": {"type": ["integer", "null"], "minimum": 1}},
+            "required": ["repository", "page", "per_page"]
+        },
+        "outputSchema": {
+            "type": "object", "additionalProperties": false, "required": ["repository_id", "pull_requests", "next_page"],
+            "properties": {
+                "repository_id": {"type": "integer", "minimum": 1}, "next_page": {"type": ["integer", "null"], "minimum": 2, "maximum": 1000},
+                "pull_requests": {"type": "array", "maxItems": 100, "items": {
+                    "type": "object", "additionalProperties": false, "required": ["number", "body", "head_sha", "base_sha", "base_ref"],
+                    "properties": {"number": {"type": "integer", "minimum": 1}, "body": {"type": "string", "maxLength": 262144}, "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "base_ref": {"type": "string"}}
+                }}
+            }
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "observe_pull_request_review",
+        "title": "Read an exact pull request review",
+        "description": "Read one recorded review by its PR and review ID, including its commit and complete body.",
+        "inputSchema": {
+            "type": "object", "additionalProperties": false,
+            "properties": {"repository": {"type": "string"}, "pull_number": {"type": "integer", "minimum": 1}, "review_id": {"type": "integer", "minimum": 1}},
+            "required": ["repository", "pull_number", "review_id"]
+        },
+        "outputSchema": {
+            "type": "object", "additionalProperties": false, "required": ["id", "commit_id", "body"],
+            "properties": {"id": {"type": "integer", "minimum": 1}, "commit_id": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "body": {"type": "string", "maxLength": 262144}}
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
@@ -1107,6 +1142,29 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
             };
             match mcp.app.list_issues(arguments).await {
                 Ok(result) => serialized_tool_result(id, &result, "Issue page was observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("list_pull_requests") => {
+            let Ok(arguments) = serde_json::from_value::<ListPullRequests>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.list_pull_requests(arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Pull request page was observed.")
+                }
+                Err(error) => operation_error(id, error),
+            }
+        }
+        Some("observe_pull_request_review") => {
+            let Ok(arguments) = serde_json::from_value::<ObservePullRequestReview>(arguments)
+            else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.observe_pull_request_review(arguments).await {
+                Ok(result) => {
+                    serialized_tool_result(id, &result, "Pull request review was observed.")
+                }
                 Err(error) => operation_error(id, error),
             }
         }

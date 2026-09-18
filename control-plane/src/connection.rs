@@ -155,6 +155,8 @@ fn tool_write(name: &str) -> Option<bool> {
         | "observe_ref"
         | "observe_issue"
         | "list_issues"
+        | "list_pull_requests"
+        | "observe_pull_request_review"
         | "observe_release"
         | "observe_release_workflow"
         | "observe_control_plane_deploy"
