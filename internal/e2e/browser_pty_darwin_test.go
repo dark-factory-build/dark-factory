@@ -71,7 +71,7 @@ type runResult struct {
 
 func TestGoTypeScriptBrowserPTYLifecycle(t *testing.T) {
 	if os.Getenv("DARK_FACTORY_BROWSER_E2E") != "1" {
-		t.Skip("run through scripts/go-browser-e2e.sh")
+		t.Skip("run through scripts/go-e2e.sh browser")
 	}
 	factoryctl := requiredExecutable(t, "DARK_FACTORY_E2E_FACTORYCTL")
 	runnerExecutable := requiredExecutable(t, "DARK_FACTORY_E2E_RUNNER")

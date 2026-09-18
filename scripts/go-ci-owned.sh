@@ -1,7 +1,10 @@
 #!/bin/sh
 set -eu
 
-[ "$#" -eq 0 ] || { echo "usage: scripts/go-ci-owned.sh" >&2; exit 2; }
+case "$#:${1-}" in
+    0:|1:--client-built) client_built=${1-} ;;
+    *) echo "usage: scripts/go-ci-owned.sh [--client-built]" >&2; exit 2 ;;
+esac
 script_dir=$(CDPATH= cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
 CDPATH= cd -- "$repository_root"
@@ -55,9 +58,6 @@ if [ "$#" -gt 0 ]; then
     go_gate_stage 1200 go test -short -timeout=20m -count=1 "$@"
 fi
 
-echo "go-ci: browser terminal and PTY E2E"
-go_gate_stage 600 "$script_dir/go-browser-e2e.sh"
-
-echo "go-ci: daemon and runner lifecycle E2E"
-go_gate_stage 900 "$script_dir/go-daemon-e2e.sh"
+echo "go-ci: browser, daemon and runner E2E"
+go_gate_stage 1500 "$script_dir/go-e2e.sh" all ${client_built:+"$client_built"}
 echo "go-ci: PASS"

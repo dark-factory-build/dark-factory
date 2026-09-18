@@ -22,6 +22,11 @@ PUBLICATION_SPEC = importlib.util.spec_from_file_location("factory_publication",
 publication = importlib.util.module_from_spec(PUBLICATION_SPEC)
 PUBLICATION_SPEC.loader.exec_module(publication)
 
+INTAKE_SPEC = importlib.util.spec_from_file_location("factory_intake", Path(__file__).with_name("factory-intake.py"))
+intake = importlib.util.module_from_spec(INTAKE_SPEC)
+INTAKE_SPEC.loader.exec_module(intake)
+atomic_json = intake.atomic_json
+
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_RANGE_COMMITS = 100
 MAX_RANGE_PULLS = 100
@@ -33,29 +38,6 @@ GENERATOR_TRAILER = re.compile(
 
 class ReleaseError(Exception):
     pass
-
-
-def atomic_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except BaseException:
-        try:
-            os.unlink(name)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def run(argv, timeout=60, env=None):

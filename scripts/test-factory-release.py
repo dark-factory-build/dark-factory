@@ -50,6 +50,19 @@ def snapshot():
 
 
 class ReleaseFixtures(unittest.TestCase):
+    def test_shared_atomic_writer_preserves_receipt_on_replace_failure(self):
+        self.assertIs(release.atomic_json, release.intake.atomic_json)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "receipt.json"
+            release.atomic_json(path, {"state": "verified"})
+            before = path.read_bytes()
+            with mock.patch.object(release.intake.os, "replace", side_effect=OSError("injected")):
+                with self.assertRaises(OSError):
+                    release.atomic_json(path, {"state": "running"})
+            self.assertEqual(before, path.read_bytes())
+            self.assertEqual([path], list(path.parent.iterdir()))
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
+
     def test_wrong_sha_verification_is_rejected(self):
         with self.assertRaises(release.ReleaseError):
             release.verify_output(json.dumps({"sha": "c" * 40, "healthy": True}), SHA)
