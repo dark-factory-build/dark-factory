@@ -425,6 +425,31 @@ fn tools() -> Value {
             "properties": {"repository": {"type": "string"}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 50}},
             "required": ["repository", "page"], "additionalProperties": false
         },
+        "outputSchema": {
+            "type": "object", "additionalProperties": false,
+            "required": ["repository_id", "issues", "next_page"],
+            "properties": {
+                "repository_id": {"type": "integer", "minimum": 1},
+                "next_page": {"type": ["integer", "null"], "minimum": 2, "maximum": 1000},
+                "issues": {"type": "array", "maxItems": 25, "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["id", "node_id", "number", "url", "title", "body", "author", "labels", "updated_at", "state"],
+                    "properties": {
+                        "id": {"type": "integer", "minimum": 1},
+                        "node_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "number": {"type": "integer", "minimum": 1},
+                        "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"},
+                        "author": {"type": "object", "additionalProperties": false, "required": ["login", "type"], "properties": {
+                            "login": {"type": "string", "minLength": 1, "maxLength": 100},
+                            "type": {"type": "string", "minLength": 1, "maxLength": 100}
+                        }},
+                        "labels": {"type": "array", "items": {"type": "string"}},
+                        "updated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+                        "state": {"type": "string", "enum": ["open"]}
+                    }
+                }}
+            }
+        },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
         "name": "observe_issue",
@@ -1449,5 +1474,29 @@ mod tests {
         assert_eq!(request_id(object.get("id")), Some(json!(1)));
         assert_eq!(request_id(Some(&json!({"bad": true}))), Some(Value::Null));
         assert_eq!(tools()["tools"][0]["name"], "maintainer_status");
+        let surface = tools();
+        for tool in surface["tools"].as_array().unwrap() {
+            assert_eq!(
+                tool["outputSchema"]["type"], "object",
+                "{} has no typed output",
+                tool["name"]
+            );
+        }
+        let page = surface["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "list_issues")
+            .unwrap();
+        assert_eq!(
+            page["outputSchema"]["required"],
+            json!(["repository_id", "issues", "next_page"])
+        );
+        let issue = &page["outputSchema"]["properties"]["issues"]["items"];
+        assert_eq!(
+            issue["properties"]["author"]["required"],
+            json!(["login", "type"])
+        );
+        assert_eq!(issue["required"].as_array().unwrap().len(), 10);
     }
 }
