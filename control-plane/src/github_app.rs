@@ -500,6 +500,43 @@ pub(crate) struct ObserveIssue {
     pub(crate) issue_number: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ListIssues {
+    pub(crate) repository: String,
+    pub(crate) issue_number: Option<i64>,
+    pub(crate) page: u32,
+    pub(crate) label: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct IssuePage {
+    pub(crate) repository_id: i64,
+    pub(crate) issues: Vec<IssueCandidate>,
+    pub(crate) next_page: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct IssueCandidate {
+    pub(crate) id: i64,
+    pub(crate) node_id: String,
+    pub(crate) number: i64,
+    pub(crate) url: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) author: IssueAuthor,
+    pub(crate) labels: Vec<String>,
+    pub(crate) updated_at: String,
+    pub(crate) state: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct IssueAuthor {
+    pub(crate) login: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct IssueObservationResult {
     pub(crate) number: i64,
@@ -1140,6 +1177,58 @@ impl AppAuthority {
             branch: request.branch,
             head_sha: reference.map(|reference| reference.object.sha),
         })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn list_issues(
+        &self,
+        mut request: ListIssues,
+    ) -> Result<IssuePage, OperationError> {
+        request.validate()?;
+        let repository = RepositoryName::requested(&mut request.repository)?;
+        let token = self
+            .0
+            .installation_token(
+                repository,
+                BTreeMap::from([("issues", "read"), ("metadata", "read")]),
+            )
+            .await
+            .map_err(issue_read_error)?;
+        if let Some(number) = request.issue_number {
+            let entry: IssuePageEntry = github_json(
+                &format!(
+                    "https://api.github.com/repos/{}/{}/issues/{number}",
+                    token.repository.owner, token.repository.name
+                ),
+                token.as_str(),
+            )
+            .await
+            .map_err(|error: Error| issue_read_error(error.into()))?;
+            if entry.issue.number != number || !entry.issue.is_real_issue() {
+                return Err(OperationError::Conflict);
+            }
+            return issue_page(token.repository_id, 1, vec![entry]);
+        }
+        let label = request
+            .label
+            .as_deref()
+            // GitHub splits this query parameter on commas, even after decoding.
+            .filter(|label| !label.contains(','))
+            .map(percent_encode)
+            .unwrap_or_default();
+        let issues: Vec<IssuePageEntry> = github_json(&format!(
+            "https://api.github.com/repos/{}/{}/issues?state=open&sort=created&direction=asc&per_page=25&page={}&labels={}",
+            token.repository.owner, token.repository.name, request.page, label), token.as_str()).await.map_err(|error: Error| issue_read_error(error.into()))?;
+        let mut page = issue_page(token.repository_id, request.page, issues)?;
+        if let Some(label) = request.label.as_deref().filter(|label| label.contains(',')) {
+            page.issues.retain(|issue| {
+                issue
+                    .labels
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(label))
+            });
+        }
+        Ok(page)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3504,6 +3593,24 @@ impl ObserveFile {
 impl ObserveTree {
     fn validate(&self) -> Result<(), OperationError> {
         valid_sha(&self.commit_sha)
+    }
+}
+
+impl ListIssues {
+    fn validate(&self) -> Result<(), OperationError> {
+        if !(1..=1000).contains(&self.page) {
+            return Err(OperationError::InvalidInput);
+        }
+        if let Some(label) = &self.label {
+            valid_text(label, 1, MAX_ISSUE_LABEL_BYTES, false)?;
+        }
+        if let Some(number) = self.issue_number {
+            valid_exact_integer(number)?;
+            if self.page != 1 || self.label.is_some() {
+                return Err(OperationError::InvalidInput);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -6114,6 +6221,80 @@ impl RepositoryMetadata {
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Deserialize)]
+struct IssuePageEntry {
+    #[serde(flatten)]
+    issue: Issue,
+    id: i64,
+    node_id: String,
+    user: IssueAuthor,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn issue_read_error(error: OperationError) -> OperationError {
+    // A GitHub read refusal includes ambiguous rate limits and missing data;
+    // it cannot establish an empty backlog or permanently retire a source.
+    match error {
+        OperationError::Refused(_) => OperationError::Unavailable,
+        other => other,
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn issue_page(
+    repository_id: i64,
+    page: u32,
+    entries: Vec<IssuePageEntry>,
+) -> Result<IssuePage, OperationError> {
+    if entries.len() > 25 {
+        return Err(OperationError::Indeterminate);
+    }
+    // A full page remains incomplete even when it contains only pull requests.
+    let next_page = if entries.len() == 25 {
+        if page >= 1000 {
+            return Err(OperationError::Unavailable);
+        }
+        Some(page + 1)
+    } else {
+        None
+    };
+    let mut issues = Vec::new();
+    for entry in entries {
+        let issue = entry.issue;
+        if !issue.is_real_issue() {
+            continue;
+        }
+        valid_exact_integer(entry.id)?;
+        valid_exact_integer(issue.number)?;
+        valid_text(&entry.node_id, 1, 256, false)?;
+        valid_github_url(&issue.html_url)?;
+        valid_text(&entry.user.login, 1, 100, false)?;
+        valid_text(&entry.user.kind, 1, 100, false)?;
+        valid_github_timestamp(&issue.updated_at)?;
+        if !matches!(issue.state.as_str(), "open" | "closed") {
+            return Err(OperationError::Indeterminate);
+        }
+        issues.push(IssueCandidate {
+            id: entry.id,
+            node_id: entry.node_id,
+            number: issue.number,
+            url: issue.html_url,
+            title: issue.title,
+            body: issue.body.unwrap_or_default(),
+            author: entry.user,
+            labels: issue.labels.into_iter().map(|label| label.name).collect(),
+            updated_at: issue.updated_at,
+            state: issue.state,
+        });
+    }
+    Ok(IssuePage {
+        repository_id,
+        issues,
+        next_page,
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Deserialize)]
 struct Issue {
     number: i64,
     html_url: String,
@@ -8258,6 +8439,40 @@ mod tests {
     /// observation, failed-job rerun, release publication/recovery, and the
     /// control-plane deploy dispatch -- returned an opaque "authority is
     /// unavailable".
+    #[test]
+    fn issue_pages_preserve_content_and_pagination_without_admitting_work() {
+        let entry = |pr: bool| -> IssuePageEntry {
+            serde_json::from_value(serde_json::json!({
+                "id": 71, "node_id": "I_fixture", "number": 4,
+                "html_url": "https://github.com/team/repo/issues/4", "title": "title",
+                "body": "x".repeat(6000), "state": "open", "updated_at": "2026-09-18T12:00:00Z",
+                "user": { "login": "outsider", "type": "User" },
+                "pull_request": if pr { Some(serde_json::json!({})) } else { None }
+            }))
+            .unwrap()
+        };
+        let page = issue_page(2, 1, (0..25).map(|_| entry(true)).collect()).unwrap();
+        assert!(page.issues.is_empty());
+        assert_eq!(page.next_page, Some(2));
+        let page = issue_page(2, 2, vec![entry(false)]).unwrap();
+        assert_eq!(page.issues[0].body.len(), 6000);
+        assert_eq!(page.issues[0].author.login, "outsider");
+        assert_eq!(page.next_page, None);
+        assert!(issue_page(2, 1000, (0..25).map(|_| entry(true)).collect()).is_err());
+        for page in [0, 1001] {
+            assert!(
+                ListIssues {
+                    repository: "team/repo".into(),
+                    issue_number: None,
+                    page,
+                    label: None
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn repository_metadata_parses_a_real_body_without_optional_fields() {
         const BODY: &str = include_str!("../tests/fixtures/repository-without-administration.json");

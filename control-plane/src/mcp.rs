@@ -11,8 +11,8 @@ use crate::{
     access::AccessAuthority,
     github_app::{
         AppAuthority, ClosePullRequest, CreateIssue, CreatePullRequest, DispatchControlPlaneDeploy,
-        EnqueuePullRequest, MergePullRequestAtHead, ObserveControlPlaneDeploy, ObserveFile,
-        ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
+        EnqueuePullRequest, ListIssues, MergePullRequestAtHead, ObserveControlPlaneDeploy,
+        ObserveFile, ObserveIssue, ObservePullRequestChecks, ObservePullRequestMerge,
         ObservePullRequestWorkflows, ObserveRef, ObserveRelease, ObserveReleaseWorkflow,
         ObserveRepository, ObserveTree, OperationError, PublishCommit, PublishReleaseTag,
         ReadPullRequestJobLog, RecoverRelease, RerunFailedPullRequestJobs, ResolveIssue,
@@ -414,6 +414,41 @@ fn tools() -> Value {
             },
             "required": ["branch", "head_sha"],
             "additionalProperties": false
+        },
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
+    }, {
+        "name": "list_issues",
+        "title": "List an issue page",
+        "description": "Read one bounded page of open issues, with an optional label filter. Optional issue_number reads that exact open or closed issue (page 1, no label), independently of discovery limits. Follow next_page even for empty pages. This read never accepts work.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"repository": {"type": "string"}, "issue_number": {"type": ["integer", "null"], "minimum": 1}, "page": {"type": "integer", "minimum": 1, "maximum": 1000}, "label": {"type": ["string", "null"], "minLength": 1, "maxLength": 50}},
+            "required": ["repository", "page"], "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object", "additionalProperties": false,
+            "required": ["repository_id", "issues", "next_page"],
+            "properties": {
+                "repository_id": {"type": "integer", "minimum": 1},
+                "next_page": {"type": ["integer", "null"], "minimum": 2, "maximum": 1000},
+                "issues": {"type": "array", "maxItems": 25, "items": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["id", "node_id", "number", "url", "title", "body", "author", "labels", "updated_at", "state"],
+                    "properties": {
+                        "id": {"type": "integer", "minimum": 1},
+                        "node_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "number": {"type": "integer", "minimum": 1},
+                        "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"},
+                        "author": {"type": "object", "additionalProperties": false, "required": ["login", "type"], "properties": {
+                            "login": {"type": "string", "minLength": 1, "maxLength": 100},
+                            "type": {"type": "string", "minLength": 1, "maxLength": 100}
+                        }},
+                        "labels": {"type": "array", "items": {"type": "string"}},
+                        "updated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+                        "state": {"type": "string", "enum": ["open", "closed"]}
+                    }
+                }}
+            }
         },
         "annotations": {"readOnlyHint": true, "destructiveHint": false, "openWorldHint": true}
     }, {
@@ -1043,6 +1078,15 @@ async fn call_tool(id: Value, request: &Map<String, Value>, mcp: &McpState) -> R
                 Err(error) => operation_error(id, error),
             }
         }
+        Some("list_issues") => {
+            let Ok(arguments) = serde_json::from_value::<ListIssues>(arguments) else {
+                return json_rpc_error(id, -32602, "Invalid params");
+            };
+            match mcp.app.list_issues(arguments).await {
+                Ok(result) => serialized_tool_result(id, &result, "Issue page was observed."),
+                Err(error) => operation_error(id, error),
+            }
+        }
         Some("observe_issue") => {
             let Ok(arguments) = serde_json::from_value::<ObserveIssue>(arguments) else {
                 return json_rpc_error(id, -32602, "Invalid params");
@@ -1430,5 +1474,29 @@ mod tests {
         assert_eq!(request_id(object.get("id")), Some(json!(1)));
         assert_eq!(request_id(Some(&json!({"bad": true}))), Some(Value::Null));
         assert_eq!(tools()["tools"][0]["name"], "maintainer_status");
+        let surface = tools();
+        for tool in surface["tools"].as_array().unwrap() {
+            assert_eq!(
+                tool["outputSchema"]["type"], "object",
+                "{} has no typed output",
+                tool["name"]
+            );
+        }
+        let page = surface["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "list_issues")
+            .unwrap();
+        assert_eq!(
+            page["outputSchema"]["required"],
+            json!(["repository_id", "issues", "next_page"])
+        );
+        let issue = &page["outputSchema"]["properties"]["issues"]["items"];
+        assert_eq!(
+            issue["properties"]["author"]["required"],
+            json!(["login", "type"])
+        );
+        assert_eq!(issue["required"].as_array().unwrap().len(), 10);
     }
 }
