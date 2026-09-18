@@ -464,8 +464,8 @@ fn tools() -> Value {
                         "number": {"type": "integer", "minimum": 1},
                         "url": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"},
                         "author": {"type": "object", "additionalProperties": false, "required": ["login", "type"], "properties": {
-                            "login": {"type": "string", "minLength": 1, "maxLength": 100, "description": "At most 100 UTF-8 bytes; the character limit alone does not bound multibyte labels."},
-                            "type": {"type": "string", "minLength": 1, "maxLength": 100, "description": "At most 100 UTF-8 bytes; the character limit alone does not bound multibyte labels."}
+                            "login": {"type": "string", "minLength": 1, "maxLength": 100},
+                            "type": {"type": "string", "minLength": 1, "maxLength": 100}
                         }},
                         "labels": {"type": "array", "items": {"type": "string"}},
                         "updated_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
