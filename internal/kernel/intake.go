@@ -175,7 +175,7 @@ func validIntakeSource(value IntakeSource) bool {
 }
 
 func validIntakeIssueSnapshot(value IntakeIssueSnapshot) bool {
-	return value.GitHubRepositoryID != 0 && value.GitHubRepositoryID <= math.MaxInt64 && value.IssueNumber != 0 && value.IssueNumber <= math.MaxInt64 && validBoundedIntakeText(value.NodeID, 1, maxGitHubNodeIDBytes) && validBoundedIntakeText(value.Title, 1, maxIntakeTitleBytes) && validBoundedIntakeText(value.Body, 0, maxIntakeBodyBytes) && validGitHubLogin(value.AuthorLogin) && (value.AuthorType == GitHubAuthorUser || value.AuthorType == GitHubAuthorBot)
+	return value.GitHubRepositoryID != 0 && value.GitHubRepositoryID <= math.MaxInt64 && value.IssueNumber != 0 && value.IssueNumber <= math.MaxInt64 && validBoundedIntakeText(value.NodeID, 1, maxGitHubNodeIDBytes) && validBoundedIntakeText(value.Title, 1, maxIntakeTitleBytes) && validBoundedIntakeText(value.Body, 0, maxIntakeBodyBytes) && validGitHubAuthor(value.AuthorLogin, value.AuthorType)
 }
 
 func intakeAcceptanceIDs(snapshot IntakeIssueSnapshot, projectID ProjectID, repositoryID RepositoryID) (IntakeAcceptanceID, TaskID, IncarnationID, error) {
@@ -260,4 +260,12 @@ func validGitHubLogin(value string) bool {
 
 func validBoundedIntakeText(value string, low, high int) bool {
 	return byteLen(value) >= low && byteLen(value) <= high && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+}
+
+// Bot login spelling is issue metadata, never human approval authority.
+func validGitHubAuthor(login string, kind GitHubAuthorType) bool {
+	if kind == GitHubAuthorBot {
+		return validGitHubLogin(strings.TrimSuffix(login, "[bot]"))
+	}
+	return kind == GitHubAuthorUser && validGitHubLogin(login)
 }

@@ -437,3 +437,22 @@ func TestTrustedIntakeSourcePersistsAndValidatesAuthorsAfterReopen(t *testing.T)
 		t.Fatalf("missing trusted authors accepted: %v", err)
 	}
 }
+
+func TestBotAuthorMetadataNeverGrantsAutomaticAcceptance(t *testing.T) {
+	source := intakeSourceForTest(t, IntakePolicyTrustedAuthors)
+	for _, login := range []string{"maintainer", "github-actions[bot]"} {
+		snapshot := intakeSnapshotForTest()
+		snapshot.AuthorType, snapshot.AuthorLogin = GitHubAuthorBot, login
+		if !validIntakeIssueSnapshot(snapshot) || PreviewIntake(source, snapshot, nil) != IntakeUntrustedAuthor {
+			t.Fatalf("bot metadata rejected or trusted: %q", login)
+		}
+		source.Policy = IntakePolicyManual
+		if PreviewIntake(source, snapshot, nil) != IntakeNeedsManualAcceptance {
+			t.Fatalf("bot cannot be reviewed manually: %q", login)
+		}
+		source.Policy = IntakePolicyTrustedAuthors
+	}
+	if validGitHubAuthor("github-actions[bot]", GitHubAuthorUser) || validGitHubLogin("github-actions[bot]") || validGitHubAuthor("app/owner", GitHubAuthorBot) {
+		t.Fatal("bot spelling leaked into human authority or invalid metadata")
+	}
+}
