@@ -222,8 +222,16 @@ governs its own submission and recovery path.
 
 The two typed merge operations are mutually exclusive; neither silently falls
 back to the other. Before queue enqueue, the broker re-reads the PR and requires
-the bound base and head. The GraphQL mutation supplies `expectedHeadOid`, never
-`jump`, and the broker reconciles the exact queue entry. The enqueue result
+the bound base, head and SHA-256 digest of the independently reviewed rendered
+body after claiming the durable operation. A known mismatch refuses the write;
+an uncertain outcome is never blindly replayed. The GraphQL mutation supplies
+`expectedHeadOid`, never `jump`, and the broker reconciles the exact queue entry.
+Only the head check is atomic: GitHub has no expected-body condition on enqueue,
+so a body edit can race with the final network call. The digest is a checked
+precondition, not an atomic body lock or a guarantee that metadata stays unchanged
+while queued. Adding another read cannot remove that limit. Existing completed
+legacy operations keep their original digest-free identity and stored result;
+new enqueue operations require the reviewed-body digest. The enqueue result
 reports the state the entry was created in, which makes an immediately
 `UNMERGEABLE` entry visible. An entry already present before the durable claim
 is refused as external; it is never adopted as an App enqueue. The read-only

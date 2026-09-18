@@ -631,7 +631,8 @@ pub(crate) struct EnqueuePullRequest {
     /// branch's queue instead.
     pub(crate) base: String,
     /// Digest of the exact rendered PR body that was independently reviewed.
-    /// The enqueue authority re-reads the body before claiming the queue write.
+    /// Checked after the durable claim, immediately before enqueue. GitHub
+    /// atomically binds only the head; a body edit can race with that write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reviewed_body_digest: Option<String>,
 }
