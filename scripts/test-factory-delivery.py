@@ -37,6 +37,13 @@ class DeliveryFixtures(unittest.TestCase):
         self.assertIn("issue #602", self.enqueued[0]["body"])
         self.assertIn("issue #512", self.enqueued[1]["body"])
 
+    def test_shared_source_is_never_closed_by_destination_delivery(self):
+        self.receipt['delivery_sources'][0]['repository'] = 'other/backlog'
+        with mock.patch.object(delivery, "load_intake", return_value=self.intake):
+            task_ids = delivery.deliver(self.config, {"repository": "example/factory"}, self.receipt)
+        self.assertEqual(len(task_ids), 1)
+        self.assertNotIn('602', self.enqueued[0]['body'])
+
     def test_legacy_receipt_without_mapping_is_rejected(self):
         del self.receipt["delivery_sources"]
         with mock.patch.object(delivery, "load_intake", return_value=self.intake), self.assertRaisesRegex(ValueError, "source mapping"):

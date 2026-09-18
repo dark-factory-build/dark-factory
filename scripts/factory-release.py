@@ -264,7 +264,7 @@ def release_source_footer(body):
         raise ReleaseError("merged pull request has an invalid source-footer trailer")
     if footer is None:
         return None
-    return footer.group(1).lower(), int(footer.group(2))
+    return footer.group(1).lower(), int(footer.group(3)), footer.group(2)
 
 
 def range_sources(config, previous, target):
@@ -320,8 +320,11 @@ def range_sources(config, previous, target):
             footer = release_source_footer(detail["body"])
             if footer is None:
                 continue
-            kind, issue = footer
-            sources.append({"pr": number, "merge_sha": merge, "issue": int(issue), "reference": kind.lower()})
+            kind, issue, source_repository = footer
+            source = {"pr": number, "merge_sha": merge, "issue": int(issue), "reference": kind.lower()}
+            if source_repository:
+                source["repository"] = source_repository
+            sources.append(source)
     if processed != set(by_number):
         raise ReleaseError("deployment pull-request lookup did not cover every merged PR")
     return sources, "range"

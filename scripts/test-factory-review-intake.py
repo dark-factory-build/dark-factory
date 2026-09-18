@@ -36,6 +36,11 @@ class ReviewIntakeTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_qualified_source_cannot_borrow_same_number_local_issue(self):
+        journal = json.loads(Path(self.config['journal']).read_text())
+        self.assertIsNone(review.linked_issue(self.config, {'number': 9, 'body': 'Refs other/backlog#7'}, journal))
+        self.assertEqual(7, review.linked_issue(self.config, {'number': 9, 'body': 'Refs O/R#7'}, journal))
+
     def test_discovery_processes_one_bounded_overflow_pr_instead_of_starving_it(self):
         prs = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 11)]
         with patch.object(review.intake, 'command', return_value=json.dumps(prs)) as command:
