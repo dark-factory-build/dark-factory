@@ -1199,6 +1199,18 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.equal(connected.includes("evil.example"), false);
   assert.match(disconnected, /GITHUB/);
 
+  const pagerCalls = [];
+  const pageProps = (installations) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => pagerCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "pager", state: "connected", repositories: [] }, installations } } });
+  act(() => { renderer = create(createElement(FactoryConsole, pageProps({ installations: [{ id: 7, account: { id: 8, login: "factory-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/7", eligibility: "available" }], next_page: 2 }))); });
+  pagerCalls.length = 0;
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "MORE INSTALLATIONS").props.onClick(); });
+  act(() => { renderer.update(createElement(FactoryConsole, pageProps({ installations: [{ id: 8, account: { id: 9, login: "another-org" }, suspended_at: null, html_url: "https://github.com/settings/installations/8", eligibility: "available" }], next_page: 3 }))); });
+  assert.equal(renderer.root.findAllByType("button").some((button) => button.props.children === "PREVIOUS INSTALLATIONS"), true);
+  act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "REFRESH ACCESS").props.onClick(); });
+  assert.deepEqual(pagerCalls, [{ action: "installations", page: 2 }, { action: "refresh" }]);
+  assert.equal(renderer.root.findAllByType("button").some((button) => button.props.children === "PREVIOUS INSTALLATIONS"), false);
+  renderer.unmount();
+
   const repositoryCalls = [];
   const statusRepositories = [];
   const repositoryProps = (repositories, delegated = statusRepositories, installationID = 7) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => repositoryCalls.push(request), github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "connected", repositories: delegated }, installations: { installations: [{ id: installationID, account: { id: 8, login: "factory-org" }, suspended_at: null, eligibility: "available" }], }, repositories } } });
