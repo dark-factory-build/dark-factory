@@ -18,7 +18,7 @@ import (
 )
 
 func TestLegacyHomeMigratesAndKeepsEveryRow(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v11UserVersion, v12UserVersion, v13UserVersion, v14UserVersion} {
 		for _, persistWAL := range []bool{false, true} {
 			t.Run(fmt.Sprintf("v%d/wal=%v", version, persistWAL), func(t *testing.T) {
 				testLegacyHomeMigratesAndKeepsEveryRow(t, version, persistWAL)
@@ -129,60 +129,6 @@ func testLegacyHomeMigratesAndKeepsEveryRow(t *testing.T, version int, persistWA
 	}
 	if after := snapshotRows(t, ctx, again); !reflect.DeepEqual(before, after) {
 		t.Fatal("reopening a migrated home changed rows")
-	}
-}
-
-func TestV15LibraryMigrationPreservesDelegation(t *testing.T) {
-	path, _ := newLegacyDatabase(t, false, v15UserVersion)
-	store, err := Open(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	var prerequisite, conflict int
-	if err := store.readers.QueryRow(`SELECT
-		(SELECT COUNT(*) FROM task_prerequisites WHERE task_id = ? AND upstream_task_id = ? AND upstream_work_revision = 1 AND consumed_run_id IS NULL),
-		(SELECT COUNT(*) FROM task_conflict_paths WHERE task_id = ? AND path = 'src/example.go')`, taskID(t, 210).Bytes(), taskID(t, 3).Bytes(), taskID(t, 210).Bytes()).Scan(&prerequisite, &conflict); err != nil {
-		t.Fatal(err)
-	}
-	if prerequisite != 1 || conflict != 1 {
-		t.Fatalf("migration lost delegation: prerequisite=%d conflict=%d", prerequisite, conflict)
-	}
-	for _, table := range []string{"project_content_revisions", "project_content_evidence", "task_content_references"} {
-		var count int
-		if err := store.readers.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("new optional table %s: count=%d error=%v", table, count, err)
-		}
-	}
-}
-
-func TestV16OutcomeMigrationPreservesLibrary(t *testing.T) {
-	ctx := context.Background()
-	path, _ := newLegacyDatabase(t, false, v16UserVersion)
-	store, err := Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	first, firstBody, err := store.LegacyContent(ctx, contentID(t, 212), 1)
-	if err != nil || firstBody != "original definition" {
-		t.Fatalf("original revision: %+v %v", first, err)
-	}
-	second, secondBody, err := store.LegacyContent(ctx, contentID(t, 212), 2)
-	if err != nil || secondBody != "corrected definition" {
-		t.Fatalf("corrected revision: %+v %v", second, err)
-	}
-	evidence, err := store.ListContentEvidence(ctx, projectID(t, 1), contentID(t, 212), mustRevision(t, 1), 0, 4)
-	if err != nil || len(evidence.Items) != 1 || evidence.Items[0].Result != "passed" {
-		t.Fatalf("retained evidence: %+v %v", evidence, err)
-	}
-	refs, err := store.TaskContentReferences(ctx, projectID(t, 1), taskID(t, 210), mustRevision(t, 1))
-	if err != nil || len(refs) != 1 || refs[0].ContentRevision.Int64() != 1 {
-		t.Fatalf("retained attachment: %+v %v", refs, err)
-	}
-	var count int
-	if err := store.readers.QueryRow("SELECT COUNT(*) FROM project_outcome_revisions").Scan(&count); err != nil || count != 0 {
-		t.Fatalf("optional outcome table: %d %v", count, err)
 	}
 }
 
@@ -319,28 +265,6 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 		}
 	}
 	project := projectID(t, 1)
-	if version >= v15UserVersion {
-		_, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 210), ProjectID: project, AssignedAgentID: agentID(t, 2), IncarnationID: incarnationID(t, 211), Title: "dependent", Prerequisites: []TaskPrerequisite{{TaskID: taskID(t, 3), WorkRevision: mustRevision(t, 1)}}, ConflictPaths: []string{"src/example.go"}}, mustTime(t, 6))
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if version >= v16UserVersion {
-		id := contentID(t, 212)
-		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 1, ?, '', 'original definition', 'operator:local', '', 0, 9)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
-		corruptSQL(t, store, `INSERT INTO project_content_revisions(id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms) VALUES(?, ?, ?, 2, ?, '', 'corrected definition', 'operator:local', '', 0, 10)`, id.Bytes(), project.Bytes(), string(ContentAcceptanceScenario), "retained scenario")
-		content := ContentRevision{ID: id, ProjectID: project, Revision: mustRevision(t, 1)}
-		evidence, err := ContentEvidenceIDFromBytes(bytes.Repeat([]byte{213}, IDBytes))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.CreateContentEvidence(ctx, NewContentEvidence{ID: evidence, ProjectID: project, ContentID: content.ID, ContentRevision: content.Revision, TestedSource: "retained-source", Result: "passed", Evaluator: "operator:local"}, mustTime(t, 11)); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.AttachContentToTask(ctx, taskID(t, 210), project, content.ID, content.Revision, mustTime(t, 12)); err != nil {
-			t.Fatal(err)
-		}
-	}
 	for _, agent := range []struct {
 		seed     byte
 		provider Provider
@@ -425,15 +349,17 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 	if err := rebuildTable(ctx, connection, legacy, "tasks", taskColumnsFor, "tasks_id_project_incarnation_unique", "tasks_incarnation_unique", "tasks_canonical_queue", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	// Every version before v14 bound a Git-free tree by its manifest facts,
-	// which a prepared, available or retained row had to carry.
-	if version < v14UserVersion {
+	if version >= v14UserVersion {
+		if err := rebuildTable(ctx, connection, legacy, "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "head_commit", "NULL"); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		// Older versions bound a Git-free tree by manifest facts.
 		if err := rebuildTable(ctx, connection, legacy, "changes", testChangeColumns, "changes_id_project_task_incarnation_unique", "changes_task_incarnation_unique", "tree_digest, entry_count, total_bytes, tree_dev, tree_inode",
 			"CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE zeroblob(32) END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 1 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 0 END, CASE WHEN prepared_at_ms IS NULL THEN NULL ELSE 2 END"); err != nil {
 			t.Fatal(err)
 		}
 	}
-
 	if version < priorUserVersion {
 		if err := rebuildTable(ctx, connection, legacy, "browser_pairing_challenges", previousPairingChallengeColumns, "", "", ""); err != nil {
 			t.Fatal(err)
@@ -453,19 +379,14 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	if version >= v16UserVersion && version < userVersion {
-		columns := "id, project_id, kind, revision, title, description, body, author, source_references, deprecated, created_at_ms"
-		if err := rebuildTable(ctx, connection, legacy, "project_content_revisions", columns, "project_content_revisions_project_kind", "", ""); err != nil {
-			t.Fatal(err)
+	if version < userVersion {
+		for _, statement := range []string{"DROP INDEX IF EXISTS project_content_revisions_project_kind", "DROP TABLE IF EXISTS task_content_references", "DROP TABLE IF EXISTS project_content_evidence", "DROP TABLE IF EXISTS project_content_revisions"} {
+			if _, err := connection.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("remove v15 content object: %v", err)
+			}
 		}
 	}
-	downgrade := []string{"DROP TABLE project_outcome_revisions", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
-	if version < v16UserVersion {
-		downgrade = append([]string{"DROP TABLE task_content_references", "DROP TABLE project_content_evidence", "DROP TABLE project_content_revisions"}, downgrade...)
-	}
-	if version < v15UserVersion {
-		downgrade = append([]string{"DROP TABLE task_conflict_paths", "DROP INDEX task_prerequisites_upstream", "DROP TABLE task_prerequisites"}, downgrade...)
-	}
+	downgrade := []string{fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
 	if version < v7UserVersion {
 		downgrade = append([]string{"DROP TABLE peer_questions"}, downgrade...)
 	}
@@ -666,22 +587,20 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "a3af3c17a532d6b7b324507554a00080ec1c26d61831e3c51f1f1a6ac5279457"},
-		{"v17", v17SchemaStatements(), "8e566e2483f36de3f9b9d13722bbab6fb58293787b77f201ab16d98c7084ff54"},
-		{"v16", v16SchemaStatements(), "2547d01bcfd2878245cb3e6d27c0116cb6ebb9a032bf4816834b2138892d8705"},
-		{"v15", v15SchemaStatements(), "4657aab650b20fbf6ff2dac4e57d334d954321da14b5e14224aab200247cb4dc"},
-		{"v13", v13SchemaStatements(), "f38d4c5ac959eb2c3b23e3c0ace78faa1859201688cb12314c0c4fa721db56db"},
-		{"v12", v12SchemaStatements(), "78ff7808dc146c35383329f73c94559172e824e0b72484bc56db48291dbadefa"},
-		{"v11", v11SchemaStatements(), "06e43f9cc643630e66b9f2606549735d9d170cee25da54fb072b8df14ba48bcd"},
-		{"v10", v10SchemaStatements(), "af5c61224274d2c62e8b78036e911239aa98d8b40154811cb9c4788ad224a603"},
-		{"v9", v9SchemaStatements(), "049dc8ff317e31a86157fd5366579954581a4468caaca63c5dd95ee2958ab4cb"},
-		{"v8", v8SchemaStatements(), "45606d5fa2b054c4ccee79c55f20b184f25ee0860ec5817099c0582174df676b"},
-		{"v7", v7SchemaStatements(), "c6793e1552a878dfff3fb4efc4179ba6343a26f122337580b6ac558e8a6bfedf"},
-		{"v6", v6SchemaStatements(), "4063acf5233e3aaf29fe932259283622df543733b56a7e78a359bd73ce85da8c"},
-		{"v4", v4SchemaStatements(), "6eb8be2af2f3efc8ed7d40ecf9bd1ec316675e39ad11fb8b0827a228e9232cf1"},
-		{"v3", priorSchemaStatements(), "2d5319a0afce6206d963631465833bc5f25d0f2261537f4f33c92a8e38a36009"},
-		{"v2", previousSchemaStatements(), "6a1de54c3fcad5f6770c6d80b91fda3f914e8b236f34d62bb875a7f4efde347c"},
-		{"v1", legacySchemaStatements(), "63a444a2fe57a994b712bfe5b56764d684b2cb3ed73d7324465d894107f96f33"},
+		{"current", schemaStatements, "6954f06a2b8d93e35d16b6cfe00bb4111030d94eecba66798740b7a578b6b3ad"},
+		{"v14", v14SchemaStatements(), "4657aab650b20fbf6ff2dac4e57d334d954321da14b5e14224aab200247cb4dc"},
+		{"v13", v13SchemaStatements(), "51354ebd4eecb9d6bca35030a228d9df58a0f744ab0cd3128e1dc68cb0c5760a"},
+		{"v12", v12SchemaStatements(), "5b438089e85612a2b3c58ef1f116737b139e9790456d6ed43602d885abf8f948"},
+		{"v11", v11SchemaStatements(), "55e9de3ade172e5c0ae15c219f7161931fc49c0f53d181614a751abecfa69718"},
+		{"v10", v10SchemaStatements(), "9a982d473640d53bf6a227380f6264e19df1f475b0ce87e7adb194ade0b284d4"},
+		{"v9", v9SchemaStatements(), "8edf9557995f4b599a8254b02b6a7cc376e3f97d71a2609746d7493dd79d9b81"},
+		{"v8", v8SchemaStatements(), "cd5cf949d35a43f0c5bb350e4f6a554f392a90080816d9935151acf670515481"},
+		{"v7", v7SchemaStatements(), "49845cd2fa61e8e09581a0aeef122a4f311e82288f166b2bd9517ba4322e994e"},
+		{"v6", v6SchemaStatements(), "e6714e226486209092c9052ace570d2b5c6c3711bc7482396fa8d820e2041291"},
+		{"v4", v4SchemaStatements(), "e054d3c42193dad71ccb4c3fbf2e13dad29c81999820ada7357aebb8a11866af"},
+		{"v3", priorSchemaStatements(), "793c38244a1b77f0b51d3f4fb821c1674f401997ff92ff6b7f0cf76f930454fa"},
+		{"v2", previousSchemaStatements(), "74ddb3f76f2c01ae06e4ea8c3db3f9cdef2312d7cc0a3904f74fd75b8ff934a2"},
+		{"v1", legacySchemaStatements(), "a6265126706feb27242cc5bb21aa22dc6e86b107e37982bebaa70457054016b7"},
 	} {
 		sum := sha256.Sum256([]byte(strings.Join(pin.statements, "\n")))
 		if got := hex.EncodeToString(sum[:]); got != pin.digest {
@@ -690,11 +609,50 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 	}
 }
 
+func TestV14ToV15AddsContentWithoutChangingDurableRows(t *testing.T) {
+	ctx := context.Background()
+	path, before := newLegacyDatabase(t, false, v14UserVersion)
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open v14: %v", err)
+	}
+	defer store.Close()
+	connection, err := store.readerConnection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, version, err := inspectIdentity(ctx, connection); err != nil || version != userVersion {
+		t.Fatalf("version = %d, %v, want %d", version, err, userVersion)
+	}
+	after := snapshotRows(t, ctx, connection)
+	for table, rows := range before {
+		if !reflect.DeepEqual(rows, after[table]) {
+			t.Fatalf("migration changed durable rows in %s", table)
+		}
+	}
+	var rawProject []byte
+	if err := connection.QueryRowContext(ctx, `SELECT id FROM projects LIMIT 1`).Scan(&rawProject); err != nil {
+		t.Fatal(err)
+	}
+	project, err := ProjectIDFromBytes(rawProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := ContentIDFromBytes(bytes.Repeat([]byte{7}, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateContent(ctx, NewContent{ID: content, ProjectID: project, Kind: ContentProcedure, Title: "post-migration", Author: "operator", Body: "steps"}, mustTime(t, 9)); err != nil {
+		t.Fatalf("create migrated content: %v", err)
+	}
+}
+
 // TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses is the only refusal
 // that reaches inside the migration transaction: the two above are rejected by
 // the preflight, on its disposable copy, before any pool exists.
 func TestLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t *testing.T) {
-	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion, v14UserVersion, v15UserVersion, v16UserVersion} {
+	for _, version := range []int{legacyUserVersion, previousUserVersion, priorUserVersion, v4UserVersion, v5UserVersion, v6UserVersion, v7UserVersion, v8UserVersion, v9UserVersion, v10UserVersion, v12UserVersion, v13UserVersion, v14UserVersion} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			testLegacyHomeWithBrokenDurableStateRollsBackAndRefuses(t, version)
 		})
