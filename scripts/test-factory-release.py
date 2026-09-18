@@ -152,6 +152,109 @@ class ReleaseFixtures(unittest.TestCase):
             verifier.assert_called_once_with(cfg, HEAD, snapshot()[2])
             command.assert_called_once()
 
+    def test_reconcile_supersedes_multiple_historical_blocked_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            old_sha, older_sha = OLD, "e" * 40
+            old = {"pr": 631, "sha": old_sha, "state": "blocked", "error": "old failure",
+                   "config_fingerprint": "f" * 64, "history": ["kept"]}
+            older = {"pr": 632, "sha": older_sha, "state": "blocked", "error": "older failure",
+                     "config_fingerprint": "e" * 64}
+            release.atomic_json(journal, {"version": 1, "live_tip": {"sha": OLD, "healthy": True},
+                                          "releases": {"631": old, "632": older}})
+            current = snapshot()
+            old_snapshot = tuple([dict(current[0], mergeCommitSha=old_sha), old_sha, [], current[3]])
+            older_snapshot = tuple([dict(current[0], mergeCommitSha=older_sha), older_sha, [], current[3]])
+            def compare(argv, *args, **kwargs):
+                target = next(part for part in argv if "..." in part).split("/")[-1].split("...")[0]
+                return json.dumps({"status": "ahead", "merge_base_commit": {"sha": target}})
+            with mock.patch.object(release, "gh_snapshot", side_effect=[current, old_snapshot, older_snapshot]), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "run", side_effect=compare):
+                result = release.reconcile(cfg, 633, SHA, [631, 632], baseline_current=True)
+            saved = release.load(journal)
+            self.assertEqual(result["delivery_mode"], "baseline_current")
+            self.assertEqual(saved["releases"]["631"]["error"], "old failure")
+            self.assertEqual(saved["releases"]["631"]["superseded_by"], {"pr": 633, "sha": SHA,
+                                                                     "source_pr": 631, "source_sha": old_sha})
+            self.assertEqual(saved["releases"]["632"]["config_fingerprint"], "e" * 64)
+            self.assertEqual(saved["releases"]["633"]["reconciliation"]["baseline_sha"], OLD)
+            for named in ([631, 632], []):
+                with mock.patch.object(release, "gh_snapshot", side_effect=[current, old_snapshot, older_snapshot]), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                     mock.patch.object(release, "run", side_effect=compare):
+                    release.reconcile(cfg, 633, SHA, named, baseline_current=bool(named))
+            for number, original in ((631, old), (632, older)):
+                preserved = dict(release.load(journal)["releases"][str(number)])
+                preserved.pop("superseded_by")
+                self.assertEqual(preserved, original)
+            with mock.patch.object(release, "gh_snapshot", return_value=current), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "run") as command:
+                self.assertEqual(release.once(cfg, 633)["state"], "verified")
+            command.assert_not_called()
+            repeated = release.load(journal)["releases"]["633"]["reconciliation"]
+            self.assertEqual(repeated["superseded_prs"], [{"pr": 631, "sha": old_sha}, {"pr": 632, "sha": older_sha}])
+            self.assertEqual(repeated["baseline_live_tip"]["sha"], OLD)
+            self.assertTrue(repeated["baseline_live_tip"]["healthy"])
+
+    def test_supersede_rejects_active_or_malformed_or_diverged_receipt_without_write(self):
+        for old_state, old_sha, comparison in (("running", OLD, "ahead"), ("blocked", "bad", "ahead"), ("blocked", OLD, "diverged")):
+            with self.subTest(old_state=old_state, old_sha=old_sha, comparison=comparison), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory) / "release.json"
+                cfg = config(journal)
+                before = {"version": 1, "releases": {"631": {"pr": 631, "sha": old_sha,
+                    "state": old_state, "error": "keep", "config_fingerprint": "f" * 64}}}
+                release.atomic_json(journal, before)
+                current = snapshot()
+                old_snapshot = tuple([dict(current[0], mergeCommitSha=OLD), OLD, [], current[3]])
+                def compare(argv, *args, **kwargs):
+                    base = argv[2].split("/")[-1].split("...")[0]
+                    return json.dumps({"status": comparison if base == OLD else "identical",
+                                       "merge_base_commit": {"sha": base}})
+                with mock.patch.object(release, "gh_snapshot", side_effect=[current, old_snapshot]), \
+                     mock.patch.object(release, "review_gate"), \
+                     mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                     mock.patch.object(release, "run", side_effect=compare):
+                    with self.assertRaises(release.ReleaseError):
+                        release.reconcile(cfg, 633, SHA, [631], baseline_current=True)
+                self.assertEqual(release.load(journal), before)
+
+    def test_superseded_receipt_is_only_ignored_with_verified_reconciliation_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            old = {"pr": 631, "sha": OLD, "state": "blocked", "config_fingerprint": "f" * 64,
+                   "superseded_by": {"pr": 633, "sha": SHA, "source_sha": OLD}}
+            target = {"pr": 633, "sha": SHA, "state": "verified",
+                      "verification": {"sha": SHA, "healthy": True},
+                      "reconciliation": {"mode": "operator_observed", "observed_sha": SHA,
+                                          "superseded_prs": [{"pr": 631, "sha": OLD}]}}
+            old["superseded_by"]["source_pr"] = 631
+            release.atomic_json(journal, {"version": 1, "releases": {"631": old, "633": target}})
+            newer = tuple([dict(snapshot()[0], mergeCommitSha=SECOND), SECOND, snapshot()[2], snapshot()[3]])
+            with mock.patch.object(release, "gh_snapshot", return_value=newer), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SECOND, "healthy": True}), \
+                 mock.patch.object(release, "range_sources", return_value=([], "range")), \
+                 mock.patch.object(release, "run") as command:
+                result = release.once(cfg, 634)
+            self.assertEqual(result["state"], "verified")
+            command.assert_not_called()
+            for invalid in (None, {}, [], [None]):
+                target["reconciliation"]["superseded_prs"] = invalid
+                release.atomic_json(journal, {"version": 1, "releases": {"631": old, "633": target}})
+                with mock.patch.object(release, "gh_snapshot") as github, \
+                     mock.patch.object(release, "run") as command:
+                    with self.assertRaises(release.ReleaseError):
+                        release.once(cfg, 634)
+                github.assert_not_called()
+                command.assert_not_called()
+
     def test_reconcile_accepts_reviewed_ancestor_when_default_advanced(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "release.json"
