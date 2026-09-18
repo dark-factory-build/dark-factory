@@ -42,11 +42,11 @@ type Daemon struct {
 	scheduledRun func(context.Context, kernel.RunID) (kernel.Run, bool, error)
 	// successSource* are package-test-only seams for failure-injection coverage;
 	// production source validation always reads the concrete Store.
-	successSourceRun      func(context.Context, kernel.RunID) (kernel.Run, bool, error)
-	successSourceChange   func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
-	successSourceProject  func(context.Context, kernel.ProjectID) (kernel.Project, bool, error)
-	beforeSuccessProposal func()
-	successSourceInspect  func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
+	successSourceRun        func(context.Context, kernel.RunID) (kernel.Run, bool, error)
+	successSourceChange     func(context.Context, kernel.ChangeID) (kernel.Change, bool, error)
+	successSourceRepository func(context.Context, kernel.TaskID) (kernel.ProjectRepository, bool, error)
+	beforeSuccessProposal   func()
+	successSourceInspect    func(context.Context, string, string, change.RepositoryIdentity, string) (change.WorktreeFacts, error)
 
 	browserMu          sync.Mutex
 	browserLifecycleMu sync.Mutex

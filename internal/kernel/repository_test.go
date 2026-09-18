@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestTaskRepositoryBindingSnapshotsDefaultAndScopesConflict(t *testing.T) {
 	store, _ := newTestStore(t)
+	if err := store.InitializeRepositoryBase(context.Background(), "HEAD"); err != nil {
+		t.Fatal(err)
+	}
 	project, err := store.CreateProject(context.Background(), NewProject{ID: projectID(t, 80), Name: "repositories", Root: filepath.Join(t.TempDir(), "first")}, mustTime(t, 8))
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +48,13 @@ func TestTaskRepositoryBindingSnapshotsDefaultAndScopesConflict(t *testing.T) {
 	secondTask, found, err := store.TaskRepository(ctx, taskID(t, 94))
 	if err != nil || !found || secondTask.ID != second.ID || secondTask.BaseRef != "release" {
 		t.Fatalf("second route = %#v/%v/%v", secondTask, found, err)
+	}
+	if _, err := store.UpdateProjectRepositoryBase(ctx, second.ID, secondTask.Revision, "develop", mustTime(t, 14)); err != nil {
+		t.Fatal(err)
+	}
+	retained, found, err := store.TaskRepository(ctx, taskID(t, 94))
+	if err != nil || !found || retained.BaseRef != "release" {
+		t.Fatalf("base change retargeted queued work: %#v/%v/%v", retained, found, err)
 	}
 	if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 96), ProjectID: project.ID, RepositoryID: RepositoryID(project.ID), AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 97), Title: "explicit", ConflictPaths: []string{"same"}}, mustTime(t, 14)); err != nil {
 		t.Fatal(err)
@@ -96,4 +107,110 @@ func repositoryID(t *testing.T, value byte) RepositoryID {
 		t.Fatal(err)
 	}
 	return id
+}
+
+func TestLegacyRepositoryBasePinsOnceAcrossMigrationAndRestart(t *testing.T) {
+	ctx := context.Background()
+	store, path := newTestStore(t)
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 130), Name: "legacy", Root: filepath.Join(t.TempDir(), "legacy")}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 131), ProjectID: project.ID, Name: "worker", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 10}, mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 132), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 133), Title: "queued before migration"}, mustTime(t, 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the exact v20 schema, which had no repository/base setting.
+	for _, statement := range []string{"DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "PRAGMA user_version = 20"} {
+		if _, err := store.writer.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, found, err := store.TaskRepository(ctx, task.ID)
+	if err != nil || !found || route.BaseRef != inheritedRepositoryBase {
+		t.Fatalf("migration guessed a base: %+v %v %v", route, found, err)
+	}
+	if err := store.InitializeRepositoryBase(ctx, "refs/heads/release"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InitializeRepositoryBase(ctx, "refs/heads/ignored"); err != nil {
+		t.Fatal(err)
+	}
+	route, found, err = store.TaskRepository(ctx, task.ID)
+	if err != nil || !found || route.ID != RepositoryID(project.ID) || route.BaseRef != "refs/heads/release" {
+		t.Fatalf("legacy route: %+v %v %v", route, found, err)
+	}
+	if _, err := store.UpdateProjectRepositoryBase(ctx, route.ID, route.Revision, "refs/heads/develop", mustTime(t, 5)); err != nil {
+		t.Fatal(err)
+	}
+	next, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 134), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 135), Title: "queued after update"}, mustTime(t, 6))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.InitializeRepositoryBase(ctx, "refs/heads/new-boot-default"); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[TaskID]string{task.ID: "refs/heads/release", next.ID: "refs/heads/develop"} {
+		route, found, err := store.TaskRepository(ctx, id)
+		if err != nil || !found || route.BaseRef != want {
+			t.Fatalf("task %v retargeted: %+v %v %v", id, route, found, err)
+		}
+	}
+	retainedDefault, found, err := store.DefaultProjectRepository(ctx, project.ID)
+	if err != nil || !found || retainedDefault.BaseRef != "refs/heads/develop" {
+		t.Fatalf("old project default retargeted: %+v %v %v", retainedDefault, found, err)
+	}
+	fresh, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 136), Name: "new", Root: filepath.Join(t.TempDir(), "new")}, mustTime(t, 7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newDefault, found, err := store.DefaultProjectRepository(ctx, fresh.ID)
+	if err != nil || !found || newDefault.BaseRef != "refs/heads/new-boot-default" {
+		t.Fatalf("new project did not inherit boot policy: %+v %v %v", newDefault, found, err)
+	}
+	if original, found, err := store.Task(ctx, task.ID); err != nil || !found || original.IncarnationID != task.IncarnationID || original.Revision != task.Revision {
+		t.Fatalf("migration changed task identity: %+v %v %v", original, found, err)
+	}
+}
+
+func TestRepositoryBaseInitializationPreservesBootArgumentBounds(t *testing.T) {
+	store, _ := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	for _, invalid := range []string{"", inheritedRepositoryBase, "-option", "bad\x00ref", strings.Repeat("a", 4097)} {
+		if err := store.InitializeRepositoryBase(ctx, invalid); !errors.Is(err, ErrInvalidValue) {
+			t.Fatalf("invalid base %q: %v", invalid, err)
+		}
+	}
+	base := strings.Repeat("a", 4096)
+	if err := store.InitializeRepositoryBase(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 140), Name: "long base", Root: filepath.Join(t.TempDir(), "repo")}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, found, err := store.DefaultProjectRepository(ctx, project.ID)
+	if err != nil || !found || repository.BaseRef != base {
+		t.Fatalf("boot base did not fit durable binding: %+v %v %v", repository, found, err)
+	}
 }

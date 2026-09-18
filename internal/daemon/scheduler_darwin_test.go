@@ -61,6 +61,9 @@ func TestSchedulerRetriesUncertainTerminalCompletionRead(t *testing.T) {
 
 func TestSchedulerKeepsAnActiveRunAfterReconciledAbsentAdmission(t *testing.T) {
 	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	if err := fixture.store.InitializeRepositoryBase(context.Background(), fixture.spec.BaseRevision); err != nil {
+		t.Fatal(err)
+	}
 	lock, err := sql.Open("sqlite3", "file:"+fixture.storePath)
 	if err != nil {
 		t.Fatal(err)

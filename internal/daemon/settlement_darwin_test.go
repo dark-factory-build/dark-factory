@@ -262,9 +262,9 @@ func TestSuccessfulWorkerOutcomeRefusesUnavailableSourceFacts(t *testing.T) {
 				t.Fatalf("refusal = %v", err)
 			}
 		},
-		"Store.Project": func(fixture *recoveryFixture, _ string) {
-			fixture.daemon.successSourceProject = func(context.Context, kernel.ProjectID) (kernel.Project, bool, error) {
-				return kernel.Project{}, false, errors.New("injected Project read failure")
+		"Store.TaskRepository": func(fixture *recoveryFixture, _ string) {
+			fixture.daemon.successSourceRepository = func(context.Context, kernel.TaskID) (kernel.ProjectRepository, bool, error) {
+				return kernel.ProjectRepository{}, false, errors.New("injected TaskRepository read failure")
 			}
 			err := fixture.daemon.validateSuccessSource(context.Background(), &liveAttempt{daemon: fixture.daemon, runID: fixture.run.ID}, success)
 			if !errors.Is(err, kernel.ErrConflict) {

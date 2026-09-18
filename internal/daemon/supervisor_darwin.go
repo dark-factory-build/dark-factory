@@ -151,6 +151,11 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		spec.AccountHome == "" || !filepath.IsAbs(spec.AccountHome) || filepath.Clean(spec.AccountHome) != spec.AccountHome || provider.ValidateToolPath(spec.ToolPath) != nil {
 		return kernel.Run{}, fmt.Errorf("%w: invalid supervisor specification", kernel.ErrInvalidValue)
 	}
+	// Production initializes this before recovery/listeners; direct supervisors
+	// use the same one-time transition before any admission.
+	if err := daemon.store.InitializeRepositoryBase(ctx, spec.BaseRevision); err != nil {
+		return kernel.Run{}, err
+	}
 	keys, err := newSupervisorKeys(rand.Reader)
 	if err != nil {
 		return kernel.Run{}, err
@@ -438,7 +443,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		AgentID: run.AgentID.String(), TaskIncarnationID: run.TaskIncarnationID.String(), PreviousWorkingDirectory: previousWorkingDirectory,
 		RuntimePath: gotRuntimePath, RuntimeIdentity: runtimeFileIdentity,
 		GitExecutable: spec.GitExecutable, FactoryctlExecutable: factoryctl.Path(), ToolPath: spec.ToolPath, ToolchainReadRoots: spec.ToolchainReadRoots, LocalCILeaseDir: localCILeaseDir, AccountHome: spec.AccountHome, AccountConfigDir: accountConfigDir, RepositoryRoot: repository.Root, RepositoryIdentity: repositoryIdentity, GitCommonDir: gitCommonDir,
-		Revision: spec.BaseRevision, ChangeParent: spec.ChangeParent, FinalName: finalName,
+		Revision: repository.BaseRef, ChangeParent: spec.ChangeParent, FinalName: finalName,
 		AttemptSocket: spec.AttemptSocket, Retained: retained, RetainedSourceReview: retainedSourceReview, ProviderTask: providerTask,
 	}
 	workerConfig, err := changeworker.EncodeConfig(config)

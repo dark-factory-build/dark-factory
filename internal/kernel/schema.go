@@ -49,7 +49,7 @@ var schemaStatements = []string{
     project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
     name TEXT NOT NULL CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
     root TEXT NOT NULL CHECK (length(CAST(root AS BLOB)) BETWEEN 1 AND 4096 AND substr(root, 1, 1) = '/'),
-    base_ref TEXT NOT NULL CHECK (length(CAST(base_ref AS BLOB)) BETWEEN 1 AND 256),
+    base_ref TEXT NOT NULL CHECK (length(CAST(base_ref AS BLOB)) BETWEEN 1 AND 4096),
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
     is_default INTEGER NOT NULL CHECK (is_default IN (0, 1)),
     revision INTEGER NOT NULL CHECK (revision >= 1),
@@ -130,7 +130,7 @@ var schemaStatements = []string{
 	`CREATE TABLE task_repository_bindings (
     task_id BLOB PRIMARY KEY CHECK (length(task_id) = 16) REFERENCES tasks(id),
     repository_id BLOB NOT NULL CHECK (length(repository_id) = 16) REFERENCES project_repositories(id),
-    base_ref TEXT NOT NULL CHECK (length(CAST(base_ref AS BLOB)) BETWEEN 1 AND 256)
+    base_ref TEXT NOT NULL CHECK (length(CAST(base_ref AS BLOB)) BETWEEN 1 AND 4096)
 ) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE project_outcome_revisions (
     id BLOB NOT NULL CHECK (length(id) = 16),

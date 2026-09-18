@@ -44,12 +44,23 @@ func (store *Store) CreateProject(ctx context.Context, spec NewProject, at UnixM
 		}
 		return Project{}, tx.Rollback(ErrConflict)
 	}
+	var rootExists bool
+	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM projects WHERE root = ?)`, spec.Root).Scan(&rootExists); err != nil {
+		return Project{}, tx.Rollback(err)
+	}
+	if rootExists {
+		return Project{}, tx.Rollback(ErrConflict)
+	}
 	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO projects(id, name, root, verification_policy, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 1, ?, ?)`, spec.ID.Bytes(), spec.Name, spec.Root, spec.VerificationPolicy.String(), at.Int64(), at.Int64()); err != nil {
 		return Project{}, tx.Rollback(err)
 	}
 	// Project creation keeps the old root input as the first durable binding so
 	// existing CLI invocations remain valid while every later route uses it.
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, 'HEAD', 1, 1, 1, ?, ?)`, spec.ID.Bytes(), spec.ID.Bytes(), spec.Name, spec.Root, at.Int64(), at.Int64()); err != nil {
+	base := store.repositoryBase
+	if base == "" {
+		base = inheritedRepositoryBase
+	}
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO project_repositories(id, project_id, name, root, base_ref, enabled, is_default, revision, created_at_ms, updated_at_ms) VALUES(?, ?, ?, ?, ?, 1, 1, 1, ?, ?)`, spec.ID.Bytes(), spec.ID.Bytes(), spec.Name, spec.Root, base, at.Int64(), at.Int64()); err != nil {
 		return Project{}, tx.Rollback(err)
 	}
 	if err := appendInvalidations(ctx, tx.connection, at, []pendingInvalidation{{kind: EntityProject, id: spec.ID.Bytes(), revision: 1}}); err != nil {

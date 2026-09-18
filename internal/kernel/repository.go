@@ -4,7 +4,53 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 )
+
+// A migration cannot know factoryd's --base-revision. This is an internal
+// placeholder, never a caller-selectable Git revision or a runtime fallback.
+const inheritedRepositoryBase = ":factoryd-base-revision"
+
+func validRepositoryBase(base string) bool {
+	return byteLen(base) >= 1 && byteLen(base) <= 4096 && utf8.ValidString(base) && !strings.ContainsRune(base, 0) && !strings.HasPrefix(base, "-") && base != inheritedRepositoryBase
+}
+
+// InitializeRepositoryBase pins legacy inheritance before recovery/listeners.
+// Already resolved repositories and task bindings are immutable here. The
+// boot default also applies to initial bindings of subsequently created projects.
+func (store *Store) InitializeRepositoryBase(ctx context.Context, base string) error {
+	if !validRepositoryBase(base) {
+		return ErrInvalidValue
+	}
+	if err := store.acquireWriter(ctx); err != nil {
+		return err
+	}
+	initialized := store.repositoryBase != ""
+	store.releaseWriter()
+	if initialized {
+		return nil
+	}
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	if store.repositoryBase != "" {
+		return tx.Rollback(nil)
+	}
+	for _, table := range []string{"project_repositories", "task_repository_bindings"} {
+		if _, err := tx.connection.ExecContext(ctx, `UPDATE `+table+` SET base_ref = ? WHERE base_ref = ?`, base, inheritedRepositoryBase); err != nil {
+			return tx.Rollback(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	// All readers of this process-owned default hold writerGate.
+	store.repositoryBase = base
+	return nil
+}
 
 // ProjectRepository is private operator configuration. Its root is never part
 // of a public snapshot; task and content bindings retain this ID and base ref.
@@ -43,7 +89,7 @@ func scanProjectRepository(scanner rowScanner) (ProjectRepository, bool, error) 
 	rev, revErr := NewRevision(revision)
 	createdAt, createdErr := NewUnixMillis(created)
 	updatedAt, updatedErr := NewUnixMillis(updated)
-	if idErr != nil || projectErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || byteLen(base) < 1 || byteLen(base) > 256 || (enabled != 0 && enabled != 1) || (defaultValue != 0 && defaultValue != 1) || updated < created {
+	if idErr != nil || projectErr != nil || revErr != nil || createdErr != nil || updatedErr != nil || byteLen(name) < 1 || byteLen(name) > 128 || !validAbsolutePath(root) || !validRepositoryBase(base) || (enabled != 0 && enabled != 1) || (defaultValue != 0 && defaultValue != 1) || updated < created {
 		return ProjectRepository{}, false, fmt.Errorf("%w: invalid project repository", ErrCorruptState)
 	}
 	return ProjectRepository{ID: id, ProjectID: projectID, Name: name, Root: root, BaseRef: base, Enabled: enabled == 1, Default: defaultValue == 1, Revision: rev, CreatedAt: createdAt, UpdatedAt: updatedAt}, true, nil
@@ -70,7 +116,7 @@ func (store *Store) TaskRepository(ctx context.Context, taskID TaskID) (ProjectR
 		return ProjectRepository{}, false, err
 	}
 	defer read.Close()
-	return scanProjectRepository(read.connection.QueryRowContext(ctx, `SELECT `+qualifiedProjectRepositoryColumns+` FROM project_repositories AS r JOIN task_repository_bindings AS b ON b.repository_id = r.id WHERE b.task_id = ?`, taskID.Bytes()))
+	return scanProjectRepository(read.connection.QueryRowContext(ctx, `SELECT r.id, r.project_id, r.name, r.root, b.base_ref, r.enabled, r.is_default, r.revision, r.created_at_ms, r.updated_at_ms FROM project_repositories AS r JOIN task_repository_bindings AS b ON b.repository_id = r.id WHERE b.task_id = ?`, taskID.Bytes()))
 }
 
 func (store *Store) ContentRepository(ctx context.Context, id ContentID, revision Revision) (ProjectRepository, bool, error) {
@@ -135,7 +181,7 @@ func (store *Store) DefaultProjectRepository(ctx context.Context, projectID Proj
 }
 
 func (store *Store) AddProjectRepository(ctx context.Context, spec NewProjectRepository, at UnixMillis) (ProjectRepository, error) {
-	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !validAbsolutePath(spec.Root) || byteLen(spec.BaseRef) < 1 || byteLen(spec.BaseRef) > 256 {
+	if spec.ID.zero() || spec.ProjectID.zero() || byteLen(spec.Name) < 1 || byteLen(spec.Name) > 128 || !validAbsolutePath(spec.Root) || !validRepositoryBase(spec.BaseRef) {
 		return ProjectRepository{}, ErrInvalidValue
 	}
 	tx, err := store.beginValidatedWrite(ctx)
@@ -249,7 +295,7 @@ func (store *Store) SetProjectRepositoryEnabled(ctx context.Context, id Reposito
 // UpdateProjectRepositoryBase affects only future selection; bindings retain
 // their copied base ref. Root and publication identity have no update path.
 func (store *Store) UpdateProjectRepositoryBase(ctx context.Context, id RepositoryID, expected Revision, base string, at UnixMillis) (ProjectRepository, error) {
-	if byteLen(base) < 1 || byteLen(base) > 256 {
+	if !validRepositoryBase(base) {
 		return ProjectRepository{}, ErrInvalidValue
 	}
 	tx, err := store.beginValidatedWrite(ctx)
