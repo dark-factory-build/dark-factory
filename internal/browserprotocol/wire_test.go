@@ -76,7 +76,7 @@ func TestControlFixturesRoundTrip(t *testing.T) {
 
 func decodeFixtureControl(name string, data []byte) (ControlFrame, error) {
 	switch name {
-	case "pair_prove", "auth_prove", "state_get", "state_watch", "human_request_detail_get", "task_enqueue", "project_create", "repositories_get", "repository_mutate", "terminal_target_get":
+	case "pair_prove", "auth_prove", "state_get", "state_watch", "human_request_detail_get", "task_enqueue", "project_create", "repositories_get", "repository_mutate", "terminal_target_get", "github_connection":
 		return DecodeClientControl(data)
 	default:
 		return DecodeServerControl(data)
@@ -177,6 +177,10 @@ func encodeDecoded(frame ControlFrame) ([]byte, error) {
 		return EncodeBrowserClientRevoke(frame.ID, value)
 	case BrowserClientRevokeResult:
 		return EncodeBrowserClientRevokeResult(frame.ID, value)
+	case GitHubConnection:
+		return encodeControl(TypeGitHubConnection, frame.ID, value)
+	case GitHubConnectionResult:
+		return EncodeGitHubConnectionResult(frame.ID, value)
 	case AgentUpdateResult:
 		return EncodeAgentUpdateResult(frame.ID, value)
 	case TaskUpdate:
@@ -697,6 +701,8 @@ func TestManifestMatchesImplementedRegistry(t *testing.T) {
 		{"BROWSER_CLIENTS", "server", "required", "browser_clients.json"},
 		{"BROWSER_CLIENT_REVOKE", "client", "required", "browser_client_revoke.json"},
 		{"BROWSER_CLIENT_REVOKE_RESULT", "server", "required", "browser_client_revoke_result.json"},
+		{"GITHUB_CONNECTION", "client", "required", "github_connection.json"},
+		{"GITHUB_CONNECTION_RESULT", "server", "required", "github_connection_result.json"},
 		{"REMOTE_INVITE", "client", "required", "remote_invite.json"},
 		{"REMOTE_INVITE_RESULT", "server", "required", "remote_invite_result.json"},
 		{"PUSH_SUBSCRIBE", "client", "required", "push_subscribe.json"},

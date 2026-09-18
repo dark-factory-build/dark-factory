@@ -108,6 +108,7 @@ export class FactorySettingsCoordinator {
           installations: request.action === "refresh" ? result.installations : sameConnection ? result.installations ?? this.#github.installations : result.installations,
           repositories: request.action === "refresh" ? result.repositories : sameConnection ? result.repositories ?? this.#github.repositories : result.repositories,
         };
+      }
       this.#githubError = undefined;
     } catch (error) {
       if (!this.#owner.current(generation)) return;
@@ -119,12 +120,6 @@ export class FactorySettingsCoordinator {
     if (request.action === "confirm" && this.#github?.state === "ok" || request.action === "refresh" && this.#github?.status?.state === "connected") {
       if (request.action === "confirm") await this.githubConnection({ action: "refresh" });
       else await this.githubConnection({ action: "installations", page: 1 });
-    }
-  }
-
-  clearRemoteInvite(): void {
-    this.#remoteInvite = undefined;
-    this.#remoteInviteError = undefined;
     }
   }
 
