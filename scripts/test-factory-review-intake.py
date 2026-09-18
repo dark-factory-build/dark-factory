@@ -36,6 +36,22 @@ class ReviewIntakeTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_discovery_processes_one_bounded_overflow_pr_instead_of_starving_it(self):
+        prs = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 12)]
+        with patch.object(review.intake, 'command', return_value=json.dumps(prs)) as command:
+            discovered = review.list_prs(dict(self.config, max_issues=10))
+        self.assertEqual([{'number': number, 'headRefOid': ('%040d' % number), 'body': 'Refs #7'} for number in range(1, 12)], discovered)
+        self.assertEqual(['--field', 'page=1'], command.call_args.args[0][-2:])
+
+    def test_discovery_cursor_reaches_prs_beyond_first_bounded_page(self):
+        page_one = [{'number': number, 'head': {'sha': ('%040d' % number)}, 'body': 'Refs #7'} for number in range(1, 12)]
+        page_two = [{'number': 12, 'head': {'sha': '%040d' % 12}, 'body': 'Refs #7'}]
+        with patch.object(review.intake, 'command', side_effect=[json.dumps(page_one), json.dumps(page_two)]) as command:
+            self.assertEqual(11, len(review.list_prs(dict(self.config, max_issues=10), 1)))
+            self.assertEqual([{'number': 12, 'headRefOid': '%040d' % 12, 'body': 'Refs #7'}], review.list_prs(dict(self.config, max_issues=10), 2))
+        self.assertEqual('page=1', command.call_args_list[0].args[0][-1])
+        self.assertEqual('page=2', command.call_args_list[1].args[0][-1])
+
     def test_only_app_footer_linked_pr_is_woken_once_after_lost_response(self):
         prs = [{'number': 9, 'headRefOid': SHA, 'body': 'text\nRefs #7\n'}]
         self.observe.return_value = 'allow'
@@ -183,7 +199,7 @@ class ReviewIntakeTest(unittest.TestCase):
         self.observe.side_effect = ['block', 'missing', 'block', 'missing']
         with patch.object(review, 'mirror', return_value=Path('/mirror')), \
              patch.object(review, 'list_prs', return_value=[{'number': 9, 'headRefOid': SHA, 'body': new_body}]), \
-             patch.object(review, 'verify_existing'), patch.object(review, 'app_receipt', return_value=True), \
+             patch.object(review, 'verify_existing'), patch.object(review, 'app_update_receipt', return_value=True), \
              patch.object(review, 'launch_review', return_value=1) as launch, \
              patch.object(review.intake, 'task_state', return_value={'status': 'queued'}):
             review.run_once(self.config)
@@ -195,6 +211,26 @@ class ReviewIntakeTest(unittest.TestCase):
         self.assertNotEqual(operation['review_operation'], corrected['review_operation'])
         self.assertTrue(corrected['review_attempted'])
         self.assertEqual(new_body, (snapshot / 'body.md').read_text())
+
+    def test_direct_body_edit_with_old_creation_marker_cannot_prove_update(self):
+        operation_id = '11111111-1111-4111-8111-111111111111'
+        body = 'direct author edit\n\n' + self.MARK % (operation_id, 'a' * 64)
+        value = {'state': 'completed', 'kind': 'create_pull_request', 'request_digest': 'a' * 64,
+                 'result': {'number': 9, 'url': 'https://github.com/o/r/pull/9'}}
+        with patch.object(review, 'observe_operation', return_value=value):
+            self.assertFalse(review.app_update_receipt(body, 9, 'o/r'))
+
+    def test_app_update_receipt_binds_digest_to_exact_current_body(self):
+        operation_id = '22222222-2222-4222-8222-222222222222'
+        updated = 'verified metadata\nRefs #7\n'
+        request = {'repository': 'o/r', 'operation_id': operation_id, 'pull_number': 9, 'body': updated}
+        digest = review.hashlib.sha256(json.dumps(request, separators=(',', ':')).encode()).hexdigest()
+        body = updated + '\n\n' + '<!-- dark-factory-operation:%s:%s -->' % (operation_id, digest)
+        value = {'state': 'completed', 'kind': 'update_pull_request_body', 'request_digest': digest,
+                 'result': {'number': 9, 'url': 'https://github.com/o/r/pull/9'}}
+        with patch.object(review, 'observe_operation', return_value=value):
+            self.assertTrue(review.app_update_receipt(body, 9, 'o/r'))
+            self.assertFalse(review.app_update_receipt('changed\n\n' + body, 9, 'o/r'))
 
     def test_launch_uses_host_boundary_exact_receipt_and_owned_group(self):
         operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')

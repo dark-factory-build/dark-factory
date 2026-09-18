@@ -82,6 +82,35 @@ def app_receipt(body, kinds, number, repository, object_path):
         and not parsed.query and not parsed.fragment and parsed.path.casefold() == expected.casefold()
 
 
+def app_update_receipt(body, number, repository):
+    """Prove the exact current body was rendered by one completed App update."""
+    marker = publication.APP_MARKER_TRAILER.search(body)
+    if marker is None:
+        return False
+    value = observe_operation(marker.group(1))
+    result = value.get("result")
+    if value["state"] != "completed" or value.get("kind") != "update_pull_request_body" \
+            or value.get("request_digest") != marker.group(2) or not isinstance(result, dict) \
+            or result.get("number") != number or not isinstance(result.get("url"), str):
+        return False
+    parsed = urlparse(result["url"])
+    expected = "/" + repository + "/pull/" + str(number)
+    if parsed.scheme != "https" or parsed.netloc != "github.com" or parsed.params or parsed.query or parsed.fragment \
+            or parsed.path.casefold() != expected.casefold():
+        return False
+    prefix = body[:marker.start()]
+    if prefix == "":
+        updated_body = ""
+    elif prefix.endswith("\n\n"):
+        updated_body = prefix[:-2]
+    else:
+        return False
+    request = {"repository": repository, "operation_id": marker.group(1),
+               "pull_number": number, "body": updated_body}
+    digest = hashlib.sha256(json.dumps(request, separators=(",", ":")).encode()).hexdigest()
+    return digest == marker.group(2)
+
+
 def linked_issue(config, pr, journal, existing=None):
     body = pr["body"]
     if not isinstance(body, str):
@@ -112,19 +141,32 @@ def linked_issue(config, pr, journal, existing=None):
     return issue
 
 
-def list_prs(config):
+def list_prs(config, page=1):
     limit = int(config.get("max_issues", 25))
-    raw = intake.command(["gh", "pr", "list", "--repo", config["repository"], "--state", "open", "--limit", str(limit + 1), "--json", "number,headRefOid,body"], timeout=int(config.get("command_timeout", 30)))
+    batch = limit + 1
+    if type(page) is not int or page < 1:
+        raise ReviewError("pull request discovery page is invalid")
+    # GitHub's pull-list endpoint gives us a bounded page cursor. Rotating the
+    # durable page across passes prevents entries beyond one full page from
+    # being permanently starved by newer open PRs.
+    raw = intake.command(["gh", "api", "repos/" + config["repository"] + "/pulls", "--method", "GET",
+                          "--field", "state=open", "--field", "per_page=" + str(batch),
+                          "--field", "page=" + str(page)], timeout=int(config.get("command_timeout", 30)))
     try:
         values = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ReviewError("gh returned invalid pull request JSON") from exc
-    if not isinstance(values, list) or len(values) > limit:
-        raise ReviewError("pull request review cap reached")
+    if not isinstance(values, list) or len(values) > batch:
+        raise ReviewError("gh returned more pull requests than the bounded discovery batch")
+    normalized = []
     for value in values:
-        if not isinstance(value, dict) or not isinstance(value.get("number"), int) or value["number"] < 1 or not isinstance(value.get("body"), str) or not isinstance(value.get("headRefOid"), str) or not SHA.fullmatch(value["headRefOid"]):
+        head = value.get("head") if isinstance(value, dict) else None
+        if not isinstance(value, dict) or not isinstance(value.get("number"), int) or value["number"] < 1 \
+                or not isinstance(value.get("body"), (str, type(None))) or not isinstance(head, dict) \
+                or not isinstance(head.get("sha"), str) or not SHA.fullmatch(head["sha"]):
             raise ReviewError("gh returned an invalid pull request")
-    return values
+        normalized.append({"number": value["number"], "headRefOid": head["sha"], "body": value.get("body") or ""})
+    return normalized
 
 
 def ready(config, path, pr, issue):
@@ -428,8 +470,14 @@ def run_locked(config, path, journal, journal_path):
     else:
         receipts = {"version": 2, "config_fingerprint": config_fingerprint(config), "pulls": {}}
     messages = []
+    page = receipts.get("discovery_page", 1)
+    if type(page) is not int or page < 1:
+        raise ReviewError("review receipt discovery page is invalid")
+    discovered = list_prs(config, page)
+    batch = int(config.get("max_issues", 25)) + 1
+    next_page = 1 if len(discovered) < batch else page + 1
     launched = False
-    for pr in list_prs(config):
+    for pr in discovered:
         key = str(pr["number"]) + ":" + pr["headRefOid"]
         existing = receipts["pulls"].get(key)
         try:
@@ -460,7 +508,7 @@ def run_locked(config, path, journal, journal_path):
             except OSError as exc:
                 raise ReviewError("stale review body snapshot is unavailable") from exc
             if snapshot != pr["body"]:
-                if not app_receipt(pr["body"], {"update_pull_request_body"}, pr["number"], config["repository"], "pull"):
+                if not app_update_receipt(pr["body"], pr["number"], config["repository"]):
                     raise ReviewError("changed review body has no completed App metadata update receipt")
                 prior = operation["review_operation"]
                 operation["prior_review_operation"] = prior
@@ -507,6 +555,8 @@ def run_locked(config, path, journal, journal_path):
         if intake.task_state(config, followup) is None:
             intake.enqueue(config, followup)
             messages.append("woke PR #" + str(pr["number"]) + " review " + state)
+    receipts["discovery_page"] = next_page
+    intake.atomic_json(journal_path, receipts)
     return messages
 
 
