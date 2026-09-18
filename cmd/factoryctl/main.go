@@ -2148,7 +2148,11 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		_, _ = io.WriteString(stderr, "factoryctl: operator client configuration is invalid\n")
 		return exitFailure
 	}
-	callContext, cancel := context.WithTimeout(ctx, attemptRequestTimeout)
+	timeout := attemptRequestTimeout
+	if command.kind == commandIntake {
+		timeout = 120 * time.Second
+	}
+	callContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments {
 		return runContent(callContext, client, command, stdout, stderr)

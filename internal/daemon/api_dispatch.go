@@ -152,7 +152,7 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 	}
 	dispatchContext, cancel := context.WithTimeout(ctx, defaultDispatchTimeout)
 	defer cancel()
-	if call.Kind() == api.CallMaintainer {
+	if call.Kind() == api.CallMaintainer || call.Kind() == api.CallIntake {
 		cancel()
 		dispatchContext, cancel = context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()

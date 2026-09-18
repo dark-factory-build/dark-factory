@@ -70,15 +70,16 @@ type IntakeCandidate struct {
 	Truncated    bool     `json:"truncated,omitempty"`
 }
 type IntakeResult struct {
-	AcceptanceCursor string            `json:"acceptance_cursor,omitempty"`
-	State            string            `json:"state"`
-	ImportedTasks    []string          `json:"imported_tasks,omitempty"`
-	Sources          []IntakeSource    `json:"sources,omitempty"`
-	Candidates       []IntakeCandidate `json:"candidates,omitempty"`
-	NextPage         *uint32           `json:"next_page,omitempty"`
-	ReviewedRevision uint64            `json:"reviewed_revision,omitempty"`
-	AcceptanceID     string            `json:"acceptance_id,omitempty"`
-	TaskID           string            `json:"task_id,omitempty"`
+	AcceptanceProgress bool              `json:"acceptance_progress,omitempty"`
+	AcceptanceCursor   string            `json:"acceptance_cursor,omitempty"`
+	State              string            `json:"state"`
+	ImportedTasks      []string          `json:"imported_tasks,omitempty"`
+	Sources            []IntakeSource    `json:"sources,omitempty"`
+	Candidates         []IntakeCandidate `json:"candidates,omitempty"`
+	NextPage           *uint32           `json:"next_page,omitempty"`
+	ReviewedRevision   uint64            `json:"reviewed_revision,omitempty"`
+	AcceptanceID       string            `json:"acceptance_id,omitempty"`
+	TaskID             string            `json:"task_id,omitempty"`
 }
 
 func ValidIntakeInput(input IntakeInput) bool {

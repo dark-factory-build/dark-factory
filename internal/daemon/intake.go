@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -305,11 +306,19 @@ func (daemon *Daemon) withdrawIntakeTask(ctx context.Context, acceptanceID kerne
 }
 
 func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSource, page uint32, tick bool, cursor string) api.IntakeResult {
+	// Leave response time inside the existing 90-second dispatch budget.
+	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
+	defer cancel()
 	result := api.IntakeResult{State: "ok", ReviewedRevision: uint64(source.Revision.Int64()), Candidates: []api.IntakeCandidate{}, ImportedTasks: []string{}}
+	failure := func(err error) api.IntakeResult {
+		result.State = intakeFailure(err).State
+		return result
+	}
+
 	if tick {
 		withdrawals, err := daemon.store.PendingIntakeWithdrawals(ctx, source.ID, source.AdmissionLimit)
 		if err != nil {
-			return intakeFailure(err)
+			return failure(err)
 		}
 		for _, accepted := range withdrawals {
 			if err := daemon.reconcileIntakeWithdrawal(ctx, accepted); err != nil {
@@ -330,15 +339,16 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 		const receiptPageSize = 25
 		pending, err := daemon.store.PendingIntakeAcceptancesAfter(ctx, source.ID, receiptPageSize, after)
 		if err != nil {
-			return intakeFailure(err)
+			return failure(err)
 		}
+		result.AcceptanceProgress = true
 		for index, accepted := range pending {
 			result.AcceptanceCursor = accepted.ID.String()
 			task, err := daemon.importAcceptedIntake(ctx, accepted)
 			if err == nil {
 				result.ImportedTasks = append(result.ImportedTasks, task.ID.String())
 			} else if !errors.Is(err, kernel.ErrConflict) && !errors.Is(err, kernel.ErrRevisionConflict) {
-				return intakeFailure(err)
+				return failure(err)
 			}
 			if index == len(pending)-1 && len(pending) < receiptPageSize {
 				result.AcceptanceCursor = ""
@@ -350,14 +360,14 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	}
 	observed, err := daemon.readIntakeIssues(ctx, source.GitHubRepositoryName, source.GitHubRepositoryID, page, source.LabelFilter, 0)
 	if err != nil {
-		return intakeFailure(err)
+		return failure(err)
 	}
 	result.NextPage = observed.NextPage
 	for _, issue := range observed.Issues {
 		snapshot := intakeSnapshot(source, issue)
 		accepted, found, err := daemon.store.LatestIntakeAcceptance(ctx, source.GitHubRepositoryID, issue.Number, issue.NodeID, source.ProjectID, source.TargetRepositoryID)
 		if err != nil {
-			return intakeFailure(err)
+			return failure(err)
 		}
 		var prior *kernel.IntakeAcceptance
 		if found {
@@ -385,15 +395,15 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 		if tick && reason == string(kernel.IntakeEligibleTrusted) && len(result.ImportedTasks) < int(source.AdmissionLimit) {
 			at, err := daemon.timestamp()
 			if err != nil {
-				return intakeFailure(err)
+				return failure(err)
 			}
 			accepted, err = daemon.store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, at, source.Revision)
 			if err != nil {
-				return intakeFailure(err)
+				return failure(err)
 			}
 			task, err := daemon.importAcceptedIntake(ctx, accepted)
 			if err != nil {
-				return intakeFailure(err)
+				return failure(err)
 			}
 			candidate.AcceptanceID = accepted.ID.String()
 			candidate.TaskID = task.ID.String()
