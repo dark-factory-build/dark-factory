@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -32,6 +33,8 @@ const (
 // TargetRepositoryID is selected at configuration time and never follows a
 // later project-default change.
 type IntakeSource struct {
+	PriorityDefault      int64
+	PriorityByLabel      map[string]int64
 	ID                   IntakeSourceID
 	GitHubRepositoryID   uint64
 	GitHubRepositoryName string
@@ -49,6 +52,8 @@ type IntakeSource struct {
 }
 
 type NewIntakeSource struct {
+	PriorityDefault      int64
+	PriorityByLabel      map[string]int64
 	ID                   IntakeSourceID
 	GitHubRepositoryID   uint64
 	GitHubRepositoryName string
@@ -154,7 +159,8 @@ func PreviewIntake(source IntakeSource, snapshot IntakeIssueSnapshot, accepted *
 	return IntakeNeedsManualAcceptance
 }
 
-func validIntakeSource(value IntakeSource) bool {
+// ValidIntakeSource checks the complete configuration before preview or mutation.
+func ValidIntakeSource(value IntakeSource) bool {
 	if value.ID.zero() || value.GitHubRepositoryID == 0 || value.GitHubRepositoryID > math.MaxInt64 || !validGitHubRepositoryName(value.GitHubRepositoryName) || value.ProjectID.zero() || value.TargetRepositoryID.zero() || value.Policy != IntakePolicyManual && value.Policy != IntakePolicyTrustedAuthors || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || value.Revision.Int64() < 1 || value.UpdatedAt.Int64() < value.CreatedAt.Int64() {
 		return false
 	}
@@ -162,6 +168,21 @@ func validIntakeSource(value IntakeSource) bool {
 		return false
 	}
 	if len(value.TrustedGitHubLogins) > maxTrustedGitHubLogins {
+		return false
+	}
+	if value.PriorityDefault < -1000000 || value.PriorityDefault > 1000000 || len(value.PriorityByLabel) > 25 {
+		return false
+	}
+	for label, priority := range value.PriorityByLabel {
+		if !validBoundedIntakeText(label, 1, maxIntakeLabelBytes) || priority < -1000000 || priority > 1000000 {
+			return false
+		}
+	}
+	// ponytail: priority JSON is capped at 2 KiB per source so 200 sources,
+	// including escaped labels, fit the existing 1 MiB operator reply. Raising
+	// this ceiling requires paginating configuration, not larger private reads.
+	priorities, err := json.Marshal(value.PriorityByLabel)
+	if err != nil || len(priorities) > 2048 {
 		return false
 	}
 	seen := make(map[string]bool, len(value.TrustedGitHubLogins))

@@ -56,6 +56,14 @@ class IntakeTest(unittest.TestCase):
         self.states[task_id] = {"status": "queued", "id": task_id, "incarnation": incarnation}
         return json.dumps({"id": task_id, "incarnation_id": incarnation})
 
+    def test_explicit_cutover_receipt_fences_legacy_before_remote_reads_or_enqueue(self):
+        marker = Path(str(Path(self.config['factory_home']).resolve()) + '.intake/migration.json')
+        marker.parent.mkdir()
+        marker.write_text('{}')
+        with self.assertRaisesRegex(INTAKE.IntakeError, 'explicitly cut over'):
+            INTAKE.run_once(self.config)
+        self.assertEqual([], self.calls)
+
     def test_unlimited_allowance_preserves_duration_and_finite_exhaustion_checks(self):
         with sqlite3.connect(Path(self.config["factory_home"]) / "factory.sqlite3") as database:
             database.executescript("CREATE TABLE projects (id BLOB, run_budget_limit INTEGER, runs_used INTEGER, max_run_seconds INTEGER); CREATE TABLE agents (id BLOB, project_id BLOB, role TEXT, provider TEXT);")

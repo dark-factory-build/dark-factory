@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run one independent host review and wake its overseer with the App receipt."""
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import importlib.util
@@ -107,7 +108,7 @@ def app_update_receipt(body, number, repository):
     return digest == marker.group(2)
 
 
-def linked_issue(config, pr, journal, existing=None):
+def linked_issue(config, pr, journal, existing=None, managed=None):
     body = pr["body"]
     if not isinstance(body, str):
         raise ReviewError("pull request body is invalid")
@@ -127,14 +128,21 @@ def linked_issue(config, pr, journal, existing=None):
         return issue
     if matched:
         raise Unproven("terminal footer #" + str(issue) + " is not the tracked source #" + str(min(matched)) + " the body also links")
-    if existing is not None and existing.get("source_marker") == intake.source_marker(config, {"number": issue}):
+    if managed is None and existing is not None and existing.get("source_marker") == intake.source_marker(config, {"number": issue}):
         return issue
-    # An overseer tracking issue never enters the intake journal (it has no
-    # intake label), so prove the App wrote both objects: the PR's own marker
-    # is a completed publication receipt for this PR number, and the footer
-    # issue's marker is the completed create_issue receipt for that number.
+    # New managed work needs both imported acceptance lineage and a completed
+    # PR publication receipt. The legacy App-created tracking-issue fallback
+    # below still proves both objects; App authorship alone grants no approval.
     if not app_receipt(body, {"create_pull_request", "update_pull_request_body"}, pr["number"], config["repository"], "pull"):
         raise Unproven("footer #" + str(issue) + " is not an intake-managed source and PR #" + str(pr["number"]) + " has no completed App publication receipt")
+    if managed is not None:
+        controller, receipt, factoryctl = managed
+        request = dict(receipt['request'], action='legacy_lineage', issue_number=issue)
+        reply = controller.managed_api(factoryctl, Path(config['factory_home']), ['legacy_lineage'], request)
+        if reply.get('state') == 'imported' and all(isinstance(reply.get(key), str) and intake.ID_RE.fullmatch(reply[key]) for key in ('acceptance_id', 'task_id')):
+            return issue
+        if reply.get('state') != 'not_found':
+            raise Unproven('managed source lineage is unavailable for footer #' + str(issue))
     try:
         source = intake.exact_issue(config, issue)
     except intake.IssueBodyTooLarge as exc:
@@ -215,7 +223,7 @@ def bridge_call(name, arguments):
         raise ReviewError("maintainer bridge is not a safe executable")
     request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
     try:
-        response = subprocess.run([bridge], input=json.dumps(request) + "\n", capture_output=True, text=True, timeout=40, check=True)
+        response = subprocess.run([bridge], input=json.dumps(request) + "\n", capture_output=True, text=True, timeout=40, check=True, pass_fds=() if intake.CONTROLLER_LOCK_FD is None else (intake.CONTROLLER_LOCK_FD,))
         reply = json.loads(response.stdout)
         result = reply["result"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
@@ -343,6 +351,7 @@ def merge_failure_followup(config, operation):
 
 
 def enqueue_allowed(config, operation, journal_path, receipts):
+    require_legacy_home(config)
     # One durable id per exact head, journaled before the write; an id an
     # operator already recorded is kept so a repair is never replayed.
     operation.setdefault("enqueue_operation", str(uuid.uuid5(uuid.NAMESPACE_URL, "dark-factory:host-enqueue:" + config["repository"] + ":" + str(operation["pr"]) + ":" + operation["head"])))
@@ -380,6 +389,7 @@ def enqueue_allowed(config, operation, journal_path, receipts):
 
 
 def launch_review(config, path, pr, operation):
+    require_legacy_home(config)
     # The existing process-group wrapper owns and verifies reviewer cleanup.
     # A parent subprocess timeout must not kill only the shell and orphan Codex.
     directory = Path(config["journal"]).parent / ("review-" + str(pr["number"]) + "-" + operation["head"])
@@ -398,7 +408,7 @@ def launch_review(config, path, pr, operation):
         return subprocess.run(["/bin/sh", "-c", '. "$1"; shift; go_gate_run_bounded "$@"', "review-process-owner",
                                str(HERE / "go-gate-environment.sh"), "1200", str(HERE / "cold-review.sh"),
                                config["repository"], str(pr["number"]), operation["head"], operation["base"], str(body)],
-                              cwd=directory, env=env, stdout=output, stderr=subprocess.STDOUT).returncode
+                              cwd=directory, env=env, stdout=output, stderr=subprocess.STDOUT, pass_fds=() if intake.CONTROLLER_LOCK_FD is None else (intake.CONTROLLER_LOCK_FD,)).returncode
 
 
 def review_body_path(config, pr, operation):
@@ -459,23 +469,75 @@ def legacy_config_fingerprint(config):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def run_once(config):
-    config = intake.validate_config(config)
-    path = mirror(config)
-    journal_path = Path(config["journal"] + ".reviews.json")
-    lock_path = Path(str(journal_path) + ".lock")
-    journal = intake.load_journal(Path(config["journal"]))
-    intake.bind_journal(config, journal)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+") as lock:
+def require_legacy_home(config):
+    home = Path(config['factory_home'])
+    if not home.is_dir() or home.stat().st_uid != os.geteuid():
+        raise ReviewError('legacy review factory home is unavailable')
+    try:
+        (Path(config['factory_home']) / 'maintainer.json').lstat()
+    except FileNotFoundError:
+        return
+    raise ReviewError('Legacy review is owner-only and stops after customer GitHub opt-in, including disconnect. Use the installed customer publication workflow; do not restart the legacy bridge.')
+
+
+@contextlib.contextmanager
+def review_ownership(config, inherited):
+    # ponytail: one CLI pass owns one factory. Parallel reviews require passing
+    # the retained descriptor explicitly instead of this process-local handle.
+    path = Path(str(Path(config['factory_home']).resolve()) + '.autonomy.lock')
+    with contextlib.ExitStack() as ownership:
+        if inherited is None:
+            spec = importlib.util.spec_from_file_location('factory_autonomy', HERE / 'factory-autonomy.py')
+            controller = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(controller)
+            inherited = ownership.enter_context(controller.managed_lock(path))
+        else:
+            proof, current = os.fstat(inherited), path.lstat()
+            if not stat.S_ISREG(proof.st_mode) or proof.st_uid != os.geteuid() or stat.S_IMODE(proof.st_mode) != 0o600 or proof.st_nlink != 1 or (proof.st_dev, proof.st_ino) != (current.st_dev, current.st_ino):
+                raise ReviewError('legacy controller ownership is invalid')
+            fcntl.flock(inherited, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        previous = intake.CONTROLLER_LOCK_FD
+        intake.CONTROLLER_LOCK_FD = inherited
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise ReviewError("another review intake process owns the journal") from exc
-        return run_locked(config, path, journal, journal_path)
+            yield
+        finally:
+            intake.CONTROLLER_LOCK_FD = previous
 
 
-def run_locked(config, path, journal, journal_path):
+def run_once(config, managed=None, controller_lock_fd=None):
+    config = intake.validate_config(config)
+    with review_ownership(config, controller_lock_fd):
+        require_legacy_home(config)
+        path = mirror(config)
+        journal_path = Path(config["journal"] + ".reviews.json")
+        lock_path = Path(str(journal_path) + ".lock")
+        journal = intake.load_journal(Path(config["journal"]))
+        intake.bind_journal(config, journal)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ReviewError("another review intake process owns the journal") from exc
+            return run_locked(config, path, journal, journal_path, managed)
+
+
+def enqueue_followup(config, followup, pr, journal, managed):
+    require_legacy_home(config)
+    if managed is not None:
+        # Review may run for minutes. Recheck withdrawal/live authority at the
+        # write boundary and bind this generated operator task to the frozen route.
+        try:
+            if linked_issue(config, pr, journal, managed=managed) is None:
+                return False
+        except Unproven:
+            return False
+        followup['repository_id'] = managed[1]['request']['configuration']['target_repository_id']
+    intake.enqueue(config, followup)
+    return True
+
+
+def run_locked(config, path, journal, journal_path, managed=None):
     provider = review_provider(config)
     if journal_path.exists():
         try:
@@ -499,7 +561,7 @@ def run_locked(config, path, journal, journal_path):
         key = str(pr["number"]) + ":" + pr["headRefOid"]
         existing = receipts["pulls"].get(key)
         try:
-            issue = linked_issue(config, pr, journal, existing)
+            issue = linked_issue(config, pr, journal, existing, managed)
         except Unproven as exc:
             messages.append("skipped PR #" + str(pr["number"]) + ": " + str(exc))
             continue
@@ -584,12 +646,10 @@ def run_locked(config, path, journal, journal_path):
                 intake.atomic_json(journal_path, receipts)
                 if merge["state"] == "NOT_QUEUED" and merge["pull_state"] == "open":
                     followup = merge_failure_followup(config, operation)
-                    if intake.task_state(config, followup) is None:
-                        intake.enqueue(config, followup)
+                    if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
                         messages.append("woke PR #" + str(pr["number"]) + " queue failure")
         followup = review_followup(config, operation, state)
-        if intake.task_state(config, followup) is None:
-            intake.enqueue(config, followup)
+        if intake.task_state(config, followup) is None and enqueue_followup(config, followup, pr, journal, managed):
             messages.append("woke PR #" + str(pr["number"]) + " review " + state)
     receipts["discovery_page"] = next_page
     intake.atomic_json(journal_path, receipts)
@@ -600,10 +660,25 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--controller-lock-fd", type=int)
+    parser.add_argument("--managed-migration", type=Path)
+    parser.add_argument("--factoryctl", type=Path)
     args = parser.parse_args(argv)
     try:
         config = json.loads(args.config.read_text())
-        print(json.dumps({"ok": True, "messages": run_once(config)}))
+        managed = None
+        if args.managed_migration is not None:
+            spec = importlib.util.spec_from_file_location('factory_autonomy', HERE / 'factory-autonomy.py')
+            controller = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(controller)
+            home, state, identity = controller.managed_paths(Path(config['factory_home']))
+            if args.managed_migration != state / 'migration.json' or args.factoryctl is None or not args.factoryctl.is_absolute():
+                raise ReviewError('managed review requires the installed controller receipt and CLI')
+            receipt = controller.managed_read(args.managed_migration, maximum=4 << 20)
+            if not receipt or receipt.get('phase') != 'completed' or receipt.get('home_identity') != identity or json.loads(receipt['config']) != config:
+                raise ReviewError('managed review migration does not match the frozen configuration')
+            managed = controller, receipt, args.factoryctl
+        print(json.dumps({"ok": True, "messages": run_once(config, managed, args.controller_lock_fd)}))
         return 0
     except (OSError, ValueError, json.JSONDecodeError, intake.IntakeError, ReviewError) as exc:
         print("factory-review-intake: " + str(exc), file=__import__("sys").stderr)

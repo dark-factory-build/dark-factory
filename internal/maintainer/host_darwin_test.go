@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/install"
+	"golang.org/x/sys/unix"
 )
 
 func TestHostDisconnectPersistsBeforeRemoteRevocation(t *testing.T) {
@@ -113,5 +114,92 @@ func TestHostDisconnectPersistsBeforeRemoteRevocation(t *testing.T) {
 	restarted.client.origin = server.URL
 	if _, err := restarted.Connect(ctx); err != nil || !restarted.CustomerMode() {
 		t.Fatalf("reconnect: %v", err)
+	}
+}
+
+func TestHostInitialConnectFencesLegacyControllerUntilCredentialSaved(t *testing.T) {
+	parent, err := os.MkdirTemp("/private/tmp", "df-connect-fence-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	path := filepath.Join(parent, "home")
+	ctx := context.Background()
+	if _, err := install.Init(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	home, err := install.OpenOperationalHome(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer home.Close()
+	host, err := OpenHost(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(path+".autonomy.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	secret := strings.Repeat("ab", 32)
+	digest := sha256.Sum256([]byte(secret))
+	server := httptest.NewServer(http.HandlerFunc(func(out http.ResponseWriter, request *http.Request) {
+		calls++
+		if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); !errors.Is(err, unix.EWOULDBLOCK) {
+			t.Error("activation released legacy fence before credential save")
+		}
+		_ = json.NewEncoder(out).Encode(map[string]any{"connection_id": hex.EncodeToString(digest[:]), "credential": secret, "authorization_url": "https://github.com/login/oauth/authorize?state=fixture", "expires_at": time.Now().Unix() + 600})
+	}))
+	defer server.Close()
+	host.client.origin = server.URL
+	if _, err := host.Connect(ctx); !errors.Is(err, install.ErrBusy) || calls != 0 || host.CustomerMode() {
+		t.Fatalf("busy legacy pass permitted connect: %v calls=%d", err, calls)
+	}
+	if _, err := os.Stat(filepath.Join(path, "maintainer.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("blocked connect wrote credential")
+	}
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path+".autonomy.lock", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Connect(ctx); err == nil || calls != 0 {
+		t.Fatal("unsafe legacy lock permitted connect")
+	}
+	if err := os.Chmod(path+".autonomy.lock", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".autonomy.lock", path+".saved-lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path+".saved-lock", path+".autonomy.lock"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Connect(ctx); err == nil || calls != 0 {
+		t.Fatal("symlink legacy lock permitted connect")
+	}
+	if err := os.Remove(path + ".autonomy.lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".saved-lock", path+".autonomy.lock"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !host.CustomerMode() || calls != 1 {
+		t.Fatal("retry did not establish customer mode")
+	}
+	if _, err := os.Stat(filepath.Join(path, "maintainer.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal("durable connect retained fence", err)
 	}
 }

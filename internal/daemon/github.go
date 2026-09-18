@@ -75,6 +75,8 @@ func (daemon *Daemon) GitHubConnection(ctx context.Context, input api.GitHubConn
 	}
 	// Failed authorization never carries partial or previously cached metadata.
 	switch {
+	case errors.Is(err, install.ErrBusy):
+		return api.GitHubConnectionResult{State: "legacy_overseers_running"}
 	case errors.Is(err, maintainer.ErrDenied):
 		return api.GitHubConnectionResult{State: "denied"}
 	case errors.Is(err, maintainer.ErrInvalid):

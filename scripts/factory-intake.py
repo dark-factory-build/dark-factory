@@ -66,9 +66,13 @@ def atomic_json(path: Path, value: dict) -> None:
         raise
 
 
+# Inherited only by the single-home legacy review pass; never a credential.
+CONTROLLER_LOCK_FD = None
+
+
 def command(argv: list[str], env=None, timeout=30) -> str:
     try:
-        return subprocess.run(argv, check=True, text=True, capture_output=True, env=env, timeout=timeout).stdout
+        return subprocess.run(argv, check=True, text=True, capture_output=True, env=env, timeout=timeout, pass_fds=() if CONTROLLER_LOCK_FD is None else (CONTROLLER_LOCK_FD,)).stdout
     except subprocess.TimeoutExpired as exc:
         raise IntakeError(f"command timed out: {argv[0]}") from exc
     except (OSError, subprocess.CalledProcessError) as exc:
@@ -262,7 +266,12 @@ def operation_for(config: dict, issue: dict, source_fingerprint: str) -> dict:
 def enqueue(config: dict, operation: dict) -> None:
     env, home = os.environ.copy(), Path(config["factory_home"])
     env["DARK_FACTORY_SOCKET"], env["DARK_FACTORY_OPERATOR_TOKEN_FILE"] = str(home / "runtimes" / "factory.sock"), str(home / "operator.token")
-    raw = command(["factoryctl", "task", "add", "--project", config["project_id"], "--agent", config["overseer_agent_id"], "--title", operation["title"], "--body", operation["body"], "--priority", str(operation["priority"]), "--task-id", operation["task_id"], "--incarnation-id", operation["incarnation_id"]], env=env, timeout=int(config.get("command_timeout", 30)))
+    arguments = ["factoryctl", "task", "add", "--project", config["project_id"], "--agent", config["overseer_agent_id"], "--title", operation["title"], "--body", operation["body"], "--priority", str(operation["priority"]), "--task-id", operation["task_id"], "--incarnation-id", operation["incarnation_id"]]
+    if 'repository_id' in operation:
+        if not isinstance(operation['repository_id'], str) or not ID_RE.fullmatch(operation['repository_id']):
+            raise IntakeError('generated control task destination is invalid')
+        arguments += ['--repository', operation['repository_id']]
+    raw = command(arguments, env=env, timeout=int(config.get("command_timeout", 30)))
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -330,6 +339,8 @@ def run_once(config: dict) -> list[str]:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise IntakeError("another factory-intake process owns the journal") from exc
+        if Path(str(Path(config["factory_home"]).resolve()) + ".intake/migration.json").exists():
+            raise IntakeError("legacy intake was explicitly cut over; use the managed controller")
         journal = load_journal(journal_path)
         bind_journal(config, journal)
         numbers = set(listed_issues(config))

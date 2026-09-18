@@ -10,16 +10,19 @@ import (
 // Intake uses the same private operator actions for CLI, console and the
 // installed controller. Candidates cannot supply their own author or content.
 type IntakeConfiguration struct {
-	Repository         string   `json:"repository"`
-	TargetRepositoryID string   `json:"target_repository_id"`
-	OverseerAgentID    string   `json:"overseer_agent_id"`
-	Label              string   `json:"label"`
-	Policy             string   `json:"policy"`
-	TrustedAuthors     []string `json:"trusted_authors"`
-	PollSeconds        uint32   `json:"poll_seconds"`
-	AdmissionLimit     uint16   `json:"admission_limit"`
+	PriorityDefault    int64            `json:"priority_default,omitempty"`
+	PriorityByLabel    map[string]int64 `json:"priority_by_label,omitempty"`
+	Repository         string           `json:"repository"`
+	TargetRepositoryID string           `json:"target_repository_id"`
+	OverseerAgentID    string           `json:"overseer_agent_id"`
+	Label              string           `json:"label"`
+	Policy             string           `json:"policy"`
+	TrustedAuthors     []string         `json:"trusted_authors"`
+	PollSeconds        uint32           `json:"poll_seconds"`
+	AdmissionLimit     uint16           `json:"admission_limit"`
 }
 type IntakeInput struct {
+	Legacy           *LegacyIntakeInput   `json:"legacy,omitempty"`
 	AcceptanceCursor string               `json:"acceptance_cursor,omitempty"`
 	Action           string               `json:"action"`
 	SourceID         string               `json:"source_id,omitempty"`
@@ -40,7 +43,9 @@ type IntakeSync struct {
 	Error         string `json:"error"`
 }
 type IntakeSource struct {
-	Sync *IntakeSync `json:"sync,omitempty"`
+	PriorityDefault int64            `json:"priority_default,omitempty"`
+	PriorityByLabel map[string]int64 `json:"priority_by_label,omitempty"`
+	Sync            *IntakeSync      `json:"sync,omitempty"`
 
 	Repository         string   `json:"repository"`
 	TargetRepositoryID string   `json:"target_repository_id"`
@@ -70,6 +75,7 @@ type IntakeCandidate struct {
 	Truncated    bool     `json:"truncated,omitempty"`
 }
 type IntakeResult struct {
+	Legacy             *LegacyIntakePlan `json:"legacy,omitempty"`
 	AcceptanceProgress bool              `json:"acceptance_progress,omitempty"`
 	AcceptanceCursor   string            `json:"acceptance_cursor,omitempty"`
 	State              string            `json:"state"`
@@ -89,6 +95,13 @@ func ValidIntakeInput(input IntakeInput) bool {
 	allowed := IntakeInput{Action: input.Action}
 	valid := false
 	switch input.Action {
+	case "legacy_preview", "legacy_commit", "legacy_lineage":
+		allowed.SourceID, allowed.ProjectID, allowed.Configuration, allowed.Legacy = input.SourceID, input.ProjectID, input.Configuration, input.Legacy
+		valid = validID(input.SourceID) && validID(input.ProjectID) && input.Configuration != nil && input.Legacy != nil && validLegacyIntakeInput(*input.Legacy, input.Action == "legacy_commit")
+		if input.Action == "legacy_lineage" {
+			allowed.IssueNumber = input.IssueNumber
+			valid = valid && input.IssueNumber > 0 && validLegacyDigest(input.Legacy.PlanHash) && validID(input.Configuration.TargetRepositoryID)
+		}
 	case "list":
 		allowed.ProjectID = input.ProjectID
 		valid = input.ProjectID == "" || validID(input.ProjectID)
