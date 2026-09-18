@@ -16,22 +16,22 @@ export type AgentPanelView = "terminal" | "config";
 
 /** One private peer-conversation page, shared by queued and completed work. */
 export function TaskConversation({ brief, onOlder, pending = false }: { brief: TaskBrief; onOlder?: () => void; pending?: boolean }) {
-  return <section aria-label="Task conversation"><h3>CONVERSATION</h3>{brief.peerQuestions.length === 0 ? <p>NO PEER QUESTIONS</p> : <ol>{brief.peerQuestions.map((question) => <li key={question.id}><strong>QUESTION · {question.source_task_id} → {question.target_task_id}</strong><span>{question.question}</span><small>RECIPIENT DELIVERY · {question.recipient_delivery_state.toUpperCase()}</small>{question.answer === undefined || question.answer === "" ? null : <><span>ANSWER · {question.answer}</span><small>ANSWER DELIVERY · {question.answer_delivery_state.toUpperCase()}</small></>}</li>)}</ol>}{brief.nextPeerOffset === undefined || onOlder === undefined ? null : <button type="button" disabled={pending} onClick={onOlder}>OLDER CONVERSATION</button>}</section>;
+  return <section aria-label="Task conversation"><h3>Conversation</h3>{brief.peerQuestions.length === 0 ? <p>No peer questions</p> : <ol>{brief.peerQuestions.map((question) => <li key={question.id}><strong>Question · {question.source_task_id} → {question.target_task_id}</strong><span>{question.question}</span><small>Recipient delivery · {question.recipient_delivery_state.replaceAll("_", " ")}</small>{question.answer === undefined || question.answer === "" ? null : <><span>Answer · {question.answer}</span><small>Answer delivery · {question.answer_delivery_state.replaceAll("_", " ")}</small></>}</li>)}</ol>}{brief.nextPeerOffset === undefined || onOlder === undefined ? null : <button type="button" disabled={pending} onClick={onOlder}>Older conversation</button>}</section>;
 }
 
 const EDIT_ERRORS = new Map<string, string>([
-  ["stale", "SOMEONE ELSE CHANGED THIS — REOPEN IT AND TRY AGAIN"],
-  ["invalid_request", "THE FACTORY REFUSED THIS EDIT"],
-  ["not_found", "THIS NO LONGER EXISTS"],
-  ["too_large", "TOO LONG"],
-  ["rate_limited", "TOO MANY EDITS AT ONCE"],
-  ["unauthorized", "THIS BROWSER MAY NOT EDIT"],
-  ["unsupported", "THE FACTORY DOES NOT SUPPORT THIS YET"],
+  ["stale", "Someone else changed this. Reopen it and try again."],
+  ["invalid_request", "The factory refused this edit."],
+  ["not_found", "This no longer exists."],
+  ["too_large", "That is too long."],
+  ["rate_limited", "Too many edits at once. Try again shortly."],
+  ["unauthorized", "This browser cannot edit it."],
+  ["unsupported", "The factory does not support this yet."],
 ]);
 
 export function editErrorCopy(edit: FactoryEditView | undefined): string | undefined {
   if (edit?.error === undefined) return undefined;
-  return EDIT_ERRORS.get(edit.error.code) ?? "THE EDIT DID NOT COMPLETE";
+  return EDIT_ERRORS.get(edit.error.code) ?? "The edit did not complete.";
 }
 
 /** One agent: what it is doing, how it is configured, and what it owes. */
@@ -103,11 +103,11 @@ export function AgentPanel({
       {queueHint === undefined ? null : <p className="dfConsoleSidebar__inherit">{queueHint}</p>}
 
       {archived ? null : <div className="dfConsoleViewToggle" role="group" aria-label="Agent controls">
-        <button type="button" aria-pressed={panel === "terminal"} onClick={() => selectPanel("terminal")}>TERMINAL</button>
-        <button type="button" aria-pressed={panel === "config"} onClick={() => selectPanel("config")}>CONFIG</button>
+        <button type="button" aria-pressed={panel === "terminal"} onClick={() => selectPanel("terminal")}>Terminal</button>
+        <button type="button" aria-pressed={panel === "config"} onClick={() => selectPanel("config")}>Settings</button>
       </div>}
       {archived ? null : <section className="dfConsoleSidebar__section dfConsoleSidebar__terminalSlot" aria-label="Terminal" hidden={panel !== "terminal"}>
-        {terminalContent ?? <p className="dfFactoryConsole__empty">OPENING TERMINAL</p>}
+        {terminalContent ?? <p className="dfFactoryConsole__empty">Opening terminal…</p>}
       </section>}
 
       <section className="dfConsoleSidebar__section" aria-label="Agent configuration" hidden={!archived && panel !== "config"}>
@@ -284,7 +284,7 @@ export function QueuePanel({
     }),
   ];
   return <section className="dfConsoleSidebar__panel" aria-label="Queue">
-    {state === undefined ? <p className="dfFactoryConsole__empty">WAITING FOR SNAPSHOT</p>
+    {state === undefined ? <p className="dfFactoryConsole__empty">Waiting for the latest state…</p>
       : <>
         {running.length === 0 || selectedTaskId !== undefined ? null : <section className="dfConsoleSidebar__section" aria-label="Running tasks">
           <h3>Running <span>{running.length}</span></h3>
@@ -293,7 +293,7 @@ export function QueuePanel({
             <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"}</span>
           </div></li>)}</ul>
         </section>}
-        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">NO QUEUED TASKS</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ projectId, tasks }) => {
+        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">No queued tasks</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ projectId, tasks }) => {
           const peers = agents.filter((peer) => peer.project_id === projectId);
           return tasks.filter((task) => selectedTaskId === undefined || task.id === selectedTaskId).map((task) => <QueuedTask
               selected={selectedTaskId === task.id}
@@ -568,7 +568,7 @@ export function SettingsDialog({
     >
       <div className="dfConsoleSidebar__panel">
         <div className="dfConsoleSidebar__heading">
-          <h2>SETTINGS</h2>
+          <h2>Settings</h2>
           {onClose === undefined ? null : <button type="button" onClick={close}>CLOSE</button>}
         </div>
         <div className="dfConsoleSidebar__section" aria-label="PAIRING">
@@ -625,9 +625,9 @@ function ProjectLimitsSection({ state, edit, ready, onSave }: {
   onSave?: (project: { id: string; revision: bigint }, limits: { runBudget: bigint; maxRunSeconds: number }) => void;
 }) {
   const projects = state === undefined ? [] : [...state.projects.values()];
-  return <div className="dfConsoleSidebar__section" aria-label="PROJECT LIMITS">
-    <h3>PROJECT LIMITS</h3>
-    {projects.length === 0 ? <p className="dfFactoryConsole__empty">NO PROJECTS</p> : projects.map((project) => <ProjectLimitsForm key={`${project.id}:${project.revision}:${edit?.target === project.id && edit.error !== undefined ? "refused" : ""}`} project={project} edit={edit} ready={ready} onSave={onSave} />)}
+  return <div className="dfConsoleSidebar__section" aria-label="Project limits">
+    <h3>Project limits</h3>
+    {projects.length === 0 ? <p className="dfFactoryConsole__empty">No projects</p> : projects.map((project) => <ProjectLimitsForm key={`${project.id}:${project.revision}:${edit?.target === project.id && edit.error !== undefined ? "refused" : ""}`} project={project} edit={edit} ready={ready} onSave={onSave} />)}
   </div>;
 }
 
@@ -788,7 +788,7 @@ export function HumanRequestPanel({
           {selected.canReply ? null : <p className="dfFactoryConsole__empty">{selected.request.status === "open" ? "THIS OPEN DECISION IS READ-ONLY IN THIS VIEW." : `THIS DECISION IS ${selected.request.status.replaceAll("_", " ").toUpperCase()}.`}</p>}
           <div className="dfFactoryConsole__humanActions">
             {selected.canCancel ? <button type="button" disabled={busy || onCancel === undefined} onClick={onCancel}>STOP TASK</button> : null}
-            {onOpenTerminal === undefined ? null : <button type="button" disabled={busy || !terminalReady} onClick={() => onOpenTerminal(selected.request)}>OPEN TERMINAL</button>}
+            {onOpenTerminal === undefined ? null : <button type="button" disabled={busy || !terminalReady} onClick={() => onOpenTerminal(selected.request)}>Open terminal</button>}
           </div>
         </>
       )}
