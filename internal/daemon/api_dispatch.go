@@ -15,6 +15,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
 
@@ -27,8 +28,9 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
-	store *kernel.Store
-	now   func() time.Time
+	github *maintainer.Host
+	store  *kernel.Store
+	now    func() time.Time
 
 	// Cleanup survives caller cancellation but remains interruptible by daemon shutdown.
 	cleanupCtx    context.Context
@@ -304,6 +306,12 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(api.RemoteInternal)
 		}
 		return reply
+	case api.CallGitHubConnection:
+		input, ok := call.GitHubConnectionInput()
+		if !ok {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		return api.NewContentReply(daemon.GitHubConnection(ctx, input))
 	case api.CallRemoteStatus:
 		status, err := daemon.RemoteStatus()
 		if err != nil {

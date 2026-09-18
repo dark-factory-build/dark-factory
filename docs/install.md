@@ -85,6 +85,30 @@ factoryctl remote status
 The CLI cannot delete origin-scoped browser storage; pairing afresh from the
 pair page makes that manual browser action unnecessary.
 
+## Feedback and public backlog
+
+Settings → Help and feedback opens the public reporting and backlog pages,
+including while the factory is disconnected. From the CLI:
+
+```sh
+factoryctl feedback bug --open
+factoryctl feedback feature --agent-assisted --factory-name "My workshop"
+factoryctl backlog
+factoryctl backlog --open
+```
+
+Without `--open`, feedback prints its preparation link. Only bounded build
+identity and explicitly supplied context are included; no factory settings,
+repository names, paths or logs are read. Factory names and agent assistance
+are self-reported context. Review the report and submit it under your own GitHub
+account. Opening a page does not submit an issue. The reporting page provides
+copyable text when a report is too long for a prefilled URL.
+
+`backlog` returns the fixed public backlog as JSON, with its observation time
+and truncation indicator. It needs no running daemon, GitHub connection or local
+execution subscription. Use the issue's native GitHub thumbs-up reaction to
+endorse it. Reports and votes do not accept work or start a local agent.
+
 Create each agent with an explicit provider. `shell` needs no external tool;
 `claude_code` and `codex` require the corresponding `claude` or `codex` CLI to
 be installed and already signed in through its normal account workflow:
@@ -104,3 +128,42 @@ installation; restart it with `factoryctl service start --home
 "$HOME/.dark-factory"`. `factoryctl service uninstall` is the evidence-first
 removal path for that exact home and label. Homebrew does not own the running
 service; do not use `brew services` for Dark Factory.
+
+## GitHub connection (next release)
+
+This setup requires the release containing the GitHub connection commands and
+an activated Maintainer connection endpoint. It is not available in older
+archives. Use the operator socket and token exports above; these identify your
+local factory, not someone else's GitHub account.
+
+Run `factoryctl github connect --open`. Authorize the Dark Factory GitHub App
+under your GitHub account. Enter the callback page's one-time code with
+`factoryctl github confirm CODE` on the same factory where you started. Do not
+send that code to another person. The browser and CLI never receive GitHub App
+private keys or installation tokens.
+
+`factoryctl github installations` lists your installations. Follow `next_page`
+with `--page N`, including after an empty page. Use
+`factoryctl github manage --installation ID --open` for native GitHub access
+settings. Organization approval may be needed there; a selected-repository
+installation is the supported baseline. A visible repository does not grant
+publication rights: your GitHub account must have write permission.
+
+Run `factoryctl github repositories --installation ID --page 1` to discover
+repository IDs. To set the connection's maximum delegation, put a JSON array
+of `{ "installation_id": 123, "repository_id": 456, "repository": "org/code" }`
+in a file and run `factoryctl github delegate --repositories FILE`. This
+replaces the whole selection. An empty array removes all repository access.
+Delegation does not register a checkout or subscribe to an issue backlog.
+
+Use `factoryctl github status` or `factoryctl github refresh` to check live
+access. Lost authorization never falls back to a different operator's account.
+`factoryctl github disconnect` disables new host operations before contacting
+the broker. If the broker is offline, status reports `disconnect_pending`;
+retry disconnect when it is reachable to finish remote revocation. The fixed
+private credential record stays in the protected factory home, outside worker
+homes, task text and browser snapshots. Keep that record with the home backup.
+
+Git fetch authentication remains separate: use the operator-owned Git setup in
+the [provider guide](providers.md). A working Maintainer connection does not
+make a private checkout fetchable.

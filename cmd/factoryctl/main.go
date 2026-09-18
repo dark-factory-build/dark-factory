@@ -41,6 +41,11 @@ const (
 	pairListenPatience = 10 * time.Second
 
 	usage = `usage:
+  factoryctl github connect [--open] | confirm CODE | status | refresh | disconnect
+  factoryctl github installations [--page N]
+  factoryctl github repositories --installation ID [--page N]
+  factoryctl github delegate --repositories FILE
+  factoryctl github manage --installation ID [--open]
   factoryctl attempt task
   factoryctl attempt source --task ID
   factoryctl attempt succeed [--result TEXT]
@@ -117,6 +122,8 @@ const (
   factoryctl service stop --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl service uninstall --home ABSOLUTE [--label LABEL] [--plist-dir ABSOLUTE]
   factoryctl --version
+  factoryctl feedback bug|feature [--open] [--agent-assisted] [--factory-name TEXT]
+  factoryctl backlog [--open]
   factoryctl --build-identity
   factoryctl outcome write --id ID --project ID [--revision N] --document JSON|--document-file PATH
   factoryctl outcome read --project ID --id ID [--revision N]
@@ -287,6 +294,15 @@ func runWithOpener(ctx context.Context, args []string, getenv func(string) strin
 type serviceInspector func(context.Context, string) (install.ServiceStatus, error)
 
 func runWithDependencies(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer, opener browserOpener, inspect serviceInspector) int {
+	if len(args) > 0 && args[0] == "github" {
+		return runGitHub(ctx, args[1:], getenv, stdout, stderr, opener)
+	}
+	if len(args) > 0 && args[0] == "backlog" {
+		return runBacklog(ctx, args[1:], stdout, stderr, opener)
+	}
+	if len(args) > 0 && args[0] == "feedback" {
+		return runFeedback(ctx, args[1:], stdout, stderr, opener)
+	}
 	if len(args) > 0 && args[0] == "--local-ci-process-identity" {
 		if len(args) != 2 {
 			return exitUsage
