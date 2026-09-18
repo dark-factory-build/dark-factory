@@ -155,12 +155,16 @@ local branch tip, its recorded merge commit is reachable from `origin/main`, and
 its patch is incorporated. Keep the branch if any proof is missing.
 
 Factory-owned Change worktrees live under the daemon home's `changes`
-directory on `factory/<12 hex>` branches and are registered in the project
-repository like any other linked worktree. Remove one only after the same
+directory on `factory/<12 hex>` branches. New Changes use their own bare Git
+administration under the project's `.git/dark-factory-changes/<Change ID>/.git`;
+legacy retained Changes may still use the project's canonical administration.
+Use the exact settled source receipt's `git_directory`, not an assumed canonical
+branch. Remove one only after the same
 proof: its task is terminal and not queued for correction, no run owns it,
 its branch tip is merged into freshly fetched `origin/main` (or its squash
 merge is verified as above), and the worktree has no uncommitted work. Then
-`git worktree remove <changes/ID>` without force and delete the branch. A
+`git --git-dir=<receipt git_directory> worktree remove <changes/ID>` without
+force and delete the branch from that same administration. A
 retained Change of an open task, a dirty worktree, or a worktree whose
 identity you have not verified is preserved and reported. Never `git
 worktree prune` a shared repository: it removes every registration whose
@@ -261,6 +265,13 @@ If lease preparation is unavailable or refused, source work can still start with
 no lease grant and an explicit startup diagnostic; required CI remains blocked.
 
 ## Cutover to worktree Changes
+
+Independent Git administration applies only to new Changes. Retained linked
+worktrees keep their source, Gitfile, index and refs in the original layout,
+including on retry. Legacy canonical Changes are not independent; do not
+migrate or prune them as part of installation. Use each exact source receipt's
+`git_directory` for review and publication. Provider permissions are unchanged;
+independent Git state is not an enforced filesystem boundary.
 
 The worktree runtime changes the SQLite schema (`changes` gains `head_commit`
 and loses the manifest facts) and reads every retained Change through Git.

@@ -179,12 +179,17 @@ selecting lower work.
 admission reserves one daemon-derived path for one task incarnation, and a
 registered wrapper makes it a linked Git worktree of the project repository
 at one exact committed revision on the Change's own branch before the
-provider can execute. The provider's local commands are granted that worktree
-and the repository's Git directory (writable for a worker, read-only for an
-orchestrator) so they can commit, read and diff; they receive no Git
-credential helper, SSH command, prompt or `gh` configuration, so nothing in
-the provider can push or publish. A worktree isolates changes; it is not a
-security sandbox. Factoryd exposes no repository status, commit, push,
+provider can execute. New Changes have self-contained private Git administration
+under the project's `.git/dark-factory-changes/<Change ID>/.git`, populated by
+native Git fetch without object hardlinks or alternates. Ordinary Git commands
+in a Change update its own refs, objects and index. This prevents accidental
+shared-administration interference; it is not a filesystem security boundary.
+Provider permissions are unchanged. Explicit paths, Git environment overrides,
+and newly created filesystem aliases are not prevented by private Git state.
+An orchestrator retains read-only project Git access. The worker Git environment
+supplies no credential helper, SSH command, prompt or `gh` configuration.
+Private Git state does not isolate same-user credentials, processes or sockets.
+Factoryd exposes no repository status, commit, push,
 pull-request, or publication operation of its own.
 
 A retained Change is identified by its branch and the head the daemon read at
@@ -192,6 +197,11 @@ settlement; a reopen or source request that finds the branch elsewhere is
 refused rather than described by a stale receipt. Factory worktrees are
 removed only by an operator after the merge and disuse proof in the
 development workflow; never by the daemon.
+
+Retained linked worktrees remain in their original layout, including retries.
+Legacy canonical worktrees still share project Git administration and are not
+independent. Installation does not migrate their source, Gitfiles, indexes or
+refs; the existing adoption of older Git-free Changes is unchanged.
 
 ## Build and storage boundary
 

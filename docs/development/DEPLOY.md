@@ -57,6 +57,13 @@ Preparation does not back up, migrate a browser profile, or alter the service.
 
 ## Order matters
 
+**Independent Change Git state.** Only newly created Changes receive private
+Git administration. Retained linked worktrees keep their existing layout,
+including on retry; legacy canonical Changes remain shared. Follow the normal
+installation procedure above, then verify the installed build and fresh Codex
+and Claude commit/settlement/source receipts. This is accident prevention,
+not an enforced filesystem boundary or a provider-permission change.
+
 **Pairing capability mask.** Both ends accept any subset of the five known
 capability bits with `observe` set, and reject any other bit as malformed:
 `knownCapabilities` in `internal/browserprotocol/wire.go` and `capabilities()`

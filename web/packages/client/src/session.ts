@@ -879,7 +879,9 @@ export class BrowserSession {
       const target = this.#targetPending.get(id);
       if (target !== undefined) {
         this.#targetPending.delete(id);
-        target.reject(new SessionError(frame.body.code, frame.body.retryable));
+        const error = new SessionError(frame.body.code, frame.body.retryable);
+        target.reject(error);
+        if (error.retryable) this.#fail(error);
         return;
       }
       const task = this.#taskPending.get(id);
@@ -924,7 +926,9 @@ export class BrowserSession {
       const pending = this.#humanPending.get(id);
       if (pending !== undefined) {
         this.#humanPending.delete(id);
-        pending.reject(new SessionError(frame.body.code, frame.body.retryable));
+        const error = new SessionError(frame.body.code, frame.body.retryable);
+        pending.reject(error);
+        if (pending.kind === "detail" && error.retryable) this.#fail(error);
         return;
       }
     }

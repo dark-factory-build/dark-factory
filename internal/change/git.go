@@ -127,9 +127,10 @@ func BranchName(changeID string) string { return "factory/" + changeID[:min(12, 
 // its HEAD names, the branch HEAD is on (empty when detached), and whether
 // the work tree or index differs from that commit.
 type WorktreeFacts struct {
-	head   ObjectID
-	branch string
-	dirty  bool
+	head         ObjectID
+	branch       string
+	dirty        bool
+	gitDirectory string
 }
 
 // Head returns the commit the worktree's HEAD names.
@@ -140,6 +141,9 @@ func (f WorktreeFacts) Branch() string { return f.branch }
 
 // Dirty reports uncommitted or untracked work in the worktree.
 func (f WorktreeFacts) Dirty() bool { return f.dirty }
+
+// GitDirectory returns the administration used by this worktree.
+func (f WorktreeFacts) GitDirectory() string { return f.gitDirectory }
 
 // TrustedGitExecutable is the only Git installation whose complete path is
 // rooted in system-owned directories on macOS. Xcode applications live below
