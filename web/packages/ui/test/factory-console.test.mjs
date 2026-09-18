@@ -40,6 +40,15 @@ function consoleElements(props) {
 
 const VIEWS = ["floor", "agents"];
 
+test("community help works disconnected without private report fields", () => {
+  const markup = render({ status: "closed", state: undefined, settingsOpen: true });
+  for (const href of ["https://darkfactory.build/feedback?kind=bug", "https://darkfactory.build/feedback?kind=feature", "https://darkfactory.build/backlog"]) {
+    assert.ok(markup.includes(`href="${href}" target="_blank" rel="noopener noreferrer"`));
+  }
+  assert.match(markup, /Report a Dark Factory problem/);
+  assert.match(markup, /Reporting and voting do not start factory work/);
+});
+
 const agentSelection = (id = ids.agent) => {
   const agent = fixtureState.agents.get(id);
   return { id: agent.id, name: agent.name, revision: agent.revision };
