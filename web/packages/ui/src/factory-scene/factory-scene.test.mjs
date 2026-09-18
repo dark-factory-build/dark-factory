@@ -677,7 +677,7 @@ test("queue selection picks the exact task sharing a representative workstation"
 
 
 test("narrow bays truncate full-width titles while retaining their accessible name", () => {
-  for (const glyph of ["界", "😀"]) {
+  for (const glyph of ["界", "😀", "👨‍👩‍👧‍👦", "🇯🇵", "é"]) {
     const label = glyph.repeat(15);
     const nodes = ["a", "b"].map((id) => ({ ...inventoryTopology.nodes[0], id, path: ".", label }));
     const markup = render({ topology: { digest: "wide-titles", nodes }, workers: [] });
