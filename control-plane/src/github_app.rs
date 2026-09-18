@@ -2299,21 +2299,26 @@ impl AppAuthority {
         request.validate()?;
         let repository = RepositoryName::requested(&mut request.repository)?;
         let operation = request.operation("enqueue_pull_request")?;
-        let state = journal
-            .begin_operation(&operation)
-            .await
-            .map_err(|_| OperationError::Unavailable)?;
+        // Older completed enqueue operations were intentionally bound without
+        // a body digest. Read those exact rows without beginning a new one;
+        // an omitted digest on a new request must not leave a planned claim
+        // that poisons a corrected retry under the same UUID.
+        let state = if request.reviewed_body_digest.is_some() {
+            journal
+                .begin_operation(&operation)
+                .await
+                .map_err(|_| OperationError::Unavailable)?
+        } else {
+            let observation = journal
+                .observe_operation(&operation.operation_id)
+                .await
+                .map_err(|_| OperationError::Unavailable)?;
+            return legacy_completed_result(observation.as_ref(), &operation);
+        };
         if let Some(result) = completed_or_conflict::<EnqueueResult>(&state)? {
             return Ok(result);
         }
-        // Older completed enqueue operations were intentionally bound without
-        // a body digest. Reconcile that exact journal row before requiring the
-        // digest that protects new writes; never invent a current-body digest
-        // or replay a legacy refused/uncertain operation.
-        let reviewed_body_digest = request
-            .reviewed_body_digest
-            .as_deref()
-            .ok_or(OperationError::InvalidInput)?;
+        let reviewed_body_digest = request.reviewed_body_digest.as_deref().unwrap();
         let token = self
             .0
             .installation_token(
@@ -3810,6 +3815,31 @@ fn completed_or_conflict<T: serde::de::DeserializeOwned>(
         OperationRecord::Conflict => Err(OperationError::Conflict),
         _ => Ok(None),
     }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn legacy_completed_result<T: serde::de::DeserializeOwned>(
+    observation: Option<&OperationObservation>,
+    operation: &Operation,
+) -> Result<T, OperationError> {
+    let Some(observation) = observation else {
+        return Err(OperationError::InvalidInput);
+    };
+    if observation.kind != operation.kind
+        || observation.request_digest != operation.request_digest
+    {
+        return Err(OperationError::Conflict);
+    }
+    if observation.state != "completed" {
+        return Err(OperationError::InvalidInput);
+    }
+    serde_json::from_str(
+        observation
+            .result_json
+            .as_deref()
+            .ok_or(OperationError::Unavailable)?,
+    )
+    .map_err(|_| OperationError::Unavailable)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -8870,6 +8900,48 @@ mod tests {
         assert_eq!(
             revalidate_enqueue_pull(Err(Error::Unavailable), &request, digest),
             Err(OperationError::Indeterminate)
+        );
+    }
+
+    #[test]
+    fn an_omitted_digest_does_not_claim_a_uuid_before_a_corrected_retry() {
+        let missing_digest = EnqueuePullRequest {
+            repository: "dark-factory-build/dark-factory".into(),
+            operation_id: "6c8a5c44-7f1f-11f0-952e-acde48001122".into(),
+            pull_number: 848,
+            head_sha: "a".repeat(40),
+            base: "main".into(),
+            reviewed_body_digest: None,
+        };
+        let operation = Operation {
+            operation_id: missing_digest.operation_id.clone(),
+            kind: "enqueue_pull_request".into(),
+            request_digest: request_digest(&missing_digest).unwrap(),
+        };
+        assert!(matches!(
+            legacy_completed_result::<EnqueueResult>(None, &operation),
+            Err(OperationError::InvalidInput)
+        ));
+
+        let planned = OperationObservation {
+            kind: operation.kind.clone(),
+            request_digest: operation.request_digest.clone(),
+            state: "planned".into(),
+            result_json: None,
+        };
+        assert!(matches!(
+            legacy_completed_result::<EnqueueResult>(Some(&planned), &operation),
+            Err(OperationError::InvalidInput)
+        ));
+
+        let corrected = EnqueuePullRequest {
+            reviewed_body_digest: Some(text_digest("reviewed body")),
+            ..missing_digest
+        };
+        assert_ne!(
+            request_digest(&corrected).unwrap(),
+            operation.request_digest,
+            "the corrected request must be a new journal binding, not a retry of a poisoned plan"
         );
     }
 
