@@ -263,7 +263,37 @@ func TestTurnCompleteConsumesPendingHumanRequestWithoutSecondAPIRequest(t *testi
 		t.Fatalf("pending turn completion = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
 	}
 	encoded, err := os.ReadFile(state)
-	if err != nil || string(encoded) != `{"pending":false,"handled_turn_id":"turn-1"}` {
+	if err != nil || string(encoded) != `{"pending":false,"outcome":false,"handled_turn_id":"turn-1"}` {
+		t.Fatalf("turn state = %q, err=%v", encoded, err)
+	}
+}
+
+func TestTurnCompleteIgnoresRecordedDurableOutcome(t *testing.T) {
+	directory := t.TempDir()
+	token := filepath.Join(directory, "attempt.token")
+	if err := os.WriteFile(token, []byte("token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(directory, ".factory-turn-state.json")
+	if err := os.WriteFile(state, []byte(`{"outcome":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notification := `{"type":"agent-turn-complete","thread-id":"thread-1","turn-id":"turn-2","cwd":"/private/runtime"}`
+	var stdout, stderr bytes.Buffer
+	exit := run(context.Background(), []string{"attempt", "turn-complete", notification}, func(name string) string {
+		if name == "DARK_FACTORY_SOCKET" {
+			return "/private/unconnected.sock"
+		}
+		if name == "DARK_FACTORY_ATTEMPT_TOKEN_FILE" {
+			return token
+		}
+		return ""
+	}, &stdout, &stderr)
+	if exit != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("outcome turn completion = exit %d, stdout %q, stderr %q", exit, stdout.String(), stderr.String())
+	}
+	encoded, err := os.ReadFile(state)
+	if err != nil || string(encoded) != `{"pending":false,"outcome":false,"handled_turn_id":"turn-2"}` {
 		t.Fatalf("turn state = %q, err=%v", encoded, err)
 	}
 }

@@ -252,6 +252,7 @@ type attemptCommand struct {
 
 type turnCompletionState struct {
 	Pending       bool   `json:"pending"`
+	Outcome       bool   `json:"outcome"`
 	HandledTurnID string `json:"handled_turn_id,omitempty"`
 }
 
@@ -386,6 +387,10 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		if state.HandledTurnID == command.turnID {
 			return 0
 		}
+		if state.Outcome {
+			writeTurnCompletionState(getenv, turnCompletionState{HandledTurnID: command.turnID})
+			return 0
+		}
 		if state.Pending {
 			writeTurnCompletionState(getenv, turnCompletionState{HandledTurnID: command.turnID})
 			return 0
@@ -494,7 +499,9 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		writeFailure(stderr, command.kind, err)
 		return exitFailure
 	}
-	if command.kind == commandRequestHuman {
+	if command.kind == commandSucceed || command.kind == commandBlock || command.kind == commandFail {
+		writeTurnCompletionState(getenv, turnCompletionState{Outcome: true})
+	} else if command.kind == commandRequestHuman {
 		writeTurnCompletionState(getenv, turnCompletionState{Pending: true})
 	} else if command.kind == commandTurnComplete {
 		writeTurnCompletionState(getenv, turnCompletionState{HandledTurnID: command.turnID})
