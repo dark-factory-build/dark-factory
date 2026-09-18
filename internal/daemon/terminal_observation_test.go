@@ -74,6 +74,24 @@ func TestTerminalWindowRedactionCannotBeBypassedByCursor(t *testing.T) {
 	}
 }
 
+func TestTerminalWindowRedactsEscapedJSONQuotesAcrossCursor(t *testing.T) {
+	for _, line := range [][]byte{
+		[]byte(`{"token":"prefix\"escaped-secret-suffix"}` + "\n"),
+		[]byte(`{"cwd":"/Users/operator/quo\"ted/private"}` + "\n"),
+	} {
+		got, _ := redactTerminalWindow(line, 0)
+		if bytes.Contains(got, []byte("escaped-secret-suffix")) || bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte("ted/private")) {
+			t.Fatalf("escaped JSON leaked: %q", got)
+		}
+		for cursor := 1; cursor < len(line); cursor++ {
+			got, _ := redactTerminalWindow(line[cursor:], 0, terminalLookbehind{start: 0, bytes: line[:cursor]})
+			if bytes.Contains(got, []byte("escaped-secret-suffix")) || bytes.Contains(got, []byte("/Users/")) || bytes.Contains(got, []byte("ted/private")) {
+				t.Fatalf("cursor=%d escaped JSON leaked: %q", cursor, got)
+			}
+		}
+	}
+}
+
 func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 	fixture := newDispatchFixture(t)
 	active := prepareActiveAttemptInProject(t, fixture, 11, testID(11), "worker")
@@ -238,6 +256,15 @@ func TestTerminalObservationAPIReadsExactBoundedSnapshot(t *testing.T) {
 		t.Fatalf("settled caller retained observation authority: %v", err)
 	}
 
+}
+
+func TestTerminalObservationSettledCursorUsesRetainedLookbehind(t *testing.T) {
+	retained := []byte("{\"token\":\n\"hunter2\"}\nnext\n")
+	floor, offset := uint64(100), uint64(1)
+	got, _ := redactTerminalWindow(retained[offset:], floor+offset, terminalLookbehind{start: floor, bytes: retained[:offset]})
+	if bytes.Contains(got, []byte("hunter2")) || !bytes.Contains(got, []byte("next")) {
+		t.Fatalf("settled cursor redaction = %q", got)
+	}
 }
 
 func TestTerminalObservationTargetAuthorizationMatrix(t *testing.T) {

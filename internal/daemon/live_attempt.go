@@ -257,12 +257,20 @@ type liveAttempt struct {
 	controller *runner.AttemptController
 	// sourceOps counts explicit source requests in flight for this attempt,
 	// so shutdown refuses new ones and waits for admitted ones to finish.
-	sourceOpsMu        sync.Mutex
-	sourceOpsDone      chan struct{}
-	sourceCloseStarted chan struct{}
-	sourceOps          int
-	sourceClosing      bool
-	attemptDigest      kernel.AttemptDigest
+	sourceOpsMu                 sync.Mutex
+	sourceOpsDone               chan struct{}
+	sourceCloseStarted          chan struct{}
+	sourceOps                   int
+	sourceClosing               bool
+	attemptDigest               kernel.AttemptDigest
+	diagnosticMu                sync.Mutex
+	diagnosticPayload           [kernel.MaxTerminalDiagnosticsBytes]byte
+	diagnosticOffset            int
+	diagnosticLength            int
+	diagnosticFloor             uint64
+	diagnosticHead              uint64
+	diagnosticReplayCorrelation uint64
+	diagnosticReplayHead        uint64
 
 	commands chan liveAttemptCommand
 	wake     chan struct{}
@@ -308,6 +316,58 @@ type liveAttempt struct {
 	beforeRenewCommit        func()
 	beforeAttachEffect       func()
 	beforeProviderStateCheck func() error
+}
+
+func (attempt *liveAttempt) retainDiagnosticOutput(start, end uint64, payload []byte) {
+	if attempt == nil || end < start {
+		return
+	}
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	if uint64(len(payload)) > end-start {
+		payload = payload[:min(len(payload), int(end-start))]
+	}
+	for len(payload) > 0 {
+		if attempt.diagnosticLength == kernel.MaxTerminalDiagnosticsBytes {
+			attempt.diagnosticOffset = (attempt.diagnosticOffset + 1) % kernel.MaxTerminalDiagnosticsBytes
+			attempt.diagnosticLength--
+		}
+		index := (attempt.diagnosticOffset + attempt.diagnosticLength) % kernel.MaxTerminalDiagnosticsBytes
+		n := min(len(payload), kernel.MaxTerminalDiagnosticsBytes-attempt.diagnosticLength)
+		n = min(n, kernel.MaxTerminalDiagnosticsBytes-index)
+		copy(attempt.diagnosticPayload[index:index+n], payload[:n])
+		attempt.diagnosticLength += n
+		payload = payload[n:]
+	}
+	attempt.diagnosticHead = end
+	if uint64(attempt.diagnosticLength) > attempt.diagnosticHead {
+		attempt.diagnosticLength = 0
+	}
+	attempt.diagnosticFloor = attempt.diagnosticHead - uint64(attempt.diagnosticLength)
+}
+
+func (attempt *liveAttempt) resetDiagnosticOutput(floor, head uint64) {
+	if attempt == nil || head < floor {
+		return
+	}
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	attempt.diagnosticOffset = 0
+	attempt.diagnosticLength = 0
+	attempt.diagnosticFloor = floor
+	attempt.diagnosticHead = head
+}
+
+func (attempt *liveAttempt) diagnosticSnapshot() (uint64, uint64, []byte) {
+	attempt.diagnosticMu.Lock()
+	defer attempt.diagnosticMu.Unlock()
+	out := make([]byte, attempt.diagnosticLength)
+	if attempt.diagnosticLength > 0 {
+		first := min(attempt.diagnosticLength, kernel.MaxTerminalDiagnosticsBytes-attempt.diagnosticOffset)
+		copy(out, attempt.diagnosticPayload[attempt.diagnosticOffset:attempt.diagnosticOffset+first])
+		copy(out[first:], attempt.diagnosticPayload[:attempt.diagnosticLength-first])
+	}
+	return attempt.diagnosticFloor, attempt.diagnosticHead, out
 }
 
 func newLiveAttempt(daemon *Daemon, runID kernel.RunID, sessionID kernel.TerminalSessionID, controller *runner.AttemptController) *liveAttempt {

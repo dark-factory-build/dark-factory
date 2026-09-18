@@ -12,15 +12,18 @@ import (
 // Only complete lines are exposed. Starting inside a retained page discards
 // its first line, and a partial final line is omitted, so a caller cannot
 // bypass credential labels by requesting a cursor inside their value.
-var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:blank:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|~/)[^[:space:]]+`)
-var terminalJSONSecret = regexp.MustCompile(`(?is)"(?:api[_-]?key|password|token|secret)"[[:space:]]*:[[:space:]]*"[^"]{0,512}"`)
-var terminalJSONPrivatePath = regexp.MustCompile(`(?is)"[^"]{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|~/)[^"]{0,512}"`)
+var terminalPrivateText = regexp.MustCompile(`(?i)(?:authorization[[:blank:]]*[:=][[:blank:]]*(?:bearer[[:blank:]]+)?|bearer[[:blank:]]+|(?:api[_-]?key|password|token|secret)["']?[[:blank:]]*[:=][[:blank:]]*["']?)[^\r\n]+|(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^[:space:]]+`)
+
+const terminalJSONStringAtom = `(?:\\.|[^"\\])`
+
+var terminalJSONSecret = regexp.MustCompile(`(?is)"(?:api[_-]?key|password|token|secret)"[[:space:]]*:[[:space:]]*"` + terminalJSONStringAtom + `{0,512}"`)
+var terminalJSONPrivatePath = regexp.MustCompile(`(?is)"` + terminalJSONStringAtom + `{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)` + terminalJSONStringAtom + `{0,512}"`)
 var terminalJSONSecretKey = regexp.MustCompile(`(?i)^[[:space:]\{"']*(?:api[_-]?key|password|assword|ssword|sword|secret|ecret|cret|token|oken|ken|en|n)["']?[[:space:]]*:`)
 var terminalJSONAmbiguousSecretKey = regexp.MustCompile(`(?i)^[[:space:]\{"']*n["']?[[:space:]]*:`)
-var terminalJSONPathStart = regexp.MustCompile(`(?i)"[^"]{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|~/)`)
+var terminalJSONPathStart = regexp.MustCompile(`(?i)"[^"]{0,128}"[[:space:]]*:[[:space:]]*"(?:/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)`)
 var terminalJSONOrphanValue = regexp.MustCompile(`(?m)^[^:\r\n]{1,512}"[[:space:]]*[},]`)
 var terminalJSONOrphanSecret = regexp.MustCompile(`(?im)^[^:\r\n]{0,512}(?:secret|token|password|bearer|api[_-]?key)[^:\r\n]{0,512}"[[:space:]]*[},]`)
-var terminalJSONOrphanPath = regexp.MustCompile(`(?im)^[[:space:]]*(?:\.|/Users/|/home/|/private/|~/)[^:\r\n]{0,512}"[[:space:]]*[},]`)
+var terminalJSONOrphanPath = regexp.MustCompile(`(?im)^[[:space:]]*(?:\.|/Users/|/home/|/private/|/var/|/tmp/|/Volumes/|/opt/|/usr/local/|~/)[^:\r\n]{0,512}"[[:space:]]*[},]`)
 
 type terminalLookbehind struct {
 	start uint64
@@ -140,7 +143,53 @@ func (daemon *Daemon) terminalObserve(ctx context.Context, call api.Call) api.Re
 	if found && !terminalObservationTargetAllowed(authority, project, task, run) {
 		return newErrorReply(api.RemoteForbidden)
 	}
-	if !found || run.Phase != kernel.RunRunning {
+	if !found {
+		return newErrorReply(api.RemoteConflict)
+	}
+	if run.Phase == kernel.RunTerminal {
+		if authority.Role != kernel.RoleOrchestrator || run.Role != kernel.RoleWorker {
+			return newErrorReply(api.RemoteForbidden)
+		}
+		diagnostics, present, err := daemon.store.TerminalDiagnostics(ctx, runID)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		if !present {
+			return newErrorReply(api.RemoteNotFound)
+		}
+		if input.Cursor < diagnostics.Floor {
+			result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: diagnostics.Floor, Floor: diagnostics.Floor, Head: diagnostics.Head, Source: "stored", Gap: true, Omitted: diagnostics.Floor - input.Cursor}
+			reply, err := api.NewTerminalObservationReply(result)
+			if err != nil {
+				return newErrorReply(api.RemoteInternal)
+			}
+			return reply
+		}
+		if input.Cursor > diagnostics.Head {
+			return newErrorReply(api.RemoteConflict)
+		}
+		remaining := min(uint64(input.MaxBytes), diagnostics.Head-input.Cursor)
+		offset := input.Cursor - diagnostics.Floor
+		if offset > uint64(len(diagnostics.Payload)) || remaining > uint64(len(diagnostics.Payload))-offset {
+			return newErrorReply(api.RemoteInternal)
+		}
+		raw := diagnostics.Payload[offset : offset+remaining]
+		var payload []byte
+		var omitted uint64
+		if offset == 0 {
+			payload, omitted = redactTerminalWindow(raw, input.Cursor)
+		} else {
+			contextOffset := offset - min(offset, uint64(512))
+			payload, omitted = redactTerminalWindow(raw, input.Cursor, terminalLookbehind{start: diagnostics.Floor + contextOffset, bytes: diagnostics.Payload[contextOffset:offset]})
+		}
+		result := api.TerminalObservation{ProjectID: input.ProjectID, TaskID: input.TaskID, RunID: input.RunID, Cursor: input.Cursor, NextCursor: input.Cursor + remaining, Floor: diagnostics.Floor, Head: diagnostics.Head, Source: "stored", Omitted: omitted, Payload: payload}
+		reply, err := api.NewTerminalObservationReply(result)
+		if err != nil {
+			return newErrorReply(api.RemoteInternal)
+		}
+		return reply
+	}
+	if run.Phase != kernel.RunRunning {
 		return newErrorReply(api.RemoteConflict)
 	}
 	session, found, err := daemon.store.TerminalSessionForRun(ctx, runID)
