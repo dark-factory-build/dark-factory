@@ -77,6 +77,7 @@ const (
   factoryctl project repository name --id ID --revision REVISION --name TEXT
   factoryctl project repository base --id ID --revision REVISION --base REF
   factoryctl project repository default|enable|disable|remove --id ID --revision REVISION
+  factoryctl project repository fetch|github --id ID
   factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
@@ -1360,7 +1361,7 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 3 && args[0] == "project" && args[1] == "repository" {
 		action := args[2]
-		if action != "list" && action != "add" && action != "name" && action != "base" && action != "default" && action != "enable" && action != "disable" && action != "remove" {
+		if action != "list" && action != "add" && action != "name" && action != "base" && action != "default" && action != "enable" && action != "disable" && action != "remove" && action != "fetch" && action != "github" {
 			return attemptCommand{}, false, false
 		}
 		command := attemptCommand{kind: commandProjectRepository, provider: action}
@@ -1409,6 +1410,9 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			default:
 				return attemptCommand{}, false, false
 			}
+		}
+		if action == "fetch" || action == "github" {
+			return command, false, len(args) == 5 && args[3] == "--id" && command.repository != ""
 		}
 		if action == "list" {
 			return command, false, command.project != ""

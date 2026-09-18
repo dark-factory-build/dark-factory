@@ -1051,14 +1051,18 @@ type ProjectRepositoryInput struct {
 	Enabled          *bool  `json:"enabled,omitempty"`
 }
 type ProjectRepository struct {
-	ID        string `json:"id"`
-	ProjectID string `json:"project_id"`
-	Name      string `json:"name"`
-	Root      string `json:"root"`
-	BaseRef   string `json:"base_ref"`
-	Enabled   bool   `json:"enabled"`
-	Default   bool   `json:"default"`
-	Revision  uint64 `json:"revision"`
+	FetchState         string `json:"fetch_state,omitempty"`
+	GitHubRepositoryID uint64 `json:"github_repository_id,omitempty"`
+	PublicationState   string `json:"publication_state,omitempty"`
+	ReadinessMessage   string `json:"readiness_message,omitempty"`
+	ID                 string `json:"id"`
+	ProjectID          string `json:"project_id"`
+	Name               string `json:"name"`
+	Root               string `json:"root"`
+	BaseRef            string `json:"base_ref"`
+	Enabled            bool   `json:"enabled"`
+	Default            bool   `json:"default"`
+	Revision           uint64 `json:"revision"`
 }
 
 type ProjectRepositories struct {
