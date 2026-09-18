@@ -217,3 +217,56 @@ reviews. Disable prevents new selection while preserving history. Removal is
 refused while a binding remains referenced and never removes the checkout.
 Private Git fetch authentication remains operator-owned and separate from the
 Maintainer connection.
+
+## Reviewed issue intake (next release)
+
+These commands require the release containing managed intake and an activated
+GitHub connection. GitHub holds the backlog; the factory holds execution and
+acceptance. An issue repository can feed a different registered code repository.
+Delegating GitHub access alone does not subscribe to issues or start work.
+
+Use `factoryctl intake list --project PROJECT_ID` to inspect sources. Create a
+source with `factoryctl intake create --source HEX32 --project PROJECT_ID
+--configuration JSON`; choose a fresh 32-character lowercase hexadecimal source
+ID. The JSON fields are `repository` (`owner/backlog`), `target_repository_id`,
+`overseer_agent_id`, `label` (empty for no filter), `policy` (`manual` or
+`trusted_authors`), `trusted_authors` (an array of GitHub logins), `poll_seconds`
+and `admission_limit`. The destination and overseer must belong to that project.
+`@me` in trusted authors resolves your connected GitHub identity. A trusted-author
+policy permits initial acceptance by those authors **or** explicit operator
+acceptance; a label is only a filter. New sources start paused.
+
+Run `factoryctl intake preview --source SOURCE_ID --page 1`, following
+`next_page`, and inspect the title, body, destination and eligibility reasons.
+Enable the reviewed configuration with `factoryctl intake enable --source
+SOURCE_ID --revision REVISION --reviewed-revision REVISION`. An update uses
+`intake update` with the full configuration and current revision; it pauses the
+source so you can preview the change before enabling it.
+
+Accept the exact displayed content using `factoryctl intake accept --source
+SOURCE_ID --revision REVISION --issue NUMBER --hash CONTENT_HASH`. The daemon
+checks the current GitHub content again before recording acceptance. The
+controller imports accepted work into the existing queue; comments and reactions
+do not create work. A later title/body edit needs fresh acceptance, including
+when the original issue author is trusted. Existing failed or completed work is
+not automatically retried.
+
+Install the packaged controller with `factoryctl intake service install --home
+"$HOME/.dark-factory"`; `status` and `uninstall` use the same home argument.
+Python 3.9 or newer is required (Homebrew installs it). No source checkout or
+handwritten launchd file is needed. The controller owns its private journal and
+sync status beside the factory home; back up that directory with the home.
+`intake list` reports the last successful sync and current error. An unavailable
+GitHub connection is not an empty backlog.
+
+`factoryctl intake pause --source SOURCE_ID --revision REVISION` stops new
+imports, not existing work. `factoryctl intake withdraw --acceptance ID`
+withdraws that approval, cancels linked queued work and requests the existing
+stop mechanism for running work. `withdrawal_pending` requires reconciliation;
+it does not promise that an offline host or running process has stopped.
+
+Existing legacy intake configurations and journals remain unchanged. This
+release does not reinterpret their fingerprints as new acceptance receipts or
+silently start importing their old backlog. Keep an existing controller and its
+journal together; do not run a second source over the same live queue as an
+implicit migration. Review an explicit cutover before replacing it.
