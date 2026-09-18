@@ -997,6 +997,56 @@ func TestDaemonOverseerTaskRetryRejectsOrchestratorTask(t *testing.T) {
 	}
 }
 
+func TestDaemonOperatorTaskRetryAndAgentPauseUseExactRevisions(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	active := prepareActiveAttemptInProject(t, fixture, 212, testID(212), "worker")
+	ctx := context.Background()
+	operator, err := api.NewOperatorClient(fixture.socket, fixture.operator)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agent, found, err := fixture.store.Agent(ctx, active.run.AgentID)
+	if err != nil || !found {
+		t.Fatalf("agent = %+v, found=%v, err=%v", agent, found, err)
+	}
+	paused := true
+	done := fixture.serve(t)
+	pause, err := operator.UpdateAgent(ctx, api.OverseerAgentUpdateInput{AgentID: agent.ID.String(), ExpectedRevision: uint64(agent.Revision.Int64()), Paused: &paused})
+	waitDispatch(t, done)
+	if err != nil || pause.Revision != uint64(agent.Revision.Int64()+1) {
+		t.Fatalf("pause = %+v, %v", pause, err)
+	}
+	done = fixture.serve(t)
+	_, err = operator.UpdateAgent(ctx, api.OverseerAgentUpdateInput{AgentID: agent.ID.String(), ExpectedRevision: uint64(agent.Revision.Int64()), Paused: &paused})
+	waitDispatch(t, done)
+	var remote *api.RemoteError
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteRevisionConflict {
+		t.Fatalf("stale pause = %v", err)
+	}
+
+	taskID, incarnationID := testID(250), testID(251)
+	done = fixture.serve(t)
+	created, err := operator.EnqueueTask(ctx, api.EnqueueTaskInput{ID: taskID, ProjectID: active.run.ProjectID.String(), AssignedAgentID: agent.ID.String(), IncarnationID: incarnationID, Title: "queued", Body: "work", Priority: 1})
+	waitDispatch(t, done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priority := int64(9)
+	done = fixture.serve(t)
+	updated, err := operator.UpdateTask(ctx, api.OverseerTaskUpdateInput{TaskID: taskID, ExpectedRevision: created.Revision, Priority: &priority})
+	waitDispatch(t, done)
+	if err != nil || updated.Revision != created.Revision+1 {
+		t.Fatalf("update = %+v, %v", updated, err)
+	}
+	done = fixture.serve(t)
+	_, err = operator.UpdateTask(ctx, api.OverseerTaskUpdateInput{TaskID: taskID, ExpectedRevision: updated.Revision, Retry: true})
+	waitDispatch(t, done)
+	if !errors.As(err, &remote) || remote.Code() != api.RemoteConflict {
+		t.Fatalf("queued retry = %v", err)
+	}
+}
+
 func TestDaemonDispatchesBlockAndFailCalls(t *testing.T) {
 	for _, test := range []struct {
 		name string
