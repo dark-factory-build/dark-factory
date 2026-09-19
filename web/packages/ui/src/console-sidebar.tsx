@@ -263,9 +263,6 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
 }
 
 /** The single editable queue keeps the authoritative per-agent task order. */
-/** Every idle wake carries this kernel title; it is the agent's rule, not operator work. */
-const STANDING_TASK_TITLE = "Standing instruction";
-
 export function QueuePanel({
   state,
   edit,
@@ -288,11 +285,12 @@ export function QueuePanel({
   if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Tasks"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
   const agents = [...state.agents.values()];
   const name = (task: TaskItem) => task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
-  const tasks = [...state.tasks.values()].filter((task) => !(task.title === STANDING_TASK_TITLE && state.agents.get(task.assigned_agent_id)?.idle_policy === "standing_instruction"));
+  const tasks = [...state.tasks.values()];
   // Served order: a global priority sort would present a false next-start order.
   const queued = tasks.filter((task) => task.status === "queued");
   const opened = (status: TaskItem["status"], label: string) => {
-    const rows = tasks.filter((task) => task.status === status);
+    // An orchestrator's passes are its own rule at work; they live on its Agent tab.
+    const rows = tasks.filter((task) => task.status === status && state.agents.get(task.assigned_agent_id)?.role !== "orchestrator");
     return rows.length === 0 ? null : <section className="dfConsoleSidebar__section" aria-label={`${label} tasks`}>
       <h3>{label} <span>{rows.length}</span></h3>
       <ul className="dfConsoleItems">{rows.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">

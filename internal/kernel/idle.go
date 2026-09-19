@@ -125,9 +125,6 @@ func (store *Store) EnqueueIdleInstructions(ctx context.Context, at UnixMillis) 
 	return tasks, nil
 }
 
-// standingTaskTitle names every idle wake; the public snapshot filters on it.
-const standingTaskTitle = "Standing instruction"
-
 func enqueueStandingTask(ctx context.Context, connection *sql.Conn, agent Agent, at UnixMillis) (Task, error) {
 	return enqueueStandingTaskWithBody(ctx, connection, agent, agent.Idle.Instruction, at)
 }
@@ -144,7 +141,7 @@ func enqueueStandingTaskWithBody(ctx context.Context, connection *sql.Conn, agen
 	}
 	taskID, _ := TaskIDFromBytes(ids[0][:])
 	incarnationID, _ := IncarnationIDFromBytes(ids[1][:])
-	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: standingTaskTitle, Body: body, Priority: 0}
+	spec := NewTask{ID: taskID, ProjectID: agent.ProjectID, AssignedAgentID: agent.ID, IncarnationID: incarnationID, Title: "Standing instruction", Body: body, Priority: 0}
 	if err := validateNewTask(spec); err != nil {
 		return Task{}, err
 	}

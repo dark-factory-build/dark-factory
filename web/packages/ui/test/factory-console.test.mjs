@@ -672,12 +672,11 @@ test("Queue keeps running tasks visible without a second queue", () => {
   assert.equal((markup.match(/aria-label="Tasks"/g) ?? []).length, 1, "one queue panel");
 });
 
-test("Tasks lists blocked work, hides standing passes, flags dispatch off and queues new work", async () => {
+test("Tasks lists blocked work, hides orchestrator passes, flags dispatch off and queues new work", async () => {
   const running = fixtureState.tasks.get(ids.task);
-  const supervisor = { ...fixtureState.agents.get(ids.orchestrator), idle_policy: "standing_instruction", idle_after_seconds: 10, idle_instruction: "Supervise." };
+  const supervisor = fixtureState.agents.get(ids.orchestrator);
   const state = baseState({
     factory: { ...fixtureState.factory, dispatch_enabled: false },
-    agents: new Map([...fixtureState.agents, [supervisor.id, supervisor]]),
     tasks: new Map([
       ...fixtureState.tasks,
       ["b1".repeat(16), { ...running, id: "b1".repeat(16), title: "Stuck on a prerequisite", status: "blocked" }],
@@ -692,7 +691,7 @@ test("Tasks lists blocked work, hides standing passes, flags dispatch off and qu
   assert.equal(panel.findByProps({ "aria-label": "Blocked tasks" }).findAllByType("button")[0].children.join(""), "Stuck on a prerequisite");
   await act(async () => { panel.findByProps({ "aria-label": "Cancel Stuck on a prerequisite" }).props.onClick(); });
   assert.deepEqual(edits, [["b1".repeat(16), { cancel: true }]], "a blocked task is cleared in one step");
-  assert.ok(!panel.findAllByType("button").some((button) => button.children.join("") === "Standing instruction"), "an idle wake is the agent's rule, not a task row");
+  assert.ok(!panel.findAllByType("button").some((button) => button.children.join("") === "Standing instruction"), "an orchestrator pass is not a task row");
   assert.match(panel.findByProps({ role: "status" }).children.join(""), /Dispatch is off/);
   const form = panel.findByProps({ "aria-label": "New task" });
   const values = { target: `any:${ids.project}`, instruction: " Ship it " };

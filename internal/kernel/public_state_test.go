@@ -482,14 +482,21 @@ func publicIDs(count int, at func(int) string) []string {
 	return result
 }
 
-func TestPublicSnapshotCarriesBlockedWorkButNotBlockedStandingPasses(t *testing.T) {
+func TestPublicSnapshotCarriesBlockedWorkerTasksButOnlyAnOrchestratorsLatest(t *testing.T) {
 	store, run, _ := runningOrchestratorRun(t)
 	defer store.Close()
 	ctx := context.Background()
-	titles := []string{"older blocked work", standingTaskTitle, "newest blocked work"}
+	worker, err := store.CreateAgent(ctx, NewAgent{ID: publicAgentID(t, 1), ProjectID: run.ProjectID, Name: "worker", Role: RoleWorker, Provider: ProviderCodex, ToolBudgetLimit: 1}, mustTime(t, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	titles := []string{"older worker task", "newer worker task", "older pass", "newer pass"}
 	for index, title := range titles {
-		id := publicTaskID(t, index+1)
-		if _, err := store.EnqueueTask(ctx, NewTask{ID: id, ProjectID: run.ProjectID, AssignedAgentID: run.AgentID, IncarnationID: incarnationID(t, byte(100+index)), Title: title}, mustTime(t, int64(600+index))); err != nil {
+		owner := worker.ID
+		if index >= 2 {
+			owner = run.AgentID
+		}
+		if _, err := store.EnqueueTask(ctx, NewTask{ID: publicTaskID(t, index+1), ProjectID: run.ProjectID, AssignedAgentID: owner, IncarnationID: incarnationID(t, byte(100+index)), Title: title}, mustTime(t, int64(600+index))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -498,29 +505,21 @@ func TestPublicSnapshotCarriesBlockedWorkButNotBlockedStandingPasses(t *testing.
 		corruptSQL(t, store, `UPDATE tasks SET status = 'blocked', blocked_reason = 'waiting', updated_at_ms = ? WHERE id = ?`, 700+index, publicTaskID(t, index+1).Bytes())
 	}
 	// Hand-blocked rows have no run history, so read the public selection itself.
-	public := func() []string {
-		rows, err := store.writer.QueryContext(ctx, publicTaskIDs+`SELECT title FROM tasks WHERE status = 'blocked' AND id IN (SELECT id FROM public_task_ids)`)
-		if err != nil {
+	rows, err := store.writer.QueryContext(ctx, publicTaskIDs+`SELECT title FROM tasks WHERE status = 'blocked' AND id IN (SELECT id FROM public_task_ids)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var blocked []string
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
 			t.Fatal(err)
 		}
-		defer rows.Close()
-		var blocked []string
-		for rows.Next() {
-			var title string
-			if err := rows.Scan(&title); err != nil {
-				t.Fatal(err)
-			}
-			blocked = append(blocked, title)
-		}
-		slices.Sort(blocked)
-		return blocked
+		blocked = append(blocked, title)
 	}
-	// The title alone hides nothing: only an agent's own standing pass is its rule.
-	if blocked := public(); !slices.Equal(blocked, []string{standingTaskTitle, "newest blocked work", "older blocked work"}) {
-		t.Fatalf("blocked public tasks without a standing rule = %q", blocked)
-	}
-	corruptSQL(t, store, `UPDATE agents SET idle_policy = 'standing_instruction', idle_after_seconds = 60, idle_instruction = 'supervise' WHERE id = ?`, run.AgentID.Bytes())
-	if blocked := public(); !slices.Equal(blocked, []string{"newest blocked work", "older blocked work"}) {
+	slices.Sort(blocked)
+	if !slices.Equal(blocked, []string{"newer pass", "newer worker task", "older worker task"}) {
 		t.Fatalf("blocked public tasks = %q", blocked)
 	}
 }
