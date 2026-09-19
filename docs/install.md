@@ -323,10 +323,9 @@ not automatically retried.
 
 Starting with v0.4.1, installing the managed service from a release or Homebrew
 also schedules the packaged controller. `factoryctl service status --home
-"$HOME/.dark-factory"` reports whether intake is scheduled, absent, or
-unavailable. A source-built CLI without packaged assets reports intake as
-unavailable while the daemon remains usable; use a release archive or Homebrew
-for issue intake.
+"$HOME/.dark-factory"` reports intake readiness separately from the daemon.
+A source-built CLI without packaged assets reports intake as unavailable while
+the daemon remains usable; use a release archive or Homebrew for issue intake.
 
 If controller setup fails after the daemon starts, installation reports the
 failure and the repair command: `factoryctl intake service install --home
