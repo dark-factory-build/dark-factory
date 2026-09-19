@@ -20,11 +20,12 @@ tap.
 
 The archive includes the intake controller under `libexec/dark-factory/`.
 Keep that directory with the release binaries, or use Homebrew's installed
-commands. After setting up your home and intake sources, run `factoryctl intake
-service install --home "$HOME/.dark-factory"` to schedule intake. Python 3.9 or
-newer is required; Homebrew installs it. No operator JSON, handwritten launchd
-file, or source checkout is needed. See the managed intake and explicit legacy
-migration instructions below.
+commands. **Starting with v0.4.1**, `factoryctl service install` also schedules
+the packaged intake controller. On v0.4.0, run `factoryctl intake service install
+--home "$HOME/.dark-factory"` separately. Python 3.9 or newer is required;
+Homebrew installs it. No operator JSON, handwritten launchd file, or source
+checkout is needed. See the managed intake and explicit legacy migration
+instructions below.
 
 Create and install one managed home. Those two commands are the whole terminal
 side of setup: an install that starts a fresh service loads the launchd job,
@@ -320,11 +321,24 @@ do not create work. A later title/body edit needs fresh acceptance, including
 when the original issue author is trusted. Existing failed or completed work is
 not automatically retried.
 
-Install the packaged controller with `factoryctl intake service install --home
-"$HOME/.dark-factory"`; `status` and `uninstall` use the same home argument.
-Python 3.9 or newer is required (Homebrew installs it). No source checkout or
-handwritten launchd file is needed. The controller owns its private journal and
-sync status beside the factory home; back up that directory with the home.
+Starting with v0.4.1, installing the managed service from a release or Homebrew
+also schedules the packaged controller. `factoryctl service status --home
+"$HOME/.dark-factory"` reports whether intake is scheduled, absent, or
+unavailable. A source-built CLI without packaged assets reports intake as
+unavailable while the daemon remains usable; use a release archive or Homebrew
+for issue intake.
+
+If controller setup fails after the daemon starts, installation reports the
+failure and the repair command: `factoryctl intake service install --home
+"$HOME/.dark-factory"`. Use that same command for v0.4.0's separate setup step;
+`status` and `uninstall` use the same home argument. In v0.4.1, managed-service
+uninstall removes its scheduled controller first and refuses to remove the
+daemon if safe controller removal fails. Existing legacy schedules still need
+explicit migration; setup never silently replaces them.
+
+Python 3.9 or newer is required (Homebrew installs it). The controller owns its
+private journal and sync status beside the factory home; back up that directory
+with the home.
 `intake list` reports the last successful sync and current error. An unavailable
 GitHub connection is not an empty backlog.
 
