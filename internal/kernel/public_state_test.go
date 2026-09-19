@@ -498,21 +498,29 @@ func TestPublicSnapshotCarriesBlockedWorkButNotBlockedStandingPasses(t *testing.
 		corruptSQL(t, store, `UPDATE tasks SET status = 'blocked', blocked_reason = 'waiting', updated_at_ms = ? WHERE id = ?`, 700+index, publicTaskID(t, index+1).Bytes())
 	}
 	// Hand-blocked rows have no run history, so read the public selection itself.
-	rows, err := store.writer.QueryContext(ctx, publicTaskIDs+`SELECT title FROM tasks WHERE status = 'blocked' AND id IN (SELECT id FROM public_task_ids)`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var blocked []string
-	for rows.Next() {
-		var title string
-		if err := rows.Scan(&title); err != nil {
+	public := func() []string {
+		rows, err := store.writer.QueryContext(ctx, publicTaskIDs+`SELECT title FROM tasks WHERE status = 'blocked' AND id IN (SELECT id FROM public_task_ids)`)
+		if err != nil {
 			t.Fatal(err)
 		}
-		blocked = append(blocked, title)
+		defer rows.Close()
+		var blocked []string
+		for rows.Next() {
+			var title string
+			if err := rows.Scan(&title); err != nil {
+				t.Fatal(err)
+			}
+			blocked = append(blocked, title)
+		}
+		slices.Sort(blocked)
+		return blocked
 	}
-	slices.Sort(blocked)
-	if !slices.Equal(blocked, []string{"newest blocked work", "older blocked work"}) {
+	// The title alone hides nothing: only an agent's own standing pass is its rule.
+	if blocked := public(); !slices.Equal(blocked, []string{standingTaskTitle, "newest blocked work", "older blocked work"}) {
+		t.Fatalf("blocked public tasks without a standing rule = %q", blocked)
+	}
+	corruptSQL(t, store, `UPDATE agents SET idle_policy = 'standing_instruction', idle_after_seconds = 60, idle_instruction = 'supervise' WHERE id = ?`, run.AgentID.Bytes())
+	if blocked := public(); !slices.Equal(blocked, []string{"newest blocked work", "older blocked work"}) {
 		t.Fatalf("blocked public tasks = %q", blocked)
 	}
 }

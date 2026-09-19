@@ -16,12 +16,13 @@ const PublicStateEntityLimit = 4096
 // Blocked work waits on someone, so the newest of it is public too; a blocked
 // standing pass is superseded by the next wake and stays in the agent's history.
 // ponytail: newest 64 only, so stuck work cannot exhaust PublicStateEntityLimit;
-// page the rest through ReadTaskList if an operator ever needs it.
+// page the rest through ReadTaskList if an operator ever needs it. The sort
+// scans every blocked row; index (status, updated_at_ms) if they accumulate.
 // ponytail: the completion window scans task history; add a matching history
 // index if measured snapshot latency warrants a schema migration.
 const publicTaskIDs = `WITH public_task_ids AS (
  SELECT id FROM tasks WHERE status IN ('queued', 'running')
- UNION SELECT id FROM (SELECT id FROM tasks WHERE status = 'blocked' AND title <> '` + standingTaskTitle + `' ORDER BY updated_at_ms DESC, id DESC LIMIT 64)
+ UNION SELECT id FROM (SELECT id FROM tasks WHERE status = 'blocked' AND NOT (title = '` + standingTaskTitle + `' AND assigned_agent_id IN (SELECT id FROM agents WHERE idle_policy = 'standing_instruction')) ORDER BY updated_at_ms DESC, id DESC LIMIT 64)
  UNION SELECT r.task_id FROM human_requests h JOIN runs r ON r.id = h.run_id WHERE h.status IN ('open', 'delivering', 'delivery_unknown')
  UNION SELECT id FROM (
   SELECT id, ROW_NUMBER() OVER (PARTITION BY assigned_agent_id ORDER BY updated_at_ms DESC, id DESC) AS rank
