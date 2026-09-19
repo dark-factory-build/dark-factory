@@ -50,7 +50,8 @@ def snapshot():
         SHA,
         [{"commit_id": HEAD, "state": "APPROVED", "user": {"id": 101},
           "body": f"Dark-Factory-Review: allow {HEAD}"}],
-        [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+        [{"id": 2, "name": "required", "app": {"id": 1},
+          "status": "COMPLETED", "conclusion": "SUCCESS"}],
     )
 
 
@@ -162,6 +163,23 @@ class ReleaseFixtures(unittest.TestCase):
     def test_failed_check_is_rejected(self):
         pr, default, reviews, checks = snapshot()
         checks[0]["conclusion"] = "FAILURE"
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+
+    def test_superseded_failed_check_is_ignored(self):
+        pr, default, reviews, checks = snapshot()
+        checks.append({**checks[0], "id": 1, "conclusion": "FAILURE"})
+        self.assertEqual(
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA),
+            HEAD,
+        )
+
+    def test_same_named_check_from_another_app_and_duplicate_ids_fail_closed(self):
+        pr, default, reviews, checks = snapshot()
+        checks.append({**checks[0], "id": 3, "app": {"id": 2}, "conclusion": "FAILURE"})
+        with self.assertRaises(release.ReleaseError):
+            release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
+        checks[-1] = {**checks[0], "conclusion": "FAILURE"}
         with self.assertRaises(release.ReleaseError):
             release.merge_gate(pr, default, reviews, checks, config(Path("/tmp/release.json")), SHA)
 
