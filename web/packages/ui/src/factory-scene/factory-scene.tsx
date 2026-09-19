@@ -9,6 +9,7 @@ import {
   placeWorkers,
   inventoryLabels,
   type RoomContent,
+  type SceneRoomLayout,
   type SceneTopology,
   type SceneWorker,
 } from "./scene.js";
@@ -273,7 +274,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
   const sceneHeight = boardTop + (tasks.some((task) => task.status === "queued") ? 48 : 0) + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
-  const conduit = useMemo(() => conduits(layout, topology), [layout, topology]);
+  const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
   const queued = tasks.filter((order) => order.status === "queued").length;
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
@@ -321,7 +322,6 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
         </text>
       ))}
 
-      {appearance.scenery === "off" ? null : <path data-conduit-trunk="" aria-hidden="true" d={conduit.trunk} fill="none" stroke="#728078" strokeWidth="2" opacity={appearance.scenery === "subtle" ? .35 : .6} />}
       {layout.rooms.map((room) => {
         const node = nodes.get(room.id);
         if (node === undefined) return null;
@@ -339,7 +339,6 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
             <path d={`M${room.x + 4} ${room.y + 10}v${room.height - 14} M${room.x + room.width - 4} ${room.y + 10}v${room.height - 14}`} stroke="#141f23" strokeWidth="2" />
             <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill={operating ? "url(#df-lamplight)" : "#08131d"} opacity={operating ? 1 : .18} pointerEvents="none" />
             {appearance.scenery === "off" ? null : <g aria-hidden="true" opacity={appearance.scenery === "subtle" ? .35 : .6}>
-              {!conduit.linked.has(room.id) ? null : <path data-conduit-drop={room.id} d={`M${room.x + 9} ${room.y + 38}h6v4h-6z M${room.x + 12} ${room.y + 42}V${room.door.y + 5}`} fill="none" stroke={linkedFrom !== undefined && (linkedFrom === room.id || conduit.linked.get(linkedFrom)?.has(room.id)) ? "#e5c58b" : "#728078"} strokeWidth="2" />}
               <path d={`M${room.door.x - 12} ${room.door.y - 8}h24 M${room.door.x - 7} ${room.door.y - 14}h14`} stroke="#53615c" strokeWidth="2" />
             </g>}
             {contents.map((item) => <g key={item.key} data-room-content={item.kind} aria-hidden="true"><Equipment item={item} operating={operating} scenery={appearance.scenery} /></g>)}
@@ -366,6 +365,11 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
 
 
+      {appearance.scenery === "off" ? null : <g aria-hidden="true" fill="none" strokeLinecap="round" pointerEvents="none">
+        {cabling.trunks.map((trunk, index) => <path key={index} data-wire-trunk={trunk.count} d={trunk.d} stroke="#728078" strokeWidth={Math.min(8, 1.5 * Math.sqrt(trunk.count))} opacity={appearance.scenery === "subtle" ? .3 : .5} />)}
+        {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
+          <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
+      </g>}
       <Area width={commonWidth} top={layout.restingTop - 40} bottom={commonBottom} />
       {[
         { label: "Break room", seats: seating.resting, planning: false },
@@ -420,29 +424,86 @@ function Area({ width, top, bottom }: { width: number; top: number; bottom: numb
 
 
 /**
- * Static dependencies as one shared conduit: a drop from each linked room into
- * its corridor, joined by the spine. Which rooms a drop serves is shown on hover.
- * ponytail: a bus, not per-edge routes; route individual edges if the floor ever needs to show them at rest.
+ * Static dependencies as floor cabling. Every link is routed once: out under
+ * the desk and through the door, along corridors, down the nearest wall of any
+ * row in between, and into a lower room down its side wall. At rest the shared
+ * stretches are drawn once, thicker the more links they carry; a link's own
+ * end-to-end route is only drawn when one of its rooms is inspected.
  */
-function conduits(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) {
-  const shown = new Set(layout.rooms.map((room) => room.id));
-  const linked = new Map<string, Set<string>>();
-  for (const node of topology.nodes) {
-    const targets = (node.dependencies?.links ?? []).map((link) => link.nodeId).filter((id) => id !== node.id && shown.has(id));
-    if (shown.has(node.id) && targets.length > 0) linked.set(node.id, new Set(targets));
+function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) {
+  type Point = { x: number; y: number };
+  const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
+  const rowOf = (room: SceneRoomLayout) => room.door.y;
+  const rows = [...new Set(layout.rooms.map(rowOf))].sort((a, b) => a - b);
+  const pairs = new Set<string>();
+  for (const node of topology.nodes) for (const link of node.dependencies?.links ?? []) {
+    if (link.nodeId !== node.id && rooms.has(node.id) && rooms.has(link.nodeId)) pairs.add([node.id, link.nodeId].sort().join("\n"));
   }
-  // Corridor y → [nearest, furthest] drop on that row.
-  const rows = new Map<number, [number, number]>();
-  for (const room of layout.rooms) {
-    if (!linked.has(room.id)) continue;
-    const y = room.door.y + 5, x = room.x + 12, span = rows.get(y);
-    rows.set(y, span === undefined ? [x, x] : [Math.min(span[0], x), Math.max(span[1], x)]);
+  const leads = new Map<string, { d: string; count: number }>();
+  const lead = (room: SceneRoomLayout, wallX?: number) => {
+    const desk = room.contents.find((item) => item.workSurface);
+    const key = `${room.id} ${wallX ?? "door"}`;
+    let d: string;
+    if (wallX === undefined) {
+      const plug = desk === undefined ? { x: room.x + room.width / 2, y: room.y + 60 } : { x: desk.x + desk.width / 2, y: desk.y + 33 };
+      d = `M${plug.x} ${plug.y}C${plug.x + 14} ${plug.y + 22} ${room.door.x - 10} ${room.door.y - 18} ${room.door.x} ${room.door.y}`;
+    } else {
+      const left = wallX < room.x + room.width / 2;
+      const plug = desk === undefined ? { x: room.x + room.width / 2, y: room.y + 60 } : { x: left ? desk.x : desk.x + desk.width, y: desk.y + 22 };
+      d = `M${wallX} ${plug.y - 12}C${wallX} ${plug.y + 12} ${(wallX + plug.x) / 2} ${plug.y + 16} ${plug.x} ${plug.y}`;
+    }
+    leads.set(key, { d, count: (leads.get(key)?.count ?? 0) + 1 });
+    return d;
+  };
+  // Axis-aligned stretches by channel, for counting what each one carries.
+  const channels = new Map<string, [number, number][]>();
+  const routes = [...pairs].sort().map((pair, index) => {
+    const [from, to] = (pair.split("\n").map((id) => rooms.get(id)!) as [SceneRoomLayout, SceneRoomLayout]).sort((a, b) => rowOf(a) - rowOf(b));
+    const points: Point[] = [{ x: from.door.x, y: from.door.y }, { x: from.door.x, y: from.door.y + 16 }];
+    let tail: string;
+    if (rowOf(from) === rowOf(to)) {
+      points.push({ x: to.door.x, y: to.door.y + 16 }, { x: to.door.x, y: to.door.y });
+      tail = lead(to);
+    } else {
+      const nearest = (row: number, x: number) => layout.rooms.filter((room) => rowOf(room) === row).flatMap((room) => [room.x, room.x + room.width])
+        .reduce((best, wall) => Math.abs(wall - x) < Math.abs(best - x) ? wall : best);
+      for (const row of rows.filter((row) => row > rowOf(from) && row < rowOf(to))) {
+        const wall = nearest(row, to.x + to.width / 2);
+        points.push({ x: wall, y: points.at(-1)!.y }, { x: wall, y: row + 16 });
+      }
+      const wall = Math.abs(to.x - points.at(-1)!.x) <= Math.abs(to.x + to.width - points.at(-1)!.x) ? to.x : to.x + to.width;
+      const desk = to.contents.find((item) => item.workSurface);
+      points.push({ x: wall, y: points.at(-1)!.y }, { x: wall, y: (desk === undefined ? to.y + 60 : desk.y + 22) - 12 });
+      tail = lead(to, wall);
+    }
+    let run = `M${points[0]!.x} ${points[0]!.y}`;
+    for (let at = 1; at < points.length; at += 1) {
+      const a = points[at - 1]!, b = points[at]!, next = points[at + 1];
+      if (a.x === b.x && a.y === b.y) continue;
+      const key = a.y === b.y ? `h${a.y}` : `v${a.x}`, span = a.y === b.y ? [a.x, b.x] : [a.y, b.y];
+      channels.set(key, [...(channels.get(key) ?? []), [Math.min(...span), Math.max(...span)]]);
+      // Rounded corners and a little slack on long stretches.
+      const length = Math.abs(b.x - a.x) + Math.abs(b.y - a.y), ux = (b.x - a.x) / length, uy = (b.y - a.y) / length;
+      const r = next === undefined ? 0 : Math.min(8, length / 2), sag = length > 48 ? (index % 2 === 0 ? 3 : -3) : 0;
+      run += `Q${(a.x + b.x) / 2 - uy * sag} ${(a.y + b.y) / 2 + ux * sag} ${b.x - ux * r} ${b.y - uy * r}`;
+      if (next !== undefined && (next.x !== b.x || next.y !== b.y)) {
+        const after = Math.min(8, (Math.abs(next.x - b.x) + Math.abs(next.y - b.y)) / 2);
+        run += `Q${b.x} ${b.y} ${b.x + Math.sign(next.x - b.x) * after} ${b.y + Math.sign(next.y - b.y) * after}`;
+      }
+    }
+    return { from: from.id, to: to.id, d: `${lead(from)} ${run} ${tail}` };
+  });
+  const trunks: { d: string; count: number }[] = [...leads.values()];
+  for (const [key, spans] of channels) {
+    const fixed = Number(key.slice(1)), cuts = [...new Set(spans.flat())].sort((a, b) => a - b);
+    for (let at = 1; at < cuts.length; at += 1) {
+      const lo = cuts[at - 1]!, hi = cuts[at]!, count = spans.filter(([from, to]) => from <= lo && to >= hi).length;
+      if (count === 0) continue;
+      const sag = hi - lo > 48 ? (at % 2 === 0 ? 2 : -2) : 0;
+      trunks.push({ count, d: key[0] === "h" ? `M${lo} ${fixed}Q${(lo + hi) / 2} ${fixed + sag} ${hi} ${fixed}` : `M${fixed} ${lo}Q${fixed + sag} ${(lo + hi) / 2} ${fixed} ${hi}` });
+    }
   }
-  const ys = [...rows.keys()], spine = PADDING + 5;
-  const trunk = ys.length < 2
-    ? [...rows].map(([y, [from, to]]) => `M${from} ${y}H${to}`).join(" ")
-    : `M${spine} ${Math.min(...ys)}V${Math.max(...ys)} ${[...rows].map(([y, [, to]]) => `M${spine} ${y}H${to}`).join(" ")}`;
-  return { linked, trunk };
+  return { routes, trunks };
 }
 
 /** Furniture is subdued scenery, never a second set of file-category controls. */

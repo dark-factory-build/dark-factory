@@ -869,12 +869,27 @@ test("direct rooms picture only direct counts while subtree rooms retain descend
   assert.equal(displayed("subtree").find((item) => item.kind === "source").count, fileCounts.source);
 });
 
-test("linked rooms drop into one conduit and the floor carries no native tooltip", () => {
+test("dependencies are cabled between shown rooms, routes light on inspection, and the floor carries no native tooltip", async () => {
   const link = (nodeId) => ({ omitted: 0, links: [{ nodeId, label: nodeId, path: nodeId, direction: "to", weight: 1 }] });
   const linked = { ...topology, nodes: topology.nodes.map((node) => ({ ...node, dependencies: node.id === "lib" ? link("src") : node.id === "src" ? link("lib") : link("hidden") })) };
   const markup = renderToStaticMarkup(createElement(FactoryScene, { topology: linked, workers: [] }));
-  assert.deepEqual([...markup.matchAll(/data-conduit-drop="([^"]+)"/g)].map((match) => match[1]).sort(), ["lib", "src"]);
-  assert.match(markup, /data-conduit-trunk="" aria-hidden="true" d="M\d/);
-  assert.doesNotMatch(markup, /<title>/);
-  assert.doesNotMatch(renderToStaticMarkup(createElement(FactoryScene, { topology, workers: [] })), /data-conduit-drop/);
+  assert.ok([...markup.matchAll(/data-wire-trunk="1" d="([^"]+)"/g)].every((match) => !/NaN|undefined/.test(match[1])));
+  assert.match(markup, /data-wire-trunk/);
+  assert.doesNotMatch(markup, /data-wire=|<title>/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(FactoryScene, { topology, workers: [] })), /data-wire/);
+
+  const priorWindow = globalThis.window;
+  globalThis.window = { innerWidth: 390, innerHeight: 844 };
+  try {
+    let renderer;
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology: linked, workers: [] })); });
+    const map = renderer.root.findByProps({ className: "dfFactoryFloor__map" });
+    const over = (roomId) => ({ target: { closest: (selector) => selector === "[data-room-id]" ? { getAttribute: () => roomId } : null } });
+    const lit = () => renderer.root.findAll((node) => node.props["data-wire"] !== undefined).map((node) => node.props["data-wire"]);
+    // Both directions of one edge are a single wire; hidden endpoints draw nothing.
+    await act(async () => map.props.onPointerOver(over("src")));
+    assert.deepEqual(lit(), ["lib src"]);
+    await act(async () => map.props.onPointerOver(over("repo")));
+    assert.deepEqual(lit(), []);
+  } finally { globalThis.window = priorWindow; }
 });
