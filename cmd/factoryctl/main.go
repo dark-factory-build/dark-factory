@@ -47,7 +47,9 @@ const (
   factoryctl github delegate --repositories FILE
 	factoryctl intake list [--project ID]
 	factoryctl intake config [--project ID]
-	factoryctl intake create|update --source ID --project ID --configuration JSON [--revision N]
+	factoryctl intake create --project ID --repository OWNER/REPO --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID]
+	factoryctl intake update --source ID --project ID --repository OWNER/REPO --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] --revision N
+	  New sources use manual approval, poll every 60 seconds, and admit up to 25 accepted issues. --configuration JSON remains available for automation.
 	factoryctl intake preview|refresh --source ID --page N
 	factoryctl intake enable|pause --source ID --revision N [--reviewed-revision N]
 	factoryctl intake accept --source ID --revision N --issue N --hash HEX64
@@ -81,7 +83,7 @@ const (
   factoryctl human reply --operation-id ID --request ID --revision REVISION --reply TEXT
   factoryctl project create --name TEXT --root ABSOLUTE
   factoryctl project repository list --project ID
-  factoryctl project repository add --id HEX32 --project ID --name TEXT --root ABSOLUTE --base REF
+	factoryctl project repository add --project ID --name TEXT --root ABSOLUTE --base REF [--id HEX32]
   factoryctl project repository name --id ID --revision REVISION --name TEXT
   factoryctl project repository base --id ID --revision REVISION --base REF
   factoryctl project repository default|enable|disable|remove --id ID --revision REVISION
@@ -1386,8 +1388,16 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		if (len(args)-2)%2 != 0 {
 			return attemptCommand{}, false, false
 		}
+		configuration := api.IntakeConfiguration{Policy: "manual", PollSeconds: 60, AdmissionLimit: 25}
+		configurationFlags := false
+		configurationJSON := false
+		seen := map[string]bool{}
 		for i := 2; i < len(args); i += 2 {
 			key, value := args[i], args[i+1]
+			if key != "--trusted-author" && seen[key] {
+				return attemptCommand{}, false, false
+			}
+			seen[key] = true
 			switch key {
 			case "--source":
 				input.SourceID = value
@@ -1424,12 +1434,74 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			case "--acceptance":
 				input.AcceptanceID = value
 			case "--configuration":
-				var config api.IntakeConfiguration
-				if json.Unmarshal([]byte(value), &config) != nil {
+				if configurationFlags || json.Unmarshal([]byte(value), &configuration) != nil {
 					return attemptCommand{}, false, false
 				}
-				input.Configuration = &config
+				configurationJSON = true
+			case "--repository":
+				if configurationJSON || !validIntakeRepository(value) {
+					return attemptCommand{}, false, false
+				}
+				configuration.Repository, configurationFlags = value, true
+			case "--target-repository":
+				if configurationJSON || !validHumanRequestKey(value) {
+					return attemptCommand{}, false, false
+				}
+				configuration.TargetRepositoryID, configurationFlags = value, true
+			case "--overseer":
+				if configurationJSON || !validHumanRequestKey(value) {
+					return attemptCommand{}, false, false
+				}
+				configuration.OverseerAgentID, configurationFlags = value, true
+			case "--label":
+				if configurationJSON || !validOperatorText(value, 1, 100) {
+					return attemptCommand{}, false, false
+				}
+				configuration.Label, configurationFlags = value, true
+			case "--policy":
+				if configurationJSON || value != "manual" && value != "trusted-authors" {
+					return attemptCommand{}, false, false
+				}
+				configuration.Policy, configurationFlags = strings.ReplaceAll(value, "-", "_"), true
+			case "--trusted-author":
+				if configurationJSON || !validOperatorText(value, 1, 100) {
+					return attemptCommand{}, false, false
+				}
+				configuration.TrustedAuthors, configurationFlags = append(configuration.TrustedAuthors, value), true
+			case "--poll-seconds":
+				n, ok := parseRevision(value)
+				if configurationJSON || !ok || n < 5 || n > 86400 {
+					return attemptCommand{}, false, false
+				}
+				configuration.PollSeconds, configurationFlags = uint32(n), true
+			case "--admission-limit":
+				n, ok := parseRevision(value)
+				if configurationJSON || !ok || n < 1 || n > 200 {
+					return attemptCommand{}, false, false
+				}
+				configuration.AdmissionLimit, configurationFlags = uint16(n), true
+			case "--priority":
+				n, err := strconv.ParseInt(value, 10, 64)
+				if configurationJSON || err != nil || value != strconv.FormatInt(n, 10) || n < -1_000_000 || n > 1_000_000 {
+					return attemptCommand{}, false, false
+				}
+				configuration.PriorityDefault, configurationFlags = n, true
 			default:
+				return attemptCommand{}, false, false
+			}
+		}
+		if configurationFlags || configurationJSON {
+			input.Configuration = &configuration
+		}
+		if input.Action == "create" && input.SourceID == "" {
+			id, err := newOperatorID()
+			if err != nil {
+				return attemptCommand{}, false, false
+			}
+			input.SourceID = id
+		}
+		if input.Action == "create" || input.Action == "update" {
+			if input.Configuration == nil || configurationFlags && !validNamedIntakeConfiguration(*input.Configuration) {
 				return attemptCommand{}, false, false
 			}
 		}
@@ -1497,7 +1569,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 			return command, false, command.project != ""
 		}
 		if action == "add" {
-			return command, false, command.repository != "" && command.project != "" && command.name != "" && command.root != "" && command.body != ""
+			return command, false, command.project != "" && command.name != "" && command.root != "" && command.body != ""
 		}
 		return command, false, command.repository != "" && command.expectedRevision != 0
 	}
@@ -1769,6 +1841,33 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 		}
 	}
 	return command, false, true
+}
+
+// validNamedIntakeConfiguration keeps the friendly flags at the same trust
+// boundary as the JSON form. The daemon still verifies repository access and
+// persists the authoritative configuration.
+func validNamedIntakeConfiguration(value api.IntakeConfiguration) bool {
+	if !validIntakeRepository(value.Repository) || !validHumanRequestKey(value.TargetRepositoryID) || value.OverseerAgentID != "" && !validHumanRequestKey(value.OverseerAgentID) || !validOperatorText(value.Label, 0, 100) || value.Policy != "manual" && value.Policy != "trusted_authors" || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || value.PriorityDefault < -1_000_000 || value.PriorityDefault > 1_000_000 || len(value.TrustedAuthors) > 25 || len(value.PriorityByLabel) > 25 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, author := range value.TrustedAuthors {
+		if !validOperatorText(author, 1, 39) || seen[strings.ToLower(author)] {
+			return false
+		}
+		seen[strings.ToLower(author)] = true
+	}
+	for label, priority := range value.PriorityByLabel {
+		if !validOperatorText(label, 1, 100) || priority < -1_000_000 || priority > 1_000_000 {
+			return false
+		}
+	}
+	encoded, err := json.Marshal(value.PriorityByLabel)
+	return err == nil && len(encoded) <= 2048 && (value.Policy != "trusted_authors" || len(value.TrustedAuthors) > 0)
+}
+
+func validIntakeRepository(value string) bool {
+	return validOperatorText(value, 3, 140) && strings.Count(value, "/") == 1
 }
 
 // anyWorkerAgent maps the CLI's `--agent any` to the wire's empty assigned
@@ -2310,7 +2409,15 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			}
 			return writeJSON(stdout, struct{}{})
 		}
-		input := api.ProjectRepositoryInput{Action: command.provider, ID: command.repository, ProjectID: command.project, Name: command.name, Root: command.root, BaseRef: command.body, ExpectedRevision: command.expectedRevision}
+		repositoryID := command.repository
+		if command.provider == "add" && repositoryID == "" {
+			var mintErr error
+			repositoryID, mintErr = newOperatorID()
+			if mintErr != nil {
+				return writeWebFailure(stderr, "project repository add", mintErr)
+			}
+		}
+		input := api.ProjectRepositoryInput{Action: command.provider, ID: repositoryID, ProjectID: command.project, Name: command.name, Root: command.root, BaseRef: command.body, ExpectedRevision: command.expectedRevision}
 		if command.provider == "enable" {
 			input.Action = "enabled"
 			value := true
