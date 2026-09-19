@@ -2355,7 +2355,7 @@ test("private issue review shows sync guidance and immutable linked work", () =>
   const review = { state: "withdrawal_pending", task_id: ids.task, imported_tasks: ["87".repeat(16)], sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "withdrawal_pending", acceptance_id: "86".repeat(16), task_id: ids.task }] };
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]) });
   assert.match(markup, /Waiting for the first check/);
-  assert.match(markup, /factoryctl intake service status/);
+  assert.match(markup, /factoryctl intake service install/);
   assert.match(markup, /WITHDRAWAL PENDING/);
   assert.match(markup, /IMPORTED TASKS · 1/);
   assert.match(markup, /title="Task [a-f0-9]{32}"/);
