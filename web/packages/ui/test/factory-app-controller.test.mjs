@@ -1166,3 +1166,38 @@ test("failed source preview cannot reuse another source's reviewed candidates or
   assert.equal(context.latest().intake.size, 0);
   context.controller.close();
 });
+
+test("registering a checkout checks fetch and publication separately without losing readiness", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  const repository = { id: "61".repeat(16), project_id: projectId, name: "Code", root: "/fixture/code", base_ref: "release", enabled: true, default: true, revision: 1n, fetch_state: "unchecked" };
+  const calls = [];
+  const context = harness({
+    getRepositories: async () => [repository],
+    mutateRepository: async (request) => {
+      calls.push(request.action);
+      return { ...repository, fetch_state: request.action === "fetch" ? "setup_required" : "unchecked", publication_state: request.action === "github" ? "ready" : "unchecked" };
+    },
+  });
+  context.controller.start(); context.emitStatus("ready");
+  await context.controller.mutateRepository({ action: "add", projectId, name: repository.name, root: repository.root, baseRef: repository.base_ref });
+  assert.deepEqual(calls, ["add", "fetch", "github"]);
+  assert.equal(context.latest().repositories.get(projectId)[0].fetch_state, "setup_required");
+  assert.equal(context.latest().repositories.get(projectId)[0].publication_state, "ready");
+});
+
+test("registration finishing after disconnect cannot check remote access in a new session", async () => {
+  const projectId = [...fixtureState.projects.keys()][0];
+  let finish;
+  const calls = [];
+  const context = harness({ mutateRepository: async (request) => {
+    calls.push(request.action);
+    return new Promise((resolve) => { finish = resolve; });
+  } });
+  context.controller.start(); context.emitStatus("ready");
+  const pending = context.controller.mutateRepository({ action: "add", projectId, name: "Code", root: "/fixture/code", baseRef: "release" });
+  context.emitStatus("disconnected");
+  finish({ id: "61".repeat(16), revision: 1n });
+  await pending;
+  assert.deepEqual(calls, ["add"]);
+  assert.equal(context.latest().repositories.size, 0);
+});

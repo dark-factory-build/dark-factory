@@ -238,11 +238,13 @@ export class FactorySettingsCoordinator {
     const session = this.#owner.session();
     if (!this.#owner.ready() || session === undefined || this.#repositoryPending.has(request.projectId)) return;
     const generation = this.#owner.generation();
+    let added: RepositoryView | undefined;
     this.#repositoryPending.add(request.projectId);
     this.#owner.publish();
     try {
       const result = await session.mutateRepository(request);
       if (!this.#current(generation, session)) return;
+      if (request.action === "add") added = result;
       if (result !== undefined && (request.action === "fetch" || request.action === "github")) {
         this.#repositories.set(request.projectId, (this.#repositories.get(request.projectId) ?? []).map((item) => item.id !== result.id ? item : item.revision !== result.revision ? result : { ...result,
           ...(request.action === "fetch" ? { publication_state: item.publication_state } : { fetch_state: item.fetch_state }),
@@ -258,7 +260,14 @@ export class FactorySettingsCoordinator {
       this.#repositoryPending.delete(request.projectId);
     }
     this.#owner.publish();
+    if (!this.#current(generation, session)) return;
     if (request.action !== "fetch" && request.action !== "github") await this.loadRepositories(request.projectId);
+    if (added !== undefined) {
+      for (const action of ["fetch", "github"] as const) {
+        if (!this.#current(generation, session)) return;
+        await this.mutateRepository({ action, projectId: request.projectId, repositoryId: added.id });
+      }
+    }
   }
 
   async createProject(request: { name: string; root: string }): Promise<void> {
