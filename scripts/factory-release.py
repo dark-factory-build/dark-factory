@@ -160,10 +160,22 @@ def review_gate(config, head, reviews):
 def check_runs_ok(checks):
     if not isinstance(checks, list) or not checks:
         return False
-    successful = False
+    latest = {}
+    seen_ids = set()
     for check in checks:
-        if not isinstance(check, dict):
+        app = check.get("app") if isinstance(check, dict) else None
+        if (not isinstance(app, dict) or type(app.get("id")) is not int or app["id"] < 1
+                or type(check.get("id")) is not int or check["id"] < 1
+                or not isinstance(check.get("name"), str) or not check["name"]):
             return False
+        if check["id"] in seen_ids:
+            return False
+        seen_ids.add(check["id"])
+        key = app["id"], check["name"]
+        if key not in latest or check["id"] > latest[key]["id"]:
+            latest[key] = check
+    successful = False
+    for check in latest.values():
         status = str(check.get("status", "")).lower()
         conclusion = str(check.get("conclusion", "")).lower()
         if status not in {"completed", "complete"}:
