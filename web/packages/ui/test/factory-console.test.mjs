@@ -685,10 +685,13 @@ test("Tasks lists blocked work, hides standing passes, flags dispatch off and qu
     ]),
   });
   const added = [];
+  const edits = [];
   let renderer;
-  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "queue", state, onDetail() {}, onAddTask: async (agent, instruction, mode) => { added.push([agent.id, instruction, mode]); return true; } })); });
+  await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "queue", state, onDetail() {}, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; }, onAddTask: async (agent, instruction, mode) => { added.push([agent.id, instruction, mode]); return true; } })); });
   const panel = renderer.root.findByProps({ "aria-label": "Tasks" });
-  assert.equal(panel.findByProps({ "aria-label": "Blocked tasks" }).findByType("button").children.join(""), "Stuck on a prerequisite");
+  assert.equal(panel.findByProps({ "aria-label": "Blocked tasks" }).findAllByType("button")[0].children.join(""), "Stuck on a prerequisite");
+  await act(async () => { panel.findByProps({ "aria-label": "Cancel Stuck on a prerequisite" }).props.onClick(); });
+  assert.deepEqual(edits, [["b1".repeat(16), { cancel: true }]], "a blocked task is cleared in one step");
   assert.ok(!panel.findAllByType("button").some((button) => button.children.join("") === "Standing instruction"), "an idle wake is the agent's rule, not a task row");
   assert.match(panel.findByProps({ role: "status" }).children.join(""), /Dispatch is off/);
   const form = panel.findByProps({ "aria-label": "New task" });

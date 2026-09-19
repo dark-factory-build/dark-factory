@@ -452,7 +452,7 @@ export class BrowserSession {
     return result;
   }
 
-  /** Edit one still-queued task: its brief, priority, assignment, or cancel it. */
+  /** Edit one still-queued task: its brief, priority, assignment, or cancel it. A blocked task can only be cancelled. */
   updateTask(request: { taskId: string; expectedRevision: bigint; title?: string; body?: string; priority?: number; assignedAgentId?: string; cancel?: boolean }): Promise<TaskUpdateResult> {
     const body: TaskUpdateBody = { task_id: request.taskId, expected_revision: request.expectedRevision };
     if (request.title !== undefined) body.title = request.title;
