@@ -109,6 +109,7 @@ test("repository roots stay inside private settings", () => {
   assert.match(settings, new RegExp(root));
   assert.match(settings, /FETCH: SETUP_REQUIRED/);
   assert.match(settings, /PUBLICATION: IDENTITY VERIFIED/);
+  assert.match(settings, /base branch and repository-local Git authentication/);
   assert.match(settings, /CHECK FETCH READINESS/);
   assert.match(settings, /REFRESH GITHUB BINDING/);
   assert.match(settings, /Git checkout needs operator setup\./);
@@ -2356,7 +2357,10 @@ test("private issue review shows sync guidance and immutable linked work", () =>
   assert.match(markup, /Waiting for the first check/);
   assert.match(markup, /factoryctl service status/);
   assert.match(markup, /WITHDRAWAL PENDING/);
-  assert.match(markup, /IMPORTED TASKS/);
+  assert.match(markup, /IMPORTED TASKS · 1/);
+  assert.match(markup, /title="Task [a-f0-9]{32}"/);
+  assert.match(markup, /Review the state projection/);
+  assert.doesNotMatch(markup, /87878787878787878787878787878787/);
   assert.match(markup, /Review issue content/);
   assert.match(markup, /Add issue source/);
   assert.match(markup, /Source settings/);
