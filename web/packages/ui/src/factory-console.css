@@ -832,7 +832,6 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfFactoryFloor [role="button"]:focus-visible > rect,
 .dfFactoryScene__target:focus-visible > .dfFactoryScene__focus { stroke: var(--df-console-accent); stroke-width: 2; }
 .dfFactoryScene__target:focus { outline: none; }
-.dfFactoryScene__target { cursor: help; }
 .dfFactoryTooltip { position: fixed; z-index: 1000; width: max-content; max-width: min(256px, calc(100vw - 16px)); box-sizing: border-box; padding: 8px 10px; border: 1px solid #637575; border-radius: 4px; background: #142126; color: #e0e3d6; font: 12px/1.5 system-ui, sans-serif; white-space: pre-line; overflow-wrap: anywhere; max-height: calc(100vh - 16px); overflow-y: auto; box-shadow: 0 3px 12px #0008; }
 .dfConsoleSidebar__section[aria-label="FLOOR APPEARANCE"] { display: grid; gap: .65rem; }
 .dfConsoleSidebar__section[aria-label="FLOOR APPEARANCE"] label { display: grid; gap: .25rem; }

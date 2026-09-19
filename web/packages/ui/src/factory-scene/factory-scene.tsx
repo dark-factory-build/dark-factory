@@ -9,6 +9,7 @@ import {
   placeWorkers,
   inventoryLabels,
   type RoomContent,
+  type SceneRoomLayout,
   type SceneTopology,
   type SceneWorker,
 } from "./scene.js";
@@ -226,7 +227,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
               <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               {!seated ? null : <g aria-hidden="true">
                 <path d="M-5 4h4v3h-5 M2 4h4v3H2" stroke="#838574" strokeWidth="2" fill="#4f5d59" />
-                {placement.area === "resting" || !connected ? null : <g data-planning-light="" ><circle cx="12" cy="-14" r="12" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}
+                {placement.area === "resting" || !connected ? null : <g data-planning-light="" ><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}
         {placement.area === "resting" ? <g><rect x="3" y="-1" width="5" height="4" fill="#d1c8a9" /><path d="M8 0h2v2H8" fill="none" stroke="#d1c8a9" /></g> : <path d="M2 0l5 -4" stroke="#d1c8a9" strokeWidth="2" />}
               </g>}</g>
             </g>
@@ -242,6 +243,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
 export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
+  const [linkedFrom, setLinkedFrom] = useState<string>();
   useLayoutEffect(() => {
     if (!tooltip || !tooltipElement.current) return;
     const height = tooltipElement.current.getBoundingClientRect().height;
@@ -257,6 +259,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
   const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => {
     const element = event.target as Element;
     if (!element.closest('[role="tooltip"]')) showTooltip(element.closest("[data-tooltip]"));
+    setLinkedFrom(element.closest("[data-room-id]")?.getAttribute("data-room-id") ?? undefined);
   };
   const layout = useMemo(() => layoutScene(topology), [topology]);
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
@@ -271,6 +274,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
   const sceneHeight = boardTop + (tasks.some((task) => task.status === "queued") ? 48 : 0) + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
+  const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
   const queued = tasks.filter((order) => order.status === "queued").length;
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
@@ -278,7 +282,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
   return (
     <>
-    <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
+    <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => { setTooltip(undefined); setLinkedFrom(undefined); }} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") { setTooltip(undefined); setLinkedFrom(undefined); } }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
       viewBox={`0 0 ${layout.width} ${sceneHeight}`}
       role="group"
@@ -286,7 +290,6 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
       data-topology-digest={topology.digest}
       style={{ display: "block", width: "100%", minWidth: layout.width, maxWidth, height: "auto", margin: "0 auto", background: "#08131d" }}
     >
-      <title>Dark Factory codebase floor</title>
       <desc>{`${layout.rooms.length} topology spaces, ${workers.length} workers${omittedLocations === 0 ? "" : `, ${omittedLocations} current locations not shown in this view`}`}</desc>
       <defs>
         {/* The sheet enters the document once; every frame is a window on it. */}
@@ -305,8 +308,8 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
           <rect width="24" height="12" fill="#41494a" />
           <path d="M0 0h24 M0 6h24 M12 0v6 M0 6v6 M24 6v6" stroke="#20292d" strokeWidth="2" />
         </pattern>
-        <radialGradient id="df-lamplight" cx="85%" cy="10%" r="95%">
-          <stop offset="0" stopColor="#f2dab0" stopOpacity=".18" />
+        <radialGradient id="df-lamplight" cx="50%" cy="45%" r="60%">
+          <stop offset="0" stopColor="#f2dab0" stopOpacity=".24" />
           <stop offset="1" stopColor="#f2dab0" stopOpacity="0" />
         </radialGradient>
       </defs>
@@ -336,9 +339,6 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
             <path d={`M${room.x + 4} ${room.y + 10}v${room.height - 14} M${room.x + room.width - 4} ${room.y + 10}v${room.height - 14}`} stroke="#141f23" strokeWidth="2" />
             <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill={operating ? "url(#df-lamplight)" : "#08131d"} opacity={operating ? 1 : .18} pointerEvents="none" />
             {appearance.scenery === "off" ? null : <g aria-hidden="true" opacity={appearance.scenery === "subtle" ? .35 : .6}>
-              <path d={room.width >= 192
-                ? `M${room.x + room.width - 14} ${room.y + 42}v40h-8 M${room.x + room.width - 17} ${room.y + 48}h6 M${room.x + room.width - 17} ${room.y + 72}h6`
-                : `M${room.x + 12} ${room.y + 44}h20v10h-20z M${room.x + 16} ${room.y + 46}v6 M${room.x + 21} ${room.y + 46}v6 M${room.x + 26} ${room.y + 46}v6`} fill="none" stroke="#728078" strokeWidth="2" />
               <path d={`M${room.door.x - 12} ${room.door.y - 8}h24 M${room.door.x - 7} ${room.door.y - 14}h14`} stroke="#53615c" strokeWidth="2" />
             </g>}
             {contents.map((item) => <g key={item.key} data-room-content={item.kind} aria-hidden="true"><Equipment item={item} operating={operating} scenery={appearance.scenery} /></g>)}
@@ -365,6 +365,11 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
 
 
+      {appearance.scenery === "off" ? null : <g aria-hidden="true" fill="none" strokeLinecap="round" pointerEvents="none">
+        <g opacity={appearance.scenery === "subtle" ? .3 : .5}>{cabling.trunks.map((trunk, index) => <path key={index} data-wire-trunk={trunk.count} d={trunk.d} stroke={trunk.wall ? "#9aa69c" : "#728078"} strokeWidth={Math.min(trunk.wall ? 4 : 8, 1.5 * Math.sqrt(trunk.count))} />)}</g>
+        {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
+          <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
+      </g>}
       <Area width={commonWidth} top={layout.restingTop - 40} bottom={commonBottom} />
       {[
         { label: "Break room", seats: seating.resting, planning: false },
@@ -418,6 +423,99 @@ function Area({ width, top, bottom }: { width: number; top: number; bottom: numb
 }
 
 
+/**
+ * Static dependencies as floor cabling. Every link is routed once: out under
+ * the desk and through the door, along corridors, down the nearest wall of any
+ * row in between, and into a lower room down its side wall. At rest the shared
+ * stretches are drawn once, thicker the more links they carry; a link's own
+ * end-to-end route is only drawn when one of its rooms is inspected.
+ */
+function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) {
+  type Point = { x: number; y: number };
+  // Corridor cable sways by position alone, so a lit route lies exactly on its
+  // trunk; stretches pinned inside a wall or a doorway run straight.
+  const on = (across: boolean, fixed: number, along: number): Point =>
+    across ? { x: along, y: fixed + 2 * Math.sin(along / 28 + fixed) } : { x: fixed, y: along };
+  const spot = ({ x, y }: Point) => `${+x.toFixed(1)} ${+y.toFixed(1)}`;
+  const stretch = (across: boolean, fixed: number, from: number, to: number) => {
+    let d = "";
+    for (let along = from + (from < to ? 8 : -8); from < to ? along < to : along > to; along += from < to ? 8 : -8) d += `L${spot(on(across, fixed, along))}`;
+    return `${d}L${spot(on(across, fixed, to))}`;
+  };
+  const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
+  const rowOf = (room: SceneRoomLayout) => room.door.y;
+  const rows = [...new Set(layout.rooms.map(rowOf))].sort((a, b) => a - b);
+  const pairs = new Set<string>();
+  for (const node of topology.nodes) for (const link of node.dependencies?.links ?? []) {
+    if (link.nodeId !== node.id && rooms.has(node.id) && rooms.has(link.nodeId)) pairs.add([node.id, link.nodeId].sort().join("\n"));
+  }
+  // Leads and corner bends, drawn once however many links share them.
+  const leads = new Map<string, { d: string; count: number }>();
+  const carry = (key: string, d: string) => leads.set(key, { d, count: (leads.get(key)?.count ?? 0) + 1 });
+  const lead = (room: SceneRoomLayout, wallX?: number) => {
+    const desk = room.contents.find((item) => item.workSurface);
+    const key = `${room.id} ${wallX ?? "door"}`;
+    let d: string;
+    if (wallX === undefined) {
+      const plug = desk === undefined ? { x: room.x + room.width / 2, y: room.y + 60 } : { x: desk.x + desk.width / 2, y: desk.y + 33 };
+      d = `M${plug.x} ${plug.y}C${plug.x + 14} ${plug.y + 22} ${room.door.x - 10} ${room.door.y - 18} ${room.door.x} ${room.door.y}`;
+    } else {
+      const left = wallX < room.x + room.width / 2;
+      const plug = desk === undefined ? { x: room.x + room.width / 2, y: room.y + 60 } : { x: left ? desk.x : desk.x + desk.width, y: desk.y + 22 };
+      d = `M${wallX} ${plug.y - 12}C${wallX} ${plug.y + 12} ${(wallX + plug.x) / 2} ${plug.y + 16} ${plug.x} ${plug.y}`;
+    }
+    carry(key, d);
+    return d;
+  };
+  // Axis-aligned stretches by channel, for counting what each one carries.
+  const channels = new Map<string, [number, number][]>();
+  const routes = [...pairs].sort().map((pair, index) => {
+    const [from, to] = (pair.split("\n").map((id) => rooms.get(id)!) as [SceneRoomLayout, SceneRoomLayout]).sort((a, b) => rowOf(a) - rowOf(b));
+    const points: Point[] = [{ x: from.door.x, y: from.door.y }, { x: from.door.x, y: from.door.y + 16 }];
+    let tail: string;
+    if (rowOf(from) === rowOf(to)) {
+      points.push({ x: to.door.x, y: to.door.y + 16 }, { x: to.door.x, y: to.door.y });
+      tail = lead(to);
+    } else {
+      const nearest = (row: number, x: number) => layout.rooms.filter((room) => rowOf(room) === row).flatMap((room) => [room.x, room.x + room.width])
+        .reduce((best, wall) => Math.abs(wall - x) < Math.abs(best - x) ? wall : best);
+      for (const row of rows.filter((row) => row > rowOf(from) && row < rowOf(to))) {
+        const wall = nearest(row, to.x + to.width / 2);
+        points.push({ x: wall, y: points.at(-1)!.y }, { x: wall, y: row + 16 });
+      }
+      const wall = Math.abs(to.x - points.at(-1)!.x) <= Math.abs(to.x + to.width - points.at(-1)!.x) ? to.x : to.x + to.width;
+      const desk = to.contents.find((item) => item.workSurface);
+      points.push({ x: wall, y: points.at(-1)!.y }, { x: wall, y: (desk === undefined ? to.y + 60 : desk.y + 22) - 12 });
+      tail = lead(to, wall);
+    }
+    let run = "", bent = "";
+    for (let at = 1; at < points.length; at += 1) {
+      const a = points[at - 1]!, b = points[at]!, before = points[at - 2], next = points[at + 1];
+      const across = a.y === b.y, fixed = across ? a.y : a.x, [start, end] = across ? [a.x, b.x] : [a.y, b.y];
+      // A vertical stretch that is not a door stub runs inside a wall.
+      const key = `${across ? "h" : at === 1 || (next === undefined && rowOf(from) === rowOf(to)) ? "v" : "w"}${fixed}`;
+      const corner = Math.min(8, Math.abs(end - start) / 2), way = Math.sign(end - start);
+      const entry = start + (before === undefined ? 0 : way * corner), exit = end - (next === undefined ? 0 : way * corner);
+      // A stretch stops short of each bend, so a turning cable curves into the bundle it joins.
+      channels.set(key, [...(channels.get(key) ?? []), [Math.min(entry, exit), Math.max(entry, exit)]]);
+      if (before !== undefined) { const bend = `${bent}Q${a.x} ${a.y} ${spot(on(across, fixed, entry))}`; carry(bend, `M${bend}`); }
+      run += `${before === undefined ? "M" : `Q${a.x} ${a.y} `}${spot(on(across, fixed, entry))}${stretch(across, fixed, entry, exit)}`;
+      bent = spot(on(across, fixed, exit));
+    }
+    return { from: from.id, to: to.id, d: `${lead(from)} ${run} ${tail}` };
+  });
+  const trunks: { d: string; count: number; wall?: boolean }[] = [...leads.values()];
+  for (const [key, spans] of channels) {
+    const fixed = Number(key.slice(1)), cuts = [...new Set(spans.flat())].sort((a, b) => a - b);
+    for (let at = 1; at < cuts.length; at += 1) {
+      const lo = cuts[at - 1]!, hi = cuts[at]!, count = spans.filter(([from, to]) => from <= lo && to >= hi).length;
+      if (count === 0) continue;
+      trunks.push({ count, wall: key[0] === "w", d: `M${spot(on(key[0] === "h", fixed, lo))}${stretch(key[0] === "h", fixed, lo, hi)}` });
+    }
+  }
+  return { routes, trunks };
+}
+
 /** Furniture is subdued scenery, never a second set of file-category controls. */
 function Equipment({ item, operating, scenery }: { item: RoomContent; operating: boolean; scenery: FloorAppearance["scenery"] }) {
   return <g transform={`translate(${item.x} ${item.y})`} opacity={operating ? .9 : .55}>
@@ -442,6 +540,8 @@ function Equipment({ item, operating, scenery }: { item: RoomContent; operating:
 
 function roomInfo(node: SceneTopology["nodes"][number]) {
   const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
+  // The cabling is scenery; its content is stated here for every reader and appearance.
+  const links = [...new Set((node.dependencies?.links ?? []).map((link) => link.label))];
   const inventory = counts === undefined ? "Inventory unavailable" : Object.entries(inventoryLabels).filter(([kind]) => counts[kind as keyof typeof counts] > 0).map(([kind, label]) => `${counts[kind as keyof typeof counts]} ${label.toLowerCase()}`).join(" · ") || "No scanned files";
-  return `${node.path === "." ? node.label : node.path}\n${node.language ? `${node.language} · ` : ""}${node.kind} · ${node.inventoryScope === "direct" ? "direct files" : "subtree"}\n${inventory}`;
+  return `${node.path === "." ? node.label : node.path}\n${node.language ? `${node.language} · ` : ""}${node.kind} · ${node.inventoryScope === "direct" ? "direct files" : "subtree"}\n${inventory}${links.length === 0 ? "" : `\nWired to ${links.slice(0, 6).join(", ")}${links.length > 6 ? ` +${links.length - 6}` : ""}`}`;
 }
