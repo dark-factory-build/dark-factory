@@ -93,6 +93,27 @@ factoryctl remote status
 The CLI cannot delete origin-scoped browser storage; pairing afresh from the
 pair page makes that manual browser action unnecessary.
 
+## Working in the console
+
+Select an agent on the floor or in the roster. Its terminal, queue and Needs
+You decisions share the side panel. A terminal instruction to a ready agent
+creates durable work; Message steers a running session. Interrupt stops Codex
+generation while preserving the task, while Stop ends it. Send a completed
+result back with feedback or start a separate replacement without losing its
+history. Add to queue can hold later work while an agent is busy.
+
+Assign work to a named worker or Any eligible worker in the project. Named
+work is taken first; the next free eligible worker then claims shared work.
+Raise or lower numeric priority explicitly when ordering either queue. Recent
+Work loads authorized completed and blocked details on demand; private
+instructions and results never enter public snapshots. It starts with the
+newest ten results; Show more loads ten at a time. Agent state is Ready,
+Working, Needs you, or Paused: Working includes startup and cleanup, while
+queued work alone remains Ready. Pause prevents future admissions without
+stopping current work, and Show archived lets you inspect or restore a drained
+worker without erasing its history. Factory capacity counts workers; one
+overseer can run alongside them.
+
 ## Feedback and public backlog
 
 Settings → Help and feedback opens the public reporting and backlog pages,
@@ -137,12 +158,12 @@ installation; restart it with `factoryctl service start --home
 removal path for that exact home and label. Homebrew does not own the running
 service; do not use `brew services` for Dark Factory.
 
-## GitHub connection (next release)
+## GitHub connection (v0.4.0+)
 
-This setup requires the release containing the GitHub connection commands and
-an activated Maintainer connection endpoint. It is not available in older
-archives. Use the operator socket and token exports above; these identify your
-local factory, not someone else's GitHub account.
+This setup requires v0.4.0 or later and an activated Maintainer connection
+endpoint. It is not available in older archives. Use the operator socket and
+token exports above; these identify your local factory, not someone else's
+GitHub account.
 
 Run `factoryctl github connect --open`. Authorize the Dark Factory GitHub App
 under your GitHub account. Enter the callback page's one-time code with
@@ -190,7 +211,7 @@ configured publication repository to the live GitHub connection. Fetch readiness
 and publication binding are separate checks. A verified publication binding
 still requires live write permission for every publication operation.
 
-## Project repositories (next release)
+## Project repositories (v0.4.0+)
 
 Project settings can register several existing Git checkouts. Creating a project
 registers its initial checkout; an upgrade preserves the old project root and
@@ -214,12 +235,26 @@ refused while a binding remains referenced and never removes the checkout.
 Private Git fetch authentication remains operator-owned and separate from the
 Maintainer connection.
 
-## Reviewed issue intake (next release)
+For a newly created project's first repository, `factoryd` defaults to
+`--base-revision HEAD`; this boot setting initializes the binding and does not
+retarget existing work. With `HEAD` on a branch that has a configured remote
+upstream, a fresh Change fetches and pins that upstream's exact commit. A
+`refs/remotes/upstream/main` base selects a different remote branch. Detached
+HEAD, branches without an upstream, and explicit local refs or commit IDs stay
+local. A configured fetch failure stops source preparation rather than using
+a stale tracking ref. Fetching does not move the registered checkout or update
+tracking refs or `FETCH_HEAD`. Retained Changes keep their original source and
+edits; use the repository `base` setting for future work in that binding. Git
+runs noninteractively with a private home and global/system configuration
+disabled. Private remotes use repository-local authentication; missing
+credentials fail preparation rather than borrowing a worker account.
 
-These commands require the release containing managed intake and an activated
-GitHub connection. GitHub holds the backlog; the factory holds execution and
-acceptance. An issue repository can feed a different registered code repository.
-Delegating GitHub access alone does not subscribe to issues or start work.
+## Reviewed issue intake (v0.4.0+)
+
+These commands require v0.4.0 or later and an activated GitHub connection.
+GitHub holds the backlog; the factory holds execution and acceptance. An issue
+repository can feed a different registered code repository. Delegating GitHub
+access alone does not subscribe to issues or start work.
 
 Use `factoryctl intake list --project PROJECT_ID` to inspect sources. Create a
 source with `factoryctl intake create --source HEX32 --project PROJECT_ID
