@@ -152,12 +152,12 @@ installation; restart it with `factoryctl service start --home
 removal path for that exact home and label. Homebrew does not own the running
 service; do not use `brew services` for Dark Factory.
 
-## GitHub connection (next release)
+## GitHub connection (v0.4.0+)
 
-This setup requires the release containing the GitHub connection commands and
-an activated Maintainer connection endpoint. It is not available in older
-archives. Use the operator socket and token exports above; these identify your
-local factory, not someone else's GitHub account.
+This setup requires v0.4.0 or later and an activated Maintainer connection
+endpoint. It is not available in older archives. Use the operator socket and
+token exports above; these identify your local factory, not someone else's
+GitHub account.
 
 Run `factoryctl github connect --open`. Authorize the Dark Factory GitHub App
 under your GitHub account. Enter the callback page's one-time code with
@@ -205,7 +205,7 @@ configured publication repository to the live GitHub connection. Fetch readiness
 and publication binding are separate checks. A verified publication binding
 still requires live write permission for every publication operation.
 
-## Project repositories (next release)
+## Project repositories (v0.4.0+)
 
 Project settings can register several existing Git checkouts. Creating a project
 registers its initial checkout; an upgrade preserves the old project root and
@@ -240,12 +240,12 @@ a stale tracking ref. Fetching does not move the registered checkout or update
 tracking refs or `FETCH_HEAD`. Retained Changes keep their original source and
 edits; use the repository `base` setting for future work in that binding.
 
-## Reviewed issue intake (next release)
+## Reviewed issue intake (v0.4.0+)
 
-These commands require the release containing managed intake and an activated
-GitHub connection. GitHub holds the backlog; the factory holds execution and
-acceptance. An issue repository can feed a different registered code repository.
-Delegating GitHub access alone does not subscribe to issues or start work.
+These commands require v0.4.0 or later and an activated GitHub connection.
+GitHub holds the backlog; the factory holds execution and acceptance. An issue
+repository can feed a different registered code repository. Delegating GitHub
+access alone does not subscribe to issues or start work.
 
 Use `factoryctl intake list --project PROJECT_ID` to inspect sources. Create a
 source with `factoryctl intake create --source HEX32 --project PROJECT_ID
