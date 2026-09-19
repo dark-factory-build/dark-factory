@@ -46,7 +46,7 @@ func TestRetainedSourceReviewRouteUsesInstalledProviderCapability(t *testing.T) 
 		wantErr  bool
 	}{
 		{name: "codex worker", role: RoleWorker, provider: ProviderCodex},
-		{name: "claude worker", role: RoleWorker, provider: ProviderClaudeCode, wantErr: true},
+		{name: "claude worker", role: RoleWorker, provider: ProviderClaudeCode},
 		{name: "shell worker", role: RoleWorker, provider: ProviderShell, wantErr: true},
 		{name: "orchestrator", role: RoleOrchestrator, provider: ProviderCodex, wantErr: true},
 	} {
@@ -55,7 +55,7 @@ func TestRetainedSourceReviewRouteUsesInstalledProviderCapability(t *testing.T) 
 			if test.wantErr != (err != nil) {
 				t.Fatalf("route error = %v, wantErr=%v", err, test.wantErr)
 			}
-			if test.wantErr && test.role == RoleWorker && (!errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "supported routes: codex")) {
+			if test.wantErr && test.role == RoleWorker && (!errors.Is(err, ErrConflict) || !strings.Contains(err.Error(), "supported routes: codex, claude_code")) {
 				t.Fatalf("route error lacks durable unavailable proof: %v", err)
 			}
 		})
@@ -70,13 +70,13 @@ func TestRetainedSourceReviewRouteLeavesOrdinaryTasksProviderAgnostic(t *testing
 	}
 }
 
-// TestRetainedSourceReviewRouteBlocksNonCodexTaskCreation exercises the
+// TestRetainedSourceReviewRouteBlocksUnsupportedTaskCreation exercises the
 // production guard through the real durable entry point (Store.EnqueueTask
 // -> insertTaskOnConnection), not the private validator directly. Deleting
 // or bypassing the validateRetainedSourceReviewRoute call at
 // internal/kernel/store.go's insertTaskOnConnection would make this test
-// fail: a review-handoff task would be accepted for a non-Codex worker.
-func TestRetainedSourceReviewRouteBlocksNonCodexTaskCreation(t *testing.T) {
+// fail: a review-handoff task would be accepted for an unsupported worker.
+func TestRetainedSourceReviewRouteBlocksUnsupportedTaskCreation(t *testing.T) {
 	store, _ := newTestStore(t)
 	defer store.Close()
 	ctx := context.Background()
@@ -85,35 +85,32 @@ func TestRetainedSourceReviewRouteBlocksNonCodexTaskCreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	claude, err := store.CreateAgent(ctx, NewAgent{
-		ID: agentID(t, 2), ProjectID: project.ID, Name: "claude-worker", Role: RoleWorker,
-		Provider: ProviderClaudeCode, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
-	}, mustTime(t, 11))
+		ID: agentID(t, 3), ProjectID: project.ID, Name: "claude-worker", Role: RoleWorker,
+		Provider: ProviderClaudeCode, ToolBudgetLimit: 100,
+	}, mustTime(t, 13))
 	if err != nil {
 		t.Fatal(err)
 	}
-	codex, err := store.CreateAgent(ctx, NewAgent{
-		ID: agentID(t, 3), ProjectID: project.ID, Name: "codex-worker", Role: RoleWorker,
-		Provider: ProviderCodex, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
+	shell, err := store.CreateAgent(ctx, NewAgent{
+		ID: agentID(t, 2), ProjectID: project.ID, Name: "shell-worker", Role: RoleWorker,
+		Provider: ProviderShell, Model: "", ReasoningEffort: "", ToolBudgetLimit: 100,
 	}, mustTime(t, 12))
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := reviewHandoffTask()
 	if _, err := store.EnqueueTask(ctx, NewTask{
-		ID: taskID(t, 4), ProjectID: project.ID, AssignedAgentID: claude.ID, IncarnationID: incarnationID(t, 4),
+		ID: taskID(t, 4), ProjectID: project.ID, AssignedAgentID: shell.ID, IncarnationID: incarnationID(t, 4),
 		Title: "task", Body: body, Priority: 0,
 	}, mustTime(t, 13)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("review handoff task assigned to non-codex worker: err=%v, want ErrConflict", err)
+		t.Fatalf("review handoff task assigned to shell worker: err=%v, want ErrConflict", err)
 	}
 	task, err := store.EnqueueTask(ctx, NewTask{
-		ID: taskID(t, 5), ProjectID: project.ID, AssignedAgentID: codex.ID, IncarnationID: incarnationID(t, 5),
+		ID: taskID(t, 5), ProjectID: project.ID, AssignedAgentID: claude.ID, IncarnationID: incarnationID(t, 5),
 		Title: "task", Body: body, Priority: 0,
 	}, mustTime(t, 14))
-	if err != nil {
-		t.Fatalf("review handoff task assigned to codex worker rejected: %v", err)
-	}
-	if task.Status != TaskQueued {
-		t.Fatalf("unexpected task: %+v", task)
+	if err != nil || task.Status != TaskQueued {
+		t.Fatalf("review handoff task assigned to Claude worker = %+v, err=%v", task, err)
 	}
 }
 
@@ -223,8 +220,8 @@ func TestRetainedSourceReviewRouteAdmissionRequiresWorkerRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker, err := store.CreateAgent(ctx, NewAgent{
-		ID: agentID(t, 3), ProjectID: project.ID, Name: "codex-worker", Role: RoleWorker,
-		Provider: ProviderCodex, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
+		ID: agentID(t, 3), ProjectID: project.ID, Name: "claude-worker", Role: RoleWorker,
+		Provider: ProviderClaudeCode, Model: "private-model", ReasoningEffort: "high", ToolBudgetLimit: 100,
 	}, mustTime(t, 4))
 	if err != nil {
 		t.Fatal(err)
@@ -249,12 +246,12 @@ func TestRetainedSourceReviewRouteAdmissionRequiresWorkerRole(t *testing.T) {
 		ID: taskID(t, 5), ProjectID: project.ID, AssignedAgentID: worker.ID, IncarnationID: incarnationID(t, 5),
 		Title: "task", Body: body, Priority: 0,
 	}, mustTime(t, 6)); err != nil {
-		t.Fatalf("review handoff task assigned to codex worker rejected: %v", err)
+		t.Fatalf("review handoff task assigned to Claude worker rejected: %v", err)
 	}
 
 	result, err := store.AdmitNext(ctx, admissionKeys(t, 7, nil), mustTime(t, 7))
 	if err != nil || !result.Admitted() || result.Run.AgentID != worker.ID {
-		t.Fatalf("codex worker review handoff not admitted: %+v, %v", result, err)
+		t.Fatalf("Claude worker review handoff not admitted: %+v, %v", result, err)
 	}
 
 	result, err = store.AdmitNext(ctx, admissionKeys(t, 8, nil), mustTime(t, 8))
@@ -269,4 +266,63 @@ func TestRetainedSourceReviewRouteAdmissionRequiresWorkerRole(t *testing.T) {
 	if err != nil || !found || orchestratorTask.Status != TaskQueued || orchestratorTask.AssignedAgentID != orchestrator.ID {
 		t.Fatalf("orchestrator review handoff task unexpectedly changed: %+v found=%v err=%v", orchestratorTask, found, err)
 	}
+}
+
+func TestRetainedSourceReviewAdmissionUsesDeclaredProviderSet(t *testing.T) {
+	for index, provider := range retainedSourceReviewProviders {
+		t.Run(provider.String(), func(t *testing.T) {
+			store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			ctx := context.Background()
+			project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 1), Name: "project", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 2), ProjectID: project.ID, Name: "reviewer", Role: RoleWorker, Provider: provider, ToolBudgetLimit: 10}, mustTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 3), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 3), Title: "review", Body: reviewHandoffTask()}, mustTime(t, 4)); err != nil {
+				t.Fatal(err)
+			}
+			result, err := store.AdmitNext(ctx, admissionKeys(t, byte(20+index), nil), mustTime(t, 5))
+			if err != nil || !result.Admitted() || result.Run.AgentID != agent.ID {
+				t.Fatalf("declared provider %s was not admitted: %+v, %v", provider, result, err)
+			}
+		})
+	}
+
+	t.Run("unsupported shell", func(t *testing.T) {
+		store, err := createTestStore(context.Background(), filepath.Join(t.TempDir(), "kernel.db"), FactoryConfig{DispatchEnabled: true, Capacity: 2}, mustTime(t, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		ctx := context.Background()
+		project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 11), Name: "project", Root: filepath.Join(t.TempDir(), "root")}, mustTime(t, 2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent, err := store.CreateAgent(ctx, NewAgent{ID: agentID(t, 12), ProjectID: project.ID, Name: "shell", Role: RoleWorker, Provider: ProviderShell, ToolBudgetLimit: 10}, mustTime(t, 3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.writer.ExecContext(ctx, `INSERT INTO tasks(
+			id, project_id, assigned_agent_id, incarnation_id, work_revision, title, body,
+			sent_back_instruction_bytes, status, priority, blocked_reason, result, completed_at_ms, revision,
+			created_at_ms, updated_at_ms
+		) VALUES(?, ?, ?, ?, 1, ?, ?, NULL, 'queued', 0, NULL, NULL, NULL, 1, ?, ?)`, taskID(t, 13).Bytes(), project.ID.Bytes(), agent.ID.Bytes(), incarnationID(t, 13).Bytes(), "legacy review", reviewHandoffTask(), int64(4), int64(4)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.writer.Exec(fixtureTaskRepositorySQL); err != nil {
+			t.Fatal(err)
+		}
+		result, err := store.AdmitNext(ctx, admissionKeys(t, 31, nil), mustTime(t, 5))
+		if err != nil || result.Admitted() || result.Reason != NoAdmissionSourceRouteUnavailable {
+			t.Fatalf("unsupported provider admission = %+v, %v", result, err)
+		}
+	})
 }
