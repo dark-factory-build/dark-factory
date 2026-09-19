@@ -227,7 +227,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
               <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
               {!seated ? null : <g aria-hidden="true">
                 <path d="M-5 4h4v3h-5 M2 4h4v3H2" stroke="#838574" strokeWidth="2" fill="#4f5d59" />
-                {placement.area === "resting" || !connected ? null : <g data-planning-light="" ><circle cx="12" cy="-14" r="12" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}
+                {placement.area === "resting" || !connected ? null : <g data-planning-light="" ><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}
         {placement.area === "resting" ? <g><rect x="3" y="-1" width="5" height="4" fill="#d1c8a9" /><path d="M8 0h2v2H8" fill="none" stroke="#d1c8a9" /></g> : <path d="M2 0l5 -4" stroke="#d1c8a9" strokeWidth="2" />}
               </g>}</g>
             </g>
@@ -308,8 +308,8 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
           <rect width="24" height="12" fill="#41494a" />
           <path d="M0 0h24 M0 6h24 M12 0v6 M0 6v6 M24 6v6" stroke="#20292d" strokeWidth="2" />
         </pattern>
-        <radialGradient id="df-lamplight" cx="85%" cy="10%" r="95%">
-          <stop offset="0" stopColor="#f2dab0" stopOpacity=".18" />
+        <radialGradient id="df-lamplight" cx="50%" cy="45%" r="60%">
+          <stop offset="0" stopColor="#f2dab0" stopOpacity=".24" />
           <stop offset="1" stopColor="#f2dab0" stopOpacity="0" />
         </radialGradient>
       </defs>
@@ -366,7 +366,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
 
       {appearance.scenery === "off" ? null : <g aria-hidden="true" fill="none" strokeLinecap="round" pointerEvents="none">
-        {cabling.trunks.map((trunk, index) => <path key={index} data-wire-trunk={trunk.count} d={trunk.d} stroke="#728078" strokeWidth={Math.min(8, 1.5 * Math.sqrt(trunk.count))} opacity={appearance.scenery === "subtle" ? .3 : .5} />)}
+        {cabling.trunks.map((trunk, index) => <path key={index} data-wire-trunk={trunk.count} d={trunk.d} stroke={trunk.wall ? "#9aa69c" : "#728078"} strokeWidth={Math.min(trunk.wall ? 4 : 8, 1.5 * Math.sqrt(trunk.count))} opacity={appearance.scenery === "subtle" ? .3 : .5} />)}
         {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
           <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
       </g>}
@@ -432,6 +432,16 @@ function Area({ width, top, bottom }: { width: number; top: number; bottom: numb
  */
 function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) {
   type Point = { x: number; y: number };
+  // Corridor cable sways by position alone, so a lit route lies exactly on its
+  // trunk; stretches pinned inside a wall or a doorway run straight.
+  const on = (across: boolean, fixed: number, along: number): Point =>
+    across ? { x: along, y: fixed + 2 * Math.sin(along / 28 + fixed) } : { x: fixed, y: along };
+  const spot = ({ x, y }: Point) => `${+x.toFixed(1)} ${+y.toFixed(1)}`;
+  const stretch = (across: boolean, fixed: number, from: number, to: number) => {
+    let d = "";
+    for (let along = from; from < to ? along < to : along > to; along += from < to ? 8 : -8) d += `L${spot(on(across, fixed, along))}`;
+    return `${d}L${spot(on(across, fixed, to))}`;
+  };
   const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
   const rowOf = (room: SceneRoomLayout) => room.door.y;
   const rows = [...new Set(layout.rooms.map(rowOf))].sort((a, b) => a - b);
@@ -476,31 +486,26 @@ function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) 
       points.push({ x: wall, y: points.at(-1)!.y }, { x: wall, y: (desk === undefined ? to.y + 60 : desk.y + 22) - 12 });
       tail = lead(to, wall);
     }
-    let run = `M${points[0]!.x} ${points[0]!.y}`;
+    let run = "";
     for (let at = 1; at < points.length; at += 1) {
-      const a = points[at - 1]!, b = points[at]!, next = points[at + 1];
-      if (a.x === b.x && a.y === b.y) continue;
-      const key = a.y === b.y ? `h${a.y}` : `v${a.x}`, span = a.y === b.y ? [a.x, b.x] : [a.y, b.y];
-      channels.set(key, [...(channels.get(key) ?? []), [Math.min(...span), Math.max(...span)]]);
-      // Rounded corners and a little slack on long stretches.
-      const length = Math.abs(b.x - a.x) + Math.abs(b.y - a.y), ux = (b.x - a.x) / length, uy = (b.y - a.y) / length;
-      const r = next === undefined ? 0 : Math.min(8, length / 2), sag = length > 48 ? (index % 2 === 0 ? 3 : -3) : 0;
-      run += `Q${(a.x + b.x) / 2 - uy * sag} ${(a.y + b.y) / 2 + ux * sag} ${b.x - ux * r} ${b.y - uy * r}`;
-      if (next !== undefined && (next.x !== b.x || next.y !== b.y)) {
-        const after = Math.min(8, (Math.abs(next.x - b.x) + Math.abs(next.y - b.y)) / 2);
-        run += `Q${b.x} ${b.y} ${b.x + Math.sign(next.x - b.x) * after} ${b.y + Math.sign(next.y - b.y) * after}`;
-      }
+      const a = points[at - 1]!, b = points[at]!, before = points[at - 2], next = points[at + 1];
+      const across = a.y === b.y, fixed = across ? a.y : a.x, [start, end] = across ? [a.x, b.x] : [a.y, b.y];
+      // A vertical stretch that is not a door stub runs inside a wall.
+      const key = `${across ? "h" : at === 1 || (next === undefined && rowOf(from) === rowOf(to)) ? "v" : "w"}${fixed}`;
+      channels.set(key, [...(channels.get(key) ?? []), [Math.min(start, end), Math.max(start, end)]]);
+      const corner = Math.min(8, Math.abs(end - start) / 2), way = Math.sign(end - start);
+      const entry = start + (before === undefined ? 0 : way * corner), exit = end - (next === undefined ? 0 : way * corner);
+      run += `${before === undefined ? "M" : `Q${a.x} ${a.y} `}${spot(on(across, fixed, entry))}${stretch(across, fixed, entry, exit)}`;
     }
     return { from: from.id, to: to.id, d: `${lead(from)} ${run} ${tail}` };
   });
-  const trunks: { d: string; count: number }[] = [...leads.values()];
+  const trunks: { d: string; count: number; wall?: boolean }[] = [...leads.values()];
   for (const [key, spans] of channels) {
     const fixed = Number(key.slice(1)), cuts = [...new Set(spans.flat())].sort((a, b) => a - b);
     for (let at = 1; at < cuts.length; at += 1) {
       const lo = cuts[at - 1]!, hi = cuts[at]!, count = spans.filter(([from, to]) => from <= lo && to >= hi).length;
       if (count === 0) continue;
-      const sag = hi - lo > 48 ? (at % 2 === 0 ? 2 : -2) : 0;
-      trunks.push({ count, d: key[0] === "h" ? `M${lo} ${fixed}Q${(lo + hi) / 2} ${fixed + sag} ${hi} ${fixed}` : `M${fixed} ${lo}Q${fixed + sag} ${(lo + hi) / 2} ${fixed} ${hi}` });
+      trunks.push({ count, wall: key[0] === "w", d: `M${spot(on(key[0] === "h", fixed, lo))}${stretch(key[0] === "h", fixed, lo, hi)}` });
     }
   }
   return { routes, trunks };
