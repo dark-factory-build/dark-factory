@@ -272,7 +272,7 @@ def managed_tick(home, factoryctl):
                     error = status
                     record.update(next_due=now + min(interval, 60), error=status, state='error')
                     if status in ('unavailable', 'denied', 'conflict') and reply.get('acceptance_progress') is True:
-                        record.update(acceptance_cursor=next_cursor, next_due=now + 5)
+                        record['acceptance_cursor'] = next_cursor
                         if isinstance(tasks, list) and len(tasks) <= 200 and all(isinstance(task, str) and len(task) == 32 and all(c in '0123456789abcdef' for c in task) for task in tasks):
                             record['imported_tasks'] = len(tasks)
                             imported += len(tasks)
