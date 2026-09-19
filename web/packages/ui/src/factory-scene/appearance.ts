@@ -58,7 +58,11 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const seated = seat !== undefined && !walking;
   // Planners write in bursts; resting workers lift the cup now and then.
   const scribble = at !== undefined && at % 2600 < 1300 ? Math.floor(at / 325) % 2 : 0;
+  // At the bench a wrench, tablet or clipboard is worked with: the carrying arm
+  // reaches forward and back. Empty hands, or a mug, leave the keyboard.
+  const wielding = motion?.action === "interacting" && ["clipboard", "wrench", "tablet"].includes(spriteOptions.tool[appearance.tool]?.name ?? "");
   const pose = walking ? `walk.${motion.frame}`
+    : wielding ? motion.frame === 1 ? "walk.1" : "idle"
     : motion?.action === "interacting" ? `type.${motion.frame}`
     : worker.activity === "needs-you" ? `wave.${at === undefined ? 0 : Math.floor(at / 400) % 2}`
     : seat === "planning" ? `type.${scribble}`
@@ -66,6 +70,8 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : worker.activity === "busy" ? "type.0"
     : worker.activity === "waiting" ? "waiting" : "idle";
   const step = walking ? pose : "stand";
+  const blinking = at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
+  const glasses = spriteOptions.face[appearance.face]?.name === "glasses";
   const held = pose === "sip" ? ["person.held.cup"]
     : seat === "planning" && pose.startsWith("type") ? [`person.held.pencil.${scribble}`]
     : pose.startsWith("type") ? ["person.held.keyboard"]
@@ -75,8 +81,9 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     `person.legs.${appearance.outfit === 1 ? appearance.clothes_colour : "plain"}.${seated ? "sit" : step}`,
     `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.${pose}`,
     `person.hair.${appearance.hair}.${appearance.hair_colour}`,
-    ...(at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200 ? [`person.blink.${appearance.skin}`] : []),
+    ...(blinking && !glasses ? [`person.blink.${appearance.skin}`] : []),
     `person.face.${appearance.face}`,
+    ...(blinking && glasses ? ["person.blink.glasses"] : []),
     `person.shoes.${appearance.shoes}.${step}`,
     `person.headwear.${appearance.headwear}`,
     ...held,

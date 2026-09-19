@@ -422,6 +422,18 @@ test("every generated person layer is reachable, including fallbacks", () => {
     assert.ok(frames.filter((name) => name.startsWith("person.held.") || name.startsWith("person.tool.")).length <= 1, `${activity}/${seat}: ${frames}`);
     assert.equal(new Set(frames).size, frames.length);
   }
+  // At the bench a carried tool is worked with; empty hands and mugs type.
+  const bench = (tool, frame) => workerFrames({ ...fallback, activity: "busy", appearance: { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool, headwear: 0 } }, { action: "interacting", frame });
+  const toolNames = spriteOptions.tool.map(({ name }) => name);
+  for (const name of ["clipboard", "wrench", "tablet"]) {
+    const tool = toolNames.indexOf(name);
+    assert.deepEqual([0, 1].map((frame) => bench(tool, frame).filter((layer) => /skin|legs|tool|held/.test(layer)).map((layer) => layer.replace("person.", ""))),
+      [["skin.0.idle", "legs.plain.stand", `tool.${tool}.low`], ["skin.0.walk.1", "legs.plain.stand", `tool.${tool}.high`]], name);
+  }
+  for (const name of ["none", "mug"]) assert.ok(bench(toolNames.indexOf(name), 0).includes("person.held.keyboard"), name);
+  // Glasses blink with their lenses; bare eyes with the face's own shadow.
+  const eyes = (face) => workerFrames({ ...fallback, appearance: { automatic: false, skin: 2, hair: 0, hair_colour: 0, face, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 } }, { action: "still", frame: 0, at: 0 }).filter((layer) => layer.includes("blink"));
+  assert.deepEqual([eyes(0), eyes(spriteOptions.face.findIndex(({ name }) => name === "glasses"))], [["person.blink.2"], ["person.blink.glasses"]]);
   // A stilled clock rests every pose on its first frame, with open eyes.
   assert.deepEqual(workerFrames({ ...fallback, activity: "needs-you" }).filter((name) => /wave|blink/.test(name)).map((name) => name.split(".").slice(-2).join(".")), ["wave.0", "wave.0"]);
 });

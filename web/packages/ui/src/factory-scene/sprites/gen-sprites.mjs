@@ -311,6 +311,8 @@ for (const [skinIndex, tone] of skinTones.entries()) {
   // Closed eyes are the face's own shadow, so a blink suits every tone.
   add(`person.blink.${skinIndex}`, pixels => draw(pixels, [tone.shadow + tone.shadow], 7, 4));
 }
+// Behind glasses the eyes are the lenses, so a blink closes those instead.
+add('person.blink.glasses', pixels => draw(pixels, ['s.s'], 6, 4));
 for (const [outfitIndex, outfit] of outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const pose of poses) add(`person.outfit.${outfitIndex}.${colourIndex}.${pose}`, pixels => {
   draw(pixels, tint(outfit, colour.colour), 4, 6);
   arms(pose).forEach((part, index) => {
