@@ -163,6 +163,7 @@ type HumanPending = {
   expectedRevision: bigint;
   expectedRunRevision: bigint;
   runId?: string;
+  yielded?: boolean;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
 };
@@ -221,6 +222,7 @@ export type RemoteInvite = Readonly<{ link: string; expiresAtMs: bigint; svg: st
 
 export type HumanRequestCancelRunDescriptor = Readonly<{
   requestId: string;
+  runId: string;
   expectedRequestRevision: bigint;
   expectedRunRevision: bigint;
 }>;
@@ -298,7 +300,7 @@ export class BrowserSession {
   #intakePending = new Map<string, { resolve: (value: IntakeView) => void; reject: (error: unknown) => void }>();
   #githubPending = new Map<string, GitHubPending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
-  #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId: string }>();
+  #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, HumanRequestDetail>();
   #generationToken: object = {};
 
   constructor(options: BrowserSessionOptions) {
@@ -622,7 +624,7 @@ export class BrowserSession {
   replyHumanRequest(detail: HumanRequestDetail, reply: string): Promise<HumanReplyResult> {
     try { this.#ensureHumanOperation(detail.requestId); } catch (error) { return Promise.reject(error); }
     if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (!this.#humanDetails.has(detail) || !detail.canReply || detail.terminalTarget === null || detail.cancelRun === null) return Promise.reject(new SessionError("stale"));
+    if (!this.#humanDetails.has(detail) || !detail.canReply || detail.cancelRun === null) return Promise.reject(new SessionError("stale"));
     const replyBytes = new TextEncoder().encode(reply).length;
     if (replyBytes < 1 || replyBytes > detail.replyMaxBytes || detail.replyMaxBytes !== MAX_HUMAN_REPLY_BYTES) return Promise.reject(new SessionError("invalid_request"));
     if (detail.revision > MAX_SQLITE_INTEGER - 2n) return Promise.reject(new SessionError("stale"));
@@ -631,12 +633,12 @@ export class BrowserSession {
     try { payload = encodeHumanRequestReply(id, { request_id: detail.requestId, expected_revision: detail.revision, reply }); } catch (error) { return Promise.reject(error); }
     this.#humanDetails.delete(detail);
     this.#humanCancelRuns.delete(detail.cancelRun);
-    return this.#humanRequest<HumanReplyResult>(id, { kind: "reply", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n }, payload);
+    return this.#humanRequest<HumanReplyResult>(id, { kind: "reply", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n, yielded: detail.terminalTarget === null }, payload);
   }
 
   cancelHumanRequest(cancelRun: HumanRequestCancelRunDescriptor): Promise<HumanCancelRunResult> {
-    const authority = this.#humanCancelRuns.get(cancelRun);
-    if (authority === undefined) return Promise.reject(new SessionError("stale"));
+    const detail = this.#humanCancelRuns.get(cancelRun);
+    if (detail === undefined) return Promise.reject(new SessionError("stale"));
     try { this.#ensureHumanOperation(cancelRun.requestId); } catch (error) { return Promise.reject(error); }
     if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
     if (cancelRun.expectedRequestRevision > MAX_SQLITE_INTEGER - 1n || cancelRun.expectedRunRevision > MAX_SQLITE_INTEGER - 1n) return Promise.reject(new SessionError("stale"));
@@ -644,8 +646,8 @@ export class BrowserSession {
     let payload: string;
     try { payload = encodeHumanRequestCancelRun(id, { request_id: cancelRun.requestId, expected_request_revision: cancelRun.expectedRequestRevision, expected_run_revision: cancelRun.expectedRunRevision }); } catch (error) { return Promise.reject(error); }
     this.#humanCancelRuns.delete(cancelRun);
-    this.#humanDetails.delete(authority.detail);
-    return this.#humanRequest<HumanCancelRunResult>(id, { kind: "cancel", requestId: cancelRun.requestId, expectedRevision: cancelRun.expectedRequestRevision, expectedRunRevision: cancelRun.expectedRunRevision, runId: authority.runId }, payload);
+    this.#humanDetails.delete(detail);
+    return this.#humanRequest<HumanCancelRunResult>(id, { kind: "cancel", requestId: cancelRun.requestId, expectedRevision: cancelRun.expectedRequestRevision, expectedRunRevision: cancelRun.expectedRunRevision, runId: cancelRun.runId, yielded: detail.terminalTarget === null }, payload);
   }
 
   connect(): Promise<void> {
@@ -1144,9 +1146,11 @@ export class BrowserSession {
       const terminalTarget = frame.body.terminal_target === null ? null : this.#mintTarget(frame.body.terminal_target);
       let cancelRun: HumanRequestCancelRunDescriptor | null = null;
       if (frame.body.cancel_run !== null) {
-        if (terminalTarget === null) throw new ProtocolError("malformed");
+        const runId = frame.body.cancel_run.run_id ?? (terminalTarget === null ? undefined : this.#targetAuthority(terminalTarget).descriptor.run_id);
+        if (runId === undefined) throw new ProtocolError("malformed");
         cancelRun = Object.freeze({
           requestId: frame.body.request_id,
+          runId,
           expectedRequestRevision: frame.body.cancel_run.expected_request_revision,
           expectedRunRevision: frame.body.cancel_run.expected_run_revision,
         });
@@ -1162,18 +1166,18 @@ export class BrowserSession {
         cancelRun,
       });
       this.#humanDetails.add(detail);
-      if (cancelRun !== null && terminalTarget !== null) this.#humanCancelRuns.set(cancelRun, { detail, runId: this.#targetAuthority(terminalTarget).descriptor.run_id });
+      if (cancelRun !== null) this.#humanCancelRuns.set(cancelRun, detail);
       this.#humanPending.delete(frame.id);
       pending.resolve(detail);
       return;
     }
     if (frame.type === "HUMAN_REQUEST_REPLY_RESULT") {
-      if (frame.body.revision !== pending.expectedRevision + 2n) throw new ProtocolError("malformed");
+      if (frame.body.revision !== pending.expectedRevision + (pending.yielded ? 1n : 2n)) throw new ProtocolError("malformed");
       this.#humanPending.delete(frame.id);
       pending.resolve(Object.freeze({ ...frame.body }));
       return;
     }
-    if (pending.runId === undefined || frame.body.run_id !== pending.runId || frame.body.run_revision !== pending.expectedRunRevision + 1n || frame.body.request_revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
+    if (pending.runId === undefined || frame.body.run_id !== pending.runId || frame.body.run_revision !== pending.expectedRunRevision + (pending.yielded ? 0n : 1n) || frame.body.request_revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
     this.#humanPending.delete(frame.id);
     pending.resolve(Object.freeze({ ...frame.body }));
   }

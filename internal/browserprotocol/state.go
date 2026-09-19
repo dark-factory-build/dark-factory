@@ -283,6 +283,7 @@ type HumanRequestDetail struct {
 }
 
 type HumanRequestCancelRunDescriptor struct {
+	RunID                   string  `json:"run_id,omitempty"`
 	ExpectedRequestRevision Decimal `json:"expected_request_revision"`
 	ExpectedRunRevision     Decimal `json:"expected_run_revision"`
 }
@@ -501,11 +502,11 @@ func validateHumanRequestDetail(value HumanRequestDetail) error {
 		}
 	}
 	if value.CancelRun != nil {
-		if value.TerminalTarget == nil || !bool(value.CanReply) || value.CancelRun.ExpectedRequestRevision != value.Revision || value.CancelRun.ExpectedRunRevision != value.TerminalTarget.RunRevision {
+		if !bool(value.CanReply) || value.CancelRun.ExpectedRequestRevision != value.Revision || value.CancelRun.ExpectedRunRevision == 0 || (value.CancelRun.RunID != "" && validateDynamicID(value.CancelRun.RunID) != nil) || (value.TerminalTarget == nil && value.CancelRun.RunID == "") || (value.TerminalTarget != nil && (value.CancelRun.ExpectedRunRevision != value.TerminalTarget.RunRevision || value.CancelRun.RunID != "" && value.CancelRun.RunID != value.TerminalTarget.RunID)) {
 			return fmt.Errorf("%w: human request cancellation", ErrMalformed)
 		}
 	}
-	if bool(value.CanReply) && (value.TerminalTarget == nil || value.CancelRun == nil) {
+	if bool(value.CanReply) && value.CancelRun == nil {
 		return fmt.Errorf("%w: human request reply availability", ErrMalformed)
 	}
 	return nil

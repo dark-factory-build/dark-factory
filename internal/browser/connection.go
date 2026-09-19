@@ -867,7 +867,7 @@ func validateHumanReplyResult(request browserprotocol.HumanRequestReply, result 
 	if result.RequestID != request.RequestID || (result.Status != "resolved" && result.Status != "delivery_unknown") {
 		return fmt.Errorf("%w: human reply identity or status", errBackendResult)
 	}
-	if uint64(request.ExpectedRevision) > browserprotocol.MaxSQLiteInteger-2 || result.Revision != request.ExpectedRevision+2 {
+	if uint64(request.ExpectedRevision) > browserprotocol.MaxSQLiteInteger-2 || result.Revision != request.ExpectedRevision+1 && result.Revision != request.ExpectedRevision+2 {
 		return fmt.Errorf("%w: human reply revision", errBackendResult)
 	}
 	return nil
@@ -877,7 +877,11 @@ func validateHumanCancelRunResult(request browserprotocol.HumanRequestCancelRun,
 	if result.RequestID != request.RequestID {
 		return fmt.Errorf("%w: human cancellation identity", errBackendResult)
 	}
-	if uint64(request.ExpectedRunRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RunRevision != request.ExpectedRunRevision+1 {
+	wantRunRevision := request.ExpectedRunRevision
+	if result.RunRevisionChanged {
+		wantRunRevision++
+	}
+	if uint64(request.ExpectedRunRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RunRevision != wantRunRevision {
 		return fmt.Errorf("%w: human cancellation run revision", errBackendResult)
 	}
 	if uint64(request.ExpectedRequestRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RequestRevision != request.ExpectedRequestRevision+1 {

@@ -156,8 +156,13 @@ type HumanRequestDetail struct {
 // precondition. The fields remain private so a caller cannot substitute a run
 // or revision after Store has projected the exact originating relationship.
 type HumanRequestCancelRun struct {
+	runID                   RunID
 	expectedRequestRevision Revision
 	expectedRunRevision     Revision
+}
+
+func (cancelRun HumanRequestCancelRun) RunID() RunID {
+	return cancelRun.runID
 }
 
 func (cancelRun HumanRequestCancelRun) ExpectedRequestRevision() Revision {

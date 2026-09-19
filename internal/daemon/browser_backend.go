@@ -224,6 +224,7 @@ func (backend *browserBackend) HumanRequestDetail(ctx context.Context, rawClient
 	}
 	if detail.CancelRun != nil {
 		result.CancelRun = &browserprotocol.HumanRequestCancelRunDescriptor{
+			RunID:                   detail.CancelRun.RunID().String(),
 			ExpectedRequestRevision: decimalRevision(detail.CancelRun.ExpectedRequestRevision()),
 			ExpectedRunRevision:     decimalRevision(detail.CancelRun.ExpectedRunRevision()),
 		}

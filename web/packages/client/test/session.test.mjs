@@ -806,6 +806,44 @@ test("HumanRequest detail-bound reply and cancellation authority is one-shot", a
   assert.equal(second.session.status, "closed");
 });
 
+test("yielded HumanRequest stays replyable without a terminal", async () => {
+  const { session, socket } = await openHumanSession();
+  const requestId = "77".repeat(16);
+  let pending = session.getHumanRequestDetail({ requestId, expectedRevision: 1n });
+  let frame = decodeClientControl(socket.sent.at(-1));
+  socket.reply(encodeHumanRequestDetail(frame.id, humanDetail(requestId, { terminal_target: null, cancel_run: { run_id: runID, expected_request_revision: 1n, expected_run_revision: 1n } })));
+  const detail = await pending;
+  assert.equal(detail.terminalTarget, null);
+
+  pending = session.replyHumanRequest(detail, "continue");
+  frame = decodeClientControl(socket.sent.at(-1));
+  assert.equal(frame.type, "HUMAN_REQUEST_REPLY");
+  socket.reply(encodeHumanRequestReplyResult(frame.id, { request_id: requestId, revision: 2n, status: "resolved" }));
+  assert.equal((await pending).status, "resolved");
+
+  const cancelId = "78".repeat(16);
+  pending = session.getHumanRequestDetail({ requestId: cancelId, expectedRevision: 1n });
+  frame = decodeClientControl(socket.sent.at(-1));
+  socket.reply(encodeHumanRequestDetail(frame.id, humanDetail(cancelId, { terminal_target: null, cancel_run: { run_id: runID, expected_request_revision: 1n, expected_run_revision: 1n } })));
+  const cancellable = await pending;
+  pending = session.cancelHumanRequest(cancellable.cancelRun);
+  frame = decodeClientControl(socket.sent.at(-1));
+  socket.reply(encodeHumanRequestCancelRunResult(frame.id, { run_id: runID, run_revision: 1n, request_id: cancelId, request_revision: 2n }));
+  assert.equal((await pending).request_id, cancelId);
+  session.close();
+
+  const forged = await openHumanSession();
+  pending = forged.session.getHumanRequestDetail({ requestId: cancelId, expectedRevision: 1n });
+  frame = decodeClientControl(forged.socket.sent.at(-1));
+  forged.socket.reply(encodeHumanRequestDetail(frame.id, humanDetail(cancelId, { terminal_target: null, cancel_run: { run_id: runID, expected_request_revision: 1n, expected_run_revision: 1n } })));
+  const pinned = await pending;
+  pending = forged.session.cancelHumanRequest(pinned.cancelRun);
+  frame = decodeClientControl(forged.socket.sent.at(-1));
+  forged.socket.reply(encodeHumanRequestCancelRunResult(frame.id, { run_id: "aa".repeat(16), run_revision: 1n, request_id: cancelId, request_revision: 2n }));
+  await assert.rejects(pending, (error) => error instanceof ProtocolError && error.code === "malformed");
+  assert.equal(forged.session.status, "closed");
+});
+
 test("malformed and binary frames fail with finite errors and never leak frame data", async () => {
   const errors = [];
   let socket;

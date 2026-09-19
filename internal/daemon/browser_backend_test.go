@@ -500,6 +500,60 @@ func TestBrowserAdapterHumanRequestDetailAndResolvedRequestLeavesTheSnapshot(t *
 	}
 }
 
+func TestBrowserAdapterEncodesYieldedHumanRequestWithoutTerminal(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail|kernel.BrowserCapabilityHumanActions)
+	connection := fixture.pair(t)
+	run := adapterRunningRun(t, fixture.store, 52)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 53))
+	request, err := fixture.store.CreateHumanQuestionAndYieldForAttempt(context.Background(), run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "continue?"}, adapterTime(t, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeYieldedOperatorRun(t, fixture.store, run)
+	detail, err := fixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.HumanRequestDetailGet{RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision)})
+	if err != nil || !bool(detail.CanReply) || detail.TerminalTarget != nil || detail.CancelRun == nil || detail.CancelRun.RunID != run.ID.String() {
+		t.Fatalf("yielded detail = %+v, %v", detail, err)
+	}
+	if _, err := browserprotocol.EncodeHumanRequestDetail("yielded", detail); err != nil {
+		t.Fatalf("encode yielded detail: %v", err)
+	}
+	reply, err := browserprotocol.EncodeHumanRequestReply("yielded-reply", browserprotocol.HumanRequestReply{RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision), Reply: "continue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, connection, reply)
+	frame := adapterRead(t, connection)
+	result, ok := frame.Body.(browserprotocol.HumanRequestReplyResult)
+	if frame.Type != browserprotocol.TypeHumanRequestReplyResult || !ok || result.Revision != decimalRevision(request.Revision)+1 || result.Status != "resolved" {
+		t.Fatalf("yielded reply = %+v", frame)
+	}
+
+	cancelFixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail|kernel.BrowserCapabilityHumanActions)
+	cancelConnection := cancelFixture.pair(t)
+	cancelRun := adapterRunningRun(t, cancelFixture.store, 62)
+	copy(key[:], adapterID(t, 63))
+	cancelRequest, err := cancelFixture.store.CreateHumanQuestionAndYieldForAttempt(context.Background(), cancelRun.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "stop?"}, adapterTime(t, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeYieldedOperatorRun(t, cancelFixture.store, cancelRun)
+	cancelDetail, err := cancelFixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(cancelFixture.client.ID), browserprotocol.HumanRequestDetailGet{RequestID: cancelRequest.ID.String(), ExpectedRevision: decimalRevision(cancelRequest.Revision)})
+	if err != nil || cancelDetail.CancelRun == nil {
+		t.Fatalf("yielded cancellation detail = %+v, %v", cancelDetail, err)
+	}
+	cancel, err := browserprotocol.EncodeHumanRequestCancelRun("yielded-cancel", browserprotocol.HumanRequestCancelRun{RequestID: cancelRequest.ID.String(), ExpectedRequestRevision: cancelDetail.CancelRun.ExpectedRequestRevision, ExpectedRunRevision: cancelDetail.CancelRun.ExpectedRunRevision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, cancelConnection, cancel)
+	frame = adapterRead(t, cancelConnection)
+	cancelResult, ok := frame.Body.(browserprotocol.HumanRequestCancelRunResult)
+	if frame.Type != browserprotocol.TypeHumanRequestCancelRunResult || !ok || cancelResult.RunRevision != cancelDetail.CancelRun.ExpectedRunRevision || cancelResult.RequestRevision != decimalRevision(cancelRequest.Revision)+1 {
+		t.Fatalf("yielded cancellation = %+v", frame)
+	}
+}
+
 func TestBrowserAdapterSubscriptionReloadsAuthorityAndJoins(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	fixture.pair(t)

@@ -40,6 +40,7 @@ const ids = {
   agent: "02020202020202020202020202020202",
   task: "03030303030303030303030303030303",
   request: "04040404040404040404040404040404",
+  run: "05050505050505050505050505050505",
 };
 const factoryItem = (revision = 1n) => ({ dispatch_enabled: true, capacity: 8, active_runs: 2, revision });
 const projectItem = (revision = 1n) => ({ id: ids.project, name: "Factory", run_budget_limit: 12n, runs_used: 5n, max_run_seconds: 900, revision });
@@ -321,6 +322,7 @@ test("public state cannot carry private fields and detail is separately bounded"
   expectMalformed(() => encodeServerControl({ ...detail, body: { ...detail.body, question: "" } }));
   expectMalformed(() => encodeServerControl({ ...detail, body: { ...detail.body, question: "x".repeat(MAX_HUMAN_QUESTION_BYTES + 1) } }));
   assert.match(encodeServerControl({ ...detail, body: { ...detail.body, options: ["Continue", "Stop"] } }), /"options":\["Continue","Stop"\]/);
+  assert.match(encodeServerControl({ ...detail, body: { ...detail.body, can_reply: true, cancel_run: { run_id: ids.run, expected_request_revision: 1n, expected_run_revision: 7n } } }), /"can_reply":true/);
   for (const options of [null, [""], [" "], ["line\nbreak"], ["zero\0byte"], ["x".repeat(161)], ["same", "same"], ["1", "2", "3", "4", "5"]]) expectMalformed(() => encodeServerControl({ ...detail, body: { ...detail.body, options } }));
 });
 

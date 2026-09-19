@@ -81,7 +81,7 @@ export type StateSnapshotBody = {
 export type StateWatchBody = { after_head: bigint };
 export type StateChangedBody = { head: bigint };
 export type HumanRequestDetailGetBody = { request_id: string; expected_revision: bigint };
-type HumanRequestCancelRunDetail = { expected_request_revision: bigint; expected_run_revision: bigint };
+type HumanRequestCancelRunDetail = { run_id?: string; expected_request_revision: bigint; expected_run_revision: bigint };
 export type HumanRequestDetailBody = { request_id: string; revision: bigint; question: string; options?: string[]; can_reply: boolean; reply_max_bytes: number; terminal_target: TerminalTargetDescriptor | null; cancel_run: HumanRequestCancelRunDetail | null };
 export type HumanRequestReplyBody = { request_id: string; expected_revision: bigint; reply: string };
 export type HumanRequestReplyResultBody = { request_id: string; revision: bigint; status: "resolved" | "delivery_unknown" };
@@ -415,11 +415,11 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
       let cancel_run: HumanRequestCancelRunDetail | null = null;
       if (body.cancel_run !== null) {
         if (!isObject(body.cancel_run)) malformed();
-        requireKeys(body.cancel_run, ["expected_request_revision", "expected_run_revision"], wire);
-        cancel_run = { expected_request_revision: decimal(body.cancel_run.expected_request_revision, wire, true), expected_run_revision: decimal(body.cancel_run.expected_run_revision, wire, true) };
+        requireKeys(body.cancel_run, ["expected_request_revision", "expected_run_revision"], wire, ["run_id"]);
+        cancel_run = { ...(present(body.cancel_run, "run_id") ? { run_id: dynamicID(body.cancel_run.run_id) } : {}), expected_request_revision: decimal(body.cancel_run.expected_request_revision, wire, true), expected_run_revision: decimal(body.cancel_run.expected_run_revision, wire, true) };
       }
-      if (cancel_run !== null && (terminal_target === null || !can_reply || cancel_run.expected_request_revision !== revision || cancel_run.expected_run_revision !== terminal_target.run_revision)) malformed();
-      if (can_reply && (terminal_target === null || cancel_run === null)) malformed();
+      if (cancel_run !== null && (!can_reply || cancel_run.expected_request_revision !== revision || (terminal_target === null && cancel_run.run_id === undefined) || (terminal_target !== null && (cancel_run.expected_run_revision !== terminal_target.run_revision || (cancel_run.run_id !== undefined && cancel_run.run_id !== terminal_target.run_id))))) malformed();
+      if (can_reply && cancel_run === null) malformed();
       const options = present(body, "options") ? humanRequestOptions(body.options) : undefined;
       return { request_id, revision, question: boundedText(body.question, 1, MAX_HUMAN_QUESTION_BYTES), ...(options === undefined ? {} : { options }), can_reply, reply_max_bytes, terminal_target, cancel_run };
     }
