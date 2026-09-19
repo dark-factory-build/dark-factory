@@ -158,16 +158,28 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?:
   // Counts belong to physical paths. A same-path child represents a hidden
   // wrapper's direct files when its sibling subtrees are displayed separately.
   const splitContents = scope !== undefined && scopeChildren.some((child) => child.path !== scope.path);
-  const rooms: SceneNode[] = (showScope ? [scope, ...pageChildren] : pageChildren).map((room) => ({
-    ...room,
-    inventoryScope: splitContents && room.path === scope?.path ? "direct" : "subtree",
-  }));
-  const kept = new Set(rooms.map((room) => room.id));
+  const shown = showScope ? [scope, ...pageChildren] : pageChildren;
+  const kept = new Set(shown.map((room) => room.id));
   const visibleAncestor = (id: string | undefined): string | undefined => {
     let room = id === undefined ? undefined : roomByID.get(id);
     while (room !== undefined && !kept.has(room.id)) room = room.parentId === undefined ? undefined : roomByID.get(room.parentId);
     return room?.id;
   };
+  // Imports are observed between packages; a room stands for everything beneath
+  // it, so each link is drawn between the rooms that show its two ends.
+  const rolled = new Map<string, Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>>();
+  for (const room of roomByID.values()) for (const link of room.dependencies?.links ?? []) {
+    const from = visibleAncestor(room.id), to = visibleAncestor(link.nodeId);
+    if (from === undefined || to === undefined || from === to) continue;
+    const links = rolled.get(from) ?? new Map(), key = `${link.direction} ${to}`, target = roomByID.get(to)!;
+    links.set(key, { nodeId: to, label: target.label, path: target.path, direction: link.direction, weight: (links.get(key)?.weight ?? 0) + link.weight });
+    rolled.set(from, links);
+  }
+  const rooms: SceneNode[] = shown.map((room) => ({
+    ...room,
+    inventoryScope: splitContents && room.path === scope?.path ? "direct" : "subtree",
+    ...(room.dependencies === undefined ? {} : { dependencies: { ...room.dependencies, links: [...(rolled.get(room.id)?.values() ?? [])] } }),
+  }));
   const inScope = (id: string): boolean => {
     if (validScope === undefined) return true;
     let room = roomByID.get(id);

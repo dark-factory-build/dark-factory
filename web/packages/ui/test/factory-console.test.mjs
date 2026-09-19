@@ -1974,9 +1974,13 @@ test("dependency projection keeps served identity, hidden endpoints and project 
   assert.equal(kernel.language, "go");
   assert.equal(kernel.childCount, 1);
   assert.equal(kernel.dependencies.omitted, 1);
-  const store = kernel.dependencies.links.find((link) => link.direction === "to");
-  assert.equal(store.nodeId, `${ids.project}:${fixtureTopology.nodes[3].id}`);
-  assert.equal(view.topology.nodes.some((node) => node.id === store.nodeId), false, "hidden endpoints retain their exact identity");
+  // kernel → store lies inside the kernel room here, so only web → kernel is a link between rooms.
+  const shownIDs = new Set(view.topology.nodes.map((node) => node.id));
+  assert.deepEqual(kernel.dependencies.links.map((link) => [link.direction, link.label, link.weight]), [["from", "web", 1]]);
+  assert.ok(view.topology.nodes.every((node) => node.dependencies.links.every((link) => shownIDs.has(link.nodeId) && link.nodeId !== node.id)), "every link joins two different rooms on this floor");
+  // Entering kernel shows store as its own room: the link reappears, and web is off this floor.
+  const inside = floorScene(fixtureState, mirrored, undefined, undefined, kernel.id).topology.nodes;
+  assert.deepEqual(inside.find((node) => node.path === "internal/kernel" && node.inventoryScope === "direct").dependencies.links.map((link) => [link.direction, link.label, link.weight]), [["to", "store", 2]]);
   assert.ok(kernel.dependencies.links.every((link) => link.nodeId.startsWith(`${ids.project}:`)), "matching node hashes in another project never cross-link");
   const legacy = new Map([[ids.project, { ...fixtureTopology, dependencies: undefined }]]);
   assert.equal(floorScene(fixtureState, legacy, undefined, undefined, rootID).topology.nodes[0].dependencies, undefined);
