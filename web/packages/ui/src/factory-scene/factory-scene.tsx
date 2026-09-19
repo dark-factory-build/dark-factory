@@ -242,6 +242,7 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
 export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
+  const [linkedFrom, setLinkedFrom] = useState<string>();
   useLayoutEffect(() => {
     if (!tooltip || !tooltipElement.current) return;
     const height = tooltipElement.current.getBoundingClientRect().height;
@@ -257,6 +258,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
   const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => {
     const element = event.target as Element;
     if (!element.closest('[role="tooltip"]')) showTooltip(element.closest("[data-tooltip]"));
+    setLinkedFrom(element.closest("[data-room-id]")?.getAttribute("data-room-id") ?? undefined);
   };
   const layout = useMemo(() => layoutScene(topology), [topology]);
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
@@ -271,6 +273,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
   const sceneHeight = boardTop + (tasks.some((task) => task.status === "queued") ? 48 : 0) + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
+  const conduit = useMemo(() => conduits(layout, topology), [layout, topology]);
   const queued = tasks.filter((order) => order.status === "queued").length;
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
@@ -278,7 +281,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
   return (
     <>
-    <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={retainFocusedTooltip} onBlur={() => setTooltip(undefined)} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
+    <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => setTooltip(undefined)} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
       viewBox={`0 0 ${layout.width} ${sceneHeight}`}
       role="group"
@@ -286,7 +289,6 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
       data-topology-digest={topology.digest}
       style={{ display: "block", width: "100%", minWidth: layout.width, maxWidth, height: "auto", margin: "0 auto", background: "#08131d" }}
     >
-      <title>Dark Factory codebase floor</title>
       <desc>{`${layout.rooms.length} topology spaces, ${workers.length} workers${omittedLocations === 0 ? "" : `, ${omittedLocations} current locations not shown in this view`}`}</desc>
       <defs>
         {/* The sheet enters the document once; every frame is a window on it. */}
@@ -319,6 +321,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
         </text>
       ))}
 
+      {appearance.scenery === "off" ? null : <path data-conduit-trunk="" aria-hidden="true" d={conduit.trunk} fill="none" stroke="#728078" strokeWidth="2" opacity={appearance.scenery === "subtle" ? .35 : .6} />}
       {layout.rooms.map((room) => {
         const node = nodes.get(room.id);
         if (node === undefined) return null;
@@ -336,9 +339,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
             <path d={`M${room.x + 4} ${room.y + 10}v${room.height - 14} M${room.x + room.width - 4} ${room.y + 10}v${room.height - 14}`} stroke="#141f23" strokeWidth="2" />
             <rect x={room.x + 4} y={room.y + 10} width={room.width - 8} height={room.height - 12} fill={operating ? "url(#df-lamplight)" : "#08131d"} opacity={operating ? 1 : .18} pointerEvents="none" />
             {appearance.scenery === "off" ? null : <g aria-hidden="true" opacity={appearance.scenery === "subtle" ? .35 : .6}>
-              <path d={room.width >= 192
-                ? `M${room.x + room.width - 14} ${room.y + 42}v40h-8 M${room.x + room.width - 17} ${room.y + 48}h6 M${room.x + room.width - 17} ${room.y + 72}h6`
-                : `M${room.x + 12} ${room.y + 44}h20v10h-20z M${room.x + 16} ${room.y + 46}v6 M${room.x + 21} ${room.y + 46}v6 M${room.x + 26} ${room.y + 46}v6`} fill="none" stroke="#728078" strokeWidth="2" />
+              {!conduit.linked.has(room.id) ? null : <path data-conduit-drop={room.id} d={`M${room.x + 9} ${room.y + 38}h6v4h-6z M${room.x + 12} ${room.y + 42}V${room.door.y + 5}`} fill="none" stroke={linkedFrom !== undefined && (linkedFrom === room.id || conduit.linked.get(linkedFrom)?.has(room.id)) ? "#e5c58b" : "#728078"} strokeWidth="2" />}
               <path d={`M${room.door.x - 12} ${room.door.y - 8}h24 M${room.door.x - 7} ${room.door.y - 14}h14`} stroke="#53615c" strokeWidth="2" />
             </g>}
             {contents.map((item) => <g key={item.key} data-room-content={item.kind} aria-hidden="true"><Equipment item={item} operating={operating} scenery={appearance.scenery} /></g>)}
@@ -417,6 +418,32 @@ function Area({ width, top, bottom }: { width: number; top: number; bottom: numb
   );
 }
 
+
+/**
+ * Static dependencies as one shared conduit: a drop from each linked room into
+ * its corridor, joined by the spine. Which rooms a drop serves is shown on hover.
+ * ponytail: a bus, not per-edge routes; route individual edges if the floor ever needs to show them at rest.
+ */
+function conduits(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) {
+  const shown = new Set(layout.rooms.map((room) => room.id));
+  const linked = new Map<string, Set<string>>();
+  for (const node of topology.nodes) {
+    const targets = (node.dependencies?.links ?? []).map((link) => link.nodeId).filter((id) => id !== node.id && shown.has(id));
+    if (shown.has(node.id) && targets.length > 0) linked.set(node.id, new Set(targets));
+  }
+  // Corridor y → [nearest, furthest] drop on that row.
+  const rows = new Map<number, [number, number]>();
+  for (const room of layout.rooms) {
+    if (!linked.has(room.id)) continue;
+    const y = room.door.y + 5, x = room.x + 12, span = rows.get(y);
+    rows.set(y, span === undefined ? [x, x] : [Math.min(span[0], x), Math.max(span[1], x)]);
+  }
+  const ys = [...rows.keys()], spine = PADDING + 5;
+  const trunk = ys.length < 2
+    ? [...rows].map(([y, [from, to]]) => `M${from} ${y}H${to}`).join(" ")
+    : `M${spine} ${Math.min(...ys)}V${Math.max(...ys)} ${[...rows].map(([y, [, to]]) => `M${spine} ${y}H${to}`).join(" ")}`;
+  return { linked, trunk };
+}
 
 /** Furniture is subdued scenery, never a second set of file-category controls. */
 function Equipment({ item, operating, scenery }: { item: RoomContent; operating: boolean; scenery: FloorAppearance["scenery"] }) {

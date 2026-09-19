@@ -868,3 +868,13 @@ test("direct rooms picture only direct counts while subtree rooms retain descend
   assert.deepEqual(displayed("direct").map(({ kind, count }) => ({ kind, count })), [{ kind: "source", count: 1 }]);
   assert.equal(displayed("subtree").find((item) => item.kind === "source").count, fileCounts.source);
 });
+
+test("linked rooms drop into one conduit and the floor carries no native tooltip", () => {
+  const link = (nodeId) => ({ omitted: 0, links: [{ nodeId, label: nodeId, path: nodeId, direction: "to", weight: 1 }] });
+  const linked = { ...topology, nodes: topology.nodes.map((node) => ({ ...node, dependencies: node.id === "lib" ? link("src") : node.id === "src" ? link("lib") : link("hidden") })) };
+  const markup = renderToStaticMarkup(createElement(FactoryScene, { topology: linked, workers: [] }));
+  assert.deepEqual([...markup.matchAll(/data-conduit-drop="([^"]+)"/g)].map((match) => match[1]).sort(), ["lib", "src"]);
+  assert.match(markup, /data-conduit-trunk="" aria-hidden="true" d="M\d/);
+  assert.doesNotMatch(markup, /<title>/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(FactoryScene, { topology, workers: [] })), /data-conduit-drop/);
+});
