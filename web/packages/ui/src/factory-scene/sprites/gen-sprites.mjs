@@ -315,6 +315,9 @@ for (const [skinIndex, tone] of skinTones.entries()) {
 add('person.blink.glasses', pixels => draw(pixels, ['s.s'], 6, 4));
 for (const [outfitIndex, outfit] of outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const pose of poses) add(`person.outfit.${outfitIndex}.${colourIndex}.${pose}`, pixels => {
   draw(pixels, tint(outfit, colour.colour), 4, 6);
+  // Overalls begin their legs a row early, inside the bib: that row belongs to
+  // the torso's frame so the split between the legs survives the layering.
+  if (outfitIndex === 1) draw(pixels, [legs[0].replaceAll('m', colour.colour)], 4, 12);
   arms(pose).forEach((part, index) => {
     const [x, y] = armPosition(pose, index);
     if (outfitIndex === 2) part = part.map((row, dy) => y + dy === 9 ? row : row.replaceAll('u', 'a'));
@@ -429,6 +432,7 @@ for (const pose of poses) for (const [group, options] of Object.entries(optionGr
   if (heldPixels) heldPixels.forEach((row, y) => row.forEach((key, x) => { if (key !== '.' && pixels[y][x] !== key) report.push(`held hidden: ${pose} ${group}=${option} held=${held} at ${x},${y}`); }));
 }
 assert.deepEqual([...new Set(report)], [], 'A feature hides a pose');
+for (const pose of ['idle', 'wave.0', 'walk.0', 'sip']) assert.equal(portrait(pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs: ${pose}`);
 // Every pose must read as a different body, or the animation is invisible.
 assert.equal(new Set(poses.map(pose => JSON.stringify(portrait(pose)))).size, poses.length, 'Indistinguishable poses');
 function tile(name, rows) {

@@ -53,7 +53,8 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const appearance = resolvedAppearance(worker);
   const role = worker.role === "orchestrator" ? "overseer" : "worker";
   const provider = worker.provider === "claude_code" || worker.provider === "codex" ? worker.provider : "shell";
-  const at = motion?.at;
+  // Only a running clock animates; anything else rests on the first frame.
+  const at = motion?.at !== undefined && Number.isFinite(motion.at) && motion.at >= 0 ? motion.at : undefined;
   const walking = motion?.action === "walking";
   const seated = seat !== undefined && !walking;
   // Planners write in bursts; resting workers lift the cup now and then.

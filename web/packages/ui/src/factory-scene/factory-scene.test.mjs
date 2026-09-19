@@ -434,6 +434,10 @@ test("every generated person layer is reachable, including fallbacks", () => {
   // Glasses blink with their lenses; bare eyes with the face's own shadow.
   const eyes = (face) => workerFrames({ ...fallback, appearance: { automatic: false, skin: 2, hair: 0, hair_colour: 0, face, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 } }, { action: "still", frame: 0, at: 0 }).filter((layer) => layer.includes("blink"));
   assert.deepEqual([eyes(0), eyes(spriteOptions.face.findIndex(({ name }) => name === "glasses"))], [["person.blink.2"], ["person.blink.glasses"]]);
+  // No clock value, however wrong, may name a frame the sheet does not hold.
+  for (const at of [-1, -0.5, -4000, NaN, Infinity, 1e15]) for (const seat of [undefined, "resting", "planning"]) for (const activity of ["busy", "needs-you", "idle"]) {
+    for (const name of workerFrames({ ...fallback, activity }, { action: "still", frame: 0, at }, seat)) assert.ok(name in spriteAtlas.frames, `${name} at ${at}`);
+  }
   // A stilled clock rests every pose on its first frame, with open eyes.
   assert.deepEqual(workerFrames({ ...fallback, activity: "needs-you" }).filter((name) => /wave|blink/.test(name)).map((name) => name.split(".").slice(-2).join(".")), ["wave.0", "wave.0"]);
 });
