@@ -257,11 +257,12 @@ registers its initial checkout; an upgrade preserves the old project root and
 all existing task and Change identities. No operation clones or deletes files.
 
 For automation, `factoryctl project repository list --project PROJECT_ID`
-returns each private binding and its revision. Add an existing checkout with
-`factoryctl project repository add --id HEX32 --project PROJECT_ID --name NAME
---root ABSOLUTE_PATH --base REF`, using a fresh 32-character lowercase hexadecimal
-ID and that repository's actual base/upstream ref. Registration verifies the
-checkout, Git directory and configured publication origin. Use the `name`,
+returns each private binding and its revision. With v0.4.1 or later, add an
+existing checkout with `factoryctl project repository add --project PROJECT_ID
+--name NAME --root ABSOLUTE_PATH --base REF`. The CLI creates the binding ID;
+use `--id HEX32` only when automation needs a chosen ID. Use that repository's
+actual base/upstream ref. Registration verifies the checkout, Git directory
+and configured publication origin. Use the `name`,
 `base`, `default`, `enable`, `disable` or `remove` subcommands with `--id` and the
 current `--revision`; name/base changes also take `--name`/`--base` respectively.
 
@@ -295,16 +296,21 @@ GitHub holds the backlog; the factory holds execution and acceptance. An issue
 repository can feed a different registered code repository. Delegating GitHub
 access alone does not subscribe to issues or start work.
 
-Use `factoryctl intake list --project PROJECT_ID` to inspect sources. Create a
-source with `factoryctl intake create --source HEX32 --project PROJECT_ID
---configuration JSON`; choose a fresh 32-character lowercase hexadecimal source
-ID. The JSON fields are `repository` (`owner/backlog`), `target_repository_id`,
-`overseer_agent_id`, `label` (empty for no filter), `policy` (`manual` or
-`trusted_authors`), `trusted_authors` (an array of GitHub logins), `poll_seconds`
-and `admission_limit`. The destination and overseer must belong to that project.
-`@me` in trusted authors resolves your connected GitHub identity. A trusted-author
+Use `factoryctl intake list --project PROJECT_ID` to inspect sources. With
+v0.4.1 or later, create a source with `factoryctl intake create --project
+PROJECT_ID --repository OWNER/BACKLOG --target-repository REPOSITORY_ID`.
+The CLI creates the source ID. New sources start paused, use manual approval,
+poll every 60 seconds and admit up to 25 accepted issues. Add `--label LABEL`,
+`--policy trusted-authors`, repeated `--trusted-author LOGIN`, `--overseer ID`,
+`--poll-seconds N`, `--admission-limit N` or `--priority N` when needed. `@me`
+in trusted authors resolves your connected GitHub identity. A trusted-author
 policy permits initial acceptance by those authors **or** explicit operator
-acceptance; a label is only a filter. New sources start paused.
+acceptance; a label is only a filter.
+
+For automation, `--source HEX32` preserves an explicit source ID and
+`--configuration JSON` supplies the complete configuration instead of named
+flags. The v0.4.0 CLI requires that explicit-ID/JSON form. The destination and
+overseer must belong to the project.
 
 Run `factoryctl intake preview --source SOURCE_ID --page 1`, following
 `next_page`, and inspect the title, body, destination and eligibility reasons.
