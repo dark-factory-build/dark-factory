@@ -106,9 +106,13 @@ Assign work to a named worker or Any eligible worker in the project. Named
 work is taken first; the next free eligible worker then claims shared work.
 Raise or lower numeric priority explicitly when ordering either queue. Recent
 Work loads authorized completed and blocked details on demand; private
-instructions and results never enter public snapshots. Pause prevents future
-admissions, and Show archived lets you inspect or restore a drained worker
-without erasing its history.
+instructions and results never enter public snapshots. It starts with the
+newest ten results; Show more loads ten at a time. Agent state is Ready,
+Working, Needs you, or Paused: Working includes startup and cleanup, while
+queued work alone remains Ready. Pause prevents future admissions without
+stopping current work, and Show archived lets you inspect or restore a drained
+worker without erasing its history. Factory capacity counts workers; one
+overseer can run alongside them.
 
 ## Feedback and public backlog
 
