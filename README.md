@@ -27,7 +27,7 @@ the paired browser and `factoryctl` steer the same factory.
 ## What you can do
 
 - Close the browser and the factory keeps its queue and running work alive while the host Mac stays awake.
-- Give a task to a named worker or let the next available worker take it.
+- Queue work across registered repositories, or admit a reviewed GitHub issue.
 - Let an overseer turn a goal into follow-up work and coordinate the workers.
 - Open a live terminal, read a Needs You request, and decide when to step in.
 - Inspect a completed result, send it back with feedback, or take it forward for review.
@@ -43,7 +43,7 @@ them back, or let the Maintainer publish them.
 
 ## Requirements and quick start
 
-Use the **next release containing this CLI**; its version is not selected.
+Use **v0.4.0 or later**.
 It requires macOS, Git, and `factoryd`, `factory-runner`, and `factoryctl` on
 `PATH`. A Codex worker requires a signed-in `codex` CLI on `PATH`. Providers
 receive repository and task material; read [provider support](docs/providers.md).
@@ -81,9 +81,9 @@ For another checkout, `project repository add --id HEX32 --project PROJECT_ID
 --name NAME --root ABSOLUTE --base REF` returns the revision needed to set its
 default; a named task keeps its explicit repository.
 
-The local candidate checked packaging, a shell attempt, routing, and restart
-recovery. Live Codex, GitHub access, and publication remain release gates.
-Issue intake and managed setup ship with the same next release. More
-in the [development workflow](docs/development/WORKFLOW.md).
+GitHub connection, repository management, and reviewed issue intake require
+v0.4.0 or later. Live Codex work and GitHub publication still depend on the
+accounts and access you configure. More in the
+[development workflow](docs/development/WORKFLOW.md).
 
 Dark Factory is MIT licensed.
