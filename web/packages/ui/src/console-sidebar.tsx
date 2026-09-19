@@ -993,7 +993,8 @@ function IntakeSection({ state, repositories, intake, pending, errors, onLoad, o
   useEffect(() => { if (open && canLoad && projectId) load.current?.(projectId); }, [open, projectId, canLoad]);
   const loadRepositories = useRef(onLoadRepositories);
   loadRepositories.current = onLoadRepositories;
-  useEffect(() => { if (open && projectId) loadRepositories.current?.(projectId); }, [open, projectId]);
+  const canLoadRepositories = onLoadRepositories !== undefined;
+  useEffect(() => { if (open && canLoadRepositories && projectId) loadRepositories.current?.(projectId); }, [open, projectId, canLoadRepositories]);
   return <details className="dfConsoleSidebar__section" aria-label="Issue intake" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open); }}><summary>Issue inbox</summary><p className="dfConsoleSidebar__inherit">Review issues before they become work. Preview reads GitHub without starting an agent.</p>{projects.length > 1 ? <label>Project<select value={projectId} onChange={(event) => setSelection(event.currentTarget.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}{projects.filter((project) => project.id === projectId).map((project) => {
     const result = intake?.get(project.id);
     const sources = result?.sources ?? [];

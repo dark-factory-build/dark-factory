@@ -2475,3 +2475,26 @@ test("new issue sources select the sole overseer and default checkout without op
     globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
   }
 });
+
+test("an open issue inbox reloads destinations as well as sources after reconnect", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const sources = [], repositories = [];
+  const props = (ready) => ({ status: ready ? "ready" : "disconnected", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map(), intake: new Map(), onLoadIntake: ready ? (id) => sources.push(id) : undefined, onLoadRepositories: ready ? (id) => repositories.push(id) : undefined });
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, props(true))); });
+    const section = renderer.root.findByProps({ "aria-label": "Issue intake" });
+    const currentTarget = { open: true };
+    await act(async () => section.props.onToggle({ target: currentTarget, currentTarget }));
+    assert.equal(sources.length, 1);
+    assert.equal(repositories.length, 1);
+    await act(async () => renderer.update(createElement(FactoryConsole, props(false))));
+    await act(async () => renderer.update(createElement(FactoryConsole, props(true))));
+    assert.deepEqual(sources, [ids.project, ids.project]);
+    assert.deepEqual(repositories, [ids.project, ids.project]);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
