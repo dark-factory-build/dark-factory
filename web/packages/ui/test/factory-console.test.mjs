@@ -1974,9 +1974,13 @@ test("dependency projection keeps served identity, hidden endpoints and project 
   assert.equal(kernel.language, "go");
   assert.equal(kernel.childCount, 1);
   assert.equal(kernel.dependencies.omitted, 1);
-  const store = kernel.dependencies.links.find((link) => link.direction === "to");
-  assert.equal(store.nodeId, `${ids.project}:${fixtureTopology.nodes[3].id}`);
-  assert.equal(view.topology.nodes.some((node) => node.id === store.nodeId), false, "hidden endpoints retain their exact identity");
+  // kernel → store lies inside the kernel room here, so only web → kernel is a link between rooms.
+  const shownIDs = new Set(view.topology.nodes.map((node) => node.id));
+  assert.deepEqual(kernel.dependencies.links.map((link) => [link.direction, link.label, link.weight]), [["from", "web", 1]]);
+  assert.ok(view.topology.nodes.every((node) => node.dependencies.links.every((link) => shownIDs.has(link.nodeId) && link.nodeId !== node.id)), "every link joins two different rooms on this floor");
+  // Entering kernel shows store as its own room: the link reappears, and web is off this floor.
+  const inside = floorScene(fixtureState, mirrored, undefined, undefined, kernel.id).topology.nodes;
+  assert.deepEqual(inside.find((node) => node.path === "internal/kernel" && node.inventoryScope === "direct").dependencies.links.map((link) => [link.direction, link.label, link.weight]), [["to", "store", 2]]);
   assert.ok(kernel.dependencies.links.every((link) => link.nodeId.startsWith(`${ids.project}:`)), "matching node hashes in another project never cross-link");
   const legacy = new Map([[ids.project, { ...fixtureTopology, dependencies: undefined }]]);
   assert.equal(floorScene(fixtureState, legacy, undefined, undefined, rootID).topology.nodes[0].dependencies, undefined);
@@ -2149,6 +2153,17 @@ test("paging reaches all served siblings and leaf inspection; stale scopes and p
   assert.equal(floorScene(fixtureState, shrunk, undefined, undefined, scope, 1).navigation.page, 0);
 });
 
+
+test("a link to a room on another page is not drawn from the scope's direct-files room", () => {
+  const root = fixtureTopology.nodes[0];
+  const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
+  const topology = served({ ...fixtureTopology, nodes: [root, ...children], dependencies: { omitted: 0, edges: [
+    { from: root.id, to: children[0].id, weight: 1 }, { from: children[29].id, to: children[0].id, weight: 5 }] } });
+  const links = (page) => Object.fromEntries(floorScene(fixtureState, topology, undefined, undefined, `${ids.project}:${root.id}`, page).topology.nodes
+    .filter((node) => node.dependencies.links.length > 0).map((node) => [node.path, node.dependencies.links.map((link) => `${link.direction} ${link.path} ${link.weight}`)]));
+  assert.deepEqual(links(0), { ".": ["to child-0 1"], "child-0": ["from . 1"] }, "the off-page importer neither appears nor adds weight");
+  assert.deepEqual(links(1), {}, "child-29 is shown, the room it imports is not");
+});
 
 test("page controls reach every child without the removed room inspector", async () => {
   const root = fixtureTopology.nodes[0];
