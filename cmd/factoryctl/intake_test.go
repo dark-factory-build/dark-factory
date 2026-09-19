@@ -34,6 +34,42 @@ func TestIntakeControllerCommandsUseOperatorTransport(t *testing.T) {
 	}
 }
 
+func TestIntakeCreateUsesNamedConfigurationAndMintsSourceID(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	project, target, overseer := strings.Repeat("ab", 16), strings.Repeat("cd", 16), strings.Repeat("ef", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.IntakeInput()
+		if !ok || input.Action != "create" || input.SourceID == "" || input.ProjectID != project || input.Configuration == nil {
+			t.Errorf("intake create = %+v", input)
+		} else if got := input.Configuration; got.Repository != "team/source" || got.TargetRepositoryID != target || got.OverseerAgentID != overseer || got.Policy != "trusted_authors" || len(got.TrustedAuthors) != 1 || got.TrustedAuthors[0] != "octocat" || got.PollSeconds != 60 || got.AdmissionLimit != 25 {
+			t.Errorf("named configuration = %+v", got)
+		}
+		return api.NewContentReply(api.IntakeResult{State: "ok"})
+	})
+	var stdout, stderr bytes.Buffer
+	args := []string{"intake", "create", "--project", project, "--repository", "team/source", "--target-repository", target, "--overseer", overseer, "--policy", "trusted-authors", "--trusted-author", "octocat"}
+	if exit := run(context.Background(), args, webEnvironment(fixture), &stdout, &stderr); exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("intake create exit=%d stderr=%s", exit, stderr.String())
+	}
+	if result := awaitServer(t, done); result.err != nil {
+		t.Fatal(result.err)
+	}
+}
+
+func TestIntakeNamedConfigurationRejectsUnsafePolicy(t *testing.T) {
+	id := strings.Repeat("ab", 16)
+	for _, args := range [][]string{
+		{"intake", "create", "--project", id, "--repository", "team/source", "--target-repository", id, "--policy", "trusted-authors"},
+		{"intake", "create", "--project", id, "--repository", "team/source", "--target-repository", id, "--poll-seconds", "4"},
+		{"intake", "create", "--project", id, "--repository", "team/source", "--target-repository", id, "--trusted-author", "octocat", "--trusted-author", "OCTOCAT"},
+	} {
+		if _, _, ok := parse(args); ok {
+			t.Fatalf("unsafe intake configuration accepted: %v", args)
+		}
+	}
+}
+
 func TestIntakeControllerWaitsBeyondAttemptDeadline(t *testing.T) {
 	fixture := newAPIFixture(t)
 	defer fixture.close(t)

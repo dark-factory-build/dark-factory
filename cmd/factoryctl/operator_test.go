@@ -687,3 +687,24 @@ func TestRepositoryEnableDisableUseEnabledOperatorAction(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryAddMintsIDWhenOmitted(t *testing.T) {
+	fixture := newAPIFixture(t)
+	defer fixture.close(t)
+	project := strings.Repeat("ab", 16)
+	done := serveOne(fixture.listener, func(call api.Call) api.Reply {
+		input, ok := call.ProjectRepositoryInput()
+		if !ok || input.Action != "add" || input.ID == "" || input.ProjectID != project || input.Name != "Service" || input.Root != "/private/tmp/service" || input.BaseRef != "release" {
+			t.Errorf("repository add = %+v", input)
+		}
+		return api.NewContentReply(api.ProjectRepository{ID: input.ID, Revision: 1})
+	})
+	var stdout, stderr bytes.Buffer
+	args := []string{"project", "repository", "add", "--project", project, "--name", "Service", "--root", "/private/tmp/service", "--base", "release"}
+	if exit := run(context.Background(), args, webEnvironment(fixture), &stdout, &stderr); exit != 0 || stderr.Len() != 0 {
+		t.Fatalf("repository add exit=%d stderr=%q", exit, stderr.String())
+	}
+	if result := awaitServer(t, done); result.err != nil {
+		t.Fatal(result.err)
+	}
+}
