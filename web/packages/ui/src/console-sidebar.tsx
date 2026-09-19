@@ -286,7 +286,7 @@ export function QueuePanel({
       <h3>{label} <span>{rows.length}</span></h3>
       <ul className="dfConsoleItems">{rows.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
         <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
-        <span className="dfConsoleItem__meta">{name(task)}{status === "blocked" ? ` · since ${dateLabel(task.updated_at_ms)}` : ""}</span>
+        <span className="dfConsoleItem__meta">{name(task)}{status === "blocked" && task.updated_at_ms !== undefined ? ` · since ${dateLabel(task.updated_at_ms)}` : ""}</span>
       </div></li>)}</ul>
     </section>;
   };
@@ -325,7 +325,7 @@ function NewTask({ agents, state, disabled, onAddTask }: {
     return worker === undefined ? [] : [{ project, worker }];
   });
   return <details className="dfConsoleSidebar__section"><summary>New task</summary>
-    <form className="dfConsoleSidebar__config" aria-label="New task" onSubmit={(event) => {
+    <form className="dfFactoryConsole__reply" aria-label="New task" onSubmit={(event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const data = new FormData(form);
@@ -335,11 +335,13 @@ function NewTask({ agents, state, disabled, onAddTask }: {
       if (agent === undefined || instruction.trim() === "") return;
       void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue").then((added) => { if (added) form.reset(); });
     }}>
-      <label>For <select name="target" required disabled={disabled}>
+      <label htmlFor="df-new-task-target">For</label>
+      <select id="df-new-task-target" name="target" required disabled={disabled}>
         {shared.map(({ project }) => <option key={project.id} value={`any:${project.id}`}>Any eligible worker · {project.name}</option>)}
         {live.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
-      </select></label>
-      <label>Instruction <textarea name="instruction" rows={4} required disabled={disabled} /></label>
+      </select>
+      <label htmlFor="df-new-task-instruction">Instruction</label>
+      <textarea id="df-new-task-instruction" name="instruction" rows={4} required disabled={disabled} />
       <button disabled={disabled}>Add to queue</button>
     </form>
   </details>;

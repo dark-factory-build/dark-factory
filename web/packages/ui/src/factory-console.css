@@ -298,6 +298,7 @@
 }
 
 .dfFactoryConsole__reply button { justify-self: start; }
+.dfFactoryConsole__reply select { box-sizing: border-box; width: 100%; min-width: 0; }
 
 .dfFactoryConsole__humanActions {
   display: flex;
