@@ -8,14 +8,19 @@ export type { SpriteAppearance };
 
 export const appearanceFields = ["skin", "hair", "hair_colour", "face", "outfit", "clothes_colour", "shoes", "tool", "headwear"] as const;
 
-function identity(id: string): number {
-  let hash = 2166136261;
-  for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 16777619) >>> 0;
-  return hash % 4;
+function hash(id: string): number {
+  let value = 2166136261;
+  for (let i = 0; i < id.length; i++) value = Math.imul(value ^ id.charCodeAt(i), 16777619) >>> 0;
+  return value;
+}
+
+/** Each worker keeps their own time, so a floor of people never moves in step. */
+export function workerPhase(id: string): number {
+  return hash(id) % 5000;
 }
 
 export function automaticAppearance(worker: Pick<SceneWorker, "id" | "role">): SpriteAppearance {
-  const slot = identity(worker.id);
+  const slot = hash(worker.id) % 4;
   return {
     automatic: true,
     skin: slot < 2 ? 1 : 2,
@@ -39,25 +44,53 @@ export function resolvedAppearance(worker: Pick<SceneWorker, "id" | "role" | "ap
   ]) as SpriteAppearance;
 }
 
-/** The aligned atlas layers for one worker; combinations grow additively. */
-export function workerFrames(worker: SceneWorker, motion?: WorkerMotion): readonly string[] {
+/**
+ * The aligned atlas layers for one worker. Status and motion choose a pose; the
+ * person's own layers ride on it unchanged. `motion.at` is the worker's own
+ * running clock: absent, every pose rests on its first frame.
+ */
+export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: "resting" | "planning"): readonly string[] {
   const appearance = resolvedAppearance(worker);
   const role = worker.role === "orchestrator" ? "overseer" : "worker";
   const provider = worker.provider === "claude_code" || worker.provider === "codex" ? worker.provider : "shell";
-  const activity = motion?.action === "interacting" ? "busy" : ["busy", "waiting", "needs-you", "idle"].includes(worker.activity) ? worker.activity : "idle";
-  const bodyActivity = motion?.action === "interacting" && motion.frame === 1 ? "typing" : activity;
-  const frames = [
-    `person.skin.${appearance.skin}.${bodyActivity}`,
-    `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.${bodyActivity}`,
-    `person.hair.${appearance.hair}.${appearance.hair_colour}.${activity}`,
-    `person.face.${appearance.face}.${activity}`,
-    `person.shoes.${appearance.shoes}.${activity}`,
-    ...(motion?.action === "interacting" ? [] : [`person.tool.${appearance.tool}.${activity}`]),
-    `person.headwear.${appearance.headwear}.${activity}`,
-    `person.system.${role}.${provider}.${activity}`,
+  // Only a running clock animates; anything else rests on the first frame.
+  const at = motion?.at !== undefined && Number.isFinite(motion.at) && motion.at >= 0 ? motion.at : undefined;
+  const walking = motion?.action === "walking";
+  const seated = seat !== undefined && !walking;
+  // Planners write in bursts; resting workers lift the cup now and then.
+  const scribble = at !== undefined && at % 2600 < 1300 ? Math.floor(at / 325) % 2 : 0;
+  // At the bench a wrench, tablet or clipboard is worked with: the carrying arm
+  // reaches forward and back. Empty hands, or a mug, leave the keyboard.
+  const wielding = motion?.action === "interacting" && ["clipboard", "wrench", "tablet"].includes(spriteOptions.tool[appearance.tool]?.name ?? "");
+  const pose = walking ? `walk.${motion.frame}`
+    : wielding ? motion.frame === 1 ? "walk.1" : "idle"
+    : motion?.action === "interacting" ? `type.${motion.frame}`
+    : worker.activity === "needs-you" ? `wave.${at === undefined ? 0 : Math.floor(at / 400) % 2}`
+    : seat === "planning" ? `type.${scribble}`
+    : seat === "resting" ? at !== undefined && at % 5200 < 900 ? "sip" : "idle"
+    : worker.activity === "busy" ? "type.0"
+    : worker.activity === "waiting" ? "waiting" : "idle";
+  const step = walking ? pose : "stand";
+  const blinking = at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
+  const glasses = spriteOptions.face[appearance.face]?.name === "glasses";
+  const held = pose === "sip" ? ["person.held.cup"]
+    : seat === "planning" && pose.startsWith("type") ? [`person.held.pencil.${scribble}`]
+    : pose.startsWith("type") ? ["person.held.keyboard"]
+    : seated ? [] : [`person.tool.${appearance.tool}.${pose === "walk.1" ? "high" : "low"}`];
+  return [
+    `person.skin.${appearance.skin}.${pose}`,
+    `person.legs.${appearance.outfit === 1 ? appearance.clothes_colour : "plain"}.${seated ? "sit" : step}`,
+    `person.outfit.${appearance.outfit}.${appearance.clothes_colour}.${pose}`,
+    `person.hair.${appearance.hair}.${appearance.hair_colour}`,
+    ...(blinking && !glasses ? [`person.blink.${appearance.skin}`] : []),
+    `person.face.${appearance.face}`,
+    ...(blinking && glasses ? ["person.blink.glasses"] : []),
+    `person.shoes.${appearance.shoes}.${step}`,
+    `person.headwear.${appearance.headwear}`,
+    ...held,
+    `person.system.${role}.${provider}`,
+    ...(worker.activity === "needs-you" ? ["person.alert"] : []),
   ];
-  if (motion?.action === "walking" && motion.direction !== undefined) frames.push(`person.motion.walk.${motion.direction}.${motion.frame}`);
-  return frames;
 }
 
 export function randomAppearance(random = Math.random): SpriteAppearance {

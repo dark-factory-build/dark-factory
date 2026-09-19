@@ -6,6 +6,8 @@ export type WorkerMotion = Readonly<{
   action: "still" | "walking" | "interacting";
   direction?: WalkingDirection;
   frame: 0 | 1;
+  /** The worker's own running clock in milliseconds; absent while motion is stilled. */
+  at?: number;
 }>;
 
 export type Route = Readonly<{

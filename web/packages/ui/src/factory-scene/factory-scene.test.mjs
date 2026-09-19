@@ -188,9 +188,10 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
 
   const placements = placeWorkers(layout, workers);
   assert.deepEqual(placements, placeWorkers(layout, [...workers].reverse()));
-  assert.equal(workerFrames(workers[0]).length, 8);
-  assert.match(workerFrames(workers[0]).at(-1), /person\.system\.worker\.codex\.busy/);
-  assert.match(workerFrames({ ...workers[0], provider: "made_up" }).at(-1), /person\.system\.worker\.shell\.busy/);
+  assert.equal(workerFrames(workers[0]).length, 9);
+  assert.equal(workerFrames(workers[0]).at(-1), "person.system.worker.codex");
+  assert.equal(workerFrames({ ...workers[0], provider: "made_up" }).at(-1), "person.system.worker.shell");
+  assert.equal(workerFrames(workers[1]).at(-1), "person.alert", "the alert rides above whoever needs you");
 
   const first = render();
   const reordered = render({
@@ -223,7 +224,10 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     const rendered = first.slice(first.indexOf(`data-worker-id="${worker.id}"`));
     const frame = rendered.slice(0, rendered.indexOf("</g>")).match(/href="#df-frame-([^"]+)"/g)
       .map((match) => match.slice('href="#df-frame-'.length, -1));
-    assert.deepEqual(frame, workerFrames(worker).filter((name) => worker.location === "working" || !name.startsWith("person.tool.")));
+    // Off the floor of a room a worker sits: resting with a cup on the table, or planning.
+    const seat = worker.location === "working" ? undefined : worker.location === "unobserved" ? "planning" : "resting";
+    assert.deepEqual(frame, [...workerFrames(worker, undefined, seat), ...(seat === "resting" ? ["person.held.cup"] : [])]);
+    if (seat !== undefined) assert.equal(frame.some((name) => name.startsWith("person.tool.")), false, "tools are put down at a table");
     for (const name of frame) assert.ok(name in spriteAtlas.frames, name);
   }
   assert.equal(first.includes("dfFactoryScene__alternate"), false);
@@ -394,11 +398,13 @@ test("the selected scene worker has a ring without changing its sprite", () => {
 
 test("every generated person layer is reachable, including fallbacks", () => {
   const reached = new Set();
+  // Still, frozen, and every beat of a worker's own clock; on the floor and at both tables.
+  const moments = [undefined, ...[0, 100, 350, 500, 1000, 1500].flatMap((at) => ["still", "interacting", "walking"].flatMap((action) => [0, 1].map((frame) => ({ action, frame, at, direction: "east" }))))];
   for (const role of ["worker", "orchestrator"]) {
     for (const provider of ["claude_code", "codex", "shell"]) {
       for (const activity of ["busy", "waiting", "needs-you", "idle"]) {
         const base = { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 };
-        const add = (appearance) => { for (const motion of [undefined, { action: "interacting", frame: 1 }]) for (const frame of workerFrames({ id: "agent", name: "Agent", role, provider, activity, appearance }, motion)) reached.add(frame); };
+        const add = (appearance) => { for (const motion of moments) for (const seat of [undefined, "resting", "planning"]) for (const frame of workerFrames({ id: "agent", name: "Agent", role, provider, activity, appearance }, motion, seat)) reached.add(frame); };
         for (const field of ["skin", "face", "shoes", "tool", "headwear"]) for (let index = 0; index < spriteOptions[field].length; index++) add({ ...base, [field]: index });
         for (let hair = 0; hair < spriteOptions.hair.length; hair++) for (let hair_colour = 0; hair_colour < spriteOptions.hair_colour.length; hair_colour++) add({ ...base, hair, hair_colour });
         for (let outfit = 0; outfit < spriteOptions.outfit.length; outfit++) for (let clothes_colour = 0; clothes_colour < spriteOptions.clothes_colour.length; clothes_colour++) add({ ...base, outfit, clothes_colour });
@@ -406,14 +412,34 @@ test("every generated person layer is reachable, including fallbacks", () => {
     }
   }
   const fallback = { id: idForIdentity(2), name: "Fallback", role: "worker", provider: "unknown", activity: "debugging" };
-  assert.match(workerFrames(fallback).at(-1), /person\.system\.worker\.shell\.idle/);
-  for (const frame of workerFrames(fallback)) reached.add(frame);
-  for (const direction of ["north", "south", "east", "west"]) for (const frame of [0, 1]) {
-    for (const name of workerFrames(fallback, { action: "walking", direction, frame })) reached.add(name);
-  }
-  for (const frame of [0, 1]) for (const name of workerFrames(fallback, { action: "interacting", frame })) reached.add(name);
+  assert.match(workerFrames(fallback).at(-1), /^person\.system\.worker\.shell$/);
+  assert.ok(workerFrames(fallback).includes("person.skin.2.idle") || workerFrames(fallback).some((name) => /^person\.skin\.\d\.idle$/.test(name)), "an unknown activity stands idle");
   const personFrames = Object.keys(spriteAtlas.frames).filter((name) => name.startsWith("person."));
   assert.deepEqual([...reached].sort(), personFrames.sort());
+  // One cup, one pose: never a tool and a cup, never two held things.
+  for (const motion of moments) for (const seat of [undefined, "resting", "planning"]) for (const activity of ["busy", "waiting", "needs-you", "idle"]) {
+    const frames = workerFrames({ ...fallback, activity }, motion, seat);
+    assert.ok(frames.filter((name) => name.startsWith("person.held.") || name.startsWith("person.tool.")).length <= 1, `${activity}/${seat}: ${frames}`);
+    assert.equal(new Set(frames).size, frames.length);
+  }
+  // At the bench a carried tool is worked with; empty hands and mugs type.
+  const bench = (tool, frame) => workerFrames({ ...fallback, activity: "busy", appearance: { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool, headwear: 0 } }, { action: "interacting", frame });
+  const toolNames = spriteOptions.tool.map(({ name }) => name);
+  for (const name of ["clipboard", "wrench", "tablet"]) {
+    const tool = toolNames.indexOf(name);
+    assert.deepEqual([0, 1].map((frame) => bench(tool, frame).filter((layer) => /skin|legs|tool|held/.test(layer)).map((layer) => layer.replace("person.", ""))),
+      [["skin.0.idle", "legs.plain.stand", `tool.${tool}.low`], ["skin.0.walk.1", "legs.plain.stand", `tool.${tool}.high`]], name);
+  }
+  for (const name of ["none", "mug"]) assert.ok(bench(toolNames.indexOf(name), 0).includes("person.held.keyboard"), name);
+  // Glasses blink with their lenses; bare eyes with the face's own shadow.
+  const eyes = (face) => workerFrames({ ...fallback, appearance: { automatic: false, skin: 2, hair: 0, hair_colour: 0, face, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0 } }, { action: "still", frame: 0, at: 0 }).filter((layer) => layer.includes("blink"));
+  assert.deepEqual([eyes(0), eyes(spriteOptions.face.findIndex(({ name }) => name === "glasses"))], [["person.blink.2"], ["person.blink.glasses"]]);
+  // No clock value, however wrong, may name a frame the sheet does not hold.
+  for (const at of [-1, -0.5, -4000, NaN, Infinity, 1e15]) for (const seat of [undefined, "resting", "planning"]) for (const activity of ["busy", "needs-you", "idle"]) {
+    for (const name of workerFrames({ ...fallback, activity }, { action: "still", frame: 0, at }, seat)) assert.ok(name in spriteAtlas.frames, `${name} at ${at}`);
+  }
+  // A stilled clock rests every pose on its first frame, with open eyes.
+  assert.deepEqual(workerFrames({ ...fallback, activity: "needs-you" }).filter((name) => /wave|blink/.test(name)).map((name) => name.split(".").slice(-2).join(".")), ["wave.0", "wave.0"]);
 });
 
 test("movement uses clear corridor lanes, doors and standing points", () => {
@@ -809,7 +835,7 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
   const timers = new Map();
   let clock = 0;
   globalThis.performance = { now: () => clock };
-  globalThis.setTimeout = (callback, delay) => { assert.equal(delay, 450); timers.set(++next, callback); return next; };
+  globalThis.setTimeout = (callback, delay) => { assert.equal(delay, 200); timers.set(++next, callback); return next; };
   globalThis.clearTimeout = (id) => timers.delete(id);
   let next = 0, visibilityListener, mediaListener;
   const media = { matches: false, addEventListener: (_event, listener) => { mediaListener = listener; }, removeEventListener() {} };
@@ -824,10 +850,9 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
     const staticRoom = renderer.root.findByProps({ "data-room-id": "src" }).props;
     const frameNames = () => renderer.root.findByProps({ "data-worker-id": workers[0].id }).findAllByType("use").map((node) => node.props.href);
     assert.equal(frames.size, 0, "stationary work never schedules RAF");
-    await act(async () => { clock = 900; timers.values().next().value(); });
-    const first = frameNames();
-    await act(async () => { clock = 1350; timers.values().next().value(); });
-    assert.notDeepEqual(frameNames(), first, "stationary interaction frame advances");
+    const seen = new Set();
+    for (clock = 200; clock <= 2000; clock += 200) { await act(async () => { timers.values().next().value(); }); seen.add(frameNames().join()); }
+    assert.ok(seen.size >= 2, "stationary interaction frame advances");
     assert.equal(renderer.root.findByProps({ "data-room-id": "src" }).props, staticRoom);
     await act(async () => { clock += 1; globalThis.document.visibilityState = "hidden"; visibilityListener(); });
     assert.equal(timers.size, 0);
@@ -852,7 +877,7 @@ test("stationary active workers animate while idle, reduced, hidden and disconne
     await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: [], connected: true })); });
     assert.equal(timers.size, 0, "idle floor leaves no continuous animation clock");
     await act(async () => { renderer.update(createElement(FactoryScene, { topology: { ...topology, nodes: topology.nodes.map(({ inventory, ...node }) => node) }, workers, connected: true })); });
-    assert.equal(timers.size, 0, "unknown inventory cannot invent an active work surface");
+    assert.equal(timers.size, 1, "people on the floor keep its slow pulse");
     assert.equal(renderer.root.findByProps({ "data-worker-id": workers[0].id }).props["data-worker-action"], "still");
   } finally {
     if (renderer) await act(async () => renderer.unmount());

@@ -14,7 +14,7 @@ import {
   type SceneWorker,
 } from "./scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
-import { workerFrames } from "./appearance.js";
+import { workerFrames, workerPhase } from "./appearance.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -154,10 +154,11 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
       const frame = requestAnimationFrame((time) => setClock(time));
       return () => cancelAnimationFrame(frame);
     }
-    if (active.size === 0) return;
-    const timer = setTimeout(() => setClock(now()), 450);
+    // Blinks, sips and waves are short, so the floor keeps a slow pulse while anyone is on it.
+    if (placements.length === 0) return;
+    const timer = setTimeout(() => setClock(now()), 200);
     return () => clearTimeout(timer);
-  }, [clock, connected, reduced, active]);
+  }, [clock, connected, reduced, placements]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -173,11 +174,12 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
   for (const placement of placements) {
     const state = motions.current.get(placement.id);
     const current = state === undefined ? { point: placement, walking: false } : motionPoint(state, clock);
+    const at = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible") ? clock + workerPhase(placement.id) : undefined;
     output.set(placement.id, {
       ...current.point,
       motion: current.walking
-        ? { action: "walking", direction: current.direction!, frame: Math.floor(clock / 150) % 2 as 0 | 1 }
-        : { action: active.has(placement.id) ? "interacting" : "still", frame: connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible") ? Math.floor(clock / 450) % 2 as 0 | 1 : 0 },
+        ? { action: "walking", direction: current.direction!, frame: Math.floor((at ?? clock) / 150) % 2 as 0 | 1, at }
+        : { action: active.has(placement.id) ? "interacting" : "still", frame: at === undefined ? 0 : Math.floor(at / (380 + workerPhase(placement.id) % 140)) % 2 as 0 | 1, at },
     });
   }
   return output;
@@ -211,7 +213,10 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
 
         const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
         const seated = placement.area !== "room" && position.motion.action !== "walking";
-        const frames = workerFrames(worker, position.motion).filter((frame) => !seated || !frame.startsWith("person.tool."));
+        const frames = workerFrames(worker, position.motion, placement.area === "room" ? undefined : placement.area === "resting" ? "resting" : "planning");
+        const sipping = frames.includes("person.held.cup");
+        // A step lifts the whole body a pixel.
+        const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
         return (
           <g
             key={worker.id}
@@ -224,12 +229,10 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
             <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.area === "resting" ? worker.paused ? "Paused · taking a break" : "Taking a break" : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
-              <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
-              {!seated ? null : <g aria-hidden="true">
-                <path d="M-5 4h4v3h-5 M2 4h4v3H2" stroke="#838574" strokeWidth="2" fill="#4f5d59" />
-                {placement.area === "resting" || !connected ? null : <g data-planning-light="" ><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}
-        {placement.area === "resting" ? <g><rect x="3" y="-1" width="5" height="4" fill="#d1c8a9" /><path d="M8 0h2v2H8" fill="none" stroke="#d1c8a9" /></g> : <path d="M2 0l5 -4" stroke="#d1c8a9" strokeWidth="2" />}
-              </g>}</g>
+              <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}
+                {/* One cup each: on the table in front of them until it is at their lips. */}
+                {seated && placement.area === "resting" && !sipping ? <Frame name="person.held.cup" x={-6} y={-21} /> : null}</g>
+              {!seated || placement.area === "resting" || !connected ? null : <g data-planning-light="" aria-hidden="true"><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>}</g>
             </g>
             {attention.length === 0 ? null : <g {...sceneAction(onSelectHumanRequest === undefined ? undefined : () => onSelectHumanRequest(attention[0]!))} aria-label={`Question from ${worker.name}`} data-human-request-id={attention[0]}>
               <rect x="10" y="-20" width="22" height="22" rx="3" fill="#f0c777" /><text x="21" y="-5" textAnchor="middle" fill="#172330" fontSize="16" fontWeight="700">!</text>
@@ -372,22 +375,21 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
       </g>}
       <Area width={commonWidth} top={layout.restingTop - 40} bottom={commonBottom} />
       {[
-        { label: "Break room", seats: seating.resting, planning: false },
-        { label: "Planning", seats: seating.planning, planning: true },
-      ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning }) => {
+        { label: "Break room", seats: seating.resting, planning: false, occupied: resting.length },
+        { label: "Planning", seats: seating.planning, planning: true, occupied: planning.length },
+      ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied }) => {
         const top = seats[0]!.y;
-        const columns = seats.filter((seat) => seat.y === top).length;
         return <g key={label} role="group" aria-label={label}>
           <text x={seats[0]!.x - 18} y={top - 25} fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="8">{label}</text>
-          {seats.map((seat, index) => <g key={index} aria-hidden="true" data-common-seat={planning ? "planning" : "resting"} transform={`translate(${seat.x} ${seat.y})`}>
+          {/* One table per row, as long as the people at it; a stool only where someone sits. */}
+          {[...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!; return <g key={y} aria-hidden="true" data-common-table={planning ? "planning" : "resting"} transform={`translate(${first.x} ${y})`}>
+            <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
+            {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" />
+              <path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path data-planning-light={connected} d="M4 -20h6" stroke={connected ? "#dfc38f" : "#626c64"} strokeWidth="3" /></g>}
+          </g>; })}
+          {seats.slice(0, occupied).map((seat, index) => <g key={index} aria-hidden="true" data-common-seat={planning ? "planning" : "resting"} transform={`translate(${seat.x} ${seat.y})`}>
             <rect x="-7" y="3" width="14" height="6" rx="2" fill="#655948" stroke="#897c61" />
             <path d="M-5 9v3 M5 9v3" stroke="#3f4540" strokeWidth="3" />
-            {index > 0 && seats[index - 1]!.y === seat.y && index % columns % 2 === 1 ? null : <>
-              <rect x="-18" y="-21" width={seats[index + 1]?.y === seat.y ? 76 : 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
-              {planning ? <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" />
-                <path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path data-planning-light={connected} d="M4 -20h6" stroke={connected ? "#dfc38f" : "#626c64"} strokeWidth="3" />
-              </g> : <g><rect x="5" y="-19" width="4" height="4" rx="1" fill="#cbc4a6" /><path d="M9 -18h2v2H9" fill="none" stroke="#cbc4a6" /></g>}
-            </>}
           </g>)}
         </g>;
       })}

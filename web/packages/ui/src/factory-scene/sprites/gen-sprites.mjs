@@ -192,11 +192,13 @@ const faceFeatures = [
   { name: 'beard', label: 'Beard', part: grid(`hhhh\n.hh.`), y: 6 },
   { name: 'moustache', label: 'Moustache', part: grid(`hhh`), y: 5 },
 ];
+// One cup, whether carried about, left on the table or lifted to drink.
+const cup = grid(`opp\nopp`);
 const tools = [
   { name: 'none', label: 'None', part: [], x: 0, y: 0 },
   { name: 'clipboard', label: 'Clipboard', part: clipboard, x: 11, y: 9 },
   { name: 'wrench', label: 'Wrench', part: grid(`s.s\n.s.\n.s.\n.s.\noso`), x: 12, y: 8 },
-  { name: 'mug', label: 'Mug', part: grid(`pppoo\nppp.o\npppoo\nooo..`), x: 11, y: 10 },
+  { name: 'mug', label: 'Mug', part: cup, x: 12, y: 10 },
   { name: 'tablet', label: 'Tablet', part: grid(`oooo\notto\nokto\nooso`), x: 11, y: 10 },
 ];
 const headwear = [
@@ -262,21 +264,62 @@ const wall = grid(`
 
 const sprites = new Map();
 const providers = { claude_code: 'c', codex: 't', shell: 's' };
-const activities = ['busy', 'waiting', 'needs-you', 'idle'];
+// A pose is the body's shape, independent of who wears it or why. Only the
+// layers that bend (skin, sleeves, legs, shoes) are baked per pose; hair, face,
+// headwear, tools and badges are drawn once and ride on every pose.
+const poses = ['idle', 'waiting', 'wave.0', 'wave.1', 'type.0', 'type.1', 'walk.0', 'walk.1', 'sip'];
 const add = (name, build) => { const pixels = blank(); build(pixels); sprites.set(name, pixels); };
-const arms = activity => activity === 'waiting' ? [foldedArms] : activity === 'busy' ? [typingArms] : activity === 'typing' ? [grid(`ou....uo\noaaa..ao\n....aa..`)] : activity === 'needs-you' ? [relaxedArm, mirror(relaxedArm), raisedArm] : [relaxedArm, mirror(relaxedArm)];
-const armPosition = (activity, index) => index === 0 ? [activity === 'waiting' || activity === 'busy' || activity === 'typing' ? 4 : 3, activity === 'waiting' ? 11 : 9] : index === 1 ? [11, 9] : [2, 4];
-for (const [skinIndex, tone] of skinTones.entries()) for (const activity of [...activities, 'typing']) add(`person.skin.${skinIndex}.${activity}`, pixels => {
+const shortArm = grid(`
+  ou
+  oa
+  oo
+`);
+const wavingArm = grid(`
+  oo.
+  aao
+  oao
+  ouo
+  ouo
+  .ou
+  ..o
+`);
+// The cup itself is a held layer, so every skin and sleeve shares one.
+const sippingArm = grid(`
+  .ao
+  .uo
+  .uo
+`);
+const arms = pose => ({
+  waiting: [foldedArms],
+  'type.0': [typingArms],
+  'type.1': [grid(`ou....uo\noaaa..ao\n....aa..`)],
+  'wave.0': [relaxedArm, mirror(relaxedArm), raisedArm],
+  'wave.1': [relaxedArm, mirror(relaxedArm), wavingArm],
+  // The forward arm foreshortens; the pair alternates with the legs.
+  'walk.0': [shortArm, mirror(relaxedArm)],
+  'walk.1': [relaxedArm, mirror(shortArm)],
+  sip: [relaxedArm, sippingArm],
+})[pose] ?? [relaxedArm, mirror(relaxedArm)];
+const armPosition = (pose, index) => index === 0 ? [pose === 'waiting' || pose.startsWith('type') ? 4 : 3, pose === 'waiting' ? 11 : 9]
+  : index === 1 ? pose === 'sip' ? [10, 7] : [11, 9] : [2, 4];
+for (const [skinIndex, tone] of skinTones.entries()) {
   const colour = rows => rows.map(row => row.replace(/[ab]/g, key => key === 'a' ? tone.skin : tone.shadow));
-  draw(pixels, colour(head), 5, 2);
-  arms(activity).forEach((part, index) => draw(pixels, keep(colour(part).map(row => row.replaceAll('u', tone.skin)), [tone.skin, tone.shadow]), ...armPosition(activity, index)));
-});
-for (const [outfitIndex, outfit] of outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const activity of [...activities, 'typing']) add(`person.outfit.${outfitIndex}.${colourIndex}.${activity}`, pixels => {
+  for (const pose of poses) add(`person.skin.${skinIndex}.${pose}`, pixels => {
+    draw(pixels, colour(head), 5, 2);
+    arms(pose).forEach((part, index) => draw(pixels, keep(colour(part).map(row => row.replaceAll('u', tone.skin)), [tone.skin, tone.shadow]), ...armPosition(pose, index)));
+  });
+  // Closed eyes are the face's own shadow, so a blink suits every tone.
+  add(`person.blink.${skinIndex}`, pixels => draw(pixels, [tone.shadow + tone.shadow], 7, 4));
+}
+// Behind glasses the eyes are the lenses, so a blink closes those instead.
+add('person.blink.glasses', pixels => draw(pixels, ['s.s'], 6, 4));
+for (const [outfitIndex, outfit] of outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const pose of poses) add(`person.outfit.${outfitIndex}.${colourIndex}.${pose}`, pixels => {
   draw(pixels, tint(outfit, colour.colour), 4, 6);
-  draw(pixels, outfitIndex === 1 ? legs.map(row => row.replaceAll('m', colour.colour)) : legs, 4, outfitIndex === 1 ? 12 : 13);
-  if (activity === 'busy' || activity === 'typing') draw(pixels, keyboard, 2, 12);
-  arms(activity).forEach((part, index) => {
-    const [x, y] = armPosition(activity, index);
+  // Overalls begin their legs a row early, inside the bib: that row belongs to
+  // the torso's frame so the split between the legs survives the layering.
+  if (outfitIndex === 1) draw(pixels, [legs[0].replaceAll('m', colour.colour)], 4, 12);
+  arms(pose).forEach((part, index) => {
+    const [x, y] = armPosition(pose, index);
     if (outfitIndex === 2) part = part.map((row, dy) => y + dy === 9 ? row : row.replaceAll('u', 'a'));
     // Hands and short sleeves reveal the skin layer beneath the clothes.
     part.forEach((row, dy) => [...row].forEach((key, dx) => {
@@ -285,62 +328,113 @@ for (const [outfitIndex, outfit] of outfits.entries()) for (const [colourIndex, 
     draw(pixels, keep(tint(part, colour.colour), ['o', colour.colour]), x, y);
   });
 });
-for (const [hairIndex, style] of hair.entries()) for (const [colourIndex, colour] of hairColours.entries()) for (const activity of activities) add(`person.hair.${hairIndex}.${colourIndex}.${activity}`, pixels => draw(pixels, tint(style, colour.colour), 4, 1));
-for (const [featureIndex, feature] of faceFeatures.entries()) for (const activity of activities) add(`person.face.${featureIndex}.${activity}`, pixels => draw(pixels, feature.part, feature.x ?? 6, feature.y ?? 4));
-for (const [shoeIndex, colour] of shoes.entries()) for (const activity of activities) add(`person.shoes.${shoeIndex}.${activity}`, pixels => draw(pixels, tint(shoe, colour.colour), 4, 13));
-for (const [toolIndex, tool] of tools.entries()) for (const activity of activities) add(`person.tool.${toolIndex}.${activity}`, pixels => {
-  draw(pixels, tool.part, tool.x, tool.y);
-});
-for (const [hatIndex, item] of headwear.entries()) for (const activity of activities) add(`person.headwear.${hatIndex}.${activity}`, pixels => draw(pixels, item.part, item.x, item.y));
-for (const role of ['worker', 'overseer']) for (const [provider, colour] of Object.entries(providers)) for (const activity of activities) add(`person.system.${role}.${provider}.${activity}`, pixels => {
+// Legs sit beneath the torso and sleeves. Overalls carry their colour down.
+const striding = grid(`
+  .omoomo.
+  .omoomo.
+  .....oo.
+`);
+const lap = grid(`
+  ommoommo
+  .omoomo.
+  .oo..oo.
+`);
+const legPoses = { stand: legs, 'walk.0': striding, 'walk.1': mirror(striding), sit: lap };
+for (const [cloth, colour] of [['plain', 'm'], ...clothesColours.map(({ colour }, index) => [index, colour])]) for (const [pose, part] of Object.entries(legPoses)) {
+  add(`person.legs.${cloth}.${pose}`, pixels => draw(pixels, part.map(row => row.replaceAll('m', colour)), 4, cloth === 'plain' ? 13 : 12));
+}
+const lifted = grid(`
+  .uu.....
+  ouo..uu.
+  .....ouo
+`);
+for (const [shoeIndex, colour] of shoes.entries()) for (const [pose, part] of Object.entries({ stand: shoe, 'walk.0': lifted, 'walk.1': mirror(lifted) })) {
+  add(`person.shoes.${shoeIndex}.${pose}`, pixels => draw(pixels, tint(part, colour.colour), 4, 13));
+}
+for (const [hairIndex, style] of hair.entries()) for (const [colourIndex, colour] of hairColours.entries()) add(`person.hair.${hairIndex}.${colourIndex}`, pixels => draw(pixels, tint(style, colour.colour), 4, 1));
+for (const [featureIndex, feature] of faceFeatures.entries()) add(`person.face.${featureIndex}`, pixels => draw(pixels, feature.part, feature.x ?? 6, feature.y ?? 4));
+// A tool is carried in the right hand, so it rises with that arm's forward swing.
+for (const [toolIndex, tool] of tools.entries()) for (const [grip, lift] of [['low', 0], ['high', 1]]) add(`person.tool.${toolIndex}.${grip}`, pixels => draw(pixels, tool.part, tool.x, tool.y - lift));
+for (const [hatIndex, item] of headwear.entries()) add(`person.headwear.${hatIndex}`, pixels => draw(pixels, item.part, item.x, item.y));
+for (const role of ['worker', 'overseer']) for (const [provider, colour] of Object.entries(providers)) add(`person.system.${role}.${provider}`, pixels => {
   draw(pixels, [colour], 9, 8);
   if (role === 'overseer') draw(pixels, ['yy'], 7, 8);
-  if (activity === 'needs-you') draw(pixels, alert, 13, 0);
 });
-// Movement is one small overlay, not a new full appearance for every person.
-// The two steps make the local clock legible; direction markers keep the tiny
-// silhouette readable at the scene's normal three-pixel scale.
-for (const direction of ['north', 'south', 'east', 'west']) for (const step of [0, 1]) add(`person.motion.walk.${direction}.${step}`, pixels => {
-  const shift = step === 0 ? 0 : 2;
-  if (direction === 'east') draw(pixels, grid(`tt`), 12 + shift, 11);
-  if (direction === 'west') draw(pixels, grid(`tt`), 2 - shift, 11);
-  if (direction === 'north') draw(pixels, grid(`t`), 8, shift);
-  if (direction === 'south') draw(pixels, grid(`t`), 8, 15 - shift);
-});
+add('person.alert', pixels => draw(pixels, alert, 13, 0));
+// What the hands are busy with belongs to the moment, not the person.
+add('person.held.keyboard', pixels => draw(pixels, keyboard, 2, 12));
+add('person.held.cup', pixels => draw(pixels, cup, 8, 6));
+add('person.held.pencil.0', pixels => draw(pixels, grid(`..y\n.y.\no..`), 10, 9));
+// The pencil tips upright between strokes, beside the hand rather than over it.
+add('person.held.pencil.1', pixels => draw(pixels, grid(`y\ny\no`), 11, 8));
 // Compare finished portraits: transparent layer differences can disappear in composition.
-const portrait = (activity, appearance = {}) => {
+const legPose = pose => pose.startsWith('walk') ? pose : 'stand';
+// Busy hands put the tool down: a cup, a keyboard or a pencil takes its place.
+const carries = pose => pose !== 'sip' && !pose.startsWith('type');
+const portrait = (pose, appearance = {}) => {
   const v = { skin: 1, hair: 0, hair_colour: 1, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0, ...appearance };
   const pixels = blank();
-  for (const name of [`skin.${v.skin}`, `outfit.${v.outfit}.${v.clothes_colour}`, `hair.${v.hair}.${v.hair_colour}`, `face.${v.face}`, `shoes.${v.shoes}`, `tool.${v.tool}`, `headwear.${v.headwear}`, 'system.worker.codex']) {
-    draw(pixels, sprites.get(`person.${name}.${activity}`).map(row => row.join('')));
+  for (const name of [`skin.${v.skin}.${pose}`, `legs.${v.outfit === 1 ? v.clothes_colour : 'plain'}.${legPose(pose)}`, `outfit.${v.outfit}.${v.clothes_colour}.${pose}`, `hair.${v.hair}.${v.hair_colour}`, `face.${v.face}`, `shoes.${v.shoes}.${legPose(pose)}`, `headwear.${v.headwear}`, ...(carries(pose) ? [`tool.${v.tool}.${pose === 'walk.1' ? 'high' : 'low'}`] : []), 'system.worker.codex']) {
+    draw(pixels, sprites.get(`person.${name}`).map(row => row.join('')));
   }
   return pixels;
 };
-for (const activity of activities) {
+for (const pose of poses) {
   for (let colour = 0; colour < clothesColours.length; colour++) {
-    const dressed = outfits.map((_, outfit) => portrait(activity, { outfit, clothes_colour: colour }).flat());
+    const dressed = outfits.map((_, outfit) => portrait(pose, { outfit, clothes_colour: colour }).flat());
     for (let first = 0; first < dressed.length; first++) for (let second = first + 1; second < dressed.length; second++) {
       const difference = dressed[first].filter((pixel, index) => pixel !== dressed[second][index]).length;
-      assert(difference >= 8, `Clothing needs more than trim differences: ${activity}/${colour}/${first}/${second}: ${difference} pixels`);
+      assert(difference >= 8, `Clothing needs more than trim differences: ${pose}/${colour}/${first}/${second}: ${difference} pixels`);
     }
   }
   for (const [group, options] of Object.entries(optionGroups)) {
-    assert.equal(new Set(options.map((_, index) => JSON.stringify(portrait(activity, { [group]: index })))).size, options.length, `Indistinguishable ${group}: ${activity}`);
+    if (group === 'tool' && !carries(pose)) continue;
+    assert.equal(new Set(options.map((_, index) => JSON.stringify(portrait(pose, { [group]: index })))).size, options.length, `Indistinguishable ${group}: ${pose}`);
   }
   for (const [skin, tone] of skinTones.entries()) {
-    const pixels = portrait(activity, { skin });
-    if (activity === 'idle') {
-      assert.equal(portrait(activity, { skin, outfit: 2 })[10][4], tone.skin, 'Shirt must expose forearms');
+    const pixels = portrait(pose, { skin });
+    if (pose === 'idle') {
+      assert.equal(portrait(pose, { skin, outfit: 2 })[10][4], tone.skin, 'Shirt must expose forearms');
       assert.equal(pixels[10][4], clothesColours[0].colour, 'Jacket must retain long sleeves');
     }
-    arms(activity).forEach((part, index) => {
-      const [x, y] = armPosition(activity, index);
+    arms(pose).forEach((part, index) => {
+      const [x, y] = armPosition(pose, index);
       part.forEach((row, dy) => [...row].forEach((key, dx) => {
-        if (key === 'a' || key === 'b') assert.equal(pixels[y + dy][x + dx], key === 'a' ? tone.skin : tone.shadow, `Hidden hand: ${activity}/${skin}`);
+        if (key === 'a' || key === 'b') assert.equal(pixels[y + dy][x + dx], key === 'a' ? tone.skin : tone.shadow, `Hidden hand: ${pose}/${skin}`);
       }));
     });
   }
 }
+// What a person wears must never swallow what their body is doing: in every
+// pose, under every hat, face and hairstyle, and with whatever the pose holds,
+// both hands and the held thing itself stay on show.
+const heldBy = { sip: ['cup'], 'type.0': ['keyboard', 'pencil.0'], 'type.1': ['keyboard', 'pencil.1'] };
+const report = [];
+for (const pose of poses) for (const [group, options] of Object.entries(optionGroups)) for (const [option] of options.entries()) for (const held of [undefined, ...(heldBy[pose] ?? [])]) {
+  if (group === 'tool' && (held !== undefined || !carries(pose))) continue;
+  const pixels = portrait(pose, { [group]: option, ...(held === undefined ? {} : { tool: 0 }) });
+  const tone = skinTones[group === 'skin' ? option : 1];
+  const heldPixels = held === undefined ? undefined : sprites.get(`person.held.${held}`);
+  if (heldPixels) heldPixels.forEach((row, y) => row.forEach((key, x) => { if (key !== '.') pixels[y][x] = key; }));
+  // Only the badge rides above what is held: a cup passes in front of a headset's boom.
+  if (heldPixels) sprites.get('person.system.worker.codex').forEach((row, y) => row.forEach((key, x) => { if (key !== '.') pixels[y][x] = key; }));
+  arms(pose).forEach((part, index) => {
+    const [x, y] = armPosition(pose, index);
+    part.forEach((row, dy) => [...row].forEach((key, dx) => {
+      const gripped = group === 'tool' && option > 0 && index === 1;
+      if (gripped && key === 'a') {
+        const tool = sprites.get(`person.tool.${option}.${pose === 'walk.1' ? 'high' : 'low'}`);
+        const near = [-1, 0, 1].some(ny => [-1, 0, 1].some(nx => tool[y + dy + ny]?.[x + dx + nx] !== undefined && tool[y + dy + ny][x + dx + nx] !== '.'));
+        if (!near) report.push(`tool floats free of the hand: ${pose} tool=${option}`);
+      } else if ((key === 'a' || key === 'b') && pixels[y + dy][x + dx] !== (key === 'a' ? tone.skin : tone.shadow)) report.push(`hand hidden: ${pose} ${group}=${option} held=${held} at ${x + dx},${y + dy} by ${pixels[y + dy][x + dx]}`);
+    }));
+  });
+  if (heldPixels) heldPixels.forEach((row, y) => row.forEach((key, x) => { if (key !== '.' && pixels[y][x] !== key) report.push(`held hidden: ${pose} ${group}=${option} held=${held} at ${x},${y}`); }));
+}
+assert.deepEqual([...new Set(report)], [], 'A feature hides a pose');
+for (const pose of ['idle', 'wave.0', 'walk.0', 'sip']) assert.equal(portrait(pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs: ${pose}`);
+// Every pose must read as a different body, or the animation is invisible.
+assert.equal(new Set(poses.map(pose => JSON.stringify(portrait(pose)))).size, poses.length, 'Indistinguishable poses');
 function tile(name, rows) {
   const pixels = blank();
   draw(pixels, rows);
@@ -791,7 +885,7 @@ const preview = `<!doctype html>
 <label>Role <select id="role"><option value="worker">Worker</option><option value="overseer">Overseer</option></select></label>
 <label>Provider badge <select id="provider">${Object.keys(providers).map(provider => `<option>${provider}</option>`).join('')}</select></label>
 <p>Each pose: native 1×, normal display 3×, enlarged 8×, over the factory floor tile.</p>
-${hairStyles.map((style, index) => `<h2>${index} · ${style}</h2><section>${activities.map(activity => `<figure><figcaption>${activity}</figcaption><div class="scales">${[1, 3, 8].map(scale => `<div><canvas width="16" height="16" style="width:${16 * scale}px;height:${16 * scale}px" data-identity="${index}" data-activity="${activity}" role="img" aria-label="${style}, ${activity}, ${scale}×"></canvas><small>${scale}×</small></div>`).join('')}</div></figure>`).join('')}</section>`).join('')}
+${hairStyles.map((style, index) => `<h2>${index} · ${style}</h2><section>${poses.map(activity => `<figure><figcaption>${activity}</figcaption><div class="scales">${[1, 3, 8].map(scale => `<div><canvas width="16" height="16" style="width:${16 * scale}px;height:${16 * scale}px" data-identity="${index}" data-activity="${activity}" role="img" aria-label="${style}, ${activity}, ${scale}×"></canvas><small>${scale}×</small></div>`).join('')}</div></figure>`).join('')}</section>`).join('')}
 <h2>Floor / equipment bays</h2>
 <section>${[...sprites.keys()].filter(name => /^(tile|bay)\./.test(name)).map(name => `<figure><figcaption>${name}</figcaption><canvas width="16" height="16" style="width:48px;height:48px" data-tile="${name}" role="img" aria-label="${name}"></canvas></figure>`).join('')}</section>
 <p>Edit hair, outfits, identities or equipment in gen-sprites.mjs, run <code>node web/packages/ui/src/factory-scene/sprites/gen-sprites.mjs</code>, reload this page, then inspect the console fixture floor.</p>
@@ -810,13 +904,15 @@ function paint() {
     const activity = canvas.dataset.activity;
     const names = canvas.dataset.tile ? [canvas.dataset.tile] : [
       'person.skin.' + (identity < 2 ? 1 : 2) + '.' + activity,
+      'person.legs.' + (identity === 1 ? identity : 'plain') + '.' + (activity.startsWith('walk') ? activity : 'stand'),
       'person.outfit.' + identity + '.' + identity + '.' + activity,
-      'person.hair.' + identity + '.' + identity + '.' + activity,
-      'person.face.0.' + activity,
-      'person.shoes.' + identity + '.' + activity,
-      'person.tool.' + (role.value === 'overseer' ? 1 : 0) + '.' + activity,
-      'person.headwear.' + (role.value === 'overseer' ? 1 : 0) + '.' + activity,
-      'person.system.' + role.value + '.' + provider.value + '.' + activity,
+      'person.hair.' + identity + '.' + identity,
+      'person.face.0',
+      'person.shoes.' + identity + '.' + (activity.startsWith('walk') ? activity : 'stand'),
+      ...(activity === 'sip' ? ['person.held.cup'] : activity.startsWith('type') ? ['person.held.keyboard'] : ['person.tool.' + (role.value === 'overseer' ? 1 : 0) + (activity === 'walk.1' ? '.high' : '.low')]),
+      'person.headwear.' + (role.value === 'overseer' ? 1 : 0),
+      'person.system.' + role.value + '.' + provider.value,
+      ...(activity.startsWith('wave') ? ['person.alert'] : []),
     ];
     for (const name of names) { const {x,y} = atlas.frames[name]; context.drawImage(image, x, y, 16, 16, 0, 0, 16, 16); }
   }
@@ -876,7 +972,7 @@ for (const {x, y} of Object.values(savedAtlas.frames)) {
   occupied.add(`${x},${y}`);
 }
 assert.equal(Object.keys(palette).length, 16);
-for (const provider of Object.keys(providers)) assert.equal(sprites.get(`person.system.worker.${provider}.needs-you`).flat().filter(key => key === 'r').length, 3);
+assert.equal(sprites.get('person.alert').flat().filter(key => key === 'r').length, 3);
 console.log(`Verified PNG decode, 16-colour palette, exact atlas names, bounds, and sprite layers.`);
 console.log(`Sheet: ${width} × ${height} RGBA; frames: ${sprites.size}`);
 for (const name of ['gen-sprites.mjs', 'sprites.png', 'sprites.generated.ts', 'preview.html']) {
