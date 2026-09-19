@@ -633,7 +633,7 @@ export class BrowserSession {
     try { payload = encodeHumanRequestReply(id, { request_id: detail.requestId, expected_revision: detail.revision, reply }); } catch (error) { return Promise.reject(error); }
     this.#humanDetails.delete(detail);
     this.#humanCancelRuns.delete(detail.cancelRun);
-    return this.#humanRequest<HumanReplyResult>(id, { kind: "reply", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n }, payload);
+    return this.#humanRequest<HumanReplyResult>(id, { kind: "reply", requestId: detail.requestId, expectedRevision: detail.revision, expectedRunRevision: 0n, yielded: detail.terminalTarget === null }, payload);
   }
 
   cancelHumanRequest(cancelRun: HumanRequestCancelRunDescriptor): Promise<HumanCancelRunResult> {
@@ -1172,7 +1172,7 @@ export class BrowserSession {
       return;
     }
     if (frame.type === "HUMAN_REQUEST_REPLY_RESULT") {
-      if (frame.body.revision !== pending.expectedRevision + 2n) throw new ProtocolError("malformed");
+      if (frame.body.revision !== pending.expectedRevision + (pending.yielded ? 1n : 2n)) throw new ProtocolError("malformed");
       this.#humanPending.delete(frame.id);
       pending.resolve(Object.freeze({ ...frame.body }));
       return;

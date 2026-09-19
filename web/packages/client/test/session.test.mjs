@@ -818,7 +818,7 @@ test("yielded HumanRequest stays replyable without a terminal", async () => {
   pending = session.replyHumanRequest(detail, "continue");
   frame = decodeClientControl(socket.sent.at(-1));
   assert.equal(frame.type, "HUMAN_REQUEST_REPLY");
-  socket.reply(encodeHumanRequestReplyResult(frame.id, { request_id: requestId, revision: 3n, status: "resolved" }));
+  socket.reply(encodeHumanRequestReplyResult(frame.id, { request_id: requestId, revision: 2n, status: "resolved" }));
   assert.equal((await pending).status, "resolved");
 
   const cancelId = "78".repeat(16);

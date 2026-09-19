@@ -867,7 +867,7 @@ func validateHumanReplyResult(request browserprotocol.HumanRequestReply, result 
 	if result.RequestID != request.RequestID || (result.Status != "resolved" && result.Status != "delivery_unknown") {
 		return fmt.Errorf("%w: human reply identity or status", errBackendResult)
 	}
-	if uint64(request.ExpectedRevision) > browserprotocol.MaxSQLiteInteger-2 || result.Revision != request.ExpectedRevision+2 {
+	if uint64(request.ExpectedRevision) > browserprotocol.MaxSQLiteInteger-2 || result.Revision != request.ExpectedRevision+1 && result.Revision != request.ExpectedRevision+2 {
 		return fmt.Errorf("%w: human reply revision", errBackendResult)
 	}
 	return nil

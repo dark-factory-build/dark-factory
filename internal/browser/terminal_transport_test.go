@@ -999,7 +999,7 @@ func TestTerminalTransportClosesInvalidBackendAttachment(t *testing.T) {
 func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	backend := newTerminalTestBackend()
 	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions
-	backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 3, Status: "resolved"}
+	backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 2, Status: "resolved"}
 	backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2}
 	server := startTerminalServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)

@@ -502,7 +502,7 @@ func TestBrowserAdapterHumanRequestDetailAndResolvedRequestLeavesTheSnapshot(t *
 
 func TestBrowserAdapterEncodesYieldedHumanRequestWithoutTerminal(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail|kernel.BrowserCapabilityHumanActions)
-	fixture.pair(t)
+	connection := fixture.pair(t)
 	run := adapterRunningRun(t, fixture.store, 52)
 	var key [kernel.IDBytes]byte
 	copy(key[:], adapterID(t, 53))
@@ -517,6 +517,16 @@ func TestBrowserAdapterEncodesYieldedHumanRequestWithoutTerminal(t *testing.T) {
 	}
 	if _, err := browserprotocol.EncodeHumanRequestDetail("yielded", detail); err != nil {
 		t.Fatalf("encode yielded detail: %v", err)
+	}
+	reply, err := browserprotocol.EncodeHumanRequestReply("yielded-reply", browserprotocol.HumanRequestReply{RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision), Reply: "continue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterWrite(t, connection, reply)
+	frame := adapterRead(t, connection)
+	result, ok := frame.Body.(browserprotocol.HumanRequestReplyResult)
+	if frame.Type != browserprotocol.TypeHumanRequestReplyResult || !ok || result.Revision != decimalRevision(request.Revision)+1 || result.Status != "resolved" {
+		t.Fatalf("yielded reply = %+v", frame)
 	}
 }
 
