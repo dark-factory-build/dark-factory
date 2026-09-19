@@ -104,9 +104,11 @@ history. Add to queue can hold later work while an agent is busy.
 
 Assign work to a named worker or Any eligible worker in the project. Named
 work is taken first; the next free eligible worker then claims shared work.
-Recent Work loads completed and blocked results on demand. Pause prevents
-future admissions, and Show archived lets you inspect or restore a drained
-worker without erasing its history.
+Raise or lower numeric priority explicitly when ordering either queue. Recent
+Work loads authorized completed and blocked details on demand; private
+instructions and results never enter public snapshots. Pause prevents future
+admissions, and Show archived lets you inspect or restore a drained worker
+without erasing its history.
 
 ## Feedback and public backlog
 
@@ -238,7 +240,10 @@ HEAD, branches without an upstream, and explicit local refs or commit IDs stay
 local. A configured fetch failure stops source preparation rather than using
 a stale tracking ref. Fetching does not move the registered checkout or update
 tracking refs or `FETCH_HEAD`. Retained Changes keep their original source and
-edits; use the repository `base` setting for future work in that binding.
+edits; use the repository `base` setting for future work in that binding. Git
+runs noninteractively with a private home and global/system configuration
+disabled. Private remotes use repository-local authentication; missing
+credentials fail preparation rather than borrowing a worker account.
 
 ## Reviewed issue intake (v0.4.0+)
 
