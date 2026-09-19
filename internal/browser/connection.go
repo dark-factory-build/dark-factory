@@ -877,7 +877,11 @@ func validateHumanCancelRunResult(request browserprotocol.HumanRequestCancelRun,
 	if result.RequestID != request.RequestID {
 		return fmt.Errorf("%w: human cancellation identity", errBackendResult)
 	}
-	if uint64(request.ExpectedRunRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RunRevision != request.ExpectedRunRevision+1 {
+	wantRunRevision := request.ExpectedRunRevision
+	if result.RunRevisionChanged {
+		wantRunRevision++
+	}
+	if uint64(request.ExpectedRunRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RunRevision != wantRunRevision {
 		return fmt.Errorf("%w: human cancellation run revision", errBackendResult)
 	}
 	if uint64(request.ExpectedRequestRevision) > browserprotocol.MaxSQLiteInteger-1 || result.RequestRevision != request.ExpectedRequestRevision+1 {

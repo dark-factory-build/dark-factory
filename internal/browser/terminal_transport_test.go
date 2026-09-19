@@ -290,7 +290,7 @@ func TestTerminalTransportKeepsTinyOutputFlowingDuringSlowControl(t *testing.T) 
 		{
 			name: "human cancellation",
 			request: func(backend *terminalTestBackend) ([]byte, error) {
-				backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 2}
+				backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 2, RequestID: requestID, RequestRevision: 2, RunRevisionChanged: true}
 				return browserprotocol.EncodeHumanRequestCancelRun("cancel", browserprotocol.HumanRequestCancelRun{RequestID: requestID, ExpectedRequestRevision: 1, ExpectedRunRevision: 1})
 			},
 			result: browserprotocol.TypeHumanRequestCancelRunResult,
@@ -1000,7 +1000,7 @@ func TestTerminalTransportHumanRequestEffectDispatch(t *testing.T) {
 	backend := newTerminalTestBackend()
 	backend.authentication.Capabilities = browserprotocol.CapabilityObserve | browserprotocol.CapabilityHumanActions
 	backend.replyResult = browserprotocol.HumanRequestReplyResult{RequestID: requestID, Revision: 2, Status: "resolved"}
-	backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2}
+	backend.cancelResult = browserprotocol.HumanRequestCancelRunResult{RunID: testID, RunRevision: 3, RequestID: requestID, RequestRevision: 2, RunRevisionChanged: true}
 	server := startTerminalServer(t, backend)
 	connection, _ := dialServer(t, server, testOrigin)
 	authenticateTerminalTest(t, connection)

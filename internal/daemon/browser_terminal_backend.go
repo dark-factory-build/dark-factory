@@ -179,7 +179,7 @@ func (backend *browserBackend) CancelHumanRequestRun(ctx context.Context, princi
 	if err != nil {
 		return browserprotocol.HumanRequestCancelRunResult{}, mapBrowserError(err)
 	}
-	return browserprotocol.HumanRequestCancelRunResult{RunID: run.ID.String(), RunRevision: decimalRevision(run.Revision), RequestID: requestRow.ID.String(), RequestRevision: decimalRevision(requestRow.Revision)}, nil
+	return browserprotocol.HumanRequestCancelRunResult{RunID: run.ID.String(), RunRevision: decimalRevision(run.Revision), RequestID: requestRow.ID.String(), RequestRevision: decimalRevision(requestRow.Revision), RunRevisionChanged: run.Revision != expectedRun}, nil
 }
 
 func (daemon *Daemon) cancelHumanRequestRun(ctx context.Context, clientID kernel.BrowserClientID, requestID kernel.HumanRequestID, expectedRequest, expectedRun kernel.Revision, at kernel.UnixMillis) (kernel.Run, kernel.HumanRequest, error) {

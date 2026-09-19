@@ -89,10 +89,11 @@ type HumanRequestCancelRun struct {
 	ExpectedRunRevision     Decimal `json:"expected_run_revision"`
 }
 type HumanRequestCancelRunResult struct {
-	RunID           string  `json:"run_id"`
-	RunRevision     Decimal `json:"run_revision"`
-	RequestID       string  `json:"request_id"`
-	RequestRevision Decimal `json:"request_revision"`
+	RunID              string  `json:"run_id"`
+	RunRevision        Decimal `json:"run_revision"`
+	RequestID          string  `json:"request_id"`
+	RequestRevision    Decimal `json:"request_revision"`
+	RunRevisionChanged bool    `json:"-"`
 }
 type TerminalAttach struct {
 	RunID                   string  `json:"run_id"`
