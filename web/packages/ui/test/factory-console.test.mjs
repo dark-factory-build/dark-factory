@@ -108,11 +108,12 @@ test("repository roots stay inside private settings", () => {
   assert.match(settings, /Repositories/);
   assert.match(settings, new RegExp(root));
   assert.match(settings, /FETCH: SETUP_REQUIRED/);
-  assert.match(settings, /GITHUB BINDING: VERIFIED · ID 123456/);
+  assert.match(settings, /PUBLICATION: IDENTITY VERIFIED/);
+  assert.match(settings, /base branch and repository-local Git authentication/);
   assert.match(settings, /CHECK FETCH READINESS/);
   assert.match(settings, /REFRESH GITHUB BINDING/);
   assert.match(settings, /Git checkout needs operator setup\./);
-  assert.match(settings, /ADD CHECKOUT/);
+  assert.match(settings, /ADD REPOSITORY/);
 });
 
 test("floor appearance waits for storage, changes while disconnected, and resets only itself", () => {
@@ -2293,44 +2294,37 @@ test("same-path wrappers retain navigation without overlapping displayed physica
   assert.equal(prepared.roomByID.get(id(root)).inventoryScope, "subtree", "selection does not mutate prepared source facts");
 });
 
- test("repository response renders do not reload private settings", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const props = () => ({ status: "ready", state: baseState(), settingsOpen: true,
-    onToggleSettings: () => {}, onLoadRepositories: (id) => calls.push(id) });
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
-    const initial = [...calls];
-    assert.equal(initial.length, fixtureState.projects.size);
-    await act(async () => { renderer.update(createElement(FactoryConsole, props())); });
-    assert.deepEqual(calls, initial);
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
-
-test("private issue review loads every project once across settings renders", async () => {
-  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let renderer;
-  const calls = [];
-  const props = () => ({ status: "ready", state: baseState(), settingsOpen: true,
-    onToggleSettings: () => {}, onLoadIntake: (id) => calls.push(id) });
-  try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
-    const initial = [...calls];
-    assert.deepEqual(new Set(initial), new Set(fixtureState.projects.keys()));
-    assert.equal(initial.length, fixtureState.projects.size);
-    await act(async () => { renderer.update(createElement(FactoryConsole, props())); });
-    assert.deepEqual(calls, initial);
-  } finally {
-    if (renderer) await act(async () => renderer.unmount());
-    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
-  }
-});
+for (const [label, loader] of [["Repositories", "onLoadRepositories"], ["Issue intake", "onLoadIntake"]]) {
+  test(`${label} reads only the selected project when opened`, async () => {
+    const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    let renderer;
+    const calls = [];
+    const props = () => ({ status: "ready", state: baseState(), settingsOpen: true,
+      onToggleSettings: () => {}, [loader]: (id) => calls.push(id) });
+    try {
+      await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
+      assert.deepEqual(calls, [], "collapsed settings must not read private project data");
+      const section = renderer.root.findByProps({ "aria-label": label });
+      const element = { open: true };
+      await act(async () => section.props.onToggle({ target: element, currentTarget: element }));
+      assert.deepEqual(calls, [ids.project]);
+      await act(async () => renderer.update(createElement(FactoryConsole, props())));
+      assert.deepEqual(calls, [ids.project], "response renders must not trigger another read");
+      const select = section.findAllByType("select")[0];
+      const secondProject = [...fixtureState.projects.keys()].find((id) => id !== ids.project);
+      await act(async () => select.props.onChange({ currentTarget: { value: secondProject } }));
+      assert.deepEqual(calls, [ids.project, secondProject]);
+      element.open = false;
+      await act(async () => section.props.onToggle({ target: element, currentTarget: element }));
+      await act(async () => select.props.onChange({ currentTarget: { value: ids.project } }));
+      assert.deepEqual(calls, [ids.project, secondProject], "a closed section must not load");
+    } finally {
+      if (renderer) await act(async () => renderer.unmount());
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+    }
+  });
+}
 
 test("issue review refuses a stale preview before acceptance", async () => {
   const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
@@ -2360,13 +2354,16 @@ test("private issue review shows sync guidance and immutable linked work", () =>
   const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
   const review = { state: "withdrawal_pending", task_id: ids.task, imported_tasks: ["87".repeat(16)], sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "withdrawal_pending", acceptance_id: "86".repeat(16), task_id: ids.task }] };
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]) });
-  assert.match(markup, /NOT YET SYNCHRONIZED/);
+  assert.match(markup, /Waiting for the first check/);
   assert.match(markup, /factoryctl intake service install/);
   assert.match(markup, /WITHDRAWAL PENDING/);
-  assert.match(markup, /IMPORTED TASKS/);
-  assert.match(markup, /REVIEWED ISSUE CONTENT/);
-  assert.match(markup, /NEW ISSUE SOURCE/);
-  assert.match(markup, /EDIT ISSUE SOURCE/);
+  assert.match(markup, /IMPORTED TASKS · 1/);
+  assert.match(markup, /title="Task [a-f0-9]{32}"/);
+  assert.match(markup, /Review the state projection/);
+  assert.doesNotMatch(markup, /87878787878787878787878787878787/);
+  assert.match(markup, /Review issue content/);
+  assert.match(markup, /Add issue source/);
+  assert.match(markup, /Source settings/);
   assert.doesNotMatch(markup, />WITHDRAW</);
   assert.doesNotMatch(markup, /private\/tmp|\/Users\//);
 });
@@ -2377,7 +2374,7 @@ test("issue source configuration uses private checkout and overseer names", () =
   assert.match(markup, /Destination repository/);
   assert.match(markup, /Primary checkout \(default\)/);
   assert.match(markup, /Choose an overseer/);
-  assert.match(markup, /Trusted authors or explicit acceptance/);
+  assert.match(markup, /Allow trusted authors/);
   assert.doesNotMatch(markup, /Destination repository ID/);
 });
 
@@ -2415,7 +2412,10 @@ test("revised issue content can be accepted without discarding the prior receipt
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
     await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "PREVIEW")[0].props.onClick());
-    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "ACCEPT REVIEWED CONTENT")[0].props.onClick());
+    const content = renderer.root.findAllByType("details").find((node) => node.findAllByType("summary").some((summary) => summary.props.children === "Review issue content") && node.findAllByType("details").length === 1);
+    assert.equal(content.props.open, undefined, "issue bodies are collapsed until selected");
+    assert.equal(content.findAll((node) => node.type === "button" && node.props.children === "ACCEPT REVIEWED CONTENT").length, 1, "acceptance stays inside content review");
+    await act(async () => content.findAll((node) => node.type === "button" && node.props.children === "ACCEPT REVIEWED CONTENT")[0].props.onClick());
     assert.deepEqual(calls.at(-1), { action: "accept", source_id: source.id, expected_revision: 3n, issue_number: 17n, content_hash: candidate.content_hash });
     await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "WITHDRAW")[0].props.onClick());
     assert.deepEqual(calls.at(-1), { action: "withdraw", acceptance_id: candidate.acceptance_id });
@@ -2445,6 +2445,54 @@ test("refreshing a changed source replaces stale configuration drafts", async ()
     assert.equal(calls[0].configuration.label, "enhancement");
     assert.equal(calls[0].configuration.policy, "trusted_authors");
     assert.deepEqual(calls[0].configuration.trusted_authors, ["reviewer"]);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+
+test("new issue sources select the sole overseer and default checkout without operator IDs", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Widgets", root: "/private/source", base_ref: "release", enabled: true, default: true, revision: 1n };
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState({ agents: new Map([[ids.orchestrator, { ...fixtureState.agents.get(ids.orchestrator), project_id: ids.project }]]) }), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "CREATE PAUSED SOURCE"));
+    await act(async () => form.findAllByType("input").find((input) => input.props.placeholder === "owner/repository").props.onChange({ currentTarget: { value: "example/issues" } }));
+    const policy = form.findAllByType("select").find((select) => select.props.value === "manual");
+    await act(async () => policy.props.onChange({ currentTarget: { value: "trusted_authors" } }));
+    await act(async () => form.props.onSubmit({ preventDefault() {} }));
+    assert.equal(calls[0].configuration.overseer_agent_id, ids.orchestrator);
+    assert.equal(calls[0].configuration.target_repository_id, checkout.id);
+    assert.deepEqual(calls[0].configuration.trusted_authors, ["@me"]);
+    assert.equal(calls[0].configuration.poll_seconds, 60);
+    assert.equal(calls[0].configuration.admission_limit, 25);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+test("an open issue inbox reloads destinations as well as sources after reconnect", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const sources = [], repositories = [];
+  const props = (ready) => ({ status: ready ? "ready" : "disconnected", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map(), intake: new Map(), onLoadIntake: ready ? (id) => sources.push(id) : undefined, onLoadRepositories: ready ? (id) => repositories.push(id) : undefined });
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, props(true))); });
+    const section = renderer.root.findByProps({ "aria-label": "Issue intake" });
+    const currentTarget = { open: true };
+    await act(async () => section.props.onToggle({ target: currentTarget, currentTarget }));
+    assert.equal(sources.length, 1);
+    assert.equal(repositories.length, 1);
+    await act(async () => renderer.update(createElement(FactoryConsole, props(false))));
+    await act(async () => renderer.update(createElement(FactoryConsole, props(true))));
+    assert.deepEqual(sources, [ids.project, ids.project]);
+    assert.deepEqual(repositories, [ids.project, ids.project]);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     globalThis.IS_REACT_ACT_ENVIRONMENT = previous;

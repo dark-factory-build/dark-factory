@@ -611,7 +611,7 @@ export function SettingsDialog({
         />
         <GitHubSection github={github} onGitHub={onGitHub} />
         <RepositoriesSection state={state} repositories={repositories} pending={repositoryPending} errors={repositoryErrors} onLoad={onLoadRepositories} onMutate={onMutateRepository} onCreateProject={onCreateProject} />
-        <IntakeSection state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onAction={onIntakeAction} />
+        <IntakeSection state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
         <details className="dfConsoleSidebar__section" aria-label="Run limits">
           <summary>Run limits</summary>
           <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
@@ -641,13 +641,16 @@ function RepositoriesSection({ state, repositories, pending, errors, onLoad, onM
   const projects = state === undefined ? [] : [...state.projects.values()];
   const load = useRef(onLoad);
   load.current = onLoad;
-  const projectIds = projects.map((project) => project.id).join(" ");
+  const [open, setOpen] = useState(false);
+  const [selection, setSelection] = useState("");
+  const projectId = projects.find((project) => project.id === selection)?.id ?? projects[0]?.id;
   const canLoad = onLoad !== undefined;
-  useEffect(() => { if (canLoad && projectIds) projectIds.split(" ").forEach((id) => load.current?.(id)); }, [projectIds, canLoad]);
-  return <details className="dfConsoleSidebar__section" aria-label="Repositories">
+  useEffect(() => { if (open && canLoad && projectId) load.current?.(projectId); }, [open, projectId, canLoad]);
+  return <details className="dfConsoleSidebar__section" aria-label="Repositories" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open); }}>
     <summary>Repositories</summary>
-    <p className="dfConsoleSidebar__inherit">Private checkout routing. It is never shown on the factory floor.</p>
-    {projects.map((project) => <RepositoryProject key={project.id} project={project} items={repositories?.get(project.id)} pending={pending?.has(project.id) === true} error={errors?.get(project.id)} onMutate={onMutate} />)}
+    <p className="dfConsoleSidebar__inherit">Register an existing checkout on the factory host. Each task keeps its chosen repository.</p>
+    {projects.length > 1 ? <label>Project<select value={projectId} onChange={(event) => setSelection(event.currentTarget.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}
+    {projects.filter((project) => project.id === projectId).map((project) => <RepositoryProject key={project.id} project={project} items={repositories?.get(project.id)} pending={pending?.has(project.id) === true} error={errors?.get(project.id)} onMutate={onMutate} />)}
     <ProjectCreateForm onCreate={onCreateProject} error={errors?.get("create")} />
   </details>;
 }
@@ -664,38 +667,39 @@ function ProjectCreateForm({ onCreate, error }: { onCreate?: (request: { name: s
 }
 
 function RepositoryProject({ project, items, pending, error, onMutate }: { project: ProjectItem; items?: readonly RepositoryView[]; pending: boolean; error?: string; onMutate?: (request: RepositoryMutation) => void }) {
-  const [name, setName] = useState(""); const [root, setRoot] = useState(""); const [baseRef, setBaseRef] = useState("HEAD");
+  const [name, setName] = useState(""); const [root, setRoot] = useState(""); const [baseRef, setBaseRef] = useState("");
   return <section className="dfConsoleSidebar__section" aria-label={`Repositories for ${project.name}`}>
     <h3>{project.name}</h3>{error === undefined ? null : <p role="alert">{error}</p>}
     {items === undefined ? <p className="dfFactoryConsole__empty">{pending ? "LOADING REPOSITORIES" : "REPOSITORIES UNAVAILABLE"}</p> : <ul className="dfFactoryConsole__list">{items.map((item) => <RepositoryRow key={`${item.id}:${item.revision}`} project={project} item={item} pending={pending} onMutate={onMutate} />)}</ul>}
-    <form onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/") && baseRef.trim()) onMutate?.({ projectId: project.id, action: "add", name: name.trim(), root, baseRef: baseRef.trim() }); }}>
+    <details><summary>Add repository</summary><p>Connect GitHub above to publish reviewed work. Enter the local checkout and its intended base branch.</p><form onSubmit={(event) => { event.preventDefault(); if (name.trim() && root.startsWith("/") && baseRef.trim()) onMutate?.({ projectId: project.id, action: "add", name: name.trim(), root, baseRef: baseRef.trim() }); }}>
       <label>Name<input value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
       <label>Existing checkout<input value={root} placeholder="/absolute/path" onChange={(event) => setRoot(event.currentTarget.value)} /></label>
-      <label>Base<input value={baseRef} onChange={(event) => setBaseRef(event.currentTarget.value)} /></label>
-      <button type="submit" disabled={pending || onMutate === undefined || !name.trim() || !root.startsWith("/") || !baseRef.trim()}>ADD CHECKOUT</button>
-    </form>
+      <label>Base branch<input value={baseRef} placeholder="Repository’s base branch" onChange={(event) => setBaseRef(event.currentTarget.value)} /></label>
+      <button type="submit" disabled={pending || onMutate === undefined || !name.trim() || !root.startsWith("/") || !baseRef.trim()}>ADD REPOSITORY</button>
+    </form></details>
   </section>;
 }
 
 function RepositoryRow({ project, item, pending, onMutate }: { project: ProjectItem; item: RepositoryView; pending: boolean; onMutate?: (request: RepositoryMutation) => void }) {
   const [name, setName] = useState(item.name); const [baseRef, setBaseRef] = useState(item.base_ref);
-  const request = (action: RepositoryMutation["action"], values: Partial<{ name: string; baseRef: string; enabled: boolean }> = {}) => {
+  const request = (action: RepositoryMutation["action"]) => {
     if (action === "github" || action === "fetch") onMutate?.({ projectId: project.id, repositoryId: item.id, action });
-    else if (action === "name") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, name: values.name ?? name });
-    else if (action === "base") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, baseRef: values.baseRef ?? baseRef });
-    else if (action === "enabled") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, enabled: values.enabled ?? !item.enabled });
+    else if (action === "name") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, name });
+    else if (action === "base") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, baseRef });
+    else if (action === "enabled") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action, enabled: !item.enabled });
     else if (action === "default" || action === "remove") onMutate?.({ projectId: project.id, repositoryId: item.id, expectedRevision: item.revision, action });
   };
   const fetchState = item.fetch_state ?? "unchecked";
   const publicationState = item.publication_state ?? "unchecked";
   const githubID = item.github_repository_id === undefined ? undefined : item.github_repository_id.toString();
-  return <li className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.name}{item.default ? " · DEFAULT" : ""}</p><p className="dfFactoryConsole__eyebrow">{item.root}</p>
-    <div aria-label="Repository readiness"><p className="dfFactoryConsole__eyebrow">FETCH: {fetchState.toUpperCase()}</p><p className="dfFactoryConsole__eyebrow">GITHUB BINDING: {publicationState === "ready" ? "VERIFIED" : publicationState.toUpperCase()}{githubID === undefined ? "" : ` · ID ${githubID}`}</p>{item.readiness_message === undefined ? null : <p role="status">{item.readiness_message}</p>}
-      <button type="button" disabled={pending} onClick={() => request("fetch")}>{fetchState === "ready" ? "REFRESH FETCH READINESS" : "CHECK FETCH READINESS"}</button><button type="button" disabled={pending} onClick={() => request("github")}>{publicationState === "ready" ? "REFRESH GITHUB BINDING" : "VERIFY GITHUB BINDING"}</button>
+  return <li className="dfConsoleSidebar__account"><p className="dfConsoleRow__title">{item.name}{item.default ? " · DEFAULT" : ""}</p><p>{item.base_ref}{item.enabled ? "" : " · Disabled"}</p>
+    <div aria-label="Repository readiness"><p className="dfFactoryConsole__eyebrow">FETCH: {fetchState.toUpperCase()}</p><p className="dfFactoryConsole__eyebrow">PUBLICATION: {publicationState === "ready" ? "IDENTITY VERIFIED" : publicationState.toUpperCase()}</p>{fetchState === "setup_required" ? <p role="status">Check this checkout’s base branch and repository-local Git authentication on the host, then open Edit to retry the fetch check.</p> : null}{item.readiness_message === undefined ? null : <p role="status">{item.readiness_message}</p>}
     </div>
+    <details><summary>Edit</summary><p>{item.root}{githubID === undefined ? "" : ` · GitHub ID ${githubID}`}</p>
+      <button type="button" disabled={pending} onClick={() => request("fetch")}>{fetchState === "ready" ? "REFRESH FETCH READINESS" : "CHECK FETCH READINESS"}</button><button type="button" disabled={pending} onClick={() => request("github")}>{publicationState === "ready" ? "REFRESH GITHUB BINDING" : "VERIFY GITHUB BINDING"}</button>
     <label>Name<input value={name} disabled={pending} onChange={(event) => setName(event.currentTarget.value)} /></label><button type="button" disabled={pending || !name.trim() || name === item.name} onClick={() => request("name")}>SAVE NAME</button>
     <label>Base<input value={baseRef} disabled={pending} onChange={(event) => setBaseRef(event.currentTarget.value)} /></label><button type="button" disabled={pending || !baseRef.trim() || baseRef === item.base_ref} onClick={() => request("base")}>SAVE BASE</button>
-    <button type="button" disabled={pending || item.default} onClick={() => request("default")}>MAKE DEFAULT</button><button type="button" disabled={pending || item.default} onClick={() => request("enabled", { enabled: !item.enabled })}>{item.enabled ? "DISABLE" : "ENABLE"}</button><button type="button" disabled={pending || item.default} onClick={() => request("remove")}>REMOVE</button>
+    <button type="button" disabled={pending || item.default} onClick={() => request("default")}>MAKE DEFAULT</button><button type="button" disabled={pending || item.default} onClick={() => request("enabled")}>{item.enabled ? "DISABLE" : "ENABLE"}</button><button type="button" disabled={pending || item.default} onClick={() => request("remove")}>REMOVE</button></details>
   </li>;
 }
 
@@ -976,15 +980,22 @@ export function HumanRequestPanel({
   );
 }
 
-function IntakeSection({ state, repositories, intake, pending, errors, onLoad, onAction }: { state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoad?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void }) {
+function IntakeSection({ state, repositories, intake, pending, errors, onLoad, onLoadRepositories, onAction }: { state: StateView | undefined; repositories?: ReadonlyMap<string, readonly RepositoryView[]>; intake?: ReadonlyMap<string, IntakeView>; pending?: ReadonlySet<string>; errors?: ReadonlyMap<string, string>; onLoad?: (projectId: string) => void; onLoadRepositories?: (projectId: string) => void; onAction?: (projectId: string, request: IntakeBody) => void }) {
   const projects = state === undefined ? [] : [...state.projects.values()];
+  const linkedTask = (id: string) => <span title={`Task ${id}`}>{state?.tasks.get(id)?.title ?? `Task ${id.slice(0, 8)}`}</span>;
   const [candidateSources, setCandidateSources] = useState<Record<string, string>>({});
   const load = useRef(onLoad);
   load.current = onLoad;
-  const projectIds = projects.map((project) => project.id).join(" ");
+  const [open, setOpen] = useState(false);
+  const [selection, setSelection] = useState("");
+  const projectId = projects.find((project) => project.id === selection)?.id ?? projects[0]?.id;
   const canLoad = onLoad !== undefined;
-  useEffect(() => { if (canLoad && projectIds) projectIds.split(" ").forEach((id) => load.current?.(id)); }, [projectIds, canLoad]);
-  return <details className="dfConsoleSidebar__section" aria-label="Issue intake"><summary>Issue intake</summary><p className="dfConsoleSidebar__inherit">Private issue review. Refresh only previews current GitHub content; it does not import work.</p>{projects.map((project) => {
+  useEffect(() => { if (open && canLoad && projectId) load.current?.(projectId); }, [open, projectId, canLoad]);
+  const loadRepositories = useRef(onLoadRepositories);
+  loadRepositories.current = onLoadRepositories;
+  const canLoadRepositories = onLoadRepositories !== undefined;
+  useEffect(() => { if (open && canLoadRepositories && projectId) loadRepositories.current?.(projectId); }, [open, projectId, canLoadRepositories]);
+  return <details className="dfConsoleSidebar__section" aria-label="Issue intake" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open); }}><summary>Issue inbox</summary><p className="dfConsoleSidebar__inherit">Review issues before they become work. Preview reads GitHub without starting an agent.</p>{projects.length > 1 ? <label>Project<select value={projectId} onChange={(event) => setSelection(event.currentTarget.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}{projects.filter((project) => project.id === projectId).map((project) => {
     const result = intake?.get(project.id);
     const sources = result?.sources ?? [];
     const candidateSource = sources.find((source) => source.id === candidateSources[project.id]);
@@ -993,37 +1004,35 @@ function IntakeSection({ state, repositories, intake, pending, errors, onLoad, o
       {errors?.get(project.id) === undefined ? null : <p role="alert">{errors.get(project.id)}</p>}
       <button type="button" disabled={busy} onClick={() => onLoad?.(project.id)}>REFRESH SOURCES</button>
       {result === undefined ? <p>{busy ? "LOADING PRIVATE SOURCES…" : "PRIVATE SOURCES UNAVAILABLE"}</p> : sources.length === 0 ? <p>NO ISSUE SOURCES</p> : null}
-      {result?.state === "withdrawal_pending" ? <p role="status">WITHDRAWAL PENDING · linked task {result.task_id ?? "unknown"}</p> : result !== undefined && result.state !== "ok" ? <p role="status">{result.state.replaceAll("_", " ").toUpperCase()}{result.task_id === undefined ? "" : ` · linked task ${result.task_id}`}</p> : null}
-      {result?.imported_tasks === undefined || result.imported_tasks.length === 0 ? null : <p role="status">IMPORTED TASKS · {result.imported_tasks.join(", ")}</p>}
+      {result?.state === "withdrawal_pending" ? <p role="status">WITHDRAWAL PENDING{result.task_id === undefined ? "" : <> · {linkedTask(result.task_id)}</>}</p> : result !== undefined && result.state !== "ok" ? <p role="status">{result.state.replaceAll("_", " ").toUpperCase()}{result.task_id === undefined ? "" : <> · {linkedTask(result.task_id)}</>}</p> : null}
+      {result?.imported_tasks === undefined || result.imported_tasks.length === 0 ? null : <p role="status">IMPORTED TASKS · {result.imported_tasks.length}</p>}
       <IntakeForm project={project} state={state} repositories={repositories?.get(project.id)} onAction={onAction}/>
       {sources.map((source) => {
         const reviewed = candidateSources[project.id] === source.id ? result?.reviewed_revision : undefined;
         const canEnable = reviewed === source.revision;
-        return <div key={source.id}><p>{source.repository} · {source.enabled ? "ENABLED" : "PAUSED"}</p>
-          {source.sync === undefined ? <p role="status">NOT YET SYNCHRONIZED · install the controller with <code>factoryctl intake service install</code>.</p> : <p role="status">LAST SUCCESS · {source.sync.last_success_at === 0n ? "none yet" : new Date(Number(source.sync.last_success_at) * 1000).toLocaleString()} · {source.sync.imported_tasks} IMPORTED · {source.sync.state.toUpperCase()}</p>}
-          {source.sync?.error === "" || source.sync?.error === undefined ? null : <p role="alert">SYNC ERROR · {source.sync.error} · CHECK <code>factoryctl intake service status</code>.</p>}
+        return <div key={source.id}><p>{source.repository} · {source.enabled ? "ENABLED" : "PAUSED"}</p><p>Work goes to {repositories?.get(project.id)?.find((item) => item.id === source.target_repository_id)?.name ?? "the configured repository"}.</p>
+          {source.sync === undefined ? <p role="status">Waiting for the first check. If intake is not installed, run <code>factoryctl intake service install --home /path/to/factory-home</code> on the host.</p> : <p role="status">LAST SUCCESS · {source.sync.last_success_at === 0n ? "none yet" : new Date(Number(source.sync.last_success_at) * 1000).toLocaleString()} · {source.sync.imported_tasks} IMPORTED · {source.sync.state.toUpperCase()}</p>}
+          {source.sync?.error === "" || source.sync?.error === undefined ? null : <p role="alert">SYNC ERROR · {source.sync.error} · CHECK <code>factoryctl intake service status --home /path/to/factory-home</code> ON THE HOST.</p>}
           {source.enabled ? <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "pause", source_id: source.id, expected_revision: source.revision })}>PAUSE</button> : <button type="button" disabled={busy || !canEnable} onClick={() => onAction?.(project.id, { action: "enable", source_id: source.id, expected_revision: source.revision, reviewed_revision: reviewed! })}>ENABLE AFTER PREVIEW</button>}
-          {!source.enabled && !canEnable ? <p>PREVIEW THIS SOURCE BEFORE ENABLING.</p> : null}
+          {!source.enabled && !canEnable ? <p>Preview this source before enabling. Pausing stops new imports; existing work continues.</p> : null}
           <button type="button" disabled={busy} onClick={() => { setCandidateSources((current) => ({ ...current, [project.id]: source.id })); onAction?.(project.id, { action: "preview", source_id: source.id, page: 1 }); }}>PREVIEW</button>
           <IntakeForm key={`${source.id}:${source.revision}`} project={project} state={state} repositories={repositories?.get(project.id)} source={source} onAction={onAction}/>
         </div>;
       })}
       {candidateSource === undefined || result?.next_page === undefined ? null : <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "preview", source_id: candidateSource.id, page: result.next_page! })}>NEXT ISSUE PAGE</button>}
-      {result?.candidates?.map((candidate) => <article key={`${candidate.number}:${candidate.content_hash}`}><p><a href={candidate.url} target="_blank" rel="noreferrer">{candidate.title}</a> · {candidate.reason.replaceAll("_", " ")}{candidate.task_id === undefined ? "" : ` · linked task ${candidate.task_id}`}</p><details open><summary>REVIEWED ISSUE CONTENT</summary><p>{candidate.body}</p></details>{candidate.truncated ? <p>CONTENT TOO LARGE TO ACCEPT</p> : candidate.acceptance_id !== undefined && candidate.reason !== "content_changed" ? null : candidateSource === undefined ? <p>PREVIEW A SOURCE BEFORE ACCEPTING.</p> : result?.reviewed_revision !== candidateSource.revision ? <p>PREVIEW THIS SOURCE AGAIN BEFORE ACCEPTING.</p> : <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "accept", source_id: candidateSource.id, expected_revision: candidateSource.revision, issue_number: candidate.number, content_hash: candidate.content_hash })}>ACCEPT REVIEWED CONTENT</button>}{candidate.acceptance_id === undefined || candidate.reason === "withdrawn" || candidate.reason === "withdrawal_pending" ? null : <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "withdraw", acceptance_id: candidate.acceptance_id })}>WITHDRAW</button>}</article>)}
+      {result?.candidates?.map((candidate) => <article key={`${candidate.number}:${candidate.content_hash}`}><p><a href={candidate.url} target="_blank" rel="noreferrer">{candidate.title}</a> · {candidate.reason.replaceAll("_", " ")}{candidate.task_id === undefined ? "" : <> · {linkedTask(candidate.task_id)}</>}</p><details><summary>Review issue content</summary><p style={{ whiteSpace: "pre-wrap" }}>{candidate.body}</p><p>Accepting uses this exact title and body. Later edits need your approval again.</p>{candidate.truncated ? <p>CONTENT TOO LARGE TO ACCEPT</p> : candidate.acceptance_id !== undefined && candidate.reason !== "content_changed" ? null : candidateSource === undefined ? <p>PREVIEW A SOURCE BEFORE ACCEPTING.</p> : result?.reviewed_revision !== candidateSource.revision ? <p>PREVIEW THIS SOURCE AGAIN BEFORE ACCEPTING.</p> : <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "accept", source_id: candidateSource.id, expected_revision: candidateSource.revision, issue_number: candidate.number, content_hash: candidate.content_hash })}>ACCEPT REVIEWED CONTENT</button>}{candidate.acceptance_id === undefined || candidate.reason === "withdrawn" || candidate.reason === "withdrawal_pending" ? null : <button type="button" disabled={busy} onClick={() => onAction?.(project.id, { action: "withdraw", acceptance_id: candidate.acceptance_id })}>WITHDRAW</button>}</details></article>)}
     </section>;
   })}</details>;
-}
-
-function newIntakeSourceID(): string {
-  const bytes = new Uint8Array(16); crypto.getRandomValues(bytes); return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function IntakeForm({ project, state, repositories, source, onAction }: { project: ProjectItem; state: StateView | undefined; repositories?: readonly RepositoryView[]; source?: import("@dark-factory/client").IntakeSource; onAction?: (projectId: string, request: IntakeBody) => void }) {
   const [repository, setRepository] = useState(source?.repository ?? ""); const [label, setLabel] = useState(source?.label ?? ""); const [target, setTarget] = useState(source?.target_repository_id ?? ""); const [agent, setAgent] = useState(source?.overseer_agent_id ?? ""); const [policy, setPolicy] = useState(source?.policy ?? "manual"); const [authors, setAuthors] = useState(source?.trusted_authors.join(", ") ?? ""); const [poll, setPoll] = useState(String(source?.poll_seconds ?? 60)); const [limit, setLimit] = useState(String(source?.admission_limit ?? 25));
   const agents = state === undefined ? [] : [...state.agents.values()].filter((item) => item.project_id === project.id && item.role === "orchestrator");
+  const soleAgent = agents.length === 1 ? agents[0]?.id : undefined;
+  useEffect(() => { if (source === undefined && agent === "" && soleAgent) setAgent(soleAgent); }, [source, agent, soleAgent]);
   const targets = repositories?.filter((item) => item.enabled) ?? [];
   const targetIds = targets.map((item) => item.id).join(" ");
   useEffect(() => { if (source === undefined && target === "") setTarget(targets.find((item) => item.default)?.id ?? (targets.length === 1 ? targets.at(0)?.id ?? "" : "")); }, [source, target, targetIds]);
-  const submit = (event: FormEvent) => { event.preventDefault(); const pollSeconds = Number(poll), admissionLimit = Number(limit); if (!/^\d+$/.test(poll) || !/^\d+$/.test(limit) || !repository.trim() || !target || !agent || policy === "trusted_authors" && authors.trim() === "") return; const configuration = { ...(source?.priority_default === undefined ? {} : { priority_default: source.priority_default }), ...(source?.priority_by_label === undefined ? {} : { priority_by_label: source.priority_by_label }), repository: repository.trim(), target_repository_id: target, overseer_agent_id: agent, label: label.trim(), policy, trusted_authors: authors.split(",").map((value) => value.trim()).filter(Boolean), poll_seconds: pollSeconds, admission_limit: admissionLimit } as const; onAction?.(project.id, source === undefined ? { action: "create", source_id: newIntakeSourceID(), project_id: project.id, configuration } : { action: "update", source_id: source.id, project_id: project.id, expected_revision: source.revision, configuration }); };
-  return <details><summary>{source === undefined ? "NEW ISSUE SOURCE" : "EDIT ISSUE SOURCE"}</summary><form onSubmit={submit}><label>GitHub repository<input value={repository} placeholder="owner/repository" onChange={(event) => setRepository(event.currentTarget.value)}/></label><label>Destination repository<select value={target} onChange={(event) => setTarget(event.currentTarget.value)}><option value="">{targets.length === 0 ? "No enabled checkout" : "Choose a checkout"}</option>{targets.map((item) => <option key={item.id} value={item.id}>{item.name}{item.default ? " (default)" : ""}</option>)}</select></label>{targets.length === 0 ? <p role="status">ADD AN ENABLED CHECKOUT IN REPOSITORIES BEFORE SAVING THIS SOURCE.</p> : null}<label>Filter<input value={label} onChange={(event) => setLabel(event.currentTarget.value)}/></label><label>Overseer<select value={agent} onChange={(event) => setAgent(event.currentTarget.value)}><option value="">Choose an overseer</option>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{agents.length === 0 ? <p role="status">CREATE AN ORCHESTRATOR FOR THIS PROJECT BEFORE SAVING THIS SOURCE.</p> : null}<label>Policy<select value={policy} onChange={(event) => setPolicy(event.currentTarget.value as "manual" | "trusted_authors")}><option value="manual">Manual: explicit acceptance</option><option value="trusted_authors">Trusted authors or explicit acceptance</option></select></label>{policy === "trusted_authors" ? <><label>Trusted authors<input value={authors} onChange={(event) => setAuthors(event.currentTarget.value)} placeholder="@me, login"/></label><p>Use @me for the linked GitHub account.</p></> : null}<label>Poll seconds<input value={poll} onChange={(event) => setPoll(event.currentTarget.value)}/></label><label>Import limit<input value={limit} onChange={(event) => setLimit(event.currentTarget.value)}/></label><button type="submit" disabled={!target || !agent || agents.length === 0}>{source === undefined ? "CREATE PAUSED SOURCE" : "SAVE PAUSED SOURCE"}</button></form></details>;
+  const submit = (event: FormEvent) => { event.preventDefault(); const pollSeconds = Number(poll), admissionLimit = Number(limit); if (!/^\d+$/.test(poll) || !/^\d+$/.test(limit) || !repository.trim() || !target || !agent || policy === "trusted_authors" && authors.trim() === "") return; const configuration = { ...(source?.priority_default === undefined ? {} : { priority_default: source.priority_default }), ...(source?.priority_by_label === undefined ? {} : { priority_by_label: source.priority_by_label }), repository: repository.trim(), target_repository_id: target, overseer_agent_id: agent, label: label.trim(), policy, trusted_authors: authors.split(",").map((value) => value.trim()).filter(Boolean), poll_seconds: pollSeconds, admission_limit: admissionLimit } as const; onAction?.(project.id, source === undefined ? { action: "create", project_id: project.id, configuration } : { action: "update", source_id: source.id, project_id: project.id, expected_revision: source.revision, configuration }); };
+  return <details><summary>{source === undefined ? "Add issue source" : "Source settings"}</summary><form onSubmit={submit}><label>GitHub repository<input value={repository} placeholder="owner/repository" onChange={(event) => setRepository(event.currentTarget.value)}/></label><label>Destination repository<select value={target} onChange={(event) => setTarget(event.currentTarget.value)}><option value="">{targets.length === 0 ? "No enabled checkout" : "Choose a checkout"}</option>{targets.map((item) => <option key={item.id} value={item.id}>{item.name}{item.default ? " (default)" : ""}</option>)}</select></label>{targets.length === 0 ? <p role="status">ADD AN ENABLED CHECKOUT IN REPOSITORIES BEFORE SAVING THIS SOURCE.</p> : null}<label>Label filter (optional)<input value={label} onChange={(event) => setLabel(event.currentTarget.value)}/></label><label>Overseer<select value={agent} onChange={(event) => setAgent(event.currentTarget.value)}><option value="">Choose an overseer</option>{agents.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{agents.length === 0 ? <p role="status">CREATE AN ORCHESTRATOR FOR THIS PROJECT BEFORE SAVING THIS SOURCE.</p> : null}<label>Which issues can become work?<select value={policy} onChange={(event) => { setPolicy(event.currentTarget.value as "manual" | "trusted_authors"); if (event.currentTarget.value === "trusted_authors" && authors === "") setAuthors("@me"); }}><option value="manual">Require my approval</option><option value="trusted_authors">Allow trusted authors</option></select></label>{policy === "trusted_authors" ? <><label>Trusted authors<input value={authors} onChange={(event) => setAuthors(event.currentTarget.value)} placeholder="@me, login"/></label><p>@me means your connected GitHub account. Other authors wait for your approval. Edited issue content always needs approval again.</p></> : null}<details><summary>Advanced</summary><label>Check every (seconds)<input value={poll} onChange={(event) => setPoll(event.currentTarget.value)}/></label><label>Maximum imports per check<input value={limit} onChange={(event) => setLimit(event.currentTarget.value)}/></label></details><button type="submit" disabled={!target || !agent || agents.length === 0}>{source === undefined ? "CREATE PAUSED SOURCE" : "SAVE PAUSED SOURCE"}</button></form></details>;
 }
