@@ -160,3 +160,67 @@ test("reopening settings queues status behind a pending installation page", asyn
   ]);
   assert.equal(coordinator.github.result.installations.installations[0].account.login, "page-one");
 });
+
+test("project settings discard private content and fence old replies across reconnect", async () => {
+  let finishOld;
+  let session = { async getRepositories() { return [{ root: "/private/checkout" }]; }, async intake() { return { sources: [{ repository: "private/source" }] }; } };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish() {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.loadRepositories("project");
+  await coordinator.loadIntake("project");
+  assert.equal(coordinator.repositories.size, 1);
+  assert.equal(coordinator.intake.size, 1);
+  session.intake = () => new Promise((resolve) => { finishOld = resolve; });
+  const oldRead = coordinator.loadIntake("project");
+  coordinator.clearProjectSettings();
+  assert.equal(coordinator.repositories.size, 0);
+  assert.equal(coordinator.intake.size, 0);
+  assert.equal(coordinator.intakePending.size, 0);
+  session = { async intake() { return { sources: [{ repository: "current/source" }] }; } };
+  await coordinator.loadIntake("project");
+  finishOld({ sources: [{ repository: "private/source" }] });
+  await oldRead;
+  assert.equal(coordinator.intake.get("project").sources[0].repository, "current/source");
+});
+
+test("failed preview cannot enable and reaccepting clears an older withdrawal receipt", async () => {
+  const source = { id: "01".repeat(16), revision: 2n, repository: "example/source", enabled: false };
+  const oldCandidate = { number: 1n, acceptance_id: "02".repeat(16), reason: "content_changed" };
+  let previewFails = false;
+  const session = { capabilities: 1, clientId: "client", async intake(request) {
+    if (request.action === "list") return { state: "ok", sources: [source] };
+    if (request.action === "preview") return previewFails ? { state: "unavailable" } : { state: "ok", reviewed_revision: 2n, candidates: [oldCandidate] };
+    if (request.action === "accept") return { state: "accepted", acceptance_id: "03".repeat(16) };
+    throw new Error(request.action);
+  } };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish() {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.loadIntake("project");
+  await coordinator.intakeAction("project", { action: "preview", source_id: source.id, page: 1 });
+  assert.equal(coordinator.intake.get("project").reviewed_revision, 2n);
+  previewFails = true;
+  await coordinator.intakeAction("project", { action: "preview", source_id: source.id, page: 1 });
+  assert.equal(coordinator.intake.get("project").reviewed_revision, undefined);
+  assert.equal(coordinator.intake.get("project").candidates, undefined);
+  previewFails = false;
+  await coordinator.intakeAction("project", { action: "preview", source_id: source.id, page: 1 });
+  await coordinator.intakeAction("project", { action: "accept", source_id: source.id, expected_revision: 2n, issue_number: 1n, content_hash: "ab".repeat(32) });
+  assert.equal(coordinator.intake.get("project").candidates, undefined);
+  assert.equal(coordinator.intake.get("project").reviewed_revision, undefined);
+});
+
+test("successful withdrawal immediately retires its candidate action", async () => {
+  const source = { id: "01".repeat(16), revision: 2n, repository: "example/source", enabled: true };
+  const acceptanceId = "02".repeat(16);
+  const candidate = { number: 1n, acceptance_id: acceptanceId, reason: "already_accepted" };
+  const session = { capabilities: 1, clientId: "client", async intake(request) {
+    if (request.action === "list") return { state: "ok", sources: [source], candidates: [candidate] };
+    if (request.action === "withdraw") return { state: "withdrawal_pending", acceptance_id: acceptanceId };
+    throw new Error(request.action);
+  } };
+  const owner = { session: () => session, ready: () => true, generation: () => 1, current: () => true, errorCode: () => "error", publish() {} };
+  const coordinator = new FactorySettingsCoordinator(owner);
+  await coordinator.loadIntake("project");
+  await coordinator.intakeAction("project", { action: "withdraw", acceptance_id: acceptanceId });
+  assert.equal(coordinator.intake.get("project").candidates[0].reason, "withdrawal_pending");
+});

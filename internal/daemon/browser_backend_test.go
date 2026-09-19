@@ -1095,3 +1095,35 @@ func rawBrowserClient(id kernel.BrowserClientID) [browserprotocol.ClientIDSize]b
 	copy(result[:], id.Bytes())
 	return result
 }
+
+func TestBrowserRepositoryReadinessUsesPrivateOperatorBoundary(t *testing.T) {
+	for _, admin := range []bool{false, true} {
+		capabilities := kernel.BrowserCapabilityObserve | kernel.BrowserCapabilityHumanActions
+		if admin {
+			capabilities |= kernel.BrowserCapabilityAdministration
+		}
+		fixture := newAdapterFixture(t, capabilities)
+		ctx := context.Background()
+		projectID, _ := kernel.ProjectIDFromBytes(adapterID(t, 21))
+		project, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: projectID, Name: "readiness", Root: t.TempDir()}, adapterTime(t, 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		connection := fixture.pair(t)
+		_ = connection.Close(websocket.StatusNormalClosure, "")
+		result, err := fixture.backend.MutateRepository(ctx, rawBrowserClient(fixture.client.ID), browserprotocol.RepositoryMutate{Action: "fetch", ID: kernel.RepositoryID(project.ID).String()})
+		if !admin {
+			if !errors.Is(err, browser.ErrUnauthorized) {
+				t.Fatalf("unprivileged readiness: %v", err)
+			}
+			continue
+		}
+		if err != nil || result.Repository == nil || result.Repository.FetchState != "setup_required" || result.Repository.PublicationState != "unbound" {
+			t.Fatalf("readiness: %+v, %v", result, err)
+		}
+		encoded, err := browserprotocol.EncodeRepositoryMutateResult("check", result)
+		if err != nil || !bytes.Contains(encoded, []byte("setup_required")) {
+			t.Fatalf("wire readiness: %s, %v", encoded, err)
+		}
+	}
+}

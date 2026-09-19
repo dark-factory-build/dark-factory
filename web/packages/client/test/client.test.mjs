@@ -403,3 +403,22 @@ test("manifest has exactly one public mapping for every stable entry", () => {
   assert.deepEqual(Object.keys(BROWSER_MANIFEST.terminal.opcodes), source.terminal.opcodes.map((x) => x.name));
   assert.deepEqual(Object.values(BROWSER_MANIFEST.terminal.opcodes), source.terminal.opcodes.map((x) => x.value));
 });
+
+
+test("private issue controls have exact action shapes and bounded controller status", () => {
+  const source = "11".repeat(16), project = "22".repeat(16), target = "33".repeat(16), task = "44".repeat(16);
+  const create = { type: "INTAKE", id: "intake-create", body: { action: "create", source_id: source, project_id: project, configuration: { repository: "example/widgets", target_repository_id: target, overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25 } } };
+  create.body.configuration.priority_default = 2;
+  create.body.configuration.priority_by_label = { urgent: 10 };
+  assert.deepEqual(decodeClientControl(encodeClientControl(create)), create);
+  expectMalformed(() => encodeClientControl({ ...create, body: { ...create.body, page: 1 } }));
+  const result = { type: "INTAKE_RESULT", id: "intake-result", body: { state: "ok", imported_tasks: [task], sources: [{ ...create.body.configuration, id: source, project_id: project, github_repository_id: "42", enabled: false, revision: "3", sync: { last_attempt_at: "20", last_success_at: "19", imported_tasks: 1, state: "error", error: "unavailable" } }] } };
+  result.body.candidates = [{ number: "17", url: "https://github.com/example/widgets/issues/17", title: "Review", body: "Exact content", author: "reporter", labels: [], content_hash: "ab".repeat(32), reason: "manual_review" }];
+  const decoded = decodeServerControl(JSON.stringify(result));
+  assert.equal(decoded.body.sources[0].sync.last_success_at, 19n);
+  assert.equal(decoded.body.candidates[0].content_hash, "ab".repeat(32));
+  assert.deepEqual(decoded.body.sources[0].priority_by_label, { urgent: 10 });
+  assert.equal(decoded.body.imported_tasks[0], task);
+  const invalid = { ...result, body: { ...result.body, sources: [{ ...result.body.sources[0], sync: { ...result.body.sources[0].sync, state: "mystery" } }] } };
+  expectMalformed(() => decodeServerControl(JSON.stringify(invalid)));
+});

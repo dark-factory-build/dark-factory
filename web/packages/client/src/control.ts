@@ -108,11 +108,18 @@ export type ProjectLimitsResultBody = { project_id: string; revision: bigint };
 export type ProjectCreateBody = { project_id: string; name: string; root: string };
 export type ProjectCreateResultBody = { project_id: string; revision: bigint };
 /** Administration-only private repository configuration; it is never STATE. */
-export type RepositoryItem = { id: string; project_id: string; name: string; root: string; base_ref: string; enabled: boolean; default: boolean; revision: bigint };
+export type RepositoryReadinessState = "unchecked" | "ready" | "unbound" | "setup_required";
+export type RepositoryItem = { id: string; project_id: string; name: string; root: string; base_ref: string; enabled: boolean; default: boolean; revision: bigint; github_repository_id?: bigint; fetch_state?: RepositoryReadinessState; publication_state?: RepositoryReadinessState; readiness_message?: string };
 export type RepositoriesGetBody = { project_id: string };
 export type RepositoriesBody = { project_id: string; items: RepositoryItem[] };
-export type RepositoryMutateBody = { action: "add" | "name" | "base" | "default" | "enabled" | "remove"; id?: string; project_id?: string; name?: string; root?: string; base_ref?: string; expected_revision?: bigint; enabled?: boolean };
+export type RepositoryMutateBody = { action: "add" | "name" | "base" | "default" | "enabled" | "remove" | "github" | "fetch"; id?: string; project_id?: string; name?: string; root?: string; base_ref?: string; expected_revision?: bigint; enabled?: boolean };
 export type RepositoryMutateResultBody = { repository?: RepositoryItem };
+export type IntakeConfiguration = { priority_default?: number; priority_by_label?: Record<string, number>; repository: string; target_repository_id: string; overseer_agent_id: string; label: string; policy: "manual" | "trusted_authors"; trusted_authors: string[]; poll_seconds: number; admission_limit: number };
+export type IntakeBody = { action: "list" | "create" | "update" | "preview" | "refresh" | "enable" | "pause" | "accept" | "withdraw" | "import" | "tick"; source_id?: string; project_id?: string; configuration?: IntakeConfiguration; expected_revision?: bigint; reviewed_revision?: bigint; page?: number; issue_number?: bigint; content_hash?: string; acceptance_id?: string };
+export type IntakeSync = { last_attempt_at: bigint; last_success_at: bigint; imported_tasks: number; state: "ok" | "paused" | "error"; error: string };
+export type IntakeSource = IntakeConfiguration & { id: string; project_id: string; github_repository_id: bigint; enabled: boolean; revision: bigint; sync?: IntakeSync };
+export type IntakeCandidate = { number: bigint; url: string; title: string; body: string; author: string; labels: string[]; content_hash: string; reason: string; acceptance_id?: string; task_id?: string; truncated?: boolean };
+export type IntakeResultBody = { state: string; sources?: IntakeSource[]; candidates?: IntakeCandidate[]; next_page?: number; reviewed_revision?: bigint; acceptance_id?: string; task_id?: string; imported_tasks?: string[] };
 export type TaskUpdateBody = { task_id: string; expected_revision: bigint; title?: string; body?: string; priority?: number; assigned_agent_id?: string; status?: "cancelled" };
 export type TaskUpdateResultBody = { task_id: string; revision: bigint };
 export type TopologyGetBody = { project_id: string };
@@ -221,6 +228,7 @@ export type ServerControlFrame = { type: "PROJECT_CONTENT_RESULT"; id: string; b
   | { type: "PROJECT_CREATE_RESULT"; id: string; body: ProjectCreateResultBody }
   | { type: "REPOSITORIES"; id: string; body: RepositoriesBody }
   | { type: "REPOSITORY_MUTATE_RESULT"; id: string; body: RepositoryMutateResultBody }
+  | { type: "INTAKE_RESULT"; id: string; body: IntakeResultBody }
   | { type: "TASK_UPDATE_RESULT"; id: string; body: TaskUpdateResultBody }
   | { type: "TOPOLOGY"; id: string; body: TopologyBody }
   | { type: "RUN_PATHS"; id: string; body: RunPathsBody }
@@ -247,6 +255,7 @@ export type ClientControlFrame = { type: "PROJECT_CONTENT"; id: string; body: Pr
   | { type: "PROJECT_CREATE"; id: string; body: ProjectCreateBody }
   | { type: "REPOSITORIES_GET"; id: string; body: RepositoriesGetBody }
   | { type: "REPOSITORY_MUTATE"; id: string; body: RepositoryMutateBody }
+  | { type: "INTAKE"; id: string; body: IntakeBody }
   | { type: "TASK_UPDATE"; id: string; body: TaskUpdateBody }
   | { type: "TOPOLOGY_GET"; id: string; body: TopologyGetBody }
   | { type: "RUN_PATHS_GET"; id: string; body: RunPathsGetBody }
@@ -308,6 +317,8 @@ export function encodeTaskEnqueueResult(id: string, body: TaskEnqueueResultBody)
 export function encodeProjectCreateResult(id: string, body: ProjectCreateResultBody): string { return encodeServerControl({ type: "PROJECT_CREATE_RESULT", id, body }); }
 export function encodeRepositories(id: string, body: RepositoriesBody): string { return encodeServerControl({ type: "REPOSITORIES", id, body }); }
 export function encodeRepositoryMutateResult(id: string, body: RepositoryMutateResultBody): string { return encodeServerControl({ type: "REPOSITORY_MUTATE_RESULT", id, body }); }
+export function encodeIntake(id: string, body: IntakeBody): string { return encodeClientControl({ type: "INTAKE", id, body }); }
+export function encodeIntakeResult(id: string, body: IntakeResultBody): string { return encodeServerControl({ type: "INTAKE_RESULT", id, body }); }
 export function encodeAgentControlResult(id: string, body: AgentControlResultBody): string { return encodeServerControl({ type: "AGENT_CONTROL_RESULT", id, body }); }
 export function encodeTaskHistory(id: string, body: TaskHistoryBody): string { return encodeServerControl({ type: "TASK_HISTORY", id, body }); }
 export function encodeTaskDetail(id: string, body: TaskDetailBody): string { return encodeServerControl({ type: "TASK_DETAIL", id, body }); }
@@ -343,7 +354,7 @@ function wireValue(value: unknown): unknown {
 }
 
 /** Only bounded server observations may exceed the 64 KiB control bound. */
-function controlLimit(type: ControlType): number { return type === "STATE_SNAPSHOT" || type === "TOPOLOGY" || type === "ACCOUNTS" || type === "REPOSITORIES" ? MAX_SNAPSHOT_BYTES : MAX_CONTROL_BYTES; }
+function controlLimit(type: ControlType): number { return type === "STATE_SNAPSHOT" || type === "TOPOLOGY" || type === "ACCOUNTS" || type === "REPOSITORIES" || type === "INTAKE_RESULT" ? MAX_SNAPSHOT_BYTES : MAX_CONTROL_BYTES; }
 
 function decodeControl(data: string | Uint8Array, role: "client" | "server"): ClientControlFrame | ServerControlFrame {
   let text: string;
@@ -477,6 +488,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "REPOSITORIES": return repositoriesBody(body, wire);
     case "REPOSITORY_MUTATE": return repositoryMutateBody(body, wire);
     case "REPOSITORY_MUTATE_RESULT": { requireKeys(body, [], wire, ["repository"]); return present(body, "repository") ? { repository: repositoryItem(body.repository, wire) } : {}; }
+    case "INTAKE": return intakeBody(body, wire);
+    case "INTAKE_RESULT": return intakeResult(body, wire);
     case "TASK_UPDATE": requireKeys(body, ["task_id", "expected_revision"], wire, ["title", "body", "priority", "assigned_agent_id", "status"]); { const result: TaskUpdateBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "title")) result.title = boundedText(body.title, 1, MAX_TASK_TITLE_BYTES); if (present(body, "body")) result.body = boundedText(body.body, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "priority")) result.priority = integer(body.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY); if (present(body, "assigned_agent_id")) result.assigned_agent_id = dynamicID(body.assigned_agent_id); if (present(body, "status")) { if (body.status !== "cancelled") malformed(); result.status = body.status; } return result; }
     case "TASK_UPDATE_RESULT": requireKeys(body, ["task_id", "revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true) };
     case "TOPOLOGY_GET": requireKeys(body, ["project_id"], wire); return { project_id: dynamicID(body.project_id) };
@@ -719,9 +732,19 @@ const TOPOLOGY_BUCKETS = ["empty", "tiny", "small", "medium", "large"] as const;
 function topologySource(value: unknown): string { if (typeof value !== "string" || value !== "" && !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) malformed(); return value; }
 function repositoryItem(value: unknown, wire: boolean): RepositoryItem {
   if (!isObject(value)) malformed();
-  requireKeys(value, ["id", "project_id", "name", "root", "base_ref", "enabled", "default", "revision"], wire);
+  requireKeys(value, ["id", "project_id", "name", "root", "base_ref", "enabled", "default", "revision"], wire, ["github_repository_id", "fetch_state", "publication_state", "readiness_message"]);
   if (typeof value.enabled !== "boolean" || typeof value.default !== "boolean") malformed();
-  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), root: boundedText(value.root, 1, 4096), base_ref: boundedText(value.base_ref, 1, 4096), enabled: value.enabled, default: value.default, revision: decimal(value.revision, wire, true) };
+  const fetch_state = present(value, "fetch_state") ? readinessState(value.fetch_state) : undefined;
+  const publication_state = present(value, "publication_state") ? readinessState(value.publication_state) : undefined;
+  const readiness_message = present(value, "readiness_message") ? boundedText(value.readiness_message, 0, 512) : undefined;
+  if (readiness_message !== undefined && /[\u0000\r\n]/.test(readiness_message)) malformed();
+  const github_repository_id = present(value, "github_repository_id") ? decimal(value.github_repository_id, wire, true) : undefined;
+  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), name: boundedText(value.name, 1, MAX_AGENT_NAME_BYTES), root: boundedText(value.root, 1, 4096), base_ref: boundedText(value.base_ref, 1, 4096), enabled: value.enabled, default: value.default, revision: decimal(value.revision, wire, true), ...(github_repository_id === undefined ? {} : { github_repository_id }), ...(fetch_state === undefined ? {} : { fetch_state }), ...(publication_state === undefined ? {} : { publication_state }), ...(readiness_message === undefined ? {} : { readiness_message }) };
+}
+
+function readinessState(value: unknown): RepositoryReadinessState {
+  if (value !== "unchecked" && value !== "ready" && value !== "unbound" && value !== "setup_required") malformed();
+  return value;
 }
 
 function repositoriesBody(body: Record<string, unknown>, wire: boolean): RepositoriesBody {
@@ -736,7 +759,7 @@ function repositoriesBody(body: Record<string, unknown>, wire: boolean): Reposit
 function repositoryMutateBody(body: Record<string, unknown>, wire: boolean): RepositoryMutateBody {
   requireKeys(body, ["action"], wire, ["id", "project_id", "name", "root", "base_ref", "expected_revision", "enabled"]);
   const action = body.action;
-  if (action !== "add" && action !== "name" && action !== "base" && action !== "default" && action !== "enabled" && action !== "remove") malformed();
+  if (action !== "add" && action !== "name" && action !== "base" && action !== "default" && action !== "enabled" && action !== "remove" && action !== "github" && action !== "fetch") malformed();
   const id = present(body, "id") ? dynamicID(body.id) : undefined;
   const project_id = present(body, "project_id") ? dynamicID(body.project_id) : undefined;
   const name = present(body, "name") ? boundedText(body.name, 1, MAX_AGENT_NAME_BYTES) : undefined;
@@ -747,8 +770,54 @@ function repositoryMutateBody(body: Record<string, unknown>, wire: boolean): Rep
   const enabled = present(body, "enabled") ? body.enabled as boolean : undefined;
   if (action === "add") {
     if (id === undefined || project_id === undefined || name === undefined || root === undefined || base_ref === undefined) malformed();
+  } else if (action === "github" || action === "fetch") {
+    if (id === undefined || expected_revision !== undefined || project_id !== undefined || name !== undefined || root !== undefined || base_ref !== undefined || enabled !== undefined) malformed();
   } else if (id === undefined || expected_revision === undefined || action === "name" && name === undefined || action === "base" && base_ref === undefined || action === "enabled" && enabled === undefined) malformed();
   return { action, ...(id === undefined ? {} : { id }), ...(project_id === undefined ? {} : { project_id }), ...(name === undefined ? {} : { name }), ...(root === undefined ? {} : { root }), ...(base_ref === undefined ? {} : { base_ref }), ...(expected_revision === undefined ? {} : { expected_revision }), ...(enabled === undefined ? {} : { enabled }) };
+}
+
+function intakeConfiguration(value: unknown): IntakeConfiguration {
+  if (!isObject(value)) malformed(); requireKeys(value, ["repository", "target_repository_id", "overseer_agent_id", "label", "policy", "trusted_authors", "poll_seconds", "admission_limit"], true, ["priority_default", "priority_by_label"]);
+  if ((value.policy !== "manual" && value.policy !== "trusted_authors") || !Array.isArray(value.trusted_authors) || value.trusted_authors.length > 25) malformed();
+  const priority_default = present(value, "priority_default") ? integer(value.priority_default, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY) : undefined;
+  let priority_by_label: Record<string, number> | undefined;
+  if (present(value, "priority_by_label")) {
+    if (!isObject(value.priority_by_label) || Object.keys(value.priority_by_label).length > 25) malformed();
+    priority_by_label = Object.fromEntries(Object.entries(value.priority_by_label).map(([label, priority]) => [boundedText(label, 1, 100), integer(priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY)]));
+    if (new TextEncoder().encode(JSON.stringify(priority_by_label)).length > 2048) malformed();
+  }
+  return { ...(priority_default === undefined ? {} : { priority_default }), ...(priority_by_label === undefined ? {} : { priority_by_label }), repository: boundedText(value.repository, 3, 140), target_repository_id: dynamicID(value.target_repository_id), overseer_agent_id: value.overseer_agent_id === "" ? "" : dynamicID(value.overseer_agent_id), label: boundedText(value.label, 0, 100), policy: value.policy, trusted_authors: value.trusted_authors.map((author) => boundedText(author, 1, 39)), poll_seconds: integer(value.poll_seconds, 5, 86400), admission_limit: integer(value.admission_limit, 1, 200) };
+}
+function intakeBody(body: Record<string, unknown>, wire: boolean): IntakeBody {
+  requireKeys(body, ["action"], wire, ["source_id", "project_id", "configuration", "expected_revision", "reviewed_revision", "page", "issue_number", "content_hash", "acceptance_id"]);
+  const action = body.action; if (action !== "list" && action !== "create" && action !== "update" && action !== "preview" && action !== "refresh" && action !== "enable" && action !== "pause" && action !== "accept" && action !== "withdraw" && action !== "import" && action !== "tick") malformed();
+  const source_id = present(body, "source_id") ? dynamicID(body.source_id) : undefined;
+  const project_id = present(body, "project_id") ? dynamicID(body.project_id) : undefined;
+  const configuration = present(body, "configuration") ? intakeConfiguration(body.configuration) : undefined;
+  const expected_revision = present(body, "expected_revision") ? decimal(body.expected_revision, wire, true) : undefined;
+  const reviewed_revision = present(body, "reviewed_revision") ? decimal(body.reviewed_revision, wire, true) : undefined;
+  const page = present(body, "page") ? integer(body.page, 1, 1000) : undefined;
+  const issue_number = present(body, "issue_number") ? decimal(body.issue_number, wire, true) : undefined;
+  const content_hash = present(body, "content_hash") ? fixedHex(body.content_hash, 32) : undefined;
+  const acceptance_id = present(body, "acceptance_id") ? dynamicID(body.acceptance_id) : undefined;
+  const exact = (keys: readonly string[]) => Object.keys(body).length === keys.length && keys.every((key) => present(body, key));
+  if (action === "list" ? !(exact(["action"]) || exact(["action", "project_id"]))
+    : action === "create" ? !exact(["action", "source_id", "project_id", "configuration"])
+    : action === "update" ? !exact(["action", "source_id", "project_id", "configuration", "expected_revision"])
+    : action === "preview" || action === "refresh" || action === "tick" ? !exact(["action", "source_id", "page"])
+    : action === "enable" ? !exact(["action", "source_id", "expected_revision", "reviewed_revision"]) || expected_revision !== reviewed_revision
+    : action === "pause" ? !exact(["action", "source_id", "expected_revision"])
+    : action === "accept" ? !exact(["action", "source_id", "expected_revision", "issue_number", "content_hash"])
+    : !exact(["action", "acceptance_id"])) malformed();
+  return { action, ...(source_id === undefined ? {} : { source_id }), ...(project_id === undefined ? {} : { project_id }), ...(configuration === undefined ? {} : { configuration }), ...(expected_revision === undefined ? {} : { expected_revision }), ...(reviewed_revision === undefined ? {} : { reviewed_revision }), ...(page === undefined ? {} : { page }), ...(issue_number === undefined ? {} : { issue_number }), ...(content_hash === undefined ? {} : { content_hash }), ...(acceptance_id === undefined ? {} : { acceptance_id }) };
+}
+
+function intakeResult(body: Record<string, unknown>, wire: boolean): IntakeResultBody {
+  requireKeys(body, ["state"], wire, ["sources", "candidates", "next_page", "reviewed_revision", "acceptance_id", "task_id", "imported_tasks"]);
+  const state = boundedText(body.state, 1, 128); const result: IntakeResultBody = { state };
+  if (present(body, "sources")) { if (!Array.isArray(body.sources) || body.sources.length > MAX_SNAPSHOT_ENTITIES) malformed(); result.sources = body.sources.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["id", "project_id", "github_repository_id", "enabled", "revision", "repository", "target_repository_id", "overseer_agent_id", "label", "policy", "trusted_authors", "poll_seconds", "admission_limit"], wire, ["sync"]); if (typeof item.enabled !== "boolean") malformed(); let sync: IntakeSync | undefined; if (present(item, "sync")) { if (!isObject(item.sync)) malformed(); requireKeys(item.sync, ["last_attempt_at", "last_success_at", "imported_tasks", "state", "error"], wire); if (item.sync.state !== "ok" && item.sync.state !== "paused" && item.sync.state !== "error") malformed(); sync = { last_attempt_at: decimal(item.sync.last_attempt_at, wire), last_success_at: decimal(item.sync.last_success_at, wire), imported_tasks: integer(item.sync.imported_tasks, 0, 200), state: item.sync.state, error: boundedText(item.sync.error, 0, 128) }; } return { ...intakeConfiguration(item), id: dynamicID(item.id), project_id: dynamicID(item.project_id), github_repository_id: decimal(item.github_repository_id, wire, true), enabled: item.enabled, revision: decimal(item.revision, wire, true), ...(sync === undefined ? {} : { sync }) }; }); }
+  if (present(body, "candidates")) { if (!Array.isArray(body.candidates) || body.candidates.length > MAX_SNAPSHOT_ENTITIES) malformed(); result.candidates = body.candidates.map((item) => { if (!isObject(item)) malformed(); requireKeys(item, ["number", "url", "title", "body", "author", "labels", "content_hash", "reason"], wire, ["acceptance_id", "task_id", "truncated"]); if (!Array.isArray(item.labels) || (present(item, "truncated") && typeof item.truncated !== "boolean")) malformed(); return { number: decimal(item.number, wire, true), url: boundedText(item.url, 1, 4096), title: boundedText(item.title, 0, 900), body: boundedText(item.body, 0, 5000), author: boundedText(item.author, 0, 44), labels: item.labels.map((label) => boundedText(label, 1, 100)), content_hash: fixedHex(item.content_hash, 32), reason: boundedText(item.reason, 1, 128), ...(present(item, "acceptance_id") ? { acceptance_id: dynamicID(item.acceptance_id) } : {}), ...(present(item, "task_id") ? { task_id: dynamicID(item.task_id) } : {}), ...(present(item, "truncated") ? { truncated: item.truncated as boolean } : {}) }; }); }
+  if (present(body, "next_page")) result.next_page = integer(body.next_page, 1, 1000); if (present(body, "reviewed_revision")) result.reviewed_revision = decimal(body.reviewed_revision, wire, true); if (present(body, "acceptance_id")) result.acceptance_id = dynamicID(body.acceptance_id); if (present(body, "task_id")) result.task_id = dynamicID(body.task_id); if (present(body, "imported_tasks")) { if (!Array.isArray(body.imported_tasks) || body.imported_tasks.length > MAX_ARRAY_ITEMS) malformed(); result.imported_tasks = body.imported_tasks.map((id) => dynamicID(id)); } return result;
 }
 
 function topologyBody(body: Record<string, unknown>, wire: boolean): TopologyBody {

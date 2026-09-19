@@ -146,9 +146,11 @@ export function FactoryApp({ onStatusChange, browserPort }: FactoryAppProps = {}
       onLoadAccounts={() => { void owner.current?.loadAccounts(); }}
       onLinkAccount={(login, label) => { void owner.current?.linkAccount({ provider: login.provider, home: login.home, label }); }}
       onUpdateAccount={(account, change) => { void owner.current?.updateAccount({ accountId: account.id, expectedRevision: account.revision, ...change }); }}
-      onLoadRepositories={(projectId) => { void owner.current?.loadRepositories(projectId); }}
+      onLoadRepositories={snapshot.status === "ready" ? (projectId) => { void owner.current?.loadRepositories(projectId); } : undefined}
       onMutateRepository={(request) => { void owner.current?.mutateRepository(request); }}
       onCreateProject={(request) => { void owner.current?.createProject(request); }}
+      onLoadIntake={snapshot.status === "ready" ? (projectId) => { void owner.current?.loadIntake(projectId); } : undefined}
+      onIntakeAction={(projectId, request) => { void owner.current?.intakeAction(projectId, request); }}
       onGitHub={(request) => { void owner.current?.githubConnection(request); }}
       onInviteRemote={() => { void owner.current?.inviteRemote(); }}
       onLoadDevices={() => { void owner.current?.loadDevices(); }}

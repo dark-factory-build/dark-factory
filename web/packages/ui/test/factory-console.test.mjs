@@ -102,11 +102,16 @@ test("floor appearance is local, field-validated, and available before a connect
 test("repository roots stay inside private settings", () => {
   const project = fixtureState.projects.get(ids.project);
   const root = "/private/operator/checkout";
-  const repositories = new Map([[project.id, [{ id: "ad".repeat(16), project_id: project.id, name: "Checkout", root, base_ref: "main", enabled: true, default: true, revision: 1n }]]]);
+  const repositories = new Map([[project.id, [{ id: "ad".repeat(16), project_id: project.id, name: "Checkout", root, base_ref: "main", enabled: true, default: true, revision: 1n, fetch_state: "setup_required", publication_state: "ready", github_repository_id: 123456n, readiness_message: "Git checkout needs operator setup." }]]]);
   assert.equal(render({ repositories }).includes(root), false);
   const settings = render({ settingsOpen: true, repositories });
   assert.match(settings, /Repositories/);
   assert.match(settings, new RegExp(root));
+  assert.match(settings, /FETCH: SETUP_REQUIRED/);
+  assert.match(settings, /GITHUB BINDING: VERIFIED · ID 123456/);
+  assert.match(settings, /CHECK FETCH READINESS/);
+  assert.match(settings, /REFRESH GITHUB BINDING/);
+  assert.match(settings, /Git checkout needs operator setup\./);
   assert.match(settings, /ADD CHECKOUT/);
 });
 
@@ -568,12 +573,12 @@ test("the console never shows a kernel-grammar or retired vocabulary word", () =
     ["terminal", renderToStaticMarkup(terminalView())],
     ["terminal-reset", renderToStaticMarkup(terminalView({ terminal: { resets: 1 } }))],
   ];
-  // "overseer" left this list by owner decision: it is the console's word for
-  // the orchestrator rank. Everything else is still kernel grammar. The lease
+  // "overseer" and private issue review left this list by owner decision: they
+  // are console controls. Everything else is still kernel grammar. The lease
   // ban is anchored at a word start so it still catches lease/leased/leases
   // without catching the floor's "release-ready".
   for (const [name, markup] of surfaces) {
-    for (const forbidden of [/attempt/i, /converge/i, /admission/i, /finalize/i, /unresolved/i, /proposal/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /\blease/i, /intake/i, /quarantine/i, /work item/i, /cancel run/i]) {
+    for (const forbidden of [/attempt/i, /converge/i, /finalize/i, /unresolved/i, /proposal/i, /verdict/i, /\bALLOW\b/, /\bBLOCK\b/, /\blease/i, /quarantine/i, /work item/i, /cancel run/i]) {
       assert.equal(forbidden.test(markup), false, `${name}: ${forbidden}`);
     }
   }
@@ -2301,6 +2306,145 @@ test("same-path wrappers retain navigation without overlapping displayed physica
     assert.equal(initial.length, fixtureState.projects.size);
     await act(async () => { renderer.update(createElement(FactoryConsole, props())); });
     assert.deepEqual(calls, initial);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+test("private issue review loads every project once across settings renders", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const props = () => ({ status: "ready", state: baseState(), settingsOpen: true,
+    onToggleSettings: () => {}, onLoadIntake: (id) => calls.push(id) });
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, props())); });
+    const initial = [...calls];
+    assert.deepEqual(new Set(initial), new Set(fixtureState.projects.keys()));
+    assert.equal(initial.length, fixtureState.projects.size);
+    await act(async () => { renderer.update(createElement(FactoryConsole, props())); });
+    assert.deepEqual(calls, initial);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+test("issue review refuses a stale preview before acceptance", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
+  const review = { state: "ok", sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "manual_review" }], reviewed_revision: 2n, next_page: 2 };
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push({ projectId, request }) })); });
+    const preview = renderer.root.findAll((node) => node.type === "button" && node.props.children === "PREVIEW")[0];
+    await act(async () => preview.props.onClick());
+    assert.deepEqual(calls, [{ projectId: ids.project, request: { action: "preview", source_id: source.id, page: 1 } }]);
+    assert.equal(renderer.root.findAll((node) => node.type === "p" && node.children.join("") === "PREVIEW THIS SOURCE AGAIN BEFORE ACCEPTING.").length, 1);
+    assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.children === "ACCEPT REVIEWED CONTENT").length, 0);
+    const next = renderer.root.findAll((node) => node.type === "button" && node.props.children === "NEXT ISSUE PAGE")[0];
+    await act(async () => next.props.onClick());
+    assert.deepEqual(calls.at(-1), { projectId: ids.project, request: { action: "preview", source_id: source.id, page: 2 } });
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+
+test("private issue review shows sync guidance and immutable linked work", () => {
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
+  const review = { state: "withdrawal_pending", task_id: ids.task, imported_tasks: ["87".repeat(16)], sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "withdrawal_pending", acceptance_id: "86".repeat(16), task_id: ids.task }] };
+  const markup = render({ settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]) });
+  assert.match(markup, /NOT YET SYNCHRONIZED/);
+  assert.match(markup, /factoryctl intake service install/);
+  assert.match(markup, /WITHDRAWAL PENDING/);
+  assert.match(markup, /IMPORTED TASKS/);
+  assert.match(markup, /REVIEWED ISSUE CONTENT/);
+  assert.match(markup, /NEW ISSUE SOURCE/);
+  assert.match(markup, /EDIT ISSUE SOURCE/);
+  assert.doesNotMatch(markup, />WITHDRAW</);
+  assert.doesNotMatch(markup, /private\/tmp|\/Users\//);
+});
+
+test("issue source configuration uses private checkout and overseer names", () => {
+  const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Primary checkout", root: "/private/source", base_ref: "HEAD", enabled: true, default: true, revision: 1n };
+  const markup = render({ settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]) });
+  assert.match(markup, /Destination repository/);
+  assert.match(markup, /Primary checkout \(default\)/);
+  assert.match(markup, /Choose an overseer/);
+  assert.match(markup, /Trusted authors or explicit acceptance/);
+  assert.doesNotMatch(markup, /Destination repository ID/);
+});
+
+
+test("editing an intake filter preserves migrated priority rules", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n, priority_default: 2, priority_by_label: { urgent: 10 } };
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "SAVE PAUSED SOURCE"));
+    await act(async () => form.findAllByType("input").find((input) => input.props.value === "bug").props.onChange({ currentTarget: { value: "enhancement" } }));
+    await act(async () => form.props.onSubmit({ preventDefault() {} }));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].configuration.label, "enhancement");
+    assert.equal(calls[0].configuration.priority_default, 2);
+    assert.deepEqual(calls[0].configuration.priority_by_label, { urgent: 10 });
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+
+test("revised issue content can be accepted without discarding the prior receipt", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
+  const candidate = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Revised parser instructions", body: "The operator must review this new content.", author: "reporter", labels: ["bug"], content_hash: "cd".repeat(32), reason: "content_changed", acceptance_id: "86".repeat(16), task_id: ids.task };
+  const review = { state: "ok", sources: [source], candidates: [candidate], reviewed_revision: 3n };
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
+    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "PREVIEW")[0].props.onClick());
+    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "ACCEPT REVIEWED CONTENT")[0].props.onClick());
+    assert.deepEqual(calls.at(-1), { action: "accept", source_id: source.id, expected_revision: 3n, issue_number: 17n, content_hash: candidate.content_hash });
+    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "WITHDRAW")[0].props.onClick());
+    assert.deepEqual(calls.at(-1), { action: "withdraw", acceptance_id: candidate.acceptance_id });
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
+
+test("refreshing a changed source replaces stale configuration drafts", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  const calls = [];
+  const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
+  const props = (item) => ({ status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, { state: "ok", sources: [item] }]]), onIntakeAction: (projectId, request) => calls.push(request) });
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, props(source))); });
+    const changed = { ...source, revision: 4n, target_repository_id: "90".repeat(16), label: "enhancement", policy: "trusted_authors", trusted_authors: ["reviewer"] };
+    await act(async () => renderer.update(createElement(FactoryConsole, props(changed))));
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "SAVE PAUSED SOURCE"));
+    await act(async () => form.props.onSubmit({ preventDefault() {} }));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].expected_revision, 4n);
+    assert.equal(calls[0].configuration.target_repository_id, changed.target_repository_id);
+    assert.equal(calls[0].configuration.label, "enhancement");
+    assert.equal(calls[0].configuration.policy, "trusted_authors");
+    assert.deepEqual(calls[0].configuration.trusted_authors, ["reviewer"]);
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     globalThis.IS_REACT_ACT_ENVIRONMENT = previous;

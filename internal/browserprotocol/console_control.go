@@ -1,6 +1,7 @@
 package browserprotocol
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -65,14 +66,18 @@ type RepositoriesGet struct {
 	ProjectID string `json:"project_id"`
 }
 type Repository struct {
-	ID        string  `json:"id"`
-	ProjectID string  `json:"project_id"`
-	Name      string  `json:"name"`
-	Root      string  `json:"root"`
-	BaseRef   string  `json:"base_ref"`
-	Enabled   Bool    `json:"enabled"`
-	Default   Bool    `json:"default"`
-	Revision  Decimal `json:"revision"`
+	ID                 string   `json:"id"`
+	ProjectID          string   `json:"project_id"`
+	Name               string   `json:"name"`
+	Root               string   `json:"root"`
+	BaseRef            string   `json:"base_ref"`
+	Enabled            Bool     `json:"enabled"`
+	Default            Bool     `json:"default"`
+	Revision           Decimal  `json:"revision"`
+	GitHubRepositoryID *Decimal `json:"github_repository_id,omitempty"`
+	FetchState         string   `json:"fetch_state,omitempty"`
+	PublicationState   string   `json:"publication_state,omitempty"`
+	ReadinessMessage   string   `json:"readiness_message,omitempty"`
 }
 type Repositories struct {
 	ProjectID string       `json:"project_id"`
@@ -90,6 +95,98 @@ type RepositoryMutate struct {
 }
 type RepositoryMutateResult struct {
 	Repository *Repository `json:"repository,omitempty"`
+}
+
+// Intake is private administration traffic for configured GitHub issue
+// sources. Candidate bytes only arrive in the result after an explicit
+// preview; acceptance carries the reviewed hash, never caller-authored text.
+type IntakeConfiguration struct {
+	PriorityDefault    int64            `json:"priority_default,omitempty"`
+	PriorityByLabel    map[string]int64 `json:"priority_by_label,omitempty"`
+	Repository         string           `json:"repository"`
+	TargetRepositoryID string           `json:"target_repository_id"`
+	OverseerAgentID    string           `json:"overseer_agent_id"`
+	Label              string           `json:"label"`
+	Policy             string           `json:"policy"`
+	TrustedAuthors     []string         `json:"trusted_authors"`
+	PollSeconds        uint32           `json:"poll_seconds"`
+	AdmissionLimit     uint16           `json:"admission_limit"`
+}
+type Intake struct {
+	Action           string               `json:"action"`
+	SourceID         string               `json:"source_id,omitempty"`
+	ProjectID        string               `json:"project_id,omitempty"`
+	Configuration    *IntakeConfiguration `json:"configuration,omitempty"`
+	ExpectedRevision Decimal              `json:"expected_revision,omitempty"`
+	ReviewedRevision Decimal              `json:"reviewed_revision,omitempty"`
+	Page             uint32               `json:"page,omitempty"`
+	IssueNumber      Decimal              `json:"issue_number,omitempty"`
+	ContentHash      string               `json:"content_hash,omitempty"`
+	AcceptanceID     string               `json:"acceptance_id,omitempty"`
+}
+type IntakeSync struct {
+	LastAttemptAt Decimal `json:"last_attempt_at"`
+	LastSuccessAt Decimal `json:"last_success_at"`
+	ImportedTasks uint16  `json:"imported_tasks"`
+	State         string  `json:"state"`
+	Error         string  `json:"error"`
+}
+type IntakeSource struct {
+	Sync *IntakeSync `json:"sync,omitempty"`
+
+	PriorityDefault    int64            `json:"priority_default,omitempty"`
+	PriorityByLabel    map[string]int64 `json:"priority_by_label,omitempty"`
+	Repository         string           `json:"repository"`
+	TargetRepositoryID string           `json:"target_repository_id"`
+	OverseerAgentID    string           `json:"overseer_agent_id"`
+	Label              string           `json:"label"`
+	Policy             string           `json:"policy"`
+	TrustedAuthors     []string         `json:"trusted_authors"`
+	PollSeconds        uint32           `json:"poll_seconds"`
+	AdmissionLimit     uint16           `json:"admission_limit"`
+	ID                 string           `json:"id"`
+	ProjectID          string           `json:"project_id"`
+	GitHubRepositoryID Decimal          `json:"github_repository_id"`
+	Enabled            Bool             `json:"enabled"`
+	Revision           Decimal          `json:"revision"`
+}
+type IntakeCandidate struct {
+	Number       Decimal  `json:"number"`
+	URL          string   `json:"url"`
+	Title        string   `json:"title"`
+	Body         string   `json:"body"`
+	Author       string   `json:"author"`
+	Labels       []string `json:"labels"`
+	ContentHash  string   `json:"content_hash"`
+	Reason       string   `json:"reason"`
+	AcceptanceID string   `json:"acceptance_id,omitempty"`
+	TaskID       string   `json:"task_id,omitempty"`
+	Truncated    Bool     `json:"truncated,omitempty"`
+}
+type IntakeResult struct {
+	State            string            `json:"state"`
+	ImportedTasks    []string          `json:"imported_tasks,omitempty"`
+	Sources          []IntakeSource    `json:"sources,omitempty"`
+	Candidates       []IntakeCandidate `json:"candidates,omitempty"`
+	NextPage         *uint32           `json:"next_page,omitempty"`
+	ReviewedRevision Decimal           `json:"reviewed_revision,omitempty"`
+	AcceptanceID     string            `json:"acceptance_id,omitempty"`
+	TaskID           string            `json:"task_id,omitempty"`
+}
+
+func validateRepository(value Repository) error {
+	if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Name, 1, 128) != nil || validateBoundedText(value.Root, 1, 4096) != nil || validateBoundedText(value.BaseRef, 1, 4096) != nil || value.Revision == 0 {
+		return fmt.Errorf("%w: repository", ErrMalformed)
+	}
+	if value.GitHubRepositoryID != nil && *value.GitHubRepositoryID == 0 {
+		return fmt.Errorf("%w: github repository id", ErrMalformed)
+	}
+	if value.FetchState != "" && value.FetchState != "unchecked" && value.FetchState != "ready" && value.FetchState != "setup_required" ||
+		value.PublicationState != "" && value.PublicationState != "unchecked" && value.PublicationState != "ready" && value.PublicationState != "unbound" && value.PublicationState != "setup_required" ||
+		validateBoundedText(value.ReadinessMessage, 0, 512) != nil || strings.ContainsAny(value.ReadinessMessage, "\x00\r\n") {
+		return fmt.Errorf("%w: repository readiness", ErrMalformed)
+	}
+	return nil
 }
 
 // TaskUpdate edits one still-queued task. Status is the only member that is
@@ -327,6 +424,19 @@ func EncodeRepositories(id string, value Repositories) ([]byte, error) {
 func EncodeRepositoryMutateResult(id string, value RepositoryMutateResult) ([]byte, error) {
 	return encodeControl(TypeRepositoryMutateResult, id, value)
 }
+func EncodeIntakeResult(id string, value IntakeResult) ([]byte, error) {
+	for i := range value.Sources {
+		if value.Sources[i].TrustedAuthors == nil {
+			value.Sources[i].TrustedAuthors = []string{}
+		}
+	}
+	for i := range value.Candidates {
+		if value.Candidates[i].Labels == nil {
+			value.Candidates[i].Labels = []string{}
+		}
+	}
+	return encodeControl(TypeIntakeResult, id, value)
+}
 
 func EncodeTaskUpdateResult(id string, value TaskUpdateResult) ([]byte, error) {
 	return encodeControl(TypeTaskUpdateResult, id, value)
@@ -422,16 +532,20 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 		for _, item := range value.Items {
-			if validateDynamicID(item.ID) != nil || item.ProjectID != value.ProjectID || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 4096) != nil || item.Revision == 0 {
+			if validateRepository(item) != nil || item.ProjectID != value.ProjectID {
 				return bad()
 			}
 		}
 	case RepositoryMutate:
-		if value.Action != "add" && value.Action != "name" && value.Action != "base" && value.Action != "default" && value.Action != "enabled" && value.Action != "remove" {
+		if value.Action != "add" && value.Action != "name" && value.Action != "base" && value.Action != "default" && value.Action != "enabled" && value.Action != "remove" && value.Action != "github" && value.Action != "fetch" {
 			return bad()
 		}
 		if value.Action == "add" {
 			if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Name, 1, 128) != nil || validateBoundedText(value.Root, 1, 4096) != nil || validateBoundedText(value.BaseRef, 1, 4096) != nil {
+				return bad()
+			}
+		} else if value.Action == "github" || value.Action == "fetch" {
+			if validateDynamicID(value.ID) != nil || value.ExpectedRevision != 0 || value.ProjectID != "" || value.Name != "" || value.Root != "" || value.BaseRef != "" || value.Enabled != nil {
 				return bad()
 			}
 		} else if validateDynamicID(value.ID) != nil || value.ExpectedRevision == 0 || value.Action == "base" && validateBoundedText(value.BaseRef, 1, 4096) != nil || value.Action == "enabled" && value.Enabled == nil {
@@ -440,9 +554,17 @@ func validConsoleControl(kind MessageType, body any) error {
 	case RepositoryMutateResult:
 		if value.Repository != nil {
 			item := *value.Repository
-			if validateDynamicID(item.ID) != nil || validateDynamicID(item.ProjectID) != nil || validateBoundedText(item.Name, 1, 128) != nil || validateBoundedText(item.Root, 1, 4096) != nil || validateBoundedText(item.BaseRef, 1, 4096) != nil || item.Revision == 0 {
+			if validateRepository(item) != nil {
 				return bad()
 			}
+		}
+	case Intake:
+		if !validIntake(value) {
+			return bad()
+		}
+	case IntakeResult:
+		if !validIntakeResult(value) {
+			return bad()
 		}
 	case TaskUpdate:
 		if validateDynamicID(value.TaskID) != nil || value.ExpectedRevision == 0 ||
@@ -679,6 +801,91 @@ func validTopologyInventory(value TopologyInventory) bool {
 			return false
 		}
 		seen[name] = true
+	}
+	return true
+}
+
+func validIntakeConfiguration(value IntakeConfiguration) bool {
+	if value.PriorityDefault < -MaxTaskPriority || value.PriorityDefault > MaxTaskPriority || len(value.PriorityByLabel) > 25 {
+		return false
+	}
+	for label, priority := range value.PriorityByLabel {
+		if validateBoundedText(label, 1, 100) != nil || priority < -MaxTaskPriority || priority > MaxTaskPriority {
+			return false
+		}
+	}
+	priorities, err := json.Marshal(value.PriorityByLabel)
+	if err != nil || len(priorities) > 2048 {
+		return false
+	}
+	if validateBoundedText(value.Repository, 3, 140) != nil || strings.Count(value.Repository, "/") != 1 || validateDynamicID(value.TargetRepositoryID) != nil || value.OverseerAgentID != "" && validateDynamicID(value.OverseerAgentID) != nil || validateBoundedText(value.Label, 0, 100) != nil || (value.Policy != "manual" && value.Policy != "trusted_authors") || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || len(value.TrustedAuthors) > 25 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, author := range value.TrustedAuthors {
+		if validateBoundedText(author, 1, 39) != nil || seen[strings.ToLower(author)] {
+			return false
+		}
+		seen[strings.ToLower(author)] = true
+	}
+	return value.Policy != "trusted_authors" || len(value.TrustedAuthors) > 0
+}
+
+func validIntake(value Intake) bool {
+	if value.Page > 1000 || value.IssueNumber > Decimal(MaxSQLiteInteger) {
+		return false
+	}
+	validHash := func(value string) bool {
+		decoded, err := hex.DecodeString(value)
+		return err == nil && len(decoded) == 32 && hex.EncodeToString(decoded) == value
+	}
+	switch value.Action {
+	case "list":
+		return value.SourceID == "" && value.Configuration == nil && value.ExpectedRevision == 0 && value.ReviewedRevision == 0 && value.Page == 0 && value.IssueNumber == 0 && value.ContentHash == "" && value.AcceptanceID == "" && (value.ProjectID == "" || validateDynamicID(value.ProjectID) == nil)
+	case "create":
+		return validateDynamicID(value.SourceID) == nil && validateDynamicID(value.ProjectID) == nil && value.Configuration != nil && validIntakeConfiguration(*value.Configuration) && value.ExpectedRevision == 0 && value.ReviewedRevision == 0 && value.Page == 0 && value.IssueNumber == 0 && value.ContentHash == "" && value.AcceptanceID == ""
+	case "update":
+		return validateDynamicID(value.SourceID) == nil && validateDynamicID(value.ProjectID) == nil && value.Configuration != nil && validIntakeConfiguration(*value.Configuration) && value.ExpectedRevision > 0 && value.ReviewedRevision == 0 && value.Page == 0 && value.IssueNumber == 0 && value.ContentHash == "" && value.AcceptanceID == ""
+	case "preview", "refresh", "tick":
+		return validateDynamicID(value.SourceID) == nil && value.ProjectID == "" && value.Configuration == nil && value.ExpectedRevision == 0 && value.ReviewedRevision == 0 && value.Page > 0 && value.IssueNumber == 0 && value.ContentHash == "" && value.AcceptanceID == ""
+	case "enable":
+		return validateDynamicID(value.SourceID) == nil && value.ProjectID == "" && value.Configuration == nil && value.ExpectedRevision > 0 && value.ReviewedRevision == value.ExpectedRevision && value.Page == 0 && value.IssueNumber == 0 && value.ContentHash == "" && value.AcceptanceID == ""
+	case "pause":
+		return validateDynamicID(value.SourceID) == nil && value.ProjectID == "" && value.Configuration == nil && value.ExpectedRevision > 0 && value.ReviewedRevision == 0 && value.Page == 0 && value.IssueNumber == 0 && value.ContentHash == "" && value.AcceptanceID == ""
+	case "accept":
+		return validateDynamicID(value.SourceID) == nil && value.ProjectID == "" && value.Configuration == nil && value.ExpectedRevision > 0 && value.ReviewedRevision == 0 && value.Page == 0 && value.IssueNumber > 0 && validHash(value.ContentHash) && value.AcceptanceID == ""
+	case "withdraw", "import":
+		return value.SourceID == "" && value.ProjectID == "" && value.Configuration == nil && value.ExpectedRevision == 0 && value.ReviewedRevision == 0 && value.Page == 0 && value.IssueNumber == 0 && value.ContentHash == "" && validateDynamicID(value.AcceptanceID) == nil
+	}
+	return false
+}
+
+func validIntakeResult(value IntakeResult) bool {
+	if validateBoundedText(value.State, 1, 128) != nil || len(value.ImportedTasks) > MaxSnapshotEntities || len(value.Sources) > MaxSnapshotEntities || len(value.Candidates) > MaxSnapshotEntities || value.NextPage != nil && (*value.NextPage == 0 || *value.NextPage > 1000) || value.ReviewedRevision > Decimal(MaxSQLiteInteger) || value.AcceptanceID != "" && validateDynamicID(value.AcceptanceID) != nil || value.TaskID != "" && validateDynamicID(value.TaskID) != nil {
+		return false
+	}
+	for _, task := range value.ImportedTasks {
+		if validateDynamicID(task) != nil {
+			return false
+		}
+	}
+	for _, source := range value.Sources {
+		if validateDynamicID(source.ID) != nil || validateDynamicID(source.ProjectID) != nil || source.GitHubRepositoryID == 0 || source.GitHubRepositoryID > Decimal(MaxSQLiteInteger) || source.Revision == 0 || !validIntakeConfiguration(IntakeConfiguration{PriorityDefault: source.PriorityDefault, PriorityByLabel: source.PriorityByLabel, Repository: source.Repository, TargetRepositoryID: source.TargetRepositoryID, OverseerAgentID: source.OverseerAgentID, Label: source.Label, Policy: source.Policy, TrustedAuthors: source.TrustedAuthors, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}) {
+			return false
+		}
+		if source.Sync != nil && (source.Sync.LastAttemptAt > Decimal(MaxSQLiteInteger) || source.Sync.LastSuccessAt > Decimal(MaxSQLiteInteger) || source.Sync.ImportedTasks > 200 || (source.Sync.State != "ok" && source.Sync.State != "paused" && source.Sync.State != "error") || validateBoundedText(source.Sync.Error, 0, 128) != nil) {
+			return false
+		}
+	}
+	for _, candidate := range value.Candidates {
+		if candidate.Number == 0 || candidate.Number > Decimal(MaxSQLiteInteger) || validateBoundedText(candidate.URL, 0, 4096) != nil || validateBoundedText(candidate.Title, 0, 900) != nil || validateBoundedText(candidate.Body, 0, 5000) != nil || validateBoundedText(candidate.Author, 0, 44) != nil || len(candidate.Labels) > MaxSnapshotEntities || len(candidate.ContentHash) != 64 || validateBoundedText(candidate.Reason, 1, 128) != nil || candidate.AcceptanceID != "" && validateDynamicID(candidate.AcceptanceID) != nil || candidate.TaskID != "" && validateDynamicID(candidate.TaskID) != nil {
+			return false
+		}
+		for _, label := range candidate.Labels {
+			if validateBoundedText(label, 1, 100) != nil {
+				return false
+			}
+		}
 	}
 	return true
 }

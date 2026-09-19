@@ -341,15 +341,27 @@ func (backend *browserBackend) GitHubConnection(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.GitHubConnectionResult{}, err
 	}
-	defer release()
 	if client.ID != clientID || backend.owner == nil {
+		release()
 		return browserprotocol.GitHubConnectionResult{}, browser.ErrUnauthorized
 	}
+	// The request was admitted while authorized. Let revocation close the
+	// transport and cancel an in-flight broker call, then check authority again
+	// before returning any private connection or repository metadata.
+	release()
 	input := api.GitHubConnectionInput{Action: request.Action, Code: request.Code, Page: request.Page, InstallationID: request.InstallationID}
 	for _, item := range request.Repositories {
 		input.Repositories = append(input.Repositories, maintainer.Delegation{InstallationID: item.InstallationID, RepositoryID: item.RepositoryID, Repository: item.Repository})
 	}
+	if backend.owner.browserRemote != nil {
+		backend.owner.browserRemote(ctx, "github")
+	}
 	result := backend.owner.GitHubConnection(ctx, input)
+	_, release, _, err = backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.GitHubConnectionResult{}, err
+	}
+	release()
 	return projectGitHubConnection(result), nil
 }
 
@@ -492,8 +504,13 @@ func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [bro
 	return browserprotocol.ProjectCreateResult{ProjectID: project.ID.String(), Revision: decimalRevision(project.Revision)}, nil
 }
 
-func browserRepository(value kernel.ProjectRepository) browserprotocol.Repository {
-	return browserprotocol.Repository{ID: value.ID.String(), ProjectID: value.ProjectID.String(), Name: value.Name, Root: value.Root, BaseRef: value.BaseRef, Enabled: browserprotocol.Bool(value.Enabled), Default: browserprotocol.Bool(value.Default), Revision: decimalRevision(value.Revision)}
+func browserRepository(value api.ProjectRepository) browserprotocol.Repository {
+	result := browserprotocol.Repository{ID: value.ID, ProjectID: value.ProjectID, Name: value.Name, Root: value.Root, BaseRef: value.BaseRef, Enabled: browserprotocol.Bool(value.Enabled), Default: browserprotocol.Bool(value.Default), Revision: browserprotocol.Decimal(value.Revision), FetchState: value.FetchState, PublicationState: value.PublicationState, ReadinessMessage: value.ReadinessMessage}
+	if value.GitHubRepositoryID != 0 {
+		id := browserprotocol.Decimal(value.GitHubRepositoryID)
+		result.GitHubRepositoryID = &id
+	}
+	return result
 }
 func (backend *browserBackend) Repositories(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.RepositoriesGet) (browserprotocol.Repositories, error) {
 	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
@@ -511,7 +528,14 @@ func (backend *browserBackend) Repositories(ctx context.Context, rawClient [brow
 	}
 	result := browserprotocol.Repositories{ProjectID: request.ProjectID, Items: make([]browserprotocol.Repository, 0, len(values))}
 	for _, value := range values {
-		result.Items = append(result.Items, browserRepository(value))
+		view := repositoryDTO(value)
+		if backend.owner != nil {
+			view, err = backend.owner.RepositoryReadiness(ctx, value.ID, false)
+			if err != nil {
+				return browserprotocol.Repositories{}, mapBrowserError(err)
+			}
+		}
+		result.Items = append(result.Items, browserRepository(view))
 	}
 	return result, nil
 }
@@ -520,7 +544,14 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	if err != nil {
 		return browserprotocol.RepositoryMutateResult{}, err
 	}
-	defer release()
+	remote := request.Action == "fetch" || request.Action == "github"
+	if remote {
+		// Source inspection and GitHub verification can wait on a remote. A
+		// paired-client revocation must be able to cancel that transport.
+		release()
+	} else {
+		defer release()
+	}
 	at, err := backend.timestamp()
 	if err != nil {
 		return browserprotocol.RepositoryMutateResult{}, mapBrowserError(err)
@@ -539,12 +570,42 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 		if err != nil {
 			return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(err)
 		}
-		item := browserRepository(value)
+		item := browserRepository(repositoryDTO(value))
 		return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
 	}
 	id, err := parse()
 	if err != nil {
 		return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+	}
+	if remote {
+		if backend.owner == nil {
+			return browserprotocol.RepositoryMutateResult{}, browser.ErrStale
+		}
+		if backend.owner.browserRemote != nil {
+			backend.owner.browserRemote(ctx, "repository")
+		}
+		var callErr error
+		if request.Action == "github" {
+			callErr = backend.owner.BindProjectRepositoryGitHub(ctx, id)
+		}
+		var view api.ProjectRepository
+		if callErr == nil {
+			view, callErr = backend.owner.RepositoryReadiness(ctx, id, request.Action == "fetch")
+		}
+		_, release, _, err = backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+		if err != nil {
+			return browserprotocol.RepositoryMutateResult{}, err
+		}
+		release()
+		if callErr != nil {
+			return browserprotocol.RepositoryMutateResult{}, consoleUpdateError(callErr)
+		}
+		if request.Action == "github" {
+			view.PublicationState = "ready"
+			view.ReadinessMessage = "Repository identity verified through the GitHub connection. Publication permissions are checked for each operation."
+		}
+		item := browserRepository(view)
+		return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
 	}
 	expected, err := browserDecimal(request.ExpectedRevision)
 	if err != nil {
@@ -574,7 +635,7 @@ func (backend *browserBackend) MutateRepository(ctx context.Context, rawClient [
 	if request.Action == "remove" {
 		return browserprotocol.RepositoryMutateResult{}, nil
 	}
-	item := browserRepository(value)
+	item := browserRepository(repositoryDTO(value))
 	return browserprotocol.RepositoryMutateResult{Repository: &item}, nil
 }
 

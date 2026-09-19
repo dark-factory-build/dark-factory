@@ -32,9 +32,12 @@ type Daemon struct {
 	intakeControllerHome string
 	// intakeIssues is a package-test-only remote failure/race seam.
 	intakeIssues func(context.Context, string, uint64, uint32, string, uint64) (maintainer.IssuePage, error)
-	maintainerMu sync.Mutex
-	store        *kernel.Store
-	now          func() time.Time
+	// browserRemote is a package-test-only seam for operator calls that wait
+	// outside a paired client's gate.
+	browserRemote func(context.Context, string)
+	maintainerMu  sync.Mutex
+	store         *kernel.Store
+	now           func() time.Time
 
 	// Cleanup survives caller cancellation but remains interruptible by daemon shutdown.
 	cleanupCtx    context.Context

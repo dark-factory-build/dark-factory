@@ -16,6 +16,7 @@ import {
   encodeProjectCreate,
   encodeRepositoriesGet,
   encodeRepositoryMutate,
+  encodeIntake,
   encodeTaskDetailGet,
   encodeTaskHistoryGet,
   encodeTerminalTargetGet,
@@ -47,6 +48,8 @@ import {
   type TaskUpdateBody,
   type TerminalTargetDescriptor,
   type TopologyBody,
+  type IntakeBody,
+  type IntakeResultBody,
   type GitHubConnectionBody,
   type GitHubConnectionResultBody,
 } from "./control.js";
@@ -190,6 +193,7 @@ export type TaskListView = Readonly<{ agentId: string; head: bigint; total: bigi
 type InvitePending = { resolve: (value: RemoteInvite) => void; reject: (error: unknown) => void };
 type PushPending = { resolve: () => void; reject: (error: unknown) => void };
 type AccountPending = { operation?: ProjectContentOperation; kind: "PROJECT_CONTENT_RESULT" | "ACCOUNTS" | "ACCOUNT_LINK_RESULT" | "ACCOUNT_UPDATE_RESULT" | "BROWSER_CLIENTS" | "BROWSER_CLIENT_REVOKE_RESULT" | "PROJECT_CREATE_RESULT" | "REPOSITORIES" | "REPOSITORY_MUTATE_RESULT"; accountId?: string; entityId?: string; expectedRevision?: bigint; action?: RepositoryMutateBody["action"]; resolve: (value: never) => void; reject: (error: unknown) => void };
+
 type GitHubPending = { resolve: (value: GitHubConnectionResult) => void; reject: (error: unknown) => void };
 
 /** One identity the factory has granted and not revoked. */
@@ -200,15 +204,17 @@ export type BrowserClientsView = Readonly<{ clients: readonly BrowserClientView[
 export type DiscoveredAccountView = AccountsBody["accounts"][number];
 export type AccountLinkResult = Readonly<{ accountId: string; revision: bigint }>;
 export type AccountUpdateResult = Readonly<{ accountId: string; revision: bigint }>;
-export type GitHubConnectionResult = Readonly<GitHubConnectionResultBody>;
 export type RepositoryView = Readonly<RepositoryItem>;
 export type ProjectCreateResult = Readonly<{ projectId: string; revision: bigint }>;
 export type RepositoryMutation =
   | Readonly<{ projectId: string; action: "add"; name: string; root: string; baseRef: string }>
+  | Readonly<{ projectId: string; repositoryId: string; action: "github" | "fetch" }>
   | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "name"; name: string }>
   | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "base"; baseRef: string }>
   | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "default" | "remove" }>
   | Readonly<{ projectId: string; repositoryId: string; expectedRevision: bigint; action: "enabled"; enabled: boolean }>;
+export type IntakeView = Readonly<IntakeResultBody>;
+export type GitHubConnectionResult = Readonly<GitHubConnectionResultBody>;
 
 /** One minted remote pairing invitation and the code that carries it. */
 export type RemoteInvite = Readonly<{ link: string; expiresAtMs: bigint; svg: string }>;
@@ -289,6 +295,7 @@ export class BrowserSession {
   #invitePending = new Map<string, InvitePending>();
   #pushPending = new Map<string, PushPending>();
   #accountPending = new Map<string, AccountPending>();
+  #intakePending = new Map<string, { resolve: (value: IntakeView) => void; reject: (error: unknown) => void }>();
   #githubPending = new Map<string, GitHubPending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
   #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId: string }>();
@@ -415,15 +422,32 @@ export class BrowserSession {
       if (bounded(request.name, MAX_AGENT_NAME_BYTES) || bounded(request.root, 4096) || bounded(request.baseRef, 4096) || !request.root.startsWith("/")) return Promise.reject(new SessionError("invalid_request"));
       try { repositoryId = this.#randomID(); } catch (error) { return Promise.reject(error); }
       body = { action: "add", id: repositoryId, project_id: request.projectId, name: request.name, root: request.root, base_ref: request.baseRef };
+    } else if (request.action === "github" || request.action === "fetch") {
+      if (!validDynamicID(request.repositoryId)) return Promise.reject(new SessionError("invalid_request"));
+      repositoryId = request.repositoryId;
+      body = { action: request.action, id: repositoryId };
     } else {
-      if (!validDynamicID(request.repositoryId) || request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
+      if (!validDynamicID(request.repositoryId) || !("expectedRevision" in request) || request.expectedRevision < 1n || request.expectedRevision > MAX_SQLITE_INTEGER) return Promise.reject(new SessionError("invalid_request"));
       repositoryId = request.repositoryId;
       body = { action: request.action, id: repositoryId, expected_revision: request.expectedRevision };
       if (request.action === "name") { if (bounded(request.name, MAX_AGENT_NAME_BYTES)) return Promise.reject(new SessionError("invalid_request")); body.name = request.name; }
       if (request.action === "base") { if (bounded(request.baseRef, 4096)) return Promise.reject(new SessionError("invalid_request")); body.base_ref = request.baseRef; }
       if (request.action === "enabled") body.enabled = request.enabled;
     }
-    return this.#accountRequest("REPOSITORY_MUTATE_RESULT", CAPABILITIES.administration, "repository-mutate", (id) => encodeRepositoryMutate(id, body), { entityId: repositoryId, expectedRevision: request.action === "add" ? undefined : request.expectedRevision, action: request.action });
+    const expectedRevision = "expectedRevision" in request ? request.expectedRevision : undefined;
+    return this.#accountRequest("REPOSITORY_MUTATE_RESULT", CAPABILITIES.administration, "repository-mutate", (id) => encodeRepositoryMutate(id, body), { entityId: repositoryId, expectedRevision, action: request.action });
+  }
+
+  /** Private operator intake controls; candidate content never enters STATE. */
+  intake(request: IntakeBody): Promise<IntakeView> {
+    try { this.#ensureLive(); } catch (error) { return Promise.reject(error); }
+    if ((this.#capabilities & CAPABILITIES.administration) === 0) return Promise.reject(new SessionError("unauthorized"));
+    if (this.#intakePending.size >= MAX_ARRAY_ITEMS) return Promise.reject(new SessionError("rate_limited"));
+    const id = this.#nextID("intake"); let payload: string; let body = request;
+    try { if (body.action === "create" && body.source_id === undefined) body = { ...body, source_id: this.#randomID() }; payload = encodeIntake(id, body); } catch (error) { return Promise.reject(error); }
+    const result = new Promise<IntakeView>((resolve, reject) => this.#intakePending.set(id, { resolve, reject }));
+    try { this.#send(payload); } catch { this.#fail(new SessionError("connection")); }
+    return result;
   }
 
   /** Edit one still-queued task: its brief, priority, assignment, or cancel it. */
@@ -826,6 +850,10 @@ export class BrowserSession {
       this.#taskResult(frame.body, frame.id);
       return;
     }
+    if (frame.type === "INTAKE_RESULT") {
+      const pending = this.#intakePending.get(frame.id); if (pending === undefined) throw new ProtocolError("malformed");
+      this.#intakePending.delete(frame.id); pending.resolve(Object.freeze(frame.body)); return;
+    }
     if (frame.type === "AGENT_CONTROL_RESULT") {
       this.#agentControlResult(frame.body, frame.id);
       return;
@@ -849,10 +877,7 @@ export class BrowserSession {
       this.#accountResult(frame);
       return;
     }
-    if (frame.type === "GITHUB_CONNECTION_RESULT") {
-      this.#githubResult(frame.body, frame.id);
-      return;
-    }
+    if (frame.type === "GITHUB_CONNECTION_RESULT") { this.#githubResult(frame.body, frame.id); return; }
     if (terminalControlFrame(frame)) {
       if (frame.type === "TERMINAL_EOF") { if (!this.#anyTerminal((handle) => handle.receiveEOF(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
       if (frame.type === "TERMINAL_EXIT") { if (!this.#anyTerminal((handle) => handle.receiveExit(frame.id, frame.body))) throw new ProtocolError("malformed"); return; }
@@ -977,6 +1002,12 @@ export class BrowserSession {
       if (github !== undefined) {
         this.#githubPending.delete(id);
         github.reject(new SessionError(frame.body.code, frame.body.retryable));
+        return;
+      }
+      const intake = this.#intakePending.get(id);
+      if (intake !== undefined) {
+        this.#intakePending.delete(id);
+        intake.reject(new SessionError(frame.body.code, frame.body.retryable));
         return;
       }
     }
@@ -1168,7 +1199,7 @@ export class BrowserSession {
 
   /** Every request still waiting on a result learns the session is gone, once. */
   #closePending(error: SessionError | ProtocolError): void {
-    for (const pending of [this.#targetPending, this.#taskPending, this.#agentControlPending, this.#consolePending, this.#invitePending, this.#pushPending, this.#accountPending, this.#githubPending, this.#humanPending]) {
+    for (const pending of [this.#targetPending, this.#taskPending, this.#agentControlPending, this.#consolePending, this.#invitePending, this.#pushPending, this.#accountPending, this.#intakePending, this.#githubPending, this.#humanPending]) {
       for (const entry of pending.values()) entry.reject(error);
       pending.clear();
     }
