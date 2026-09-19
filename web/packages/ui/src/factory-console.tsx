@@ -408,4 +408,3 @@ function entityLabel(entities: ReadonlyMap<string, { name?: string; title?: stri
 function shortID(value: string): string {
   return value.slice(0, 8);
 }
-
