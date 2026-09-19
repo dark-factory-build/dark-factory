@@ -219,7 +219,7 @@ func TestServiceStatusCLIUsesExactReadOnlyInspectorAndBoundedOutput(t *testing.T
 		lookups = append(lookups, name)
 		return "/private/tmp/user-private-sentinel"
 	}, &stdout, &stderr, nil, inspector)
-	if exit != 0 || calls != 1 || stdout.String() != "{\"state\":\"absent\"}\n" || stderr.Len() != 0 {
+	if exit != 0 || calls != 1 || stdout.String() != "{\"state\":\"absent\",\"intake\":{\"state\":\"absent\"}}\n" || stderr.Len() != 0 {
 		t.Fatalf("status = exit %d calls %d stdout %q stderr %q", exit, calls, stdout.String(), stderr.String())
 	}
 	if len(lookups) != 0 {
@@ -298,7 +298,7 @@ func TestServiceStatusCLIRefusesMissingHomeOrNonAbsentProjection(t *testing.T) {
 				return test.userHome
 			}, &stdout, &stderr, nil, test.inspector)
 			if test.name == "alternate HOME ignored" {
-				if exit != 0 || stdout.String() != "{\"state\":\"absent\"}\n" || stderr.Len() != 0 {
+				if exit != 0 || stdout.String() != "{\"state\":\"absent\",\"intake\":{\"state\":\"absent\"}}\n" || stderr.Len() != 0 {
 					t.Fatalf("alternate HOME affected status: exit %d stdout %q stderr %q", exit, stdout.String(), stderr.String())
 				}
 			} else if exit != exitFailure || stdout.Len() != 0 || stderr.Len() == 0 {

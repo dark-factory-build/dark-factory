@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -374,7 +375,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 		return runHome(ctx, command, stdout, stderr)
 	}
 	if command.kind == commandServiceStatus || command.kind == commandServiceInstall || command.kind == commandServiceStart || command.kind == commandServiceStop || command.kind == commandServiceUninstall {
-		return runService(ctx, command, stdout, stderr, inspect, opener)
+		return runService(ctx, command, getenv, stdout, stderr, inspect, opener, runIntakeService)
 	}
 	if command.kind == commandWebStatus || command.kind == commandWebListClients || command.kind == commandWebRevoke {
 		return runWeb(ctx, command, getenv, stdout, stderr)
@@ -1178,7 +1179,26 @@ func serviceConfigFor(command attemptCommand) install.ServiceConfig {
 	return config
 }
 
-func runService(ctx context.Context, command attemptCommand, stdout, stderr io.Writer, inspect serviceInspector, opener browserOpener) int {
+type intakeServiceRunner func(context.Context, []string, func(string) string, io.Writer, io.Writer) int
+
+type intakeServiceStatus struct {
+	State  string          `json:"state"`
+	Detail string          `json:"detail,omitempty"`
+	Sync   json.RawMessage `json:"sync,omitempty"`
+}
+
+type serviceStatusOutput struct {
+	install.ServiceStatus
+	Intake intakeServiceStatus `json:"intake"`
+}
+
+type serviceInstallOutput struct {
+	serviceStatusOutput
+	PairPage      string `json:"pair_page,omitempty"`
+	BrowserOpened bool   `json:"browser_opened"`
+}
+
+func runService(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer, inspect serviceInspector, opener browserOpener, intakeRunner intakeServiceRunner) int {
 	callContext, cancel := context.WithTimeout(ctx, serviceRequestTimeout)
 	defer cancel()
 	config := serviceConfigFor(command)
@@ -1209,6 +1229,18 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 	case commandServiceStop:
 		status, err = install.ServiceStop(callContext, command.home, config)
 	case commandServiceUninstall:
+		intake, ready := managedIntakeStatus(callContext, command.home, getenv, intakeRunner)
+		if !ready {
+			_, _ = io.WriteString(stderr, "factoryctl: intake service must be removed before factoryd; "+intake.Detail+"\n")
+			return exitFailure
+		}
+		if intake.State == "scheduled" || intake.State == "stopped" {
+			var output bytes.Buffer
+			if intakeRunner == nil || intakeRunner(callContext, []string{"uninstall", "--home", command.home}, getenv, &output, stderr) != 0 || intakeServiceResult(output.Bytes(), "uninstall").State != "absent" {
+				_, _ = io.WriteString(stderr, "factoryctl: intake service must be removed before factoryd; run factoryctl intake service uninstall --home ABSOLUTE\n")
+				return exitFailure
+			}
+		}
 		status, err = install.ServiceUninstall(callContext, command.home, config)
 	}
 	if err != nil {
@@ -1252,17 +1284,113 @@ func runService(ctx context.Context, command attemptCommand, stdout, stderr io.W
 		_, _ = io.WriteString(stderr, "factoryctl: the service projection is ambiguous\n")
 		return exitFailure
 	}
+	intake, _ := managedIntakeStatus(callContext, command.home, getenv, intakeRunner)
+	packagedIntake := command.kind == commandServiceInstall && installedIntakeAssets()
+	if packagedIntake {
+		var diagnostic []byte
+		var failed bool
+		intake, diagnostic, failed = installManagedIntake(callContext, command.home, getenv, intakeRunner)
+		if failed {
+			_, _ = stderr.Write(diagnostic)
+			_, _ = io.WriteString(stderr, "factoryctl: factoryd started, but intake setup failed; run factoryctl intake service install --home ABSOLUTE after resolving the reported problem\n")
+			return exitFailure
+		}
+	}
+	if command.kind == commandServiceInstall && !packagedIntake && intake.State == "absent" {
+		intake = intakeServiceStatus{State: "unavailable", Detail: "Install a release or Homebrew factoryctl to add managed intake."}
+	}
 	if command.kind == commandServiceInstall && pairPageOpens(existing, status.State) {
 		// The one command whose result is more than the projection. Every word
 		// of it goes in the JSON on stdout: this output is parsed, and a stray
 		// stderr line would be merged into it by any caller reading both.
-		return writeJSON(stdout, struct {
-			install.ServiceStatus
-			PairPage      string `json:"pair_page,omitempty"`
-			BrowserOpened bool   `json:"browser_opened"`
-		}{ServiceStatus: status, PairPage: pairPageURL, BrowserOpened: openPairPage(ctx, pairListenAddress, pairPageURL, opener)})
+		return writeJSON(stdout, serviceInstallOutput{serviceStatusOutput: serviceStatusOutput{ServiceStatus: status, Intake: intake}, PairPage: pairPageURL, BrowserOpened: openPairPage(ctx, pairListenAddress, pairPageURL, opener)})
 	}
-	return writeJSON(stdout, status)
+	return writeJSON(stdout, serviceStatusOutput{ServiceStatus: status, Intake: intake})
+}
+
+// managedIntakeStatus is deliberately separate from factoryd's service state:
+// a source checkout can run factoryd without packaged controller assets, while
+// a release gets one controller schedule through the existing private receipt.
+func managedIntakeStatus(ctx context.Context, home string, getenv func(string) string, runner intakeServiceRunner) (intakeServiceStatus, bool) {
+	return managedIntakeStatusWithAssets(ctx, home, getenv, runner, installedIntakeAssets())
+}
+
+func managedIntakeStatusWithAssets(ctx context.Context, home string, getenv func(string) string, runner intakeServiceRunner, assets bool) (intakeServiceStatus, bool) {
+	present, err := managedIntakeReceipt(home)
+	if err != nil {
+		return intakeServiceStatus{State: "unavailable", Detail: "Intake receipt is unsafe; inspect it before retrying."}, false
+	}
+	if !present && !assets {
+		if _, err := os.Lstat(home + ".intake"); errors.Is(err, os.ErrNotExist) {
+			return intakeServiceStatus{State: "absent"}, true
+		}
+		return intakeServiceStatus{State: "unavailable", Detail: "Intake state needs a packaged release to inspect safely."}, false
+	}
+	var output, serviceErr bytes.Buffer
+	if runner == nil || runner(ctx, []string{"status", "--home", home}, getenv, &output, &serviceErr) != 0 {
+		return intakeServiceStatus{State: "unavailable", Detail: "Run factoryctl intake service status --home ABSOLUTE."}, false
+	}
+	result := intakeServiceResult(output.Bytes(), "status")
+	return result, result.State != "unavailable"
+}
+
+func managedIntakeReceipt(home string) (bool, error) {
+	_, err := os.Lstat(home + ".intake/service.json")
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_, err = privateControllerFile(home+".intake/service.json", 16384, true)
+	return err == nil, err
+}
+
+func installedIntakeAssets() bool {
+	executable, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		return false
+	}
+	_, err = installedIntakeController(executable)
+	return err == nil
+}
+
+func intakeServiceResult(output []byte, action string) intakeServiceStatus {
+	var result struct {
+		State string          `json:"state"`
+		Sync  json.RawMessage `json:"sync"`
+	}
+	if len(output) > 64<<10 || json.Unmarshal(output, &result) != nil {
+		return intakeServiceStatus{State: "unavailable", Detail: "Managed intake returned an invalid status; run factoryctl intake service " + action + " --home ABSOLUTE."}
+	}
+	switch result.State {
+	case "scheduled", "stopped":
+		return intakeServiceStatus{State: result.State, Sync: result.Sync}
+	case "absent":
+		return intakeServiceStatus{State: "absent"}
+	default:
+		return intakeServiceStatus{State: "unavailable", Detail: "Managed intake is not scheduled; run factoryctl intake service " + action + " --home ABSOLUTE."}
+	}
+}
+
+func legacyIntakeSchedule(output string) bool {
+	return strings.Contains(output, "legacy intake already schedules this factory")
+}
+
+func installManagedIntake(ctx context.Context, home string, getenv func(string) string, runner intakeServiceRunner) (intakeServiceStatus, []byte, bool) {
+	var output, diagnostic bytes.Buffer
+	if runner == nil || runner(ctx, []string{"install", "--home", home}, getenv, &output, &diagnostic) != 0 {
+		if legacyIntakeSchedule(diagnostic.String()) {
+			return intakeServiceStatus{State: "unavailable", Detail: "A legacy intake controller manages this factory; run its explicit migration before replacing it."}, nil, false
+		}
+		return intakeServiceStatus{State: "unavailable"}, diagnostic.Bytes(), true
+	}
+	result := intakeServiceResult(output.Bytes(), "install")
+	return result, nil, result.State != "scheduled"
 }
 
 // inspectService is the read-only projection status and install share: the

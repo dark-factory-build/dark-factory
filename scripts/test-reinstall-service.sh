@@ -28,6 +28,20 @@ fake_home=$temporary/home
 mkdir -p "$test_repository/scripts" "$fake_bin" "$fake_home/.dark-factory"
 cp "$repository_root/scripts/reinstall-service.sh" "$test_repository/scripts/reinstall-service.sh"
 cp "$repository_root/scripts/verification-profile.mjs" "$test_repository/scripts/verification-profile.mjs"
+for controller_asset in \
+    cold-review.sh \
+    factory-autonomy.py \
+    factory-delivery.py \
+    factory-intake.py \
+    factory-publication.py \
+    factory-release.py \
+    factory-review-intake.py \
+    go-gate-environment.sh \
+    verify-adversarial-review.sh \
+    supervision.md
+do
+    cp "$repository_root/scripts/$controller_asset" "$test_repository/scripts/$controller_asset"
+done
 
 git -C "$test_repository" init -q -b main
 git -C "$test_repository" config user.name fixture
@@ -35,7 +49,7 @@ git -C "$test_repository" config user.email fixture@example.invalid
 printf 'fixture\n' >"$test_repository/README.md"
 printf 'module fixture\n\ngo 1.2.3\n' >"$test_repository/go.mod"
 printf '0.3.5\n' >"$test_repository/VERSION"
-git -C "$test_repository" add README.md go.mod VERSION
+git -C "$test_repository" add README.md go.mod VERSION scripts
 git -C "$test_repository" commit -q -m fixture
 git clone -q --bare "$test_repository" "$temporary/origin.git"
 git -C "$test_repository" remote add origin "$temporary/origin.git"
@@ -303,6 +317,22 @@ for cmd in factoryctl factoryd factory-runner; do
     [ -x "$test_repository/.worktrees/bin-$sha/$cmd" ] || fail "$cmd not built"
     grep -q '^# pins GOTOOLCHAIN=go1.2.3 GOENV=off GOAUTH=off$' "$test_repository/.worktrees/bin-$sha/$cmd" \
         || fail "$cmd not built with the go.mod toolchain pinned: $(grep '^# pins' "$test_repository/.worktrees/bin-$sha/$cmd")"
+done
+for controller_asset in \
+    cold-review.sh \
+    factory-autonomy.py \
+    factory-delivery.py \
+    factory-intake.py \
+    factory-publication.py \
+    factory-release.py \
+    factory-review-intake.py \
+    go-gate-environment.sh \
+    verify-adversarial-review.sh \
+    supervision.md
+do
+    installed="$test_repository/.worktrees/bin-$sha/libexec/dark-factory/$controller_asset"
+    [ -x "$installed" ] && cmp -s "$installed" "$test_repository/.worktrees/build-$sha/scripts/$controller_asset" \
+        || fail "controller asset was not prepared with factoryctl: $controller_asset"
 done
 builds=$(wc -l <"$DARK_FACTORY_TEST_GO_LOG" | tr -d ' ')
 [ "$builds" -gt 0 ] && [ "$(grep -F -c -- '-buildvcs=true' "$DARK_FACTORY_TEST_GO_LOG")" = "$builds" ] \

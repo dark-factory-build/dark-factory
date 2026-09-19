@@ -188,6 +188,28 @@ else
                 && join("|", @{$identity}{qw(version source target build_id)}) eq $expected;
         ' "$receipt" || { echo "$cmd build receipt mismatch" >&2; exit 1; }
     done
+    # Keep the managed intake controller beside the exact factoryctl that will
+    # run it. This is the same release asset set, so a reinstall never removes
+    # an existing companion and then falls back to a source checkout.
+    controller_dir="$bin/libexec/dark-factory"
+    mkdir -p "$controller_dir"
+    for controller_asset in \
+        cold-review.sh \
+        factory-autonomy.py \
+        factory-delivery.py \
+        factory-intake.py \
+        factory-publication.py \
+        factory-release.py \
+        factory-review-intake.py \
+        go-gate-environment.sh \
+        verify-adversarial-review.sh \
+        supervision.md
+    do
+        [ -f "$worktree/scripts/$controller_asset" ] \
+            || { echo "release controller asset is missing: $controller_asset" >&2; exit 1; }
+        cp "$worktree/scripts/$controller_asset" "$controller_dir/$controller_asset"
+        chmod 755 "$controller_dir/$controller_asset"
+    done
 
     exit 0
 fi
