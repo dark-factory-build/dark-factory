@@ -167,9 +167,12 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?:
   };
   // Imports are observed between packages; a room stands for everything beneath
   // it, so each link is drawn between the rooms that show its two ends.
+  // The scope's own room holds only its direct files: a descendant that climbs
+  // to it sits under a child on another page, which this floor does not show.
+  const roomOf = (id: string) => { const shownAs = visibleAncestor(id); return shownAs === validScope && id !== validScope ? undefined : shownAs; };
   const rolled = new Map<string, Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>>();
   for (const room of roomByID.values()) for (const link of room.dependencies?.links ?? []) {
-    const from = visibleAncestor(room.id), to = visibleAncestor(link.nodeId);
+    const from = roomOf(room.id), to = roomOf(link.nodeId);
     if (from === undefined || to === undefined || from === to) continue;
     const links = rolled.get(from) ?? new Map(), key = `${link.direction} ${to}`, target = roomByID.get(to)!;
     links.set(key, { nodeId: to, label: target.label, path: target.path, direction: link.direction, weight: (links.get(key)?.weight ?? 0) + link.weight });

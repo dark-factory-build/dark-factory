@@ -2154,6 +2154,17 @@ test("paging reaches all served siblings and leaf inspection; stale scopes and p
 });
 
 
+test("a link to a room on another page is not drawn from the scope's direct-files room", () => {
+  const root = fixtureTopology.nodes[0];
+  const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
+  const topology = served({ ...fixtureTopology, nodes: [root, ...children], dependencies: { omitted: 0, edges: [
+    { from: root.id, to: children[0].id, weight: 1 }, { from: children[29].id, to: children[0].id, weight: 5 }] } });
+  const links = (page) => Object.fromEntries(floorScene(fixtureState, topology, undefined, undefined, `${ids.project}:${root.id}`, page).topology.nodes
+    .filter((node) => node.dependencies.links.length > 0).map((node) => [node.path, node.dependencies.links.map((link) => `${link.direction} ${link.path} ${link.weight}`)]));
+  assert.deepEqual(links(0), { ".": ["to child-0 1"], "child-0": ["from . 1"] }, "the off-page importer neither appears nor adds weight");
+  assert.deepEqual(links(1), {}, "child-29 is shown, the room it imports is not");
+});
+
 test("page controls reach every child without the removed room inspector", async () => {
   const root = fixtureTopology.nodes[0];
   const children = Array.from({ length: 30 }, (_, index) => ({ ...root, id: index.toString(16).padStart(64, "0"), parent_id: root.id, kind: "directory", path: `child-${index}`, label: `Child ${index}` }));
