@@ -891,5 +891,12 @@ test("dependencies are cabled between shown rooms, routes light on inspection, a
     assert.deepEqual(lit(), ["lib src"]);
     await act(async () => map.props.onPointerOver(over("repo")));
     assert.deepEqual(lit(), []);
+    for (const leave of [() => map.props.onBlur(), () => map.props.onKeyDown({ key: "Escape" }), () => map.props.onPointerLeave()]) {
+      await act(async () => map.props.onFocus(over("lib")));
+      assert.deepEqual(lit(), ["lib src"]);
+      await act(async () => leave());
+      assert.deepEqual(lit(), [], "a lit route never outlives the inspection that lit it");
+    }
+    assert.match(renderer.root.findAll((node) => node.props["data-tooltip"]?.includes("Wired to"))[0].props["data-tooltip"], /Wired to (lib|src|hidden)$/);
   } finally { globalThis.window = priorWindow; }
 });

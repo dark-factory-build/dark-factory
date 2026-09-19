@@ -282,7 +282,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
   return (
     <>
-    <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => setTooltip(undefined)} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") setTooltip(undefined); }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
+    <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => { setTooltip(undefined); setLinkedFrom(undefined); }} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") { setTooltip(undefined); setLinkedFrom(undefined); } }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
       viewBox={`0 0 ${layout.width} ${sceneHeight}`}
       role="group"
@@ -366,7 +366,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
 
 
       {appearance.scenery === "off" ? null : <g aria-hidden="true" fill="none" strokeLinecap="round" pointerEvents="none">
-        {cabling.trunks.map((trunk, index) => <path key={index} data-wire-trunk={trunk.count} d={trunk.d} stroke={trunk.wall ? "#9aa69c" : "#728078"} strokeWidth={Math.min(trunk.wall ? 4 : 8, 1.5 * Math.sqrt(trunk.count))} opacity={appearance.scenery === "subtle" ? .3 : .5} />)}
+        <g opacity={appearance.scenery === "subtle" ? .3 : .5}>{cabling.trunks.map((trunk, index) => <path key={index} data-wire-trunk={trunk.count} d={trunk.d} stroke={trunk.wall ? "#9aa69c" : "#728078"} strokeWidth={Math.min(trunk.wall ? 4 : 8, 1.5 * Math.sqrt(trunk.count))} />)}</g>
         {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
           <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
       </g>}
@@ -439,7 +439,7 @@ function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) 
   const spot = ({ x, y }: Point) => `${+x.toFixed(1)} ${+y.toFixed(1)}`;
   const stretch = (across: boolean, fixed: number, from: number, to: number) => {
     let d = "";
-    for (let along = from; from < to ? along < to : along > to; along += from < to ? 8 : -8) d += `L${spot(on(across, fixed, along))}`;
+    for (let along = from + (from < to ? 8 : -8); from < to ? along < to : along > to; along += from < to ? 8 : -8) d += `L${spot(on(across, fixed, along))}`;
     return `${d}L${spot(on(across, fixed, to))}`;
   };
   const rooms = new Map(layout.rooms.map((room) => [room.id, room]));
@@ -449,7 +449,9 @@ function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) 
   for (const node of topology.nodes) for (const link of node.dependencies?.links ?? []) {
     if (link.nodeId !== node.id && rooms.has(node.id) && rooms.has(link.nodeId)) pairs.add([node.id, link.nodeId].sort().join("\n"));
   }
+  // Leads and corner bends, drawn once however many links share them.
   const leads = new Map<string, { d: string; count: number }>();
+  const carry = (key: string, d: string) => leads.set(key, { d, count: (leads.get(key)?.count ?? 0) + 1 });
   const lead = (room: SceneRoomLayout, wallX?: number) => {
     const desk = room.contents.find((item) => item.workSurface);
     const key = `${room.id} ${wallX ?? "door"}`;
@@ -462,7 +464,7 @@ function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) 
       const plug = desk === undefined ? { x: room.x + room.width / 2, y: room.y + 60 } : { x: left ? desk.x : desk.x + desk.width, y: desk.y + 22 };
       d = `M${wallX} ${plug.y - 12}C${wallX} ${plug.y + 12} ${(wallX + plug.x) / 2} ${plug.y + 16} ${plug.x} ${plug.y}`;
     }
-    leads.set(key, { d, count: (leads.get(key)?.count ?? 0) + 1 });
+    carry(key, d);
     return d;
   };
   // Axis-aligned stretches by channel, for counting what each one carries.
@@ -486,16 +488,19 @@ function wires(layout: ReturnType<typeof layoutScene>, topology: SceneTopology) 
       points.push({ x: wall, y: points.at(-1)!.y }, { x: wall, y: (desk === undefined ? to.y + 60 : desk.y + 22) - 12 });
       tail = lead(to, wall);
     }
-    let run = "";
+    let run = "", bent = "";
     for (let at = 1; at < points.length; at += 1) {
       const a = points[at - 1]!, b = points[at]!, before = points[at - 2], next = points[at + 1];
       const across = a.y === b.y, fixed = across ? a.y : a.x, [start, end] = across ? [a.x, b.x] : [a.y, b.y];
       // A vertical stretch that is not a door stub runs inside a wall.
       const key = `${across ? "h" : at === 1 || (next === undefined && rowOf(from) === rowOf(to)) ? "v" : "w"}${fixed}`;
-      channels.set(key, [...(channels.get(key) ?? []), [Math.min(start, end), Math.max(start, end)]]);
       const corner = Math.min(8, Math.abs(end - start) / 2), way = Math.sign(end - start);
       const entry = start + (before === undefined ? 0 : way * corner), exit = end - (next === undefined ? 0 : way * corner);
+      // A stretch stops short of each bend, so a turning cable curves into the bundle it joins.
+      channels.set(key, [...(channels.get(key) ?? []), [Math.min(entry, exit), Math.max(entry, exit)]]);
+      if (before !== undefined) { const bend = `${bent}Q${a.x} ${a.y} ${spot(on(across, fixed, entry))}`; carry(bend, `M${bend}`); }
       run += `${before === undefined ? "M" : `Q${a.x} ${a.y} `}${spot(on(across, fixed, entry))}${stretch(across, fixed, entry, exit)}`;
+      bent = spot(on(across, fixed, exit));
     }
     return { from: from.id, to: to.id, d: `${lead(from)} ${run} ${tail}` };
   });
@@ -535,6 +540,8 @@ function Equipment({ item, operating, scenery }: { item: RoomContent; operating:
 
 function roomInfo(node: SceneTopology["nodes"][number]) {
   const counts = node.inventory?.[node.inventoryScope === "direct" ? "direct" : "total"];
+  // The cabling is scenery; its content is stated here for every reader and appearance.
+  const links = [...new Set((node.dependencies?.links ?? []).map((link) => link.label))];
   const inventory = counts === undefined ? "Inventory unavailable" : Object.entries(inventoryLabels).filter(([kind]) => counts[kind as keyof typeof counts] > 0).map(([kind, label]) => `${counts[kind as keyof typeof counts]} ${label.toLowerCase()}`).join(" · ") || "No scanned files";
-  return `${node.path === "." ? node.label : node.path}\n${node.language ? `${node.language} · ` : ""}${node.kind} · ${node.inventoryScope === "direct" ? "direct files" : "subtree"}\n${inventory}`;
+  return `${node.path === "." ? node.label : node.path}\n${node.language ? `${node.language} · ` : ""}${node.kind} · ${node.inventoryScope === "direct" ? "direct files" : "subtree"}\n${inventory}${links.length === 0 ? "" : `\nWired to ${links.slice(0, 6).join(", ")}${links.length > 6 ? ` +${links.length - 6}` : ""}`}`;
 }
