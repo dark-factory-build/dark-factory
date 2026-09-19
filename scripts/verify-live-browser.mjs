@@ -3,7 +3,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { verificationProfile } from './verification-profile.mjs';
+import { enforceLoopbackBoundary, verificationProfile } from './verification-profile.mjs';
 
 const require = createRequire(join(process.env.DARK_FACTORY_SITE || join(homedir(), 'dark-factory-site'), 'package.json'));
 const { chromium, expect } = require('@playwright/test');
@@ -12,9 +12,10 @@ let stage = 'launch';
 try {
   const profile = await verificationProfile();
   context = await chromium.launchPersistentContext(profile, { headless: true, viewport: { width: 1440, height: 900 } });
+  let pageFailed = false;
+  await enforceLoopbackBoundary(context, () => { pageFailed = true; });
   await context.grantPermissions(['local-network-access'], { origin: 'https://app.darkfactory.build' });
   const page = await context.newPage();
-  let pageFailed = false;
   page.on('pageerror', () => { pageFailed = true; });
   stage = 'navigation';
   await page.goto('https://app.darkfactory.build/factory', { waitUntil: 'domcontentloaded' });
@@ -37,7 +38,8 @@ try {
   process.exitCode = 1;
 } finally {
   try {
-    await context?.close();
+    // The grant must not outlive this run in the persistent profile.
+    try { await context?.clearPermissions(); } finally { await context?.close(); }
   } catch {
     process.stderr.write('live browser verification failed at cleanup\n');
     process.exitCode = 1;
