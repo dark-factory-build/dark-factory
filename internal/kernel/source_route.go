@@ -7,12 +7,26 @@ import (
 	"strings"
 )
 
+var retainedSourceReviewProviders = [...]Provider{ProviderCodex, ProviderClaudeCode}
+
 // RetainedSourceReviewSupported reports the installed provider routes that
-// can obtain an exact, read-only retained-source receipt. Claude's launch is
-// fixture-proven but lacks the protected local-command boundary required for
-// this capability, so it remains unavailable until that proof exists.
+// can obtain an exact, read-only retained-source receipt.
 func RetainedSourceReviewSupported(provider Provider) bool {
-	return provider == ProviderCodex
+	for _, supported := range retainedSourceReviewProviders {
+		if provider == supported {
+			return true
+		}
+	}
+	return false
+}
+
+func retainedSourceReviewProviderSQL() (string, []any) {
+	placeholders := make([]string, len(retainedSourceReviewProviders))
+	args := make([]any, len(retainedSourceReviewProviders))
+	for i, provider := range retainedSourceReviewProviders {
+		placeholders[i], args[i] = "?", provider.String()
+	}
+	return strings.Join(placeholders, ", "), args
 }
 
 // validateRetainedSourceReviewRoute is the installed capability table for
@@ -29,7 +43,7 @@ func validateRetainedSourceReviewRoute(taskBody string, agent Agent) error {
 		return fmt.Errorf("%w: retained-source review requires an independent worker", ErrConflict)
 	}
 	if !RetainedSourceReviewSupported(agent.Provider) {
-		return fmt.Errorf("%w: retained-source review unavailable for %s; supported routes: codex", ErrConflict, agent.Provider)
+		return fmt.Errorf("%w: retained-source review unavailable for %s; supported routes: codex, claude_code", ErrConflict, agent.Provider)
 	}
 	return nil
 }

@@ -626,10 +626,16 @@ func Build(request Request) (Launch, error) {
 		if request.reasoningEffort != "" {
 			argv = append(argv, "--effort", request.reasoningEffort)
 		}
-		// Only the installed browser and orchestrator Maintainer servers are allowed;
-		// account configuration and Change-local .mcp.json cannot add servers.
+		// Only the installed attempt, browser and orchestrator Maintainer servers
+		// are allowed; account configuration and Change-local .mcp.json cannot
+		// add servers.
 		argv = append(argv, "--strict-mcp-config")
-		servers := map[string]any{}
+		servers := map[string]any{
+			"factory_attempt": map[string]any{
+				"command": request.runtime.factoryctl,
+				"args":    []string{"attempt", "mcp"},
+			},
+		}
 		environment := request.runtime.environment(request.provider)
 		if browser != "" {
 			servers["factory_browser"] = map[string]any{"command": browser, "args": browserArgs}
