@@ -545,8 +545,12 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 	if _, err := EncodeHumanRequestDetail("detail", authorized); err != nil {
 		t.Fatalf("authorized detail = %v", err)
 	}
+	yielded := authorized
+	yielded.TerminalTarget = nil
+	if _, err := EncodeHumanRequestDetail("detail", yielded); err != nil {
+		t.Fatalf("yielded detail = %v", err)
+	}
 	for name, mutate := range map[string]func(*HumanRequestDetail){
-		"reply without target": func(value *HumanRequestDetail) { value.TerminalTarget = nil },
 		"reply without cancel": func(value *HumanRequestDetail) { value.CancelRun = nil },
 		"cancel without reply": func(value *HumanRequestDetail) { value.CanReply = false },
 		"request revision":     func(value *HumanRequestDetail) { value.CancelRun.ExpectedRequestRevision++ },
@@ -561,6 +565,10 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 				t.Fatalf("inconsistent detail accepted: %+v", value)
 			}
 		})
+	}
+	yielded.CancelRun = &HumanRequestCancelRunDescriptor{ExpectedRequestRevision: yielded.Revision}
+	if _, err := EncodeHumanRequestDetail("detail", yielded); err == nil {
+		t.Fatal("yielded detail without a run revision accepted")
 	}
 }
 

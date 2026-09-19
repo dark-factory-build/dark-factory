@@ -418,8 +418,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
         requireKeys(body.cancel_run, ["expected_request_revision", "expected_run_revision"], wire);
         cancel_run = { expected_request_revision: decimal(body.cancel_run.expected_request_revision, wire, true), expected_run_revision: decimal(body.cancel_run.expected_run_revision, wire, true) };
       }
-      if (cancel_run !== null && (terminal_target === null || !can_reply || cancel_run.expected_request_revision !== revision || cancel_run.expected_run_revision !== terminal_target.run_revision)) malformed();
-      if (can_reply && (terminal_target === null || cancel_run === null)) malformed();
+      if (cancel_run !== null && (!can_reply || cancel_run.expected_request_revision !== revision || (terminal_target !== null && cancel_run.expected_run_revision !== terminal_target.run_revision))) malformed();
+      if (can_reply && cancel_run === null) malformed();
       const options = present(body, "options") ? humanRequestOptions(body.options) : undefined;
       return { request_id, revision, question: boundedText(body.question, 1, MAX_HUMAN_QUESTION_BYTES), ...(options === undefined ? {} : { options }), can_reply, reply_max_bytes, terminal_target, cancel_run };
     }

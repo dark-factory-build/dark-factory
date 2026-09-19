@@ -500,6 +500,26 @@ func TestBrowserAdapterHumanRequestDetailAndResolvedRequestLeavesTheSnapshot(t *
 	}
 }
 
+func TestBrowserAdapterEncodesYieldedHumanRequestWithoutTerminal(t *testing.T) {
+	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve|kernel.BrowserCapabilityPrivateHumanRequestDetail|kernel.BrowserCapabilityHumanActions)
+	fixture.pair(t)
+	run := adapterRunningRun(t, fixture.store, 52)
+	var key [kernel.IDBytes]byte
+	copy(key[:], adapterID(t, 53))
+	request, err := fixture.store.CreateHumanQuestionAndYieldForAttempt(context.Background(), run.CredentialDigest, kernel.NewHumanQuestion{IdempotencyKey: key, QuestionText: "continue?"}, adapterTime(t, 500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeYieldedOperatorRun(t, fixture.store, run)
+	detail, err := fixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.HumanRequestDetailGet{RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision)})
+	if err != nil || !bool(detail.CanReply) || detail.TerminalTarget != nil || detail.CancelRun == nil {
+		t.Fatalf("yielded detail = %+v, %v", detail, err)
+	}
+	if _, err := browserprotocol.EncodeHumanRequestDetail("yielded", detail); err != nil {
+		t.Fatalf("encode yielded detail: %v", err)
+	}
+}
+
 func TestBrowserAdapterSubscriptionReloadsAuthorityAndJoins(t *testing.T) {
 	fixture := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
 	fixture.pair(t)

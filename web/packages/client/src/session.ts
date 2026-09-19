@@ -298,7 +298,7 @@ export class BrowserSession {
   #intakePending = new Map<string, { resolve: (value: IntakeView) => void; reject: (error: unknown) => void }>();
   #githubPending = new Map<string, GitHubPending>();
   #humanDetails = new WeakSet<HumanRequestDetail>();
-  #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId: string }>();
+  #humanCancelRuns = new WeakMap<HumanRequestCancelRunDescriptor, { detail: HumanRequestDetail; runId?: string }>();
   #generationToken: object = {};
 
   constructor(options: BrowserSessionOptions) {
@@ -622,7 +622,7 @@ export class BrowserSession {
   replyHumanRequest(detail: HumanRequestDetail, reply: string): Promise<HumanReplyResult> {
     try { this.#ensureHumanOperation(detail.requestId); } catch (error) { return Promise.reject(error); }
     if ((this.#capabilities & CAPABILITIES.human_actions) === 0) return Promise.reject(new SessionError("unauthorized"));
-    if (!this.#humanDetails.has(detail) || !detail.canReply || detail.terminalTarget === null || detail.cancelRun === null) return Promise.reject(new SessionError("stale"));
+    if (!this.#humanDetails.has(detail) || !detail.canReply || detail.cancelRun === null) return Promise.reject(new SessionError("stale"));
     const replyBytes = new TextEncoder().encode(reply).length;
     if (replyBytes < 1 || replyBytes > detail.replyMaxBytes || detail.replyMaxBytes !== MAX_HUMAN_REPLY_BYTES) return Promise.reject(new SessionError("invalid_request"));
     if (detail.revision > MAX_SQLITE_INTEGER - 2n) return Promise.reject(new SessionError("stale"));
@@ -1144,7 +1144,6 @@ export class BrowserSession {
       const terminalTarget = frame.body.terminal_target === null ? null : this.#mintTarget(frame.body.terminal_target);
       let cancelRun: HumanRequestCancelRunDescriptor | null = null;
       if (frame.body.cancel_run !== null) {
-        if (terminalTarget === null) throw new ProtocolError("malformed");
         cancelRun = Object.freeze({
           requestId: frame.body.request_id,
           expectedRequestRevision: frame.body.cancel_run.expected_request_revision,
@@ -1162,7 +1161,7 @@ export class BrowserSession {
         cancelRun,
       });
       this.#humanDetails.add(detail);
-      if (cancelRun !== null && terminalTarget !== null) this.#humanCancelRuns.set(cancelRun, { detail, runId: this.#targetAuthority(terminalTarget).descriptor.run_id });
+      if (cancelRun !== null) this.#humanCancelRuns.set(cancelRun, { detail, ...(terminalTarget === null ? {} : { runId: this.#targetAuthority(terminalTarget).descriptor.run_id }) });
       this.#humanPending.delete(frame.id);
       pending.resolve(detail);
       return;
@@ -1173,7 +1172,7 @@ export class BrowserSession {
       pending.resolve(Object.freeze({ ...frame.body }));
       return;
     }
-    if (pending.runId === undefined || frame.body.run_id !== pending.runId || frame.body.run_revision !== pending.expectedRunRevision + 1n || frame.body.request_revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
+    if ((pending.runId !== undefined && frame.body.run_id !== pending.runId) || frame.body.run_revision !== pending.expectedRunRevision + (pending.runId === undefined ? 0n : 1n) || frame.body.request_revision !== pending.expectedRevision + 1n) throw new ProtocolError("malformed");
     this.#humanPending.delete(frame.id);
     pending.resolve(Object.freeze({ ...frame.body }));
   }

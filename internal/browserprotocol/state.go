@@ -501,11 +501,11 @@ func validateHumanRequestDetail(value HumanRequestDetail) error {
 		}
 	}
 	if value.CancelRun != nil {
-		if value.TerminalTarget == nil || !bool(value.CanReply) || value.CancelRun.ExpectedRequestRevision != value.Revision || value.CancelRun.ExpectedRunRevision != value.TerminalTarget.RunRevision {
+		if !bool(value.CanReply) || value.CancelRun.ExpectedRequestRevision != value.Revision || value.CancelRun.ExpectedRunRevision == 0 || (value.TerminalTarget != nil && value.CancelRun.ExpectedRunRevision != value.TerminalTarget.RunRevision) {
 			return fmt.Errorf("%w: human request cancellation", ErrMalformed)
 		}
 	}
-	if bool(value.CanReply) && (value.TerminalTarget == nil || value.CancelRun == nil) {
+	if bool(value.CanReply) && value.CancelRun == nil {
 		return fmt.Errorf("%w: human request reply availability", ErrMalformed)
 	}
 	return nil

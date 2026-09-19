@@ -321,6 +321,7 @@ test("public state cannot carry private fields and detail is separately bounded"
   expectMalformed(() => encodeServerControl({ ...detail, body: { ...detail.body, question: "" } }));
   expectMalformed(() => encodeServerControl({ ...detail, body: { ...detail.body, question: "x".repeat(MAX_HUMAN_QUESTION_BYTES + 1) } }));
   assert.match(encodeServerControl({ ...detail, body: { ...detail.body, options: ["Continue", "Stop"] } }), /"options":\["Continue","Stop"\]/);
+  assert.match(encodeServerControl({ ...detail, body: { ...detail.body, can_reply: true, cancel_run: { expected_request_revision: 1n, expected_run_revision: 7n } } }), /"can_reply":true/);
   for (const options of [null, [""], [" "], ["line\nbreak"], ["zero\0byte"], ["x".repeat(161)], ["same", "same"], ["1", "2", "3", "4", "5"]]) expectMalformed(() => encodeServerControl({ ...detail, body: { ...detail.body, options } }));
 });
 
