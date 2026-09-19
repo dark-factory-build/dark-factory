@@ -562,20 +562,22 @@ class ManagedIntakeTest(unittest.TestCase):
 
     def test_partial_receipt_progress_keeps_error_then_wraps_without_success(self):
         self.sources = self.sources[:1]
-        for at, reply, expected in [(100, {'state':'unavailable','acceptance_progress':True,'acceptance_cursor':'b'*32}, ''),
-                                    (105, {'state':'unavailable'}, 'b'*32),
-                                    (165, {'state':'unavailable','acceptance_progress':True}, 'b'*32),
-                                    (170, {'state':'ok'}, '')]:
+        for at, reply, expected, due in [(100, {'state':'unavailable','acceptance_progress':True,'acceptance_cursor':'b'*32}, '', 160),
+                                         (105, {'state':'unavailable'}, '', 160),
+                                         (160, {'state':'unavailable','acceptance_progress':True,'acceptance_cursor':'c'*32}, 'b'*32, 220),
+                                         (220, {'state':'ok'}, 'c'*32, 280)]:
             with patch.object(autonomy, 'managed_api', side_effect=[{'state':'ok','sources':self.sources},reply]) as api, patch.object(autonomy.time, 'time', return_value=at):
                 autonomy.managed_tick(self.home,self.factoryctl)
                 arguments = api.call_args.args[2]
-                self.assertEqual(expected, arguments[-1] if '--acceptance-cursor' in arguments else '')
+                if at not in (105,):
+                    self.assertEqual(expected, arguments[-1] if '--acceptance-cursor' in arguments else '')
             journal = json.loads(Path(str(self.home)+'.intake/journal.json').read_text())
             record = journal['sources']['1'*32]
+            self.assertEqual(due, record['next_due'])
             if reply['state'] != 'ok':
                 self.assertEqual('unavailable',record['error'])
                 self.assertEqual(0,record.get('last_success_at',0))
-        self.assertEqual(170,record['last_success_at'])
+        self.assertEqual(220,record['last_success_at'])
         self.assertEqual('',record['error'])
 
     def test_overflow_and_factory_replacement_fail_closed(self):

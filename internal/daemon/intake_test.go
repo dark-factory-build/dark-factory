@@ -4,10 +4,12 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -96,6 +98,56 @@ func TestIntakeAcceptedContentSurvivesLargeBacklogAndMetadataChanges(t *testing.
 	}
 	if got := fixture.daemon.Intake(ctx, accept); got.State != "conflict" {
 		t.Fatalf("source changed during remote acceptance read: %+v", got)
+	}
+}
+
+func TestIntakeWithdrawFailureReportsOnlyDurableWithdrawalAsPending(t *testing.T) {
+	fixture := newDispatchFixture(t)
+	ctx := context.Background()
+	project := mustProjectID(t, testID(183))
+	agent := mustAgentID(t, testID(184))
+	if _, err := fixture.store.CreateProject(ctx, kernel.NewProject{ID: project, Name: "withdrawal-test", Root: "/withdrawal-test"}, mustKernelTime(t, 101)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.CreateAgent(ctx, kernel.NewAgent{ID: agent, ProjectID: project, Name: "overseer", Role: kernel.RoleOrchestrator, Provider: kernel.ProviderShell, ToolBudgetLimit: 10}, mustKernelTime(t, 102)); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := hex.DecodeString(testID(185))
+	sourceID, _ := kernel.IntakeSourceIDFromBytes(raw)
+	source, err := fixture.store.CreateIntakeSource(ctx, kernel.NewIntakeSource{ID: sourceID, ProjectID: project, TargetRepositoryID: kernel.RepositoryID(project), OverseerAgentID: agent, GitHubRepositoryID: 42, GitHubRepositoryName: "team/issues", Policy: kernel.IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 1}, mustKernelTime(t, 103))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := maintainer.Issue{ID: 81, NodeID: "I_withdrawal", Number: 1, Title: "Reviewed", Body: "Approved", State: "open"}
+	issue.Author.Login, issue.Author.Type = "reviewer", "User"
+	accepted, err := fixture.store.AcceptIntakeSnapshot(ctx, source.ID, intakeSnapshot(source, issue), mustKernelTime(t, 104), source.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A real writer lock makes the withdrawal transaction fail before its
+	// withdrawn_at_ms update can commit. The daemon must preserve that error,
+	// rather than manufacturing withdrawal_pending.
+	lock, err := sql.Open("sqlite3", "file:"+fixture.databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if _, err := lock.Exec("BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Exec("ROLLBACK")
+	withdrawContext, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	result := fixture.daemon.Intake(withdrawContext, api.IntakeInput{Action: "withdraw", AcceptanceID: accepted.ID.String()})
+	if result.State == "withdrawal_pending" {
+		t.Fatalf("non-durable withdrawal reported as pending: %+v", result)
+	}
+	if result.State != "unavailable" {
+		t.Fatalf("withdrawal failure = %+v, want unavailable", result)
+	}
+	current, found, err := fixture.store.IntakeAcceptance(ctx, accepted.ID)
+	if err != nil || !found || current.WithdrawnAt != nil {
+		t.Fatalf("withdrawal became durable unexpectedly: found=%v value=%+v err=%v", found, current, err)
 	}
 }
 

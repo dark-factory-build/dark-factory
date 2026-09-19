@@ -90,6 +90,22 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		}
 		if input.Action == "withdraw" {
 			accepted, err = daemon.store.WithdrawIntakeAcceptance(ctx, id, at)
+			if err != nil {
+				// A failed write is not evidence that withdrawal became durable. Re-read
+				// the receipt so transaction/commit failures retain their real error;
+				// only a receipt observed as withdrawn may enter the retry state.
+				current, found, readErr := daemon.store.IntakeAcceptance(ctx, id)
+				if readErr != nil {
+					return intakeFailure(readErr)
+				}
+				if !found {
+					return intakeFailure(kernel.ErrNotFound)
+				}
+				if current.WithdrawnAt == nil {
+					return intakeFailure(err)
+				}
+				accepted = current
+			}
 			if err == nil {
 				err = daemon.reconcileIntakeWithdrawal(ctx, accepted)
 			}
