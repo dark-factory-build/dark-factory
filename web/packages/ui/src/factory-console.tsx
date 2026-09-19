@@ -3,7 +3,7 @@ import type { DiscoveredAccount, AccountItem, AgentItem, GitHubConnectionBody, P
 import { BROWSER_HOST, type FactoryAgentSelection, type FactoryAppSnapshot, type FactoryHumanRequestView } from "./factory-app-controller.js";
 import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
-import { AgentPanel, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
+import { AgentPanel, ConsoleDialog, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters } from "./console-view.js";
@@ -303,9 +303,9 @@ export function FactoryConsole({
                 onPanel={onAgentPanel}
               />}
             </div>
-            {selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <TaskDialog key={selectedTask.id} onClose={() => onSelectTask?.(undefined)}>
+            {selectedTask === undefined || (selectedTask.status === "queued" && onEditTask !== undefined) ? null : <ConsoleDialog key={selectedTask.id} label="Task details" title="TASK" onClose={() => onSelectTask?.(undefined)}>
               <TaskDetail key={`${selectedTask.id}:${selectedTask.revision}`} task={selectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />
-            </TaskDialog>}
+            </ConsoleDialog>}
           </aside>
         </div>
       </main>
@@ -409,14 +409,3 @@ function shortID(value: string): string {
   return value.slice(0, 8);
 }
 
-/** Task detail opens over the console; <dialog> owns ESC, the focus trap and focus return. */
-function TaskDialog({ onClose, children }: { onClose: () => void; children: ReactNode }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => { if (!dialog.current?.open) dialog.current?.showModal(); }, []);
-  return <dialog ref={dialog} className="dfConsoleDialog" aria-label="Task details" onClose={onClose} onClick={(event) => { if (event.target === dialog.current) dialog.current?.close(); }}>
-    <div className="dfConsoleSidebar__panel">
-      <div className="dfConsoleSidebar__heading"><h2>TASK</h2><button type="button" onClick={() => dialog.current?.close()}>CLOSE</button></div>
-      {children}
-    </div>
-  </dialog>;
-}

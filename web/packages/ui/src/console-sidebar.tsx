@@ -143,6 +143,22 @@ function pullRequests(value: string): readonly Readonly<{ href: string; label: s
   return [...found].map(([href, label]) => ({ href, label }));
 }
 
+/**
+ * The one modal shell: <dialog> owns ESC, the backdrop, the focus trap and
+ * focus return, so every exit goes through close().
+ */
+export function ConsoleDialog({ label, title, className = "", onClose, children }: { label: string; title: string; className?: string; onClose?: () => void; children: ReactNode }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { if (!dialog.current?.open) dialog.current?.showModal(); }, []);
+  const close = () => dialog.current?.close();
+  return <dialog ref={dialog} className={`dfConsoleDialog ${className}`.trim()} aria-label={label} onClose={onClose} onClick={(event) => { if (event.target === dialog.current) close(); }}>
+    <div className="dfConsoleSidebar__panel">
+      <div className="dfConsoleSidebar__heading"><h2>{title}</h2>{onClose === undefined ? null : <button type="button" onClick={close}>CLOSE</button>}</div>
+      {children}
+    </div>
+  </dialog>;
+}
+
 /** Private completed-task detail, kept bounded until the operator opens it. */
 function RecentWork({
   agent, completionRevision, onLoadTaskList, onLoadTaskDetail, onLoadTaskHistory,
@@ -160,7 +176,6 @@ function RecentWork({
   const [hasMore, setHasMore] = useState(false);
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
-  const dialog = useRef<HTMLDialogElement>(null);
   const request = useRef(0);
   const load = (append: boolean) => {
     const loader = onLoadTaskList;
@@ -179,16 +194,13 @@ function RecentWork({
   };
   useEffect(() => {
     if (!open) return;
-    if (!dialog.current?.open) dialog.current?.showModal();
     load(false);
     return () => { ++request.current; };
   }, [open, agent.id, completionRevision]);
   const selected = page.find((task) => task.id === selectedId) ?? page[0];
   return <div className="dfConsoleRecentWork dfConsoleSidebar__section">
     <button type="button" onClick={() => setOpen(true)}>RECENT WORK{total === undefined ? "" : ` · ${total}`}</button>
-    {!open ? null : <dialog ref={dialog} className="dfConsoleDialog dfRecentWorkDialog" aria-label={`Recent work for ${agent.name}`} onClose={() => setOpen(false)} onClick={(event) => { if (event.target === dialog.current) dialog.current?.close(); }}>
-      <div className="dfConsoleSidebar__panel">
-        <div className="dfConsoleSidebar__heading"><h2>RECENT WORK · {agent.name}</h2><button type="button" onClick={() => dialog.current?.close()}>CLOSE</button></div>
+    {!open ? null : <ConsoleDialog className="dfRecentWorkDialog" label={`Recent work for ${agent.name}`} title={`RECENT WORK · ${agent.name}`} onClose={() => setOpen(false)}>
         {failed ? <p role="alert">RECENT WORK UNAVAILABLE <button type="button" onClick={() => load(false)}>RETRY</button></p> : null}
         <div className="dfRecentWorkLayout">
           <nav aria-label="Completed work">
@@ -202,8 +214,7 @@ function RecentWork({
           </nav>
           {selected === undefined ? <p>{pending ? "Loading recent work…" : "No completed or blocked tasks."}</p> : <TaskDetail key={`${selected.id}:${selected.revision}`} task={selected} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}
         </div>
-      </div>
-    </dialog>}
+    </ConsoleDialog>}
   </div>;
 }
 
@@ -292,7 +303,7 @@ export function QueuePanel({
     </section>;
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Tasks">
-    {state.factory.dispatch_enabled ? null : <p role="status">Dispatch is off — queued tasks will not start. Turn it on in Settings.</p>}
+    {state.factory.dispatch_enabled ? null : <p role="status">Dispatch is off — queued tasks will not start. Run factoryctl dispatch on.</p>}
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
     {opened("blocked", "Blocked")}
     {opened("running", "Running")}
@@ -611,8 +622,6 @@ export function SettingsDialog({
   library?: ReactNode;
   onClose?: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  useEffect(() => { dialog.current?.showModal(); }, []);
   // Discovery is an observation of the daemon's machine, so it is asked for
   // when the dialog opens rather than carried in the durable snapshot.
   const load = useRef(onLoadAccounts);
@@ -621,20 +630,8 @@ export function SettingsDialog({
   const loadGitHub = useRef(onGitHub);
   loadGitHub.current = onGitHub;
   useEffect(() => { if (ready) loadGitHub.current?.({ action: "status" }); }, [ready]);
-  const close = () => dialog.current?.close();
   return (
-    <dialog
-      className="dfConsoleDialog"
-      ref={dialog}
-      aria-label="Settings"
-      onClose={onClose}
-      onClick={(event) => { if (event.target === dialog.current) close(); }}
-    >
-      <div className="dfConsoleSidebar__panel">
-        <div className="dfConsoleSidebar__heading">
-          <h2>Settings</h2>
-          {onClose === undefined ? null : <button type="button" onClick={close}>CLOSE</button>}
-        </div>
+    <ConsoleDialog label="Settings" title="Settings" onClose={onClose}>
         <div className="dfConsoleSidebar__section" aria-label="PAIRING">
           <h3>Devices &amp; pairing</h3>
           {pairing ?? <p className="dfFactoryConsole__empty">Pairing unavailable</p>}
@@ -663,8 +660,7 @@ export function SettingsDialog({
           <p><a href="https://darkfactory.build/backlog" target="_blank" rel="noopener noreferrer">Public backlog · Vote on GitHub</a></p>
           <p>Review and submit reports on GitHub. Reporting and voting do not start factory work.</p>
         </section>
-      </div>
-    </dialog>
+    </ConsoleDialog>
   );
 }
 
