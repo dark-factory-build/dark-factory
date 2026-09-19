@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -479,4 +480,39 @@ func publicIDs(count int, at func(int) string) []string {
 		result = append(result, at(index))
 	}
 	return result
+}
+
+func TestPublicSnapshotCarriesBlockedWorkButNotBlockedStandingPasses(t *testing.T) {
+	store, run, _ := runningOrchestratorRun(t)
+	defer store.Close()
+	ctx := context.Background()
+	titles := []string{"older blocked work", standingTaskTitle, "newest blocked work"}
+	for index, title := range titles {
+		id := publicTaskID(t, index+1)
+		if _, err := store.EnqueueTask(ctx, NewTask{ID: id, ProjectID: run.ProjectID, AssignedAgentID: run.AgentID, IncarnationID: incarnationID(t, byte(100+index)), Title: title}, mustTime(t, int64(600+index))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Blocked after the last write: every write validates run history first.
+	for index := range titles {
+		corruptSQL(t, store, `UPDATE tasks SET status = 'blocked', blocked_reason = 'waiting', updated_at_ms = ? WHERE id = ?`, 700+index, publicTaskID(t, index+1).Bytes())
+	}
+	// Hand-blocked rows have no run history, so read the public selection itself.
+	rows, err := store.writer.QueryContext(ctx, publicTaskIDs+`SELECT title FROM tasks WHERE status = 'blocked' AND id IN (SELECT id FROM public_task_ids)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var blocked []string
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			t.Fatal(err)
+		}
+		blocked = append(blocked, title)
+	}
+	slices.Sort(blocked)
+	if !slices.Equal(blocked, []string{"newest blocked work", "older blocked work"}) {
+		t.Fatalf("blocked public tasks = %q", blocked)
+	}
 }

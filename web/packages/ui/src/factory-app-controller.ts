@@ -604,6 +604,28 @@ export class FactoryAppController {
 	return false;
   }
 
+  /** Queue work from the Tasks panel: for one agent, or for any eligible worker in its project. */
+  async addTask(agent: Pick<AgentItem, "id" | "revision">, instruction: string, mode: "queue" | "any"): Promise<boolean> {
+    const session = this.#client?.session;
+    if (this.#closed || this.#status !== "ready" || session === undefined || this.#edit?.pending === true) return false;
+    const generation = this.#generation;
+    const edit: FactoryEditView = { target: agent.id, pending: true };
+    this.#edit = edit;
+    this.#publish();
+    try {
+      await session.enqueueAgentTask({ agentId: agent.id, expectedAgentRevision: agent.revision, instruction: instruction.trim(), mode });
+      if (!this.#current(generation) || this.#edit !== edit) return false;
+      this.#edit = undefined;
+      this.#publish();
+      return true;
+    } catch (error) {
+      if (!this.#current(generation) || this.#edit !== edit) return false;
+      this.#edit = { target: agent.id, pending: false, error: finiteError(error) };
+      this.#publish();
+      return false;
+    }
+  }
+
   /** Load private task text only when an operator opens its brief. */
   taskDetail(task: Pick<TaskItem, "id" | "revision">, peerOffset = 0n, expectedHead?: bigint): Promise<TaskDetailView> {
     const session = this.#client?.session;

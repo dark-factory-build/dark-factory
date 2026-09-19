@@ -252,11 +252,15 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
 }
 
 /** The single editable queue keeps the authoritative per-agent task order. */
+/** Every idle wake carries this kernel title; it is the agent's rule, not operator work. */
+const STANDING_TASK_TITLE = "Standing instruction";
+
 export function QueuePanel({
   state,
   edit,
   ready,
   onEditTask,
+  onAddTask,
   onLoadTaskDetail,
   selectedTaskId,
   onSelectTask,
@@ -267,49 +271,78 @@ export function QueuePanel({
   edit?: FactoryEditView;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
+  onAddTask?: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
 }) {
-  const agents = state === undefined ? [] : [...state.agents.values()];
-  const tasks = state === undefined ? [] : [...state.tasks.values()];
-  const running = tasks.filter((task) => task.status === "running");
-  const queued = [
-    ...agents.flatMap((agent) => {
-      const assigned = tasks
-        .filter((task) => task.assigned_agent_id === agent.id && task.status === "queued");
-      return assigned.length === 0 ? [] : [{ projectId: agent.project_id, tasks: assigned }];
-    }),
-    // Shared work waits under its project until an eligible worker claims it.
-    ...(state === undefined ? [] : [...state.projects.values()]).flatMap((project) => {
-      const shared = tasks.filter((task) => task.assigned_agent_id === "" && task.project_id === project.id && task.status === "queued");
-      return shared.length === 0 ? [] : [{ projectId: project.id, tasks: shared }];
-    }),
-  ];
-  return <section className="dfConsoleSidebar__panel" aria-label="Queue">
-    {state === undefined ? <p className="dfFactoryConsole__empty">Waiting for the latest state…</p>
-      : <>
-        {running.length === 0 || selectedTaskId !== undefined ? null : <section className="dfConsoleSidebar__section" aria-label="Running tasks">
-          <h3>Running <span>{running.length}</span></h3>
-          <ul className="dfConsoleItems">{running.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
-            <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
-            <span className="dfConsoleItem__meta">{agents.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"}</span>
-          </div></li>)}</ul>
-        </section>}
-        {queued.length === 0 ? running.length > 0 ? null : <p className="dfFactoryConsole__empty">No queued tasks</p> : <>{selectedTaskId === undefined ? <h3>Queued <span>{queued.reduce((count, group) => count + group.tasks.length, 0)}</span></h3> : null}<ul className="dfConsoleItems">{queued.flatMap(({ projectId, tasks }) => {
-          const peers = agents.filter((peer) => peer.project_id === projectId);
-          return tasks.filter((task) => selectedTaskId === undefined || task.id === selectedTaskId).map((task) => <QueuedTask
-              selected={selectedTaskId === task.id}
-              onSelectTask={onSelectTask}
-              key={task.id}
-              task={task}
-              peers={peers}
-              pending={edit?.pending === true}
-              ready={ready}
-              onEditTask={onEditTask}
-              onLoadTaskDetail={onLoadTaskDetail}
-            />);
-        })}</ul></>}
-      </>}
+  if (state === undefined) return <section className="dfConsoleSidebar__panel" aria-label="Tasks"><p className="dfFactoryConsole__empty">Waiting for the latest state…</p></section>;
+  const agents = [...state.agents.values()];
+  const name = (task: TaskItem) => task.assigned_agent_id === "" ? "Any eligible worker" : state.agents.get(task.assigned_agent_id)?.name ?? "Agent";
+  const tasks = [...state.tasks.values()].filter((task) => !(task.title === STANDING_TASK_TITLE && state.agents.get(task.assigned_agent_id)?.idle_policy === "standing_instruction"));
+  // Served order: a global priority sort would present a false next-start order.
+  const queued = tasks.filter((task) => task.status === "queued");
+  const opened = (status: TaskItem["status"], label: string) => {
+    const rows = tasks.filter((task) => task.status === status);
+    return rows.length === 0 ? null : <section className="dfConsoleSidebar__section" aria-label={`${label} tasks`}>
+      <h3>{label} <span>{rows.length}</span></h3>
+      <ul className="dfConsoleItems">{rows.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
+        <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
+        <span className="dfConsoleItem__meta">{name(task)}{status === "blocked" ? ` · since ${dateLabel(task.updated_at_ms)}` : ""}</span>
+      </div></li>)}</ul>
+    </section>;
+  };
+  return <section className="dfConsoleSidebar__panel" aria-label="Tasks">
+    {state.factory.dispatch_enabled ? null : <p role="status">Dispatch is off — queued tasks will not start. Turn it on in Settings.</p>}
+    {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
+    {opened("blocked", "Blocked")}
+    {opened("running", "Running")}
+    <section className="dfConsoleSidebar__section" aria-label="Queued tasks">
+      <h3>Queued <span>{queued.length}</span></h3>
+      {queued.length === 0 ? <p className="dfFactoryConsole__empty">No queued tasks</p> : <ul className="dfConsoleItems">{queued.map((task) => <QueuedTask
+        selected={selectedTaskId === task.id}
+        onSelectTask={onSelectTask}
+        key={task.id}
+        task={task}
+        peers={agents.filter((peer) => peer.project_id === (state.agents.get(task.assigned_agent_id)?.project_id ?? task.project_id))}
+        pending={edit?.pending === true}
+        ready={ready}
+        onEditTask={onEditTask}
+        onLoadTaskDetail={onLoadTaskDetail}
+      />)}</ul>}
+    </section>
   </section>;
+}
+
+/** The target is one agent, or "any:" plus a project whose first worker names the shared queue. */
+function NewTask({ agents, state, disabled, onAddTask }: {
+  agents: readonly AgentItem[];
+  state: StateView;
+  disabled: boolean;
+  onAddTask: (agent: AgentItem, instruction: string, mode: "queue" | "any") => Promise<boolean>;
+}) {
+  const live = agents.filter((agent) => !agent.archived);
+  const shared = [...state.projects.values()].flatMap((project) => {
+    const worker = live.find((agent) => agent.project_id === project.id && agent.role === "worker");
+    return worker === undefined ? [] : [{ project, worker }];
+  });
+  return <details className="dfConsoleSidebar__section"><summary>New task</summary>
+    <form className="dfConsoleSidebar__config" aria-label="New task" onSubmit={(event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      const target = String(data.get("target"));
+      const agent = target.startsWith("any:") ? shared.find(({ project }) => project.id === target.slice(4))?.worker : state.agents.get(target);
+      const instruction = String(data.get("instruction"));
+      if (agent === undefined || instruction.trim() === "") return;
+      void onAddTask(agent, instruction, target.startsWith("any:") ? "any" : "queue").then((added) => { if (added) form.reset(); });
+    }}>
+      <label>For <select name="target" required disabled={disabled}>
+        {shared.map(({ project }) => <option key={project.id} value={`any:${project.id}`}>Any eligible worker · {project.name}</option>)}
+        {live.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+      </select></label>
+      <label>Instruction <textarea name="instruction" rows={4} required disabled={disabled} /></label>
+      <button disabled={disabled}>Add to queue</button>
+    </form>
+  </details>;
 }
 
 /**
@@ -543,6 +576,7 @@ export function SettingsDialog({
   onLoadIntake,
   onIntakeAction,
   pairing,
+  library,
   onClose,
 }: {
   floorAppearance: FloorAppearance;
@@ -571,6 +605,7 @@ export function SettingsDialog({
   intake?: ReadonlyMap<string, IntakeView>; intakePending?: ReadonlySet<string>; intakeErrors?: ReadonlyMap<string, string>; onLoadIntake?: (projectId: string) => void; onIntakeAction?: (projectId: string, request: IntakeBody) => void;
   /** A self-contained "PAIR A PHONE" surface mounts here. */
   pairing?: ReactNode;
+  library?: ReactNode;
   onClose?: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -616,6 +651,7 @@ export function SettingsDialog({
           <summary>Run limits</summary>
           <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
         </details>
+        {library}
         <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} />
         <section className="dfConsoleSidebar__section" aria-label="Help and feedback">
           <h3>Help and feedback</h3>
