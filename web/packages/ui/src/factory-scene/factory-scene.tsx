@@ -244,24 +244,25 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
 
 /** A disposable SVG projection of topology and current factory state. */
 export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
-  const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number }>();
+  const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
   const [linkedFrom, setLinkedFrom] = useState<string>();
   useLayoutEffect(() => {
     if (!tooltip || !tooltipElement.current) return;
     const height = tooltipElement.current.getBoundingClientRect().height;
-    const y = Math.max(8, Math.min(tooltip.y, window.innerHeight - height - 8));
-    if (y !== tooltip.y) setTooltip({ ...tooltip, y });
+    const below = window.innerHeight - 8 - tooltip.bottom, above = tooltip.top - 8; // take the side with room and shrink to it, so a tooltip never covers the target it describes
+    const [y, room] = height <= below || below >= above ? [tooltip.bottom, below] : [Math.max(8, tooltip.top - height), above];
+    if (y !== tooltip.y || room !== tooltip.room) setTooltip({ ...tooltip, y, room });
   }, [tooltip]);
   const showTooltip = (target: Element | null) => {
     if (!target) { setTooltip(undefined); return; }
     const box = (target.querySelector("rect") ?? target).getBoundingClientRect();
-    setTooltip({ text: target.getAttribute("data-tooltip")!, x: Math.max(8, Math.min(box.left, window.innerWidth - 272)), y: Math.max(8, Math.min(box.bottom, window.innerHeight - 112)) });
+    setTooltip({ text: target.getAttribute("data-tooltip")!, x: Math.max(8, Math.min(box.left, window.innerWidth - 272)), y: Math.max(8, box.bottom), top: box.top, bottom: box.bottom, room: window.innerHeight });
   };
   const retainFocusedTooltip = () => showTooltip(typeof document !== "undefined" && document.activeElement?.matches("[data-tooltip]") ? document.activeElement : null);
   const inspect = (event: PointerEvent<HTMLDivElement> | FocusEvent<HTMLDivElement> | MouseEvent<HTMLDivElement>) => {
     const element = event.target as Element;
-    if (!element.closest('[role="tooltip"]')) showTooltip(element.closest("[data-tooltip]"));
+    showTooltip(element.closest("[data-tooltip]"));
     setLinkedFrom(element.closest("[data-room-id]")?.getAttribute("data-room-id") ?? undefined);
   };
   const layout = useMemo(() => layoutScene(topology), [topology]);
@@ -403,7 +404,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
       </g>}
 
     </svg>
-    {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y }}>{tooltip.text}</div>}
+    {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>
     </>
   );

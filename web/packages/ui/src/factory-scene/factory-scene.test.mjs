@@ -769,15 +769,15 @@ test("compact tooltips open on hover, focus and tap and dismiss without a detail
   globalThis.window = { innerWidth: 390, innerHeight: 844 };
   let renderer;
   try {
-    await act(async () => { renderer = create(createElement(FactoryScene, { topology: inventoryTopology, workers: [] })); });
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology: inventoryTopology, workers: [] }), { createNodeMock: () => ({ getBoundingClientRect: () => ({ height: window.innerHeight === 320 ? 160 : 60 }) }) }); });
     const map = renderer.root.findByProps({ className: "dfFactoryFloor__map" });
     const target = renderer.root.findAll((node) => node.props["data-tooltip"])[0];
-    const event = { target: { closest: (selector) => selector === '[role="tooltip"]' ? null : ({ querySelector: () => null, getBoundingClientRect: () => ({ left: 380, bottom: 830 }), getAttribute: () => target.props["data-tooltip"] }) } };
+    const event = { target: { closest: () => ({ querySelector: () => null, getBoundingClientRect: () => ({ left: 380, top: 806, bottom: 830 }), getAttribute: () => target.props["data-tooltip"] }) } };
     for (const handler of ["onPointerOver", "onFocus", "onClick"]) {
       await act(async () => map.props[handler](event));
       const tip = renderer.root.findByProps({ role: "tooltip" });
       assert.match(tip.props.children, /200 source/);
-      assert.ok(tip.props.style.left <= 118 && tip.props.style.top <= 732);
+      assert.ok(tip.props.style.left <= 118 && tip.props.style.top + 60 <= 806, "no room below: the tooltip sits above its target, not over it");
       await act(async () => map.props.onKeyDown({ key: "Escape" }));
       assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 0);
     }
@@ -790,6 +790,11 @@ test("compact tooltips open on hover, focus and tap and dismiss without a detail
     assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 1, "autoscroll retains focus even after pointer interaction");
     await act(async () => map.props.onPointerLeave());
     assert.equal(renderer.root.findAllByProps({ role: "tooltip" }).length, 1, "pointer departure retains focused tooltip");
+    // Neither side fits a 160px card on a 320px screen: it takes the roomier side and shrinks to it.
+    globalThis.window = { innerWidth: 390, innerHeight: 320 };
+    await act(async () => map.props.onPointerOver({ target: { closest: () => ({ querySelector: () => null, getBoundingClientRect: () => ({ left: 10, top: 145, bottom: 169 }), getAttribute: () => target.props["data-tooltip"] }) } }));
+    const tight = renderer.root.findByProps({ role: "tooltip" }).props.style;
+    assert.ok(tight.top >= 169 && tight.top + tight.maxHeight <= 312, `crammed tooltip must clear its target: ${JSON.stringify(tight)}`);
     assert.equal(renderer.root.findAllByType("select").length, 0);
     assert.equal(renderer.root.findAllByType("table").length, 0);
   } finally {
