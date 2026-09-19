@@ -512,7 +512,7 @@ func TestBrowserAdapterEncodesYieldedHumanRequestWithoutTerminal(t *testing.T) {
 	}
 	completeYieldedOperatorRun(t, fixture.store, run)
 	detail, err := fixture.backend.HumanRequestDetail(context.Background(), rawBrowserClient(fixture.client.ID), browserprotocol.HumanRequestDetailGet{RequestID: request.ID.String(), ExpectedRevision: decimalRevision(request.Revision)})
-	if err != nil || !bool(detail.CanReply) || detail.TerminalTarget != nil || detail.CancelRun == nil {
+	if err != nil || !bool(detail.CanReply) || detail.TerminalTarget != nil || detail.CancelRun == nil || detail.CancelRun.RunID != run.ID.String() {
 		t.Fatalf("yielded detail = %+v, %v", detail, err)
 	}
 	if _, err := browserprotocol.EncodeHumanRequestDetail("yielded", detail); err != nil {

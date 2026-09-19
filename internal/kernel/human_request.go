@@ -588,7 +588,7 @@ func humanRequestDetail(ctx context.Context, connection *sql.Conn, clientID Brow
 		}
 		if client.CapabilityMask.Has(BrowserCapabilityHumanActions) {
 			detail.CanReply = true
-			detail.CancelRun = &HumanRequestCancelRun{expectedRequestRevision: request.Revision, expectedRunRevision: run.Revision}
+			detail.CancelRun = &HumanRequestCancelRun{runID: run.ID, expectedRequestRevision: request.Revision, expectedRunRevision: run.Revision}
 		}
 		return detail, nil
 	}
@@ -613,7 +613,7 @@ func humanRequestDetail(ctx context.Context, connection *sql.Conn, clientID Brow
 	detail.TerminalTarget = &target
 	if client.CapabilityMask.Has(BrowserCapabilityHumanActions) {
 		detail.CanReply = true
-		detail.CancelRun = &HumanRequestCancelRun{expectedRequestRevision: request.Revision, expectedRunRevision: run.Revision}
+		detail.CancelRun = &HumanRequestCancelRun{runID: run.ID, expectedRequestRevision: request.Revision, expectedRunRevision: run.Revision}
 	}
 	return detail, nil
 }

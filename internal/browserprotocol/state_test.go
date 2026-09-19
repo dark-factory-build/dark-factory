@@ -540,7 +540,7 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 		t.Fatal("zero expected revision accepted")
 	}
 	target := TerminalTargetDescriptor{RunID: "11111111111111111111111111111111", SessionID: "22222222222222222222222222222222", RunRevision: 8, SessionRevision: 9}
-	cancelRun := HumanRequestCancelRunDescriptor{ExpectedRequestRevision: 2, ExpectedRunRevision: 8}
+	cancelRun := HumanRequestCancelRunDescriptor{RunID: target.RunID, ExpectedRequestRevision: 2, ExpectedRunRevision: 8}
 	authorized := HumanRequestDetail{RequestID: requestID, Revision: 2, Question: "choose", CanReply: true, ReplyMaxBytes: MaxHumanReplyBytes, TerminalTarget: &target, CancelRun: &cancelRun}
 	if _, err := EncodeHumanRequestDetail("detail", authorized); err != nil {
 		t.Fatalf("authorized detail = %v", err)
@@ -566,9 +566,9 @@ func TestHumanRequestPublicPrivacyAndDetailBounds(t *testing.T) {
 			}
 		})
 	}
-	yielded.CancelRun = &HumanRequestCancelRunDescriptor{ExpectedRequestRevision: yielded.Revision}
+	yielded.CancelRun = &HumanRequestCancelRunDescriptor{ExpectedRequestRevision: yielded.Revision, ExpectedRunRevision: 8}
 	if _, err := EncodeHumanRequestDetail("detail", yielded); err == nil {
-		t.Fatal("yielded detail without a run revision accepted")
+		t.Fatal("yielded detail without a run identity accepted")
 	}
 }
 
