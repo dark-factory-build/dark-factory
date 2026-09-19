@@ -49,8 +49,8 @@ It requires macOS, Git, and `factoryd`, `factory-runner`, and `factoryctl` on
 receive repository and task material; read [provider support](docs/providers.md).
 
 Install that release with the [installation guide](docs/install.md), initialise
-a home, and start its service. These commands use its socket
-and token:
+a home, and start its service. A fresh service install opens the pairing page.
+These commands then use its socket and token:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"
@@ -60,7 +60,6 @@ export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
 export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
 factoryctl dispatch on
 factoryctl web status
-factoryctl web open
 ```
 
 From an existing committed Git checkout, `project create` prints `PROJECT_ID`;
