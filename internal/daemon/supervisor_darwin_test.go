@@ -548,6 +548,27 @@ func runSupervisorClaudeFixture() error {
 	if err != nil {
 		return err
 	}
+	if line, ok := strings.CutPrefix(strings.SplitN(task.Task, "\n", 2)[0], "review handoff "); ok {
+		fields := strings.Fields(line)
+		if len(fields) != 5 {
+			return fmt.Errorf("Claude source target = %q", line)
+		}
+		handoff, err := client.Source(ctx, fields[0])
+		if err != nil {
+			return err
+		}
+		if handoff.TaskID != fields[0] || handoff.ChangeID != fields[1] || handoff.BaseCommit != fields[2] || strconv.FormatUint(handoff.TaskWorkRevision, 10) != fields[3] || strconv.FormatUint(handoff.ChangeRevision, 10) != fields[4] {
+			return fmt.Errorf("Claude source receipt = %+v", handoff)
+		}
+		if _, err := client.OverseerTaskSnapshot(ctx, fields[0]); err == nil {
+			return errors.New("Claude reviewer gained overseer source discovery")
+		} else {
+			var remote *api.RemoteError
+			if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+				return fmt.Errorf("Claude reviewer overseer refusal = %w", err)
+			}
+		}
+	}
 	var typed string
 	if quote := bytes.IndexByte(line, '"'); quote < 0 {
 		return fmt.Errorf("no quoted task in %d typed bytes", len(line))
@@ -961,6 +982,52 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 	fixture.assertTerminal(t, reviewer, kernel.OutcomeSucceeded)
 	if reviewer.Role != kernel.RoleWorker || reviewer.Proposal == nil || !strings.Contains(reviewer.Proposal.Result(), "review handoff ") {
 		t.Fatalf("reviewer receipt = %+v", reviewer)
+	}
+	fixture.assertReleased(t, reviewer)
+}
+
+func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *testing.T) {
+	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+	worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("source worker RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
+	changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
+	if err != nil || !found || changeState.Selection == nil {
+		t.Fatalf("retained source Change = %+v, found=%v, err=%v", changeState, found, err)
+	}
+	reviewerID := supervisorAgentID(t, 22)
+	if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
+		ID: reviewerID, ProjectID: worker.ProjectID, Name: "claude-reviewer", Role: kernel.RoleWorker,
+		Provider: kernel.ProviderClaudeCode, ToolBudgetLimit: 20,
+	}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+		ID: supervisorTaskID(t, 23), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 24),
+		Title: "review retained Change", Body: fmt.Sprintf(" \treview handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
+	}, supervisorTime()); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(fixture.root, "claude-reviewer-tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copySupervisorExecutable(t, executable, filepath.Join(tools, "claude"))
+	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+
+	reviewer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+	if err != nil {
+		t.Fatalf("Claude reviewer RunNext: %v", err)
+	}
+	fixture.assertTerminal(t, reviewer, kernel.OutcomeSucceeded)
+	if reviewer.Role != kernel.RoleWorker || reviewer.Provider != kernel.ProviderClaudeCode || reviewer.Proposal == nil || !strings.Contains(reviewer.Proposal.Result(), "review handoff ") {
+		t.Fatalf("Claude reviewer receipt = %+v", reviewer)
 	}
 	fixture.assertReleased(t, reviewer)
 }

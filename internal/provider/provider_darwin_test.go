@@ -122,6 +122,15 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if !reflect.DeepEqual(worker.Argv(), wantWorkerArgv) {
 		t.Fatalf("worker argv = %q, want %q", worker.Argv(), wantWorkerArgv)
 	}
+	for _, required := range []string{
+		"DARK_FACTORY_SOCKET=" + runtime.socket,
+		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
+		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
+	} {
+		if !slices.Contains(worker.Environment(), required) {
+			t.Fatalf("Claude worker attempt transport lacks %q: %q", required, worker.Environment())
+		}
+	}
 	if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("orchestrator without the bridge = %v, want ErrUnavailable", err)
 	}

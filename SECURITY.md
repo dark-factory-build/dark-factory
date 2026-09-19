@@ -89,6 +89,18 @@ operator-shaped command invoked by a provider is therefore authorized as the
 attempt and rejected if outside its allowlist; it never falls back to
 `operator.token`.
 
+Claude Code workers receive only the strict `factory_attempt` factory-control
+MCP server at launch; an installed `factory_browser` server is an optional,
+separate browser capability. The attempt child inherits the socket path,
+private attempt-token path, and factoryctl path, so the MCP transport cannot
+authenticate as the operator or choose another task. Attempt endpoints enforce
+the live run's task, project, role, provider, and terminal/source freshness
+rules; in particular, a worker may request an exact settled same-project source
+receipt only through the authorized route. The server is not a filesystem
+relay or a sandbox: Claude workers retain their existing same-user
+local-command authority, and the attempt allowlist does not isolate a hostile
+provider from files readable by the operator.
+
 The current daemon supports worker runs only. Operator and attempt roles confer
 no cross-agent authority; task and run ancestry never grant agent authority.
 
