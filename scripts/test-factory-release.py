@@ -79,6 +79,29 @@ class ReleaseFixtures(unittest.TestCase):
             runpy.run_path(script, run_name="__main__")
         self.assertEqual(raised.exception.code, 1)
 
+    def test_site_probe_command_never_reports_healthy_without_deployment_identity(self):
+        script = MODULE.with_name("verify-live-site.py")
+        for identity in ({}, {"id": None}, {"id": ""}, {"id": 7}):
+            deployment = {"readyState": "READY", "target": "production", "meta": {"gitCommitSha": SHA}, **identity}
+            self.assertFalse(site.deployment_healthy(deployment, deployment, SHA, True, True))
+            calls = [
+                mock.Mock(stdout=json.dumps(deployment)),
+                mock.Mock(returncode=0, stdout='{"healthy":true}'),
+                mock.Mock(stdout=json.dumps(deployment)),
+            ]
+            response = mock.MagicMock()
+            response.__enter__.return_value.status = 200
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", [str(script), SHA]), \
+                 mock.patch("subprocess.run", side_effect=calls), \
+                 mock.patch("urllib.request.urlopen", return_value=response), \
+                 mock.patch("sys.stdout", new=output), \
+                 mock.patch("sys.stderr", new=io.StringIO()), \
+                 self.assertRaises(SystemExit) as raised:
+                runpy.run_path(script, run_name="__main__")
+            self.assertEqual(raised.exception.code, 1)
+            self.assertEqual(output.getvalue(), "")
+
     def test_shared_atomic_writer_preserves_receipt_on_replace_failure(self):
         self.assertIs(release.atomic_json, release.intake.atomic_json)
         with tempfile.TemporaryDirectory() as directory:

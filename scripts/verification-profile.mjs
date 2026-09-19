@@ -33,6 +33,21 @@ export async function verificationProfile(home = homedir()) {
   return profile;
 }
 
+// The local-network-access grant is origin-wide, so the context itself is fenced:
+// only the hosted console and the exact loopback listener of SECURITY.md are reachable.
+export function insideLoopbackBoundary(url) {
+  const { origin, href } = new URL(url);
+  return origin === 'https://app.darkfactory.build' || href === 'ws://127.0.0.1:43123/browser';
+}
+
+export async function enforceLoopbackBoundary(context, escaped) {
+  const outside = (url) => !insideLoopbackBoundary(url);
+  await context.route(outside, (route) => route.abort());
+  await context.routeWebSocket(outside, (socket) => socket.close());
+  // ponytail: routing never sees redirect hops, so a hop that leaves the boundary fails the proof after the fact; fulfil via route.fetch with maxRedirects 0 if that must be blocked.
+  context.on('request', (request) => { if (request.redirectedFrom() && outside(request.url())) escaped(); });
+}
+
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try { await verificationProfile(); } catch {
     process.stderr.write('browser verification profile migration failed\n');

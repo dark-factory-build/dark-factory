@@ -8,17 +8,24 @@ import sys
 import urllib.request
 
 
+def valid_identity(deployment):
+    identity = deployment.get('id')
+    return isinstance(identity, str) and identity != ''
+
+
 def observe_deployment():
     result = subprocess.run(['vercel', 'api', '/v13/deployments/app.darkfactory.build', '--raw'], check=True, capture_output=True, text=True, timeout=30)
     deployment = json.loads(result.stdout)
-    sha = deployment.get('meta', {}).get('gitCommitSha', '')
-    if re.fullmatch('[0-9a-f]{40}', sha) is None:
+    if not isinstance(deployment, dict) or not isinstance(deployment.get('meta'), dict) or not valid_identity(deployment):
+        raise ValueError('production deployment has no valid identity')
+    sha = deployment['meta'].get('gitCommitSha')
+    if not isinstance(sha, str) or re.fullmatch('[0-9a-f]{40}', sha) is None:
         raise ValueError('production deployment has no exact source revision')
     return deployment, sha
 
 
 def deployment_healthy(before, after, expected_sha, http_ok, browser_ok):
-    return before.get('id') == after.get('id') and before.get('meta', {}).get('gitCommitSha') == expected_sha and after.get('meta', {}).get('gitCommitSha') == expected_sha and after.get('readyState') == 'READY' and after.get('target') == 'production' and http_ok and browser_ok
+    return valid_identity(before) and valid_identity(after) and before.get('id') == after.get('id') and before.get('meta', {}).get('gitCommitSha') == expected_sha and after.get('meta', {}).get('gitCommitSha') == expected_sha and after.get('readyState') == 'READY' and after.get('target') == 'production' and http_ok and browser_ok
 
 
 if __name__ == '__main__':
