@@ -1,88 +1,73 @@
 # Dark Factory
 
-**An autonomous software factory you can see and steer.** Give your coding
-agents work. Let an overseer coordinate them. Watch the live floor, inspect
-results, and step in when decisions need you.
+**An autonomous software factory you can see and steer.**
+
+Give your coding agents work. Let an overseer coordinate them. Watch progress
+on a live factory floor, inspect results, and step in when they need a decision.
+Keep parallel work in one place instead of juggling separate agent sessions.
 
 <picture>
   <source media="(max-width: 600px)" srcset="docs/assets/factory-floor-demo-mobile.png">
-  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory demo floor showing sample workers, a workshop and a Needs You decision">
+  <img src="docs/assets/factory-floor-demo.png" alt="Dark Factory console with sample workers on the factory floor and a Needs You decision open">
 </picture>
 
-*Demo data in the actual console: sample workers on the floor and a synthetic
+*Actual console with labelled demo data: sample workers and a synthetic
 Needs You decision. No daemon is connected.*
 
-Put parallel coding work in one place. An overseer follows up across workers,
-and the floor shows what each agent is doing, so you do not have to track
-separate sessions by hand. Queue and prioritize work, inspect results, and
-decide when it needs your judgment. Workers leave reviewable results, the
-Maintainer publishes approved work through the configured GitHub route, and
-the paired browser and `factoryctl` steer the same factory.
-
-[Website](https://www.darkfactory.build) · [Console (paired factory)](https://app.darkfactory.build) ·
-[Backlog](https://github.com/dark-factory-build/dark-factory/issues) ·
-[Install](docs/install.md) · [Providers](docs/providers.md) ·
-[Architecture](ARCHITECTURE.md) · [Security](SECURITY.md)
+[Get started](#quick-start) · [Website](https://www.darkfactory.build) ·
+[Console (requires pairing)](https://app.darkfactory.build) ·
+[Documentation](docs/install.md) · [Community backlog](https://www.darkfactory.build/backlog)
 
 ## What you can do
 
-- Close the browser and the factory keeps its queue and running work alive while the host Mac stays awake.
-- Queue work across registered repositories, or admit a reviewed GitHub issue.
-- Let an overseer turn a goal into follow-up work and coordinate the workers.
-- Open a live terminal, read a Needs You request, and decide when to step in.
-- Inspect a completed result, send it back with feedback, or take it forward for review.
-- Pair a phone to watch and direct the same factory away from the Mac.
+- **See the work.** Explore your codebase on the factory floor and select a worker to see its activity.
+- **Coordinate a team.** Let an overseer break down goals, assign workers, and follow up on their results.
+- **Keep work moving.** Queue and prioritize work across projects and repositories. Assign a named agent or the next available worker.
+- **Stay in control.** Open agent terminals, send instructions, and answer Needs You decisions from the same console.
+- **Review and improve.** Inspect completed work and review findings, request corrections, and publish reviewed pull requests when GitHub is configured.
+- **Step away from the browser.** Work continues while your Mac stays awake. With remote access configured, a paired phone can steer the same factory.
 
-## How work moves
+## A working day
 
-Choose a checkout, describe the outcome, add workers with accounts on the
-machine, then queue work. Dark Factory makes an isolated worktree and starts
-the selected provider. The floor shows workers and tasks. Needs You requests
-decisions; otherwise the overseer continues. Review completed changes, send
-them back, or let the Maintainer publish them.
+Give the overseer a bounded goal, such as improving a confusing setup flow.
+It coordinates workers while you follow their progress on the floor. Open a
+worker to inspect its terminal or answer a question. Read the completed result,
+request a correction if needed, and take the reviewed change forward.
 
-## Requirements and quick start
+You can also start small with one worker and one task. Adding teammates does
+not mean managing another set of disconnected sessions.
 
-Use **v0.4.0 or later**.
-It requires macOS, Git, and `factoryd`, `factory-runner`, and `factoryctl` on
-`PATH`. A Codex worker requires a signed-in `codex` CLI on `PATH`. Providers
-receive repository and task material; read [provider support](docs/providers.md).
+## Quick start
 
-Install that release with the [installation guide](docs/install.md), initialise
-a home, and start its service. A fresh service install opens the pairing page.
-These commands then use its socket and token:
+Start with macOS, Git, an existing committed checkout, and a signed-in Codex CLI.
+[Install the latest release](docs/install.md#install-a-release), keeping its
+three binaries together on `PATH`, then run:
 
 ```sh
 factoryctl init --home "$HOME/.dark-factory"
 factoryctl service install --home "$HOME/.dark-factory"
-factoryctl service status --home "$HOME/.dark-factory"
-export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
-export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
-factoryctl dispatch on
-factoryctl web status
 ```
 
-From an existing committed Git checkout, `project create` prints `PROJECT_ID`;
-`agent create` prints `AGENT_ID`. Give the worker a bounded first outcome, then
-inspect it on the floor or paired console:
+A fresh installation opens the browser pairing page. Confirm pairing, then
+follow [Start your first worker](docs/install.md#start-your-first-worker) to
+register your checkout, enable work, and give a worker its first task. That
+short CLI setup is still required; once the worker appears, use its console
+panel to inspect results and queue more work. Try one small documentation
+correction before handing over a larger goal.
 
-```sh
-factoryctl project create --name "My project" --root "$PWD"
-factoryctl agent create --project PROJECT_ID --name builder \
-  --provider codex --tool-budget 100
-factoryctl task add --project PROJECT_ID --agent AGENT_ID \
-  --title "Improve one documented setup step" \
-  --body "Read README.md and the project layout. Correct one concise setup or contributor instruction supported by the code, run git diff --check, and report the files changed."
-```
+## Status and further reading
 
-Use `factoryctl account discover` or `account list` to inspect a Codex login.
-For another checkout, `project repository add --id HEX32 --project PROJECT_ID
---name NAME --root ABSOLUTE --base REF` returns the revision needed to set its
-default; a named task keeps its explicit repository.
+Repository management and issue intake ship in v0.4.0. **Hosted GitHub
+connection for new customers still awaits service activation**; installing
+v0.4.0 alone does not enable it. Manual local work and the public
+[reporting page](https://www.darkfactory.build/feedback) remain available.
 
-GitHub connection, repository management, and reviewed issue intake require
-v0.4.0 or later. Live Codex work and GitHub publication still depend on the
-accounts and access you configure. More in the
-[development workflow](docs/development/WORKFLOW.md).
+Codex is proven with real work; Claude support still needs a live provider
+smoke test. Agents run on your Mac, but configured providers receive task and
+repository material. Remote access and GitHub publication need additional
+setup. See [installation and recovery](docs/install.md) and
+[provider support](docs/providers.md).
 
-Dark Factory is MIT licensed.
+For deeper detail: [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) ·
+[Contributing](CONTRIBUTING.md) · [Development](docs/development/WORKFLOW.md) ·
+[Deployment](docs/development/DEPLOY.md). Dark Factory is MIT licensed.

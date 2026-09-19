@@ -93,6 +93,38 @@ factoryctl remote status
 The CLI cannot delete origin-scoped browser storage; pairing afresh from the
 pair page makes that manual browser action unnecessary.
 
+## Start your first worker
+
+After pairing the browser, use the CLI once to create a project and its first
+worker. A signed-in `codex` CLI must be installed where the managed daemon can
+find it; see [provider discovery](providers.md). From an existing committed
+Git checkout, run:
+
+```sh
+export DARK_FACTORY_SOCKET="$HOME/.dark-factory/runtimes/factory.sock"
+export DARK_FACTORY_OPERATOR_TOKEN_FILE="$HOME/.dark-factory/operator.token"
+factoryctl dispatch on
+factoryctl project create --name "My project" --root "$PWD"
+```
+
+Copy the returned project ID into `PROJECT_ID` below. Creating the project also
+registers its checkout as the initial repository. Then copy the returned agent
+ID into `AGENT_ID`:
+
+```sh
+factoryctl agent create --project PROJECT_ID --name builder \
+  --provider codex --tool-budget 100
+factoryctl task add --project PROJECT_ID --agent AGENT_ID \
+  --title "Improve one documented setup step" \
+  --body "Read README.md and the project layout. Correct one concise setup or contributor instruction supported by the code, run git diff --check, and report the files changed."
+```
+
+Select **builder** on the paired factory floor to watch its terminal and inspect
+its result. Send feedback or queue the next instruction from that panel.
+`factoryctl account discover` and `factoryctl account list` help inspect a
+missing Codex login. Settings → Repositories also supports project creation and
+additional checkouts; worker creation currently uses the CLI.
+
 ## Working in the console
 
 Select an agent on the floor or in the roster. Its terminal, queue and Needs
@@ -164,6 +196,12 @@ This setup requires v0.4.0 or later and an activated Maintainer connection
 endpoint. It is not available in older archives. Use the operator socket and
 token exports above; these identify your local factory, not someone else's
 GitHub account.
+
+**Hosted availability:** the v0.4.0 client includes this flow, but the hosted
+service still requires operator activation before new customers can connect.
+Installing the client is not sufficient. The remaining service-side GitHub App
+and routing setup is documented in [activation prerequisites](development/GITHUB_CONNECTIONS.md#activation-prerequisites-and-proof).
+Customers do not need to create an App or deploy their own broker.
 
 Run `factoryctl github connect --open`. Authorize the Dark Factory GitHub App
 under your GitHub account. Enter the callback page's one-time code with
