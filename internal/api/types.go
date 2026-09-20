@@ -457,6 +457,15 @@ type OutcomeListInput struct {
 	Offset    uint64 `json:"offset,omitempty"`
 	Limit     uint64 `json:"limit,omitempty"`
 }
+
+type ProductionInput struct {
+	ProjectID   string                       `json:"project_id"`
+	Observation kernel.ProductionObservation `json:"observation"`
+}
+
+type ProductionResult struct {
+	State string `json:"state"`
+}
 type ContentInput struct {
 	ID               string `json:"id"`
 	ProjectID        string `json:"project_id"`

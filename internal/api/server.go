@@ -88,6 +88,7 @@ const (
 	CallOutcomeList
 	CallGitHubConnection
 	CallIntake
+	CallProductionObserve
 	CallMaintainer
 )
 
@@ -152,6 +153,7 @@ type Call struct {
 	outcomeWrite        OutcomeWriteInput
 	outcomeRead         OutcomeReadInput
 	outcomeList         OutcomeListInput
+	production          ProductionInput
 	webClient           WebClientRevocationInput
 	webAfter            string
 	expectedRevision    uint64
@@ -361,6 +363,10 @@ func (call Call) OutcomeReadInput() (OutcomeReadInput, bool) {
 }
 func (call Call) OutcomeListInput() (OutcomeListInput, bool) {
 	return call.outcomeList, call.kind == CallOutcomeList
+}
+
+func (call Call) ProductionInput() (ProductionInput, bool) {
+	return call.production, call.kind == CallProductionObserve
 }
 
 type replyKind uint8
@@ -1052,6 +1058,10 @@ func decodeCall(domain byte, bearer credential, encoded []byte) (Call, RemoteErr
 		if err := decodeExact(request.Params, &call.outcomeList); err != nil || !validText(call.outcomeList.ProjectID, 1, 64) || call.outcomeList.Limit > MaxContentPageItems {
 			return Call{}, RemoteInvalidRequest
 		}
+	case CallProductionObserve:
+		if err := decodeExact(request.Params, &call.production); err != nil || !validProductionInput(call.production) {
+			return Call{}, RemoteInvalidRequest
+		}
 	case CallHumanReply:
 		if err := decodeExact(request.Params, &call.humanReply); err != nil || !validID(call.humanReply.OperationID) || !validID(call.humanReply.RequestID) || call.humanReply.ExpectedRevision == 0 || !validText(call.humanReply.Reply, 1, 8192) {
 			return Call{}, RemoteInvalidRequest
@@ -1077,6 +1087,10 @@ func decodeAttemptDetail(encoded []byte) (string, bool) {
 func jsonObject(encoded []byte) bool {
 	trimmed := bytes.TrimSpace(encoded)
 	return len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}'
+}
+
+func validProductionInput(input ProductionInput) bool {
+	return validID(input.ProjectID) && validText(input.Observation.Repository, 1, 4096)
 }
 
 func methodKind(method string) (CallKind, byte) {
@@ -1225,6 +1239,8 @@ func methodKind(method string) (CallKind, byte) {
 		return CallOutcomeRead, operatorDomain
 	case "outcome_list":
 		return CallOutcomeList, operatorDomain
+	case "production_observe":
+		return CallProductionObserve, operatorDomain
 	case "attempt_outcome_write":
 		return CallOutcomeWrite, attemptDomain
 	case "attempt_outcome_read":
@@ -1343,7 +1359,7 @@ func replyMatches(kind CallKind, reply replyKind) bool {
 		return reply == replyWebClients
 	case CallWebRevokeClient:
 		return reply == replyWebRevoke
-	case CallMaintainer, CallGitHubConnection, CallIntake:
+	case CallMaintainer, CallGitHubConnection, CallIntake, CallProductionObserve:
 		return reply == replyContent
 	case CallRemoteStatus:
 		return reply == replyRemoteStatus
