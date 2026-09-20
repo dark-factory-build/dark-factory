@@ -546,14 +546,14 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
         {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
           <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
       </g>}
-      <Area width={commonAreaWidth} top={layout.restingTop - 40} bottom={commonBottom} />
+      <Area width={commonAreaWidth} top={layout.restingTop - 40} bottom={stationTop + 24} />
       {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
       {appearance.scenery === "off" ? null : nook?.furniture.map((piece) => <g key={piece.errand} aria-hidden="true" data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
         <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
       </g>)}
       {[
         { label: "Break room", seats: seating.resting, planning: false, occupied: resting.length },
-        { label: "Planning", seats: seating.planning, planning: true, occupied: planning.length },
+        { label: "Work tables", seats: seating.planning, planning: true, occupied: planning.length },
       ].filter(({ seats }) => seats.length > 0).map(({ label, seats, planning, occupied }) => {
         const top = seats[0]!.y;
         return <g key={label} role="group" aria-label={label}>
@@ -573,12 +573,12 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
         <rect x="-22" y="-8" width="44" height="16" fill="#455c5e" stroke="#8c8871" />
         <path d="M-17 8v7 M17 8v7" stroke="#393f3c" strokeWidth="3" />
         <rect x="-12" y="-6" width="24" height="6" fill="#9fae9e" /><path d="M-9 -4h12v3H-3v-3 M5 -3h4" fill="none" stroke="#536e70" />
-        <text x="0" y="5" textAnchor="middle" fill="#d4ddd2" fontFamily="ui-monospace, monospace" fontSize="5">MISSIONS</text>
+        <text x="0" y="-12" textAnchor="middle" fill="#d4ddd2" fontFamily="ui-monospace, monospace" fontSize="10">MISSIONS</text>
       </g>
       <g aria-hidden="true" pointerEvents="none" data-floor-tray-desk="" transform={`translate(${tray.x} ${tray.y})`}>
         <rect x="-22" y="-8" width="44" height="16" fill="#5b5545" stroke="#a08f68" />
         <path d="M-17 8v7 M17 8v7" stroke="#393b35" strokeWidth="3" />
-        <text x="0" y="5" textAnchor="middle" fill="#d9c58d" fontFamily="ui-monospace, monospace" fontSize="6">TASKS</text>
+        <text x="0" y="-12" textAnchor="middle" fill="#d9c58d" fontFamily="ui-monospace, monospace" fontSize="10">TASKS</text>
       </g>
       {/* Waiting work, as the tray it would be on a real desk. The pile says
           how the queue is doing; the target opens the existing Tasks panel. */}

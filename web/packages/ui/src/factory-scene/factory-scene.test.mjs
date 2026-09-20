@@ -236,7 +236,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.match(first, /data-corridor/);
   assert.equal(first.includes("<animate"), false);
   const unobserved = render({ workers: [{ ...workers[0], location: "unobserved", nodeId: undefined }] });
-  assert.match(unobserved, /aria-label="Planning"/);
+  assert.match(unobserved, /aria-label="Work tables"/);
   assert.match(unobserved, /working; location not yet observed/);
   assert.doesNotMatch(unobserved, /data-worker-task-id/);
   assert.match(first, /aria-label="Break room"/);
@@ -245,7 +245,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   const roomBottoms = [...first.matchAll(/data-room-id="[^"]+"[^>]*>\s*<rect x="[^"]+" y="([0-9.]+)" width="[^"]+" height="([0-9.]+)"/g)].map((match) => Number(match[1]) + Number(match[2]));
   assert.ok(restingY >= Math.max(...roomBottoms) + 24, "resting area stays below every room with clearance");
   const capped = render({ workers: [{ ...workers[0], location: "working", locationLabel: "Source", nodeId: undefined }], omittedLocations: 1 });
-  assert.match(capped, /aria-label="Planning"/);
+  assert.match(capped, /aria-label="Work tables"/);
   assert.match(capped, /representative location near observed changes in Source; outside displayed rooms/);
   const observed = render({ workers: [{ ...workers[1], location: "last-observed", locationLabel: "Source" }] });
   assert.match(observed, /last observed near changes in Source/);
@@ -278,7 +278,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     assert.ok(placement.y - WORKER_SIZE / 2 >= srcRoom.y + 40, "room workers stay below the title and kind");
   }
   const denseSvg = render({ workers: denseWorkers });
-  assert.match(denseSvg, /aria-label="Planning"/);
+  assert.match(denseSvg, /aria-label="Work tables"/);
   const denseHeight = Number(denseSvg.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
   assert.ok(denseHeight > Math.max(...densePlacements.map(({ y }) => y + 8)));
 
@@ -323,7 +323,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     topology: { digest: "empty", nodes: [] },
     workers: [...emptyWorkers, { ...workers[0], location: "unobserved", nodeId: undefined }],
   });
-  const stagingArea = emptyWithStaging.match(/aria-label="Planning"><text x="[^"]+" y="([0-9.]+)"/);
+  const stagingArea = emptyWithStaging.match(/aria-label="Work tables"><text x="[^"]+" y="([0-9.]+)"/);
   const stagingLabel = emptyWithStaging.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
   assert.ok(stagingArea !== null && stagingLabel !== null);
   assert.ok(Number(stagingLabel[1]) + PADDING <= Number(stagingArea[1]), "empty-floor label clears the staging area");
@@ -1101,7 +1101,7 @@ test("larger workers fit compact common seating in narrow, wide and crowded floo
       const previewWorkers = seats.map((seat, index) => ({ ...workers[0], id: `seat-${index}`, location: index < seating.resting.length ? "resting" : "unobserved" }));
       const markup = render({ topology: { digest: "proportions", nodes }, workers: previewWorkers });
       assert.ok(markup.includes('transform="scale(1.25)"'));
-      assert.equal((markup.match(/aria-label="Planning"/g) ?? []).length, count > 0 ? 1 : 0);
+      assert.equal((markup.match(/aria-label="Work tables"/g) ?? []).length, count > 0 ? 1 : 0);
       const height = Number(markup.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
       assert.ok(height > Math.max(...seats.map(({ y }) => y + WORKER_SIZE / 2)));
     }
