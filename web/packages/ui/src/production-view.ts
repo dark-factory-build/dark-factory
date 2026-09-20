@@ -41,7 +41,7 @@ export type ProductionContraption = Readonly<{
   checks: readonly (ProductionCheck & { applicable: boolean })[];
   deliveries: readonly (ProductionDelivery & { verified: boolean })[];
   reviewers: readonly ProductionReviewer[];
-  completed: boolean; status: string; nextAction: string;
+  completed: boolean; completedAt: number; status: string; nextAction: string;
 }>;
 export type ProductionView = Readonly<{
   contraptions: Readonly<Record<string, ProductionContraption>>;
@@ -128,7 +128,7 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const closedUnmerged = pr?.state === "closed" && !pr.merge;
     const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && pullDeliveries.every((delivery) => delivery.verified);
     const doc = construction ? object(construction.document) : {};
-    contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason) } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : text(doc.blocked_reason) || "Construction is in progress." };
+    contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason) } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : text(doc.blocked_reason) || "Construction is in progress." };
   }
   return { contraptions, checks, deliveries, reviewers };
 }
