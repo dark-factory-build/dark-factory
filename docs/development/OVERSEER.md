@@ -34,6 +34,9 @@ capacity from the number of visible terminals or raise limits to clear a queue.
 On each supervision wake, reconcile the current objective and its outstanding
 worker/review/publication actions before assigning more work. Obtain the
 independent exact-head review described below; never substitute your own verdict.
+That review is the host controller's (section 5), one per published head. Do
+not delegate a second review of a published pull request to a worker: the
+controller already reviews that head, and a worker cannot record a verdict.
 Return actionable findings to the responsible worker and review its resulting
 head again. Record the next action and its existing task, Change, PR or operation
 identity in the retained result so a later pass can continue without duplication.
@@ -174,6 +177,10 @@ eligible same-project handoffs can be read in one attempt.
 - Never record a review verdict yourself. The review is a separate headless
   session started by the host review controller; you read its App receipt.
   Do not run a nested provider or grant local commands Maintainer credentials.
+- Publish through the App yourself. Never delegate publication to a worker:
+  only your launch pre-approves the Maintainer tools, so a worker's
+  `publish_commit` or `submit_pull_request_review` is refused for want of an
+  approval nobody can give, and the task ends blocked.
 - Prioritize actionable changes and throughput blockers; one blocked change
   does not prevent handling another independent change in the same session.
 - A review that asks for changes is not a decision for a human: send the task
@@ -184,6 +191,12 @@ eligible same-project handoffs can be read in one attempt.
   non-shell overseer request atomically yields the run, releases its lane and
   revokes its bearer; the next fresh-authority run resumes after the reply.
   Shell overseers retain their live-request behavior.
+
+- A worker block you cannot clear (its sandbox, the platform, an authority
+  you lack) is not yours to retry and not a reason to block your own pass.
+  Raise it once with `attempt request-human`, naming the task and its block
+  reason, and cancel the task if its target has already merged. A blocked
+  task nobody was told about helps no one.
 
 For unattended projects, also follow [UNATTENDED.md](UNATTENDED.md).
 
@@ -484,6 +497,11 @@ PR head and base in its review journal, runs at most one fresh
 `cold-review.sh` per pass, and sends an idempotent task containing the exact
 Maintainer operation and its result. Intake and release checks run first.
 The reviewer is a separate read-only session, never the author or overseer.
+
+A worker review of a retained Change before publication is the exception, for
+a change whose publication is costly to undo. Ordinarily publish, and let the
+controller's review and a send-back carry the findings; the same
+diff reviewed twice is one review wasted.
 
 Observe the operation named in that task before acting. For this App-managed
 intake, only a completed `submit_pull_request_review` result for the exact head
