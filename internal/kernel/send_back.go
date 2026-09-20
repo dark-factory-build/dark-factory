@@ -272,6 +272,13 @@ func (store *Store) retryTask(ctx context.Context, digest *AttemptDigest, id Tas
 }
 
 func sendBackTask(ctx context.Context, connection *sql.Conn, task Task, note string, at UnixMillis) (Task, error) {
+	var removed bool
+	if err := connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_attachments WHERE task_id = ? AND data IS NULL)`, task.ID.Bytes()).Scan(&removed); err != nil {
+		return Task{}, err
+	}
+	if removed {
+		return Task{}, fmt.Errorf("%w: task attachments were removed; create a new task with the required files", ErrConflict)
+	}
 	if task.AssignedAgentID.zero() {
 		// Never claimed, so there is no run to correct.
 		return Task{}, ErrConflict

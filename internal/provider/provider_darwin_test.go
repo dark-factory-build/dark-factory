@@ -200,6 +200,7 @@ func TestBuildShellReturnsExactImmutableLaunchAndTask(t *testing.T) {
 		t.Fatalf("argv=%q, want %q", got, wantArgv)
 	}
 	wantEnvironment := []string{
+		"DARK_FACTORY_TASK_ATTACHMENTS=" + filepath.Join(runtime.home, "task-attachments"),
 		"DARK_FACTORY_SOCKET=" + runtime.socket,
 		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
 		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,

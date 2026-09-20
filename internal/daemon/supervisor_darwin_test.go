@@ -203,6 +203,12 @@ func runSupervisorCodexFixture() error {
 	if err != nil {
 		return err
 	}
+	if strings.Contains(task.Task, "# Task attachments:") {
+		contents, err := os.ReadFile(filepath.Join(os.Getenv("DARK_FACTORY_TASK_ATTACHMENTS"), "attachment-1.png"))
+		if err != nil || !bytes.Equal(contents, []byte{0, 1, 255}) {
+			return fmt.Errorf("provider attachment bytes: %v", err)
+		}
+	}
 	// An explicit target request must cross the runner, Change worker, provider
 	// profile and live daemon registry; task launch and status never select a
 	// project-latest tree.
@@ -723,6 +729,12 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 		t.Fatal(err)
 	}
 	execSupervisorSQL(t, fixture.storePath, `UPDATE tasks SET title = ?, body = ? WHERE id = ?`, "fallback must not win", privateTask, fixture.taskID.Bytes())
+	execSupervisorSQL(t, fixture.storePath, `INSERT INTO task_attachments (task_id, position, name, data) VALUES (?, 0, ?, ?)`, fixture.taskID.Bytes(), "screenshot.png", []byte{0, 1, 255})
+	expectedTask, err := kernel.TaskAttachmentInstruction(privateTask, []kernel.TaskAttachment{{Name: "screenshot.png", Data: []byte{0, 1, 255}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	tools := filepath.Join(fixture.root, "tools")
 	if err := os.Mkdir(tools, 0o700); err != nil {
 		t.Fatal(err)
@@ -739,7 +751,7 @@ func TestSupervisorCodexRetrievesExactTaskWithUsablePTY(t *testing.T) {
 		t.Fatalf("RunNext: %v", err)
 	}
 	fixture.assertTerminal(t, run, kernel.OutcomeSucceeded)
-	if run.Proposal == nil || run.Proposal.Result() != privateTask+"\nPTY=120x40" {
+	if run.Proposal == nil || run.Proposal.Result() != expectedTask+"\nPTY=120x40" {
 		t.Fatalf("Codex task/PTY receipt = %q", run.Proposal.Result())
 	}
 	fixture.assertReleased(t, run)

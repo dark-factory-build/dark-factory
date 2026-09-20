@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"encoding/hex"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -97,7 +98,7 @@ func TestTaskEnqueueDispatchesAndCorrelatesExactResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || gotRequest != request || string(gotClient[:]) != string(wantClient) {
+	if calls != 1 || !reflect.DeepEqual(gotRequest, request) || string(gotClient[:]) != string(wantClient) {
 		t.Fatalf("dispatch calls=%d request=%+v client=%x", calls, gotRequest, gotClient)
 	}
 }

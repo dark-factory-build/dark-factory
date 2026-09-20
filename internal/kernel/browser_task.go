@@ -45,7 +45,10 @@ func (store *Store) EnqueueTaskForBrowserAgentMode(ctx context.Context, clientID
 // EnqueueTaskForBrowserAgentRepositoryMode retains the agent-derived project
 // while letting an administrator choose one enabled repository for this task.
 // A zero repository selects that project's durable default.
-func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, repositoryID RepositoryID, instruction string, mode BrowserEnqueueMode, at UnixMillis) (BrowserTaskEnqueue, error) {
+func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context, clientID BrowserClientID, taskID TaskID, incarnationID IncarnationID, agentID AgentID, expectedAgentRevision Revision, repositoryID RepositoryID, instruction string, mode BrowserEnqueueMode, at UnixMillis, attachments ...TaskAttachment) (BrowserTaskEnqueue, error) {
+	if _, err := TaskAttachmentInstruction(instruction, attachments); err != nil {
+		return BrowserTaskEnqueue{}, err
+	}
 	queue := mode != BrowserEnqueueNow
 	if clientID.zero() || taskID.zero() || incarnationID.zero() || agentID.zero() || expectedAgentRevision.Int64() < 1 || strings.Trim(instruction, " \t\r\n") == "" || !utf8.ValidString(instruction) || byteLen(instruction) > 32768 {
 		return BrowserTaskEnqueue{}, fmt.Errorf("%w: invalid browser task enqueue", ErrInvalidValue)
@@ -84,6 +87,13 @@ func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context
 		return BrowserTaskEnqueue{}, tx.Rollback(err)
 	}
 	if replay {
+		stored, err := taskAttachments(ctx, tx.connection, taskID)
+		if err != nil {
+			return BrowserTaskEnqueue{}, tx.Rollback(err)
+		}
+		if !sameTaskAttachments(stored, attachments) {
+			return BrowserTaskEnqueue{}, tx.Rollback(ErrConflict)
+		}
 		if err = tx.Rollback(nil); err != nil {
 			return BrowserTaskEnqueue{}, err
 		}
@@ -99,6 +109,11 @@ func (store *Store) EnqueueTaskForBrowserAgentRepositoryMode(ctx context.Context
 	result, err := insertTaskOnConnection(ctx, tx.connection, spec, at)
 	if err != nil {
 		return BrowserTaskEnqueue{}, tx.Rollback(err)
+	}
+	for i, item := range attachments {
+		if _, err := tx.connection.ExecContext(ctx, `INSERT INTO task_attachments (task_id, position, name, data) VALUES (?, ?, ?, ?)`, taskID.Bytes(), i, item.Name, item.Data); err != nil {
+			return BrowserTaskEnqueue{}, tx.Rollback(err)
+		}
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return BrowserTaskEnqueue{}, err

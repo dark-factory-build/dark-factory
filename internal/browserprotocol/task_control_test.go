@@ -164,3 +164,21 @@ func TestTaskListBoundsCursorAndDirection(t *testing.T) {
 		t.Fatal("short page claims another page")
 	}
 }
+
+func TestTaskAttachmentRejectsMalformedBinaryAndNullIndex(t *testing.T) {
+	good := `{"type":"TASK_ATTACHMENT","id":"upload","body":{"index":0,"offset":"0","size":"3","name":"x.png","data":"YWJj"}}`
+	if _, err := DecodeClientControl([]byte(good)); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{
+		strings.Replace(good, `"index":0`, `"index":null`, 1),
+		strings.Replace(good, `"data":"YWJj"`, `"data":[97,98,99]`, 1),
+		strings.Replace(good, `"data":"YWJj"`, `"data":null`, 1),
+		strings.Replace(good, `"data":"YWJj"`, `"data":"!!!="`, 1),
+		strings.Replace(good, `"size":"3"`, `"size":"2"`, 1),
+	} {
+		if _, err := DecodeClientControl([]byte(bad)); err == nil {
+			t.Fatalf("accepted %s", bad)
+		}
+	}
+}

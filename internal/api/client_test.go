@@ -366,6 +366,7 @@ func TestOperatorClientMethodsUseExactPrivateWire(t *testing.T) {
 			_, err := client.SetDispatch(context.Background(), 3, true)
 			return err
 		}},
+		{name: "compact storage", response: mutationResponse(), request: `{"method":"compact_storage","params":{}}`, invoke: func(client *OperatorClient) error { _, err := client.CompactStorage(context.Background()); return err }},
 		{name: "set capacity", response: mutationResponse(), request: `{"method":"set_capacity","params":{"expected_revision":3,"capacity":2}}`, invoke: func(client *OperatorClient) error {
 			_, err := client.SetCapacity(context.Background(), 3, 2)
 			return err

@@ -276,6 +276,15 @@ func (backend *browserBackend) PairLink(ctx context.Context) (string, error) {
 	return backend.owner.OpenBrowser(ctx)
 }
 
+func (backend *browserBackend) AuthorizeTaskAttachments(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte) error {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
+	if err != nil {
+		return err
+	}
+	release()
+	return nil
+}
+
 func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.TaskEnqueue) (browserprotocol.TaskEnqueueResult, error) {
 	clientID, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityHumanActions)
 	if err != nil {
@@ -316,14 +325,22 @@ func (backend *browserBackend) EnqueueTask(ctx context.Context, rawClient [brows
 	case "any":
 		mode = kernel.BrowserEnqueueAnyWorker
 	}
+	attachments := make([]kernel.TaskAttachment, len(request.Attachments))
+	for i, item := range request.Attachments {
+		attachments[i] = kernel.TaskAttachment{Name: item.Name, Data: item.Data}
+	}
+	instruction, err := kernel.TaskAttachmentInstruction(request.Instruction, attachments)
+	if err != nil {
+		return browserprotocol.TaskEnqueueResult{}, browser.ErrTooLarge
+	}
 	if mode == kernel.BrowserEnqueueAnyWorker {
-		if err := prepareSharedTaskText("Direct instruction", request.Instruction); err != nil {
+		if err := prepareSharedTaskText("Direct instruction", instruction); err != nil {
 			return browserprotocol.TaskEnqueueResult{}, browser.ErrTooLarge
 		}
-	} else if err := backend.prepareAgentInstruction(ctx, agentID, request.Instruction); err != nil {
+	} else if err := backend.prepareAgentInstruction(ctx, agentID, instruction); err != nil {
 		return browserprotocol.TaskEnqueueResult{}, err
 	}
-	result, err := backend.store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, repositoryID, request.Instruction, mode, at)
+	result, err := backend.store.EnqueueTaskForBrowserAgentRepositoryMode(ctx, clientID, taskID, incarnationID, agentID, expectedAgentRevision, repositoryID, request.Instruction, mode, at, attachments...)
 	if err != nil {
 		return browserprotocol.TaskEnqueueResult{}, mapBrowserError(err)
 	}

@@ -26,12 +26,13 @@ import (
 )
 
 const (
-	attemptRequestTimeout        = 5 * time.Second
-	retainedSourceRequestTimeout = 10 * time.Minute
-	serviceRequestTimeout        = 30 * time.Second
-	exitUsage                    = 64
-	exitFailure                  = 1
-	maxHomeArgumentBytes         = 4096
+	attemptRequestTimeout           = 5 * time.Second
+	retainedSourceRequestTimeout    = 10 * time.Minute
+	storageCompactionRequestTimeout = 10 * time.Minute
+	serviceRequestTimeout           = 30 * time.Second
+	exitUsage                       = 64
+	exitFailure                     = 1
+	maxHomeArgumentBytes            = 4096
 
 	// pairListenAddress is factoryd's fixed loopback listener and pairPageURL
 	// the first-party pair page it serves there. A successful install opens
@@ -111,6 +112,10 @@ const (
   factoryctl status
   factoryctl task send-back --task ID --note TEXT
   factoryctl task update --task ID --revision REVISION [--title TEXT] [--body TEXT] [--priority N] [--agent ID] [--cancel] [--retry]
+  factoryctl task update --task ID --revision REVISION --remove-attachments
+    Only succeeded/cancelled tasks; retained filenames are marked removed.
+  factoryctl storage compact
+    Requires dispatch off and no nonterminal runs.
   factoryctl task recovery --task ID --incarnation ID
   factoryctl task read --task ID --revision REVISION [--offset N]
   factoryctl dispatch on|off [--revision REVISION]
@@ -194,6 +199,7 @@ const (
 	commandDispatch
 	commandCapacity
 	commandStatus
+	commandCompactStorage
 	commandOverseerStatus
 	commandOverseerTaskAdd
 	commandOverseerTaskUpdate
@@ -225,15 +231,16 @@ const (
 type attemptCommand struct {
 	toolPath, toolchainReadRoots string
 
-	kind             commandKind
-	operatorControl  bool
-	home             string
-	idempotencyKey   string
-	text             string
-	options          []string
-	id               string
-	after            string
-	expectedRevision uint64
+	kind              commandKind
+	removeAttachments bool
+	operatorControl   bool
+	home              string
+	idempotencyKey    string
+	text              string
+	options           []string
+	id                string
+	after             string
+	expectedRevision  uint64
 
 	label            string
 	plistDir         string
@@ -383,7 +390,7 @@ func runWithDependencies(ctx context.Context, args []string, getenv func(string)
 	if command.kind == commandRemoteStatus {
 		return runRemote(ctx, getenv, stdout, stderr)
 	}
-	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandHumanList || command.kind == commandHumanReply {
+	if command.kind == commandAgentPaths || command.kind == commandOperatorTerminalObserve || command.kind == commandWorkerOperation || command.kind == commandProjectCreate || command.kind == commandProjectRepository || command.kind == commandIntake || command.kind == commandProjectLimits || command.kind == commandAgentCreate || command.kind == commandAgentIdlePolicy || command.kind == commandAccountsDiscover || command.kind == commandAccountsList || command.kind == commandAccountLink || command.kind == commandAgentSelectAccount || command.kind == commandAgentSelectModel || command.kind == commandTaskAdd || command.kind == commandTaskSendBack || command.kind == commandTaskRecovery || command.kind == commandTaskRead || command.kind == commandDispatch || command.kind == commandCapacity || command.kind == commandStatus || command.kind == commandCompactStorage || command.kind == commandHumanList || command.kind == commandHumanReply {
 		return runOperator(ctx, command, getenv, stdout, stderr)
 	}
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments && len(args) > 0 && args[0] == "content" {
@@ -634,7 +641,7 @@ func parse(args []string) (attemptCommand, bool, bool) {
 		command.operatorControl = ok
 		return command, help, ok
 	}
-	if len(args) >= 1 && (args[0] == "status" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
+	if len(args) >= 1 && (args[0] == "status" || args[0] == "storage" || args[0] == "content" || args[0] == "outcome" || args[0] == "project" || args[0] == "agent" || args[0] == "account" || args[0] == "task" || args[0] == "worker" || args[0] == "dispatch" || args[0] == "capacity" || args[0] == "intake") {
 		return parseOperator(args)
 	}
 	if len(args) >= 1 && args[0] == "overseer" {
@@ -1715,6 +1722,9 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 2 && args[0] == "outcome" {
 		return parseOutcome(args)
 	}
+	if len(args) == 2 && args[0] == "storage" && args[1] == "compact" {
+		return attemptCommand{kind: commandCompactStorage}, false, true
+	}
 	if len(args) == 1 && args[0] == "status" {
 		return attemptCommand{kind: commandStatus}, false, true
 	}
@@ -2093,6 +2103,14 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			index++
 			continue
 		}
+		if name == "--remove-attachments" && command.kind == commandOverseerTaskUpdate {
+			if seen[name] {
+				return attemptCommand{}, false, false
+			}
+			seen[name], command.removeAttachments = true, true
+			index++
+			continue
+		}
 		if name == "--retry" && command.kind == commandOverseerTaskUpdate {
 			if seen[name] {
 				return attemptCommand{}, false, false
@@ -2221,6 +2239,12 @@ func parseOverseer(args []string) (attemptCommand, bool, bool) {
 			return attemptCommand{}, false, false
 		}
 	case commandOverseerTaskUpdate:
+		if command.removeAttachments {
+			if command.id == "" || command.expectedRevision == 0 || command.retry || command.cancel || command.agent != "" || command.title != "" || command.bodySet || command.prioritySet {
+				return attemptCommand{}, false, false
+			}
+			break
+		}
 		if command.id == "" || command.expectedRevision == 0 || command.retry && (command.title != "" || command.bodySet || command.prioritySet || command.cancel) || !command.retry && !command.cancel && command.agent == "" && command.title == "" && !command.bodySet && !command.prioritySet {
 			return attemptCommand{}, false, false
 		}
@@ -2385,6 +2409,9 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 	if command.kind == commandIntake {
 		timeout = 120 * time.Second
 	}
+	if command.kind == commandCompactStorage {
+		timeout = storageCompactionRequestTimeout
+	}
 	callContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if command.kind >= commandContentCreate && command.kind <= commandContentAttachments {
@@ -2398,6 +2425,12 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		result, callErr := client.Intake(callContext, command.intake)
 		if callErr != nil {
 			return writeWebFailure(stderr, "intake", callErr)
+		}
+		return writeJSON(stdout, result)
+	case commandCompactStorage:
+		result, callErr := client.CompactStorage(callContext)
+		if callErr != nil {
+			return writeWebFailure(stderr, "storage compact", callErr)
 		}
 		return writeJSON(stdout, result)
 	case commandStatus:
@@ -2631,7 +2664,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		return writeJSON(stdout, result)
 	case commandOverseerTaskUpdate:
-		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry}
+		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry, RemoveAttachments: command.removeAttachments}
 		if command.title != "" {
 			input.Title = &command.title
 		}
@@ -2720,6 +2753,9 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 }
 
 func runOverseer(ctx context.Context, command attemptCommand, getenv func(string) string, stdout, stderr io.Writer) int {
+	if command.removeAttachments {
+		return exitUsage
+	}
 	socket := getenv("DARK_FACTORY_SOCKET")
 	if socket == "" {
 		_, _ = io.WriteString(stderr, "factoryctl: overseer client configuration is invalid\n")
@@ -2756,7 +2792,7 @@ func runOverseer(ctx context.Context, command attemptCommand, getenv func(string
 		}
 		result, err = client.OverseerEnqueueTask(callContext, api.OverseerTaskCreateInput{ID: id, AssignedAgentID: anyWorkerAgent(command.agent), IncarnationID: incarnation, Title: command.title, Body: command.body, Priority: command.priority, Prerequisites: command.prerequisites, ConflictPaths: command.conflictPaths})
 	case commandOverseerTaskUpdate:
-		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry}
+		input := api.OverseerTaskUpdateInput{TaskID: command.id, ExpectedRevision: command.expectedRevision, Cancel: command.cancel, Retry: command.retry, RemoveAttachments: command.removeAttachments}
 		if command.title != "" {
 			input.Title = &command.title
 		}

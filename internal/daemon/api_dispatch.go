@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	defaultDispatchTimeout        = 10 * time.Second
-	retainedSourceDispatchTimeout = 10 * time.Minute
+	defaultDispatchTimeout           = 10 * time.Second
+	retainedSourceDispatchTimeout    = 10 * time.Minute
+	storageCompactionDispatchTimeout = 10 * time.Minute
 )
 
 // Daemon is the concrete composition root for the local API. It owns the
@@ -165,6 +166,11 @@ func (daemon *Daemon) HandleConnection(ctx context.Context, connection *api.Conn
 		dispatchContext, cancel = context.WithTimeout(ctx, retainedSourceDispatchTimeout)
 		defer cancel()
 	}
+	if call.Kind() == api.CallCompactStorage {
+		cancel()
+		dispatchContext, cancel = context.WithTimeout(ctx, storageCompactionDispatchTimeout)
+		defer cancel()
+	}
 	if err := connection.RefreshDeadline(dispatchContext); err != nil {
 		return err
 	}
@@ -226,6 +232,12 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 		return daemon.workerOperation(ctx, call)
 	case api.CallSetDispatch:
 		return daemon.setDispatch(ctx, call)
+	case api.CallCompactStorage:
+		state, err := daemon.store.CompactStorage(ctx)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return mutationReply(state.Head, state.Revision)
 	case api.CallSetCapacity:
 		return daemon.setCapacity(ctx, call)
 	case api.CallAccountsDiscover:
@@ -434,7 +446,11 @@ func (daemon *Daemon) taskRead(ctx context.Context, call api.Call) api.Reply {
 		outcomeText = task.BlockedReason
 	}
 	outcome, outcomeMore := taskDetailTextChunk(outcomeText, input.Offset)
-	result := api.TaskText{TaskID: task.ID.String(), Revision: uint64(task.Revision.Int64()), Instruction: instruction, Feedback: feedback}
+	attachments, err := daemon.store.TaskAttachments(ctx, id)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	result := api.TaskText{Attachments: attachments, TaskID: task.ID.String(), Revision: uint64(task.Revision.Int64()), Instruction: instruction, Feedback: feedback}
 	if outcomeText != "" {
 		result.Outcome = &outcome
 	}
@@ -648,7 +664,15 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}
-	task, err := attemptTaskWithContinuationContext(authority.Provider, []byte(authority.Task()), authority.ContinuationContexts)
+	attachments, err := daemon.store.TaskAttachments(ctx, authority.TaskID)
+	if err != nil {
+		return newErrorReply(remoteErrorCode(err))
+	}
+	instruction, err := kernel.TaskAttachmentInstruction(authority.Task(), attachments)
+	if err != nil {
+		return newErrorReply(api.RemoteInternal)
+	}
+	task, err := attemptTaskWithContinuationContext(authority.Provider, []byte(instruction), authority.ContinuationContexts)
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
@@ -1849,6 +1873,13 @@ func (daemon *Daemon) operatorUpdateTask(ctx context.Context, call api.Call) api
 	expected, err := kernel.NewRevision(int64(input.ExpectedRevision))
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
+	}
+	if input.RemoveAttachments {
+		task, err := daemon.store.RemoveTaskAttachments(ctx, id, expected)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return daemon.mutation(ctx, task.Revision)
 	}
 	var assigned *kernel.AgentID
 	if input.AssignedAgentID != nil {
