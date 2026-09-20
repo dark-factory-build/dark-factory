@@ -490,13 +490,23 @@ func TestPublicSnapshotCarriesBlockedWorkerTasksButOnlyAnOrchestratorsLatest(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	titles := []string{"older worker task", "newer worker task", "older pass", "newer pass"}
+	// Two more worker tasks than the bound, then two orchestrator passes.
+	const workerTasks = 66
+	titles := make([]string, 0, workerTasks+2)
+	for index := range workerTasks {
+		titles = append(titles, fmt.Sprintf("worker task %02d", index))
+	}
+	titles = append(titles, "older pass", "newer pass")
 	for index, title := range titles {
 		owner := worker.ID
-		if index >= 2 {
+		if index >= workerTasks {
 			owner = run.AgentID
 		}
-		if _, err := store.EnqueueTask(ctx, NewTask{ID: publicTaskID(t, index+1), ProjectID: run.ProjectID, AssignedAgentID: owner, IncarnationID: incarnationID(t, byte(100+index)), Title: title}, mustTime(t, int64(600+index))); err != nil {
+		incarnation, err := IncarnationIDFromBytes(publicRawID(0xa4, index+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.EnqueueTask(ctx, NewTask{ID: publicTaskID(t, index+1), ProjectID: run.ProjectID, AssignedAgentID: owner, IncarnationID: incarnation, Title: title}, mustTime(t, int64(600+index))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -519,7 +529,9 @@ func TestPublicSnapshotCarriesBlockedWorkerTasksButOnlyAnOrchestratorsLatest(t *
 		blocked = append(blocked, title)
 	}
 	slices.Sort(blocked)
-	if !slices.Equal(blocked, []string{"newer pass", "newer worker task", "older worker task"}) {
+	// The newest 64 worker tasks and the orchestrator's latest pass; the two
+	// oldest worker tasks page through ReadTaskList instead.
+	if !slices.Equal(blocked, append([]string{"newer pass"}, titles[2:workerTasks]...)) {
 		t.Fatalf("blocked public tasks = %q", blocked)
 	}
 }

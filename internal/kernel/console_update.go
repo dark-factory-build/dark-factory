@@ -201,8 +201,8 @@ func (store *Store) UpdateTask(ctx context.Context, id TaskID, expected Revision
 	return store.updateTask(ctx, nil, id, expected, patch, at)
 }
 
-// UpdateTaskForOverseer edits a queued worker task in the running
-// orchestrator's project, with authorization checked in the update transaction.
+// UpdateTaskForOverseer edits a queued worker task, or cancels a blocked one,
+// in the running orchestrator's project, with authorization checked in the update transaction.
 func (store *Store) UpdateTaskForOverseer(ctx context.Context, digest AttemptDigest, id TaskID, expected Revision, patch TaskPatch, at UnixMillis) (Task, error) {
 	return store.updateTask(ctx, &digest, id, expected, patch, at)
 }

@@ -298,6 +298,7 @@ export function QueuePanel({
         <span className="dfConsoleItem__meta">{name(task)}{status === "blocked" && task.updated_at_ms !== undefined ? ` · since ${dateLabel(task.updated_at_ms)}` : ""}</span>
         {status !== "blocked" || onEditTask === undefined ? null : <button type="button" aria-label={`Cancel ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button>}
       </div></li>)}</ul>
+      {status === "blocked" && rows.length >= 64 ? <p>Showing the newest 64. Older blocked tasks are in each agent’s Recent work.</p> : null}
     </section>;
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Tasks">
