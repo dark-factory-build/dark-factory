@@ -290,7 +290,7 @@ libexec/dark-factory/verify-adversarial-review.sh" ] || fail "$target archive ha
       $2 != 0 || $3 != "root" || $4 != "wheel" || $6 != "Jan" || $7 != 1 || $8 != 2000 { exit 1 }
       ($9 == "libexec/dark-factory/supervision.md" && $1 != "-rw-r--r--") ||
         ($9 != "libexec/dark-factory/supervision.md" && $1 != "-rwxr-xr-x") { exit 1 }
-      END { exit NR == 13 ? 0 : 1 }
+      END { exit NR == 15 ? 0 : 1 }
     ' || fail "$target archive metadata is not normalized"
 done
 (cd "$output" && shasum -a 256 -c SHA256SUMS >/dev/null) || fail "release checksums failed"
