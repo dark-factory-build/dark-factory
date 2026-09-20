@@ -224,3 +224,30 @@ test("successful withdrawal immediately retires its candidate action", async () 
   await coordinator.intakeAction("project", { action: "withdraw", acceptance_id: acceptanceId });
   assert.equal(coordinator.intake.get("project").candidates[0].reason, "withdrawal_pending");
 });
+
+test("approval adds to queue and refreshes the same source without another click", async () => {
+  const calls = [];
+  const session = { async intake(request) {
+    calls.push(request);
+    if (request.action === "accept") return {state:"accepted",acceptance_id:"receipt"};
+    if (request.action === "import") return {state:"imported",task_id:"task"};
+    if (request.action === "preview") return {state:"ok",source_id:"source",reviewed_revision:1n,candidates:[{reason:"already_accepted",task_id:"task"}]};
+    throw new Error(request.action);
+  }};
+  const coordinator = new FactorySettingsCoordinator({session:()=>session,ready:()=>true,generation:()=>1,current:()=>true,errorCode:()=>"error",publish(){}});
+  await coordinator.intakeAction("project",{action:"accept",source_id:"source",expected_revision:1n,issue_number:7n,content_hash:"ab".repeat(32)});
+  assert.deepEqual(calls.slice(1),[{action:"import",acceptance_id:"receipt"},{action:"preview",source_id:"source",page:1}]);
+  assert.equal(coordinator.intake.get("project").candidates[0].task_id,"task");
+});
+
+test("an acceptance response from a replaced session cannot trigger import", async () => {
+  let resolve, current=true;
+  const calls=[];
+  const session={intake(request){calls.push(request);return new Promise((done)=>{resolve=done;});}};
+  const coordinator=new FactorySettingsCoordinator({session:()=>session,ready:()=>true,generation:()=>1,current:()=>current,errorCode:()=>"error",publish(){}});
+  const pending=coordinator.intakeAction("project",{action:"accept",source_id:"source"});
+  current=false;
+  resolve({state:"accepted",acceptance_id:"receipt"});
+  await pending;
+  assert.equal(calls.length,1);
+});

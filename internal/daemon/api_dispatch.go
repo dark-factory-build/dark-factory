@@ -15,6 +15,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/change"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/linear"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 	"github.com/dark-factory-build/dark-factory/internal/provider"
 )
@@ -28,6 +29,8 @@ const (
 // durable Store and live attempt owners. It does not own an accept loop; the
 // caller accepts and hands one connection to HandleConnection.
 type Daemon struct {
+	intakeMu             sync.Mutex
+	linear               *linear.Host
 	github               *maintainer.Host
 	intakeControllerHome string
 	// intakeIssues is a package-test-only remote failure/race seam.
@@ -659,7 +662,7 @@ func (daemon *Daemon) attemptTask(ctx context.Context, call api.Call) api.Reply 
 	}
 	if found {
 		hash := accepted.Snapshot.ContentHash()
-		assignment.Intake = &api.IntakeTaskSource{AcceptanceID: accepted.ID.String(), Repository: accepted.SourceRepository, RepositoryID: accepted.Snapshot.GitHubRepositoryID, IssueNumber: accepted.Snapshot.IssueNumber, TargetRepositoryID: accepted.RepositoryID.String(), ContentHash: hex.EncodeToString(hash[:])}
+		assignment.Intake = &api.IntakeTaskSource{LinearTeamID: accepted.Snapshot.LinearTeamID, SourceURL: accepted.Snapshot.URL, AcceptanceID: accepted.ID.String(), Repository: accepted.SourceRepository, RepositoryID: accepted.Snapshot.GitHubRepositoryID, IssueNumber: accepted.Snapshot.IssueNumber, TargetRepositoryID: accepted.RepositoryID.String(), ContentHash: hex.EncodeToString(hash[:])}
 	}
 
 	if authority.Role == kernel.RoleWorker {

@@ -198,108 +198,127 @@ func TestCreateIntakeSourceCapsGlobalSourcesAfterExactReplay(t *testing.T) {
 }
 
 func TestAcceptedIntakeImportsOnceAcrossOverlappingSourcesAndWithdrawal(t *testing.T) {
-	ctx := context.Background()
-	store, _ := newTestStore(t)
-	defer store.Close()
-	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 230), Name: "intake", Root: "/intake"}, mustTime(t, 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	newSource := func(seed byte, label string) NewIntakeSource {
-		id, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return NewIntakeSource{ID: id, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), LabelFilter: label, Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}
-	}
-	first, err := store.CreateIntakeSource(ctx, newSource(231, "ready"), mustTime(t, 2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err = store.SetIntakeSourceEnabled(ctx, first.ID, first.Revision, true, mustTime(t, 3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	updated := newSource(231, "reviewed")
-	first, err = store.UpdateIntakeSource(ctx, first.ID, first.Revision, updated, true, mustTime(t, 4))
-	if err != nil || first.LabelFilter != "reviewed" || !first.Enabled || first.Revision.Int64() != 3 {
-		t.Fatalf("updated source = %+v, %v", first, err)
-	}
-	configured, err := store.ProjectIntakeSources(ctx, project.ID)
-	if err != nil || len(configured) != 1 || configured[0].ID != first.ID {
-		t.Fatalf("project source list = %+v, %v", configured, err)
-	}
-	second, err := store.CreateIntakeSource(ctx, newSource(232, "triaged"), mustTime(t, 4))
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := intakeSnapshotForTest()
-	accepted, err := store.AcceptIntakeSnapshot(ctx, first.ID, snapshot, mustTime(t, 4))
-	if err != nil {
-		t.Fatal(err)
-	}
-	overlap, err := store.AcceptIntakeSnapshot(ctx, second.ID, snapshot, mustTime(t, 5))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if overlap.ID != accepted.ID || overlap.TaskID != accepted.TaskID {
-		t.Fatal("overlapping sources created duplicate accepted work")
-	}
-	if _, err := store.WithdrawIntakeAcceptance(ctx, accepted.ID, mustTime(t, 6)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 7)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("withdrawn acceptance imported: %v", err)
-	}
-	edited := snapshot
-	edited.Body = "explicitly accepted edit"
-	accepted, err = store.AcceptIntakeSnapshot(ctx, first.ID, edited, mustTime(t, 8))
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err = store.SetIntakeSourceEnabled(ctx, first.ID, first.Revision, false, mustTime(t, 9))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 10)); !errors.Is(err, ErrConflict) {
-		t.Fatalf("paused source imported new task: %v", err)
-	}
-	first, err = store.SetIntakeSourceEnabled(ctx, first.ID, first.Revision, true, mustTime(t, 11))
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstTask, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 12))
-	if err != nil {
-		t.Fatal(err)
-	}
-	retry, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 13))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retry.ID != firstTask.ID || retry.IncarnationID != firstTask.IncarnationID {
-		t.Fatal("crash retry did not replay exact task")
-	}
-	terminal, err := store.UpdateTask(ctx, firstTask.ID, firstTask.Revision, TaskPatch{Cancel: true}, mustTime(t, 14))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if terminal.Status != TaskCancelled {
-		t.Fatalf("terminal task = %s", terminal.Status)
-	}
-	newest := edited
-	newest.Body = "later accepted instructions"
-	if _, err := store.AcceptIntakeSnapshot(ctx, first.ID, newest, mustTime(t, 14)); err != nil {
-		t.Fatal(err)
-	}
-	replayTerminal, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 15))
-	if err != nil || replayTerminal.Status != TaskCancelled || replayTerminal.Revision != terminal.Revision {
-		t.Fatalf("terminal acceptance replay = %+v, %v", replayTerminal, err)
-	}
-	if got := PreviewIntake(first, edited, &accepted); got != IntakeAlreadyAccepted {
-		t.Fatalf("accepted edit preview = %q", got)
-	}
-	if got := PreviewIntake(first, snapshot, &accepted); got != IntakeContentChanged {
-		t.Fatalf("old content preview = %q", got)
+	for _, linear := range []bool{false, true} {
+		t.Run(fmt.Sprint("linear=", linear), func(t *testing.T) {
+			ctx := context.Background()
+			store, _ := newTestStore(t)
+			defer store.Close()
+			project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 230), Name: "intake", Root: "/intake"}, mustTime(t, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			newSource := func(seed byte, label string) NewIntakeSource {
+				id, err := IntakeSourceIDFromBytes(bytes.Repeat([]byte{seed}, IDBytes))
+				if err != nil {
+					t.Fatal(err)
+				}
+				spec := NewIntakeSource{ID: id, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), LabelFilter: label, Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}
+				if linear {
+					spec.GitHubRepositoryID = 0
+					spec.LinearTeamID = "11111111-1111-4111-8111-111111111111"
+					spec.GitHubRepositoryName = "Engineering"
+				}
+				return spec
+			}
+			first, err := store.CreateIntakeSource(ctx, newSource(231, "ready"), mustTime(t, 2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err = store.SetIntakeSourceEnabled(ctx, first.ID, first.Revision, true, mustTime(t, 3))
+			if err != nil {
+				t.Fatal(err)
+			}
+			updated := newSource(231, "reviewed")
+			first, err = store.UpdateIntakeSource(ctx, first.ID, first.Revision, updated, true, mustTime(t, 4))
+			if err != nil || first.LabelFilter != "reviewed" || !first.Enabled || first.Revision.Int64() != 2 {
+				t.Fatalf("updated source = %+v, %v", first, err)
+			}
+			configured, err := store.ProjectIntakeSources(ctx, project.ID)
+			if err != nil || len(configured) != 1 || configured[0].ID != first.ID {
+				t.Fatalf("project source list = %+v, %v", configured, err)
+			}
+			second, err := store.CreateIntakeSource(ctx, newSource(232, "triaged"), mustTime(t, 4))
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := intakeSnapshotForTest()
+			if linear {
+				snapshot.GitHubRepositoryID = 0
+				snapshot.LinearTeamID = first.LinearTeamID
+				snapshot.NodeID = "22222222-2222-4222-8222-222222222222"
+				snapshot.URL = "https://linear.app/acme/issue/ENG-7/intake"
+			}
+			accepted, err := store.AcceptIntakeSnapshot(ctx, first.ID, snapshot, mustTime(t, 4))
+			if err != nil {
+				t.Fatal(err)
+			}
+			overlap, err := store.AcceptIntakeSnapshot(ctx, second.ID, snapshot, mustTime(t, 5))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if overlap.ID != accepted.ID || overlap.TaskID != accepted.TaskID {
+				t.Fatal("overlapping sources created duplicate accepted work")
+			}
+			if _, err := store.WithdrawIntakeAcceptance(ctx, accepted.ID, mustTime(t, 6)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 7)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("withdrawn acceptance imported: %v", err)
+			}
+			edited := snapshot
+			edited.Body = "explicitly accepted edit"
+			accepted, err = store.AcceptIntakeSnapshot(ctx, first.ID, edited, mustTime(t, 8))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, err = store.SetIntakeSourceEnabled(ctx, first.ID, first.Revision, false, mustTime(t, 9))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.SetIntakeSourceEnabled(ctx, second.ID, second.Revision, false, mustTime(t, 9)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 10)); !errors.Is(err, ErrConflict) {
+				t.Fatalf("paused source imported new task: %v", err)
+			}
+			first, err = store.SetIntakeSourceEnabled(ctx, first.ID, first.Revision, true, mustTime(t, 11))
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstTask, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 12))
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 13))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retry.ID != firstTask.ID || retry.IncarnationID != firstTask.IncarnationID {
+				t.Fatal("crash retry did not replay exact task")
+			}
+			terminal, err := store.UpdateTask(ctx, firstTask.ID, firstTask.Revision, TaskPatch{Cancel: true}, mustTime(t, 14))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if terminal.Status != TaskCancelled {
+				t.Fatalf("terminal task = %s", terminal.Status)
+			}
+			newest := edited
+			newest.Body = "later accepted instructions"
+			if _, err := store.AcceptIntakeSnapshot(ctx, first.ID, newest, mustTime(t, 14)); err != nil {
+				t.Fatal(err)
+			}
+			replayTerminal, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 15))
+			if err != nil || replayTerminal.Status != TaskCancelled || replayTerminal.Revision != terminal.Revision {
+				t.Fatalf("terminal acceptance replay = %+v, %v", replayTerminal, err)
+			}
+			if got := PreviewIntake(first, edited, &accepted); got != IntakeAlreadyAccepted {
+				t.Fatalf("accepted edit preview = %q", got)
+			}
+			if got := PreviewIntake(first, snapshot, &accepted); got != IntakeContentChanged {
+				t.Fatalf("old content preview = %q", got)
+			}
+		})
 	}
 }
 
@@ -541,7 +560,7 @@ func TestIntakeReacceptsRestoredContentWithoutDuplicatingWork(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer store.Close()
-			latest, found, err := store.LatestIntakeAcceptance(ctx, 42, snapshot.IssueNumber, snapshot.NodeID, project.ID, source.TargetRepositoryID)
+			latest, found, err := store.LatestIntakeAcceptance(ctx, snapshot, project.ID, source.TargetRepositoryID)
 			if err != nil || !found || latest.ID != first.ID {
 				t.Fatalf("latest after restart: %+v %v", latest, err)
 			}
@@ -573,7 +592,7 @@ func TestIntakeReacceptsRestoredContentWithoutDuplicatingWork(t *testing.T) {
 			if withdrawn, err := store.AcceptIntakeSnapshot(ctx, source.ID, snapshot, mustTime(t, 11)); err != nil || withdrawn.WithdrawnAt == nil {
 				t.Fatalf("withdrawal revived: %+v %v", withdrawn, err)
 			}
-			latest, _, err = store.LatestIntakeAcceptance(ctx, 42, snapshot.IssueNumber, snapshot.NodeID, project.ID, source.TargetRepositoryID)
+			latest, _, err = store.LatestIntakeAcceptance(ctx, snapshot, project.ID, source.TargetRepositoryID)
 			if err != nil || latest.ID != second.ID {
 				t.Fatalf("withdrawn review promoted: %+v %v", latest, err)
 			}

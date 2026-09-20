@@ -55,6 +55,7 @@ func TestV24MigrationPreservesSourceProofWithoutInventingGitHubID(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	downgradeIntakeToV27(t, store)
 	for _, statement := range []string{"DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations"} {
 		if _, err := store.writer.Exec(statement); err != nil {
 			t.Fatal(err)

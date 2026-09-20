@@ -111,13 +111,15 @@ struct Permissions {
 }
 #[derive(Deserialize, Serialize)]
 struct Repository {
+    private: Option<bool>,
     id: i64,
     full_name: String,
     permissions: Permissions,
 }
 impl Repository {
-    fn allows(&self, delegated: &Delegation, write: bool) -> bool {
-        self.id == delegated.repository_id
+    fn allows(&self, delegated: &Delegation, write: bool, require_private: bool) -> bool {
+        (!write || !require_private || self.private == Some(true))
+            && self.id == delegated.repository_id
             && self.full_name.eq_ignore_ascii_case(&delegated.repository)
             && self.permissions.pull
             && (!write
@@ -657,7 +659,7 @@ mod cloudflare {
             else {
                 return denied();
             };
-            if let Err(error) = authorize(token, oauth.app_id, delegated, true).await {
+            if let Err(error) = authorize(token, oauth.app_id, delegated, true, false).await {
                 return github_failure(error);
             }
             if let Some(source) = source {
@@ -668,7 +670,7 @@ mod cloudflare {
                 else {
                     return denied();
                 };
-                if let Err(error) = authorize(token, oauth.app_id, source, false).await {
+                if let Err(error) = authorize(token, oauth.app_id, source, false, false).await {
                     return github_failure(error);
                 }
             }
@@ -693,7 +695,7 @@ mod cloudflare {
             // Status contains private delegation metadata, so access loss is
             // checked here too, not only before repository operations.
             for delegated in &connection.repositories {
-                if let Err(error) = authorize(token, oauth.app_id, delegated, false).await {
+                if let Err(error) = authorize(token, oauth.app_id, delegated, false, false).await {
                     return github_failure(error);
                 }
             }
@@ -802,7 +804,7 @@ mod cloudflare {
                 {
                     return denied();
                 }
-                if let Err(error) = authorize(token, oauth.app_id, delegated, false).await {
+                if let Err(error) = authorize(token, oauth.app_id, delegated, false, false).await {
                     return github_failure(error);
                 }
             }
@@ -817,7 +819,8 @@ mod cloudflare {
             let method = rpc.get("method").and_then(Value::as_str).unwrap_or("");
             let mut repository = None;
             let mut grants = BTreeMap::new();
-            if method == "tools/call" {
+            let require_private = method == "factory/tools/call_private";
+            if method == "tools/call" || require_private {
                 let name = rpc
                     .pointer("/params/name")
                     .and_then(Value::as_str)
@@ -838,7 +841,9 @@ mod cloudflare {
                 else {
                     return denied();
                 };
-                if let Err(error) = authorize(token, oauth.app_id, delegated, write).await {
+                if let Err(error) =
+                    authorize(token, oauth.app_id, delegated, write, require_private).await
+                {
                     return github_failure(error);
                 }
                 grants.insert(
@@ -857,7 +862,7 @@ mod cloudflare {
                         return denied();
                     };
                     if let Err(error) =
-                        authorize(token, oauth.app_id, delegated_source, false).await
+                        authorize(token, oauth.app_id, delegated_source, false, false).await
                     {
                         return github_failure(error);
                     }
@@ -876,6 +881,9 @@ mod cloudflare {
                         .and_then(Value::as_object_mut)
                         .map(|args| args.remove("repository"));
                 }
+            }
+            if require_private {
+                rpc["method"] = json!("tools/call");
             }
             let state = BrokerState::from_worker_env(env)
                 .map_err(|_| worker::Error::RustError("inactive".into()))?;
@@ -967,6 +975,7 @@ mod cloudflare {
         app_id: i64,
         delegated: &Delegation,
         write: bool,
+        require_private: bool,
     ) -> Result<(), GitHubError> {
         installation(token, app_id, delegated.installation_id).await?;
         // The intersection endpoint proves this precise repository still belongs
@@ -979,7 +988,7 @@ mod cloudflare {
                 .find(|r| r.id == delegated.repository_id)
             {
                 return repository
-                    .allows(delegated, write)
+                    .allows(delegated, write, require_private)
                     .then_some(())
                     .ok_or(GitHubError::Rejected(401));
             }
@@ -994,6 +1003,24 @@ mod cloudflare {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_intake_fences_every_public_or_unknown_write() {
+        let delegated = Delegation {
+            repository: "team/repo".into(),
+            repository_id: 7,
+            installation_id: 9,
+        };
+        for private in [Some(false), None, Some(true)] {
+            let repository: Repository = serde_json::from_value(serde_json::json!({"id":7,"full_name":"team/repo","private":private,"permissions":{"pull":true,"push":true}})).unwrap();
+            assert!(repository.allows(&delegated, false, true));
+            assert!(repository.allows(&delegated, true, false));
+            assert_eq!(
+                repository.allows(&delegated, true, true),
+                private == Some(true)
+            );
+        }
+    }
+
     #[test]
     fn confirmation_expiry_and_attempt_limit_are_closed_boundaries() {
         let mut confirmation = Confirmation {
@@ -1016,6 +1043,7 @@ mod tests {
             repository: "team/repo".into(),
         };
         let mut repository = Repository {
+            private: Some(false),
             id: 2,
             full_name: "team/repo".into(),
             permissions: Permissions {
@@ -1025,12 +1053,12 @@ mod tests {
                 admin: false,
             },
         };
-        assert!(repository.allows(&delegation, false));
-        assert!(!repository.allows(&delegation, true));
+        assert!(repository.allows(&delegation, false, false));
+        assert!(!repository.allows(&delegation, true, false));
         repository.permissions.push = true;
-        assert!(repository.allows(&delegation, true));
+        assert!(repository.allows(&delegation, true, false));
         repository.id = 3;
-        assert!(!repository.allows(&delegation, false));
+        assert!(!repository.allows(&delegation, false, false));
         let mut installation = Installation {
             id: 1,
             app_id: 4,

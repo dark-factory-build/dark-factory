@@ -101,6 +101,7 @@ type RepositoryMutateResult struct {
 // sources. Candidate bytes only arrive in the result after an explicit
 // preview; acceptance carries the reviewed hash, never caller-authored text.
 type IntakeConfiguration struct {
+	LinearTeamID       string           `json:"linear_team_id,omitempty"`
 	PriorityDefault    int64            `json:"priority_default,omitempty"`
 	PriorityByLabel    map[string]int64 `json:"priority_by_label,omitempty"`
 	Repository         string           `json:"repository"`
@@ -113,6 +114,7 @@ type IntakeConfiguration struct {
 	AdmissionLimit     uint16           `json:"admission_limit"`
 }
 type Intake struct {
+	APIKey           string               `json:"api_key,omitempty"`
 	Action           string               `json:"action"`
 	SourceID         string               `json:"source_id,omitempty"`
 	ProjectID        string               `json:"project_id,omitempty"`
@@ -132,7 +134,8 @@ type IntakeSync struct {
 	Error         string  `json:"error"`
 }
 type IntakeSource struct {
-	Sync *IntakeSync `json:"sync,omitempty"`
+	LinearTeamID string      `json:"linear_team_id,omitempty"`
+	Sync         *IntakeSync `json:"sync,omitempty"`
 
 	PriorityDefault    int64            `json:"priority_default,omitempty"`
 	PriorityByLabel    map[string]int64 `json:"priority_by_label,omitempty"`
@@ -163,7 +166,14 @@ type IntakeCandidate struct {
 	TaskID       string   `json:"task_id,omitempty"`
 	Truncated    Bool     `json:"truncated,omitempty"`
 }
+type IntakeTeam struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
 type IntakeResult struct {
+	SourceID         string            `json:"source_id,omitempty"`
+	LinearTeams      []IntakeTeam      `json:"linear_teams,omitempty"`
 	State            string            `json:"state"`
 	ImportedTasks    []string          `json:"imported_tasks,omitempty"`
 	Sources          []IntakeSource    `json:"sources,omitempty"`
@@ -563,6 +573,14 @@ func validConsoleControl(kind MessageType, body any) error {
 			return bad()
 		}
 	case IntakeResult:
+		if len(value.LinearTeams) > 100 {
+			return bad()
+		}
+		for _, team := range value.LinearTeams {
+			if validateBoundedText(team.ID, 36, 36) != nil || validateBoundedText(team.Name, 1, 140) != nil || validateBoundedText(team.Key, 1, 32) != nil {
+				return bad()
+			}
+		}
 		if !validIntakeResult(value) {
 			return bad()
 		}
@@ -818,7 +836,7 @@ func validIntakeConfiguration(value IntakeConfiguration) bool {
 	if err != nil || len(priorities) > 2048 {
 		return false
 	}
-	if validateBoundedText(value.Repository, 3, 140) != nil || strings.Count(value.Repository, "/") != 1 || validateDynamicID(value.TargetRepositoryID) != nil || value.OverseerAgentID != "" && validateDynamicID(value.OverseerAgentID) != nil || validateBoundedText(value.Label, 0, 100) != nil || (value.Policy != "manual" && value.Policy != "trusted_authors") || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || len(value.TrustedAuthors) > 25 {
+	if (value.LinearTeamID == "" && (validateBoundedText(value.Repository, 3, 140) != nil || strings.Count(value.Repository, "/") != 1) || value.LinearTeamID != "" && (validateBoundedText(value.LinearTeamID, 36, 36) != nil || validateBoundedText(value.Repository, 1, 140) != nil || value.Policy != "manual" || len(value.TrustedAuthors) != 0)) || validateDynamicID(value.TargetRepositoryID) != nil || value.OverseerAgentID != "" && validateDynamicID(value.OverseerAgentID) != nil || validateBoundedText(value.Label, 0, 100) != nil || (value.Policy != "manual" && value.Policy != "trusted_authors") || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || len(value.TrustedAuthors) > 25 {
 		return false
 	}
 	seen := map[string]bool{}
@@ -832,6 +850,16 @@ func validIntakeConfiguration(value IntakeConfiguration) bool {
 }
 
 func validIntake(value Intake) bool {
+	if strings.HasPrefix(value.Action, "linear_") {
+		key := value.APIKey
+		value.APIKey = ""
+		action := value.Action
+		value.Action = ""
+		return value == (Intake{}) && (action == "linear_connect" && validateBoundedText(key, 10, 512) == nil || (action == "linear_disconnect" || action == "linear_teams") && key == "")
+	}
+	if value.APIKey != "" {
+		return false
+	}
 	if value.Page > 1000 || value.IssueNumber > Decimal(MaxSQLiteInteger) {
 		return false
 	}
@@ -861,6 +889,14 @@ func validIntake(value Intake) bool {
 }
 
 func validIntakeResult(value IntakeResult) bool {
+	if value.SourceID != "" && validateDynamicID(value.SourceID) != nil || len(value.LinearTeams) > 100 {
+		return false
+	}
+	for _, team := range value.LinearTeams {
+		if validateBoundedText(team.ID, 36, 36) != nil || validateBoundedText(team.Name, 1, 140) != nil || validateBoundedText(team.Key, 1, 32) != nil {
+			return false
+		}
+	}
 	if validateBoundedText(value.State, 1, 128) != nil || len(value.ImportedTasks) > MaxSnapshotEntities || len(value.Sources) > MaxSnapshotEntities || len(value.Candidates) > MaxSnapshotEntities || value.NextPage != nil && (*value.NextPage == 0 || *value.NextPage > 1000) || value.ReviewedRevision > Decimal(MaxSQLiteInteger) || value.AcceptanceID != "" && validateDynamicID(value.AcceptanceID) != nil || value.TaskID != "" && validateDynamicID(value.TaskID) != nil {
 		return false
 	}
@@ -870,7 +906,7 @@ func validIntakeResult(value IntakeResult) bool {
 		}
 	}
 	for _, source := range value.Sources {
-		if validateDynamicID(source.ID) != nil || validateDynamicID(source.ProjectID) != nil || source.GitHubRepositoryID == 0 || source.GitHubRepositoryID > Decimal(MaxSQLiteInteger) || source.Revision == 0 || !validIntakeConfiguration(IntakeConfiguration{PriorityDefault: source.PriorityDefault, PriorityByLabel: source.PriorityByLabel, Repository: source.Repository, TargetRepositoryID: source.TargetRepositoryID, OverseerAgentID: source.OverseerAgentID, Label: source.Label, Policy: source.Policy, TrustedAuthors: source.TrustedAuthors, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}) {
+		if validateDynamicID(source.ID) != nil || validateDynamicID(source.ProjectID) != nil || source.GitHubRepositoryID == 0 && source.LinearTeamID == "" || source.GitHubRepositoryID != 0 && source.LinearTeamID != "" || source.GitHubRepositoryID > Decimal(MaxSQLiteInteger) || source.Revision == 0 || !validIntakeConfiguration(IntakeConfiguration{LinearTeamID: source.LinearTeamID, PriorityDefault: source.PriorityDefault, PriorityByLabel: source.PriorityByLabel, Repository: source.Repository, TargetRepositoryID: source.TargetRepositoryID, OverseerAgentID: source.OverseerAgentID, Label: source.Label, Policy: source.Policy, TrustedAuthors: source.TrustedAuthors, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}) {
 			return false
 		}
 		if source.Sync != nil && (source.Sync.LastAttemptAt > Decimal(MaxSQLiteInteger) || source.Sync.LastSuccessAt > Decimal(MaxSQLiteInteger) || source.Sync.ImportedTasks > 200 || (source.Sync.State != "ok" && source.Sync.State != "paused" && source.Sync.State != "error") || validateBoundedText(source.Sync.Error, 0, 128) != nil) {

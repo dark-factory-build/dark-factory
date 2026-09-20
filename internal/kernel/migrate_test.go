@@ -679,7 +679,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "099f40bd70ce7e61dc3b8c9554c06bc733b221ee36345aeef9fd6f1e230c8b67"},
+		{"current", schemaStatements, "c2069b6b85dca60a4a4043df55e292104af26548cf8dcc916a6ea9e330adf989"},
+		{"v27", v27SchemaStatements(), "099f40bd70ce7e61dc3b8c9554c06bc733b221ee36345aeef9fd6f1e230c8b67"},
 		{"v26", v26SchemaStatements(), "426ec115fe03bc59524e6f98b7dcf5282e8d8b235c9c0175c0b03af932d0e00f"},
 		{"v25", v25SchemaStatements(), "eeb13a93e6195caed12237d22d706fd176a1964734d3a25b6eebcfe386bf2fb4"},
 		{"v24", v24SchemaStatements(), "063bf2d0c978fc630bf929104a8def8f4abca76fd17fbdaf44d130a397a77c48"},
@@ -786,5 +787,74 @@ func TestRefusedMigrationReturnsTheWriterConnection(t *testing.T) {
 	}
 	if stats := store.writer.Stats(); stats.OpenConnections != 1 || stats.Idle != 1 {
 		t.Fatalf("refused migration did not return the writer connection: open=%d idle=%d", stats.OpenConnections, stats.Idle)
+	}
+}
+
+// Keep a populated pre-Linear database, including its frozen receipts, readable.
+func TestV27IntakeMigrationPreservesReceiptsAndReplay(t *testing.T) {
+	ctx := context.Background()
+	store, path := newTestStore(t)
+	project, err := store.CreateProject(ctx, NewProject{ID: projectID(t, 210), Name: "migration", Root: "/migration"}, mustTime(t, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := IntakeSourceIDFromBytes(bytes.Repeat([]byte{211}, IDBytes))
+	source, err := store.CreateIntakeSource(ctx, NewIntakeSource{ID: id, GitHubRepositoryID: 42, GitHubRepositoryName: "owner/repository", ProjectID: project.ID, TargetRepositoryID: RepositoryID(project.ID), Policy: IntakePolicyManual, PollSeconds: 60, AdmissionLimit: 25}, mustTime(t, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AcceptIntakeSnapshot(ctx, id, intakeSnapshotForTest(), mustTime(t, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 4), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downgradeIntakeToV27(t, store)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	got, found, err := store.IntakeAcceptance(ctx, accepted.ID)
+	// Author metadata is not part of the durable accepted content.
+	accepted.Snapshot.AuthorLogin = ""
+	accepted.Snapshot.AuthorType = ""
+	if err != nil || !found || !reflect.DeepEqual(got, accepted) {
+		t.Fatalf("receipt changed: %+v, %v", got, err)
+	}
+	replay, err := store.ImportIntakeAcceptance(ctx, accepted.ID, mustTime(t, 5))
+	if err != nil || !reflect.DeepEqual(replay, task) {
+		t.Fatalf("task replay changed: %+v, %v", replay, err)
+	}
+}
+
+func downgradeIntakeToV27(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	connection, err := store.writer.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	err = migrateWithoutForeignKeys(ctx, connection, func(ctx context.Context, connection *sql.Conn) error {
+		target := expectedSchemaOf(v27SchemaStatements())
+		if err := rebuildTable(ctx, connection, target, "intake_sources", strings.TrimSuffix(intakeSourceColumns, ", linear_team_id"), "intake_sources_repository_destination", "", ""); err != nil {
+			return err
+		}
+		if err := rebuildTable(ctx, connection, target, "intake_acceptances", strings.TrimSuffix(intakeAcceptanceColumns, ", linear_team_id, source_url"), "", ""); err != nil {
+			return err
+		}
+		if _, err := connection.ExecContext(ctx, "PRAGMA user_version = 27"); err != nil {
+			return err
+		}
+		return validateSchemaVersion(ctx, connection, v27UserVersion, v27SchemaStatements())
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

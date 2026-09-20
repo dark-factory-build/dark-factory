@@ -59,6 +59,10 @@ func TestMaintainerProjectScopeRequiresPinnedTargetAndNeverCrossesProject(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	source, err = fixture.store.SetIntakeSourceEnabled(ctx, source.ID, source.Revision, false, mustKernelTime(t, 101))
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, sources, _, err = fixture.daemon.projectMaintainerRepositories(ctx, project)
 	if err != nil || len(sources) != 0 {
 		t.Fatal("disabled source exposed")

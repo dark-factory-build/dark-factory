@@ -48,7 +48,9 @@ const (
   factoryctl github delegate --repositories FILE
 	factoryctl intake list [--project ID]
 	factoryctl intake config [--project ID]
-	factoryctl intake create --project ID --repository OWNER/REPO --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID]
+	factoryctl intake linear-connect --key-file PATH
+	factoryctl intake linear-teams|linear-disconnect
+	factoryctl intake create --project ID --repository OWNER/REPO|--linear-team TEAM_ID --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] [--source ID]
 	factoryctl intake update --source ID --project ID --repository OWNER/REPO --target-repository ID [--overseer ID] [--label LABEL] [--policy manual|trusted-authors] [--trusted-author LOGIN ...] [--poll-seconds N] [--admission-limit N] [--priority N] --revision N
 	  New sources use manual approval, poll every 60 seconds, and admit up to 25 accepted issues. --configuration JSON remains available for automation.
 	factoryctl intake preview|refresh --source ID --page N
@@ -1509,7 +1511,7 @@ func parseWeb(args []string) (attemptCommand, bool, bool) {
 
 func parseOperator(args []string) (attemptCommand, bool, bool) {
 	if len(args) >= 2 && args[0] == "intake" {
-		input := api.IntakeInput{Action: args[1]}
+		input := api.IntakeInput{Action: strings.ReplaceAll(args[1], "-", "_")}
 		if input.Action == "config" {
 			input.Action = "list"
 		}
@@ -1566,6 +1568,26 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 					return attemptCommand{}, false, false
 				}
 				configurationJSON = true
+			case "--linear-team":
+				if configurationJSON || !kernel.ValidLinearID(value) {
+					return attemptCommand{}, false, false
+				}
+				configuration.LinearTeamID, configurationFlags = value, true
+				configuration.Repository = "Linear"
+			case "--key-file":
+				if input.Action != "linear_connect" {
+					return attemptCommand{}, false, false
+				}
+				file, err := os.Open(value)
+				if err != nil {
+					return attemptCommand{}, false, false
+				}
+				key, err := io.ReadAll(io.LimitReader(file, 513))
+				_ = file.Close()
+				if err != nil {
+					return attemptCommand{}, false, false
+				}
+				input.APIKey = strings.TrimSpace(string(key))
 			case "--repository":
 				if configurationJSON || !validIntakeRepository(value) {
 					return attemptCommand{}, false, false
@@ -1975,7 +1997,7 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 // boundary as the JSON form. The daemon still verifies repository access and
 // persists the authoritative configuration.
 func validNamedIntakeConfiguration(value api.IntakeConfiguration) bool {
-	if !validIntakeRepository(value.Repository) || !validHumanRequestKey(value.TargetRepositoryID) || value.OverseerAgentID != "" && !validHumanRequestKey(value.OverseerAgentID) || !validOperatorText(value.Label, 0, 100) || value.Policy != "manual" && value.Policy != "trusted_authors" || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || value.PriorityDefault < -1_000_000 || value.PriorityDefault > 1_000_000 || len(value.TrustedAuthors) > 25 || len(value.PriorityByLabel) > 25 {
+	if (value.LinearTeamID == "" && !validIntakeRepository(value.Repository) || value.LinearTeamID != "" && (!kernel.ValidLinearID(value.LinearTeamID) || value.Policy != "manual" || len(value.TrustedAuthors) != 0)) || !validHumanRequestKey(value.TargetRepositoryID) || value.OverseerAgentID != "" && !validHumanRequestKey(value.OverseerAgentID) || !validOperatorText(value.Label, 0, 100) || value.Policy != "manual" && value.Policy != "trusted_authors" || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || value.PriorityDefault < -1_000_000 || value.PriorityDefault > 1_000_000 || len(value.TrustedAuthors) > 25 || len(value.PriorityByLabel) > 25 {
 		return false
 	}
 	seen := map[string]bool{}

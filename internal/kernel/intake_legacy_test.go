@@ -92,7 +92,7 @@ func TestLegacyIntakeMigrationIsAtomicPausedAndNeverAdoptsHistoricalTask(t *test
 	if _, found, err := store.IntakeAcceptanceForTask(ctx, task.ID); err != nil || found {
 		t.Fatalf("historical task acquired acceptance: %v %v", found, err)
 	}
-	if _, found, err := store.LatestIntakeAcceptance(ctx, snapshot.GitHubRepositoryID, snapshot.IssueNumber, snapshot.NodeID, project.ID, source.TargetRepositoryID); err != nil || found {
+	if _, found, err := store.LatestIntakeAcceptance(ctx, snapshot, project.ID, source.TargetRepositoryID); err != nil || found {
 		t.Fatalf("baseline became approval: %v %v", found, err)
 	}
 	if err := store.Close(); err != nil {
@@ -149,6 +149,7 @@ func TestV26MigrationAddsEmptyLegacySuppressionWithoutChangingExistingIDs(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	downgradeIntakeToV27(t, store)
 	for _, statement := range []string{"DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "PRAGMA user_version = 26"} {
 		if _, err := store.writer.Exec(statement); err != nil {
 			t.Fatal(err)

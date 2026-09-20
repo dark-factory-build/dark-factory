@@ -9,15 +9,15 @@ import (
 	"strings"
 )
 
-const intakeSourceColumns = `id, github_repository_id, github_repository_name, project_id, target_repository_id, overseer_agent_id, label_filter, enabled, policy, poll_seconds, admission_limit, revision, created_at_ms, updated_at_ms`
-const intakeAcceptanceColumns = `source_repository, id, github_repository_id, issue_number, issue_node_id, title, body, body_hash, project_id, repository_id, overseer_agent_id, task_id, incarnation_id, withdrawn_at_ms, created_at_ms`
+const intakeSourceColumns = `id, github_repository_id, github_repository_name, project_id, target_repository_id, overseer_agent_id, label_filter, enabled, policy, poll_seconds, admission_limit, revision, created_at_ms, updated_at_ms, linear_team_id`
+const intakeAcceptanceColumns = `source_repository, id, github_repository_id, issue_number, issue_node_id, title, body, body_hash, project_id, repository_id, overseer_agent_id, task_id, incarnation_id, withdrawn_at_ms, created_at_ms, linear_team_id, source_url`
 
 func scanIntakeSource(scanner rowScanner) (IntakeSource, bool, error) {
 	var rawID, rawProject, rawRepository, rawAgent []byte
 	var repositoryID, poll, limit, revision, created, updated int64
-	var name, label, policy string
+	var name, label, policy, linear string
 	var enabled int
-	if err := scanner.Scan(&rawID, &repositoryID, &name, &rawProject, &rawRepository, &rawAgent, &label, &enabled, &policy, &poll, &limit, &revision, &created, &updated); err != nil {
+	if err := scanner.Scan(&rawID, &repositoryID, &name, &rawProject, &rawRepository, &rawAgent, &label, &enabled, &policy, &poll, &limit, &revision, &created, &updated, &linear); err != nil {
 		if err == sql.ErrNoRows {
 			return IntakeSource{}, false, nil
 		}
@@ -34,9 +34,9 @@ func scanIntakeSource(scanner rowScanner) (IntakeSource, bool, error) {
 	rev, e5 := NewRevision(revision)
 	at, e6 := NewUnixMillis(created)
 	changed, e7 := NewUnixMillis(updated)
-	value := IntakeSource{ID: id, GitHubRepositoryID: uint64(repositoryID), GitHubRepositoryName: name, ProjectID: project, TargetRepositoryID: target, OverseerAgentID: agent, LabelFilter: label, Enabled: enabled == 1, Policy: IntakePolicy(policy), PollSeconds: uint32(poll), AdmissionLimit: uint16(limit), Revision: rev, CreatedAt: at, UpdatedAt: changed}
+	value := IntakeSource{LinearTeamID: linear, ID: id, GitHubRepositoryID: uint64(repositoryID), GitHubRepositoryName: name, ProjectID: project, TargetRepositoryID: target, OverseerAgentID: agent, LabelFilter: label, Enabled: enabled == 1, Policy: IntakePolicy(policy), PollSeconds: uint32(poll), AdmissionLimit: uint16(limit), Revision: rev, CreatedAt: at, UpdatedAt: changed}
 	// The complete source is validated after its trusted-login child rows load.
-	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil || repositoryID < 1 || poll < 5 || poll > 86400 || limit < 1 || limit > 200 || enabled < 0 || enabled > 1 {
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil || !validIntakeOrigin(uint64(repositoryID), linear) || poll < 5 || poll > 86400 || limit < 1 || limit > 200 || enabled < 0 || enabled > 1 {
 		return IntakeSource{}, false, ErrCorruptState
 	}
 	return value, true, nil
@@ -183,14 +183,14 @@ func (store *Store) UpdateIntakeSource(ctx context.Context, id IntakeSourceID, e
 	if existing.Revision != expected || at.Int64() < existing.UpdatedAt.Int64() {
 		return IntakeSource{}, tx.Rollback(ErrRevisionConflict)
 	}
-	value := IntakeSource{PriorityDefault: spec.PriorityDefault, PriorityByLabel: spec.PriorityByLabel, ID: id, GitHubRepositoryID: spec.GitHubRepositoryID, GitHubRepositoryName: spec.GitHubRepositoryName, ProjectID: spec.ProjectID, TargetRepositoryID: spec.TargetRepositoryID, OverseerAgentID: spec.OverseerAgentID, LabelFilter: spec.LabelFilter, Enabled: enabled, Policy: spec.Policy, TrustedGitHubLogins: append([]string(nil), spec.TrustedGitHubLogins...), PollSeconds: spec.PollSeconds, AdmissionLimit: spec.AdmissionLimit, Revision: existing.Revision, CreatedAt: existing.CreatedAt, UpdatedAt: at}
+	value := IntakeSource{LinearTeamID: spec.LinearTeamID, PriorityDefault: spec.PriorityDefault, PriorityByLabel: spec.PriorityByLabel, ID: id, GitHubRepositoryID: spec.GitHubRepositoryID, GitHubRepositoryName: spec.GitHubRepositoryName, ProjectID: spec.ProjectID, TargetRepositoryID: spec.TargetRepositoryID, OverseerAgentID: spec.OverseerAgentID, LabelFilter: spec.LabelFilter, Enabled: enabled, Policy: spec.Policy, TrustedGitHubLogins: append([]string(nil), spec.TrustedGitHubLogins...), PollSeconds: spec.PollSeconds, AdmissionLimit: spec.AdmissionLimit, Revision: existing.Revision, CreatedAt: existing.CreatedAt, UpdatedAt: at}
 	if !ValidIntakeSource(value) {
 		return IntakeSource{}, tx.Rollback(ErrInvalidValue)
 	}
 	if err := validateIntakeSourceRoute(ctx, tx.connection, value); err != nil {
 		return IntakeSource{}, tx.Rollback(err)
 	}
-	if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_sources SET github_repository_id = ?, github_repository_name = ?, project_id = ?, target_repository_id = ?, overseer_agent_id = ?, label_filter = ?, enabled = ?, policy = ?, poll_seconds = ?, admission_limit = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, int64(value.GitHubRepositoryID), value.GitHubRepositoryName, value.ProjectID.Bytes(), value.TargetRepositoryID.Bytes(), nullableAgentID(value.OverseerAgentID), value.LabelFilter, boolInt(value.Enabled), string(value.Policy), int64(value.PollSeconds), int64(value.AdmissionLimit), at.Int64(), id.Bytes(), expected.Int64()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `UPDATE intake_sources SET linear_team_id = ?, github_repository_id = ?, github_repository_name = ?, project_id = ?, target_repository_id = ?, overseer_agent_id = ?, label_filter = ?, enabled = ?, policy = ?, poll_seconds = ?, admission_limit = ?, revision = revision + 1, updated_at_ms = ? WHERE id = ? AND revision = ?`, value.LinearTeamID, int64(value.GitHubRepositoryID), value.GitHubRepositoryName, value.ProjectID.Bytes(), value.TargetRepositoryID.Bytes(), nullableAgentID(value.OverseerAgentID), value.LabelFilter, boolInt(value.Enabled), string(value.Policy), int64(value.PollSeconds), int64(value.AdmissionLimit), at.Int64(), id.Bytes(), expected.Int64()); err != nil {
 		return IntakeSource{}, tx.Rollback(err)
 	}
 	if _, err := tx.connection.ExecContext(ctx, `DELETE FROM intake_source_trusted_logins WHERE source_id = ?`, id.Bytes()); err != nil {
@@ -238,7 +238,7 @@ func createIntakeSource(ctx context.Context, connection *sql.Conn, spec NewIntak
 	if policy == "" {
 		policy = IntakePolicyManual
 	}
-	value := IntakeSource{PriorityDefault: spec.PriorityDefault, PriorityByLabel: spec.PriorityByLabel, ID: spec.ID, GitHubRepositoryID: spec.GitHubRepositoryID, GitHubRepositoryName: spec.GitHubRepositoryName, ProjectID: spec.ProjectID, TargetRepositoryID: spec.TargetRepositoryID, OverseerAgentID: spec.OverseerAgentID, LabelFilter: spec.LabelFilter, Policy: policy, TrustedGitHubLogins: append([]string(nil), spec.TrustedGitHubLogins...), PollSeconds: spec.PollSeconds, AdmissionLimit: spec.AdmissionLimit, Revision: Revision{value: 1}, CreatedAt: at, UpdatedAt: at}
+	value := IntakeSource{LinearTeamID: spec.LinearTeamID, PriorityDefault: spec.PriorityDefault, PriorityByLabel: spec.PriorityByLabel, ID: spec.ID, GitHubRepositoryID: spec.GitHubRepositoryID, GitHubRepositoryName: spec.GitHubRepositoryName, ProjectID: spec.ProjectID, TargetRepositoryID: spec.TargetRepositoryID, OverseerAgentID: spec.OverseerAgentID, LabelFilter: spec.LabelFilter, Policy: policy, TrustedGitHubLogins: append([]string(nil), spec.TrustedGitHubLogins...), PollSeconds: spec.PollSeconds, AdmissionLimit: spec.AdmissionLimit, Revision: Revision{value: 1}, CreatedAt: at, UpdatedAt: at}
 	if !ValidIntakeSource(value) {
 		return IntakeSource{}, ErrInvalidValue
 	}
@@ -262,7 +262,7 @@ func createIntakeSource(ctx context.Context, connection *sql.Conn, spec NewIntak
 	if err := validateIntakeSourceRoute(ctx, connection, value); err != nil {
 		return IntakeSource{}, err
 	}
-	if _, err := connection.ExecContext(ctx, `INSERT INTO intake_sources(`+intakeSourceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?)`, value.ID.Bytes(), int64(value.GitHubRepositoryID), value.GitHubRepositoryName, value.ProjectID.Bytes(), value.TargetRepositoryID.Bytes(), nullableAgentID(value.OverseerAgentID), value.LabelFilter, string(value.Policy), int64(value.PollSeconds), int64(value.AdmissionLimit), at.Int64(), at.Int64()); err != nil {
+	if _, err := connection.ExecContext(ctx, `INSERT INTO intake_sources(`+intakeSourceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`, value.ID.Bytes(), int64(value.GitHubRepositoryID), value.GitHubRepositoryName, value.ProjectID.Bytes(), value.TargetRepositoryID.Bytes(), nullableAgentID(value.OverseerAgentID), value.LabelFilter, boolInt(value.Policy == IntakePolicyManual), string(value.Policy), int64(value.PollSeconds), int64(value.AdmissionLimit), at.Int64(), at.Int64(), value.LinearTeamID); err != nil {
 		return IntakeSource{}, err
 	}
 	for _, login := range value.TrustedGitHubLogins {
@@ -278,7 +278,7 @@ func createIntakeSource(ctx context.Context, connection *sql.Conn, spec NewIntak
 }
 
 func intakeSourceMatchesCreation(existing, value IntakeSource) bool {
-	if existing.PriorityDefault != value.PriorityDefault || !maps.Equal(existing.PriorityByLabel, value.PriorityByLabel) || existing.GitHubRepositoryID != value.GitHubRepositoryID || existing.GitHubRepositoryName != value.GitHubRepositoryName || existing.ProjectID != value.ProjectID || existing.TargetRepositoryID != value.TargetRepositoryID || existing.OverseerAgentID != value.OverseerAgentID || existing.LabelFilter != value.LabelFilter || existing.Enabled || existing.Policy != value.Policy || existing.PollSeconds != value.PollSeconds || existing.AdmissionLimit != value.AdmissionLimit || existing.Revision.Int64() != 1 || existing.UpdatedAt != existing.CreatedAt || len(existing.TrustedGitHubLogins) != len(value.TrustedGitHubLogins) {
+	if existing.LinearTeamID != value.LinearTeamID || existing.PriorityDefault != value.PriorityDefault || !maps.Equal(existing.PriorityByLabel, value.PriorityByLabel) || existing.GitHubRepositoryID != value.GitHubRepositoryID || existing.GitHubRepositoryName != value.GitHubRepositoryName || existing.ProjectID != value.ProjectID || existing.TargetRepositoryID != value.TargetRepositoryID || existing.OverseerAgentID != value.OverseerAgentID || existing.LabelFilter != value.LabelFilter || existing.Enabled != (value.Policy == IntakePolicyManual) || existing.Policy != value.Policy || existing.PollSeconds != value.PollSeconds || existing.AdmissionLimit != value.AdmissionLimit || existing.Revision.Int64() != 1 || existing.UpdatedAt != existing.CreatedAt || len(existing.TrustedGitHubLogins) != len(value.TrustedGitHubLogins) {
 		return false
 	}
 	seen := make(map[string]bool, len(existing.TrustedGitHubLogins))
@@ -318,8 +318,8 @@ func scanIntakeAcceptance(scanner rowScanner) (IntakeAcceptance, bool, error) {
 	var rawID, rawProject, rawRepository, rawAgent, rawTask, rawIncarnation, hash []byte
 	var repositoryID, number, created int64
 	var withdrawn sql.NullInt64
-	var sourceRepository, node, title, body string
-	if err := scanner.Scan(&sourceRepository, &rawID, &repositoryID, &number, &node, &title, &body, &hash, &rawProject, &rawRepository, &rawAgent, &rawTask, &rawIncarnation, &withdrawn, &created); err != nil {
+	var sourceRepository, node, title, body, linear, sourceURL string
+	if err := scanner.Scan(&sourceRepository, &rawID, &repositoryID, &number, &node, &title, &body, &hash, &rawProject, &rawRepository, &rawAgent, &rawTask, &rawIncarnation, &withdrawn, &created, &linear, &sourceURL); err != nil {
 		if err == sql.ErrNoRows {
 			return IntakeAcceptance{}, false, nil
 		}
@@ -345,10 +345,10 @@ func scanIntakeAcceptance(scanner rowScanner) (IntakeAcceptance, bool, error) {
 			withdrawnAt = &value
 		}
 	}
-	snapshot := IntakeIssueSnapshot{GitHubRepositoryID: uint64(repositoryID), IssueNumber: uint64(number), NodeID: node, Title: title, Body: body}
+	snapshot := IntakeIssueSnapshot{LinearTeamID: linear, URL: sourceURL, GitHubRepositoryID: uint64(repositoryID), IssueNumber: uint64(number), NodeID: node, Title: title, Body: body}
 	value := IntakeAcceptance{SourceRepository: sourceRepository, ID: id, Snapshot: snapshot, BodyHash: sha256.Sum256([]byte(body)), ProjectID: project, RepositoryID: repository, OverseerAgentID: agent, TaskID: task, IncarnationID: incarnation, WithdrawnAt: withdrawnAt, CreatedAt: at}
 	expectedID, expectedTask, expectedIncarnation, identityErr := intakeAcceptanceIDs(snapshot, project, repository)
-	if !validGitHubRepositoryName(sourceRepository) || e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil || identityErr != nil || repositoryID < 1 || number < 1 || len(hash) != DigestBytes || value.BodyHash != [DigestBytes]byte(hash) || id != expectedID || task != expectedTask || incarnation != expectedIncarnation || withdrawn.Valid && (withdrawn.Int64 < 0 || withdrawn.Int64 < created) {
+	if !validSourceName(sourceRepository, linear) || e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil || e6 != nil || e7 != nil || identityErr != nil || !validIntakeOrigin(uint64(repositoryID), linear) || number < 1 || len(hash) != DigestBytes || value.BodyHash != [DigestBytes]byte(hash) || id != expectedID || task != expectedTask || incarnation != expectedIncarnation || withdrawn.Valid && (withdrawn.Int64 < 0 || withdrawn.Int64 < created) {
 		return IntakeAcceptance{}, false, ErrCorruptState
 	}
 	return value, true, nil
@@ -370,8 +370,8 @@ func (store *Store) IntakeAcceptance(ctx context.Context, id IntakeAcceptanceID)
 	return intakeAcceptanceByID(ctx, read.connection, id)
 }
 
-func (store *Store) LatestIntakeAcceptance(ctx context.Context, repositoryID, number uint64, nodeID string, projectID ProjectID, targetRepositoryID RepositoryID) (IntakeAcceptance, bool, error) {
-	if repositoryID == 0 || repositoryID > math.MaxInt64 || number == 0 || number > math.MaxInt64 || !validBoundedIntakeText(nodeID, 1, maxGitHubNodeIDBytes) || projectID.zero() || targetRepositoryID.zero() {
+func (store *Store) LatestIntakeAcceptance(ctx context.Context, snapshot IntakeIssueSnapshot, projectID ProjectID, targetRepositoryID RepositoryID) (IntakeAcceptance, bool, error) {
+	if !validIntakeOrigin(snapshot.GitHubRepositoryID, snapshot.LinearTeamID) || snapshot.IssueNumber == 0 || snapshot.IssueNumber > math.MaxInt64 || !validBoundedIntakeText(snapshot.NodeID, 1, maxGitHubNodeIDBytes) || projectID.zero() || targetRepositoryID.zero() {
 		return IntakeAcceptance{}, false, ErrInvalidValue
 	}
 	read, err := store.beginRead(ctx)
@@ -379,7 +379,7 @@ func (store *Store) LatestIntakeAcceptance(ctx context.Context, repositoryID, nu
 		return IntakeAcceptance{}, false, err
 	}
 	defer read.Close()
-	return latestIntakeAcceptance(ctx, read.connection, repositoryID, number, nodeID, projectID, targetRepositoryID)
+	return latestIntakeAcceptance(ctx, read.connection, snapshot, projectID, targetRepositoryID)
 }
 
 // Review events promote previously accepted content without changing its receipt
@@ -388,8 +388,8 @@ func intakeReviewTime(alias string) string {
 	return "COALESCE((SELECT MAX(reviewed_at_ms) FROM intake_acceptance_reviews WHERE acceptance_id = " + alias + ".id), " + alias + ".created_at_ms)"
 }
 
-func latestIntakeAcceptance(ctx context.Context, connection *sql.Conn, repositoryID, number uint64, nodeID string, projectID ProjectID, targetRepositoryID RepositoryID) (IntakeAcceptance, bool, error) {
-	return scanIntakeAcceptance(connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE github_repository_id = ? AND issue_number = ? AND issue_node_id = ? AND project_id = ? AND repository_id = ? ORDER BY `+intakeReviewTime("intake_acceptances")+` DESC, id DESC LIMIT 1`, int64(repositoryID), int64(number), nodeID, projectID.Bytes(), targetRepositoryID.Bytes()))
+func latestIntakeAcceptance(ctx context.Context, connection *sql.Conn, snapshot IntakeIssueSnapshot, projectID ProjectID, targetRepositoryID RepositoryID) (IntakeAcceptance, bool, error) {
+	return scanIntakeAcceptance(connection.QueryRowContext(ctx, `SELECT `+intakeAcceptanceColumns+` FROM intake_acceptances WHERE github_repository_id = ? AND linear_team_id = ? AND issue_number = ? AND issue_node_id = ? AND project_id = ? AND repository_id = ? ORDER BY `+intakeReviewTime("intake_acceptances")+` DESC, id DESC LIMIT 1`, int64(snapshot.GitHubRepositoryID), snapshot.LinearTeamID, int64(snapshot.IssueNumber), snapshot.NodeID, projectID.Bytes(), targetRepositoryID.Bytes()))
 }
 
 // PendingIntakeAcceptances returns receipts that still need their first task
@@ -425,18 +425,18 @@ func (store *Store) PendingIntakeAcceptancesAfter(ctx context.Context, sourceID 
 	columns := "accepted." + strings.ReplaceAll(intakeAcceptanceColumns, ", ", ", accepted.")
 	rows, err := read.connection.QueryContext(ctx, `SELECT `+columns+` FROM intake_acceptances accepted
 		LEFT JOIN tasks task ON task.id = accepted.task_id
-		WHERE accepted.github_repository_id = ? AND accepted.project_id = ? AND accepted.repository_id = ?
+		WHERE accepted.github_repository_id = ? AND accepted.linear_team_id = ? AND accepted.project_id = ? AND accepted.repository_id = ?
 			AND accepted.withdrawn_at_ms IS NULL AND task.id IS NULL AND accepted.id > ?
 			AND NOT EXISTS (
 				SELECT 1 FROM intake_acceptances newer
-				WHERE newer.github_repository_id = accepted.github_repository_id
+				WHERE newer.github_repository_id = accepted.github_repository_id AND newer.linear_team_id = accepted.linear_team_id
 					AND newer.issue_number = accepted.issue_number
 					AND newer.issue_node_id = accepted.issue_node_id
 					AND newer.project_id = accepted.project_id
 					AND newer.repository_id = accepted.repository_id
 					AND (`+intakeReviewTime("newer")+` > `+intakeReviewTime("accepted")+` OR `+intakeReviewTime("newer")+` = `+intakeReviewTime("accepted")+` AND newer.id > accepted.id)
 			)
-		ORDER BY accepted.id LIMIT ?`, int64(source.GitHubRepositoryID), source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), after.Bytes(), int64(limit))
+		ORDER BY accepted.id LIMIT ?`, int64(source.GitHubRepositoryID), source.LinearTeamID, source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), after.Bytes(), int64(limit))
 	if err != nil {
 		return nil, err
 	}
@@ -468,7 +468,7 @@ func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSou
 	}
 	defer tx.Close()
 	source, found, err := intakeSourceByID(ctx, tx.connection, sourceID)
-	if err != nil || !found || source.GitHubRepositoryID != snapshot.GitHubRepositoryID {
+	if err != nil || !found || source.LinearTeamID != snapshot.LinearTeamID || source.GitHubRepositoryID != snapshot.GitHubRepositoryID {
 		if err == nil {
 			err = ErrConflict
 		}
@@ -481,7 +481,7 @@ func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSou
 	if err != nil {
 		return IntakeAcceptance{}, tx.Rollback(err)
 	}
-	latest, latestFound, err := latestIntakeAcceptance(ctx, tx.connection, snapshot.GitHubRepositoryID, snapshot.IssueNumber, snapshot.NodeID, source.ProjectID, source.TargetRepositoryID)
+	latest, latestFound, err := latestIntakeAcceptance(ctx, tx.connection, snapshot, source.ProjectID, source.TargetRepositoryID)
 	if err != nil {
 		return IntakeAcceptance{}, tx.Rollback(err)
 	}
@@ -516,7 +516,7 @@ func (store *Store) AcceptIntakeSnapshot(ctx context.Context, sourceID IntakeSou
 		return existing, nil
 	}
 	bodyHash := snapshot.BodyHash()
-	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_acceptances(`+intakeAcceptanceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`, source.GitHubRepositoryName, id.Bytes(), int64(snapshot.GitHubRepositoryID), int64(snapshot.IssueNumber), snapshot.NodeID, snapshot.Title, snapshot.Body, bodyHash[:], source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), nullableAgentID(source.OverseerAgentID), task.Bytes(), incarnation.Bytes(), at.Int64()); err != nil {
+	if _, err := tx.connection.ExecContext(ctx, `INSERT INTO intake_acceptances(`+intakeAcceptanceColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`, source.GitHubRepositoryName, id.Bytes(), int64(snapshot.GitHubRepositoryID), int64(snapshot.IssueNumber), snapshot.NodeID, snapshot.Title, snapshot.Body, bodyHash[:], source.ProjectID.Bytes(), source.TargetRepositoryID.Bytes(), nullableAgentID(source.OverseerAgentID), task.Bytes(), incarnation.Bytes(), at.Int64(), snapshot.LinearTeamID, snapshot.URL); err != nil {
 		return IntakeAcceptance{}, tx.Rollback(err)
 	}
 	value, found, err := intakeAcceptanceByID(ctx, tx.connection, id)
@@ -598,12 +598,12 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		if err != nil {
 			return Task{}, tx.Rollback(err)
 		}
-		if !found || !source.Enabled || source.Revision != expectedSource[0].Revision || source.GitHubRepositoryID != accepted.Snapshot.GitHubRepositoryID || source.ProjectID != accepted.ProjectID || source.TargetRepositoryID != accepted.RepositoryID {
+		if !found || !source.Enabled || source.Revision != expectedSource[0].Revision || source.LinearTeamID != accepted.Snapshot.LinearTeamID || source.GitHubRepositoryID != accepted.Snapshot.GitHubRepositoryID || source.ProjectID != accepted.ProjectID || source.TargetRepositoryID != accepted.RepositoryID {
 			return Task{}, tx.Rollback(ErrRevisionConflict)
 		}
 	}
 	var permitted int
-	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM intake_sources WHERE github_repository_id = ? AND project_id = ? AND target_repository_id = ? AND enabled = 1)`, int64(accepted.Snapshot.GitHubRepositoryID), accepted.ProjectID.Bytes(), accepted.RepositoryID.Bytes()).Scan(&permitted); err != nil || permitted == 0 {
+	if err := tx.connection.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM intake_sources WHERE github_repository_id = ? AND linear_team_id = ? AND project_id = ? AND target_repository_id = ? AND enabled = 1)`, int64(accepted.Snapshot.GitHubRepositoryID), accepted.Snapshot.LinearTeamID, accepted.ProjectID.Bytes(), accepted.RepositoryID.Bytes()).Scan(&permitted); err != nil || permitted == 0 {
 		if err == nil {
 			err = ErrConflict
 		}
@@ -630,7 +630,7 @@ func (store *Store) importIntakeAcceptance(ctx context.Context, id IntakeAccepta
 		}
 		return existing, nil
 	}
-	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot.GitHubRepositoryID, accepted.Snapshot.IssueNumber, accepted.Snapshot.NodeID, accepted.ProjectID, accepted.RepositoryID)
+	latest, found, err := latestIntakeAcceptance(ctx, tx.connection, accepted.Snapshot, accepted.ProjectID, accepted.RepositoryID)
 	if err != nil || !found || latest.ID != accepted.ID {
 		if err == nil {
 			err = ErrConflict

@@ -636,7 +636,8 @@ fn tools() -> Value {
             "properties": {
                 "repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"},
                 "operation_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"},
-                "issue_number": {"type": "integer", "minimum": 1},
+                "issue_number": {"type": "integer", "minimum": 0},
+                "external_source_url": {"type":"string", "description":"Accepted Linear issue URL. Requires issue_number 0 and close_on_merge false; publication is restricted to private repositories."},
                 "source_repository": {"type": "string", "pattern": "^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$", "description": "Issue repository; omitted means repository. Cross-repository sources always use Refs, never automatic closure. Private sources cannot be linked into public PRs."},
                 "head": {"type": "string", "minLength": 1, "maxLength": 240},
                 "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},

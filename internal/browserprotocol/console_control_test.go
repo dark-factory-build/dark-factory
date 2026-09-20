@@ -246,3 +246,26 @@ func TestTopologyInventoryOptionalAndBounded(t *testing.T) {
 		}
 	}
 }
+
+func TestLinearIntakeControlsKeepCredentialsOutOfReplies(t *testing.T) {
+	for _, action := range []string{`"linear_connect","api_key":"private-test-key"`, `"linear_teams"`, `"linear_disconnect"`} {
+		frame := `{"type":"INTAKE","id":"linear","body":{"action":` + action + `}}`
+		if _, err := DecodeClientControl([]byte(frame)); err != nil {
+			t.Fatalf("valid Linear action: %v", err)
+		}
+	}
+	team := `{"id":"11111111-1111-4111-8111-111111111111","name":"Engineering","key":"ENG"}`
+	frame := `{"type":"INTAKE_RESULT","id":"linear","body":{"state":"ok","linear_teams":[` + team + `]}}`
+	if _, err := DecodeServerControl([]byte(frame)); err != nil {
+		t.Fatal(err)
+	}
+	bad := strings.Replace(frame, `"state":"ok"`, `"state":"ok","api_key":"private-test-key"`, 1)
+	decoded, err := DecodeServerControl([]byte(bad))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(decoded.Body)
+	if err != nil || strings.Contains(string(encoded), "private-test-key") {
+		t.Fatal("credential in decoded reply", err)
+	}
+}

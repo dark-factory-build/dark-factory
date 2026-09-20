@@ -10,6 +10,7 @@ import (
 
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/linear"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 )
 
@@ -28,15 +29,45 @@ func intakeFailure(err error) api.IntakeResult {
 	return api.IntakeResult{State: state}
 }
 func intakeSourceView(source kernel.IntakeSource) api.IntakeSource {
-	return api.IntakeSource{ID: source.ID.String(), ProjectID: source.ProjectID.String(), GitHubRepositoryID: source.GitHubRepositoryID, Enabled: source.Enabled, Revision: uint64(source.Revision.Int64()),
+	return api.IntakeSource{LinearTeamID: source.LinearTeamID, ID: source.ID.String(), ProjectID: source.ProjectID.String(), GitHubRepositoryID: source.GitHubRepositoryID, Enabled: source.Enabled, Revision: uint64(source.Revision.Int64()),
 		PriorityDefault: source.PriorityDefault, PriorityByLabel: source.PriorityByLabel, Repository: source.GitHubRepositoryName, TargetRepositoryID: source.TargetRepositoryID.String(), OverseerAgentID: source.OverseerAgentID.String(), Label: source.LabelFilter, Policy: string(source.Policy), TrustedAuthors: source.TrustedGitHubLogins, PollSeconds: source.PollSeconds, AdmissionLimit: source.AdmissionLimit}
 }
 
 // Intake is the one authenticated operator path. Remote content and identity
 // always come from the configured connection, never from browser assertions.
 func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.IntakeResult {
+	// ponytail: one intake operation at a time fences disconnect against imports.
+	// Use per-connection gates if concurrent backlog reads become necessary.
+	daemon.intakeMu.Lock()
+	defer daemon.intakeMu.Unlock()
 	if !api.ValidIntakeInput(input) {
 		return api.IntakeResult{State: "invalid"}
+	}
+	if strings.HasPrefix(input.Action, "linear_") {
+		if daemon.linear == nil {
+			return api.IntakeResult{State: "unavailable"}
+		}
+		result := api.IntakeResult{State: "ok"}
+		if input.Action == "linear_disconnect" {
+			if err := daemon.linear.Disconnect(); err != nil {
+				return intakeFailure(err)
+			}
+			return result
+		}
+		var teams []linear.Team
+		var err error
+		if input.Action == "linear_connect" {
+			teams, err = daemon.linear.Connect(ctx, input.APIKey)
+		} else {
+			teams, err = daemon.linear.Teams(ctx)
+		}
+		if err != nil {
+			return intakeFailure(err)
+		}
+		for _, team := range teams {
+			result.LinearTeams = append(result.LinearTeams, api.IntakeTeam{ID: team.ID, Name: team.Name, Key: team.Key})
+		}
+		return result
 	}
 	at, err := daemon.timestamp()
 	if err != nil {
@@ -125,26 +156,48 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		return intakeFailure(kernel.ErrInvalidValue)
 	}
 	if input.Action == "create" || input.Action == "update" {
-		if daemon.github == nil {
-			return intakeFailure(maintainer.ErrUnavailable)
-		}
-		status, statusErr := daemon.github.Status(ctx)
-		if statusErr != nil {
-			return intakeFailure(statusErr)
-		}
-		if status.State != "connected" || status.User == nil {
-			return intakeFailure(maintainer.ErrDenied)
-		}
 		config := *input.Configuration
 		var remoteID uint64
-		for _, repository := range status.Repositories {
-			if strings.EqualFold(repository.Repository, config.Repository) {
-				remoteID = uint64(repository.RepositoryID)
-				config.Repository = repository.Repository
+		var login string
+		if config.LinearTeamID != "" {
+			if daemon.linear == nil || !kernel.ValidLinearID(config.LinearTeamID) || config.Policy != "manual" || len(config.TrustedAuthors) != 0 {
+				return intakeFailure(kernel.ErrInvalidValue)
 			}
-		}
-		if remoteID == 0 {
-			return intakeFailure(maintainer.ErrDenied)
+			teams, readErr := daemon.linear.Teams(ctx)
+			if readErr != nil {
+				return intakeFailure(readErr)
+			}
+			found := false
+			for _, team := range teams {
+				if team.ID == config.LinearTeamID {
+					config.Repository = team.Name
+					found = true
+				}
+			}
+			if !found {
+				return intakeFailure(maintainer.ErrDenied)
+			}
+		} else {
+			if daemon.github == nil {
+				return intakeFailure(maintainer.ErrUnavailable)
+			}
+			status, statusErr := daemon.github.Status(ctx)
+			if statusErr != nil {
+				return intakeFailure(statusErr)
+			}
+			if status.State != "connected" || status.User == nil {
+				return intakeFailure(maintainer.ErrDenied)
+			}
+			login = status.User.Login
+			for _, repository := range status.Repositories {
+				if strings.EqualFold(repository.Repository, config.Repository) {
+					remoteID = uint64(repository.RepositoryID)
+					config.Repository = repository.Repository
+				}
+			}
+			if remoteID == 0 {
+				return intakeFailure(maintainer.ErrDenied)
+			}
 		}
 		project, parseErr := browserID(input.ProjectID, kernel.ProjectIDFromBytes)
 		if parseErr != nil {
@@ -154,17 +207,20 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
 		}
-		agent, parseErr := browserID(config.OverseerAgentID, kernel.AgentIDFromBytes)
+		var agent kernel.AgentID
+		if config.OverseerAgentID != "" {
+			agent, parseErr = browserID(config.OverseerAgentID, kernel.AgentIDFromBytes)
+		}
 		if parseErr != nil {
 			return intakeFailure(kernel.ErrInvalidValue)
 		}
 		authors := append([]string(nil), config.TrustedAuthors...)
 		for index, author := range authors {
 			if author == "@me" {
-				authors[index] = status.User.Login
+				authors[index] = login
 			}
 		}
-		spec := kernel.NewIntakeSource{ID: sourceID, GitHubRepositoryID: remoteID, GitHubRepositoryName: config.Repository, ProjectID: project, TargetRepositoryID: target, OverseerAgentID: agent, LabelFilter: config.Label, Policy: kernel.IntakePolicy(config.Policy), TrustedGitHubLogins: authors, PriorityDefault: config.PriorityDefault, PriorityByLabel: config.PriorityByLabel, PollSeconds: config.PollSeconds, AdmissionLimit: config.AdmissionLimit}
+		spec := kernel.NewIntakeSource{LinearTeamID: config.LinearTeamID, ID: sourceID, GitHubRepositoryID: remoteID, GitHubRepositoryName: config.Repository, ProjectID: project, TargetRepositoryID: target, OverseerAgentID: agent, LabelFilter: config.Label, Policy: kernel.IntakePolicy(config.Policy), TrustedGitHubLogins: authors, PriorityDefault: config.PriorityDefault, PriorityByLabel: config.PriorityByLabel, PollSeconds: config.PollSeconds, AdmissionLimit: config.AdmissionLimit}
 		var source kernel.IntakeSource
 		if input.Action == "create" {
 			source, err = daemon.store.CreateIntakeSource(ctx, spec, at)
@@ -173,7 +229,15 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 			if revisionErr != nil {
 				return intakeFailure(kernel.ErrInvalidValue)
 			}
-			source, err = daemon.store.UpdateIntakeSource(ctx, sourceID, revision, spec, false, at)
+			prior, found, readErr := daemon.store.IntakeSource(ctx, sourceID)
+			if readErr != nil {
+				return intakeFailure(readErr)
+			}
+			if !found {
+				return intakeFailure(kernel.ErrNotFound)
+			}
+			// Saving filters must not resume a source the operator paused.
+			source, err = daemon.store.UpdateIntakeSource(ctx, sourceID, revision, spec, prior.Enabled && spec.Policy == kernel.IntakePolicyManual, at)
 		}
 		if err != nil {
 			return intakeFailure(err)
@@ -239,7 +303,11 @@ func (daemon *Daemon) Intake(ctx context.Context, input api.IntakeInput) api.Int
 }
 
 func intakeSnapshot(source kernel.IntakeSource, issue maintainer.Issue) kernel.IntakeIssueSnapshot {
-	return kernel.IntakeIssueSnapshot{GitHubRepositoryID: source.GitHubRepositoryID, IssueNumber: issue.Number, NodeID: issue.NodeID, Title: issue.Title, Body: issue.Body, AuthorLogin: issue.Author.Login, AuthorType: kernel.GitHubAuthorType(strings.ToLower(issue.Author.Type))}
+	url := ""
+	if source.LinearTeamID != "" {
+		url = issue.URL
+	}
+	return kernel.IntakeIssueSnapshot{LinearTeamID: source.LinearTeamID, URL: url, GitHubRepositoryID: source.GitHubRepositoryID, IssueNumber: issue.Number, NodeID: issue.NodeID, Title: issue.Title, Body: issue.Body, AuthorLogin: issue.Author.Login, AuthorType: kernel.GitHubAuthorType(strings.ToLower(issue.Author.Type))}
 }
 func intakeMatches(source kernel.IntakeSource, issue maintainer.Issue) bool {
 	if issue.State != "open" {
@@ -256,9 +324,12 @@ func intakeMatches(source kernel.IntakeSource, issue maintainer.Issue) bool {
 	return false
 }
 func (daemon *Daemon) exactIntakeIssue(ctx context.Context, source kernel.IntakeSource, number uint64) (maintainer.Issue, error) {
-	page, err := daemon.readIntakeIssues(ctx, source.GitHubRepositoryName, source.GitHubRepositoryID, 1, "", number)
+	page, err := daemon.sourceIssues(ctx, source, 1, "", number)
 	if err != nil {
 		return maintainer.Issue{}, err
+	}
+	if len(page.Issues) != 1 {
+		return maintainer.Issue{}, maintainer.ErrUnavailable
 	}
 	return page.Issues[0], nil
 }
@@ -268,7 +339,7 @@ func (daemon *Daemon) importAcceptedIntake(ctx context.Context, accepted kernel.
 		return kernel.Task{}, err
 	}
 	for _, source := range sources {
-		if !source.Enabled || source.GitHubRepositoryID != accepted.Snapshot.GitHubRepositoryID || source.TargetRepositoryID != accepted.RepositoryID {
+		if !source.Enabled || source.LinearTeamID != accepted.Snapshot.LinearTeamID || source.GitHubRepositoryID != accepted.Snapshot.GitHubRepositoryID || source.TargetRepositoryID != accepted.RepositoryID {
 			continue
 		}
 		issue, err := daemon.exactIntakeIssue(ctx, source, accepted.Snapshot.IssueNumber)
@@ -348,7 +419,7 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 	// Leave response time inside the existing 90-second dispatch budget.
 	ctx, cancel := context.WithTimeout(ctx, 75*time.Second)
 	defer cancel()
-	result := api.IntakeResult{State: "ok", ReviewedRevision: uint64(source.Revision.Int64()), Candidates: []api.IntakeCandidate{}, ImportedTasks: []string{}}
+	result := api.IntakeResult{SourceID: source.ID.String(), State: "ok", ReviewedRevision: uint64(source.Revision.Int64()), Candidates: []api.IntakeCandidate{}, ImportedTasks: []string{}}
 	failure := func(err error) api.IntakeResult {
 		result.State = intakeFailure(err).State
 		return result
@@ -397,14 +468,14 @@ func (daemon *Daemon) previewIntake(ctx context.Context, source kernel.IntakeSou
 			}
 		}
 	}
-	observed, err := daemon.readIntakeIssues(ctx, source.GitHubRepositoryName, source.GitHubRepositoryID, page, source.LabelFilter, 0)
+	observed, err := daemon.sourceIssues(ctx, source, page, source.LabelFilter, 0)
 	if err != nil {
 		return failure(err)
 	}
 	result.NextPage = observed.NextPage
 	for _, issue := range observed.Issues {
 		snapshot := intakeSnapshot(source, issue)
-		accepted, found, err := daemon.store.LatestIntakeAcceptance(ctx, source.GitHubRepositoryID, issue.Number, issue.NodeID, source.ProjectID, source.TargetRepositoryID)
+		accepted, found, err := daemon.store.LatestIntakeAcceptance(ctx, snapshot, source.ProjectID, source.TargetRepositoryID)
 		if err != nil {
 			return failure(err)
 		}
@@ -501,4 +572,17 @@ func (daemon *Daemon) readIntakeIssues(ctx context.Context, repository string, i
 		return maintainer.IssuePage{}, maintainer.ErrUnavailable
 	}
 	return daemon.github.Issues(ctx, repository, id, page, label, number)
+}
+
+func (daemon *Daemon) sourceIssues(ctx context.Context, source kernel.IntakeSource, page uint32, label string, number uint64) (maintainer.IssuePage, error) {
+	if daemon.intakeIssues != nil {
+		return daemon.intakeIssues(ctx, source.GitHubRepositoryName, source.GitHubRepositoryID, page, label, number)
+	}
+	if source.LinearTeamID != "" {
+		if daemon.linear == nil {
+			return maintainer.IssuePage{}, maintainer.ErrUnavailable
+		}
+		return daemon.linear.Issues(ctx, source.LinearTeamID, page, label, number)
+	}
+	return daemon.readIntakeIssues(ctx, source.GitHubRepositoryName, source.GitHubRepositoryID, page, label, number)
 }

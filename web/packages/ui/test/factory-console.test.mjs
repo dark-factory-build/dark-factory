@@ -2404,17 +2404,17 @@ test("issue review refuses a stale preview before acceptance", async () => {
   let renderer;
   const calls = [];
   const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
-  const review = { state: "ok", sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "manual_review" }], reviewed_revision: 2n, next_page: 2 };
+  const review = { source_id: source.id, state: "ok", sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "needs_manual_acceptance" }], reviewed_revision: 2n, next_page: 2 };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push({ projectId, request }) })); });
-    const preview = renderer.root.findAll((node) => node.type === "button" && node.props.children === "PREVIEW")[0];
+    const preview = renderer.root.findAll((node) => node.type === "button" && node.props.children === "Refresh")[0];
     await act(async () => preview.props.onClick());
     assert.deepEqual(calls, [{ projectId: ids.project, request: { action: "preview", source_id: source.id, page: 1 } }]);
-    assert.equal(renderer.root.findAll((node) => node.type === "p" && node.children.join("") === "PREVIEW THIS SOURCE AGAIN BEFORE ACCEPTING.").length, 1);
-    assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.children === "ACCEPT REVIEWED CONTENT").length, 0);
-    const next = renderer.root.findAll((node) => node.type === "button" && node.props.children === "NEXT ISSUE PAGE")[0];
-    await act(async () => next.props.onClick());
-    assert.deepEqual(calls.at(-1), { projectId: ids.project, request: { action: "preview", source_id: source.id, page: 2 } });
+    assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.children === "Add to queue").length, 0);
+    assert.equal(renderer.root.findAll((node) => node.type === "button" && node.props.children === "More issues").length, 0);
+    const sameRevisionWrongSource = {...review,reviewed_revision:source.revision,source_id:"99".repeat(16)};
+    await act(async()=>renderer.update(createElement(FactoryConsole,{...renderer.root.findByType(FactoryConsole).props,intake:new Map([[ids.project,sameRevisionWrongSource]])})));
+    assert.equal(renderer.root.findAll((node)=>node.type==="button" && node.props.children==="Add to queue").length,0,"another source with the same revision is not this review");
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
@@ -2422,30 +2422,25 @@ test("issue review refuses a stale preview before acceptance", async () => {
 });
 
 
-test("private issue review shows sync guidance and immutable linked work", () => {
+test("private issue review shows concise state and linked work", () => {
   const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: "", label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
-  const review = { state: "withdrawal_pending", task_id: ids.task, imported_tasks: ["87".repeat(16)], sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "withdrawal_pending", acceptance_id: "86".repeat(16), task_id: ids.task }] };
+  const review = { source_id: source.id, reviewed_revision: source.revision, state: "withdrawal_pending", task_id: ids.task, imported_tasks: ["87".repeat(16)], sources: [source], candidates: [{ number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Fix parser", body: "Keep this exact reviewed body.", author: "reporter", labels: ["bug"], content_hash: "ab".repeat(32), reason: "withdrawal_pending", acceptance_id: "86".repeat(16), task_id: ids.task }] };
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]) });
-  assert.match(markup, /Waiting for the first check/);
-  assert.match(markup, /factoryctl intake service install/);
-  assert.match(markup, /WITHDRAWAL PENDING/);
-  assert.match(markup, /IMPORTED TASKS · 1/);
-  assert.match(markup, /title="Task [a-f0-9]{32}"/);
-  assert.match(markup, /Review the state projection/);
+  assert.match(markup, /withdrawal pending/);
+  assert.match(markup, /View task/);
+  assert.match(markup, /Details/);
+  assert.match(markup, /Add backlog/);
+  assert.match(markup, /Backlog settings/);
+  assert.doesNotMatch(markup, />Withdraw</);
   assert.doesNotMatch(markup, /87878787878787878787878787878787/);
-  assert.match(markup, /Review issue content/);
-  assert.match(markup, /Add issue source/);
-  assert.match(markup, /Source settings/);
-  assert.doesNotMatch(markup, />WITHDRAW</);
   assert.doesNotMatch(markup, /private\/tmp|\/Users\//);
 });
 
 test("issue source configuration uses private checkout and overseer names", () => {
   const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Primary checkout", root: "/private/source", base_ref: "HEAD", enabled: true, default: true, revision: 1n };
   const markup = render({ settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]) });
-  assert.match(markup, /Destination repository/);
-  assert.match(markup, /Primary checkout \(default\)/);
-  assert.match(markup, /Choose an overseer/);
+  assert.match(markup, /Code repository/);
+  assert.match(markup, /Primary checkout/);
   assert.match(markup, /Allow trusted authors/);
   assert.doesNotMatch(markup, /Destination repository ID/);
 });
@@ -2459,7 +2454,7 @@ test("editing an intake filter preserves migrated priority rules", async () => {
   const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n, priority_default: 2, priority_by_label: { urgent: 10 } };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, { state: "ok", sources: [source] }]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "SAVE PAUSED SOURCE"));
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Save"));
     await act(async () => form.findAllByType("input").find((input) => input.props.value === "bug").props.onChange({ currentTarget: { value: "enhancement" } }));
     await act(async () => form.props.onSubmit({ preventDefault() {} }));
     assert.equal(calls.length, 1);
@@ -2480,16 +2475,16 @@ test("revised issue content can be accepted without discarding the prior receipt
   const calls = [];
   const source = { id: "88".repeat(16), project_id: ids.project, github_repository_id: 42n, repository: "example/widgets", target_repository_id: "89".repeat(16), overseer_agent_id: ids.orchestrator, label: "bug", policy: "manual", trusted_authors: [], poll_seconds: 60, admission_limit: 25, enabled: false, revision: 3n };
   const candidate = { number: 17n, url: "https://github.com/example/widgets/issues/17", title: "Revised parser instructions", body: "The operator must review this new content.", author: "reporter", labels: ["bug"], content_hash: "cd".repeat(32), reason: "content_changed", acceptance_id: "86".repeat(16), task_id: ids.task };
-  const review = { state: "ok", sources: [source], candidates: [candidate], reviewed_revision: 3n };
+  const review = { source_id: source.id, state: "ok", sources: [source], candidates: [candidate], reviewed_revision: 3n };
   try {
     await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), settingsOpen: true, onToggleSettings: () => {}, intake: new Map([[ids.project, review]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "PREVIEW")[0].props.onClick());
-    const content = renderer.root.findAllByType("details").find((node) => node.findAllByType("summary").some((summary) => summary.props.children === "Review issue content") && node.findAllByType("details").length === 1);
+    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "Refresh")[0].props.onClick());
+    const content = renderer.root.findAllByType("details").find((node) => node.findAllByType("summary").some((summary) => summary.props.children === "Details") && node.findAllByType("details").length === 1);
     assert.equal(content.props.open, undefined, "issue bodies are collapsed until selected");
-    assert.equal(content.findAll((node) => node.type === "button" && node.props.children === "ACCEPT REVIEWED CONTENT").length, 1, "acceptance stays inside content review");
-    await act(async () => content.findAll((node) => node.type === "button" && node.props.children === "ACCEPT REVIEWED CONTENT")[0].props.onClick());
+    assert.equal(content.findAll((node) => node.type === "button" && node.props.children === "Add to queue").length, 1, "acceptance stays inside content review");
+    await act(async () => content.findAll((node) => node.type === "button" && node.props.children === "Add to queue")[0].props.onClick());
     assert.deepEqual(calls.at(-1), { action: "accept", source_id: source.id, expected_revision: 3n, issue_number: 17n, content_hash: candidate.content_hash });
-    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "WITHDRAW")[0].props.onClick());
+    await act(async () => renderer.root.findAll((node) => node.type === "button" && node.props.children === "Withdraw")[0].props.onClick());
     assert.deepEqual(calls.at(-1), { action: "withdraw", acceptance_id: candidate.acceptance_id });
   } finally {
     if (renderer) await act(async () => renderer.unmount());
@@ -2509,7 +2504,7 @@ test("refreshing a changed source replaces stale configuration drafts", async ()
     await act(async () => { renderer = create(createElement(FactoryConsole, props(source))); });
     const changed = { ...source, revision: 4n, target_repository_id: "90".repeat(16), label: "enhancement", policy: "trusted_authors", trusted_authors: ["reviewer"] };
     await act(async () => renderer.update(createElement(FactoryConsole, props(changed))));
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "SAVE PAUSED SOURCE"));
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Save"));
     await act(async () => form.props.onSubmit({ preventDefault() {} }));
     assert.equal(calls.length, 1);
     assert.equal(calls[0].expected_revision, 4n);
@@ -2531,9 +2526,8 @@ test("new issue sources select the sole overseer and default checkout without op
   const calls = [];
   const checkout = { id: "89".repeat(16), project_id: ids.project, name: "Widgets", root: "/private/source", base_ref: "release", enabled: true, default: true, revision: 1n };
   try {
-    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState({ agents: new Map([[ids.orchestrator, { ...fixtureState.agents.get(ids.orchestrator), project_id: ids.project }]]) }), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]), onIntakeAction: (projectId, request) => calls.push(request) })); });
-    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "CREATE PAUSED SOURCE"));
-    await act(async () => form.findAllByType("input").find((input) => input.props.placeholder === "owner/repository").props.onChange({ currentTarget: { value: "example/issues" } }));
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState({ agents: new Map([[ids.orchestrator, { ...fixtureState.agents.get(ids.orchestrator), project_id: ids.project }]]) }), settingsOpen: true, onToggleSettings: () => {}, repositories: new Map([[ids.project, [checkout]]]), github: {result:{state:"ok",status:{repositories:[{repository:"example/issues",repository_id:42n}]}}}, onIntakeAction: (projectId, request) => calls.push(request) })); });
+    const form = renderer.root.findAllByType("form").find((form) => form.findAllByType("button").some((button) => button.props.children === "Add backlog"));
     const policy = form.findAllByType("select").find((select) => select.props.value === "manual");
     await act(async () => policy.props.onChange({ currentTarget: { value: "trusted_authors" } }));
     await act(async () => form.props.onSubmit({ preventDefault() {} }));

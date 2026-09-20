@@ -13,7 +13,7 @@ func (home *OperationalHome) ReadMaintainerCredential() ([]byte, error) {
 	if home == nil || home.state == nil {
 		return nil, ErrClosed
 	}
-	return home.state.readMaintainerCredential()
+	return home.state.readCredential(maintainerCredentialName)
 }
 
 // WriteMaintainerCredential atomically replaces the fixed connection record.
@@ -25,7 +25,7 @@ func (home *OperationalHome) WriteMaintainerCredential(data []byte) error {
 	if len(data) == 0 || len(data) > maxMaintainerCredentialBytes {
 		return ErrInvalidHome
 	}
-	return home.state.writeMaintainerCredential(data)
+	return home.state.writeCredential(maintainerCredentialName, data)
 }
 
 // LockLegacyController fences the existing host controller while the first
@@ -35,4 +35,21 @@ func (home *OperationalHome) LockLegacyController() (io.Closer, error) {
 		return nil, ErrClosed
 	}
 	return home.state.lockLegacyController()
+}
+
+// Linear credentials use the same descriptor-bound, private storage as GitHub.
+func (home *OperationalHome) ReadLinearCredential() ([]byte, error) {
+	if home == nil || home.state == nil {
+		return nil, ErrClosed
+	}
+	return home.state.readCredential("linear.json")
+}
+func (home *OperationalHome) WriteLinearCredential(data []byte) error {
+	if home == nil || home.state == nil {
+		return ErrClosed
+	}
+	if len(data) == 0 || len(data) > maxMaintainerCredentialBytes {
+		return ErrInvalidHome
+	}
+	return home.state.writeCredential("linear.json", data)
 }

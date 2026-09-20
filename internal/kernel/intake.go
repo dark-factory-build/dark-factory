@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 )
@@ -33,6 +34,7 @@ const (
 // TargetRepositoryID is selected at configuration time and never follows a
 // later project-default change.
 type IntakeSource struct {
+	LinearTeamID         string
 	PriorityDefault      int64
 	PriorityByLabel      map[string]int64
 	ID                   IntakeSourceID
@@ -52,6 +54,7 @@ type IntakeSource struct {
 }
 
 type NewIntakeSource struct {
+	LinearTeamID         string
 	PriorityDefault      int64
 	PriorityByLabel      map[string]int64
 	ID                   IntakeSourceID
@@ -67,10 +70,12 @@ type NewIntakeSource struct {
 	AdmissionLimit       uint16
 }
 
-// IntakeIssueSnapshot is the only mutable GitHub issue material that intake
+// IntakeIssueSnapshot is the only mutable backlog issue material that intake
 // considers. Metadata such as labels, comments, reactions, and updated_at is
 // intentionally absent: none can silently create new work.
 type IntakeIssueSnapshot struct {
+	LinearTeamID       string
+	URL                string
 	GitHubRepositoryID uint64
 	IssueNumber        uint64
 	NodeID             string
@@ -161,7 +166,10 @@ func PreviewIntake(source IntakeSource, snapshot IntakeIssueSnapshot, accepted *
 
 // ValidIntakeSource checks the complete configuration before preview or mutation.
 func ValidIntakeSource(value IntakeSource) bool {
-	if value.ID.zero() || value.GitHubRepositoryID == 0 || value.GitHubRepositoryID > math.MaxInt64 || !validGitHubRepositoryName(value.GitHubRepositoryName) || value.ProjectID.zero() || value.TargetRepositoryID.zero() || value.Policy != IntakePolicyManual && value.Policy != IntakePolicyTrustedAuthors || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || value.Revision.Int64() < 1 || value.UpdatedAt.Int64() < value.CreatedAt.Int64() {
+	if value.ID.zero() || !validIntakeOrigin(value.GitHubRepositoryID, value.LinearTeamID) || !validSourceName(value.GitHubRepositoryName, value.LinearTeamID) || value.ProjectID.zero() || value.TargetRepositoryID.zero() || value.Policy != IntakePolicyManual && value.Policy != IntakePolicyTrustedAuthors || value.PollSeconds < 5 || value.PollSeconds > 86400 || value.AdmissionLimit < 1 || value.AdmissionLimit > 200 || value.Revision.Int64() < 1 || value.UpdatedAt.Int64() < value.CreatedAt.Int64() {
+		return false
+	}
+	if value.LinearTeamID != "" && (value.Policy != IntakePolicyManual || len(value.TrustedGitHubLogins) != 0) {
 		return false
 	}
 	if value.LabelFilter != "" && !validBoundedIntakeText(value.LabelFilter, 1, maxIntakeLabelBytes) {
@@ -196,14 +204,20 @@ func ValidIntakeSource(value IntakeSource) bool {
 }
 
 func validIntakeIssueSnapshot(value IntakeIssueSnapshot) bool {
-	return value.GitHubRepositoryID != 0 && value.GitHubRepositoryID <= math.MaxInt64 && value.IssueNumber != 0 && value.IssueNumber <= math.MaxInt64 && validBoundedIntakeText(value.NodeID, 1, maxGitHubNodeIDBytes) && validBoundedIntakeText(value.Title, 1, maxIntakeTitleBytes) && validBoundedIntakeText(value.Body, 0, maxIntakeBodyBytes) && validGitHubAuthor(value.AuthorLogin, value.AuthorType)
+	return validIntakeOrigin(value.GitHubRepositoryID, value.LinearTeamID) && value.IssueNumber != 0 && value.IssueNumber <= math.MaxInt64 && validBoundedIntakeText(value.NodeID, 1, maxGitHubNodeIDBytes) && validBoundedIntakeText(value.Title, 1, maxIntakeTitleBytes) && validBoundedIntakeText(value.Body, 0, maxIntakeBodyBytes) && (value.LinearTeamID != "" && ValidLinearID(value.NodeID) && validLinearURL(value.URL) || value.LinearTeamID == "" && validGitHubAuthor(value.AuthorLogin, value.AuthorType))
 }
 
 func intakeAcceptanceIDs(snapshot IntakeIssueSnapshot, projectID ProjectID, repositoryID RepositoryID) (IntakeAcceptanceID, TaskID, IncarnationID, error) {
-	if snapshot.GitHubRepositoryID == 0 || snapshot.GitHubRepositoryID > math.MaxInt64 || snapshot.IssueNumber == 0 || snapshot.IssueNumber > math.MaxInt64 || !validBoundedIntakeText(snapshot.NodeID, 1, maxGitHubNodeIDBytes) || !validBoundedIntakeText(snapshot.Title, 1, maxIntakeTitleBytes) || !validBoundedIntakeText(snapshot.Body, 0, maxIntakeBodyBytes) || projectID.zero() || repositoryID.zero() {
+	if !validIntakeOrigin(snapshot.GitHubRepositoryID, snapshot.LinearTeamID) || snapshot.IssueNumber == 0 || snapshot.IssueNumber > math.MaxInt64 || !validBoundedIntakeText(snapshot.NodeID, 1, maxGitHubNodeIDBytes) || !validBoundedIntakeText(snapshot.Title, 1, maxIntakeTitleBytes) || !validBoundedIntakeText(snapshot.Body, 0, maxIntakeBodyBytes) || projectID.zero() || repositoryID.zero() {
 		return IntakeAcceptanceID{}, TaskID{}, IncarnationID{}, ErrInvalidValue
 	}
 	identity := fmt.Sprintf("github-intake-v1\x00%d\x00%d\x00%s\x00%s\x00%s\x00%x", snapshot.GitHubRepositoryID, snapshot.IssueNumber, snapshot.NodeID, projectID.String(), repositoryID.String(), snapshot.ContentHash())
+	if snapshot.LinearTeamID != "" {
+		if !ValidLinearID(snapshot.NodeID) || !validLinearURL(snapshot.URL) {
+			return IntakeAcceptanceID{}, TaskID{}, IncarnationID{}, ErrInvalidValue
+		}
+		identity = fmt.Sprintf("linear-intake-v1\x00%s\x00%s\x00%s\x00%s\x00%x", snapshot.LinearTeamID, snapshot.NodeID, projectID.String(), repositoryID.String(), snapshot.ContentHash())
+	}
 	acceptance, err := IntakeAcceptanceIDFromBytes(intakeID("acceptance", identity))
 	if err != nil {
 		return IntakeAcceptanceID{}, TaskID{}, IncarnationID{}, err
@@ -238,7 +252,7 @@ func allZero(value []byte) bool {
 }
 
 func sameIntakeIssue(left, right IntakeIssueSnapshot) bool {
-	return left.GitHubRepositoryID == right.GitHubRepositoryID && left.IssueNumber == right.IssueNumber && left.NodeID == right.NodeID
+	return left.LinearTeamID == right.LinearTeamID && left.GitHubRepositoryID == right.GitHubRepositoryID && left.IssueNumber == right.IssueNumber && left.NodeID == right.NodeID
 }
 
 func trustedGitHubLogin(logins []string, login string) bool {
@@ -289,4 +303,36 @@ func validGitHubAuthor(login string, kind GitHubAuthorType) bool {
 		return validGitHubLogin(strings.TrimSuffix(login, "[bot]"))
 	}
 	return kind == GitHubAuthorUser && validGitHubLogin(login)
+}
+
+func ValidLinearID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for i, c := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return value != "00000000-0000-0000-0000-000000000000"
+}
+func validIntakeOrigin(github uint64, linear string) bool {
+	if linear != "" {
+		return github == 0 && ValidLinearID(linear)
+	}
+	return github > 0 && github <= math.MaxInt64
+}
+func validSourceName(name, linear string) bool {
+	if linear != "" {
+		return validBoundedIntakeText(name, 1, 140)
+	}
+	return validGitHubRepositoryName(name)
+}
+func validLinearURL(value string) bool {
+	u, err := url.Parse(value)
+	return err == nil && len(value) <= 512 && u.Scheme == "https" && u.Host == "linear.app" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && strings.Contains(u.Path, "/issue/")
 }

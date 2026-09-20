@@ -7,6 +7,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/install"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
+	"github.com/dark-factory-build/dark-factory/internal/linear"
 	"github.com/dark-factory-build/dark-factory/internal/maintainer"
 )
 
@@ -17,7 +18,8 @@ func (daemon *Daemon) ConfigureMaintainer(home *install.OperationalHome) error {
 		return err
 	}
 	daemon.github = host
-	return nil
+	daemon.linear, err = linear.Open(home)
+	return err
 }
 
 // GitHubConnection is shared by the authenticated operator transport and the
