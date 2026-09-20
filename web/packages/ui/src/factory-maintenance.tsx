@@ -50,7 +50,7 @@ export function FactoryMaintenancePanel({ maintenance, runtime, connected, sourc
   const running = runtime ?? maintenance?.running;
   const serviceSourcesMatch = current && runtime?.release === true && maintenance?.installed.state === "verified" && maintenance.installed.source !== "" && maintenance.installed.source === runtime.source;
   return <section aria-label="Factory service maintenance">
-    <div className="dfFactoryConsole__sectionHeading"><h3>Factory service</h3><span style={{overflowWrap:"anywhere"}}>{maintenance?.destination || "host observation"}</span></div>
+    <h3>Factory service</h3><details><summary>Host destination</summary><p style={{overflowWrap:"anywhere"}}>{maintenance?.destination || "not observed"}</p></details>
     {!current ? <p role="status">Disconnected or stale observation. No runtime update is confirmed.</p> : null}
     {serviceSourcesMatch ? <p role="status">The running host matches the verified installed source.</p> : null}
     <div className="dfFactoryConsole__list">
