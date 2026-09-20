@@ -228,8 +228,11 @@ unset DARK_FACTORY_REVIEW_MODEL
 : >"$args"
 printf 'VERDICT: ALLOW\n' >"$run/review-7-$(printf '%s' "$head" | cut -c1-8).log"
 status=0
-(export DARK_FACTORY_FAKE_CODEX_NO_FINAL=1; review owner/repo 7 "$head" "$base" "$body") >/dev/null 2>&1 || status=$?
+# Not through review(): what the script says on stderr is what is being checked.
+(cd "$run" && TMPDIR="$scratch" DARK_FACTORY_REVIEW_REMOTE="file://$remote" DARK_FACTORY_FAKE_CLAUDE_ARGS="$args" DARK_FACTORY_FAKE_CLAUDE_REPLY="$reply" DARK_FACTORY_FAKE_CODEX_NO_FINAL=1 \
+    PATH="$tools:$PATH" "$repository_root/scripts/cold-review.sh" owner/repo 7 "$head" "$base" "$body" >/dev/null 2>"$run/no-verdict") || status=$?
 [ "$status" -eq 3 ] || fail "a stale Codex verdict with no new final message exited $status, want 3"
+grep -Eq '^no verdict reported: codex exited 1 after [0-9]+s; see ' "$run/no-verdict" || fail "a session that died did not say how: $(cat "$run/no-verdict")"
 grep -q 'provider capacity exhausted' "$run/review-7-$(printf '%s' "$head" | cut -c1-8).log.events" || fail "Codex diagnostics were discarded"
 # Given main's moved head as the base, the diff still runs from the branch
 # point, and so do the rules.
@@ -319,7 +322,7 @@ chmod 755 "$unwritable"
 farm=$temporary/farm
 mkdir -p "$farm"
 cp "$tools/codex" "$tools/dark-factory-maintainer-mcp-bridge" "$farm/"
-for tool in cat cp cut find grep ls mkdir mktemp mv rm sed stat tail tr; do
+for tool in cat cp cut date find grep ls mkdir mktemp mv rm sed stat tail tr; do
     ln -s "$(command -v "$tool")" "$farm/$tool"
 done
 printf 'Findings.\nVERDICT: ALLOW\n' >"$reply"
