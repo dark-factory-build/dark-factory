@@ -139,7 +139,13 @@ export function prepareFloor(projectMap: StateView["projects"] | undefined, topo
   for (const room of roomByID.values()) {
     if (room.parentId !== undefined) children.set(room.parentId, [...(children.get(room.parentId) ?? []), room]);
   }
-  for (const members of children.values()) members.sort((left, right) => compareText(left.id, right.id));
+  for (const members of children.values()) members.sort((left, right) => compareText(left.path, right.path) || compareText(left.label, right.label) || compareText(left.id, right.id));
+  for (const room of roomByID.values()) {
+    const members = children.get(room.id) ?? [];
+    roomByID.set(room.id, { ...room, childCount: members.length, components: members.map((node) => ({ id: node.id, label: node.label, feature: node.inventory === undefined ? "unavailable" : (Object.keys(inventoryLabels) as InventoryKind[])
+      .filter((kind) => node.inventory!.total[kind] > 0)
+      .sort((left, right) => node.inventory!.total[right] - node.inventory!.total[left] || compareText(left, right))[0] ?? "empty" })) });
+  }
   const digest = projects.map((project) => topologies?.get(project.id)?.digest).filter((value) => value !== undefined).join(" ");
   return { hierarchies, blocksByProject, roomByID, children, digest };
 }
@@ -148,7 +154,13 @@ export function prepareFloor(projectMap: StateView["projects"] | undefined, topo
 export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?: string, requestedPage = 0) {
   const { hierarchies, blocksByProject, roomByID, children } = prepared;
   const validScope = scopeId !== undefined && roomByID.has(scopeId) ? scopeId : undefined;
-  const scope = validScope === undefined ? undefined : roomByID.get(validScope)!;
+  let scope = validScope === undefined ? undefined : roomByID.get(validScope)!;
+  // Skip sole same-path wrappers for navigation, retaining every node for details.
+  while (scope !== undefined) {
+    const members = children.get(scope.id) ?? [];
+    if (members.length !== 1 || members[0]!.path !== scope.path) break;
+    scope = roomByID.get(members[0]!.id)!;
+  }
   const scopeChildren = scope === undefined ? hierarchies.map((hierarchy) => hierarchy.projectRoom) : children.get(scope.id) ?? [];
   const showScope = scope !== undefined && !scopeChildren.some((child) => child.path === scope.path);
   const roomLimit = MAX_SCOPE_ROOMS - (showScope ? 1 : 0);
@@ -158,7 +170,7 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?:
   // Counts belong to physical paths. A same-path child represents a hidden
   // wrapper's direct files when its sibling subtrees are displayed separately.
   const splitContents = scope !== undefined && scopeChildren.some((child) => child.path !== scope.path);
-  const shown = showScope ? [scope, ...pageChildren] : pageChildren;
+  const shown = showScope ? [scope!, ...pageChildren] : pageChildren;
   const kept = new Set(shown.map((room) => room.id));
   const visibleAncestor = (id: string | undefined): string | undefined => {
     let room = id === undefined ? undefined : roomByID.get(id);
@@ -169,7 +181,7 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?:
   // it, so each link is drawn between the rooms that show its two ends.
   // The scope's own room holds only its direct files: a descendant that climbs
   // to it sits under a child on another page, which this floor does not show.
-  const roomOf = (id: string) => { const shownAs = visibleAncestor(id); return shownAs === validScope && id !== validScope ? undefined : shownAs; };
+  const roomOf = (id: string) => { const shownAs = visibleAncestor(id); return shownAs === scope?.id && id !== scope?.id ? undefined : shownAs; };
   const rolled = new Map<string, Map<string, NonNullable<SceneNode["dependencies"]>["links"][number]>>();
   for (const room of roomByID.values()) for (const link of room.dependencies?.links ?? []) {
     const from = roomOf(room.id), to = roomOf(link.nodeId);
@@ -179,7 +191,7 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?:
     rolled.set(from, links);
   }
   const rooms: SceneNode[] = shown.map((room) => ({
-    ...room,
+    ...roomByID.get(room.id)!,
     inventoryScope: splitContents && room.path === scope?.path ? "direct" : "subtree",
     ...(room.dependencies === undefined ? {} : { dependencies: { ...room.dependencies, links: [...(rolled.get(room.id)?.values() ?? [])] } }),
   }));
@@ -202,7 +214,7 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?:
       chain.unshift(current);
       current = current.parentId === undefined ? undefined : roomByID.get(current.parentId);
     }
-    crumbs.push(...chain.map((node) => ({ id: node.id, label: node.label })));
+    crumbs.push(...chain.filter((node, index) => index === 0 || node.path !== chain[index - 1]!.path || children.get(chain[index - 1]!.id)?.length !== 1).map((node) => ({ id: node.id, label: node.label })));
   }
   const digest = `${prepared.digest}:${validScope ?? "root"}:${page}`;
   return {
@@ -210,9 +222,9 @@ export function selectFloor(prepared: ReturnType<typeof prepareFloor>, scopeId?:
     topology: { digest, nodes: rooms },
     navigation: {
       ...(validScope === undefined ? {} : { scopeId: validScope }),
-      ...(scope === undefined ? {} : { backScopeId: scope.parentId }),
+      ...(scope === undefined ? {} : { backScopeId: crumbs.at(-2)?.id }),
       breadcrumbs: crumbs,
-      enterableIds: rooms.filter((room) => room.id !== validScope && (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
+      enterableIds: rooms.filter((room) => room.id !== scope?.id && (children.get(room.id)?.length ?? 0) > 0).map((room) => room.id),
       omittedChildren: Math.max(0, scopeChildren.length - pageChildren.length),
       page, pageCount,
     },
@@ -370,14 +382,6 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
   if (roots.length !== 1) return { project, projectRoom: fallback, nodes: [fallback] };
   const root = roots[0]!;
   const componentLabel = (node: typeof root) => node.kind === "package" && node.label === "main" && node.path !== "." ? node.path.split("/").at(-1)! : node.label;
-  const components = new Map<string, NonNullable<SceneNode["components"]>[number][]>();
-  for (const node of served) if (node.parent_id !== "") {
-    const feature = node.inventory === undefined ? "unavailable" : (Object.keys(inventoryLabels) as InventoryKind[])
-      .filter((kind) => node.inventory!.total[kind] > 0)
-      .sort((left, right) => node.inventory!.total[right] - node.inventory!.total[left] || compareText(left, right))[0] ?? "empty";
-    components.set(node.parent_id, [...(components.get(node.parent_id) ?? []), { id: `${project.id}:${node.id}`, label: componentLabel(node), feature }]);
-  }
-  for (const children of components.values()) children.sort((a, b) => compareText(a.id, b.id));
   const links = new Map<string, NonNullable<SceneNode["dependencies"]>["links"][number][]>();
   for (const edge of topology?.dependencies?.edges ?? []) {
     // Decoder owns endpoint validation; retain project scoping for direct projections too.
@@ -397,8 +401,6 @@ function projectHierarchy(project: { id: string; name: string }, topology: Topol
     sizeBucket: node.size_bucket,
     language: node.language,
     inventoryScope: "subtree" as const,
-    childCount: components.get(node.id)?.length ?? 0,
-    components: components.get(node.id) ?? [],
     ...(node.inventory === undefined ? {} : { inventory: node.inventory }),
     ...(topology?.dependencies === undefined ? {} : { dependencies: { omitted: topology.dependencies.omitted, links: links.get(node.id) ?? [] } }),
     project: { id: project.id, name: project.name },

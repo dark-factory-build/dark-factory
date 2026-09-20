@@ -184,7 +184,14 @@ export function FactoryConsole({
     resetFloorAppearance();
     setFloorAppearance(DEFAULT_FLOOR_APPEARANCE);
   };
-  const selectedTask = selectedTaskId === undefined ? undefined : state?.tasks.get(selectedTaskId);
+  const [chosenProjectId, setProjectId] = useState<string>();
+  const projectId = chosenProjectId !== undefined && state?.projects.has(chosenProjectId) ? chosenProjectId : undefined;
+  const scopedState = state === undefined || projectId === undefined ? state : {
+    ...state,
+    agents: new Map([...state.agents].filter(([, agent]) => agent.project_id === projectId)),
+    tasks: new Map([...state.tasks].filter(([, task]) => task.project_id === projectId)),
+  };
+  const selectedTask = selectedTaskId === undefined ? undefined : scopedState?.tasks.get(selectedTaskId);
   const selectTask = onSelectTask === undefined ? undefined : (id: string) => { onSelectTask(id); onDetail?.("queue"); };
   const ready = status === "ready";
   const counters = factoryCounters(state);
@@ -200,6 +207,10 @@ export function FactoryConsole({
           <div>
             <h1>DARK FACTORY</h1>
           </div>
+          <label>Project <select aria-label="Project" value={projectId ?? ""} onChange={(event) => { setProjectId(event.currentTarget.value || undefined); onSelectTask?.(undefined); }}>
+            <option value="">All projects</option>
+            {[...state?.projects.values() ?? []].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select></label>
           <div className="dfConsoleBar__actions">
             <button type="button" aria-pressed={settingsOpen === true} disabled={onToggleSettings === undefined} onClick={onToggleSettings}>Settings</button>
           </div>
@@ -245,8 +256,8 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={state} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} connected={ready} />
-              : <AgentList state={state} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
+              ? <FactoryFloor projectId={projectId} onProject={setProjectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} connected={ready} />
+              : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
           <aside className="dfConsoleSidebar" aria-label="Selected detail">
@@ -275,7 +286,7 @@ export function FactoryConsole({
             </div>
             <div hidden={selectedDetail !== "queue"}>
               <QueuePanel
-                state={state}
+                state={scopedState}
                 edit={edit}
                 ready={ready}
                 onEditTask={onEditTask}
@@ -311,6 +322,7 @@ export function FactoryConsole({
       </main>
       {settingsOpen !== true ? null : (
         <SettingsDialog
+          projectId={projectId}
           floorAppearance={floorAppearance}
           onFloorAppearanceChange={changeFloorAppearance}
           onResetFloorAppearance={resetAppearance}

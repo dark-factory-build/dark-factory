@@ -2,6 +2,7 @@ import { useLayoutEffect, useEffect, useMemo, useRef, useState, type MouseEvent,
 import type { SceneTask } from "../console-view.js";
 import {
   PADDING,
+  compareText,
   ROOM_LEFT,
   layoutScene,
   commonSeating,
@@ -23,6 +24,7 @@ import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.gen
 export type FactorySceneProps = Readonly<{
   appearance?: FloorAppearance;
   topology: SceneTopology;
+  detailNodes?: ReadonlyMap<string, SceneTopology["nodes"][number]>;
   workers: readonly SceneWorker[];
   tasks?: readonly SceneTask[];
   selectedTaskId?: string;
@@ -243,7 +245,8 @@ function SceneWorkers({ layout, placements, nodes, workers, tasks, connected, an
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
+export function FactoryScene({ topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
+  const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
   const [linkedFrom, setLinkedFrom] = useState<string>();
@@ -268,6 +271,9 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
   const layout = useMemo(() => layoutScene(topology), [topology]);
   const placements = useMemo(() => placeWorkers(layout, workers), [layout, workers]);
   const nodes = new Map(topology.nodes.map((node) => [node.id, node]));
+  const availableNodes = detailNodes ?? nodes;
+  const selectedRoom = availableNodes.get(selectedRoomId ?? "");
+  const links = selectedRoom?.dependencies?.links ?? [];
   const resting = placements.filter((placement) => placement.area === "resting");
   const planning = placements.filter((placement) => placement.area !== "room" && placement.area !== "resting");
   const seating = commonSeating(layout, resting.length, planning.length);
@@ -346,7 +352,7 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
               <path d={`M${room.door.x - 12} ${room.door.y - 8}h24 M${room.door.x - 7} ${room.door.y - 14}h14`} stroke="#53615c" strokeWidth="2" />
             </g>}
             {contents.map((item) => <g key={item.key} data-room-content={item.kind} aria-hidden="true"><Equipment item={item} operating={operating} scenery={appearance.scenery} /></g>)}
-            <g tabIndex={0} className="dfFactoryScene__target" data-tooltip={roomInfo(node)} aria-label={roomInfo(node)}>
+            <g {...sceneAction(() => setSelectedRoomId(room.id))} className="dfFactoryScene__target" data-tooltip={roomInfo(node)} aria-label={`Inspect ${node.label}`}>
               <rect className="dfFactoryScene__focus" x={room.x + 8} y={room.y + 12} width={room.width - 44} height="24" rx="2" fill="#182429" />
               <text x={room.x + 14} y={room.y + 28} fill="#d7ddcf" fontFamily="ui-monospace, monospace" fontSize="10" fontWeight="700">{shortLabel(node.label, Math.floor((room.width - 54) / 6))}</text>
             </g>
@@ -359,9 +365,9 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
               <path d={`M${room.x + room.width - 26} ${room.y + 18}h14v10h-14Z`} fill="#303e40" stroke="#53605b" />
               <rect x={room.x + room.width - 24} y={room.y + 20} width="10" height="5" fill={operating ? "#e5c58b" : "#626c64"} />
             </g>
-            {!canEnter ? null : <g data-enter-room-id={room.id} {...sceneAction(() => onEnterRoom(room.id))} aria-label={`Enter ${node.label}`}>
-              <rect x={room.x + room.width - 32} y={room.y + room.height - 24} width="24" height="16" fill="#172b38" stroke="#80ddff" />
-              <text x={room.x + room.width - 20} y={room.y + room.height - 13} textAnchor="middle" fill="#80ddff" fontFamily="ui-monospace, monospace" fontSize="7">↳</text>
+            {!canEnter ? null : <g data-enter-room-id={room.id} {...sceneAction(() => onEnterRoom(room.id))} aria-label={`Open contents of ${node.label}`}>
+              <rect x={room.x + room.width - 92} y={room.y + room.height - 24} width="84" height="16" fill="#172b38" stroke="#80ddff" />
+              <text x={room.x + room.width - 50} y={room.y + room.height - 13} textAnchor="middle" fill="#80ddff" fontFamily="ui-monospace, monospace" fontSize="7">Open contents</text>
             </g>}
           </g>
         );
@@ -406,6 +412,30 @@ export function FactoryScene({ topology, workers, appearance = DEFAULT_FLOOR_APP
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
     </div>
+    <section className="dfRoomDetails" aria-label="Room details">
+      <label>Room <select aria-label="Inspect room" value={selectedRoom?.id ?? ""} onChange={(event) => setSelectedRoomId(event.target.value || undefined)}>
+        <option value="">Select a room</option>
+        {[...availableNodes.values()].sort((a, b) => compareText(a.project?.name ?? "", b.project?.name ?? "") || compareText(a.path, b.path) || compareText(a.label, b.label) || compareText(a.id, b.id)).map((node) => <option key={node.id} value={node.id}>{node.project?.name} · {node.label} · {node.path}</option>)}
+      </select></label>
+      {selectedRoom === undefined ? null : <details key={selectedRoom.id} open>
+        <summary>{selectedRoom.label} · Room info</summary>
+        {onEnterRoom === undefined || (selectedRoom.components?.length ?? 0) === 0 && !enterable.has(selectedRoom.id) ? null : <button type="button" onClick={() => onEnterRoom(selectedRoom.id)}>Open contents</button>}
+        {(selectedRoom.components?.length ?? 0) === 0 ? null : <ul>{selectedRoom.components!.map((component) => <li key={component.id}><button type="button" disabled={!availableNodes.has(component.id)} onClick={() => setSelectedRoomId(component.id)}>{component.label}</button></li>)}</ul>}
+        {selectedRoom.path === selectedRoom.label ? null : <p>{selectedRoom.path}</p>}
+        <p>{selectedRoom.kind} · {selectedRoom.sizeBucket ?? "size unavailable"}{selectedRoom.language ? ` · ${selectedRoom.language}` : ""}{selectedRoom.childCount === undefined ? "" : ` · ${selectedRoom.childCount} subcomponents`}</p>
+        <p>{roomInfo(selectedRoom)}</p>
+        {selectedRoom.inventory === undefined ? null : <table><caption>Scanned files</caption><thead><tr><th>Kind</th><th>Direct</th><th>Subtree</th></tr></thead><tbody>{Object.entries(inventoryLabels).map(([kind, label]) => <tr key={kind}><th>{label}</th><td>{selectedRoom.inventory!.direct[kind as keyof typeof inventoryLabels]}</td><td>{selectedRoom.inventory!.total[kind as keyof typeof inventoryLabels]}</td></tr>)}</tbody></table>}
+        <p>{selectedRoom.dependencies === undefined ? "Dependencies unavailable." : "Supplied static imports and manifest dependencies. Floor cables group their visible endpoints."}</p>
+        {selectedRoom.dependencies === undefined ? null : <>
+          {links.length === 0 ? <p>No relationships in this sample.</p> : <ul>{links.map((link) => <li key={`${link.direction}:${link.nodeId}`}>
+            {link.direction === "to" ? "Depends on " : "Used by "}
+            <button type="button" disabled={!availableNodes.has(link.nodeId)} onClick={() => setSelectedRoomId(link.nodeId)}>{link.label}</button>
+            {nodes.has(link.nodeId) ? "" : " · outside view"} · {link.path}
+          </li>)}</ul>}
+          {selectedRoom.dependencies.omitted === 0 ? null : <p>{selectedRoom.dependencies.omitted} project relationships omitted from the supplied topology.</p>}
+        </>}
+      </details>}
+    </section>
     </>
   );
 }

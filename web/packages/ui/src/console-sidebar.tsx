@@ -97,6 +97,7 @@ export function AgentPanel({
         <div>
           <p className="dfFactoryConsole__eyebrow">{rankLabel(agent.role)} · {agent.provider}{agent.effective_model === "" ? "" : ` · ${agent.effective_model}`}</p>
           <h2>{agent.name}</h2>
+          <p className="dfConsoleItem__meta">{state?.projects.get(agent.project_id)?.name ?? agent.project_id}</p>
         </div>
       </div>
 
@@ -295,7 +296,7 @@ export function QueuePanel({
       <h3>{label} <span>{rows.length}</span></h3>
       <ul className="dfConsoleItems">{rows.map((task) => <li className="dfConsoleItem" key={task.id}><div className="dfConsoleItem__summary">
         <button type="button" className="dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selectedTaskId === task.id} onClick={() => onSelectTask?.(task.id)}>{task.title}</button>
-        <span className="dfConsoleItem__meta">{name(task)}{status === "blocked" && task.updated_at_ms !== undefined ? ` · since ${dateLabel(task.updated_at_ms)}` : ""}</span>
+        <span className="dfConsoleItem__meta">{state.projects.get(task.project_id)?.name ?? task.project_id} · {name(task)}{status === "blocked" && task.updated_at_ms !== undefined ? ` · since ${dateLabel(task.updated_at_ms)}` : ""}</span>
         {status !== "blocked" || onEditTask === undefined ? null : <button type="button" aria-label={`Cancel ${task.title}`} disabled={!ready || edit?.pending === true} onClick={() => { void onEditTask(task, { cancel: true }); }}>Cancel</button>}
       </div></li>)}</ul>
       {status === "blocked" && rows.length >= 64 ? <p>Showing the newest 64. Older blocked tasks are in each agent’s Recent work.</p> : null}
@@ -313,6 +314,7 @@ export function QueuePanel({
         onSelectTask={onSelectTask}
         key={task.id}
         task={task}
+        projectName={state.projects.get(task.project_id)?.name ?? task.project_id}
         peers={agents.filter((peer) => peer.project_id === (state.agents.get(task.assigned_agent_id)?.project_id ?? task.project_id))}
         pending={edit?.pending === true}
         ready={ready}
@@ -464,6 +466,7 @@ function AgentConfig({
  */
 function QueuedTask({
   task,
+  projectName,
   selected,
   onSelectTask,
   peers,
@@ -476,6 +479,7 @@ function QueuedTask({
   selected?: boolean;
   onSelectTask?: (taskId: string) => void;
   peers: readonly AgentItem[];
+  projectName: string;
   pending: boolean;
   ready: boolean;
   onEditTask?: (task: TaskItem, change: TaskEdit) => Promise<boolean>;
@@ -510,12 +514,12 @@ function QueuedTask({
     }
   };
   if (onEditTask === undefined) {
-    return <li className="dfConsoleItem"><button type="button" className="dfConsoleItem__summary dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selected === true} onClick={() => onSelectTask?.(task.id)}>{task.title}</button></li>;
+    return <li className="dfConsoleItem"><button type="button" className="dfConsoleItem__summary dfConsoleItem__taskTitle" disabled={!ready || onSelectTask === undefined} aria-pressed={selected === true} onClick={() => onSelectTask?.(task.id)}>{task.title}<span className="dfConsoleItem__meta">{projectName} · {task.assigned_agent_id === "" ? "ANY ELIGIBLE WORKER" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"}</span></button></li>;
   }
   return (
     <li>
       <details className="dfConsoleItem" onToggle={(event) => { if (event.currentTarget.open && brief === undefined && !loading) void load(); }}>
-        <summary className="dfConsoleItem__summary"><strong>{task.title}</strong><span className="dfConsoleItem__meta">{task.assigned_agent_id === "" ? "ANY ELIGIBLE WORKER" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
+        <summary className="dfConsoleItem__summary"><strong>{task.title}</strong><span className="dfConsoleItem__meta">{projectName} · {task.assigned_agent_id === "" ? "ANY ELIGIBLE WORKER" : peers.find((agent) => agent.id === task.assigned_agent_id)?.name ?? "AGENT"} · QUEUED · PRIORITY {task.priority}</span></summary>
         <div className="dfConsoleItem__detail">
         {open ? <>
           <label htmlFor={`df-title-${task.id}`}>TITLE</label>
@@ -565,6 +569,7 @@ export function SettingsDialog({
   onFloorAppearanceChange,
   onResetFloorAppearance,
   state,
+  projectId,
   ready,
   address,
   edit,
@@ -596,6 +601,7 @@ export function SettingsDialog({
   onFloorAppearanceChange: (appearance: FloorAppearance) => void;
   onResetFloorAppearance: () => void;
   state: StateView | undefined;
+  projectId?: string;
   ready: boolean;
   address: string;
   edit?: FactoryEditView;
@@ -648,7 +654,7 @@ export function SettingsDialog({
         <IntakeSection state={state} repositories={repositories} intake={intake} pending={intakePending} errors={intakeErrors} onLoad={onLoadIntake} onLoadRepositories={onLoadRepositories} onAction={onIntakeAction} />
         <details className="dfConsoleSidebar__section" aria-label="Run limits">
           <summary>Run limits</summary>
-          <ProjectLimitsSection state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
+          <ProjectLimitsSection projectId={projectId} state={state} edit={edit} ready={ready} onSave={onSaveProjectLimits} />
         </details>
         {library}
         <FloorAppearanceSection appearance={floorAppearance} onChange={onFloorAppearanceChange} onReset={onResetFloorAppearance} />
@@ -836,13 +842,14 @@ function FloorAppearanceSection({ appearance, onChange, onReset }: {
   </section>;
 }
 
-function ProjectLimitsSection({ state, edit, ready, onSave }: {
+function ProjectLimitsSection({ state, projectId, edit, ready, onSave }: {
   state: StateView | undefined;
+  projectId?: string;
   edit?: FactoryEditView;
   ready: boolean;
   onSave?: (project: { id: string; revision: bigint }, limits: { runBudget: bigint; maxRunSeconds: number }) => void;
 }) {
-  const projects = state === undefined ? [] : [...state.projects.values()];
+  const projects = state === undefined ? [] : [...state.projects.values()].filter((project) => projectId === undefined || project.id === projectId);
   return <div className="dfConsoleSidebar__section" aria-label="Project limits">
     <h3>Project limits</h3>
     {projects.length === 0 ? <p className="dfFactoryConsole__empty">No projects</p> : projects.map((project) => <ProjectLimitsForm key={`${project.id}:${project.revision}:${edit?.target === project.id && edit.error !== undefined ? "refused" : ""}`} project={project} edit={edit} ready={ready} onSave={onSave} />)}
