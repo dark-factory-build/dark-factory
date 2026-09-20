@@ -1694,6 +1694,26 @@ test("the config inputs stay the agent's own override and caption where it came 
   assert.equal(unknown.includes("inherited from"), false);
 });
 
+test("agent config drafts survive an acknowledged live revision", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const original = fixtureState.agents.get(ids.agent);
+  const state = baseState({ agents: new Map([[original.id, original]]) });
+  const selectedAgent = { id: original.id, name: original.name, revision: original.revision };
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, selectedAgent, agentPanel: "config", onSaveAgentConfig() {} })); });
+    const model = () => renderer.root.findByProps({ id: `df-model-${original.id}` });
+    await act(async () => model().props.onChange({ currentTarget: { value: "operator draft" } }));
+    const changed = { ...original, revision: original.revision + 1n, paused: !original.paused };
+    await act(async () => renderer.update(createElement(FactoryConsole, { status: "ready", state: baseState({ agents: new Map([[changed.id, changed]]) }), selectedAgent: { ...selectedAgent, revision: changed.revision }, agentPanel: "config", onSaveAgentConfig() {} })));
+    assert.equal(model().props.value, "operator draft");
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
 test("the shell provider has no model inputs but keeps PAUSED", () => {
   const markup = withAgent(shellAgent);
   assert.match(markup, />shell has no model</);

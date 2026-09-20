@@ -456,7 +456,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       const action = planning ? onOpenMissions : undefined;
       const project = projectId;
       return <g key={`${planning} ${y}`} data-common-table={planning ? "planning" : "resting"} data-tooltip={planning ? "Missions · inspect objectives" : undefined} aria-label={planning ? "Open Missions" : undefined} className={planning ? "dfFactoryScene__target" : undefined} {...(planning ? sceneAction(action === undefined ? undefined : () => action(project)) : { "aria-hidden": true, pointerEvents: "none" })} transform={`translate(${first.x} ${y + TABLE_DROP})`}>
-        {planning ? <rect x="-22" y="-54" width="44" height="44" fill="transparent" /> : null}
+        {planning ? <rect className="dfFactoryScene__focus" x="-22" y="-54" width="44" height="44" fill="transparent" /> : null}
         <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
         {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" /></g>}
       </g>; }));
@@ -575,8 +575,8 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       <SceneWorkers errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
       {/* Waiting work, as the tray it would be on a real desk. The pile says
           how the queue is doing; the target opens the existing Tasks panel. */}
-      <g data-floor-inbox={queued} data-tooltip={queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`} aria-label="Open Tasks" {...sceneAction(onOpenTasks === undefined ? undefined : () => onOpenTasks(projectId))} transform={`translate(${tray.x - 10} ${tray.y + 4})`}>
-        {onOpenTasks === undefined ? null : <rect x="-22" y="-22" width="44" height="44" fill="transparent" />}
+      <g data-floor-inbox={queued} data-tooltip={queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`} aria-label="Open Tasks" className={onOpenTasks === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenTasks === undefined ? undefined : () => onOpenTasks(projectId))} transform={`translate(${tray.x - 10} ${tray.y + 4})`}>
+        {onOpenTasks === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
         <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>
