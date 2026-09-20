@@ -708,6 +708,13 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 	if err != nil {
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
+	// An overseer reads any settled Change in its project; a worker reads only
+	// the target its own handoff line names.
+	if authority.Role == kernel.RoleWorker {
+		if expected, review, err := kernel.ParseRetainedSourceReviewTask(authority.Task()); err != nil || !review || expected.TaskID != targetTaskID {
+			return newErrorReply(api.RemoteUnauthorized)
+		}
+	}
 	daemon.attemptMu.Lock()
 	live := daemon.attempts[authority.RunID]
 	daemon.attemptMu.Unlock()

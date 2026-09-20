@@ -73,7 +73,8 @@ the project, a linked Git worktree on the Change's branch, and works there;
 an orchestrator's run binds no Change and is given its private runtime home
 as its working directory. It requests a worker's settled Change explicitly
 with `factoryctl attempt source --task TASK_ID`. The daemon checks that target
-task in the authenticated attempt's same project, requires its current settled
+task in the authenticated attempt's same project, grants a worker only the
+target its own `review handoff` first line names, requires its current settled
 retained Change (including blocked, failed, or cancelled outcomes), verifies
 the worktree is still at the settled head, and returns the Change ID, base
 commit, `head_commit`, `branch`, target task ID, task work revision, current

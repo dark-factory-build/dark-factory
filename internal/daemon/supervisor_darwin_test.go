@@ -562,6 +562,11 @@ func runSupervisorClaudeFixture() error {
 		if handoff.TaskID != fields[0] || handoff.ChangeID != fields[1] || handoff.BaseCommit != fields[2] || strconv.FormatUint(handoff.TaskWorkRevision, 10) != fields[3] || strconv.FormatUint(handoff.ChangeRevision, 10) != fields[4] {
 			return fmt.Errorf("Claude source receipt = %+v", handoff)
 		}
+		// The handoff line names one target; any other task is refused, not looked up.
+		var refused *api.RemoteError
+		if _, err := client.Source(ctx, task.TaskID); !errors.As(err, &refused) || refused.Code() != api.RemoteUnauthorized {
+			return fmt.Errorf("Claude reviewer unnamed source = %v", err)
+		}
 		if _, err := client.OverseerTaskSnapshot(ctx, fields[0]); err == nil {
 			return errors.New("Claude reviewer gained overseer source discovery")
 		} else {
