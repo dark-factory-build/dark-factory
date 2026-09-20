@@ -708,9 +708,13 @@ type TaskSummary struct {
 	WorkRevision    Revision
 	Title           string
 	Status          string
-	Priority        int64
-	Revision        Revision
-	UpdatedAt       UnixMillis
+	// BlockedReason is a bounded excerpt, populated only when Status is
+	// "blocked"; the schema's status check constraint keeps the source column
+	// NULL otherwise.
+	BlockedReason string
+	Priority      int64
+	Revision      Revision
+	UpdatedAt     UnixMillis
 }
 
 type FactorySummary struct {

@@ -23,13 +23,14 @@ const (
 	MaxAgentModelBytes  = 128
 	// MaxModelSourceBytes bounds the configuration path an effective model was
 	// read from. It is a local filesystem path, not free text.
-	MaxModelSourceBytes          = 1024
-	MaxTaskTitleBytes            = 1024
-	MaxHumanQuestionBytes        = 8192
-	MaxHumanReplyBytes           = 8192
-	MaxFactoryCapacity           = 1024
-	MaxTaskPriority       int64  = 1_000_000
-	MaxSQLiteInteger      uint64 = math.MaxInt64
+	MaxModelSourceBytes              = 1024
+	MaxTaskTitleBytes                = 1024
+	MaxTaskBlockedReasonBytes        = 200
+	MaxHumanQuestionBytes            = 8192
+	MaxHumanReplyBytes               = 8192
+	MaxFactoryCapacity               = 1024
+	MaxTaskPriority           int64  = 1_000_000
+	MaxSQLiteInteger          uint64 = math.MaxInt64
 )
 
 // Decimal is one non-negative SQLite chronology value. JSON represents it as
@@ -209,11 +210,14 @@ type AccountItem struct {
 }
 
 type TaskItem struct {
-	ID              string  `json:"id"`
-	ProjectID       string  `json:"project_id"`
-	AssignedAgentID string  `json:"assigned_agent_id"`
-	Title           string  `json:"title"`
-	Status          string  `json:"status"`
+	ID              string `json:"id"`
+	ProjectID       string `json:"project_id"`
+	AssignedAgentID string `json:"assigned_agent_id"`
+	Title           string `json:"title"`
+	Status          string `json:"status"`
+	// BlockedReason is a bounded excerpt served only when Status is "blocked";
+	// older servers omit it, so it is optional on the wire.
+	BlockedReason   string  `json:"blocked_reason,omitempty"`
 	Priority        int64   `json:"priority"`
 	Revision        Decimal `json:"revision"`
 	UpdatedAtMillis Decimal `json:"updated_at_ms,omitempty"`
@@ -373,6 +377,9 @@ func validateSharedTaskItem(value TaskItem) error {
 func validateTaskFields(value TaskItem) error {
 	if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Title, 1, MaxTaskTitleBytes) != nil || value.Priority < -MaxTaskPriority || value.Priority > MaxTaskPriority || value.Revision == 0 {
 		return fmt.Errorf("%w: task item", ErrMalformed)
+	}
+	if validateBoundedText(value.BlockedReason, 0, MaxTaskBlockedReasonBytes) != nil || value.BlockedReason != "" && value.Status != "blocked" {
+		return fmt.Errorf("%w: task blocked reason", ErrMalformed)
 	}
 	switch value.Status {
 	case "queued", "running", "blocked", "succeeded", "failed", "cancelled":

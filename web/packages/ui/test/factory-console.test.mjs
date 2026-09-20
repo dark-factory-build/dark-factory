@@ -685,7 +685,7 @@ test("Tasks lists blocked work, hides orchestrator passes, flags dispatch off an
     factory: { ...fixtureState.factory, dispatch_enabled: false },
     tasks: new Map([
       ...fixtureState.tasks,
-      ["b1".repeat(16), { ...running, id: "b1".repeat(16), title: "Stuck on a prerequisite", status: "blocked" }],
+      ["b1".repeat(16), { ...running, id: "b1".repeat(16), title: "Stuck on a prerequisite", status: "blocked", blocked_reason: "Needs a human to resolve a merge conflict <script>" }],
       ["b2".repeat(16), { ...running, id: "b2".repeat(16), title: "Standing instruction", status: "running", assigned_agent_id: supervisor.id }],
     ]),
   });
@@ -695,6 +695,10 @@ test("Tasks lists blocked work, hides orchestrator passes, flags dispatch off an
   await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", detail: "queue", state, onDetail() {}, onEditTask: async (task, change) => { edits.push([task.id, change]); return true; }, onAddTask: async (agent, instruction, mode) => { added.push([agent.id, instruction, mode]); return true; } })); });
   const panel = renderer.root.findByProps({ "aria-label": "Tasks" });
   assert.equal(panel.findByProps({ "aria-label": "Blocked tasks" }).findAllByType("button")[0].children.join(""), "Stuck on a prerequisite");
+  // The block reason is agent-written free text: it renders as plain text
+  // (React's default escaping), never through dangerouslySetInnerHTML.
+  const markup = renderToStaticMarkup(createElement(FactoryConsole, { status: "ready", detail: "queue", state, onDetail() {} }));
+  assert.match(markup, /Needs a human to resolve a merge conflict &lt;script&gt;/);
   await act(async () => { panel.findByProps({ "aria-label": "Cancel Stuck on a prerequisite" }).props.onClick(); });
   assert.deepEqual(edits, [["b1".repeat(16), { cancel: true }]], "a blocked task is cleared in one step");
   assert.ok(!panel.findAllByType("button").some((button) => button.children.join("") === "Standing instruction"), "an orchestrator pass is not a task row");

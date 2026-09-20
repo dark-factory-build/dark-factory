@@ -1344,7 +1344,7 @@ func projectAgent(item kernel.AgentSummary, configHome string, providerDefaults 
 }
 
 func projectTask(item kernel.TaskSummary) browserprotocol.TaskItem {
-	return browserprotocol.TaskItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), AssignedAgentID: optionalAgentText(item.AssignedAgentID), Title: item.Title, Status: item.Status, Priority: item.Priority, Revision: decimalRevision(item.Revision), UpdatedAtMillis: decimalMillis(item.UpdatedAt)}
+	return browserprotocol.TaskItem{ID: item.ID.String(), ProjectID: item.ProjectID.String(), AssignedAgentID: optionalAgentText(item.AssignedAgentID), Title: item.Title, Status: item.Status, BlockedReason: item.BlockedReason, Priority: item.Priority, Revision: decimalRevision(item.Revision), UpdatedAtMillis: decimalMillis(item.UpdatedAt)}
 }
 
 func projectHumanRequest(item kernel.HumanRequestProjection) (browserprotocol.HumanRequestItem, error) {

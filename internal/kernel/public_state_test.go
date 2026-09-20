@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // Every public kind remains coherent; tasks use admission order, while other
@@ -533,5 +534,55 @@ func TestPublicSnapshotCarriesBlockedWorkerTasksButOnlyAnOrchestratorsLatest(t *
 	// oldest worker tasks page through ReadTaskList instead.
 	if !slices.Equal(blocked, append([]string{"newer pass"}, titles[2:workerTasks]...)) {
 		t.Fatalf("blocked public tasks = %q", blocked)
+	}
+}
+
+// A blocked task's public row carries a bounded excerpt of why, cut on a rune
+// boundary; a task that never blocked carries none at all.
+func TestPublicSnapshotTruncatesBlockedReasonAndOmitsItElsewhere(t *testing.T) {
+	store, _, project, agent := newAdmissionStore(t, RoleWorker, 2)
+	defer store.Close()
+	ctx := context.Background()
+	blocked, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 10), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 10), Title: "blocked task"}, mustTime(t, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 11), ProjectID: project.ID, AssignedAgentID: agent.ID, IncarnationID: incarnationID(t, 11), Title: "queued task"}, mustTime(t, 11))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 100 three-byte runes: 300 bytes, so the 200-byte bound lands mid-rune and
+	// the excerpt must trim back to the last valid boundary rather than split it.
+	reason := strings.Repeat("€", 100)
+	corruptSQL(t, store, `UPDATE tasks SET status = 'blocked', blocked_reason = ?, updated_at_ms = ? WHERE id = ?`, reason, 12, blocked.ID.Bytes())
+	// The hand-blocked row has no run history, so this reads the public
+	// task projection directly rather than through the full snapshot, whose
+	// durable-controls check demands one (as the sibling test above notes).
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	tasks, err := readPublicTasks(ctx, tx.connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotBlocked, gotQueued *TaskSummary
+	for index := range tasks {
+		switch tasks[index].ID {
+		case blocked.ID:
+			gotBlocked = &tasks[index]
+		case queued.ID:
+			gotQueued = &tasks[index]
+		}
+	}
+	if gotBlocked == nil || gotQueued == nil {
+		t.Fatalf("public tasks = %+v", tasks)
+	}
+	if !utf8.ValidString(gotBlocked.BlockedReason) || len(gotBlocked.BlockedReason) != 198 || !strings.HasPrefix(reason, gotBlocked.BlockedReason) {
+		t.Fatalf("blocked reason = %q (%d bytes)", gotBlocked.BlockedReason, len(gotBlocked.BlockedReason))
+	}
+	if gotQueued.BlockedReason != "" {
+		t.Fatalf("queued task carried a blocked reason: %q", gotQueued.BlockedReason)
 	}
 }
