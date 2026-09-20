@@ -781,6 +781,21 @@ class ReleaseFixtures(unittest.TestCase):
         with mock.patch.object(release, "run", side_effect=gh):
             self.assertEqual(release.range_sources(cfg, OLD, SHA), ([], "range"))
 
+    def test_range_records_source_less_pull_request_as_included_without_issue(self):
+        cfg = config(Path("/tmp/release.json"))
+        def gh(argv, *unused):
+            command = " ".join(argv)
+            if "/compare/" in command:
+                return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
+            if "/pulls" in command:
+                return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA}, "body": "No source"})
+        included = []
+        with mock.patch.object(release, "run", side_effect=gh):
+            sources, mode = release.range_sources(cfg, OLD, SHA, included)
+        self.assertEqual((sources, mode), ([], "range"))
+        self.assertEqual(included, [{"pr": 10, "merge_sha": SHA}])
+
     def test_range_accepts_unique_footer_with_generator_trailer_and_deduplicates(self):
         cfg = config(Path("/tmp/release.json"))
         def gh(argv, *unused):
