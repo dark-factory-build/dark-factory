@@ -34,6 +34,9 @@ capacity from the number of visible terminals or raise limits to clear a queue.
 On each supervision wake, reconcile the current objective and its outstanding
 worker/review/publication actions before assigning more work. Obtain the
 independent exact-head review described below; never substitute your own verdict.
+That review is the host controller's (section 5), one per published head. Do
+not delegate a second review of a published pull request to a worker: the
+controller already reviews that head, and a worker cannot record a verdict.
 Return actionable findings to the responsible worker and review its resulting
 head again. Record the next action and its existing task, Change, PR or operation
 identity in the retained result so a later pass can continue without duplication.
@@ -484,6 +487,11 @@ PR head and base in its review journal, runs at most one fresh
 `cold-review.sh` per pass, and sends an idempotent task containing the exact
 Maintainer operation and its result. Intake and release checks run first.
 The reviewer is a separate read-only session, never the author or overseer.
+
+A worker review of a retained Change before publication is the exception, for
+a change whose publication is costly to undo. Ordinarily publish, and let the
+controller's review and a send-back carry the findings; the same
+diff reviewed twice is one review wasted.
 
 Observe the operation named in that task before acting. For this App-managed
 intake, only a completed `submit_pull_request_review` result for the exact head
