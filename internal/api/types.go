@@ -122,7 +122,7 @@ type WebStatus struct {
 	ActiveClients    uint64        `json:"active_clients"`
 	RevokedClients   uint64        `json:"revoked_clients"`
 	ActiveChallenges uint64        `json:"active_challenges"`
-	Build            BuildIdentity `json:"build"`
+	Build            BuildIdentity `json:"build,omitzero"`
 }
 
 // BuildIdentity is the bounded public identity of the daemon serving this

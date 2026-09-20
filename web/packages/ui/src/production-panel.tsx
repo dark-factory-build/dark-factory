@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskHistoryView, TaskItem } from "@dark-factory/client";
 import { TaskDetail, type TaskBrief } from "./console-sidebar.js";
 import type { ProjectContentCall } from "./project-library.js";
-import { FactoryMaintenancePanel, type FactoryMaintenanceProps } from "./factory-maintenance.js";
+import { DeliveryEvidence, FactoryMaintenancePanel, type FactoryMaintenanceProps } from "./factory-maintenance.js";
 import type { ProductionDelivery } from "./production-view.js";
 import type { ProductionContraption } from "./production-view.js";
 
@@ -26,7 +26,6 @@ export function ProductionPanel({ maintenance, deliveries = [], items, selected,
   const [loadedTasks, setLoadedTasks] = useState<Record<string, TaskItem>>({});
   const [taskError, setTaskError] = useState("");
   const [completedLimit, setCompletedLimit] = useState(8);
-  const [deliveryLimit, setDeliveryLimit] = useState(8);
   const epoch = useRef(0);
   const selectedTaskRef = useRef<string | undefined>(undefined);
   const active = selected;
@@ -69,7 +68,7 @@ export function ProductionPanel({ maintenance, deliveries = [], items, selected,
     {items.length === 0 ? <p className="dfFactoryConsole__empty">No production records in this scope.</p> : null}<label>Inspect work<select value={active ?? ""} onChange={(event) => inspect(event.target.value)}><option value="">Select work</option><option value="maintenance">Factory service</option><option value="delivery">Delivery dock</option>{visibleItems.map((entry) => { const key = `${entry.projectId}:${entry.visualId}`; const title = entry.pullRequest?.title || entry.construction?.title || "Work"; return <option key={key} value={key}>{title} · {entry.repository} · {entry.status}</option>; })}</select></label>
     {moreItems ? <button type="button" disabled={!connected} onClick={() => { setCompletedLimit((limit) => limit + 8); loadMore?.(); }}>{overflow > 0 ? "Load more work" : "More completed work"}</button> : null}
     {active === "maintenance" && maintenance ? <FactoryMaintenancePanel {...maintenance} /> : null}
-    {active === "delivery" ? <section aria-label="Delivery dock"><h3>Delivery dock</h3><p>Shared release receipts. A merge is not a delivery; these timestamps record when each destination was verified.</p>{deliveries.length === 0 ? <p>No destination evidence recorded.</p> : deliveries.slice(0, deliveryLimit).map((delivery) => <details key={`${delivery.repository}:${delivery.id}`}><summary>{delivery.destination} · {delivery.state} · {delivery.pull_requests.length} linked PR{delivery.pull_requests.length === 1 ? "" : "s"}</summary><p>{delivery.phase}{delivery.reason ? ` · ${delivery.reason}` : ""}</p><p>Revision <code style={{overflowWrap:"anywhere"}}>{delivery.revision}</code></p>{delivery.verified_at ? <p>Verified {new Date(delivery.verified_at).toISOString()}</p> : <p>Delivery not verified.</p>}{href(delivery.url) ? <a href={delivery.url} target="_blank" rel="noreferrer">Open delivery</a> : null}<ul>{delivery.pull_requests.map((number) => <li key={number}><a href={`https://github.com/${delivery.repository}/pull/${number}`} target="_blank" rel="noreferrer">{delivery.repository} #{number}</a></li>)}</ul>{delivery.overflow ? <p>{delivery.overflow} additional links are outside this observation.</p> : null}</details>)}{deliveries.length > deliveryLimit ? <button type="button" onClick={() => setDeliveryLimit((value) => value + 8)}>More receipts ({deliveries.length - deliveryLimit})</button> : null}</section> : null}
+    {active === "delivery" ? <section aria-label="Delivery dock"><h3>Delivery dock</h3><p>Shared release receipts. These timestamps record when each destination was verified.</p><DeliveryEvidence deliveries={deliveries} current={connected && !error} /></section> : null}
     {item === undefined ? null : <article className="dfRecentWorkDetail" aria-label={`Production details for ${item.pullRequest?.title || item.construction?.title || "work"}`}>
       <h3>{item.pullRequest?.title || item.construction?.title || "Work"}</h3>
       <p>{project?.name || item.projectId} · {item.repository} · {item.status}</p>
