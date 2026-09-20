@@ -16,6 +16,7 @@ func TestWebStatusAndClientPageValidationIsStrict(t *testing.T) {
 		{State: "stopped", Path: "/browser"},
 		{State: "stopped", ActiveClients: 1},
 		{State: "ready", Ready: true, Address: "127.0.0.1:1", Path: "/browser", Origins: []string{"*"}},
+		{State: "ready", Ready: true, Address: "127.0.0.1:1", Path: "/browser", Origins: []string{"https://app.darkfactory.build"}, Build: BuildIdentity{Release: true}},
 	} {
 		if validWebStatus(invalid) {
 			t.Fatalf("invalid status accepted: %+v", invalid)

@@ -247,3 +247,26 @@ reads retain the last durable item and disclose the observation gap. Active,
 blocked and undelivered items remain inspectable; completed work has a bounded
 visible rack and explicit expansion. External record and relationship limits are
 shown, not presented as successful or empty work.
+
+The factory service dock keeps release availability, installed binary receipts,
+the daemon serving the current private connection, and the loaded hosted-console
+bundle separate. A reconnect discards runtime confirmation until that connection
+returns its build identity. The runtime deployment verifier compares the serving
+daemon with the installed source; its preflight still reports the actual old
+revision so the existing release controller can decide whether deployment is
+needed. Disconnection and stale observations never confirm an update.
+
+Both docks use the same bounded receipt inspector. A shared deployment retains
+its PR membership across re-verification; later attempts replace earlier status
+metadata for that destination/revision. Receipt timestamps describe verification
+at that time, not a perpetual claim about the current destination. Host installation
+continues through the existing safe deployment script; there is no browser updater
+or new automatic-update policy. Older merged items compact into an explicit
+inspectable dispatch rack without shrinking phone targets.
+
+Runtime destinations use stable opaque host identities, never home paths.
+Legacy destination records are normalized before private browser reads and
+transactionally migrated in bounded batches on the next observation. Tied
+receipt timestamps do not prove a newer success: unresolved evidence wins a tie
+until a later verification establishes ordering. Re-reading an old running
+receipt does not refresh its activity timestamp.

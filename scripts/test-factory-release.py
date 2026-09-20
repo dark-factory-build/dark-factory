@@ -219,6 +219,28 @@ class ReleaseFixtures(unittest.TestCase):
             verifier.assert_called_once_with(cfg, HEAD, snapshot()[2])
             command.assert_not_called()
 
+    def test_unchanged_live_tip_preserves_existing_delivery_membership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            included = [{"pr": 958, "merge_sha": OLD, "repository": "example/factory"},
+                        {"pr": 959, "merge_sha": SHA, "repository": "example/factory"}]
+            release.atomic_json(journal, {"version": 1, "live_tip": {"sha": SHA, "healthy": True},
+                                          "releases": {"633": {"pr": 633, "sha": SHA, "state": "verified",
+                                                                  "config_fingerprint": release.config_fingerprint(cfg),
+                                                                  "included_pull_requests": included,
+                                                                  "delivery_sources": [{"pr": 959, "merge_sha": SHA}]}}})
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "range_sources") as sources, \
+                 mock.patch.object(release, "run") as command:
+                result = release.once(cfg, 633)
+            self.assertEqual(result["included_pull_requests"], included)
+            self.assertEqual(result["delivery_sources"], [{"pr": 959, "merge_sha": SHA}])
+            sources.assert_not_called()
+            command.assert_not_called()
+
     def test_reconcile_records_verified_receipt_without_deploy_hook(self):
         with tempfile.TemporaryDirectory() as directory:
             journal = Path(directory) / "release.json"

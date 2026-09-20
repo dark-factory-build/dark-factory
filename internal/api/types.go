@@ -114,14 +114,26 @@ func validAgentPaths(value AgentPaths) bool {
 // adapter. It intentionally contains no challenge, key, token or client
 // identity data.
 type WebStatus struct {
-	State            string   `json:"state"`
-	Ready            bool     `json:"ready"`
-	Address          string   `json:"address"`
-	Path             string   `json:"path"`
-	Origins          []string `json:"origins"`
-	ActiveClients    uint64   `json:"active_clients"`
-	RevokedClients   uint64   `json:"revoked_clients"`
-	ActiveChallenges uint64   `json:"active_challenges"`
+	State            string        `json:"state"`
+	Ready            bool          `json:"ready"`
+	Address          string        `json:"address"`
+	Path             string        `json:"path"`
+	Origins          []string      `json:"origins"`
+	ActiveClients    uint64        `json:"active_clients"`
+	RevokedClients   uint64        `json:"revoked_clients"`
+	ActiveChallenges uint64        `json:"active_challenges"`
+	Build            BuildIdentity `json:"build,omitzero"`
+}
+
+// BuildIdentity is the bounded public identity of the daemon serving this
+// status. Development builds keep Release false even when VCS metadata is
+// available as a useful source revision.
+type BuildIdentity struct {
+	Version string `json:"version"`
+	Source  string `json:"source"`
+	Target  string `json:"target"`
+	BuildID string `json:"build_id"`
+	Release bool   `json:"release"`
 }
 
 type WebClient struct {

@@ -12,6 +12,7 @@ import (
 	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
+	"github.com/dark-factory-build/dark-factory/internal/buildinfo"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
 )
 
@@ -63,6 +64,17 @@ func browserRuntimeReady(runtime *BrowserRuntime) bool {
 	}
 }
 
+func currentDaemonBuild() api.BuildIdentity {
+	identity := buildinfo.Current()
+	source := identity.Source()
+	if !identity.Release() {
+		if revision := buildinfo.VCSRevision(); revision != "" {
+			source = revision
+		}
+	}
+	return api.BuildIdentity{Version: identity.Version(), Source: source, Target: identity.Target(), BuildID: identity.BuildID(), Release: identity.Release()}
+}
+
 func (daemon *Daemon) WebStatus(ctx context.Context) (api.WebStatus, error) {
 	if daemon == nil || daemon.store == nil {
 		return api.WebStatus{}, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
@@ -70,7 +82,8 @@ func (daemon *Daemon) WebStatus(ctx context.Context) (api.WebStatus, error) {
 	if _, err := daemon.store.Factory(ctx); err != nil {
 		return api.WebStatus{}, err
 	}
-	status := api.WebStatus{State: "stopped"}
+	status := api.WebStatus{State: "stopped", Build: currentDaemonBuild()}
+
 	runtime, valid := daemon.webRuntime()
 	if !valid {
 		return status, nil

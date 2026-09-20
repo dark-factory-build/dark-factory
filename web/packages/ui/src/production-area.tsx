@@ -1,21 +1,25 @@
 import { AgentSprite } from "./factory-scene/factory-scene.js";
 import type { KeyboardEvent } from "react";
 import { Contraption } from "./contraption.js";
-import type { ProductionContraption, ProductionView } from "./production-view.js";
+import { sharedDeliveries, type ProductionContraption, type ProductionView } from "./production-view.js";
 
 export const productionColumns = (width: number) => Math.max(1, Math.min(4, Math.floor(width / 160)));
-export const sharedChecks = (items: readonly ProductionContraption[]) => [...new Map(items.flatMap((item) => item.checks.filter((check) => check.applicable || check.scope === "merge_group").map((check) => [check.id, check] as const))).values()];
-export const productionHeight = (width: number, count: number, checks = 0) => 68 + Math.max(1, Math.ceil(count / productionColumns(width))) * 144 + Math.ceil(checks / productionColumns(width)) * 104;
+export const sharedChecks = (items: readonly ProductionContraption[]) => [...new Map(items.flatMap((item) => item.checks.filter((check) => check.applicable || check.scope === "merge_group").map((check) => [`${check.repository}:${check.id}`, check] as const))).values()];
+export const productionHeight = (width: number, count: number, checks = 0) => 68 + Math.max(1, Math.ceil(count / productionColumns(width))) * 144 + Math.ceil(checks / productionColumns(width)) * 104 + Math.ceil(2 / productionColumns(width)) * 120 + 48;
 const label = (text: string) => text.length > 23 ? `${text.slice(0, 22)}…` : text;
 const activate = (select: () => void) => ({ role: "button", tabIndex: 0, onClick: select, onKeyDown: (event: KeyboardEvent<SVGGElement>) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); } } });
 
 /** Station props show concurrent evidence beside the same machine. No animation
  * advances work or moves a PR past an authority's decision. */
-export function ProductionArea({ view, items, width, top, pulse, onSelect, selected }: {
-  view: ProductionView; items: readonly ProductionContraption[]; width: number; top: number; pulse?: number;
+export function ProductionArea({ view, items, hiddenItems = 0, width, top, pulse, onSelect, selected }: {
+  hiddenItems?: number; view: ProductionView; items: readonly ProductionContraption[]; width: number; top: number; pulse?: number;
   onSelect: (id: string) => void; selected?: string;
 }) {
   const columns = productionColumns(width), cell = width / columns, executions = sharedChecks(items);
+  const deliveries = sharedDeliveries(view);
+  const factoryDeliveries = deliveries.filter((delivery) => delivery.destination.startsWith("runtime:") || delivery.destination === "site:app.darkfactory.build");
+  const projectDeliveries = deliveries.filter((delivery) => !factoryDeliveries.includes(delivery));
+  const dockTop = 68 + Math.max(1, Math.ceil(items.length / columns)) * 144 + Math.ceil(executions.length / columns) * 104;
   return <g transform={`translate(0 ${top})`} role="group" aria-label="Production area">
     <path d="M24 -24v32h24" stroke="#526360" strokeWidth="18" fill="none" />
     <rect x="8" y="8" width={width - 16} height={productionHeight(width, items.length, executions.length) - 16} fill="url(#df-floor)" stroke="#465355" strokeWidth="3" />
@@ -60,10 +64,10 @@ export function ProductionArea({ view, items, width, top, pulse, onSelect, selec
       </g>;
     })}
     {executions.map((check, index) => {
-      const item = items.find((item) => item.checks.some((candidate) => candidate.id === check.id));
+      const item = items.find((item) => item.checks.some((candidate) => candidate.repository === check.repository && candidate.id === check.id));
       const running = item?.review.sourceFresh && ["running", "in_progress"].includes(check.state) && pulse !== undefined;
       const passed = item?.review.sourceFresh && check.state === "completed" && check.conclusion === "success";
-      return <g key={check.id} transform={`translate(${16 + index % columns * cell} ${60 + Math.max(1, Math.ceil(items.length / columns)) * 144 + Math.floor(index / columns) * 104})`} {...activate(() => { if (item) onSelect(item.projectId + ":" + item.visualId); })} aria-label={`Inspect shared check ${check.name}`} className="dfFactoryScene__target">
+      return <g key={`${check.repository}:${check.id}`} transform={`translate(${16 + index % columns * cell} ${60 + Math.max(1, Math.ceil(items.length / columns)) * 144 + Math.floor(index / columns) * 104})`} {...activate(() => { if (item) onSelect(item.projectId + ":" + item.visualId); })} aria-label={`Inspect shared check ${check.name}`} className="dfFactoryScene__target">
         <rect className="dfFactoryScene__focus" width={cell - 24} height="92" fill="transparent" />
         <rect x="8" y="4" width="100" height="46" fill="#303e40" stroke="#788379" strokeWidth="2" />
         <rect x="16" y="12" width="38" height="26" fill="#182c35" stroke="#536e70" />
@@ -73,5 +77,20 @@ export function ProductionArea({ view, items, width, top, pulse, onSelect, selec
         <text y="84" fill="#8fa4ac" fontSize="9" fontFamily="ui-monospace, monospace">{check.pull_requests.length} PRs · {check.conclusion || check.state}</text>
       </g>;
     })}
+    {[{ key: "maintenance", title: "FACTORY SERVICE", receipts: factoryDeliveries }, { key: "delivery", title: "DELIVERY DOCK", receipts: projectDeliveries }].map((dock, index) => {
+      const latest = dock.receipts[0], applying = latest?.state === "running";
+      return <g key={dock.key} transform={`translate(${16 + index % columns * cell} ${dockTop + Math.floor(index / columns) * 120})`}>
+        <g aria-hidden="true" pointerEvents="none">
+          <rect x="4" y="4" width={cell - 32} height="72" fill="#263638" stroke="#788379" strokeWidth="2" />
+          <path d={`M10 68h${cell - 44}M10 62h${cell - 44}`} stroke="#455653" strokeWidth="3" />
+          {dock.key === "maintenance" ? <><rect x="16" y="17" width="33" height="42" fill="#182c35" stroke="#9aa69c" /><path d="M21 24h20m-20 8h20m-20 8h20" stroke="#536e70" strokeWidth="3" /><path d="M62 26l14 18m-17-21 5-5 5 7-5 5m10 12 5 5" stroke="#c2b184" strokeWidth="3" /></> : <><path d="M15 58V28h38v30M22 28v-8h24v8" fill="#665f4e" stroke="#a08f68" strokeWidth="2" /><path d="M34 30v27m-18-19h36M68 59h22v-26H68z" fill="none" stroke="#9aa69c" strokeWidth="2" /></>}
+          <rect x={cell - 48} y="16" width="7" height="7" fill={applying ? pulse !== undefined && Math.floor(pulse / 500) % 2 ? "#e5c58b" : "#a08f68" : latest?.state === "blocked" ? "#d49b7d" : "#536e70"} />
+          <text x="8" y="91" fill="#c2b184" fontFamily="ui-monospace, monospace" fontSize="10">{dock.title}</text>
+          <text x="8" y="105" fill="#8fa4ac" fontFamily="ui-monospace, monospace" fontSize="9">{latest ? label(`${latest.destination.startsWith("runtime:") ? "Runtime" : latest.destination.startsWith("site:") ? "Console" : "Delivery"} · ${latest.state === "running" ? latest.phase || latest.state : latest.state}`) : "No delivery evidence · inspect"}</text>
+        </g>
+        <g {...activate(() => onSelect(dock.key))} aria-label={`Inspect ${dock.title.toLowerCase()}`} className="dfFactoryScene__target"><rect className="dfFactoryScene__focus" width={cell - 24} height="112" fill="transparent" stroke={selected === dock.key ? "#80ddff" : "none"} /></g>
+      </g>;
+    })}
+    {hiddenItems > 0 ? <g transform={`translate(16 ${productionHeight(width, items.length, executions.length) - 40})`} {...activate(() => onSelect(""))} aria-label={`Inspect all work, ${hiddenItems} more items in dispatch racks`} className="dfFactoryScene__target"><rect className="dfFactoryScene__focus" width={width - 40} height="32" fill="#263638" /><text x="8" y="21" fill="#c2b184" fontSize="10" fontFamily="ui-monospace, monospace">{hiddenItems} more in dispatch racks · inspect all</text></g> : null}
   </g>;
 }

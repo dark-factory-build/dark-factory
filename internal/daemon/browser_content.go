@@ -115,7 +115,10 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		if e != nil {
 			return result, mapBrowserError(e)
 		}
-		output = page
+		output = struct {
+			kernel.ProductionPage
+			Runtime api.BuildIdentity `json:"runtime"`
+		}{page, currentDaemonBuild()}
 	case "list":
 		page, e := backend.store.ListContent(ctx, project, kernel.ContentKind(input.Kind), int(input.Offset), int(input.Limit))
 		if e != nil {

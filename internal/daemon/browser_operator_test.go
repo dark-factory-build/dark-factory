@@ -30,7 +30,7 @@ func TestWebOperatorOpenStatusListAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.State != "ready" || !status.Ready || status.Address == "" || status.Path != "/browser" || len(status.Origins) != 1 || status.Origins[0] != adapterOrigin || status.ActiveClients != 0 || status.RevokedClients != 0 || status.ActiveChallenges != 1 {
+	if status.State != "ready" || !status.Ready || status.Address == "" || status.Path != "/browser" || len(status.Origins) != 1 || status.Origins[0] != adapterOrigin || status.ActiveClients != 0 || status.RevokedClients != 0 || status.ActiveChallenges != 1 || status.Build.Target == "" || status.Build.Source == "" {
 		t.Fatalf("initial web status = %+v", status)
 	}
 	link, err := fixture.daemon.OpenBrowser(ctx)

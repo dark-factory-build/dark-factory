@@ -1,7 +1,9 @@
 package kernel
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -60,6 +62,89 @@ func productionURL(value string) bool {
 	return err == nil && len(value) <= 2048 && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
 }
 
+func canonicalProductionRuntime(value string) string {
+	if !strings.HasPrefix(value, "runtime:/") {
+		return value
+	}
+	digest := sha256.Sum256([]byte(strings.TrimPrefix(value, "runtime:")))
+	return "runtime:host-" + hex.EncodeToString(digest[:8])
+}
+
+// Normalize legacy records at the private read boundary as well as on writes.
+// Keeping unknown document fields avoids dropping evidence during an upgrade.
+func canonicalProductionRecord(item *ProductionRecord) error {
+	if (item.Kind != "delivery" && item.Kind != "repository") || !strings.Contains(string(item.Document), "runtime:/") {
+		return nil
+	}
+	var document map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(item.Document))
+	decoder.UseNumber()
+	if err := decoder.Decode(&document); err != nil {
+		return err
+	}
+	target := document
+	if item.Kind == "repository" {
+		target, _ = document["maintenance"].(map[string]any)
+	}
+	old, _ := target["destination"].(string)
+	destination := canonicalProductionRuntime(old)
+	if old == destination {
+		return nil
+	}
+	target["destination"] = destination
+	if item.Kind == "delivery" {
+		item.ID = strings.Replace(item.ID, old, destination, 1)
+		if id, ok := document["id"].(string); ok {
+			document["id"] = strings.Replace(id, old, destination, 1)
+		}
+	}
+	body, err := json.Marshal(document)
+	item.Document = body
+	return err
+}
+
+func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project ProjectID, repository string) error {
+	// ponytail: migrate at most 128 legacy rows per observation; private reads
+	// normalize immediately and subsequent controller batches finish the rest.
+	rows, err := c.QueryContext(ctx, `SELECT kind, identity, visual_id, document, observed_at_ms FROM production_records
+        WHERE project_id = ? AND repository = ? AND kind IN ('delivery', 'repository')
+        AND document LIKE '%runtime:/%' LIMIT 128`, project.Bytes(), repository)
+	if err != nil {
+		return err
+	}
+	var records []ProductionRecord
+	for rows.Next() {
+		var item ProductionRecord
+		var body string
+		if err := rows.Scan(&item.Kind, &item.ID, &item.VisualID, &body, &item.ObservedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		item.Document = json.RawMessage(body)
+		records = append(records, item)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, item := range records {
+		oldID := item.ID
+		if err := canonicalProductionRecord(&item); err != nil {
+			return err
+		}
+		if err := productionRecordOnConnection(ctx, c, project, repository, item.Kind, item.ID, item.VisualID, item.Document, item.ObservedAt); err != nil {
+			return err
+		}
+		if oldID != item.ID {
+			if _, err := c.ExecContext(ctx, `DELETE FROM production_records WHERE project_id = ? AND repository = ? AND kind = ? AND identity = ?`, project.Bytes(), repository, item.Kind, oldID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func validProductionPull(pr ProductionPullRequest) bool {
 	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, 8192) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
@@ -72,16 +157,36 @@ func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project Proj
 	if err != nil || len(body) > 32768 {
 		return ErrInvalidValue
 	}
+	item := ProductionRecord{Kind: kind, ID: id, Document: body}
+	if err := canonicalProductionRecord(&item); err != nil {
+		return err
+	}
+	id, body = item.ID, item.Document
 	_, err = c.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET document = excluded.document, observed_at_ms = excluded.observed_at_ms
         WHERE excluded.observed_at_ms >= production_records.observed_at_ms`, project.Bytes(), repo, kind, id, visual, string(body), at)
 	return err
 }
 
+func validProductionMaintenance(value *ProductionMaintenance) bool {
+	if value == nil {
+		return true
+	}
+	if !validOutcomeText(value.Destination, 256) || !validOutcomeText(value.State, 64) || !validOutcomeText(value.Available.Version, 128) || !validOutcomeText(value.Available.State, 64) || !productionURL(value.Available.URL) {
+		return false
+	}
+	for _, build := range []ProductionBuild{value.Installed, value.Running} {
+		if !validOutcomeText(build.Version, 256) || !validOutcomeText(build.Source, 64) || !validOutcomeText(build.Target, 64) || !validOutcomeText(build.BuildID, 128) || !validOutcomeText(build.State, 64) {
+			return false
+		}
+	}
+	return true
+}
+
 // RecordProductionObservation accepts facts only from the operator authority.
 // An unavailable read updates the source's health without erasing prior work.
 func (store *Store) RecordProductionObservation(ctx context.Context, project ProjectID, observation ProductionObservation, at UnixMillis) error {
-	if project.zero() || !productionRepository.MatchString(observation.Repository) || observation.ObservedAt < 1 || observation.ObservedAt > at.Int64()+5000 || observation.Overflow < 0 || !validOutcomeText(observation.Unavailable, 256) || len(observation.PullRequests) > 256 || len(observation.Checks) > 256 || len(observation.Reviewers) > 256 || len(observation.Deliveries) > 128 {
+	if project.zero() || !validProductionMaintenance(observation.Maintenance) || !productionRepository.MatchString(observation.Repository) || observation.ObservedAt < 1 || observation.ObservedAt > at.Int64()+5000 || observation.Overflow < 0 || !validOutcomeText(observation.Unavailable, 256) || len(observation.PullRequests) > 256 || len(observation.Checks) > 256 || len(observation.Reviewers) > 256 || len(observation.Deliveries) > 128 {
 		return ErrInvalidValue
 	}
 	observation.Repository = strings.ToLower(observation.Repository)
@@ -90,6 +195,9 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 		return err
 	}
 	defer tx.Close()
+	if err := migrateProductionRuntimeRecords(ctx, tx.connection, project, observation.Repository); err != nil {
+		return tx.Rollback(err)
+	}
 	write := func(kind, id, visual string, value any) error {
 		return productionRecordOnConnection(ctx, tx.connection, project, observation.Repository, kind, id, visual, value, observation.ObservedAt)
 	}
@@ -127,14 +235,14 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 		}
 	}
 	for _, delivery := range observation.Deliveries {
-		if !productionSHA(delivery.Revision) || !validOutcomeText(delivery.Kind, 64) || !validOutcomeText(delivery.Destination, 256) || !validOutcomeText(delivery.State, 64) || !productionURL(delivery.URL) || !productionNumbers(delivery.PullRequests) || delivery.Overflow < 0 || delivery.VerifiedAt < 0 || delivery.VerifiedAt > at.Int64()+5000 {
+		if !productionSHA(delivery.Revision) || !validOutcomeText(delivery.Kind, 64) || !validOutcomeText(delivery.Destination, 256) || !validOutcomeText(delivery.State, 64) || !productionURL(delivery.URL) || !productionNumbers(delivery.PullRequests) || delivery.UpdatedAt < 0 || delivery.UpdatedAt > at.Int64()+5000 || !validOutcomeText(delivery.Phase, 64) || !validOutcomeText(delivery.Reason, 2048) || delivery.Overflow < 0 || delivery.VerifiedAt < 0 || delivery.VerifiedAt > at.Int64()+5000 {
 			return tx.Rollback(ErrInvalidValue)
 		}
 		if err := write("delivery", delivery.ID, "", delivery); err != nil {
 			return tx.Rollback(err)
 		}
 	}
-	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow}); err != nil {
+	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow, "maintenance": observation.Maintenance}); err != nil {
 		return tx.Rollback(err)
 	}
 	return tx.Commit(ctx)
@@ -252,6 +360,9 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 		}
 		size += len(body)
 		item.Document = json.RawMessage(body)
+		if err := canonicalProductionRecord(&item); err != nil {
+			return page, err
+		}
 		page.Records = append(page.Records, item)
 	}
 	if err := rows.Err(); err != nil {

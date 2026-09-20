@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Collect host-owned GitHub, review, and release facts for the factory floor."""
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -33,6 +34,7 @@ MAX_DELIVERIES = 128
 MAX_REVIEWERS = 256
 MAX_DOCUMENT = 32768
 MAX_INPUT = 240 << 10
+MAINTENANCE_REPOSITORY = "dark-factory-build/dark-factory"
 
 
 def text(value, limit=500):
@@ -81,13 +83,18 @@ def host_config(config):
     return value
 
 
+def runtime_destination(home):
+    digest = hashlib.sha256(str(Path(home).resolve()).encode("utf-8")).hexdigest()[:16]
+    return "runtime:host-" + digest
+
+
 def release_destination(config, release):
     destination = release.get("destination")
     if isinstance(destination, str) and destination and len(destination) <= 160:
         return destination
     verifier = release.get("verify_argv")
     if isinstance(verifier, list) and any(isinstance(arg, str) and arg.endswith("verify-live-runtime.py") for arg in verifier):
-        return "runtime:" + str(Path(config["factory_home"]).resolve())
+        return runtime_destination(config["factory_home"])
     if isinstance(verifier, list) and any(isinstance(arg, str) and arg.endswith("verify-live-site.py") for arg in verifier):
         return "site:app.darkfactory.build"
     return ""
@@ -126,6 +133,92 @@ def process_start(pid):
         return value if result.returncode == 0 and value else ""
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def _maintenance_identity(value):
+    if not isinstance(value, dict) or value.get("release") is not True:
+        return None
+    fields = {key: text(value.get(key), 256) for key in ("version", "source", "target", "build_id")}
+    if not all(fields.values()):
+        return None
+    fields["release"] = True
+    return fields
+
+
+def _maintenance_binary(path):
+    try:
+        completed = subprocess.run([str(path), "--build-identity"], capture_output=True,
+                                   text=True, timeout=15, env={})
+        if completed.returncode or len(completed.stdout.encode()) > 4096:
+            return None
+        return _maintenance_identity(json.loads(completed.stdout))
+    except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def maintenance(config):
+    """Observe the host release and runtime through existing read-only paths."""
+    home = Path(config["factory_home"]).resolve()
+    available = {"version": "", "url": "", "state": "unknown"}
+    installed = {key: "" for key in ("version", "source", "target", "build_id")}
+    installed.update({"release": False, "state": "unknown"})
+    running = dict(installed)
+    result = {"destination": runtime_destination(home), "available": available,
+              "installed": installed, "running": running, "state": "unknown"}
+    if config.get("repository") != MAINTENANCE_REPOSITORY:
+        available["state"] = result["state"] = "unavailable"
+        installed["state"] = running["state"] = "unavailable"
+        return result
+    try:
+        release = github(MAINTENANCE_REPOSITORY, "/releases/latest")
+        version = text(release.get("tag_name"), 128) if isinstance(release, dict) else ""
+        release_url = url(release.get("html_url"), 512) if isinstance(release, dict) else ""
+        if version and release_url:
+            available.update({"version": version, "url": release_url, "state": "available"})
+        else:
+            available["state"] = "unavailable"
+    except (intake.IntakeError, ValueError, json.JSONDecodeError, OSError):
+        available["state"] = "unavailable"
+    binary_root = Path(str(home) + ".service") / "bin" / "current"
+    identities = []
+    for name in ("factoryctl", "factoryd", "factory-runner"):
+        binary = binary_root / name
+        if not binary.is_file():
+            installed["state"] = "unavailable"
+            identities = []
+            break
+        identity = _maintenance_binary(binary)
+        if identity is None:
+            installed["state"] = "unknown"
+            identities = []
+            break
+        identities.append(identity)
+    if len(identities) == 3 and all(identity == identities[0] for identity in identities[1:]):
+        installed.update(identities[0])
+        installed["state"] = "verified"
+    factoryctl = binary_root / "factoryctl"
+    if installed["state"] == "unavailable" or not factoryctl.is_file():
+        running["state"] = "unavailable"
+    else:
+        env = {"DARK_FACTORY_SOCKET": str(home / "runtimes" / "factory.sock"),
+               "DARK_FACTORY_OPERATOR_TOKEN_FILE": str(home / "operator.token")}
+        try:
+            completed = subprocess.run([str(factoryctl), "web", "status"], capture_output=True,
+                                       text=True, timeout=15, env=env)
+            status = json.loads(completed.stdout) if not completed.returncode and len(completed.stdout.encode()) <= 4096 else None
+            identity = _maintenance_identity(status.get("build")) if isinstance(status, dict) else None
+            if identity is None:
+                running["state"] = "unknown"
+            else:
+                running.update(identity)
+                running["state"] = "ready" if status.get("ready") is True else "observed"
+        except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+            running["state"] = "unknown"
+    if available["state"] == "available" and installed["state"] == "verified" and running["state"] == "ready":
+        result["state"] = "ready"
+    elif "unavailable" in (available["state"], installed["state"], running["state"]):
+        result["state"] = "unavailable"
+    return result
 
 
 def active_review(config, operation):
@@ -179,7 +272,7 @@ def review_receipts(paths, repository):
 
 
 def release_receipts(paths, repository):
-    deliveries, unavailable = {}, False
+    deliveries, metadata_ranks, unavailable = {}, {}, False
     for entry in paths:
         if entry["repository"].casefold() != repository.casefold():
             unavailable = True
@@ -188,7 +281,7 @@ def release_receipts(paths, repository):
         if error or journal.get("version") != 1 or not isinstance(journal.get("releases"), dict):
             unavailable = True
             continue
-        for receipt in journal["releases"].values():
+        for sequence, receipt in enumerate(journal["releases"].values()):
             if not isinstance(receipt, dict):
                 continue
             revision = sha(receipt.get("sha"))
@@ -206,14 +299,30 @@ def release_receipts(paths, repository):
             delivery = deliveries.setdefault(key, {"id": identity, "kind": "release", "destination": destination,
                                                     "revision": revision, "state": "verified" if verified else "unknown",
                                                     "pull_requests": []})
-            if not verified and delivery["state"] != "verified":
-                delivery["state"] = text(receipt.get("state"), 32) or "unknown"
-            receipt_url = url(verification.get("url")) or url(receipt.get("url"))
-            if receipt_url:
-                delivery["url"] = receipt_url
+            updated_at = milliseconds(receipt.get("updated_at"))
             verified_at = milliseconds(receipt.get("verified_at"))
-            if verified and verified_at:
-                delivery["verified_at"] = verified_at
+            # A journal order is not proof of recency when second-resolution times tie.
+            rank = (updated_at or verified_at, not verified, sequence)
+            if key not in metadata_ranks or rank >= metadata_ranks[key]:
+                metadata_ranks[key] = rank
+                delivery["state"] = "verified" if verified else text(receipt.get("state"), 32) or "unknown"
+                delivery["phase"] = text(receipt.get("phase"), 64)
+                delivery["reason"] = text(receipt.get("error"), 2048)
+                delivery["updated_at"] = updated_at
+                receipt_url = url(verification.get("url")) or url(receipt.get("url"))
+                if receipt_url:
+                    delivery["url"] = receipt_url
+                else:
+                    delivery.pop("url", None)
+                if verified and verified_at:
+                    delivery["verified_at"] = verified_at
+                else:
+                    delivery.pop("verified_at", None)
+            own_pr = number(receipt.get("pr"))
+            superseded = receipt.get("superseded_by")
+            own_pr_current = not isinstance(superseded, dict) or superseded.get("sha") == revision
+            if own_pr is not None and own_pr_current and own_pr not in delivery["pull_requests"]:
+                delivery["pull_requests"].append(own_pr)
             sources = receipt.get("included_pull_requests", receipt.get("delivery_sources"))
             if not isinstance(sources, list):
                 sources = []
@@ -338,7 +447,7 @@ def collect(config):
         markers = {} # An old controller ALLOW cannot overrule an unseen formal BLOCK.
     deliveries, release_unavailable, delivery_overflow = release_receipts(release_paths, config["repository"])
     observation = {"repository": config["repository"], "observed_at": int(time.time() * 1000), "pull_requests": [], "checks": [],
-                   "reviewers": reviewers, "deliveries": deliveries}
+                   "reviewers": reviewers, "deliveries": deliveries, "maintenance": maintenance(config)}
     unavailable = []
     if formal_unavailable:
         unavailable.append("formal_reviews")
@@ -385,7 +494,7 @@ def record(config, observation):
         return False
     env = {"DARK_FACTORY_SOCKET": str(home / "runtimes" / "factory.sock"),
            "DARK_FACTORY_OPERATOR_TOKEN_FILE": str(home / "operator.token")}
-    common = {key: observation.get(key) for key in ("repository", "observed_at", "unavailable", "overflow") if key in observation}
+    common = {key: observation.get(key) for key in ("repository", "observed_at", "unavailable", "overflow", "maintenance") if key in observation}
     batches, batch = [], dict(common, pull_requests=[], checks=[], reviewers=[], deliveries=[])
     for name in ("pull_requests", "checks", "reviewers", "deliveries"):
         for item in observation.get(name, []):

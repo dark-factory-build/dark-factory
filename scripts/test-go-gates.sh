@@ -394,6 +394,7 @@ for local_child in \
     test-publication-parents.sh; do
     /bin/ln -s stub "$local_fixture/scripts/$local_child"
 done
+printf 'pass\n' >"$local_fixture/scripts/test-verify-live-runtime.py"
 printf 'process.exit(0);\n' >"$local_fixture/scripts/test-verification-profile.mjs"
 
 for local_python in production production-reviews browser intake release autonomy delivery review-intake; do
