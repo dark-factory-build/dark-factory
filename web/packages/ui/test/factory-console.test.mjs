@@ -2573,12 +2573,15 @@ test("an open issue inbox reloads destinations as well as sources after reconnec
 
 test("one project selector scopes floor, agents, tasks and project limits across view changes", async () => {
   let tree;
-  const props = { status: "ready", state: fixtureState, topologies: fixtureTopologies, selectedAgent: agentSelection(), onSelectAgent() {}, onSelectTask() {} };
+  const topologies = new Map([...fixtureTopologies].map(([id, topology]) => [id, { ...topology, inventoryOmitted: id === ids.secondProject ? 12 : 0 }]));
+  const props = { status: "ready", state: fixtureState, topologies, selectedAgent: agentSelection(), onSelectAgent() {}, onSelectTask() {} };
   await act(async () => { tree = create(createElement(FactoryConsole, props)); });
   const choose = async (value) => act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value } }));
   const floor = () => tree.root.findByType(FactoryFloor);
   await choose(ids.project);
   assert.equal(floor().props.projectId, ids.project);
+  assert.equal(floor().props.state.projects.size, 1);
+  assert.ok(!tree.root.findAllByProps({ role: "status" }).some((status) => status.children.join("").includes("room inventories omitted")));
   assert.ok([...floor().props.state.agents.values()].every((agent) => agent.project_id === ids.project));
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.project));
   assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.project));
@@ -2599,6 +2602,7 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.equal(tree.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "entering a project updates the shared selector");
   await choose(ids.secondProject);
   assert.equal(floor().props.projectId, ids.secondProject);
+  assert.ok(tree.root.findAllByProps({ role: "status" }).some((status) => status.children.join("").startsWith("12 room inventories omitted")));
   assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${fixtureState.agents.get(ids.agent).name}` }).length, 0, "a foreign selected agent cannot retain controls");
   assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.secondProject));
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.secondProject));

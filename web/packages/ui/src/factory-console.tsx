@@ -188,6 +188,7 @@ export function FactoryConsole({
   const projectId = chosenProjectId !== undefined && state?.projects.has(chosenProjectId) ? chosenProjectId : undefined;
   const scopedState = state === undefined || projectId === undefined ? state : {
     ...state,
+    projects: new Map([...state.projects].filter(([id]) => id === projectId)),
     agents: new Map([...state.agents].filter(([, agent]) => agent.project_id === projectId)),
     tasks: new Map([...state.tasks].filter(([, task]) => task.project_id === projectId)),
   };
