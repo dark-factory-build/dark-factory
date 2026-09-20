@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 29
+	userVersion   = 30
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -18,6 +18,15 @@ const (
 )
 
 var schemaStatements = []string{
+	`CREATE TABLE project_tokens (
+    project_id BLOB PRIMARY KEY REFERENCES projects(id),
+    token_limit INTEGER NOT NULL CHECK (token_limit >= 0),
+    tokens_used INTEGER NOT NULL CHECK (tokens_used >= 0)
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE run_tokens (
+    run_id BLOB PRIMARY KEY REFERENCES runs(id),
+    tokens INTEGER NOT NULL CHECK (tokens >= 0)
+) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE attachment_retention (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))

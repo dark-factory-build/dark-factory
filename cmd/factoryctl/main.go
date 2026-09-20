@@ -90,7 +90,7 @@ const (
   factoryctl project repository base --id ID --revision REVISION --base REF
   factoryctl project repository default|enable|disable|remove --id ID --revision REVISION
   factoryctl project repository fetch|github --id ID
-  factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N
+  factoryctl project limits --project ID --revision REVISION --run-budget N --max-run-seconds N [--token-budget N]
   factoryctl agent create --project ID --name TEXT --provider shell|claude_code|codex --tool-budget N [--role worker|orchestrator] [--model TEXT] [--reasoning-effort low|medium|high|xhigh|max|ultra] [--account ID]
   factoryctl agent idle-policy --agent ID --revision REVISION --policy wait
   factoryctl agent idle-policy --agent ID --revision REVISION --policy standing_instruction --after-seconds N --instruction TEXT [--run-budget N]
@@ -263,6 +263,7 @@ type attemptCommand struct {
 	capacity         uint16
 	maxBytes         uint32
 	maxRunSeconds    uint32
+	tokenBudget      *uint64
 	priority         int64
 	prioritySet      bool
 	offset           uint64
@@ -1828,6 +1829,12 @@ func parseOperator(args []string) (attemptCommand, bool, bool) {
 				return attemptCommand{}, false, false
 			}
 			command.toolBudget = budget
+		case name == "--token-budget" && command.kind == commandProjectLimits:
+			budget, err := strconv.ParseUint(value, 10, 64)
+			if err != nil || value != strconv.FormatUint(budget, 10) || budget > uint64(^uint64(0)>>1) {
+				return attemptCommand{}, false, false
+			}
+			command.tokenBudget = &budget
 		case name == "--max-run-seconds" && command.kind == commandProjectLimits:
 			seconds, err := strconv.ParseUint(value, 10, 32)
 			if err != nil || value != strconv.FormatUint(seconds, 10) || seconds > 86400 {
@@ -2551,7 +2558,7 @@ func runOperator(ctx context.Context, command attemptCommand, getenv func(string
 			Revision uint64 `json:"revision"`
 		}{ID: id, Head: result.Head, Revision: result.Revision})
 	case commandProjectLimits:
-		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds})
+		result, callErr := client.SetProjectLimits(callContext, api.ProjectLimitsInput{ProjectID: command.project, ExpectedRevision: command.expectedRevision, RunBudget: command.toolBudget, MaxRunSeconds: command.maxRunSeconds, TokenBudget: command.tokenBudget})
 		if callErr != nil {
 			return writeWebFailure(stderr, "project limits", callErr)
 		}

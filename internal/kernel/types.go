@@ -657,6 +657,7 @@ type ProjectSummary struct {
 	RunBudgetLimit uint64
 	RunsUsed       uint64
 	MaxRunSeconds  uint32
+	Tokens         ProjectTokens
 	Revision       Revision
 }
 
