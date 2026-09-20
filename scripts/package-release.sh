@@ -124,6 +124,7 @@ package_target() {
         factory-autonomy.py \
         factory-delivery.py \
         factory-intake.py \
+        factory-production-reviews.py \
         factory-production.py \
         factory-publication.py \
         factory-release.py \
@@ -186,6 +187,7 @@ package_target() {
         libexec/dark-factory/factory-autonomy.py \
         libexec/dark-factory/factory-delivery.py \
         libexec/dark-factory/factory-intake.py \
+        libexec/dark-factory/factory-production-reviews.py \
         libexec/dark-factory/factory-production.py \
         libexec/dark-factory/factory-publication.py \
         libexec/dark-factory/factory-release.py \

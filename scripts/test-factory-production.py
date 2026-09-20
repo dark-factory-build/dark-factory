@@ -17,6 +17,11 @@ OLD = "b" * 40
 
 
 class ProductionFixtures(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.object(production.formal, "collect", return_value=({}, {}, 0, ""))
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_collector_links_only_real_heads_or_run_pull_request_membership(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -63,6 +68,23 @@ class ProductionFixtures(unittest.TestCase):
             self.assertNotIn("merge", result["pull_requests"][0])
             self.assertEqual(result["deliveries"], [{"id": "site:app.darkfactory.build:release:" + SHA, "kind": "release", "destination": "site:app.darkfactory.build", "revision": SHA, "state": "verified", "url": "https://deploy.example/1", "pull_requests": [7, 8], "verified_at": 9000}])
             self.assertEqual(len([call for call in calls if "/actions/runs/1/jobs" in call[2]]), 1)
+
+    def test_release_membership_preserves_source_less_prs_and_reports_overflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            journal.write_text(json.dumps({"version": 1, "releases": {"one": {
+                "sha": SHA, "state": "verified", "verified_at": 9,
+                "verification": {"healthy": True, "sha": SHA},
+                "delivery_sources": [{"pr": 999}],
+                "included_pull_requests": [{"pr": n, "merge_sha": SHA} for n in range(1, 258)],
+            }}}))
+            deliveries, unavailable, _ = production.release_receipts([
+                {"path": str(journal), "repository": "o/r", "destination": "site:example"}
+            ], "o/r")
+            self.assertFalse(unavailable)
+            self.assertEqual(len(deliveries), 1)
+            self.assertEqual(deliveries[0]["pull_requests"], list(range(1, 257)))
+            self.assertEqual(deliveries[0]["overflow"], 1)
 
     def test_customer_config_has_no_github_or_credential_fallback(self):
         with mock.patch.object(production.intake, "command") as command:

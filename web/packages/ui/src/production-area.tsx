@@ -42,14 +42,14 @@ export function ProductionArea({ view, items, width, top, pulse, onSelect, selec
           <rect x="90" y="40" width="18" height="12" fill="#b4b4a0" stroke="#655d4c" />
           <path d="M93 44h12m-12 4h8" stroke="#536e70" />
           {item.reviewers.slice(0, 2).map((reviewer, reviewerIndex) => <g key={reviewer.id} transform={`translate(${85 + reviewerIndex * 20} 8)`} aria-label={`${reviewer.name}, external reviewer, ${reviewer.state}`}>
-            <rect x="-2" y="-2" width="24" height="28" fill="#182c35" stroke="#638095" />
+            <rect x="-2" y="-2" width="24" height="28" fill="#182c35" stroke="#638095" /><rect x="18" y="-2" width="4" height="4" fill={reviewer.state === "running" && item.review.sourceFresh ? "#80ddff" : reviewer.state === "block" ? "#d49b7d" : "#638095"} />
             <svg width="20" height="24" viewBox="0 0 16 16"><AgentSprite agent={{ id: reviewer.id, name: reviewer.name, role: "worker", provider: reviewer.provider === "claude_code" ? "claude_code" : "codex" }} activity={reviewer.state === "running" && item.review.sourceFresh && pulse !== undefined ? "busy" : "waiting"} /></svg>
             {reviewer.state === "running" && item.review.sourceFresh ? <path d={pulse !== undefined && Math.floor(pulse / 500) % 2 ? "M15 22l5 3" : "M15 24h5"} stroke="#c2b184" strokeWidth="2" /> : null}
           </g>)}
           <path d="M122 57v17m0-17h9" stroke={item.pullRequest?.state === "merged" ? "#9fe7b0" : "#a08f68"} strokeWidth="3" />
           <text x="0" y="96" fill="#c9d3d0" fontSize="10" fontFamily="ui-monospace, monospace">{label(title)}</text>
-          <text x="0" y="110" fill={color} fontSize="9" fontFamily="ui-monospace, monospace">{item.construction ? `Assembly · ${item.construction.phase}` : `Review ${item.review.current ? item.review.state : "unknown"}`}</text>
-          <text x="0" y="123" fill="#8fa4ac" fontSize="9" fontFamily="ui-monospace, monospace">{item.construction ? item.construction.status : `CI ${item.review.sourceFresh ? checkState : "stale"} · ${item.pullRequest?.state}`}</text>
+          <text x="0" y="110" fill={color} fontSize="9" fontFamily="ui-monospace, monospace">{item.construction ? "Assembly · " : ""}Review {item.review.current ? item.review.state : "unknown"}</text>
+          <text x="0" y="123" fill="#8fa4ac" fontSize="9" fontFamily="ui-monospace, monospace">{`CI ${item.review.sourceFresh ? checkState : "stale"} · ${item.pullRequest?.merge_queue || (item.pullRequest?.state === "merged" ? item.completed ? "delivered" : "delivery pending" : item.construction?.status ?? item.pullRequest?.state ?? "unpublished")}`}</text>
         </g>
       </g>;
     })}

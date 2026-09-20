@@ -1155,7 +1155,7 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfMobileNav { display: none; }
 @media (max-width: 1024px) {
   .dfConsoleLayout__left .dfConsoleViewToggle { display: none; }
-  .dfMobileNav { display: flex; margin-bottom: 1rem; }
+  .dfMobileNav { display: flex; flex-wrap: wrap; margin-bottom: 1rem; }
   .dfFactoryConsole[data-mobile-view="detail"] .dfConsoleLayout__left,
   .dfFactoryConsole[data-mobile-view="floor"] .dfConsoleSidebar,
   .dfFactoryConsole[data-mobile-view] .dfConsoleSidebar > .dfConsoleViewToggle { display: none; }

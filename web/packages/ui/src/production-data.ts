@@ -3,7 +3,7 @@ import type { ProjectContentCall } from "./project-library.js";
 
 export type ProductionRecord = {
   project_id: string; repository: string; kind: string; id: string; visual_id: string;
-  observed_at: number; document: Record<string, unknown>; tasks: string[]; missions: string[];
+  observed_at: number; links_overflow?: boolean; document: Record<string, unknown>; tasks: string[]; missions: string[];
 };
 
 /** One bounded local read for scene and inspector. External observation belongs
@@ -50,5 +50,7 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
     document.addEventListener("visibilitychange", visible);
     return () => { stopped = true; clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
   }, [key, connected, pages]);
-  return { records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loadMore: () => setPages((value) => value + 32) };
+  const scoped = records.filter((record) => projects.includes(record.project_id));
+  const notices = scoped.filter((record) => record.kind === "repository" && (record.document.unavailable || record.document.overflow)).map((record) => `${record.repository}: ${record.document.unavailable ? "some external evidence is unavailable" : "observation is bounded"}${record.document.overflow ? "; additional external records exist" : ""}.`);
+  return { notices, records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loadMore: () => setPages((value) => value + 32) };
 }

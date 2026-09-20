@@ -33,11 +33,11 @@ export function Contraption({ identity, construction, correction, active, reduce
   const design = hash(identity) % 3;
   const tick = tickFor(active, reducedMotion, pulse);
   const lamp = active ? tick % 2 === 0 ? "#e5c58b" : "#80ddff" : "#53605b";
-  return <svg viewBox="0 0 64 64" role="img" aria-label="Factory contraption" data-contraption-variant={design} data-contraption-active={active || undefined} style={{ display: "block", width: 64, height: 64, imageRendering: "pixelated" }}>
+  return <svg width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Factory contraption" data-contraption-variant={design} data-contraption-active={active || undefined} style={{ display: "block", width: 64, height: 64, imageRendering: "pixelated" }}>
     <g data-contraption-frame={design} shapeRendering="crispEdges">
       <rect x="5" y="52" width="54" height="6" fill="#455653" stroke="#1d292c" strokeWidth="2" />
       <path d="M10 58v4M54 58v4" stroke="#273134" strokeWidth="4" />
-      <rect x="11" y="24" width="42" height="28" fill="#303e40" stroke="#788379" strokeWidth="2" />
+      <rect x="11" y="24" width="42" height="28" fill={construction ? "none" : "#303e40"} stroke="#788379" strokeWidth="2" />
       <path d="M15 48h34M18 28v20M46 28v20" stroke="#20292d" strokeWidth="2" />
       {design === 0 ? <><rect x="25" y="15" width="14" height="27" fill="#536e70" stroke="#9aa69c" strokeWidth="2" /><path d="M22 15h20v5H22z" fill="#665f4e" stroke="#a08f68" /><Gear x={32} y={42} turn={tick} /></>
         : design === 1 ? <><path d="M17 23V14h15v9M32 20h15v28H32" fill="#455c5e" stroke="#9aa69c" strokeWidth="2" /><rect x="20" y="17" width="9" height="8" fill="#263e40" /><Gear x={40} y={39} turn={tick} /></>

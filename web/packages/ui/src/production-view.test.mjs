@@ -46,3 +46,17 @@ test("construction and PR with one visual identity remain one contraption", () =
   assert.equal(machine.construction.blocked_reason, "Needs review");
   assert.deepEqual(machine.tasks, ["task-1"]);
 });
+
+
+test("fresh repository reads cannot keep old active processes running", () => {
+  const view = deriveProductionView([
+    record("repository", "owner/repo", "", {}, { observed_at: 200_000 }),
+    record("pull_request", "7", "change:1", { number: 7, head, state: "open", review: { head, state: "allow" } }, { observed_at: 200_000 }),
+    record("check", "old", "", { revision: head, scope: "head", state: "in_progress", pull_requests: [7] }),
+    record("reviewer", "old", "", { number: 7, head, state: "running" }),
+  ], 200_000);
+  const machine = view.contraptions[key];
+  assert.equal(machine.checks[0].state, "stale");
+  assert.equal(machine.reviewers[0].state, "stale");
+  assert.match(machine.nextAction, /unavailable or incomplete/);
+});

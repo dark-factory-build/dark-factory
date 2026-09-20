@@ -76,4 +76,5 @@ type ProductionDelivery struct {
 	URL          string   `json:"url,omitempty"`
 	PullRequests []uint64 `json:"pull_requests"`
 	VerifiedAt   int64    `json:"verified_at,omitempty"`
+	Overflow     int      `json:"overflow,omitempty"`
 }

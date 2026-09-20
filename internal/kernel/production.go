@@ -41,7 +41,7 @@ func productionSHA(value string) bool {
 }
 
 func productionNumbers(values []uint64) bool {
-	if len(values) > 32 {
+	if len(values) > 256 {
 		return false
 	}
 	for _, value := range values {
@@ -127,7 +127,7 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 		}
 	}
 	for _, delivery := range observation.Deliveries {
-		if !productionSHA(delivery.Revision) || !validOutcomeText(delivery.Kind, 64) || !validOutcomeText(delivery.Destination, 256) || !validOutcomeText(delivery.State, 64) || !productionURL(delivery.URL) || !productionNumbers(delivery.PullRequests) || delivery.VerifiedAt < 0 || delivery.VerifiedAt > at.Int64()+5000 {
+		if !productionSHA(delivery.Revision) || !validOutcomeText(delivery.Kind, 64) || !validOutcomeText(delivery.Destination, 256) || !validOutcomeText(delivery.State, 64) || !productionURL(delivery.URL) || !productionNumbers(delivery.PullRequests) || delivery.Overflow < 0 || delivery.VerifiedAt < 0 || delivery.VerifiedAt > at.Int64()+5000 {
 			return tx.Rollback(ErrInvalidValue)
 		}
 		if err := write("delivery", delivery.ID, "", delivery); err != nil {
@@ -232,7 +232,7 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), project.Bytes()).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY repository, kind, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
+	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY CASE kind WHEN 'repository' THEN 0 WHEN 'construction' THEN 1 WHEN 'pull_request' THEN 2 WHEN 'check' THEN 3 WHEN 'delivery' THEN 4 ELSE 5 END, repository, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
 	if err != nil {
 		return page, err
 	}

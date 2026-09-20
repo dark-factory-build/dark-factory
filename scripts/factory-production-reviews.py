@@ -94,7 +94,8 @@ def _review_facts(nodes, number, head, unavailable):
             unavailable.append("review_shape")
             continue
         commit = (review.get("commit") or {}).get("oid")
-        if not SHA.fullmatch(commit or ""):
+        if not isinstance(commit, str) or not SHA.fullmatch(commit):
+            unavailable.append("review_commit")
             continue
         author = review.get("author")
         actor = author.get("databaseId") if isinstance(author, dict) else None
@@ -145,7 +146,7 @@ def collect(repository):
         current_facts = [fact for fact in facts if fact["commit_id"] == head]
         result = verify_exact_head(head, facts)
         blocking = "blocking verdict(s)" in (result.stderr or "")
-        if blocking:
+        if blocking and (not truncated and not reasons or any(fact["state"] == "CHANGES_REQUESTED" for fact in current_facts)):
             state = "block"
         elif result.returncode == 0 and not truncated and not reasons:
             state = "allow"
@@ -176,7 +177,7 @@ def verify_exact_head(head, review_records, verifier=None):
     with tempfile.NamedTemporaryFile("w", encoding="utf-8") as stream:
         stream.write(review_lines(head, review_records))
         stream.flush()
-        env = dict(__import__("os").environ, DF_REVIEW_HEAD_SHA=head, DF_REVIEW_REVIEWS=stream.name)
+        env = {"PATH": "/usr/bin:/bin", "DF_REVIEW_HEAD_SHA": head, "DF_REVIEW_REVIEWS": stream.name}
         return subprocess.run([verifier], env=env, check=False, capture_output=True, text=True)
 
 

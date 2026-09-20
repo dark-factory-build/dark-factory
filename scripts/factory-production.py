@@ -17,6 +17,9 @@ SPEC.loader.exec_module(intake)
 REVIEW_SPEC = importlib.util.spec_from_file_location("factory_review_intake", HERE / "factory-review-intake.py")
 review = importlib.util.module_from_spec(REVIEW_SPEC)
 REVIEW_SPEC.loader.exec_module(review)
+FORMAL_SPEC = importlib.util.spec_from_file_location("factory_production_reviews", HERE / "factory-production-reviews.py")
+formal = importlib.util.module_from_spec(FORMAL_SPEC)
+FORMAL_SPEC.loader.exec_module(formal)
 
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -25,7 +28,7 @@ MAX_RUNS = 100
 MAX_JOBS = 32
 MAX_JOB_READS = 8
 MAX_JOURNAL = 4 << 20
-MAX_LINKS = 32
+MAX_LINKS = 256
 MAX_DELIVERIES = 128
 MAX_REVIEWERS = 256
 MAX_DOCUMENT = 32768
@@ -211,14 +214,19 @@ def release_receipts(paths, repository):
             verified_at = milliseconds(receipt.get("verified_at"))
             if verified and verified_at:
                 delivery["verified_at"] = verified_at
-            sources = receipt.get("delivery_sources")
+            sources = receipt.get("included_pull_requests", receipt.get("delivery_sources"))
             if not isinstance(sources, list):
                 sources = []
             for source in sources:
                 source_pr = number(source.get("pr")) if isinstance(source, dict) else None
                 source_repository = source.get("repository", entry["repository"]) if isinstance(source, dict) else ""
-                if source_pr is not None and isinstance(source_repository, str) and source_repository.casefold() == repository.casefold() and source_pr not in delivery["pull_requests"] and len(delivery["pull_requests"]) < MAX_LINKS:
+                if source_pr is not None and isinstance(source_repository, str) and source_repository.casefold() == repository.casefold() and source_pr not in delivery["pull_requests"]:
                     delivery["pull_requests"].append(source_pr)
+    for delivery in deliveries.values():
+        delivery["overflow"] = max(0, len(delivery["pull_requests"]) - MAX_LINKS)
+        delivery["pull_requests"] = delivery["pull_requests"][:MAX_LINKS]
+        if not delivery["overflow"]:
+            del delivery["overflow"]
     return list(deliveries.values())[:MAX_DELIVERIES], unavailable, max(0, len(deliveries) - MAX_DELIVERIES)
 
 
@@ -320,10 +328,20 @@ def collect(config):
         return {"repository": repository, "observed_at": int(time.time() * 1000), "pull_requests": [], "checks": [], "reviewers": [], "deliveries": [], "unavailable": "host_controller_only"}
     review_paths, release_paths, path_unavailable = journal_paths(config)
     reviewers, markers, queues, review_unavailable, reviewer_overflow = review_receipts(review_paths, config["repository"])
+    formal_overflow, formal_unavailable = 0, ""
+    try:
+        formal_reviews, formal_queues, formal_overflow, formal_unavailable = formal.collect(config["repository"])
+        markers.update(formal_reviews)
+        queues.update(formal_queues)
+    except (intake.IntakeError, formal.intake.IntakeError, ValueError, json.JSONDecodeError, OSError):
+        formal_unavailable = "formal_reviews"
+        markers = {} # An old controller ALLOW cannot overrule an unseen formal BLOCK.
     deliveries, release_unavailable, delivery_overflow = release_receipts(release_paths, config["repository"])
     observation = {"repository": config["repository"], "observed_at": int(time.time() * 1000), "pull_requests": [], "checks": [],
                    "reviewers": reviewers, "deliveries": deliveries}
     unavailable = []
+    if formal_unavailable:
+        unavailable.append("formal_reviews")
     if review_unavailable:
         unavailable.append("review_journal")
     if release_unavailable:
@@ -344,7 +362,7 @@ def collect(config):
         pr_overflow = int(len(open_prs) >= MAX_PRS) + int(len(closed_prs) >= MAX_PRS)
         runs = github(config["repository"], "/actions/runs?per_page=" + str(MAX_RUNS))
         observation["checks"], run_overflow, job_unavailable = checks(config["repository"], runs, heads, current_heads)
-        observation["overflow"] = pr_overflow + run_overflow + delivery_overflow + reviewer_overflow
+        observation["overflow"] = pr_overflow + run_overflow + delivery_overflow + formal_overflow + reviewer_overflow
         if job_unavailable:
             unavailable.append("jobs")
     except (intake.IntakeError, ValueError, json.JSONDecodeError):
