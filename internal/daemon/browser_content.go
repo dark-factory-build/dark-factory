@@ -339,7 +339,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		tasks := make([]map[string]any, 0, len(items))
 		for _, item := range items {
-			tasks = append(tasks, map[string]any{"task_id": item.ID.String(), "title": item.Title, "status": item.Status.String(), "assigned_agent_id": item.AssignedAgentID.String(), "revision": item.Revision.Int64(), "work_revision": item.WorkRevision.Int64(), "blocked_reason": item.BlockedReason})
+			tasks = append(tasks, map[string]any{"task_id": item.ID.String(), "project_id": item.ProjectID.String(), "title": item.Title, "status": item.Status.String(), "assigned_agent_id": item.AssignedAgentID.String(), "revision": fmt.Sprintf("%d", item.Revision.Int64()), "work_revision": fmt.Sprintf("%d", item.WorkRevision.Int64()), "priority": item.Priority, "blocked_reason": item.BlockedReason})
 		}
 		output = map[string]any{"mission_id": id.String(), "tasks": tasks, "next_offset": next}
 	case "outcome_read", "outcome_write":

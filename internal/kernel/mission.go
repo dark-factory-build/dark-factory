@@ -108,11 +108,17 @@ func (store *Store) CreateMissionForBrowser(ctx context.Context, clientID Browse
 	if err != nil {
 		return MissionCreateResult{}, tx.Rollback(err)
 	}
-	if !found || agent.ProjectID != spec.ProjectID || agent.Role != RoleOrchestrator || agent.Archived || agent.Revision != spec.ExpectedAgentRevision {
+	if !found || agent.ProjectID != spec.ProjectID || agent.Role != RoleOrchestrator || agent.Archived {
 		return MissionCreateResult{}, tx.Rollback(ErrRevisionConflict)
 	}
-	title := "Mission anchor"
-	body := spec.Objective + "\n\nAcceptance criteria:\n" + spec.Criteria
+	title := spec.Objective
+	for byteLen(title) > 1024 {
+		title = title[:len(title)-1]
+		for len(title) > 0 && title[len(title)-1]&0xc0 == 0x80 {
+			title = title[:len(title)-1]
+		}
+	}
+	body := "Mission " + spec.ID.String() + "\n\nObjective:\n" + spec.Objective + "\n\nAcceptance criteria:\n" + spec.Criteria + "\n\nMaintain this mission outcome as work progresses."
 	taskSpec := NewTask{ID: taskID, ProjectID: spec.ProjectID, AssignedAgentID: spec.OwnerAgentID, IncarnationID: incarnationID, Title: title, Body: body, Priority: 0}
 	if err := validateNewTask(taskSpec); err != nil {
 		return MissionCreateResult{}, tx.Rollback(err)
@@ -133,6 +139,9 @@ func (store *Store) CreateMissionForBrowser(ctx context.Context, clientID Browse
 			return MissionCreateResult{}, e
 		}
 		return MissionCreateResult{Mission: mission, Anchor: existing}, nil
+	}
+	if agent.Revision != spec.ExpectedAgentRevision {
+		return MissionCreateResult{}, tx.Rollback(ErrRevisionConflict)
 	}
 	anchor, err := insertTaskOnConnection(ctx, tx.connection, taskSpec, at)
 	if err != nil {
