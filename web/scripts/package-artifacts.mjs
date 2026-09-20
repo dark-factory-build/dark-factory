@@ -67,7 +67,7 @@ const inventory = {
     "factory-scene/sprite-editor.d.ts", "factory-scene/sprite-editor.js",
     "factory-scene/sprites/sprites.generated.d.ts", "factory-scene/sprites/sprites.generated.js",
     "human-request-flow.d.ts", "human-request-flow.js",
-    "index.d.ts", "index.js", "missions-panel.d.ts", "missions-panel.js", "contraption.d.ts", "contraption.js", "production-data.d.ts", "production-data.js", "production-view.d.ts", "production-view.js", "production-area.d.ts", "production-area.js", "production-panel.d.ts", "production-panel.js", "project-library.d.ts", "project-library.js", "project-outcomes.d.ts", "project-outcomes.js",
+    "index.d.ts", "index.js", "missions-panel.d.ts", "missions-panel.js", "contraption.d.ts", "contraption.js", "production-data.d.ts", "production-data.js", "production-view.d.ts", "production-view.js", "production-area.d.ts", "production-area.js", "production-panel.d.ts", "production-panel.js", "factory-maintenance.d.ts", "factory-maintenance.js", "project-library.d.ts", "project-library.js", "project-outcomes.d.ts", "project-outcomes.js",
     "remote-invite.d.ts", "remote-invite.js",
     "remote/remote-app.d.ts", "remote/remote-app.js", "remote/remote-view.d.ts", "remote/remote-view.js",
     "terminal-controller.d.ts", "terminal-controller.js", "xterm-terminal.d.ts", "xterm-terminal.js",

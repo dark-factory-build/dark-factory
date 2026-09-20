@@ -67,7 +67,7 @@ class ProductionFixtures(unittest.TestCase):
             self.assertEqual(len(result["checks"][0]["jobs"][0]["name"]), 256)
             self.assertEqual(result["reviewers"][-1]["state"], "unknown")
             self.assertNotIn("merge", result["pull_requests"][0])
-            self.assertEqual(result["deliveries"], [{"id": "site:app.darkfactory.build:release:" + SHA, "kind": "release", "destination": "site:app.darkfactory.build", "revision": SHA, "state": "verified", "url": "https://deploy.example/1", "pull_requests": [7, 8], "verified_at": 9000}])
+            self.assertEqual(result["deliveries"], [{"id": "site:app.darkfactory.build:release:" + SHA, "kind": "release", "destination": "site:app.darkfactory.build", "revision": SHA, "state": "verified", "url": "https://deploy.example/1", "pull_requests": [7, 8], "verified_at": 9000, "phase": "", "reason": "", "updated_at": 0}])
             self.assertEqual(len([call for call in calls if "/actions/runs/1/jobs" in call[2]]), 1)
 
     def test_release_membership_preserves_source_less_prs_and_reports_overflow(self):

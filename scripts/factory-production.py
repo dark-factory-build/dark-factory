@@ -482,7 +482,7 @@ def record(config, observation):
         return False
     env = {"DARK_FACTORY_SOCKET": str(home / "runtimes" / "factory.sock"),
            "DARK_FACTORY_OPERATOR_TOKEN_FILE": str(home / "operator.token")}
-    common = {key: observation.get(key) for key in ("repository", "observed_at", "unavailable", "overflow") if key in observation}
+    common = {key: observation.get(key) for key in ("repository", "observed_at", "unavailable", "overflow", "maintenance") if key in observation}
     batches, batch = [], dict(common, pull_requests=[], checks=[], reviewers=[], deliveries=[])
     for name in ("pull_requests", "checks", "reviewers", "deliveries"):
         for item in observation.get(name, []):

@@ -9,7 +9,7 @@ const render = (props = {}) => renderToStaticMarkup(createElement(FactoryMainten
 
 test("maintenance keeps release, files, host and console observations separate", () => {
   const markup = render();
-  for (const heading of ["Available release", "Installed service files", "Running service report", "Private runtime observation", "Loaded hosted console"]) assert.match(markup, new RegExp(heading));
+  for (const heading of ["Available release", "Installed service files", "Running host", "Loaded hosted console"]) assert.match(markup, new RegExp(heading));
   assert.match(markup, /Open release/);
   assert.match(markup, /scripts\/deploy-runtime\.py/);
   assert.doesNotMatch(markup, /up to date/i);
@@ -19,4 +19,11 @@ test("stale or disconnected evidence does not confirm an update", () => {
   const markup = render({ connected: false, sourceFresh: false, deliveries: [{ repository: "dark-factory-build/dark-factory", id: "runtime", kind: "release", destination: "runtime", revision: "b".repeat(40), state: "verified", pull_requests: [] }] });
   assert.match(markup, /No runtime update is confirmed/);
   assert.match(markup, /last recorded verified/);
+});
+
+
+test("a new installed receipt cannot confirm an old running process", () => {
+  const markup = render({ runtime: { ...build, source: "b".repeat(40) } });
+  assert.doesNotMatch(markup, /running host matches/);
+  assert.match(markup, /b{40}/);
 });

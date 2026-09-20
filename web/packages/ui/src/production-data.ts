@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProjectContentCall } from "./project-library.js";
 
+export type RuntimeBuild = { version: string; source: string; target: string; build_id: string; release: boolean };
+
 export type ProductionRecord = {
   project_id: string; repository: string; kind: string; id: string; visual_id: string;
   observed_at: number; links_overflow?: boolean; document: Record<string, unknown>; tasks: string[]; missions: string[];
@@ -9,11 +11,13 @@ export type ProductionRecord = {
 /** One bounded local read for scene and inspector. External observation belongs
  * to the existing host controller; neither sprites nor panels poll GitHub. */
 export function useProduction(projects: readonly string[], call: ProjectContentCall | undefined) {
+  const [runtime, setRuntime] = useState<RuntimeBuild>();
   const [records, setRecords] = useState<ProductionRecord[]>([]);
   const [error, setError] = useState("");
   const [overflow, setOverflow] = useState(0);
   const [pages, setPages] = useState(32);
   const generation = useRef(0);
+  const runtimeGeneration = useRef(-1);
   const caller = useRef(call); caller.current = call;
   const connected = call !== undefined;
   const key = JSON.stringify(projects);
@@ -27,20 +31,22 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
       try {
         const next: ProductionRecord[] = [];
         let remaining = 0;
+        let currentRuntime: RuntimeBuild | undefined;
         for (const project_id of projects) {
           let offset = 0;
           // ponytail: at most 256 records per project per refresh; explicit
           // overflow keeps a crowded source visible with an explicit load-more control.
           for (let page = 0; page < pages; page++) {
-            const result = await caller.current!("production", { project_id, offset, limit: 8 }) as { records: Omit<ProductionRecord, "project_id">[]; next_offset: number; total: number };
+            const result = await caller.current!("production", { project_id, offset, limit: 8 }) as { records: Omit<ProductionRecord, "project_id">[]; next_offset: number; total: number; runtime?: RuntimeBuild };
             if (stopped || generation.current !== current) return;
+            currentRuntime = result.runtime;
             next.push(...result.records.map((record) => ({ ...record, project_id })));
             offset = result.next_offset;
             if (offset === 0) break;
             if (page === pages - 1) remaining += Math.max(0, result.total - offset);
           }
         }
-        if (!stopped) { setRecords(next); setOverflow(remaining); setError(""); }
+        if (!stopped) { runtimeGeneration.current = current; setRuntime(currentRuntime); setRecords(next); setOverflow(remaining); setError(""); }
       } catch { if (!stopped) setError("Production observation unavailable. Previously read work is retained."); }
       finally { busy = false; }
     };
@@ -52,5 +58,5 @@ export function useProduction(projects: readonly string[], call: ProjectContentC
   }, [key, connected, pages]);
   const scoped = records.filter((record) => projects.includes(record.project_id));
   const notices = scoped.filter((record) => record.kind === "repository" && (record.document.unavailable || record.document.overflow)).map((record) => `${record.repository}: ${record.document.unavailable ? "some external evidence is unavailable" : "observation is bounded"}${record.document.overflow ? "; additional external records exist" : ""}.`);
-  return { notices, records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loadMore: () => setPages((value) => value + 32) };
+  return { runtime: connected && runtimeGeneration.current === generation.current ? runtime : undefined, notices, records: records.filter((record) => projects.includes(record.project_id)), error, overflow, loadMore: () => setPages((value) => value + 32) };
 }

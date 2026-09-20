@@ -19,7 +19,7 @@ export type ProductionCheck = Readonly<{
 }>;
 export type ProductionDelivery = Readonly<{
   project_id?: string; repository: string; id: string; kind: string; destination: string; revision: string;
-  state: string; url?: string; pull_requests: readonly number[]; verified_at?: number; overflow?: number;
+  state: string; url?: string; pull_requests: readonly number[]; verified_at?: number; overflow?: number; updated_at?: number; phase?: string; reason?: string;
 }>;
 export type ProductionReviewer = Readonly<{
   project_id?: string; repository: string; id: string; number: number; head: string; name: string;
@@ -81,9 +81,17 @@ function activityState(record: ProductionRecord, value: unknown, now: number) {
 function verifiedDelivery(delivery: ProductionDelivery) {
   return delivery.verified_at !== undefined && delivery.verified_at > 0 && delivery.state === "verified";
 }
+function latestDestinations(deliveries: readonly ProductionContraption["deliveries"][number][]) {
+  const latest = new Map<string, typeof deliveries[number]>();
+  for (const delivery of deliveries) {
+    const previous = latest.get(delivery.destination);
+    if (previous === undefined || (delivery.updated_at || delivery.verified_at || 0) > (previous.updated_at || previous.verified_at || 0)) latest.set(delivery.destination, delivery);
+  }
+  return [...latest.values()];
+}
 function nextAction(pr: PullRequest, review: ProductionContraption["review"], checks: readonly (ProductionCheck & { applicable: boolean })[], deliveries: readonly ProductionContraption["deliveries"][number][]) {
   if (pr.state === "closed" && !pr.merge) return "Closed without merge.";
-  if (pr.state === "merged") return deliveries.length > 0 && deliveries.every((delivery) => delivery.verified) ? "Delivery verified at all recorded destinations." : "Merged; delivery verification is pending.";
+  if (pr.state === "merged") return deliveries.length > 0 && latestDestinations(deliveries).every((delivery) => delivery.verified) ? "Delivery verified at all recorded destinations." : "Merged; delivery verification is pending.";
   if (pr.next_action) return pr.next_action;
   if (review.state === "block" && review.findings) return review.findings;
   if (!review.current) return review.head ? "Review is stale for the current head." : "Independent review is required.";
@@ -104,7 +112,7 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const scope = scoped(record), key = scopeKey(scope, record.id), document = object(record.document);
     if (record.kind === "repository") health.set(scopeKey(scope, "repository"), record);
     if (record.kind === "check") checks[key] = { project_id: record.project_id, repository: record.repository, id: record.id, name: text(document.name), revision: text(document.revision), scope: text(document.scope), state: activityState(record, document.state, now), conclusion: text(document.conclusion), url: text(document.url), pull_requests: numbers(document.pull_requests), jobs: Array.isArray(document.jobs) ? document.jobs.map((job) => { const value = object(job); return { id: text(value.id), name: text(value.name), state: text(value.state), conclusion: text(value.conclusion), url: text(value.url) }; }) : [], overflow: typeof document.overflow === "number" ? document.overflow : 0 };
-    if (record.kind === "delivery") deliveries[key] = { project_id: record.project_id, repository: record.repository, id: record.id, kind: text(document.kind), destination: text(document.destination), revision: text(document.revision), state: text(document.state), url: text(document.url), pull_requests: numbers(document.pull_requests), overflow: Number(document.overflow) || 0, verified_at: typeof document.verified_at === "number" ? document.verified_at : undefined };
+    if (record.kind === "delivery") deliveries[key] = { project_id: record.project_id, repository: record.repository, id: record.id, kind: text(document.kind), destination: text(document.destination), revision: text(document.revision), state: activityState(record, document.state, now), url: text(document.url), pull_requests: numbers(document.pull_requests), phase: text(document.phase), reason: text(document.reason), updated_at: Number(document.updated_at) || 0, overflow: Number(document.overflow) || 0, verified_at: typeof document.verified_at === "number" ? document.verified_at : undefined };
     if (record.kind === "reviewer") reviewers[key] = { project_id: record.project_id, repository: record.repository, id: record.id, number: Number(document.number) || 0, head: text(document.head), name: text(document.name), provider: text(document.provider), state: activityState(record, document.state, now), url: text(document.url), findings: text(document.findings) };
   }
   const contraptions: Record<string, ProductionContraption> = {};
@@ -126,9 +134,16 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const review = pr?.review ?? {};
     const reviewView = { head: text(review.head), state: text(review.state) || "unknown", current: text(review.head) !== "" && text(review.head) === pr?.head, allowed: sourceFresh && text(review.head) !== "" && text(review.head) === pr?.head && text(review.state) === "allow", sourceFresh, findings: text(review.findings), url: text(review.url) };
     const closedUnmerged = pr?.state === "closed" && !pr.merge;
-    const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && pullDeliveries.every((delivery) => delivery.verified);
+    const completed = closedUnmerged || pr?.state === "merged" && pullDeliveries.length > 0 && latestDestinations(pullDeliveries).every((delivery) => delivery.verified);
     const doc = construction ? object(construction.document) : {};
     contraptions[key] = { visualId: item.visualId, projectId: item.scope.projectId, repository: item.scope.repository, construction: construction ? { title: text(doc.title), phase: text(doc.phase), status: text(doc.status), head: text(doc.head), task_id: text(doc.task_id), blocked_reason: text(doc.blocked_reason) } : undefined, pullRequest: pr, tasks: [...new Set([...(construction?.tasks ?? []), ...(pull?.tasks ?? [])])], missions: [...new Set([...(construction?.missions ?? []), ...(pull?.missions ?? [])])], linksOverflow: Boolean(construction?.links_overflow || pull?.links_overflow), review: reviewView, checks: pullChecks, deliveries: pullDeliveries, reviewers: assigned, completed: Boolean(completed), completedAt: Date.parse(pr?.merged_at ?? "") || pull?.observed_at || 0, status: completed ? (closedUnmerged ? "closed-unmerged" : "delivered") : text(pr?.state) || text(doc.status) || text(doc.phase) || "construction", nextAction: pr ? nextAction(pr, reviewView, pullChecks, pullDeliveries) : text(doc.blocked_reason) || "Construction is in progress." };
   }
   return { contraptions, checks, deliveries, reviewers };
+}
+
+
+/** Shared executions appear once even when several projects refer to them. */
+export function sharedDeliveries(view: ProductionView): readonly ProductionDelivery[] {
+  return [...new Map(Object.values(view.deliveries).map((delivery) => [`${delivery.repository}:${delivery.id}`, delivery])).values()]
+    .sort((a, b) => (b.updated_at || b.verified_at || 0) - (a.updated_at || a.verified_at || 0));
 }

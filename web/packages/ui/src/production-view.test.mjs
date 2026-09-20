@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { deriveProductionView } from "./production-view.ts";
+import { deriveProductionView, sharedDeliveries } from "./production-view.ts";
 
 const record = (kind, id, visual_id, document, extra = {}) => ({ repository: "owner/repo", project_id: "project", kind, id, visual_id, observed_at: 10, document, tasks: [], missions: [], ...extra });
 const head = "a".repeat(40);
@@ -59,4 +59,18 @@ test("fresh repository reads cannot keep old active processes running", () => {
   assert.equal(machine.checks[0].state, "stale");
   assert.equal(machine.reviewers[0].state, "stale");
   assert.match(machine.nextAction, /unavailable or incomplete/);
+});
+
+
+test("a later verified attempt supersedes failure at the same destination and shared deliveries remain one execution", () => {
+  const pr = { number: 7, title: "Machine", head, merge: "d".repeat(40), state: "merged" };
+  const failed = record("delivery", "old", "", { destination: "site", state: "failed", updated_at: 15, pull_requests: [7, 8] });
+  const verified = record("delivery", "new", "", { destination: "site", state: "verified", updated_at: 25, verified_at: 25, pull_requests: [7, 8] });
+  const view = deriveProductionView([record("pull_request", "7", "change:1", pr), failed, verified, { ...verified, project_id: "second-project" }]);
+  assert.equal(view.contraptions[key].completed, true);
+  assert.equal(view.contraptions[key].deliveries.length, 2);
+  assert.equal(sharedDeliveries(view).length, 2);
+  assert.deepEqual(sharedDeliveries(view)[0].pull_requests, [7, 8]);
+  const pending = deriveProductionView([record("pull_request", "7", "change:1", pr), verified, { ...failed, document: { ...failed.document, updated_at: 30 } }]);
+  assert.equal(pending.contraptions[key].completed, false);
 });

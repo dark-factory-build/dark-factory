@@ -64,13 +64,7 @@ func browserRuntimeReady(runtime *BrowserRuntime) bool {
 	}
 }
 
-func (daemon *Daemon) WebStatus(ctx context.Context) (api.WebStatus, error) {
-	if daemon == nil || daemon.store == nil {
-		return api.WebStatus{}, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
-	}
-	if _, err := daemon.store.Factory(ctx); err != nil {
-		return api.WebStatus{}, err
-	}
+func currentDaemonBuild() api.BuildIdentity {
 	identity := buildinfo.Current()
 	source := identity.Source()
 	if !identity.Release() {
@@ -78,7 +72,18 @@ func (daemon *Daemon) WebStatus(ctx context.Context) (api.WebStatus, error) {
 			source = revision
 		}
 	}
-	status := api.WebStatus{State: "stopped", Build: api.BuildIdentity{Version: identity.Version(), Source: source, Target: identity.Target(), BuildID: identity.BuildID(), Release: identity.Release()}}
+	return api.BuildIdentity{Version: identity.Version(), Source: source, Target: identity.Target(), BuildID: identity.BuildID(), Release: identity.Release()}
+}
+
+func (daemon *Daemon) WebStatus(ctx context.Context) (api.WebStatus, error) {
+	if daemon == nil || daemon.store == nil {
+		return api.WebStatus{}, fmt.Errorf("%w: invalid daemon", kernel.ErrInvalidValue)
+	}
+	if _, err := daemon.store.Factory(ctx); err != nil {
+		return api.WebStatus{}, err
+	}
+	status := api.WebStatus{State: "stopped", Build: currentDaemonBuild()}
+
 	runtime, valid := daemon.webRuntime()
 	if !valid {
 		return status, nil
