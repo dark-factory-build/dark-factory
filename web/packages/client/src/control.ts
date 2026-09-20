@@ -66,9 +66,9 @@ export type HumanRequestItem = {
   can_reply: boolean;
 };
 
-/** STATE_GET has no cursor, continuation or selector: there is one snapshot. */
 /** One live task asked another something. Who, whom, and whether it was answered: never the words. */
 export type PeerQuestionItem = { id: string; source_task_id: string; target_task_id: string; answered: boolean; revision: bigint };
+/** STATE_GET has no cursor, continuation or selector: there is one snapshot. */
 export type StateGetBody = Record<string, never>;
 export type StateSnapshotBody = {
   head: bigint;

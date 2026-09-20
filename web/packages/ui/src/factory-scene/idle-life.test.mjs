@@ -155,6 +155,7 @@ test("the floor shows the cat, what is said and the heart, and none of it withou
       for (const worker of renderer.root.findAll((node) => node.props["data-tooltip"]?.includes(": "))) seen.said.add(worker.props["data-tooltip"].split("\n").slice(2).join("\n"));
       if (hearts.length > 0) {
         assert.match(cat["data-tooltip"], /^The cat\nBeing fussed over by (Ada|Grace)$/);
+        assert.match(cat["aria-label"], /^The cat, being fussed over by (Ada|Grace)$/, "a name keeps its capital");
         const fussing = renderer.root.findAll((node) => node.props["data-tooltip"]?.includes("fussing the cat"));
         assert.equal(fussing.length, 1);
         assert.ok(fussing[0].findAllByType("use").some((use) => /pet\.[01]$/.test(use.props.href)), "the one with the heart is the one reaching for the cat");
@@ -180,14 +181,18 @@ test("the floor shows the cat, what is said and the heart, and none of it withou
   }
 });
 
-test("someone sitting down or leaving moves the cat only if its gap is gone, and an empty floor finds it asleep", () => {
-  let kept = 0;
-  for (let at = 0; at < HOUR; at += 1000) {
-    const four = catAt(seats(["ada", "grace", "linus", "ken"]), at), five = catAt(seats(["ada", "grace", "linus", "ken", "barbara"]), at);
-    // Settled on a gap both tables have, it is in the same place at both. (Its bed stands behind the last gap, so that moves with the table's end.)
-    if (!five.moving && !four.moving && five.y === 400 && five.x <= 152) { kept += 1; assert.deepEqual([four.x, four.y], [five.x, five.y], `jumped at ${at}`); }
+test("the cat shares its time evenly among a long table's gaps, and an empty floor finds it asleep", () => {
+  const ids = [..."abcdefghijkl"], visits = new Map();
+  for (let epoch = 0; epoch < 3000; epoch += 1) { const cat = catAt(seats(ids), epoch * 45_000 + 40_000); if (cat.y === 400) visits.set(cat.x, (visits.get(cat.x) ?? 0) + 1); }
+  assert.equal(visits.size, 11, "every gap of a twelve-seat table is somewhere it goes");
+  const counts = [...visits.values()];
+  assert.ok(Math.max(...counts) < 1.6 * Math.min(...counts), `no gap is a favourite: ${counts}`);
+  // Where it goes says nothing about what it does there, whatever the table's length: at every gap it both naps and gets stroked.
+  for (const length of [2, 3, 5, 9, 12]) {
+    const row = seats(ids.slice(0, length)), naps = new Set(), strokes = new Set();
+    for (let epoch = 0; epoch < 3000; epoch += 1) for (const t of [5_500, 7_000, 8_500, 10_000, 11_500, 13_000, 40_000]) { const cat = catAt(row, epoch * 45_000 + t); if (cat.y !== 400 || cat.moving) continue; if (cat.frame.startsWith("sleep")) naps.add(cat.x); if (cat.pettedBy !== undefined) strokes.add(cat.x); }
+    assert.deepEqual([naps.size, strokes.size], [length - 1, length - 1], `a table of ${length}: naps at ${[...naps]}, strokes at ${[...strokes]}`);
   }
-  assert.ok(kept > 100);
   const topology = { digest: "empty", nodes: [{ id: "repo", parentId: "", path: ".", label: "Repository", kind: "repository", sizeBucket: "large" }] };
   const empty = renderToStaticMarkup(createElement(FactoryScene, { topology, workers: [] }));
   assert.match(empty, /data-cat="sleep.0"[^>]*aria-label="The cat, asleep"/);
