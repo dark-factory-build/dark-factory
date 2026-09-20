@@ -25,6 +25,9 @@ synthetic Needs You decision. No daemon is connected.*
 - **Keep work moving.** Queue and prioritize work across projects and repositories. Assign a named agent or the next available worker.
 - **Stay in control.** Open agent terminals, send instructions, and answer Needs You decisions from the same console.
 - **Review and improve.** Inspect completed work and review findings, request corrections, and publish reviewed pull requests when GitHub is configured.
+- **Contain the work.** Every attempt gets its own Git worktree and private runtime home. Codex and Claude Code commands run in an OS sandbox that can write only there and cannot read the rest of your home directory.
+- **Set the budget.** Cap a project by runs, by wall-clock time per run, and by provider tokens. At a ceiling the project admits nothing new and running work finishes.
+- **Choose the model per worker.** Codex and Claude Code workers share one floor, each with its own provider, model and effort.
 - **Step away from the browser.** Work continues while your Mac stays awake. With remote access configured, a paired phone can steer the same factory.
 
 ## A working day
@@ -90,10 +93,15 @@ connection for new customers still awaits service activation**; installing
 v0.4.0 alone does not enable it. Manual local work and the public
 [reporting page](https://www.darkfactory.build/feedback) remain available.
 
-Codex is proven with real work; Claude support still needs a live provider
-smoke test. Agents run on your Mac, but configured providers receive task and
-repository material. Remote access and GitHub publication need additional
-setup. See [installation and recovery](docs/install.md) and
+Sandboxed Claude Code workers and provider token budgets ship in v0.5.0. Codex
+workers and overseers are proven with real work. Claude Code workers are
+proven by a live run; a Claude Code overseer has fixture proof only, so use a
+Codex overseer for now. Agents run on your Mac as your user. The sandbox
+confines the commands and file tools an agent uses; the provider process and
+its MCP servers sit outside it, and configured providers receive task and
+repository material. Token budgets count tokens, including cached input, not
+money. Remote access and GitHub publication need additional setup. See
+[installation and recovery](docs/install.md) and
 [provider support](docs/providers.md).
 
 For deeper detail: [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) ·
