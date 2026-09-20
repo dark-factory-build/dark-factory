@@ -267,7 +267,7 @@ const providers = { claude_code: 'c', codex: 't', shell: 's' };
 // A pose is the body's shape, independent of who wears it or why. Only the
 // layers that bend (skin, sleeves, legs, shoes) are baked per pose; hair, face,
 // headwear, tools and badges are drawn once and ride on every pose.
-const poses = ['idle', 'waiting', 'wave.0', 'wave.1', 'type.0', 'type.1', 'walk.0', 'walk.1', 'hold', 'sip'];
+const poses = ['idle', 'waiting', 'wave.0', 'wave.1', 'type.0', 'type.1', 'walk.0', 'walk.1', 'hold', 'sip', 'pet.0', 'pet.1'];
 const add = (name, build) => { const pixels = blank(); build(pixels); sprites.set(name, pixels); };
 const shortArm = grid(`
   ou
@@ -296,6 +296,15 @@ const sippingArm = grid(`
   .uo
   .uo
 `);
+// Stroking the cat beside them: the arm reaches out level and the hand draws back along its head.
+const reachingArm = grid(`
+  uuuao
+  oooo.
+`);
+const strokingArm = grid(`
+  uuao
+  ooo.
+`);
 const arms = pose => ({
   waiting: [foldedArms],
   'type.0': [typingArms],
@@ -307,6 +316,8 @@ const arms = pose => ({
   'walk.1': [relaxedArm, mirror(shortArm)],
   hold: [relaxedArm, holdingArm],
   sip: [relaxedArm, sippingArm],
+  'pet.0': [relaxedArm, reachingArm],
+  'pet.1': [relaxedArm, strokingArm],
 })[pose] ?? [relaxedArm, mirror(relaxedArm)];
 const armPosition = (pose, index) => index === 0 ? [pose === 'waiting' || pose.startsWith('type') ? 4 : 3, pose === 'waiting' ? 11 : 9]
   : index === 1 ? pose === 'sip' ? [10, 7] : pose === 'hold' ? [10, 9] : [11, 9] : [2, 4];
@@ -389,6 +400,120 @@ for (const [name, { art, mouth }] of Object.entries(items)) {
 add('person.held.pencil.0', pixels => draw(pixels, grid(`..y\n.y.\no..`), 10, 9));
 // The pencil tips upright between strokes, beside the hand rather than over it.
 add('person.held.pencil.1', pixels => draw(pixels, grid(`y\ny\no`), 11, 8));
+// The break room's cat, and what passes between people with time on their hands.
+// Every drawing stands on the bottom row of its frame, one column in.
+const cat = {
+  'sit.0': grid(`
+    .o...o...
+    oco.oco..
+    occccco..
+    ocococo..
+    occpcco..
+    .ocpco..o
+    occpccooc
+    occpccoco
+    ocpcpcoo.
+    .oo.oo...
+  `),
+  'sit.1': grid(`
+    .o...o...
+    oco.oco..
+    occccco..
+    ocococo..
+    occpcco..
+    .ocpco...
+    occpcco..
+    occpccooo
+    ocpcpcocc
+    .oo.ooooo
+  `),
+  // Being stroked: eyes shut, ears back.
+  pet: grid(`
+    .........
+    oo...oo..
+    occccco..
+    owcwcwo..
+    occpcco..
+    .ocpco..o
+    occpccooc
+    occpccoco
+    ocpcpcoo.
+    .oo.oo...
+  `),
+  'sleep.0': grid(`
+    .o..o......
+    ocoocooooo.
+    owcwcccccco
+    occpccccwco
+    .ooooooooo.
+  `),
+  'sleep.1': grid(`
+    .....ooooo.
+    .o..occccco
+    ocoocccccco
+    owcwcccccco
+    occpccccwco
+    .ooooooooo.
+  `),
+  'walk.0': grid(`
+    o........o.o
+    co......ococ
+    oco.....occo
+    .occccccccpo
+    .occcccccoo.
+    .oco...oco..
+    .o.o...o.o..
+  `),
+  'walk.1': grid(`
+    .........o.o
+    oo......ococ
+    occo....occo
+    .occccccccpo
+    .occcccccoo.
+    ..ocooocoo..
+    ..oo...oo...
+  `),
+};
+// Its bed, on the floor behind the table.
+add('cat.bed', pixels => draw(pixels, grid(`
+  oo.........oo
+  olssssssssslo
+  olssssssssslo
+  .ooooooooooo.
+`), 0, 12));
+for (const [name, art] of Object.entries(cat)) add(`cat.${name}`, pixels => draw(pixels, art, 1, 16 - art.length));
+add('heart', pixels => draw(pixels, grid(`
+  .oo.oo.
+  orrorro
+  orrrrro
+  .orrro.
+  ..oro..
+  ...o...
+`), 1, 10));
+// Speech without words: a question, news, banter, or just listening noises.
+const glyphs = {
+  ask: grid(`ooo\n..o\n.o.\n...\n.o.`),
+  tell: grid(`ooooooo\n.......\nooooo..\n.......\noooooo.`),
+  joke: grid(`.ooooo.\n.o...o.\n.o...o.\noo..oo.\noo..oo.`),
+  hum: grid(`.....\n.....\no.o.o\n.....\n.....`),
+};
+// A pixel of paper all round the glyph, or it runs into the outline.
+for (const [name, glyph] of Object.entries(glyphs)) add(`bubble.${name}`, pixels => {
+  draw(pixels, grid(`
+    .ooooooooo.
+    opppppppppo
+    opppppppppo
+    opppppppppo
+    opppppppppo
+    opppppppppo
+    opppppppppo
+    opppppppppo
+    .ooooooooo.
+    .oo........
+    .o.........
+  `), 1, 5);
+  draw(pixels, glyph, 1 + Math.floor((11 - glyph[0].length) / 2), 7);
+});
 // Walking away and walking across are their own drawings, not the front view
 // slid sideways. The back has no face and carries its tool on the other side;
 // the profile has one eye, one visible arm and scissoring legs. West is east
@@ -601,7 +726,7 @@ for (const [toolIndex, tool] of tools.entries()) {
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const legPose = pose => pose.startsWith('walk') ? pose : 'stand';
 // Busy hands put the tool down: a cup, a keyboard or a pencil takes its place.
-const carries = pose => pose !== 'sip' && pose !== 'hold' && !pose.startsWith('type');
+const carries = pose => pose !== 'sip' && pose !== 'hold' && !pose.startsWith('type') && !pose.startsWith('pet');
 const portrait = (pose, appearance = {}) => {
   const v = { skin: 1, hair: 0, hair_colour: 1, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: 0, headwear: 0, ...appearance };
   const pixels = blank();

@@ -8,7 +8,7 @@ export type { SpriteAppearance };
 
 export const appearanceFields = ["skin", "hair", "hair_colour", "face", "outfit", "clothes_colour", "shoes", "tool", "headwear"] as const;
 
-function hash(id: string): number {
+export function hash(id: string): number {
   let value = 2166136261;
   for (let i = 0; i < id.length; i++) value = Math.imul(value ^ id.charCodeAt(i), 16777619) >>> 0;
   return value;
@@ -81,9 +81,10 @@ export function breakRoomHabit(worker: SceneWorker): BreakRoomErrand | undefined
 /**
  * The aligned atlas layers for one worker. Status and motion choose a pose; the
  * person's own layers ride on it unchanged. `motion.at` is the worker's own
- * running clock: absent, every pose rests on its first frame.
+ * running clock: absent, every pose rests on its first frame. `stroking` is how
+ * long a resting worker has had a hand on the cat beside them.
  */
-export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: "resting" | "planning", errand?: BreakRoomErrand): readonly string[] {
+export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: "resting" | "planning", errand?: BreakRoomErrand, stroking?: number): readonly string[] {
   const appearance = resolvedAppearance(worker);
   const role = worker.role === "orchestrator" ? "overseer" : "worker";
   const provider = worker.provider === "claude_code" || worker.provider === "codex" ? worker.provider : "shell";
@@ -104,6 +105,7 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
     : errand !== undefined ? "hold"
     : worker.activity === "needs-you" ? `wave.${at === undefined ? 0 : Math.floor(at / 400) % 2}`
     : seat === "planning" ? `type.${scribble}`
+    : seat === "resting" && stroking !== undefined ? `pet.${Math.floor(stroking / 400) % 2}`
     : seat === "resting" ? rest.where === "mouth" ? "sip" : rest.where === "chest" ? "hold" : "idle"
     : worker.activity === "busy" ? "type.0"
     : worker.activity === "waiting" ? "waiting" : "idle";
