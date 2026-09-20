@@ -212,7 +212,7 @@ export function FactoryConsole({
   const ready = status === "ready";
   const productionData = useProduction([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
   const productionView = deriveProductionView(productionData.records, Date.now());
-  const productionItems = Object.values(productionView.contraptions).sort((a, b) => (a.completed && b.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId));
+  const productionItems = Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId));
   const productionFloor = [...productionItems.filter((item) => !item.completed), ...productionItems.filter((item) => item.completed).slice(-8)];
   const [selectedProduction, setSelectedProduction] = useState<string>();
   const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
