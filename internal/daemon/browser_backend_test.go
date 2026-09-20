@@ -1181,3 +1181,11 @@ func TestBrowserRepositoryReadinessUsesPrivateOperatorBoundary(t *testing.T) {
 		}
 	}
 }
+
+// The kernel's bound on public peer questions must fit the wire's: a snapshot
+// that carried more would be refused whole, not trimmed.
+func TestPublicPeerQuestionsFitTheWire(t *testing.T) {
+	if kernel.PublicPeerQuestionLimit > browserprotocol.MaxJSONArray {
+		t.Fatalf("kernel serves up to %d peer questions, the wire accepts %d", kernel.PublicPeerQuestionLimit, browserprotocol.MaxJSONArray)
+	}
+}

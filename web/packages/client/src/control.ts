@@ -67,6 +67,8 @@ export type HumanRequestItem = {
 };
 
 /** STATE_GET has no cursor, continuation or selector: there is one snapshot. */
+/** One live task asked another something. Who, whom, and whether it was answered: never the words. */
+export type PeerQuestionItem = { id: string; source_task_id: string; target_task_id: string; answered: boolean; revision: bigint };
 export type StateGetBody = Record<string, never>;
 export type StateSnapshotBody = {
   head: bigint;
@@ -78,6 +80,8 @@ export type StateSnapshotBody = {
   shared_tasks?: TaskItem[];
   human_requests: HumanRequestItem[];
   accounts: AccountItem[];
+  /** The newest questions between live tasks, additive like `shared_tasks`. */
+  peer_questions?: PeerQuestionItem[];
 };
 export type StateWatchBody = { after_head: bigint };
 export type StateChangedBody = { head: bigint };
@@ -668,7 +672,7 @@ function githubInstallationURL(value: string): boolean {
 
 function stateSnapshot(body: Record<string, unknown>, wire: boolean): StateSnapshotBody {
   // An older daemon sends no accounts at all; the console then shows none.
-  requireKeys(body, ["head", "factory", "projects", "agents", "tasks", "human_requests"], wire, ["accounts", "shared_tasks"]);
+  requireKeys(body, ["head", "factory", "projects", "agents", "tasks", "human_requests"], wire, ["accounts", "shared_tasks", "peer_questions"]);
   const head = decimal(body.head, wire);
   if (!isObject(body.factory)) malformed();
   const factory = factoryItem(body.factory, wire);
@@ -678,11 +682,14 @@ function stateSnapshot(body: Record<string, unknown>, wire: boolean): StateSnaps
   const shared_tasks = present(body, "shared_tasks") ? itemArray(body.shared_tasks, (item) => sharedTaskItem(item, wire)) : undefined;
   const human_requests = itemArray(body.human_requests, (item) => humanRequestItem(item, wire));
   const accounts = present(body, "accounts") ? itemArray(body.accounts, (item) => accountItem(item, wire)) : [];
+  const peer_questions = present(body, "peer_questions") ? itemArray(body.peer_questions, (item) => peerQuestionItem(item, wire)) : undefined;
+  if ((peer_questions?.length ?? 0) > MAX_ARRAY_ITEMS) malformed();
+  uniqueIDs(peer_questions ?? []);
   // The bound is exact and fails closed. A server that cannot fit its state
   // returns a too_large error; it never sends a trimmed snapshot.
   if (1 + projects.length + agents.length + tasks.length + (shared_tasks?.length ?? 0) + human_requests.length + accounts.length > MAX_SNAPSHOT_ENTITIES) malformed();
   for (const collection of [projects, agents, [...tasks, ...(shared_tasks ?? [])], human_requests, accounts]) uniqueIDs(collection);
-  return { head, factory, projects, agents, tasks, ...(shared_tasks === undefined ? {} : { shared_tasks }), human_requests, accounts };
+  return { head, factory, projects, agents, tasks, ...(shared_tasks === undefined ? {} : { shared_tasks }), human_requests, accounts, ...(peer_questions === undefined ? {} : { peer_questions }) };
 }
 function itemArray<T>(value: unknown, decode: (item: unknown) => T): T[] {
   if (!Array.isArray(value) || value.length > MAX_SNAPSHOT_ENTITIES) malformed();
@@ -937,6 +944,11 @@ function humanRequestItem(value: unknown, wire: boolean): HumanRequestItem {
   const created_at = decimal(value.created_at, wire); const updated_at = decimal(value.updated_at, wire);
   if (updated_at < created_at || value.kind !== "question" || typeof value.status !== "string" || !["open", "delivering", "delivery_unknown"].includes(value.status) || typeof value.can_reply !== "boolean") malformed();
   return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), agent_id: dynamicID(value.agent_id), task_id: dynamicID(value.task_id), created_at, updated_at, revision: decimal(value.revision, wire, true), kind: "question", status: value.status as HumanRequestItem["status"], reply_max_bytes: integer(value.reply_max_bytes, 1, MAX_HUMAN_REPLY_BYTES), can_reply: value.can_reply };
+}
+function peerQuestionItem(value: unknown, wire: boolean): PeerQuestionItem {
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "source_task_id", "target_task_id", "answered", "revision"], wire);
+  if (typeof value.answered !== "boolean" || value.source_task_id === value.target_task_id) malformed();
+  return { id: dynamicID(value.id), source_task_id: dynamicID(value.source_task_id), target_task_id: dynamicID(value.target_task_id), answered: value.answered, revision: decimal(value.revision, wire, true) };
 }
 function terminalTargetDescriptor(value: unknown, wire: boolean): TerminalTargetDescriptor {
   if (!isObject(value)) malformed(); requireKeys(value, ["run_id", "session_id", "run_revision", "session_revision"], wire);

@@ -253,6 +253,17 @@ type StateSnapshot struct {
 	SharedTasks   []TaskItem         `json:"shared_tasks,omitempty"`
 	HumanRequests []HumanRequestItem `json:"human_requests"`
 	Accounts      []AccountItem      `json:"accounts"`
+	// PeerQuestions is the newest questions between live tasks: who asked whom
+	// and whether it was answered, never the words. Additive, like SharedTasks.
+	PeerQuestions []PeerQuestionItem `json:"peer_questions,omitempty"`
+}
+
+type PeerQuestionItem struct {
+	ID           string  `json:"id"`
+	SourceTaskID string  `json:"source_task_id"`
+	TargetTaskID string  `json:"target_task_id"`
+	Answered     Bool    `json:"answered"`
+	Revision     Decimal `json:"revision"`
 }
 
 // StateWatch asks to be told when durable state moves past AfterHead. The
@@ -457,6 +468,18 @@ func validateStateSnapshot(value StateSnapshot) error {
 			return err
 		}
 		if err := claim("human_request:", item.ID); err != nil {
+			return err
+		}
+	}
+	// They ride outside the entity count, under the ordinary array bound.
+	if len(value.PeerQuestions) > MaxJSONArray {
+		return fmt.Errorf("%w: snapshot peer question count", ErrMalformed)
+	}
+	for _, item := range value.PeerQuestions {
+		if validateDynamicID(item.ID) != nil || validateDynamicID(item.SourceTaskID) != nil || validateDynamicID(item.TargetTaskID) != nil || item.SourceTaskID == item.TargetTaskID || item.Revision == 0 {
+			return fmt.Errorf("%w: peer question item", ErrMalformed)
+		}
+		if err := claim("peer_question:", item.ID); err != nil {
 			return err
 		}
 	}

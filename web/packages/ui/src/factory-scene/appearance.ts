@@ -82,9 +82,10 @@ export function breakRoomHabit(worker: SceneWorker): BreakRoomErrand | undefined
  * The aligned atlas layers for one worker. Status and motion choose a pose; the
  * person's own layers ride on it unchanged. `motion.at` is the worker's own
  * running clock: absent, every pose rests on its first frame. `stroking` is how
- * long a resting worker has had a hand on the cat beside them.
+ * long a resting worker has had a hand on the cat beside them; `hailing` is a
+ * hand raised to send something across the floor (1) or to take it (0).
  */
-export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: "resting" | "planning", errand?: BreakRoomErrand, stroking?: number): readonly string[] {
+export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: "resting" | "planning", errand?: BreakRoomErrand, stroking?: number, hailing?: 0 | 1): readonly string[] {
   const appearance = resolvedAppearance(worker);
   const role = worker.role === "orchestrator" ? "overseer" : "worker";
   const provider = worker.provider === "claude_code" || worker.provider === "codex" ? worker.provider : "shell";
@@ -99,6 +100,8 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   // reaches forward and back. Empty hands, or a mug, leave the keyboard.
   const wielding = motion?.action === "interacting" && ["clipboard", "wrench", "tablet"].includes(spriteOptions.tool[appearance.tool]?.name ?? "");
   const pose = walking ? `walk.${motion.frame}`
+    // A raised hand interrupts whatever the hands were doing, at the bench, the table or the shelf.
+    : hailing !== undefined ? `wave.${hailing}`
     : wielding ? motion.frame === 1 ? "walk.1" : "idle"
     : motion?.action === "interacting" ? `type.${motion.frame}`
     // Standing at the shelf with a book, or at the coffee station with a cup.

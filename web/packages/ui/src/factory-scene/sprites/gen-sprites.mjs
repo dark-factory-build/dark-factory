@@ -482,6 +482,23 @@ add('cat.bed', pixels => draw(pixels, grid(`
   .ooooooooooo.
 `), 0, 12));
 for (const [name, art] of Object.entries(cat)) add(`cat.${name}`, pixels => draw(pixels, art, 1, 16 - art.length));
+// A sheet from the tray on its way to whoever it is for: it flutters as it flies.
+add('paper.0', pixels => draw(pixels, grid(`
+  oooooo
+  oppppo
+  opllpo
+  oppppo
+  opllpo
+  oppppo
+  oooooo
+`), 5, 4));
+add('paper.1', pixels => draw(pixels, grid(`
+  ..ooooo.
+  .oppppo.
+  oplllpo.
+  opppppo.
+  .ooooo..
+`), 4, 5));
 add('heart', pixels => draw(pixels, grid(`
   .oo.oo.
   orrorro

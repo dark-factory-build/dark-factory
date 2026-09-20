@@ -61,6 +61,7 @@ const inventory = {
     "factory-scene/appearance.d.ts", "factory-scene/appearance.js",
     "factory-scene/factory-scene.d.ts", "factory-scene/factory-scene.js",
     "factory-scene/idle-life.d.ts", "factory-scene/idle-life.js",
+    "factory-scene/messages.d.ts", "factory-scene/messages.js",
     "factory-scene/movement.d.ts", "factory-scene/movement.js",
     "factory-scene/scene.d.ts", "factory-scene/scene.js",
     "factory-scene/sprite-editor.d.ts", "factory-scene/sprite-editor.js",

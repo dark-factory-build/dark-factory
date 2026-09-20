@@ -82,6 +82,11 @@ test("the Go-produced snapshot fixture becomes one complete TypeScript state vie
   assert.equal(body.shared_tasks.length, 1);
   assert.equal(view.tasks.size, 2);
   assert.equal(view.tasks.get(body.shared_tasks[0].id).assigned_agent_id, "");
+  // Who asked whom and whether it was answered; a daemon from before this sends none.
+  assert.deepEqual([...view.peerQuestions.values()], [{ id: "07070707070707070707070707070707", source_task_id: body.tasks[0].id, target_task_id: body.shared_tasks[0].id, answered: false, revision: 1n }]);
+  const { peer_questions: _none, ...older } = body;
+  assert.equal(snapshotView(older).peerQuestions.size, 0);
+  expectMalformed(() => decodeServerControl(fixture("state_snapshot.json").replace('"target_task_id":"06060606060606060606060606060606"', '"target_task_id":"03030303030303030303030303030303"')));
   assert.equal(view.humanRequests.size, 1);
   assert.equal(view.accounts.size, 1);
   const [project] = view.projects.values();
