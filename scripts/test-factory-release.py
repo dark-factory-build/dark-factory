@@ -26,6 +26,7 @@ SHA = "a" * 40
 HEAD = "b" * 40
 OLD = "c" * 40
 SECOND = "d" * 40
+APP_MARKER = "<!-- dark-factory-operation:12345678-1234-1234-1234-123456789abc:" + "e" * 64 + " -->"
 
 
 def config(journal):
@@ -757,9 +758,16 @@ class ReleaseFixtures(unittest.TestCase):
             self.assertEqual(release.range_sources(cfg, OLD, SHA)[0][0]["issue"], 602)
 
     def test_release_rejects_malformed_source_reference(self):
-        for body in ("Refs #602 extra", "Refs #0", "Refs #602foo", "Closes #unknown"):
+        for body in ("Refs #602 extra", "Refs #0", "Refs #602foo", "Closes #unknown", "Refs #602.", "Refs #602\nMore text"):
             with self.subTest(body=body), self.assertRaises(release.ReleaseError):
-                release.release_source_footer(body)
+                release.release_source_footer(body + "\n\n" + APP_MARKER)
+
+    def test_issue_mentions_in_unmarked_prose_are_source_less(self):
+        generator = "\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n"
+        for body in ("Delta: +77.\n\nRefs #678." + generator, "Work\n\nRefs #678.\n\nMore prose\n",
+                     "Work\n\nRefs #726.\n", "Refs #726\nRefs #931 too\n", "Refs #726\n\n## Verification\npassed\n"):
+            with self.subTest(body=body):
+                self.assertIsNone(release.release_source_footer(body))
 
     def test_range_skips_source_less_pull_request(self):
         cfg = config(Path("/tmp/release.json"))
@@ -813,20 +821,19 @@ class ReleaseFixtures(unittest.TestCase):
                 return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
             if "/pulls" in command:
                 return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
-            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA}, "body": "Refs #602\nMore text"})
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA}, "body": "Refs #602\nMore text\n\n" + APP_MARKER})
         with mock.patch.object(release, "run", side_effect=gh), self.assertRaisesRegex(release.ReleaseError, "footer"):
             release.range_sources(cfg, OLD, SHA)
 
     def test_range_accepts_the_app_marker_after_its_footer(self):
         cfg = config(Path("/tmp/release.json"))
-        marker = "<!-- dark-factory-operation:12345678-1234-1234-1234-123456789abc:" + "e" * 64 + " -->"
         def gh(argv, *unused):
             command = " ".join(argv)
             if "/compare/" in command:
                 return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
             if "/pulls" in command:
                 return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
-            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA}, "body": "Work\n\nRefs #602\n\n" + marker})
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA}, "body": "Work\n\nRefs #602\n\n" + APP_MARKER})
         with mock.patch.object(release, "run", side_effect=gh):
             self.assertEqual(release.range_sources(cfg, OLD, SHA)[0][0]["issue"], 602)
 
