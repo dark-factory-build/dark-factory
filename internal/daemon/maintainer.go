@@ -202,7 +202,44 @@ func (daemon *Daemon) attemptMaintainer(ctx context.Context, call api.Call) api.
 			return failure("invalid")
 		}
 	}
+	if err := daemon.recordMaintainerPublication(ctx, authority.ProjectID, authority.TaskID, request, response); err != nil {
+		return failure("unavailable")
+	}
 	return api.NewContentReply(api.MaintainerResult{State: "ok", Response: response})
+}
+
+func (daemon *Daemon) recordMaintainerPublication(ctx context.Context, project kernel.ProjectID, task kernel.TaskID, request maintainerRequest, response json.RawMessage) error {
+	if request.Method != "tools/call" && request.Method != "factory/tools/call_private" {
+		return nil
+	}
+	params, _, err := decodeMaintainerToolCall(request.Params)
+	if err != nil || params.Name != "create_pull_request" {
+		return err
+	}
+	var reply struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Pull    struct {
+				Number uint64 `json:"number"`
+				URL    string `json:"url"`
+				Head   string `json:"head_sha"`
+			} `json:"structuredContent"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(response, &reply) != nil || reply.Result.IsError || reply.Result.Pull.Number == 0 {
+		return nil
+	}
+	var repo, title, branch, base string
+	for name, target := range map[string]*string{"repository": &repo, "title": &title, "head": &branch, "base": &base} {
+		if err := json.Unmarshal(params.Arguments[name], target); err != nil {
+			return err
+		}
+	}
+	at, err := daemon.timestamp()
+	if err != nil {
+		return err
+	}
+	return daemon.store.RecordPublication(ctx, project, task, repo, kernel.ProductionPullRequest{Number: reply.Result.Pull.Number, Title: title, URL: reply.Result.Pull.URL, Head: reply.Result.Pull.Head, Branch: branch, Base: base, State: "open", Review: kernel.ProductionReview{Head: reply.Result.Pull.Head, State: "unknown"}}, at)
 }
 
 // decodeMaintainerToolCall re-encodes the exact repository fields that local

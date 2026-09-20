@@ -1,0 +1,296 @@
+package kernel
+
+import (
+	"context"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+var productionRepository = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
+
+type ProductionRecord struct {
+	Repository    string          `json:"repository"`
+	Kind          string          `json:"kind"`
+	ID            string          `json:"id"`
+	VisualID      string          `json:"visual_id"`
+	ObservedAt    int64           `json:"observed_at"`
+	Document      json.RawMessage `json:"document"`
+	Tasks         []string        `json:"tasks"`
+	Missions      []string        `json:"missions"`
+	LinksOverflow bool            `json:"links_overflow"`
+}
+
+type ProductionPage struct {
+	Records    []ProductionRecord `json:"records"`
+	NextOffset int                `json:"next_offset"`
+	Total      int                `json:"total"`
+}
+
+func productionSHA(value string) bool {
+	if value == "" {
+		return true
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil && (len(value) == 40 || len(value) == 64) && strings.ToLower(value) == value
+}
+
+func productionNumbers(values []uint64) bool {
+	if len(values) > 32 {
+		return false
+	}
+	for _, value := range values {
+		if value == 0 || value > 1<<53-1 {
+			return false
+		}
+	}
+	return true
+}
+
+func productionURL(value string) bool {
+	if value == "" {
+		return true
+	}
+	u, err := url.Parse(value)
+	return err == nil && len(value) <= 2048 && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
+}
+
+func validProductionPull(pr ProductionPullRequest) bool {
+	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, 8192) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
+}
+
+func productionRecordOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, repo, kind, id, visual string, value any, at int64) error {
+	if id == "" || !validOutcomeText(id, 256) {
+		return ErrInvalidValue
+	}
+	body, err := json.Marshal(value)
+	if err != nil || len(body) > 32768 {
+		return ErrInvalidValue
+	}
+	_, err = c.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET document = excluded.document, observed_at_ms = excluded.observed_at_ms
+        WHERE excluded.observed_at_ms >= production_records.observed_at_ms`, project.Bytes(), repo, kind, id, visual, string(body), at)
+	return err
+}
+
+// RecordProductionObservation accepts facts only from the operator authority.
+// An unavailable read updates the source's health without erasing prior work.
+func (store *Store) RecordProductionObservation(ctx context.Context, project ProjectID, observation ProductionObservation, at UnixMillis) error {
+	if project.zero() || !productionRepository.MatchString(observation.Repository) || observation.ObservedAt < 1 || observation.ObservedAt > at.Int64()+5000 || observation.Overflow < 0 || !validOutcomeText(observation.Unavailable, 256) || len(observation.PullRequests) > 256 || len(observation.Checks) > 256 || len(observation.Reviewers) > 256 || len(observation.Deliveries) > 128 {
+		return ErrInvalidValue
+	}
+	observation.Repository = strings.ToLower(observation.Repository)
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	write := func(kind, id, visual string, value any) error {
+		return productionRecordOnConnection(ctx, tx.connection, project, observation.Repository, kind, id, visual, value, observation.ObservedAt)
+	}
+	for _, pr := range observation.PullRequests {
+		if !validProductionPull(pr) {
+			return tx.Rollback(ErrInvalidValue)
+		}
+		visual, err := linkProductionChange(ctx, tx.connection, project, observation.Repository, pr, observation.ObservedAt)
+		if err != nil {
+			return tx.Rollback(err)
+		}
+		if err := write("pull_request", strconv.FormatUint(pr.Number, 10), visual, pr); err != nil {
+			return tx.Rollback(err)
+		}
+	}
+	for _, check := range observation.Checks {
+		if !productionSHA(check.Revision) || !productionURL(check.URL) || !validOutcomeText(check.Name, 256) || !validOutcomeText(check.State, 64) || !validOutcomeText(check.Conclusion, 64) || (check.Scope != "head" && check.Scope != "merge_group") || !productionNumbers(check.PullRequests) || len(check.Jobs) > 32 || check.Overflow < 0 {
+			return tx.Rollback(ErrInvalidValue)
+		}
+		for _, job := range check.Jobs {
+			if !validOutcomeText(job.ID, 256) || !validOutcomeText(job.Name, 256) || !validOutcomeText(job.State, 64) || !validOutcomeText(job.Conclusion, 64) || !productionURL(job.URL) {
+				return tx.Rollback(ErrInvalidValue)
+			}
+		}
+		if err := write("check", check.ID, "", check); err != nil {
+			return tx.Rollback(err)
+		}
+	}
+	for _, reviewer := range observation.Reviewers {
+		if reviewer.Number == 0 || reviewer.Number > 1<<53-1 || !productionSHA(reviewer.Head) || !validOutcomeText(reviewer.Name, 128) || !validOutcomeText(reviewer.Provider, 64) || !validOutcomeText(reviewer.State, 64) || !validOutcomeText(reviewer.Findings, 8192) || !productionURL(reviewer.URL) {
+			return tx.Rollback(ErrInvalidValue)
+		}
+		if err := write("reviewer", reviewer.ID, "", reviewer); err != nil {
+			return tx.Rollback(err)
+		}
+	}
+	for _, delivery := range observation.Deliveries {
+		if !productionSHA(delivery.Revision) || !validOutcomeText(delivery.Kind, 64) || !validOutcomeText(delivery.Destination, 256) || !validOutcomeText(delivery.State, 64) || !productionURL(delivery.URL) || !productionNumbers(delivery.PullRequests) || delivery.VerifiedAt < 0 || delivery.VerifiedAt > at.Int64()+5000 {
+			return tx.Rollback(ErrInvalidValue)
+		}
+		if err := write("delivery", delivery.ID, "", delivery); err != nil {
+			return tx.Rollback(err)
+		}
+	}
+	if err := write("repository", observation.Repository, "", map[string]any{"unavailable": observation.Unavailable, "overflow": observation.Overflow}); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
+// A recorded branch AND its exact settled commit are evidence of a Change;
+// titles and transient worker locations are not. Existing bindings survive rebases.
+func linkProductionChange(ctx context.Context, c *sql.Conn, project ProjectID, repo string, pr ProductionPullRequest, at int64) (string, error) {
+	key := repo + "#" + strconv.FormatUint(pr.Number, 10)
+	var existing string
+	err := c.QueryRowContext(ctx, `SELECT visual_id FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'pull_request' AND identity = ?`, project.Bytes(), repo, strconv.FormatUint(pr.Number, 10)).Scan(&existing)
+	if err != nil && err != sql.ErrNoRows {
+		return "", err
+	}
+	var change, task []byte
+	if strings.HasPrefix(pr.Branch, "factory/") && len(pr.Branch) == 20 && pr.Head != "" {
+		err = c.QueryRowContext(ctx, `SELECT id, task_id FROM changes WHERE project_id = ? AND substr(lower(hex(id)), 1, 12) = ? AND lower(hex(head_commit)) = ?`, project.Bytes(), strings.TrimPrefix(pr.Branch, "factory/"), pr.Head).Scan(&change, &task)
+		if err != nil && err != sql.ErrNoRows {
+			return "", err
+		}
+		if err == nil {
+			if _, err = c.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, change_id, created_at_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, repository, pull_number, task_id) DO UPDATE SET change_id = excluded.change_id WHERE publication_tasks.change_id IS NULL`, project.Bytes(), repo, pr.Number, task, change, at); err != nil {
+				return "", err
+			}
+			candidate := "change:" + hex.EncodeToString(change)
+			var used int
+			if err = c.QueryRowContext(ctx, `SELECT count(*) FROM production_records WHERE project_id = ? AND kind = 'pull_request' AND visual_id = ?`, project.Bytes(), candidate).Scan(&used); err != nil {
+				return "", err
+			}
+			if used == 0 {
+				key = candidate
+			}
+		}
+	}
+	if existing != "" {
+		key = existing
+	}
+	return key, nil
+}
+
+// RecordPublication captures normal overseer publication without asking the
+// operator to copy IDs. A replay attaches provenance but never rewinds a live PR.
+func (store *Store) RecordPublication(ctx context.Context, project ProjectID, task TaskID, repo string, pr ProductionPullRequest, at UnixMillis) error {
+	if !productionRepository.MatchString(repo) || !validProductionPull(pr) {
+		return ErrInvalidValue
+	}
+	repo = strings.ToLower(repo)
+	tx, err := store.beginValidatedWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	owner, found, err := taskByID(ctx, tx.connection, task)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if !found || owner.ProjectID != project {
+		return tx.Rollback(ErrUnauthorized)
+	}
+	if _, err = tx.connection.ExecContext(ctx, `INSERT INTO publication_tasks (project_id, repository, pull_number, task_id, created_at_ms) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`, project.Bytes(), repo, pr.Number, task.Bytes(), at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	visual, err := linkProductionChange(ctx, tx.connection, project, repo, pr, at.Int64())
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	body, err := json.Marshal(pr)
+	if err != nil {
+		return tx.Rollback(err)
+	}
+	if _, err = tx.connection.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, 'pull_request', ?, ?, ?, ?) ON CONFLICT DO NOTHING`, project.Bytes(), repo, strconv.FormatUint(pr.Number, 10), visual, string(body), at.Int64()); err != nil {
+		return tx.Rollback(err)
+	}
+	return tx.Commit(ctx)
+}
+
+// Current construction comes from Changes even after its worker finishes. The
+// projection replaces it only when normal publication records the association.
+const productionRows = `SELECT repository, kind, identity, visual_id, document, observed_at_ms FROM production_records WHERE project_id = ?
+ UNION ALL SELECT '', 'construction', lower(hex(c.id)), 'change:' || lower(hex(c.id)),
+ json_object('title', t.title, 'phase', c.phase, 'status', t.status, 'head', lower(hex(c.head_commit)), 'task_id', lower(hex(t.id)), 'blocked_reason', t.blocked_reason), c.updated_at_ms
+ FROM changes c JOIN tasks t ON t.id = c.task_id
+ WHERE c.project_id = ? AND NOT EXISTS (SELECT 1 FROM publication_tasks p WHERE p.change_id = c.id)`
+
+func (store *Store) Production(ctx context.Context, project ProjectID, offset, limit int) (ProductionPage, error) {
+	if project.zero() || offset < 0 || limit < 1 || limit > 8 {
+		return ProductionPage{}, ErrInvalidValue
+	}
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return ProductionPage{}, err
+	}
+	defer tx.Close()
+	page := ProductionPage{Records: []ProductionRecord{}}
+	if err := tx.connection.QueryRowContext(ctx, "SELECT count(*) FROM ("+productionRows+")", project.Bytes(), project.Bytes()).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := tx.connection.QueryContext(ctx, "SELECT * FROM ("+productionRows+") ORDER BY repository, kind, identity LIMIT ? OFFSET ?", project.Bytes(), project.Bytes(), limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	size := 0
+	for rows.Next() {
+		var item ProductionRecord
+		var body string
+		if err := rows.Scan(&item.Repository, &item.Kind, &item.ID, &item.VisualID, &body, &item.ObservedAt); err != nil {
+			return page, err
+		}
+		if !json.Valid([]byte(body)) {
+			return page, fmt.Errorf("%w: production record", ErrCorruptState)
+		}
+		if size+len(body) > 48000 {
+			break
+		}
+		size += len(body)
+		item.Document = json.RawMessage(body)
+		page.Records = append(page.Records, item)
+	}
+	if err := rows.Err(); err != nil {
+		return page, err
+	}
+	rows.Close()
+	for i := range page.Records {
+		item := &page.Records[i]
+		item.Tasks, item.Missions = []string{}, []string{}
+		if item.Kind != "pull_request" && item.Kind != "construction" {
+			continue
+		}
+		links, err := tx.connection.QueryContext(ctx, `SELECT DISTINCT lower(hex(t.id)), COALESCE(lower(hex(b.mission_id)), '') FROM tasks t LEFT JOIN mission_task_bindings b ON b.task_id = t.id WHERE t.project_id = ? AND (t.id IN (SELECT task_id FROM publication_tasks WHERE project_id = ? AND repository = ? AND pull_number = ?) OR t.id IN (SELECT task_id FROM changes WHERE lower(hex(id)) = ? AND ? = 'construction')) LIMIT 33`, project.Bytes(), project.Bytes(), item.Repository, item.ID, item.ID, item.Kind)
+		if err != nil {
+			return page, err
+		}
+		for links.Next() {
+			var task, mission string
+			if err := links.Scan(&task, &mission); err != nil {
+				links.Close()
+				return page, err
+			}
+			if len(item.Tasks) == 32 {
+				item.LinksOverflow = true
+				break
+			}
+			item.Tasks = append(item.Tasks, task)
+			if mission != "" {
+				item.Missions = append(item.Missions, mission)
+			}
+		}
+		err = links.Err()
+		links.Close()
+		if err != nil {
+			return page, err
+		}
+	}
+	if offset+len(page.Records) < page.Total {
+		page.NextOffset = offset + len(page.Records)
+	}
+	return page, nil
+}

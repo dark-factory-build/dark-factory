@@ -67,7 +67,8 @@ function latestRecords(records: readonly ProductionRecord[]) {
   return [...latest.values()];
 }
 function fresh(record: ProductionRecord | undefined, now: number) {
-  if (record === undefined || now <= 0) return true;
+  if (now <= 0) return true;
+  if (record === undefined) return false;
   const document = object(record.document);
   return record.observed_at > 0 && now - record.observed_at <= STALE_AFTER && text(document.unavailable) === "";
 }
@@ -75,12 +76,14 @@ function verifiedDelivery(delivery: ProductionDelivery) {
   return delivery.verified_at !== undefined && delivery.verified_at > 0 && delivery.state === "verified";
 }
 function nextAction(pr: PullRequest, review: ProductionContraption["review"], checks: readonly (ProductionCheck & { applicable: boolean })[], deliveries: readonly ProductionContraption["deliveries"][number][]) {
+  if (pr.state === "closed" && !pr.merge) return "Closed without merge.";
+  if (pr.state === "merged") return deliveries.length > 0 && deliveries.every((delivery) => delivery.verified) ? "Delivery verified at all recorded destinations." : "Merged; delivery verification is pending.";
   if (pr.next_action) return pr.next_action;
   if (review.state === "block" && review.findings) return review.findings;
   if (!review.current) return review.head ? "Review is stale for the current head." : "Independent review is required.";
   if (!review.sourceFresh) return "Production source observation is stale or unavailable.";
   if (review.state !== "allow") return "Independent review is required.";
-  if (checks.some((check) => check.applicable && check.state === "running")) return "Current-head checks are running.";
+  if (checks.some((check) => check.applicable && ["running", "in_progress", "queued", "waiting"].includes(check.state))) return "Current-head checks are running.";
   if (checks.some((check) => check.applicable && ["unknown", "unavailable", "skipped", "notapplicable"].includes(check.state))) return "A current-head check is unavailable or incomplete.";
   if (checks.some((check) => check.applicable && check.conclusion && check.conclusion !== "success")) return "A current-head check is not successful.";
   if (pr.state === "merged" && deliveries.length === 0) return "Merged; delivery verification is pending.";
@@ -114,9 +117,9 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
     const construction = item.construction, pull = item.pull, pr = pull ? object(pull.document) as PullRequest : undefined;
     const repositoryRecord = health.get(scopeKey(item.scope, "repository"));
     const sourceFresh = fresh(repositoryRecord, now);
-    const pullChecks = pr ? Object.values(checks).filter((check) => check.project_id === item.scope.projectId && check.repository === item.scope.repository && check.pull_requests.includes(pr.number)).map((check) => ({ ...check, applicable: check.scope === "head" && check.revision === pr.head })) : [];
-    const pullDeliveries = pr ? Object.values(deliveries).filter((delivery) => delivery.project_id === item.scope.projectId && delivery.repository === item.scope.repository && delivery.pull_requests.includes(pr.number)).map((delivery) => ({ ...delivery, verified: verifiedDelivery(delivery) })) : [];
-    const assigned = pr ? Object.values(reviewers).filter((reviewer) => reviewer.project_id === item.scope.projectId && reviewer.repository === item.scope.repository && reviewer.number === pr.number && reviewer.head === pr.head) : [];
+    const pullChecks = pr ? Object.values(checks).filter((check) => (check.project_id ?? "") === item.scope.projectId && check.repository === item.scope.repository && check.pull_requests.includes(pr.number)).map((check) => ({ ...check, applicable: check.scope === "head" && check.revision === pr.head })) : [];
+    const pullDeliveries = pr ? Object.values(deliveries).filter((delivery) => (delivery.project_id ?? "") === item.scope.projectId && delivery.repository === item.scope.repository && delivery.pull_requests.includes(pr.number)).map((delivery) => ({ ...delivery, verified: verifiedDelivery(delivery) })) : [];
+    const assigned = pr ? Object.values(reviewers).filter((reviewer) => (reviewer.project_id ?? "") === item.scope.projectId && reviewer.repository === item.scope.repository && reviewer.number === pr.number && reviewer.head === pr.head) : [];
     const review = pr?.review ?? {};
     const reviewView = { head: text(review.head), state: text(review.state) || "unknown", current: text(review.head) !== "" && text(review.head) === pr?.head, allowed: sourceFresh && text(review.head) !== "" && text(review.head) === pr?.head && text(review.state) === "allow", sourceFresh, findings: text(review.findings), url: text(review.url) };
     const closedUnmerged = pr?.state === "closed" && !pr.merge;

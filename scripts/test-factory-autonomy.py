@@ -26,6 +26,14 @@ deploy = module('deploy-runtime')
 
 
 class AutonomyTest(unittest.TestCase):
+    def test_production_uses_existing_release_lane(self):
+        config = {'repository': 'example/factory', 'project_id': 'a' * 32}
+        with patch.object(autonomy.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}', '')) as run:
+            results = autonomy.tick(Path('/config.json'), config, release_only=True)
+        self.assertEqual([{'component': 'factory-production', 'ok': True}], results)
+        self.assertEqual('factory-production.py', Path(run.call_args.args[0][1]).name)
+        self.assertEqual('--record', run.call_args.args[0][-1])
+
     def test_installed_controller_does_not_refresh_an_archive_parent(self):
         with tempfile.TemporaryDirectory() as directory:
             installed = Path(directory) / 'libexec' / 'dark-factory'

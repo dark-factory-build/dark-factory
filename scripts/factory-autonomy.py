@@ -78,6 +78,10 @@ def refresh_controller(checkout, release_config, receipt):
 def tick(config_path, config, release_only=False, skip_intake=False, environment=None, review_arguments=(), controller_lock_fd=None):
     scripts = Path(__file__).resolve().parent
     calls = []
+    # The existing release lane also observes production. It can see a reviewer
+    # while the normal lane waits for that process; there is no second poller.
+    if release_only and config.get('repository') and config.get('project_id'):
+        calls.append([sys.executable, str(scripts / 'factory-production.py'), str(config_path), '--record'])
     if not release_only and not skip_intake:
         calls.append([sys.executable, str(scripts / 'factory-intake.py'), str(config_path), '--once'])
     releases = config.get('release_configs', []) if release_only else []

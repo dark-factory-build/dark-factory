@@ -22,6 +22,8 @@ type ProductionPullRequest struct {
 	Base       string           `json:"base"`
 	State      string           `json:"state"`
 	Merge      string           `json:"merge,omitempty"`
+	MergeQueue string           `json:"merge_queue,omitempty"`
+	MergedAt   string           `json:"merged_at,omitempty"`
 	Review     ProductionReview `json:"review"`
 	NextAction string           `json:"next_action,omitempty"`
 }

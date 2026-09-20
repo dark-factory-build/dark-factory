@@ -65,7 +65,7 @@ func validProjectContent(kind MessageType, body any) error {
 
 func validProjectOperation(operation string) bool {
 	switch operation {
-	case "list", "read", "body", "create", "revise", "deprecate", "evidence", "evidence_list", "attach", "attachments", "outcome_list", "outcome_read", "outcome_write", "mission_create", "mission_tasks":
+	case "list", "read", "body", "create", "revise", "deprecate", "evidence", "evidence_list", "attach", "attachments", "outcome_list", "outcome_read", "outcome_write", "mission_create", "mission_tasks", "production", "task_read":
 		return true
 	default:
 		return false

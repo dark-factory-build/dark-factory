@@ -53,7 +53,7 @@ run_packaged_smoke() {
     done
     for controller_asset in \
         cold-review.sh factory-autonomy.py factory-delivery.py factory-intake.py \
-        factory-publication.py factory-release.py factory-review-intake.py \
+        factory-production.py factory-publication.py factory-release.py factory-review-intake.py \
         go-gate-environment.sh verify-adversarial-review.sh supervision.md
     do
         [ -f "$smoke_bin/libexec/dark-factory/$controller_asset" ] \
@@ -276,6 +276,7 @@ libexec/dark-factory/cold-review.sh
 libexec/dark-factory/factory-autonomy.py
 libexec/dark-factory/factory-delivery.py
 libexec/dark-factory/factory-intake.py
+libexec/dark-factory/factory-production.py
 libexec/dark-factory/factory-publication.py
 libexec/dark-factory/factory-release.py
 libexec/dark-factory/factory-review-intake.py

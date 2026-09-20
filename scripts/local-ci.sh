@@ -54,6 +54,7 @@ if [ "$local_ci_mode" = full ]; then
     python3 ./scripts/test-factory-release.py
     python3 ./scripts/test-factory-autonomy.py
     python3 ./scripts/test-factory-delivery.py
+    python3 ./scripts/test-factory-production.py
     python3 ./scripts/test-factory-review-intake.py
     ./scripts/test-github-step-summary.sh
     ./scripts/test-verify-adversarial-review.sh
