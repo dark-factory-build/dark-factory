@@ -341,7 +341,7 @@ def range_sources(config, previous, target, included_pull_requests=None):
                 raise ReleaseError("deployment pull request changed or is malformed")
             processed.add(number)
             if included_pull_requests is not None:
-                included_pull_requests.append({"pr": number, "merge_sha": merge})
+                included_pull_requests.append({"pr": number, "merge_sha": merge, "repository": repo})
             footer = release_source_footer(detail["body"])
             if footer is None:
                 continue
@@ -691,6 +691,9 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
         prior_tip = journal.get("live_tip")
         previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
         included_pull_requests = []
+        if (isinstance(entry, dict) and entry.get("sha") == expected
+                and isinstance(entry.get("included_pull_requests"), list)):
+            included_pull_requests = list(entry["included_pull_requests"])
         if baseline_current:
             sources, delivery_mode = [], "baseline_current"
         elif previous is not None and previous == expected:
