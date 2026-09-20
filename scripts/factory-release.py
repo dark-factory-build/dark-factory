@@ -581,10 +581,16 @@ def once(config, number, retry=False):
             raise ReleaseError(entry["error"])
         previous = value["sha"]
         included_pull_requests = []
+        if isinstance(entry, dict) and entry.get("sha") == sha:
+            prior_included = entry.get("included_pull_requests")
+            if isinstance(prior_included, list):
+                included_pull_requests = list(prior_included)
         if prior_tip is None:
             record_live_tip(journal, value)
         if previous == sha:
-            sources, delivery_mode = [], "baseline_current" if prior_tip is None else "unchanged"
+            prior_sources = entry.get("delivery_sources") if isinstance(entry, dict) else None
+            sources = list(prior_sources) if isinstance(prior_sources, list) else []
+            delivery_mode = "baseline_current" if prior_tip is None else "unchanged"
         else:
             try:
                 sources, delivery_mode = range_sources(config, previous, sha, included_pull_requests)
