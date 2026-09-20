@@ -543,6 +543,8 @@ for (const [view, art] of Object.entries(views)) {
   });
   for (const [outfitIndex, outfit] of art.outfits.entries()) for (const [colourIndex, colour] of clothesColours.entries()) for (const pose of strides) add(`person.outfit.${outfitIndex}.${colourIndex}.${view}.${pose}`, pixels => {
     draw(pixels, tint(outfit, colour.colour), 4, 6);
+    // As from the front, the back of a pair of overalls keeps the split between its legs.
+    if (outfitIndex === 1 && view === 'back') draw(pixels, [legs[0].replaceAll('m', colour.colour)], 4, 12);
     for (let [part, x, y] of art.arms(pose)) {
       if (outfitIndex === 2) part = part.map((row, dy) => y + dy === 9 ? row : row.replaceAll('u', 'a'));
       part.forEach((row, dy) => [...row].forEach((key, dx) => { if (key === 'a' || key === 'b') pixels[y + dy][x + dx] = '.'; }));
@@ -571,8 +573,8 @@ for (const [shoeIndex, colour] of shoes.entries()) for (const [pose, part] of Ob
 for (const [toolIndex, tool] of tools.entries()) {
   const wide = tool.part[0]?.length ?? 0;
   for (const [grip, lift] of [['low', 0], ['high', 1]]) add(`person.tool.${toolIndex}.back.${grip}`, pixels => draw(pixels, mirror(tool.part), 16 - tool.x - wide, tool.y - lift));
-  add(`person.tool.${toolIndex}.side.walk.0`, pixels => draw(pixels, tool.part, 11, tool.y));
-  add(`person.tool.${toolIndex}.side.walk.1`, pixels => draw(pixels, mirror(tool.part), 4 - wide, tool.y));
+  add(`person.tool.${toolIndex}.side.walk.0`, pixels => draw(pixels, tool.part, 10, tool.y));
+  add(`person.tool.${toolIndex}.side.walk.1`, pixels => draw(pixels, mirror(tool.part), 5 - wide, tool.y));
 }
 // Compare finished portraits: transparent layer differences can disappear in composition.
 const legPose = pose => pose.startsWith('walk') ? pose : 'stand';
@@ -659,7 +661,16 @@ for (const [view, art] of Object.entries(views)) {
   for (const pose of strides) for (const [group, options] of Object.entries(optionGroups)) {
     if (view === 'back' && group === 'face') continue; // A face cannot be seen from behind.
     assert.equal(new Set(options.map((_, index) => JSON.stringify(turned(view, pose, { [group]: index })))).size, options.length, `Indistinguishable ${group}: ${view}/${pose}`);
-    if (group === 'tool') continue;
+    if (group === 'tool') {
+      // The tool stays in the hand that carries it: the first arm drawn in both views.
+      const [part, x, y] = art.arms(pose)[0];
+      for (const [option] of options.entries()) if (option > 0) {
+        const tool = sprites.get(view === 'back' ? `person.tool.${option}.back.${pose === 'walk.0' ? 'high' : 'low'}` : `person.tool.${option}.side.${pose}`);
+        const held = part.some((row, dy) => [...row].some((key, dx) => key === 'a' && [-1, 0, 1].some(ny => [-1, 0, 1].some(nx => (tool[y + dy + ny]?.[x + dx + nx] ?? '.') !== '.'))));
+        assert(held, `Tool floats free of the hand: ${view}/${pose} tool=${option}`);
+      }
+      continue;
+    }
     for (const [option] of options.entries()) {
       const pixels = turned(view, pose, { [group]: option }), tone = skinTones[group === 'skin' ? option : 1];
       for (const [part, x, y] of art.arms(pose)) part.forEach((row, dy) => [...row].forEach((key, dx) => {
@@ -668,6 +679,7 @@ for (const [view, art] of Object.entries(views)) {
     }
   }
 }
+for (const pose of strides) assert.equal(turned('back', pose, { outfit: 1 })[12].slice(7, 9).join(''), 'oo', `Overalls lost the split between their legs from behind: ${pose}`);
 // Every pose must read as a different body, or the animation is invisible.
 assert.equal(new Set(poses.map(pose => JSON.stringify(portrait(pose)))).size, poses.length, 'Indistinguishable poses');
 function tile(name, rows) {
