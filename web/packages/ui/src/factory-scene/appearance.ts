@@ -1,6 +1,6 @@
 import type { SpriteAppearance } from "@dark-factory/client";
 import { spriteOptions } from "./sprites/sprites.generated.js";
-import type { SceneWorker } from "./scene.js";
+import type { BreakRoomErrand, SceneWorker } from "./scene.js";
 import type { WorkerMotion } from "./movement.js";
 
 export { spriteOptions };
@@ -69,11 +69,21 @@ export function restingItem(worker: SceneWorker, at?: number): Readonly<{ item: 
 }
 
 /**
+ * Nobody sits for ever: a reader is drawn to the bookshelf, a drinker or snacker
+ * to the coffee station. Whoever already has their reading with them, or is
+ * asking for you, stays where they are.
+ */
+export function breakRoomHabit(worker: SceneWorker): BreakRoomErrand | undefined {
+  const { item } = restingItem(worker);
+  return worker.activity === "needs-you" || item === "clipboard" || item === "tablet" ? undefined : item === "book" ? "shelf" : "coffee";
+}
+
+/**
  * The aligned atlas layers for one worker. Status and motion choose a pose; the
  * person's own layers ride on it unchanged. `motion.at` is the worker's own
  * running clock: absent, every pose rests on its first frame.
  */
-export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: "resting" | "planning"): readonly string[] {
+export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: "resting" | "planning", errand?: BreakRoomErrand): readonly string[] {
   const appearance = resolvedAppearance(worker);
   const role = worker.role === "orchestrator" ? "overseer" : "worker";
   const provider = worker.provider === "claude_code" || worker.provider === "codex" ? worker.provider : "shell";
@@ -90,6 +100,8 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const pose = walking ? `walk.${motion.frame}`
     : wielding ? motion.frame === 1 ? "walk.1" : "idle"
     : motion?.action === "interacting" ? `type.${motion.frame}`
+    // Standing at the shelf with a book, or at the coffee station with a cup.
+    : errand !== undefined ? "hold"
     : worker.activity === "needs-you" ? `wave.${at === undefined ? 0 : Math.floor(at / 400) % 2}`
     : seat === "planning" ? `type.${scribble}`
     : seat === "resting" ? rest.where === "mouth" ? "sip" : rest.where === "chest" ? "hold" : "idle"
@@ -125,7 +137,8 @@ export function workerFrames(worker: SceneWorker, motion?: WorkerMotion, seat?: 
   const step = walking ? pose : "stand";
   const blinking = at !== undefined && at % (3000 + hash(worker.id) % 4000) < 200;
   const glasses = spriteOptions.face[appearance.face]?.name === "glasses";
-  const held = pose === "sip" || pose === "hold" ? [`person.held.${rest.item}.${rest.where}`]
+  const held = errand !== undefined && pose === "hold" ? [`person.held.${errand === "shelf" ? "book" : "cup"}.chest`]
+    : pose === "sip" || pose === "hold" ? [`person.held.${rest.item}.${rest.where}`]
     : seat === "planning" && pose.startsWith("type") ? [`person.held.pencil.${scribble}`]
     : pose.startsWith("type") ? ["person.held.keyboard"]
     : seated ? [] : [`person.tool.${appearance.tool}.${pose === "walk.1" ? "high" : "low"}`];

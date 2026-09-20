@@ -68,16 +68,20 @@ export type SceneWorkerPlacement = Readonly<{
   id: string;
   area: "room" | "resting" | "staging" | "outside" | "overflow";
   roomId?: string;
+  /** A resting worker who has got up for a while stands here instead of sitting. */
+  errand?: BreakRoomErrand;
   x: number;
   y: number;
 }>;
+
+export type BreakRoomErrand = "shelf" | "coffee";
 
 // Staggered workshop bays share walls; dimensions never depend on live work.
 const CORRIDOR = 32;
 export const PADDING = 16;
 export const ROOM_LEFT = PADDING + CORRIDOR;
 const FLOOR_TOP = 48;
-const WORKER_GAP = 40;
+export const WORKER_GAP = 40;
 export const WORKER_SIZE = 20;
 
 /** Ordering for the floor: byte order over served fields, never a locale. */
@@ -156,7 +160,8 @@ export function placeWorkers(layout: SceneLayout, workers: readonly SceneWorker[
 /** Two compact seating sections share one bay, growing down only when crowded. */
 export function commonSeating(layout: SceneLayout, restingCount: number, planningCount: number) {
   const available = layout.width - ROOM_LEFT - PADDING;
-  const capacity = (available - 16) / 2;
+  // The break-room furniture keeps whatever two seats a section can spare it.
+  const capacity = (available - 16 - nookWidth(layout)) / 2;
   const columns = Math.max(2, Math.min(Math.floor((capacity - 48) / WORKER_GAP) + 1, Math.max(restingCount, planningCount)));
   const width = (columns - 1) * WORKER_GAP + 48;
   const seats = (count: number, left: number, top: number) => Array.from({ length: Math.max(2, count) }, (_, slot) => ({
@@ -169,6 +174,51 @@ export function commonSeating(layout: SceneLayout, restingCount: number, plannin
   return { resting, planning };
 }
 
+
+// Each piece of break-room furniture wants this much of the back wall.
+const PIECE = 30;
+const nookWidth = (layout: SceneLayout) => Math.max(0, Math.min(2 * PIECE + 4, layout.width - ROOM_LEFT - PADDING - (2 * 88 + 16)));
+
+/**
+ * Furniture along the break room's back wall, right of the last seats, with one
+ * standing place in front of each piece: a bookshelf where there is room for
+ * one thing, a coffee station beside it where there is room for two. On a floor
+ * with room for neither, workers simply stay seated.
+ */
+export function breakRoomNook(layout: SceneLayout, restingCount: number, planningCount: number) {
+  const width = nookWidth(layout), pieces = Math.floor(width / PIECE);
+  if (pieces === 0) return undefined;
+  const seating = commonSeating(layout, restingCount, planningCount);
+  const left = Math.max(...[...seating.resting, ...seating.planning].map((seat) => seat.x)) + 24;
+  return { width, furniture: (["shelf", "coffee"] as const).slice(0, pieces).map((errand, index) => ({ errand, x: left + 5 + index * PIECE, y: layout.restingTop - 38, stand: { x: left + 15 + index * PIECE, y: layout.restingTop - 8 } })) };
+}
+
+// Each piece of furniture is visited in turns: free for the first part of a turn, then one visitor.
+const TURN = 24000, FREE = 8000;
+
+/**
+ * Turns at the furniture are fair, and a visit ends only when its turn does or its visitor
+ * stops resting — given the placements it last returned as `before`: for each piece, each
+ * turn belongs to one of the seated workers whose habit it suits, drawn afresh
+ * every turn, and to nobody when there are few of them, so a lone reader is not
+ * forever on their feet. The pieces are out of step, and every turn starts free,
+ * so a floor that has just loaded stays seated for a while.
+ */
+export function placeErrands(placements: readonly SceneWorkerPlacement[], nook: ReturnType<typeof breakRoomNook>, habitOf: (id: string) => BreakRoomErrand | undefined, at: number, before: readonly SceneWorkerPlacement[] = []): readonly SceneWorkerPlacement[] {
+  if (nook === undefined) return placements;
+  const visiting = new Map<string, (typeof nook.furniture)[number]>();
+  for (const [index, piece] of nook.furniture.entries()) {
+    // Later pieces run behind the first, so every piece's first turn begins free.
+    const clock = at - index * TURN / 2, turn = Math.floor(clock / TURN);
+    const suited = placements.filter((placement) => placement.area === "resting" && habitOf(placement.id) === piece.errand);
+    // Whoever has the piece keeps it for as long as they rest and the turn runs, whoever else
+    // sits down or leaves meanwhile. (Every turn starts free, so nobody is carried into the next.)
+    const holder = before.find((placement) => placement.errand === piece.errand)?.id;
+    const visitor = clock < 0 || clock - turn * TURN < FREE ? undefined : suited.find((placement) => placement.id === holder) ?? suited[(Math.imul(turn + 1, 2654435761) >>> 0) % Math.max(suited.length, 4)];
+    if (visitor !== undefined) visiting.set(visitor.id, piece);
+  }
+  return placements.map((placement) => { const piece = visiting.get(placement.id); return piece === undefined ? placement : { ...placement, errand: piece.errand, ...piece.stand }; });
+}
 
 /** Pictured surface slots also determine standing destinations; no parallel workstation map. */
 export function workPositions(room: SceneRoomLayout): readonly ScenePoint[] {

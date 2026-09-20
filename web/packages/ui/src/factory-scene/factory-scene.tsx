@@ -8,6 +8,8 @@ import {
   commonSeating,
   WORKER_SIZE,
   placeWorkers,
+  placeErrands,
+  breakRoomNook,
   inventoryLabels,
   type RoomContent,
   type SceneRoomLayout,
@@ -15,7 +17,7 @@ import {
   type SceneWorker,
 } from "./scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
-import { restingItem, workerFrames, workerPhase } from "./appearance.js";
+import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -105,14 +107,8 @@ function motionPoint(motion: MotionState, at: number) {
   return { point: motion.placement, walking: false };
 }
 
-/** One browser clock; source state only ever supplies the next local destination. */
-function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, active: ReadonlySet<string>) {
-  const motions = useRef(new Map<string, MotionState>());
-  const priorTopology = useRef<string | undefined>(undefined);
-  const priorConnected = useRef<boolean | undefined>(undefined);
-  const [clock, setClock] = useState(0);
+function useReducedMotion() {
   const [reduced, setReduced] = useState(false);
-
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
     const query = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -121,6 +117,16 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
     query.addEventListener("change", update);
     return () => query.removeEventListener("change", update);
   }, []);
+  return reduced;
+}
+
+/** One browser clock; source state only ever supplies the next local destination. */
+function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>) {
+  const motions = useRef(new Map<string, MotionState>());
+  const priorTopology = useRef<string | undefined>(undefined);
+  const priorConnected = useRef<boolean | undefined>(undefined);
+  const motionsFloor = useRef(topologyDigest);
+  const [clock, setClock] = useState(0);
 
   useEffect(() => {
     const at = now();
@@ -149,6 +155,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
         : { placement, point: current, route, startedAt: at });
     }
     motions.current = next;
+    motionsFloor.current = topologyDigest;
     setClock(at);
   }, [connected, layout, placements, reduced, topologyDigest]);
 
@@ -175,23 +182,28 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
     return () => document.removeEventListener("visibilitychange", reconcile);
   }, []);
 
-  const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion }>>();
+  // Remembered motion lags a render behind what it is told. Where nothing may move, or the
+  // floor it was worked out on has been replaced, everyone is simply drawn where they belong.
+  const moving = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
+  const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion; placement: ReturnType<typeof placeWorkers>[number] }>>();
   for (const placement of placements) {
-    const state = motions.current.get(placement.id);
+    const state = moving && motionsFloor.current === topologyDigest ? motions.current.get(placement.id) : undefined;
     const current = state === undefined ? { point: placement, walking: false } : motionPoint(state, clock);
-    const at = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible") ? clock + workerPhase(placement.id) : undefined;
+    const at = moving ? clock + workerPhase(placement.id) : undefined;
     output.set(placement.id, {
+      // The placement this motion is actually on: pose and position are always of one moment.
+      placement: state?.placement ?? placement,
       ...current.point,
       motion: current.walking
         ? { action: "walking", direction: current.direction!, frame: Math.floor((at ?? clock) / 150) % 2 as 0 | 1, at }
         : { action: active.has(placement.id) ? "interacting" : "still", frame: at === undefined ? 0 : Math.floor(at / (380 + workerPhase(placement.id) % 140)) % 2 as 0 | 1, at },
     });
   }
-  return output;
+  return { positions: output, pulse: moving ? clock : undefined };
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
@@ -200,16 +212,51 @@ function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, co
   animate: boolean;
   /** Drawn over the workers: tables stand in front of whoever sits at them. */
   furniture: ReactNode;
+  /** Whether the break-room furniture is there to be visited. */
+  errands: boolean;
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
   const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, placements, layout]);
-  const positions = useSceneMotion(layout, placements, geometryKey, connected && animate, active);
+  // The break room keeps no clock of its own: every couple of seconds of the
+  // floor's pulse it asks who has got up. Where motion is stilled the pulse is
+  // absent, and everyone stays seated.
+  // The count belongs to the floor it was taken on: one left over from another floor is ignored at once.
+  const [errandBeat, setErrandBeat] = useState<Readonly<{ floor: string; clock: number }>>();
+  // It counts only while this floor is moving, judged in the render that uses it: the moment
+  // motion is stilled by any means, or another floor is shown, everyone is back in their seat.
+  const reduced = useReducedMotion();
+  const moving = connected && animate && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
+  const errandClock = moving && errandBeat?.floor === geometryKey ? errandBeat.clock : undefined;
+  // Who holds which piece, so that a visit outlasts changes among the others resting.
+  const errandsBefore = useRef<ReturnType<typeof placeWorkers>>([]);
+  const seatedPlacements = placements;
+  placements = useMemo(() => {
+    const nook = breakRoomNook(layout, seatedPlacements.filter((placement) => placement.area === "resting").length, seatedPlacements.filter((placement) => placement.area !== "room" && placement.area !== "resting").length);
+    // With the scenery off there is no furniture to walk to.
+    if (errandClock === undefined || !errands) return errandsBefore.current = seatedPlacements;
+    const byId = new Map(workers.map((worker) => [worker.id, worker]));
+    return errandsBefore.current = placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
+  }, [seatedPlacements, errandClock, errands, layout, workers]);
+  const { positions, pulse } = useSceneMotion(layout, placements, geometryKey, connected && animate, reduced, active);
+  // Turns run on the time this floor has actually been moving: a hidden tab, stilled
+  // motion or a long gap adds nothing, and a different floor starts again from seated.
+  const movingTime = useRef({ floor: geometryKey, total: 0, last: undefined as number | undefined });
+  useEffect(() => {
+    const time = movingTime.current;
+    if (time.floor !== geometryKey) Object.assign(time, { floor: geometryKey, total: 0, last: undefined });
+    if (pulse !== undefined && time.last !== undefined && pulse - time.last < 1000) time.total += pulse - time.last;
+    time.last = pulse;
+    const clock = Math.floor(time.total / 2000) * 2000;
+    setErrandBeat((beat) => pulse === undefined ? undefined : beat?.floor === geometryKey && beat.clock === clock ? beat : { floor: geometryKey, clock });
+  }, [pulse, geometryKey]);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
-  return <>{placements.map((placement) => {
-        const worker = workerById.get(placement.id);
+  return <>{placements.map((told) => {
+        const worker = workerById.get(told.id);
         if (worker === undefined) return null;
-        const position = positions.get(placement.id) ?? { ...placement, motion: { action: "still", frame: 0 } as WorkerMotion };
+        const position = positions.get(told.id) ?? { ...told, placement: told, motion: { action: "still", frame: 0 } as WorkerMotion };
+        // Drawn as where their motion has them, which is a render behind where they have just been told to go.
+        const placement = position.placement;
         const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
         const picturedSurface = layout.rooms.find((candidate) => candidate.id === placement.roomId)?.contents.some((item) => item.workSurface);
         const location = worker.location === "working"
@@ -219,8 +266,8 @@ function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, co
           : worker.paused ? "paused in resting area" : "ready in resting area";
 
         const attention = tasks.flatMap((order) => order.agentId === worker.id ? order.humanRequestIds : []);
-        const seated = placement.area !== "room" && position.motion.action !== "walking";
-        const frames = workerFrames(worker, position.motion, placement.area === "room" ? undefined : placement.area === "resting" ? "resting" : "planning");
+        const seated = placement.area !== "room" && placement.errand === undefined && position.motion.action !== "walking";
+        const frames = workerFrames(worker, position.motion, placement.area === "room" || placement.errand !== undefined ? undefined : placement.area === "resting" ? "resting" : "planning", placement.errand);
         // A step lifts the whole body a pixel.
         const bob = position.motion.action === "walking" && position.motion.frame === 1 ? -1 : 0;
         // Only a profile facing east is drawn; walking west is its mirror image.
@@ -235,7 +282,7 @@ function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, co
             transform={`translate(${position.x} ${position.y})`}
             className={worker.id === selectedWorkerId ? "dfFactoryScene__worker dfFactoryScene__worker--selected" : "dfFactoryScene__worker"}
           >
-            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.area === "resting" ? worker.paused ? "Paused · taking a break" : "Taking a break" : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
+            <g role="img" className="dfFactoryScene__target" data-tooltip={`${worker.name} · ${worker.activity}\n${placement.area === "room" ? `Working near ${worker.locationLabel ?? room?.label ?? "observed changes"}` : placement.errand === "shelf" ? "Taking a break · at the bookshelf" : placement.errand === "coffee" ? "Taking a break · at the coffee station" : placement.area === "resting" ? worker.paused ? "Paused · taking a break" : "Taking a break" : worker.location === "unobserved" ? "Planning · location not yet observed" : "Planning · work outside this room"}`} aria-label={`${worker.name}, ${worker.role}, ${worker.activity}, ${location}`} {...sceneAction(onSelectWorker === undefined ? undefined : () => onSelectWorker(worker.id))}>
                 <rect className="dfFactoryScene__focus" x={-12} y={-12} width="24" height="24" rx="3" fill="transparent" />
               {worker.id === selectedWorkerId ? <circle className="dfFactoryScene__selection" cx="0" cy="0" r="12" /> : null}
               <g data-seated={seated ? placement.area === "resting" ? "coffee" : "planning" : undefined} data-active-pose={position.motion.action === "interacting" ? position.motion.frame : undefined}><g transform={`scale(${WORKER_SIZE / FRAME})${bob === 0 ? "" : ` translate(0 ${bob})`}${facingWest ? " scale(-1 1)" : ""}`}>{frames.map((frame) => <Frame key={frame} name={frame} x={-8} y={-8} />)}</g>
@@ -249,9 +296,9 @@ function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, co
       })}
       {furniture}
       {/* On the table in front of each of them: a planner's lit lamp, or the one thing a resting worker has until it is in their hand. */}
-      {placements.map((placement) => {
-        const worker = workerById.get(placement.id), position = positions.get(placement.id);
-        if (worker === undefined || placement.area === "room" || position?.motion.action === "walking") return null;
+      {placements.map((told) => {
+        const worker = workerById.get(told.id), position = positions.get(told.id), placement = position?.placement ?? told;
+        if (worker === undefined || placement.area === "room" || placement.errand !== undefined || position?.motion.action === "walking") return null;
         if (placement.area !== "resting") return !connected ? null : <g key={placement.id} data-planning-light="" aria-hidden="true" pointerEvents="none" transform={`translate(${position?.x ?? placement.x} ${(position?.y ?? placement.y) + TABLE_DROP})`}><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>;
         const rest = restingItem(worker, worker.activity === "needs-you" ? undefined : position?.motion.at);
         return rest.where !== "table" ? null : <g key={placement.id} aria-hidden="true" pointerEvents="none" data-table-item={rest.item} transform={`translate(${position?.x ?? placement.x} ${position?.y ?? placement.y}) scale(${WORKER_SIZE / FRAME})`}>
@@ -296,6 +343,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   const seats = [...seating.resting, ...seating.planning];
   const commonBottom = Math.max(...seats.map(({ y }) => y)) + 24;
   const commonWidth = Math.max(...seats.map(({ x }) => x)) + 24 - ROOM_LEFT;
+  const nook = breakRoomNook(layout, resting.length, planning.length);
   const boardTop = Math.max(layout.height, commonBottom, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneHeight = boardTop + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
@@ -403,7 +451,11 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
         {cabling.routes.filter((wire) => linkedFrom === wire.from || linkedFrom === wire.to).map((wire) =>
           <path key={`${wire.from} ${wire.to}`} data-wire={`${wire.from} ${wire.to}`} d={wire.d} stroke="#e5c58b" strokeWidth="1.5" opacity=".9" />)}
       </g>}
-      <Area width={commonWidth} top={layout.restingTop - 40} bottom={commonBottom} />
+      <Area width={commonWidth + (nook?.width ?? 0)} top={layout.restingTop - 40} bottom={commonBottom} />
+      {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
+      {appearance.scenery === "off" ? null : nook?.furniture.map((piece) => <g key={piece.errand} aria-hidden="true" data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
+        <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
+      </g>)}
       {[
         { label: "Break room", seats: seating.resting, planning: false, occupied: resting.length },
         { label: "Planning", seats: seating.planning, planning: true, occupied: planning.length },
@@ -420,7 +472,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers errands={appearance.scenery !== "off"} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
       {/* Waiting work, as the tray it would be on a real desk. Scenery, like
           everything else standing on these tables: the pile says how the queue
           is doing, the Tasks panel is where it is read and changed. */}

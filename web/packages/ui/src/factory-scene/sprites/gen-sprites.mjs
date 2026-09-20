@@ -774,6 +774,43 @@ tile('tile.wall.door', grid(`
   oooooooooooooooo
 `));
 const worldObjects = {
+  // Break-room furniture stands against the back wall; a worker stands in front of it.
+  'prop.bookshelf': grid(`
+    oooooooooooooooo
+    owwwwwwwwwwwwwwo
+    owcsyctpscywspwo
+    owcsyctpscywspwo
+    owwwwwwwwwwwwwwo
+    owtypscwyctspcwo
+    owtypscwyctspcwo
+    owwwwwwwwwwwwwwo
+    owscpytcspwcytwo
+    owscpytcspwcytwo
+    owwwwwwwwwwwwwwo
+    owpp.cstyp.scpwo
+    owppocstypoccpwo
+    owwwwwwwwwwwwwwo
+    owo..........owo
+    ooo..........ooo
+  `),
+  'prop.coffeestation': grid(`
+    ................
+    ....oooooooo....
+    ....ommmmmmo....
+    ....omrkmmmo....
+    ....ommmmmmo....
+    ....omdddmmo....
+    ....omdpdmmo..pp
+    ....omdddmmo.opp
+    oooooooooooooooo
+    owwwwwwwwwwwwwwo
+    owwwwwwwwwwwwwwo
+    oooooooooooooooo
+    ow............wo
+    ow............wo
+    ow............wo
+    oo............oo
+  `),
   'prop.workbench': grid(`
     ................
     ....oooooooo....

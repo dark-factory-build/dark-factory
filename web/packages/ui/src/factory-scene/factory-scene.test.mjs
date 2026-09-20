@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { inflateSync } from "node:zlib";
 import { join } from "node:path";
 import test from "node:test";
-import { createElement } from "react";
+import { Profiler, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
-import { PADDING, WORKER_SIZE, commonSeating, layoutScene, placeWorkers } from "../../dist/src/factory-scene/scene.js";
-import { resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
+import { PADDING, ROOM_LEFT, WORKER_SIZE, breakRoomNook, commonSeating, layoutScene, placeErrands, placeWorkers } from "../../dist/src/factory-scene/scene.js";
+import { breakRoomHabit, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
@@ -634,6 +634,218 @@ test("tables stand in front of whoever sits at them, with each resting worker's 
   assert.ok(onTables > 0 && onTables < 10, "the sample has things both in hand and on the table");
   assert.match(markup, /data-worker-id="asking"[\s\S]*?wave\./, "someone asking for you waves; their thing waits on the table");
   assert.equal((markup.match(/data-planning-light=""/g) ?? []).length, 1);
+});
+
+test("resting workers take fair, uninterrupted turns at the break-room furniture and walk there by the aisles", () => {
+  const person = (id, extra) => ({ id, name: id, role: "worker", provider: "codex", activity: "idle", location: "resting", ...extra });
+  const carrying = (id, name) => person(id, { appearance: { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: spriteOptions.tool.findIndex((tool) => tool.name === name), headwear: 0 } });
+  const crowd = Array.from({ length: 12 }, (_, index) => person(`habit-${String(index).padStart(2, "0")}`));
+  // A reader is drawn to the shelf, a drinker or snacker to the coffee; someone asking for you, or with their reading in hand, to neither.
+  for (const worker of crowd) assert.equal(breakRoomHabit(worker), restingItem(worker).item === "book" ? "shelf" : "coffee");
+  assert.deepEqual([person("asking", { activity: "needs-you" }), carrying("reader", "tablet"), carrying("checker", "clipboard")].map(breakRoomHabit), [undefined, undefined, undefined]);
+  assert.deepEqual([...new Set(crowd.map(breakRoomHabit))].sort(), ["coffee", "shelf"]);
+
+  // The furniture stands inside the room, clear of every seat, on a wide floor and on the narrowest.
+  const wide = layoutScene({ digest: "wide", nodes: Array.from({ length: 16 }, (_, index) => ({ ...topology.nodes[0], id: `room-${index}`, path: `room-${index}` })) });
+  const nook = breakRoomNook(wide, 12, 1);
+  assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee"]);
+  const narrow = layoutScene({ digest: "narrow", nodes: [topology.nodes[0]] }), narrowNook = breakRoomNook(narrow, 40, 40);
+  assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf"]);
+  for (const [layout, pieces, counts] of [[wide, nook.furniture, [12, 1]], [narrow, narrowNook.furniture, [40, 40]]]) for (const piece of pieces) {
+    assert.ok(piece.x + WORKER_SIZE <= layout.width - PADDING && piece.stand.x + WORKER_SIZE / 2 <= layout.width - PADDING);
+    const seating = commonSeating(layout, ...counts);
+    for (const seat of [...seating.resting, ...seating.planning]) assert.ok(Math.abs(seat.x - piece.stand.x) >= WORKER_SIZE, "nobody stands on a seat");
+  }
+
+  // Half an hour of turns: one visitor a piece at most, nobody but a suited, seated worker,
+  // every visit runs its whole turn, every turn starts free, and everyone gets a fair share.
+  const placements = placeWorkers(wide, [...crowd, person("planner", { location: "unobserved" }), person("asking", { activity: "needs-you" })]);
+  const habits = new Map([...crowd, person("asking", { activity: "needs-you" })].map((worker) => [worker.id, breakRoomHabit(worker)]));
+  const visits = new Map(), running = new Map();
+  let cutShort = 0;
+  let before = [];
+  for (let at = 0; at < 1800000; at += 2000) {
+    before = placeErrands(placements, nook, (id) => habits.get(id), at, before);
+    const away = before.filter((placement) => placement.errand !== undefined);
+    assert.equal(new Set(away.map((placement) => placement.errand)).size, away.length, "one visitor a piece");
+    for (const placement of away) { assert.equal(habits.get(placement.id), placement.errand); assert.notEqual(placement.id, "planner"); }
+    for (const piece of nook.furniture) {
+      const now = away.find((placement) => placement.errand === piece.errand)?.id, before = running.get(piece.errand);
+      if (before?.id !== undefined && before.id !== now && at - before.since < 15000) cutShort++;
+      if (before?.id !== now) { running.set(piece.errand, { id: now, since: at }); if (now !== undefined) visits.set(now, (visits.get(now) ?? 0) + 1); }
+    }
+  }
+  assert.equal(cutShort, 0, "no visit is cut short");
+  assert.equal(placeErrands(placements, nook, (id) => habits.get(id), 0).some((placement) => placement.errand !== undefined), false, "a floor that has just loaded stays seated");
+  for (const piece of nook.furniture) {
+    const shares = crowd.filter((worker) => habits.get(worker.id) === piece.errand).map((worker) => visits.get(worker.id) ?? 0);
+    assert.ok(Math.min(...shares) > 0 && Math.max(...shares) <= 4 * Math.min(...shares), `${piece.errand} turns are shared: ${shares}`);
+  }
+  assert.equal(visits.has("asking"), false);
+  // A visit outlasts comings and goings among the others: someone suited sitting down ahead of
+  // the visitor in the order, or another leaving, mid-turn changes nothing; it ends with the turn,
+  // or when the visitor themselves stops resting.
+  let mid = 0, held = [];
+  for (let at = 0, last = []; at < 1800000 && mid === 0; at += 2000) { last = placeErrands(placements, nook, (id) => habits.get(id), at, last); if (last.filter((placement) => placement.errand !== undefined).length === nook.furniture.length) { mid = at; held = last; } }
+  const holders = held.filter((placement) => placement.errand !== undefined);
+  assert.equal(holders.length, nook.furniture.length, "a moment with every piece occupied");
+  const newcomer = person("aaa-first-in-order"), joined = placeWorkers(wide, [...crowd, newcomer, person("planner", { location: "unobserved" }), person("asking", { activity: "needs-you" })]);
+  for (const suits of ["shelf", "coffee"]) {
+    const habit = (id) => id === newcomer.id ? suits : habits.get(id);
+    assert.deepEqual(placeErrands(joined, nook, habit, mid + 2000, held).filter((placement) => placement.errand !== undefined).map(({ id, errand }) => [id, errand]), holders.map(({ id, errand }) => [id, errand]), `a newcomer suited to the ${suits} takes nobody's place`);
+    assert.notDeepEqual(placeErrands(joined, nook, habit, mid + 2000).filter((placement) => placement.errand !== undefined).map(({ id }) => id), holders.map(({ id }) => id), "the sample does change who would be drawn afresh");
+  }
+  const leaving = new Set(placements.filter((placement) => placement.area === "resting" && !holders.some((holder) => holder.id === placement.id)).slice(0, 3).map((placement) => placement.id));
+  const departed = placements.filter((placement) => !leaving.has(placement.id));
+  assert.deepEqual(placeErrands(departed, nook, (id) => habits.get(id), mid + 2000, held).filter((placement) => placement.errand !== undefined).map(({ id }) => id), holders.map(({ id }) => id), "others leaving takes nobody's place");
+  const withoutVisitor = placements.filter((placement) => placement.id !== holders[0].id);
+  assert.equal(placeErrands(withoutVisitor, nook, (id) => habits.get(id), mid + 2000, held).some((placement) => placement.id === holders[0].id), false);
+  assert.equal(placeErrands(placements, undefined, (id) => habits.get(id), 60000), placements);
+  // A lone reader is not forever on their feet.
+  const lone = placeWorkers(wide, [crowd.find((worker) => breakRoomHabit(worker) === "shelf")]);
+  let loneAway = 0; for (let at = 0; at < 1800000; at += 2000) if (placeErrands(lone, nook, () => "shelf", at)[0].errand !== undefined) loneAway++;
+  assert.ok(loneAway > 0 && loneAway / 900 < .25, `away ${loneAway}/900 beats`);
+
+  // Every walk that starts in the common room keeps to the aisles, the furniture's side and the spine:
+  // square, inside the floor, and never through anybody's seat but its own two ends.
+  const seating = commonSeating(wide, 12, 1), seats = [...seating.resting, ...seating.planning];
+  const stands = nook.furniture.map((piece) => ({ id: "x", area: "resting", errand: piece.errand, ...piece.stand }));
+  const asSeat = (seat) => ({ id: "x", area: "resting", ...seat });
+  const room = placeWorkers(wide, [{ ...workers[0], nodeId: "room-5" }])[0];
+  // Arrivals count too: from a room, and from anywhere on the spine — above the common room,
+  // level with an aisle, level with a row of seats, and between rows — as a retarget mid-walk would be.
+  const spineX = PADDING + 16, onSpine = [wide.restingTop - 120, wide.restingTop - 16, wide.restingTop, wide.restingTop + 24, wide.restingTop + 40].map((y) => ({ x: spineX, y }));
+  const walks = [...seats.flatMap((from) => [...seats.filter((to) => to !== from).map(asSeat), ...stands].map((to) => [from, to])), ...stands.flatMap((from) => [...seats.map(asSeat), room].map((to) => [from, to])), ...seats.map((from) => [from, room]),
+    ...[room, ...onSpine].flatMap((from) => [...seats.map(asSeat), ...stands].map((to) => [from, to]))];
+  assert.ok(seating.resting.some((seat) => seat.y !== seating.resting[0].y), "the sample has more than one row");
+  for (const [from, to] of walks) {
+    const path = routeFromCurrent(wide, from, to);
+    assert.ok(path && path.length > 0, `${JSON.stringify(from)} to ${JSON.stringify(to)}`);
+    assert.deepEqual([path.points.at(-1).x, path.points.at(-1).y], [to.x, to.y]);
+    let previous = from;
+    for (const point of path.points) {
+      assert.ok(point.x === previous.x || point.y === previous.y, "walks are square");
+      assert.ok(point.x >= PADDING && point.x <= wide.width - PADDING);
+      for (const seat of seats) {
+        if (seat.x === from.x && seat.y === from.y || seat.x === to.x && seat.y === to.y) continue;
+        const crosses = Math.min(previous.x, point.x) - WORKER_SIZE / 2 < seat.x && seat.x < Math.max(previous.x, point.x) + WORKER_SIZE / 2 && Math.min(previous.y, point.y) - 6 < seat.y && seat.y < Math.max(previous.y, point.y) + 6;
+        assert.equal(crosses, false, `${JSON.stringify(from)} to ${JSON.stringify(to)} walks through the seat at ${seat.x},${seat.y}`);
+      }
+      previous = point;
+    }
+  }
+
+  // Standing at the furniture is its own pose: on their feet, the thing in hand, no tool.
+  const atShelf = workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "shelf");
+  assert.ok(atShelf.some((name) => name.endsWith(".hold")) && atShelf.includes("person.held.book.chest") && atShelf.some((name) => name.includes("legs.") && name.endsWith(".stand")));
+  assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "coffee").includes("person.held.cup.chest"));
+  assert.ok(atShelf.every((name) => !name.startsWith("person.tool.")));
+  // The floor draws exactly the furniture the nook has, and none with the scenery off.
+  assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(layoutScene(topology), 0, 1).furniture.length);
+  assert.equal((render({ appearance: { scenery: "off", animation: "on" } }).match(/data-break-room=/g) ?? []).length, 0);
+});
+
+test("a floor mounted late still starts seated, then someone gets up, stands at the furniture, and comes back", async () => {
+  const saved = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, window: globalThis.window, document: globalThis.document };
+  let visibility;
+  globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
+  globalThis.document = { visibilityState: "visible", addEventListener: (_event, listener) => { visibility = listener; }, removeEventListener() {} };
+  // The page has been open a while: well past any first free turn counted from zero.
+  let clock = 47000, next = 0;
+  const timers = new Map(), frames = new Map();
+  globalThis.performance = { now: () => clock };
+  globalThis.setTimeout = (callback) => { timers.set(++next, callback); return next; };
+  globalThis.clearTimeout = (id) => timers.delete(id);
+  globalThis.requestAnimationFrame = (callback) => { frames.set(++next, callback); return next; };
+  globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+  const resting = Array.from({ length: 10 }, (_, index) => ({ ...workers[0], id: `habit-${String(index).padStart(2, "0")}`, activity: "idle", location: "resting", nodeId: undefined }));
+  let renderer;
+  try {
+    // Every commit is looked at, not only where things settle: a worker drawn at the
+    // furniture for a single frame after the floor is stilled is still drawn there.
+    const commits = [];
+    // In every commit, pose and place are of one moment: whoever is drawn standing at the
+    // furniture is drawn at the furniture, never for a frame at their seat.
+    const stands = new Set(breakRoomNook(layoutScene(inventoryTopology), 10, 0).furniture.map((piece) => `translate(${piece.stand.x} ${piece.stand.y})`));
+    const misplaced = () => renderer === undefined ? 0 : renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]))
+      .filter((node) => node.parent.props["data-worker-action"] !== "walking" && !stands.has(node.parent.props.transform)).length;
+    const scene = (props) => createElement(Profiler, { id: "floor", onRender: () => commits.push(misplaced()) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...props }));
+    await act(async () => { renderer = create(scene({})); });
+    // Where each sprite is actually drawn, against the seat it belongs in.
+    const outOfSeat = (floor) => {
+      const seatOf = new Map(placeWorkers(layoutScene(floor), resting).map((placement) => [placement.id, `translate(${placement.x} ${placement.y})`]));
+      return renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined).filter((node) => node.props.transform !== seatOf.get(node.props["data-worker-id"])).length;
+    };
+    const pieces = breakRoomNook(layoutScene(inventoryTopology), resting.length, 0).furniture.length;
+    const away = () => renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]));
+    const standingWithIt = () => away().some((node) => node.parent.props["data-worker-action"] === "still" && node.findAllByType("use").some((use) => /held\.(book|cup)\.chest/.test(use.props.href)));
+    const tick = async () => {
+      clock += 100;
+      const due = [...frames.values(), ...timers.values()]; frames.clear(); timers.clear();
+      await act(async () => { for (const callback of due) callback(clock); });
+    };
+    // A second of movement, most of a minute hidden, and the floor is still in its first free turn:
+    // time it was not moving does not count.
+    for (let step = 0; step < 10; step++) await tick();
+    await act(async () => { globalThis.document.visibilityState = "hidden"; visibility(); });
+    clock += 45000;
+    await act(async () => { globalThis.document.visibilityState = "visible"; visibility(); });
+    for (let step = 0; step < 60; step++) { await tick(); assert.equal(away().length, 0, `someone got up ${step / 10}s after the tab came back`); }
+    const mounted = clock - 7000;
+    let firstAway, stood = false, cameBack = false;
+    for (let step = 0; step < 1500 && !cameBack; step++) {
+      await tick();
+      if (away().length > 0) { firstAway ??= clock - mounted; stood ||= standingWithIt(); }
+      else if (stood) cameBack = true;
+      assert.ok(away().length <= pieces, "never more visitors than furniture");
+    }
+    assert.ok(firstAway >= 8000, `nobody gets up during the floor's first free turn, however long the page has been open: ${firstAway}`);
+    assert.ok(stood, "the visitor arrives and stands with the thing in hand");
+    assert.ok(cameBack, "and sits down again");
+    assert.ok(commits.length > 100 && commits.every((count) => count === 0), `someone was drawn standing at the furniture while somewhere else: ${commits.filter((count) => count > 0).length} of ${commits.length} commits`);
+    // Stilled motion seats everyone in the very render that stills it, by whichever means.
+    const seatedNow = (when) => {
+      assert.equal(away().length, 0, `someone is at the furniture ${when}`);
+      for (const worker of renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined)) assert.ok(worker.props["data-worker-action"] !== "walking" && worker.findAll((node) => node.props["data-seated"] === "coffee").length === 1, `${worker.props["data-worker-id"]} is not in their seat ${when}`);
+    };
+    const untilSomeoneStands = async () => { for (let step = 0; step < 3000 && !standingWithIt(); step++) await tick(); assert.ok(standingWithIt()); };
+    for (const [how, still, resume] of [
+      ["with animation turned off", { appearance: { scenery: "subtle", animation: "off" } }, {}],
+      ["on disconnect", { connected: false }, {}],
+    ]) {
+      await untilSomeoneStands();
+      const seen = [];
+      await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => seen.push(away().length + outOfSeat(inventoryTopology)) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...still }))); });
+      assert.ok(seen.length > 0 && seen.every((count) => count === 0), `${how}: someone was drawn at or placed by the furniture in a commit after the floor was stilled: ${seen}`);
+      seatedNow(how);
+      await act(async () => { renderer.update(scene(resume)); });
+    }
+    await untilSomeoneStands();
+    await act(async () => { clock += 1; globalThis.document.visibilityState = "hidden"; visibility(); });
+    seatedNow("in a hidden tab");
+    await act(async () => { clock += 1; globalThis.document.visibilityState = "visible"; visibility(); });
+    // Another floor starts again from seated, however long this one had been going.
+    for (let step = 0; step < 3000 && away().length === 0; step++) await tick();
+    assert.ok(away().length > 0, "someone is up when the floor changes");
+    const another = { ...inventoryTopology, digest: "another-floor", nodes: [...inventoryTopology.nodes, { ...inventoryTopology.nodes[0], id: "extra-1", path: "extra-1" }, { ...inventoryTopology.nodes[0], id: "extra-2", path: "extra-2" }] };
+    const floorCommits = [];
+    await act(async () => { renderer.update(createElement(Profiler, { id: "floor", onRender: () => floorCommits.push(away().length + outOfSeat(another)) }, createElement(FactoryScene, { topology: another, workers: resting, connected: true }))); });
+    assert.ok(floorCommits.length > 0 && floorCommits.every((count) => count === 0), `someone was drawn out of their seat in a commit of the new floor: ${floorCommits}`);
+    // Judged by what is drawn, from the very first render of the new floor: nobody at the
+    // furniture, nobody walking, nobody on their feet with a book or a cup.
+    const seatedAsDrawn = (when) => {
+      assert.equal(away().length, 0, `someone is at the furniture ${when}`);
+      for (const worker of renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined)) {
+        assert.notEqual(worker.props["data-worker-action"], "walking", `${worker.props["data-worker-id"]} is walking ${when}`);
+        assert.ok(worker.findAll((node) => node.props["data-seated"] === "coffee").length === 1, `${worker.props["data-worker-id"]} is not in their seat ${when}`);
+      }
+    };
+    seatedAsDrawn("as the new floor appears");
+    for (let step = 0; step < 70; step++) { await tick(); seatedAsDrawn(`${step / 10}s into the new floor`); }
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
+  }
 });
 
 test("a walking worker is drawn facing where they go, and only a westward walk is mirrored", async () => {
