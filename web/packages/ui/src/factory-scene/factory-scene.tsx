@@ -91,7 +91,7 @@ function Frame({ name, x, y, className }: { name: string; x: number; y: number; 
 /** A standalone crop of the shared sheet for lists and detail panels. */
 export function AgentSprite({ agent, activity }: AgentSpriteProps) {
   const frames = workerFrames({ ...agent, activity });
-  return <svg viewBox={`0 0 ${FRAME} ${FRAME}`} role="img" aria-label={`${agent.name}, ${agent.role}, ${activity}`} className="dfAgentSprite">
+  return <svg viewBox={`0 0 ${FRAME} ${FRAME}`} overflow="hidden" role="img" aria-label={`${agent.name}, ${agent.role}, ${activity}`} className="dfAgentSprite">
     {frames.map((frame) => { const cell = spriteAtlas.frames[frame as keyof typeof spriteAtlas.frames]; return <image key={frame} href={spriteSheet} x={-cell.x} y={-cell.y} width={spriteSheetSize.width} height={spriteSheetSize.height} style={{ imageRendering: "pixelated" }} />; })}
   </svg>;
 }
