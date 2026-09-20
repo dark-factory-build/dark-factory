@@ -967,7 +967,7 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 	}
 	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
 		ID: supervisorTaskID(t, 13), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 14),
-		Title: "review retained Change", Body: fmt.Sprintf(" \treview handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
+		Title: "review retained Change", Body: fmt.Sprintf("review handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
 	}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}
@@ -994,49 +994,64 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 }
 
 func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *testing.T) {
-	fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
-	worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-	if err != nil {
-		t.Fatalf("source worker RunNext: %v", err)
-	}
-	fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
-	changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
-	if err != nil || !found || changeState.Selection == nil {
-		t.Fatalf("retained source Change = %+v, found=%v, err=%v", changeState, found, err)
-	}
-	reviewerID := supervisorAgentID(t, 22)
-	if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
-		ID: reviewerID, ProjectID: worker.ProjectID, Name: "claude-reviewer", Role: kernel.RoleWorker,
-		Provider: kernel.ProviderClaudeCode, ToolBudgetLimit: 20,
-	}, supervisorTime()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
-		ID: supervisorTaskID(t, 23), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 24),
-		Title: "review retained Change", Body: fmt.Sprintf(" \treview handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
-	}, supervisorTime()); err != nil {
-		t.Fatal(err)
-	}
-	tools := filepath.Join(fixture.root, "claude-reviewer-tools")
-	if err := os.Mkdir(tools, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	copySupervisorExecutable(t, executable, filepath.Join(tools, "claude"))
-	fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+	for _, titleOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("titleOnly=%v", titleOnly), func(t *testing.T) {
+			fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+			worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if err != nil {
+				t.Fatalf("source worker RunNext: %v", err)
+			}
+			fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
+			changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
+			if err != nil || !found || changeState.Selection == nil {
+				t.Fatalf("retained source Change = %+v, found=%v, err=%v", changeState, found, err)
+			}
+			handoff := fmt.Sprintf("review handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64())
+			title, taskBody := "review retained Change", handoff
+			if titleOnly {
+				// A handoff is its body's first line: admission and the supervisor read
+				// only the body, so a title grants no source.
+				title, taskBody = strings.SplitN(handoff, "  \r", 2)[0], ""
+			}
+			reviewerID := supervisorAgentID(t, 22)
+			if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
+				ID: reviewerID, ProjectID: worker.ProjectID, Name: "claude-reviewer", Role: kernel.RoleWorker,
+				Provider: kernel.ProviderClaudeCode, ToolBudgetLimit: 20,
+			}, supervisorTime()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+				ID: supervisorTaskID(t, 23), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 24),
+				Title: title, Body: taskBody, Priority: 1,
+			}, supervisorTime()); err != nil {
+				t.Fatal(err)
+			}
+			tools := filepath.Join(fixture.root, "claude-reviewer-tools")
+			if err := os.Mkdir(tools, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			copySupervisorExecutable(t, executable, filepath.Join(tools, "claude"))
+			fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
 
-	reviewer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
-	if err != nil {
-		t.Fatalf("Claude reviewer RunNext: %v", err)
+			reviewer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if err != nil {
+				t.Fatalf("Claude reviewer RunNext: %v", err)
+			}
+			if titleOnly {
+				fixture.assertTerminal(t, reviewer, kernel.OutcomeFailed)
+				return
+			}
+			fixture.assertTerminal(t, reviewer, kernel.OutcomeSucceeded)
+			if reviewer.Role != kernel.RoleWorker || reviewer.Provider != kernel.ProviderClaudeCode || reviewer.Proposal == nil || !strings.Contains(reviewer.Proposal.Result(), "review handoff ") {
+				t.Fatalf("Claude reviewer receipt = %+v", reviewer)
+			}
+			fixture.assertReleased(t, reviewer)
+		})
 	}
-	fixture.assertTerminal(t, reviewer, kernel.OutcomeSucceeded)
-	if reviewer.Role != kernel.RoleWorker || reviewer.Provider != kernel.ProviderClaudeCode || reviewer.Proposal == nil || !strings.Contains(reviewer.Proposal.Result(), "review handoff ") {
-		t.Fatalf("Claude reviewer receipt = %+v", reviewer)
-	}
-	fixture.assertReleased(t, reviewer)
 }
 
 func TestSupervisorReviewerRefusesMismatchedRetainedIdentityBeforeProvider(t *testing.T) {

@@ -51,11 +51,12 @@ func validateRetainedSourceReviewRoute(taskBody string, agent Agent) error {
 // ParseRetainedSourceReviewTask reads the exact retained identity from the
 // task's first line. Later lines are reviewer instructions, never authority.
 func ParseRetainedSourceReviewTask(taskBody string) (RetainedChangeHandoff, bool, error) {
-	line, _, _ := strings.Cut(taskBody, "\n")
-	fields := strings.Fields(line)
-	if len(fields) < 2 || fields[0] != "review" || fields[1] != "handoff" {
+	// The same prefix admission matches in SQL, so both classify one body alike.
+	if !strings.HasPrefix(taskBody, "review handoff ") {
 		return RetainedChangeHandoff{}, false, nil
 	}
+	line, _, _ := strings.Cut(taskBody, "\n")
+	fields := strings.Fields(line)
 	if len(fields) != 7 {
 		return RetainedChangeHandoff{}, true, ErrInvalidValue
 	}

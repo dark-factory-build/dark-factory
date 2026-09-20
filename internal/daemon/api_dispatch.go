@@ -709,9 +709,13 @@ func (daemon *Daemon) attemptSource(ctx context.Context, call api.Call) api.Repl
 		return newErrorReply(api.RemoteInvalidRequest)
 	}
 	// An overseer reads any settled Change in its project; a worker reads only
-	// the target its own handoff line names.
+	// the target its own handoff line names, in the body the supervisor parsed.
 	if authority.Role == kernel.RoleWorker {
-		if expected, review, err := kernel.ParseRetainedSourceReviewTask(authority.Task()); err != nil || !review || expected.TaskID != targetTaskID {
+		task, _, err := daemon.store.Task(ctx, authority.TaskID)
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		if expected, review, err := kernel.ParseRetainedSourceReviewTask(task.Body); err != nil || !review || expected.TaskID != targetTaskID {
 			return newErrorReply(api.RemoteUnauthorized)
 		}
 	}

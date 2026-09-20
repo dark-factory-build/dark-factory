@@ -14,12 +14,15 @@ func reviewHandoffTask() string {
 
 func TestParseRetainedSourceReviewTaskBindsFirstLine(t *testing.T) {
 	want := reviewHandoffTask()
-	parsed, review, err := ParseRetainedSourceReviewTask(" \t" + want + "  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source")
+	parsed, review, err := ParseRetainedSourceReviewTask(want + "  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source")
 	if err != nil || !review || parsed.TaskID.String() != strings.Repeat("a", 32) || parsed.ChangeID.String() != strings.Repeat("b", 32) || parsed.BaseCommit != strings.Repeat("c", 40) || parsed.TaskWorkRevision.Int64() != 3 || parsed.ChangeRevision.Int64() != 7 {
 		t.Fatalf("parsed handoff = %+v, review=%v, err=%v", parsed, review, err)
 	}
 	for _, body := range []string{
 		"ordinary worker task",
+		// Admission matches this prefix in SQL, so the parser must not see more.
+		" \t" + want,
+		"review  handoff" + strings.TrimPrefix(want, "review handoff"),
 		"FACTORY_SOURCE owner/repo#1\nreview handoff is prose below the first line",
 	} {
 		if _, review, err := ParseRetainedSourceReviewTask(body); err != nil || review {
