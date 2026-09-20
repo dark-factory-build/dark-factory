@@ -25,7 +25,7 @@ synthetic Needs You decision. No daemon is connected.*
 - **Keep work moving.** Queue and prioritize work across projects and repositories. Assign a named agent or the next available worker.
 - **Stay in control.** Open agent terminals, send instructions, and answer Needs You decisions from the same console.
 - **Review and improve.** Inspect completed work and review findings, request corrections, and publish reviewed pull requests when GitHub is configured.
-- **Contain the work.** Every attempt gets its own Git worktree and private runtime home. Codex and Claude Code commands run in an OS sandbox that can write only there and cannot read the rest of your home directory.
+- **Contain the work.** Every worker attempt gets its own Git worktree and private runtime home; an overseer works from a private runtime home alone. Codex and Claude Code commands run in an OS sandbox that can write only there and cannot read the rest of your home directory.
 - **Set the budget.** Cap a project by runs, by wall-clock time per run, and by provider tokens. At a ceiling the project admits nothing new and running work finishes.
 - **Choose the model per worker.** Codex and Claude Code workers share one floor, each with its own provider, model and effort.
 - **Step away from the browser.** Work continues while your Mac stays awake. With remote access configured, a paired phone can steer the same factory.
