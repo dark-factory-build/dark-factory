@@ -274,8 +274,9 @@ export function RemoteApp(props: RemoteAppProps = {}) {
   };
   const reply = () => { setCancelPhrase(undefined); human.current?.reply(); };
   const question = useRef<HTMLDialogElement>(null);
-  // Native modality: Escape closes it, and the rest of the page cannot be reached behind it.
-  useEffect(() => { if (detail !== undefined) question.current?.showModal(); }, [detail === undefined]);
+  // The one modal shell's rule: <dialog> owns Escape and the backdrop, and every
+  // exit — including a close the browser forces on us — lands in onClose.
+  useEffect(() => { if (detail !== undefined && !question.current?.open) question.current?.showModal(); }, [detail === undefined]);
   const changeReply = (value: string) => human.current?.setReply(value);
   const cancelRun = () => {
     if (cancelPhrase?.trim().toUpperCase() !== CANCEL_PHRASE) return;
@@ -578,13 +579,13 @@ export function RemoteApp(props: RemoteAppProps = {}) {
         </div>
 
         {detail === undefined ? null : (
-          <dialog ref={question} className="dfFactoryConsole__section dfRemote__detail" aria-label="Selected question" aria-live="polite" onCancel={(event) => { event.preventDefault(); if (!busy(detail)) { setCancelPhrase(undefined); human.current?.clear(true); } }}>
+          <dialog ref={question} className="dfFactoryConsole__section dfRemote__detail" aria-label="Selected question" aria-live="polite" onCancel={(event) => { if (busy(detail)) event.preventDefault(); }} onClose={() => { setCancelPhrase(undefined); human.current?.clear(true); }}>
             <button
               type="button"
               className="dfRemote__close"
               autoFocus
               disabled={busy(detail)}
-              onClick={() => { setCancelPhrase(undefined); human.current?.clear(true); }}
+              onClick={() => question.current?.close()}
             >
               CLOSE
             </button>
