@@ -600,7 +600,7 @@ test("verify rejects archive members with unsafe shape, mode, JSON, count, and s
     }, "not canonical JSON");
     mutateAndCheck((root) => truncateSync(join(root, "package/dist/src/control.js"), 512 * 1024 + 1), "member is too large");
     mutateAndCheck((root) => {
-      for (let index = 0; index < 50; index += 1) writeFileSync(join(root, `extra-${index}`), "x");
+      for (let index = 0; index < 100; index += 1) writeFileSync(join(root, `extra-${index}`), "x");
     }, "too many members");
     mutateAndCheck((root) => {
       for (const name of ["control.js", "errors.js", "index.js", "manifest.js", "session.js", "state.js", "terminal.js", "terminal_session.js", "transcript.js", "control.d.ts", "errors.d.ts"]) {
