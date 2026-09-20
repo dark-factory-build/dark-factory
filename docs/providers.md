@@ -92,7 +92,8 @@ revision or Change revision, or a branch that moved since settlement, is
 refused.
 overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
 with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
-the fixed tool path, as its one MCP server. A Claude Code worker is launched
+the fixed tool path, beside the same `factory_attempt` server (`factoryctl
+attempt mcp`) a Codex orchestrator already has. A Claude Code worker is launched
 with `--strict-mcp-config` and exactly one factory-control MCP server,
 `factory_attempt` (`factoryctl attempt mcp`). If the optional installed
 browser bridge is present, the worker also receives `factory_browser`; it is a

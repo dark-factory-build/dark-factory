@@ -209,7 +209,7 @@ func runSupervisorCodexFixture() error {
 	target, overseer := "", false
 	if target, overseer = strings.CutPrefix(task.Task, "handoff "); !overseer {
 		var reviewer bool
-		target, reviewer = strings.CutPrefix(task.Task, "review handoff ")
+		target, reviewer = strings.CutPrefix(strings.SplitN(strings.TrimSpace(task.Task), "\n", 2)[0], "review handoff ")
 		if !reviewer {
 			target = ""
 		}
