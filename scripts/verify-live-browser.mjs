@@ -28,6 +28,8 @@ try {
   await expect(floorButton).toBeEnabled({ timeout: 45000 });
   stage = 'settings button';
   await page.locator('header').getByRole('button', { name: 'Settings', exact: true }).click();
+  stage = 'connections tab';
+  await page.getByRole('tab', { name: 'Connections', exact: true }).click();
   stage = 'accounts';
   await page.getByRole('dialog', { name: 'Settings', exact: true }).getByRole('button', { name: 'REFRESH ACCOUNTS', exact: true }).waitFor({ state: 'visible' });
   if (pageFailed) throw new Error('browser error');

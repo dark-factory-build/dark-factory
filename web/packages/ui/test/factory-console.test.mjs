@@ -45,8 +45,8 @@ test("community help works disconnected without private report fields", () => {
   for (const href of ["https://darkfactory.build/feedback?kind=bug", "https://darkfactory.build/feedback?kind=feature", "https://darkfactory.build/backlog"]) {
     assert.ok(markup.includes(`href="${href}" target="_blank" rel="noopener noreferrer"`));
   }
-  assert.match(markup, /Report a Dark Factory problem/);
-  assert.match(markup, /Reporting and voting do not start factory work/);
+  assert.match(markup, /Report a problem/);
+  assert.doesNotMatch(markup, /Reporting and voting/);
 });
 
 const agentSelection = (id = ids.agent) => {
@@ -96,7 +96,7 @@ test("floor appearance is local, field-validated, and available before a connect
   assert.deepEqual(readFloorAppearance('{"scenery":"subtle"}'), { ...DEFAULT_FLOOR_APPEARANCE, scenery: "subtle" });
   assert.deepEqual(readFloorAppearance("not json"), DEFAULT_FLOOR_APPEARANCE);
   const markup = render({ status: "closed", settingsOpen: true });
-  for (const text of ["Scenery", "Animation", "Reset floor appearance", "Saved in this browser. Does not change how the factory runs."]) assert.match(markup, new RegExp(text));
+  for (const text of ["Scenery", "Animation", "Reset floor appearance", "Saved in this browser."]) assert.match(markup, new RegExp(text));
   assert.doesNotMatch(markup, /Dependency links|Task props|Ambient life/);
 });
 
@@ -110,7 +110,7 @@ test("repository roots stay inside private settings", () => {
   assert.match(settings, new RegExp(root));
   assert.match(settings, /FETCH: SETUP_REQUIRED/);
   assert.match(settings, /PUBLICATION: IDENTITY VERIFIED/);
-  assert.match(settings, /base branch and repository-local Git authentication/);
+  assert.match(settings, /base branch and Git login/);
   assert.match(settings, /CHECK FETCH READINESS/);
   assert.match(settings, /REFRESH GITHUB BINDING/);
   assert.match(settings, /Git checkout needs operator setup\./);
@@ -1201,7 +1201,7 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   const settings = { settingsOpen: true, onToggleSettings: () => {}, onGitHub: (request) => calls.push(request) };
   const disconnected = render(settings);
   assert.match(disconnected, /aria-label="GITHUB SETTINGS"/);
-  assert.match(disconnected, />PRIVATE OPERATOR CONNECTION · DISCONNECTED</);
+  assert.match(disconnected, />DISCONNECTED</);
   assert.match(disconnected, />CONNECT GITHUB<\/button>/);
   let renderer;
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings })); });
@@ -1209,13 +1209,13 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   assert.ok(calls.some((request) => request.action === "connect"));
   renderer.unmount();
   const denied = render({ ...settings, github: { pending: false, result: { state: "denied" } } });
-  assert.match(denied, /GITHUB ACCESS WAS DENIED OR EXPIRED/);
+  assert.match(denied, /Access expired or was denied/);
   act(() => { renderer = create(createElement(FactoryConsole, { status: "ready", state: baseState(), ...settings, github: { pending: false, result: { state: "denied" } } })); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "RESET GITHUB ACCESS").props.onClick(); });
   assert.equal(calls.at(-1).action, "disconnect");
   renderer.unmount();
   const unavailable = render({ ...settings, github: { pending: false, result: { state: "unavailable" } } });
-  assert.match(unavailable, /GITHUB IS UNAVAILABLE/);
+  assert.match(unavailable, /GitHub is unavailable/);
   const disconnectPending = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "", state: "disconnect_pending", repositories: [] } } } });
   assert.match(disconnectPending, /RETRY DISCONNECT/);
   const awaitingConfirmation = render({ ...settings, github: { pending: false, result: { state: "ok", status: { connection_id: "c", state: "awaiting_confirmation", repositories: [] } } } });
@@ -1289,9 +1289,9 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }], next_page: 2 }))); });
-  act(() => { renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
+  act(() => { renderer.root.findByProps({"aria-label":"GITHUB SETTINGS"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.onChange({ currentTarget: { checked: true } }); });
   await act(async () => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 102, full_name: "factory-org/two", permissions: { pull: true, push: true, maintain: true, admin: true } }] }))); });
-  act(() => { renderer.root.findAllByType("button").find((button) => String(button.props.children).startsWith("DELEGATE SELECTED")).props.onClick(); });
+  act(() => { renderer.root.findAllByType("button").find((button) => String(button.props.children).startsWith("Save access")).props.onClick(); });
   assert.deepEqual(repositoryCalls.find((request) => request.action === "delegate"), { action: "delegate", repositories: [{ installation_id: 7, repository_id: 101, repository: "factory-org/one" }] });
   renderer.unmount();
 
@@ -1299,9 +1299,9 @@ test("private GitHub settings stays behind the paired admin surface", async () =
   act(() => { renderer = create(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, delegated))); });
-  assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
+  assert.equal(renderer.root.findByProps({"aria-label":"GITHUB SETTINGS"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, true);
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, []))); });
-  assert.equal(renderer.root.findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);
+  assert.equal(renderer.root.findByProps({"aria-label":"GITHUB SETTINGS"}).findAllByType("input").find((input) => input.props.type === "checkbox").props.checked, false);
   act(() => { renderer.update(createElement(FactoryConsole, repositoryProps({ repositories: [{ id: 101, full_name: "factory-org/one", permissions: { pull: true, push: true, maintain: true, admin: true } }] }, [], 8))); });
   act(() => { renderer.root.findAllByType("button").find((button) => button.props.children === "CHOOSE REPOSITORIES").props.onClick(); });
   assert.equal(renderer.root.findAllByProps({ className: "dfConsoleSidebar__list" }).length, 0);
@@ -2632,4 +2632,42 @@ test("floor project changes clear task selection without restoring an old dialog
   await act(async () => tree.root.findByProps({ "aria-label": "Floor hierarchy" }).findAllByType("button").find((button) => button.children.join("") === "All projects").props.onClick());
   assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
   await act(async () => tree.unmount());
+});
+
+test("settings tabs hide other sections, support keyboard navigation and retain drafts", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, {status:"ready",state:baseState(),settingsOpen:true,onToggleSettings(){},onCreateProject(){}})); });
+    const tabs = () => renderer.root.findAllByProps({role:"tab"});
+    const panels = () => renderer.root.findAllByProps({role:"tabpanel"});
+    assert.deepEqual(tabs().map(tab=>tab.props.children),["Projects","Connections","Devices","Appearance","Help"]);
+    const selected = (index) => {
+      assert.deepEqual(tabs().map(tab=>tab.props["aria-selected"]),tabs().map((_,i)=>i===index));
+      assert.equal(panels().filter(panel=>!panel.props.hidden).length,1);
+      assert.equal(panels()[index].props.hidden,false);
+      for (let i=0;i<tabs().length;i++) {
+        assert.equal(tabs()[i].props["aria-controls"],panels()[i].props.id);
+        assert.equal(panels()[i].props["aria-labelledby"],tabs()[i].props.id);
+        assert.equal(tabs()[i].props.tabIndex,i===index?0:-1);
+      }
+    };
+    selected(0);
+    const form=renderer.root.findAllByType("form").find(form=>form.findAllByType("button").some(button=>button.props.children==="CREATE PROJECT"));
+    await act(async()=>form.findAllByType("input")[0].props.onChange({currentTarget:{value:"Unfinished project"}}));
+    await act(async()=>tabs()[1].props.onClick());
+    selected(1);
+    let focused=-1;
+    const parentElement={querySelectorAll(){return tabs().map((_,i)=>({focus(){focused=i;}}));}};
+    for (const [key,want] of [["End",4],["ArrowRight",0],["ArrowLeft",4],["Home",0]]) {
+      let prevented=false;
+      await act(async()=>tabs().find(tab=>tab.props["aria-selected"]).props.onKeyDown({key,preventDefault(){prevented=true;},currentTarget:{parentElement}}));
+      assert.equal(prevented,true);assert.equal(focused,want);selected(want);
+    }
+    assert.equal(form.findAllByType("input")[0].props.value,"Unfinished project");
+  } finally {
+    if (renderer) await act(async()=>renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT=previous;
+  }
 });

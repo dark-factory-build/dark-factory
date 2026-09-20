@@ -777,6 +777,12 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfConsoleDialog .dfFactoryConsole__metrics dd { font-size: 1rem; }
 .dfConsoleDialog .dfConsoleSidebar__account { overflow-wrap: anywhere; }
 
+.dfSettingsTabs { display: flex; flex-wrap: wrap; gap: 0.25rem; position: sticky; top: 0; z-index: 1; padding: 0.75rem 0; background: var(--df-console-surface); border-bottom: 1px solid var(--df-console-rule); }
+.dfSettingsTabs button { flex: 1 0 auto; min-height: 2.75rem; padding: 0.5rem; }
+.dfSettingsTabs [aria-selected="true"] { color: var(--df-console-accent); border-bottom: 2px solid currentColor; }
+.dfSettingsPanel[hidden] { display: none; }
+.dfSettingsPanel > .dfConsoleSidebar__section:first-child { margin-top: 0; border-top: 0; }
+
 .dfAgentList { display: grid; gap: 1.5rem; }
 .dfAgentList__row { width: 100%; border: 1px solid var(--df-console-rule); }
 .dfAgentList__provider,
