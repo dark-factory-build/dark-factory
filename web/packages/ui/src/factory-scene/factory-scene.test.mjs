@@ -582,6 +582,45 @@ test("retargets leave the current room or corridor through a clear lane", () => 
   assertRouteGeometry(layout, { x: center, y: row.y - row.height / 2 }, fromSpine, "direct spine route");
 });
 
+test("a walking worker is drawn facing where they go, and only a westward walk is mirrored", async () => {
+  const topology = inventoryTopology;
+  const saved = { requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame, performance: globalThis.performance };
+  let clock = 0, pending;
+  globalThis.performance = { now: () => clock };
+  globalThis.requestAnimationFrame = (callback) => { pending = callback; return 1; };
+  globalThis.cancelAnimationFrame = () => { pending = undefined; };
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryScene, { topology, workers, connected: true })); });
+    const drawn = () => {
+      const worker = renderer.root.findByProps({ "data-worker-id": workers[0].id });
+      const sprite = worker.findAll((node) => node.type === "g" && typeof node.props.transform === "string" && node.props.transform.startsWith("scale("))[0];
+      return { action: worker.props["data-worker-action"], facing: worker.props["data-worker-facing"], transform: sprite.props.transform, frames: sprite.findAllByType("use").map((node) => node.props.href) };
+    };
+    const seen = new Set();
+    const check = () => {
+      const { action, facing, transform, frames } = drawn();
+      assert.equal(transform.includes("scale(-1 1)"), action === "walking" && facing === "west", `${action}/${facing}: ${transform}`);
+      assert.equal(facing !== undefined, action === "walking");
+      assert.equal(frames.some((name) => name.includes(".back")), facing === "north", `${facing}: ${frames}`);
+      assert.equal(frames.some((name) => name.includes(".side")), facing === "east" || facing === "west", `${facing}: ${frames}`);
+      seen.add(facing);
+    };
+    check();
+    // There and back again covers both horizontal directions of the same route.
+    for (const nodeId of ["lib", "src"]) {
+      await act(async () => { renderer.update(createElement(FactoryScene, { topology, workers: [{ ...workers[0], nodeId }, workers[1]], connected: true })); });
+      for (let step = 0; step < 400 && pending !== undefined; step++) { const tick = pending; pending = undefined; clock += 40; await act(async () => { tick(clock); }); check(); }
+      assert.notEqual(drawn().action, "walking", "the route ends");
+    }
+    assert.ok(seen.has("west") && seen.has("east"), `both profiles were walked: ${[...seen]}`);
+    assert.ok(seen.has("north") || seen.has("south"), `a vertical leg was walked: ${[...seen]}`);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
+  }
+});
+
 test("the production scene stops motion on disconnect and unmount", async () => {
   const topology = inventoryTopology;
   const requested = [];
