@@ -548,7 +548,9 @@ func runSupervisorClaudeFixture() error {
 	if err != nil {
 		return err
 	}
-	if line, ok := strings.CutPrefix(strings.SplitN(task.Task, "\n", 2)[0], "review handoff "); ok {
+	result := "exact"
+	if line, ok := strings.CutPrefix(strings.SplitN(strings.TrimSpace(task.Task), "\n", 2)[0], "review handoff "); ok {
+		result = task.Task
 		fields := strings.Fields(line)
 		if len(fields) != 5 {
 			return fmt.Errorf("Claude source target = %q", line)
@@ -593,7 +595,7 @@ func runSupervisorClaudeFixture() error {
 			}
 		}
 	}
-	_, err = client.Succeed(ctx, "exact")
+	_, err = client.Succeed(ctx, result)
 	return err
 }
 
@@ -1033,8 +1035,12 @@ func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *tes
 }
 
 func TestSupervisorReviewerRefusesMismatchedRetainedIdentityBeforeProvider(t *testing.T) {
-	for _, field := range []string{"change", "base", "work revision", "change revision"} {
+	for _, field := range []string{"change", "base", "work revision", "change revision", "claude change"} {
 		t.Run(field, func(t *testing.T) {
+			provider := kernel.ProviderCodex
+			if rest, ok := strings.CutPrefix(field, "claude "); ok {
+				field, provider = rest, kernel.ProviderClaudeCode
+			}
 			fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 			worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 			if err != nil {
@@ -1058,7 +1064,7 @@ func TestSupervisorReviewerRefusesMismatchedRetainedIdentityBeforeProvider(t *te
 				changeRevision++
 			}
 			reviewerID := supervisorAgentID(t, 12)
-			if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: reviewerID, ProjectID: worker.ProjectID, Name: "reviewer", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 20}, supervisorTime()); err != nil {
+			if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: reviewerID, ProjectID: worker.ProjectID, Name: "reviewer", Role: kernel.RoleWorker, Provider: provider, ToolBudgetLimit: 20}, supervisorTime()); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
