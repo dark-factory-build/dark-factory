@@ -30,9 +30,18 @@ factoryctl project limits --project PROJECT_ID --revision REVISION \
 The allowance adds this many future admissions to the recorded count; it does
 not erase history. Zero disables that ceiling. Duration starts at admission,
 includes startup and human waiting, and cancels overdue work through the
-normal owned-process cleanup. These are run and wall-clock limits, not token
-counts or a monetary spending cap. Legacy tool-budget fields are not provider
-usage accounting.
+normal owned-process cleanup.
+
+Add `--token-budget N` to the same command to cap provider tokens. Each settled
+run adds what it spent, read from the provider's own session log (Claude Code
+transcripts and Codex rollouts, for work in that run's directory since its
+admission). Once `tokens_used` reaches a nonzero `token_limit`, the project
+admits nothing more; running work finishes. Like the run allowance, the budget
+is additional to what is already recorded, and zero removes the ceiling.
+`factoryctl status` reports both figures per project. This counts tokens, not
+money, and input tokens include cached ones. The shell provider spends none,
+and a run adopted by recovery after a daemon restart records none. Legacy
+tool-budget fields are not provider usage accounting.
 
 ## Standing supervision policy
 

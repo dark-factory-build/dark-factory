@@ -1237,7 +1237,7 @@ func (daemon *Daemon) setProjectLimits(ctx context.Context, call api.Call) api.R
 	if err != nil {
 		return newErrorReply(api.RemoteInternal)
 	}
-	project, err := daemon.store.SetProjectLimits(ctx, id, expected, input.RunBudget, input.MaxRunSeconds, at)
+	project, err := daemon.store.SetProjectLimitsWithTokens(ctx, id, expected, input.RunBudget, input.MaxRunSeconds, input.TokenBudget, at)
 	if err != nil {
 		return newErrorReply(remoteErrorCode(err))
 	}

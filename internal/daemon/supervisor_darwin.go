@@ -825,6 +825,27 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 		return nil
 	}
 	run, err = daemon.attemptResultTail(ctx, spec.RuntimeParent, spec.ChangeParent, run, live, resultOutcome, runtimeDirectory, runtimeIdentity, keys.resources.RunnerProcess, keys.resources.RuntimeRoot, awaitConvergence, recordConvergence, closeRuntime)
+	// Spend is read from the provider's own session log once the run is over.
+	// The run's row is the receipt, so the write is retried without counting
+	// twice; a store that still refuses is reported with the figure it lost.
+	// ponytail: a run adopted by recovery after a daemon restart records none.
+	cwd := filepath.Join(spec.ChangeParent, finalName)
+	if !worker {
+		cwd = filepath.Join(gotRuntimePath, changeworker.HomeName)
+	}
+	if tokens := provider.RunTokens(run.Provider, spec.AccountHome, accountConfigDir, cwd, time.UnixMilli(run.AdmittedAt.Int64())); tokens > 0 {
+		var tokenErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if tokenErr = daemon.store.AddRunTokens(daemon.cleanupCtx, run.ID, tokens); tokenErr == nil {
+				break
+			}
+			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+		}
+		if tokenErr != nil {
+			fmt.Fprintf(os.Stderr, "factoryd: run %s spent %d tokens that could not be recorded: %v\n", run.ID, tokens, tokenErr)
+			err = errors.Join(err, tokenErr)
+		}
+	}
 	return run, err
 }
 
