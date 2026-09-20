@@ -708,6 +708,7 @@ type TaskSummary struct {
 	WorkRevision    Revision
 	Title           string
 	Status          string
+	BlockedReason   string
 	Priority        int64
 	Revision        Revision
 	UpdatedAt       UnixMillis

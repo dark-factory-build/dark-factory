@@ -121,8 +121,9 @@ no history is deleted or silently folded into the active-state bound. Task
 text and intervention history still require their existing private reads.
 
 The snapshot read runs in a single pinned SQLite transaction and selects only
-public columns, so a concurrent writer cannot produce a mixed head and private
-durable data is never loaded. A watcher registers before rereading the durable
+public columns plus a bounded excerpt of a blocked task's reason, so a
+concurrent writer cannot produce a mixed head and other private durable data is
+never loaded. A watcher registers before rereading the durable
 head, so a commit landing between a client's snapshot and its registration is
 announced immediately rather than waiting for the next poll.
 

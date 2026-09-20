@@ -34,7 +34,12 @@ const publicTaskIDs = `WITH public_task_ids AS (
 // chooses that agent's candidate, then compares candidates across agents by
 // taskQueueOrder; promoting it globally would present a false next-start order.
 const taskReplacementOrder = `EXISTS (SELECT 1 FROM task_interventions WHERE state = 'delivered' AND successor_task_id = tasks.id) DESC, `
-const publicTaskColumns = `id, project_id, assigned_agent_id, title, status, priority, revision, updated_at_ms`
+const publicTaskColumns = `id, project_id, assigned_agent_id, title, status, blocked_reason, priority, revision, updated_at_ms`
+
+// PublicBlockedReasonExcerptBytes bounds the block-reason excerpt served on a
+// blocked task's public row; the operator sees why at a glance, the full text
+// stays behind the task-detail read.
+const PublicBlockedReasonExcerptBytes = 200
 
 // PublicSnapshot is one transactionally pinned, complete public projection of
 // the Factory. Every field is a positive allowlist: durable rows carry private
@@ -139,8 +144,9 @@ func readPublicAccounts(ctx context.Context, connection *sql.Conn) ([]AccountSum
 	return result, nil
 }
 
-// Each read below selects only public columns. Private durable data is not
-// loaded at all, so it cannot reach a projection by accident.
+// Each read below selects only public columns, plus a blocked task's reason,
+// which leaves as a bounded excerpt. Other private durable data is not loaded
+// at all, so it cannot reach a projection by accident.
 
 func readPublicProjects(ctx context.Context, connection *sql.Conn) ([]ProjectSummary, error) {
 	rows, err := connection.QueryContext(ctx, `SELECT id, name, run_budget_limit, runs_used, max_run_seconds, revision FROM projects ORDER BY id`)
@@ -197,8 +203,9 @@ func scanPublicTasks(rows *sql.Rows) ([]TaskSummary, error) {
 	for rows.Next() {
 		var rawID, rawProjectID, rawAgentID []byte
 		var title, rawStatus string
+		var rawBlockedReason sql.NullString
 		var priority, rawRevision, rawUpdatedAt int64
-		if err := rows.Scan(&rawID, &rawProjectID, &rawAgentID, &title, &rawStatus, &priority, &rawRevision, &rawUpdatedAt); err != nil {
+		if err := rows.Scan(&rawID, &rawProjectID, &rawAgentID, &title, &rawStatus, &rawBlockedReason, &priority, &rawRevision, &rawUpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan public task: %w", err)
 		}
 		id, idErr := TaskIDFromBytes(rawID)
@@ -211,7 +218,8 @@ func scanPublicTasks(rows *sql.Rows) ([]TaskSummary, error) {
 			updatedAtErr != nil || byteLen(title) < 1 || byteLen(title) > 1024 || priority < -1_000_000 || priority > 1_000_000 {
 			return nil, fmt.Errorf("%w: invalid public task", ErrCorruptState)
 		}
-		result = append(result, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, Title: title, Status: status.String(), Priority: priority, Revision: revision, UpdatedAt: updatedAt})
+		blockedReason, _ := overseerExcerpt(rawBlockedReason.String, PublicBlockedReasonExcerptBytes)
+		result = append(result, TaskSummary{ID: id, ProjectID: projectID, AssignedAgentID: agentID, Title: title, Status: status.String(), BlockedReason: blockedReason, Priority: priority, Revision: revision, UpdatedAt: updatedAt})
 	}
 	return result, rows.Err()
 }

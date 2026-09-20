@@ -30,6 +30,7 @@ import {
   MAX_TERMINAL_UNACKED_BYTES,
   MAX_TASK_PRIORITY,
   MAX_TASK_TITLE_BYTES,
+  MAX_TASK_BLOCKED_REASON_BYTES,
   type CapabilityMask,
   type ControlType,
   type ErrorCode,
@@ -57,7 +58,7 @@ export type SpriteAppearance = { automatic: boolean; skin: number; hair: number;
 export type AgentItem = { id: string; project_id: string; name: string; role: "orchestrator" | "worker"; provider: "claude_code" | "codex" | "shell"; appearance: SpriteAppearance; paused: boolean; archived?: boolean; model: string; reasoning_effort: string; effective_model: string; effective_reasoning_effort: string; model_source: string; revision: bigint; account_id: string; idle_policy: IdlePolicy; idle_after_seconds: number; idle_instruction: string; idle_run_budget: number; idle_runs_used: number };
 export type AccountItem = { id: string; provider: "claude_code" | "codex"; home: string; label: string; revision: bigint };
 /** An empty `assigned_agent_id` is queued shared work no worker has claimed yet; it is served only in `shared_tasks`. */
-export type TaskItem = { id: string; project_id: string; assigned_agent_id: string; title: string; status: "queued" | "running" | "blocked" | "succeeded" | "failed" | "cancelled"; priority: number; revision: bigint; updated_at_ms?: bigint };
+export type TaskItem = { id: string; project_id: string; assigned_agent_id: string; title: string; status: "queued" | "running" | "blocked" | "succeeded" | "failed" | "cancelled"; blocked_reason?: string; priority: number; revision: bigint; updated_at_ms?: bigint };
 export type HumanRequestItem = {
   id: string; project_id: string; agent_id: string; task_id: string;
   created_at: bigint; updated_at: bigint; revision: bigint; kind: "question";
@@ -122,7 +123,7 @@ export type IntakeSync = { last_attempt_at: bigint; last_success_at: bigint; imp
 export type IntakeSource = IntakeConfiguration & { id: string; project_id: string; github_repository_id: bigint; enabled: boolean; revision: bigint; sync?: IntakeSync };
 export type IntakeCandidate = { number: bigint; url: string; title: string; body: string; author: string; labels: string[]; content_hash: string; reason: string; acceptance_id?: string; task_id?: string; truncated?: boolean };
 export type IntakeResultBody = { source_id?: string; linear_teams?: { id: string; name: string; key: string }[]; state: string; sources?: IntakeSource[]; candidates?: IntakeCandidate[]; next_page?: number; reviewed_revision?: bigint; acceptance_id?: string; task_id?: string; imported_tasks?: string[] };
-export type TaskUpdateBody = { task_id: string; expected_revision: bigint; title?: string; body?: string; priority?: number; assigned_agent_id?: string; status?: "cancelled" };
+export type TaskUpdateBody = { task_id: string; expected_revision: bigint; title?: string; body?: string; priority?: number; assigned_agent_id?: string; status?: "cancelled" | "queued" };
 export type TaskUpdateResultBody = { task_id: string; revision: bigint };
 export type TopologyGetBody = { project_id: string };
 export type TopologyInventoryCounts = { source: number; tests: number; documentation: number; configuration: number; assets: number; unclassified: number };
@@ -518,7 +519,7 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
     case "REPOSITORY_MUTATE_RESULT": { requireKeys(body, [], wire, ["repository"]); return present(body, "repository") ? { repository: repositoryItem(body.repository, wire) } : {}; }
     case "INTAKE": return intakeBody(body, wire);
     case "INTAKE_RESULT": return intakeResult(body, wire);
-    case "TASK_UPDATE": requireKeys(body, ["task_id", "expected_revision"], wire, ["title", "body", "priority", "assigned_agent_id", "status"]); { const result: TaskUpdateBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "title")) result.title = boundedText(body.title, 1, MAX_TASK_TITLE_BYTES); if (present(body, "body")) result.body = boundedText(body.body, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "priority")) result.priority = integer(body.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY); if (present(body, "assigned_agent_id")) result.assigned_agent_id = dynamicID(body.assigned_agent_id); if (present(body, "status")) { if (body.status !== "cancelled") malformed(); result.status = body.status; } return result; }
+    case "TASK_UPDATE": requireKeys(body, ["task_id", "expected_revision"], wire, ["title", "body", "priority", "assigned_agent_id", "status"]); { const result: TaskUpdateBody = { task_id: dynamicID(body.task_id), expected_revision: decimal(body.expected_revision, wire, true) }; if (present(body, "title")) result.title = boundedText(body.title, 1, MAX_TASK_TITLE_BYTES); if (present(body, "body")) result.body = boundedText(body.body, 0, MAX_TASK_INSTRUCTION_BYTES); if (present(body, "priority")) result.priority = integer(body.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY); if (present(body, "assigned_agent_id")) result.assigned_agent_id = dynamicID(body.assigned_agent_id); if (present(body, "status")) { if (body.status !== "cancelled" && body.status !== "queued" || body.status === "queued" && (present(body, "title") || present(body, "body") || present(body, "priority"))) malformed(); result.status = body.status; } return result; }
     case "TASK_UPDATE_RESULT": requireKeys(body, ["task_id", "revision"], wire); return { task_id: dynamicID(body.task_id), revision: decimal(body.revision, wire, true) };
     case "TOPOLOGY_GET": requireKeys(body, ["project_id"], wire); return { project_id: dynamicID(body.project_id) };
     case "TOPOLOGY": return topologyBody(body, wire);
@@ -886,9 +887,10 @@ function topologyNode(value: unknown, wire: boolean): TopologyNode {
   return { id: fixedHex(value.id, 32), parent_id: value.parent_id === "" ? "" : fixedHex(value.parent_id, 32), kind: value.kind as TopologyNode["kind"], path: boundedText(value.path, 1, MAX_TASK_TITLE_BYTES), label: boundedText(value.label, 1, MAX_AGENT_NAME_BYTES), language: boundedText(value.language, 0, MAX_AGENT_NAME_BYTES), size_bucket: value.size_bucket as TopologyNode["size_bucket"], ...(present(value, "inventory") ? { inventory: topologyInventory(value.inventory, wire) } : {}) };
 }
 function taskItem(value: unknown, wire: boolean): TaskItem {
-  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"], wire, ["updated_at_ms"]);
+  if (!isObject(value)) malformed(); requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision"], wire, ["updated_at_ms", "blocked_reason"]);
   if (typeof value.status !== "string" || !["queued", "running", "blocked", "succeeded", "failed", "cancelled"].includes(value.status)) malformed();
-  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), assigned_agent_id: dynamicID(value.assigned_agent_id), title: boundedText(value.title, 1, MAX_TASK_TITLE_BYTES), status: value.status as TaskItem["status"], priority: integer(value.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY), revision: decimal(value.revision, wire, true), ...(present(value, "updated_at_ms") ? { updated_at_ms: decimal(value.updated_at_ms, wire, true) } : {}) };
+  if (present(value, "blocked_reason") && value.status !== "blocked") malformed();
+  return { id: dynamicID(value.id), project_id: dynamicID(value.project_id), assigned_agent_id: dynamicID(value.assigned_agent_id), title: boundedText(value.title, 1, MAX_TASK_TITLE_BYTES), status: value.status as TaskItem["status"], priority: integer(value.priority, -MAX_TASK_PRIORITY, MAX_TASK_PRIORITY), revision: decimal(value.revision, wire, true), ...(present(value, "updated_at_ms") ? { updated_at_ms: decimal(value.updated_at_ms, wire, true) } : {}), ...(present(value, "blocked_reason") ? { blocked_reason: boundedText(value.blocked_reason, 0, MAX_TASK_BLOCKED_REASON_BYTES) } : {}) };
 }
 /** Unclaimed queued work: decoded as a task item, with its empty agent kept. */
 function sharedTaskItem(value: unknown, wire: boolean): TaskItem {
@@ -897,7 +899,7 @@ function sharedTaskItem(value: unknown, wire: boolean): TaskItem {
 }
 function taskListItem(value: unknown, wire: boolean, agentID: string): TaskItem {
   if (!isObject(value)) malformed();
-  requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision", "updated_at_ms"], wire);
+  requireKeys(value, ["id", "project_id", "assigned_agent_id", "title", "status", "priority", "revision", "updated_at_ms"], wire, ["blocked_reason"]);
   const task = taskItem(value, wire);
   if (task.assigned_agent_id !== agentID || task.updated_at_ms === undefined || task.status === "queued" || task.status === "running") malformed();
   return task;

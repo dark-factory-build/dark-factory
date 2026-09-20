@@ -25,6 +25,7 @@ const (
 	// read from. It is a local filesystem path, not free text.
 	MaxModelSourceBytes          = 1024
 	MaxTaskTitleBytes            = 1024
+	MaxBlockedReasonBytes        = 200
 	MaxHumanQuestionBytes        = 8192
 	MaxHumanReplyBytes           = 8192
 	MaxFactoryCapacity           = 1024
@@ -214,6 +215,7 @@ type TaskItem struct {
 	AssignedAgentID string  `json:"assigned_agent_id"`
 	Title           string  `json:"title"`
 	Status          string  `json:"status"`
+	BlockedReason   string  `json:"blocked_reason,omitempty"`
 	Priority        int64   `json:"priority"`
 	Revision        Decimal `json:"revision"`
 	UpdatedAtMillis Decimal `json:"updated_at_ms,omitempty"`
@@ -373,6 +375,9 @@ func validateSharedTaskItem(value TaskItem) error {
 func validateTaskFields(value TaskItem) error {
 	if validateDynamicID(value.ID) != nil || validateDynamicID(value.ProjectID) != nil || validateBoundedText(value.Title, 1, MaxTaskTitleBytes) != nil || value.Priority < -MaxTaskPriority || value.Priority > MaxTaskPriority || value.Revision == 0 {
 		return fmt.Errorf("%w: task item", ErrMalformed)
+	}
+	if validateBoundedText(value.BlockedReason, 0, MaxBlockedReasonBytes) != nil || value.BlockedReason != "" && value.Status != "blocked" {
+		return fmt.Errorf("%w: task blocked reason", ErrMalformed)
 	}
 	switch value.Status {
 	case "queued", "running", "blocked", "succeeded", "failed", "cancelled":
