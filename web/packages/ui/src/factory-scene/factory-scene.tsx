@@ -419,16 +419,17 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
           </g>)}
         </g>;
       })}
-      <g data-floor-inbox={queued} className="dfFactoryScene__target" transform={`translate(${ROOM_LEFT + commonWidth - 30} ${layout.restingTop - 21})`}
+      {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
+
+      <g data-floor-inbox={queued} className="dfFactoryScene__target" transform={`translate(${ROOM_LEFT + commonWidth - 30} ${layout.restingTop + TABLE_DROP - 21})`}
         data-tooltip={queued === 0 ? "In-tray · nothing waiting" : `In-tray · ${queued} waiting`}
         aria-label={queued === 0 ? "Tasks, nothing waiting" : `Tasks, ${queued} waiting`}
         {...sceneAction(onOpenQueue)}>
-        <rect className="dfFactoryScene__focus" x="-4" y="-12" width="28" height="24" rx="2" fill="transparent" />
-        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="2" y={-1 - index * 3} width="16" height="3" fill="#d9d2b5" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
-        <path d="M0 2h20v4H0z M3 6v3 M17 6v3" fill="#5d5a4c" stroke="#8c8871" />
+        <rect className="dfFactoryScene__focus" x="-6" y="-14" width="32" height="26" rx="2" fill="transparent" />
+        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
+        {/* An open tray, not another mug on the table: two walls and a base. */}
+        <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
       </g>
-      {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
-
       <SceneWorkers furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
 
 
