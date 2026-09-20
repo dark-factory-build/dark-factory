@@ -87,6 +87,27 @@ class ProductionFixtures(unittest.TestCase):
             self.assertEqual(deliveries[0]["pull_requests"], list(range(1, 257)))
             self.assertEqual(deliveries[0]["overflow"], 1)
 
+    def test_release_metadata_comes_from_latest_receipt_while_membership_is_union(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            journal.write_text(json.dumps({"version": 1, "releases": {
+                "old": {"sha": SHA, "state": "blocked", "phase": "deploying", "error": "old failure",
+                         "updated_at": 10, "delivery_sources": [{"pr": 7}]},
+                "new": {"sha": SHA, "state": "verified", "phase": "verified", "updated_at": 20,
+                         "verified_at": 21, "verification": {"healthy": True, "sha": SHA, "url": "https://new.example"},
+                         "included_pull_requests": [{"pr": 8}]},
+            }}))
+            deliveries, unavailable, _ = production.release_receipts([
+                {"path": str(journal), "repository": "o/r", "destination": "site:example"}
+            ], "o/r")
+            self.assertFalse(unavailable)
+            self.assertEqual(deliveries[0]["state"], "verified")
+            self.assertEqual(deliveries[0]["phase"], "verified")
+            self.assertEqual(deliveries[0]["reason"], "")
+            self.assertEqual(deliveries[0]["updated_at"], 20000)
+            self.assertEqual(deliveries[0]["pull_requests"], [7, 8])
+            self.assertEqual(deliveries[0]["url"], "https://new.example")
+
     def test_customer_config_has_no_github_or_credential_fallback(self):
         with mock.patch.object(production.intake, "command") as command:
             result = production.collect({"repository": "o/r"})

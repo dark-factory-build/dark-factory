@@ -266,7 +266,7 @@ def review_receipts(paths, repository):
 
 
 def release_receipts(paths, repository):
-    deliveries, unavailable = {}, False
+    deliveries, metadata_ranks, unavailable = {}, {}, False
     for entry in paths:
         if entry["repository"].casefold() != repository.casefold():
             unavailable = True
@@ -275,7 +275,7 @@ def release_receipts(paths, repository):
         if error or journal.get("version") != 1 or not isinstance(journal.get("releases"), dict):
             unavailable = True
             continue
-        for receipt in journal["releases"].values():
+        for sequence, receipt in enumerate(journal["releases"].values()):
             if not isinstance(receipt, dict):
                 continue
             revision = sha(receipt.get("sha"))
@@ -293,14 +293,24 @@ def release_receipts(paths, repository):
             delivery = deliveries.setdefault(key, {"id": identity, "kind": "release", "destination": destination,
                                                     "revision": revision, "state": "verified" if verified else "unknown",
                                                     "pull_requests": []})
-            if not verified and delivery["state"] != "verified":
-                delivery["state"] = text(receipt.get("state"), 32) or "unknown"
-            receipt_url = url(verification.get("url")) or url(receipt.get("url"))
-            if receipt_url:
-                delivery["url"] = receipt_url
+            updated_at = milliseconds(receipt.get("updated_at"))
             verified_at = milliseconds(receipt.get("verified_at"))
-            if verified and verified_at:
-                delivery["verified_at"] = verified_at
+            rank = (updated_at or verified_at, sequence)
+            if key not in metadata_ranks or rank >= metadata_ranks[key]:
+                metadata_ranks[key] = rank
+                delivery["state"] = "verified" if verified else text(receipt.get("state"), 32) or "unknown"
+                delivery["phase"] = text(receipt.get("phase"), 64)
+                delivery["reason"] = text(receipt.get("error"), 2048)
+                delivery["updated_at"] = updated_at
+                receipt_url = url(verification.get("url")) or url(receipt.get("url"))
+                if receipt_url:
+                    delivery["url"] = receipt_url
+                else:
+                    delivery.pop("url", None)
+                if verified and verified_at:
+                    delivery["verified_at"] = verified_at
+                else:
+                    delivery.pop("verified_at", None)
             sources = receipt.get("included_pull_requests", receipt.get("delivery_sources"))
             if not isinstance(sources, list):
                 sources = []
