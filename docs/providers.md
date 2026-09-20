@@ -18,9 +18,9 @@ the runtime has no authority to signal those PIDs, and process ancestry, cwd,
 or a matching birth record do not create that authority. Native Codex currently
 has no provider-owned shutdown capability exposed through this contract.
 
-Shell and Codex are proven end to end. The Claude Code launch path is
-fixture-proven in the current source; a live run against its
-signed-in CLI remains required before it is included in a release.
+Shell and Codex are proven end to end. A Claude Code worker is proven by one
+live run against its signed-in CLI; a Claude Code overseer is fixture-proven
+only.
 
 ## Select an existing provider account
 
@@ -145,7 +145,7 @@ configuration and capability boundaries are described below.
 ### Native session persistence
 
 A worker's Claude Code launch adds `--session-id UUID` or `--resume UUID`
-right after `--dangerously-skip-permissions`. The CLI keys a conversation's
+right after `--permission-mode dontAsk`. The CLI keys a conversation's
 own transcript by the exact launch directory under its effective
 configuration directory (`<config-home>/projects/<escaped-cwd>/<uuid>.jsonl`,
 where every byte of the directory outside `A-Za-z0-9` becomes `-`, so
@@ -271,7 +271,24 @@ and cold reviews disable Codex computer use, browser use and inherited plugins:
 plugins can start desktop helpers even when the two built-in tools are disabled.
 This does not modify the operator's personal Codex configuration. Explicit MCP
 servers, including the Maintainer bridge, remain separate capabilities.
-Claude's existing launch has not gained the local-command filesystem boundary.
+Claude Code receives the same grants through `--settings` (`claudeSettings`):
+`dontAsk` refuses any tool call no rule allows, which bounds its file tools,
+and its OS sandbox bounds Bash, fails closed when it cannot start, refuses the
+unsandboxed escape, and cannot read where user data lives (`/Users`,
+`/Volumes`, `/Network`, `/private/tmp`, `/private/var/folders`,
+`/private/var/root`) outside the granted paths and the CLI's own scratch
+directory. System locations stay readable, as under Codex's minimal profile;
+denying every read crashes ordinary tools. `--setting-sources ""` stops user,
+project and local Claude settings from merging rules that widen this. The
+provider process and MCP servers remain outside this boundary, as for Codex.
+Sandboxed Bash cannot reach the attempt API, so every Claude launch carries the
+`factory_attempt` stdio tool Codex already uses, and its task lead names it.
+A live worker run on CLI 2.1.278 (20 September 2026, isolated home, a
+repository whose own `.claude/settings.json` tried to allow its parent) edited
+and committed in its Change, was refused reads of a sentinel under `/Users` and
+under `/private/tmp` and writes outside its grants, from Bash and from the file
+tools, reached the network, and settled `succeeded` through the tool. Git's
+xcrun cache and Go telemetry warn that they cannot write outside the grants. A Claude overseer has not had a live run.
 
 Interactive Codex workers override `notify=[]` so a personal notification command
 cannot launch desktop helpers. They retain account configuration and authentication

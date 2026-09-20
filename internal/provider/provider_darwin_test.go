@@ -118,8 +118,8 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantWorkerArgv := append([]string{"/usr/bin/true", "--dangerously-skip-permissions"}, wantClaudeWorkerSessionFlag(t, workerRequest)...)
-	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--mcp-config", `{"mcpServers":{"factory_attempt":{"args":["attempt","mcp"],"command":"`+runtime.factoryctl+`"}}}`)
+	wantWorkerArgv := append([]string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", ""}, wantClaudeWorkerSessionFlag(t, workerRequest)...)
+	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--settings", wantClaudeSettings(t, workerRequest, "factory_attempt"), "--mcp-config", wantClaudeServers(t, workerRequest, nil))
 	if !reflect.DeepEqual(worker.Argv(), wantWorkerArgv) {
 		t.Fatalf("worker argv = %q, want %q", worker.Argv(), wantWorkerArgv)
 	}
@@ -145,11 +145,12 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	launch, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator))
+	overseerRequest := roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)
+	launch, err := Build(overseerRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/usr/bin/true", "--dangerously-skip-permissions", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{"factory_attempt":{"args":["attempt","mcp"],"command":"` + runtime.factoryctl + `"},"maintainer":{"command":"` + resolvedBridge + `"}}}`}
+	want := []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--settings", wantClaudeSettings(t, overseerRequest, "factory_attempt", "maintainer"), "--mcp-config", wantClaudeServers(t, overseerRequest, map[string]any{"maintainer": map[string]string{"command": resolvedBridge}})}
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
@@ -314,7 +315,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 	}{
 		{
 			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryStartupTerminal,
-			wantArgv: []string{"/usr/bin/true", "--dangerously-skip-permissions", "--model", "claude-model", "--effort", "max", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{"factory_attempt":{"args":["attempt","mcp"],"command":"<factoryctl>"}}}`},
+			wantArgv: []string{"/usr/bin/true", "--permission-mode", "dontAsk", "--setting-sources", "", "--model", "claude-model", "--effort", "max", "--strict-mcp-config"},
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
@@ -336,8 +337,8 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			}
 			wantArgv := test.wantArgv
 			if test.kind == kernel.ProviderClaudeCode {
-				wantArgv[len(wantArgv)-1] = `{"mcpServers":{"factory_attempt":{"args":["attempt","mcp"],"command":"` + runtime.factoryctl + `"}}}`
-				wantArgv = slices.Insert(slices.Clone(wantArgv), 2, wantClaudeWorkerSessionFlag(t, request)...)
+				wantArgv = slices.Insert(slices.Clone(wantArgv), 5, wantClaudeWorkerSessionFlag(t, request)...)
+				wantArgv = append(wantArgv, "--settings", wantClaudeSettings(t, request, "factory_attempt"), "--mcp-config", wantClaudeServers(t, request, nil))
 			}
 			if test.kind == kernel.ProviderCodex {
 				wantArgv[2] = "notify=[" + tomlBasicString(runtime.factoryctl) + ", \"attempt\", \"turn-complete\"]"
@@ -1709,5 +1710,79 @@ func TestGitAuthorEnvironmentUsesVerifiedOperator(t *testing.T) {
 	}
 	if _, err := runtime.WithGitAuthor(gitauthor.Identity{ID: 123, Login: "spoof\nAuthor"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("malformed author: %v", err)
+	}
+}
+
+// wantClaudeServers is the attempt tool every Claude launch carries, plus any
+// role-specific servers.
+func wantClaudeServers(t *testing.T, request Request, servers map[string]any) string {
+	t.Helper()
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	servers["factory_attempt"] = map[string]any{"command": request.runtime.factoryctl, "args": []string{"attempt", "mcp"}}
+	config, err := json.Marshal(map[string]any{"mcpServers": servers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(config)
+}
+
+func wantClaudeSettings(t *testing.T, request Request, servers ...string) string {
+	t.Helper()
+	settings, err := claudeSettings(request, servers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settings
+}
+
+// A Claude run gets the grants Codex gets: the Change and runtime paths are
+// writable, the operator's home is unreadable, nothing prompts and nothing
+// leaves the sandbox.
+func TestClaudeSettingsConfineTheRunToItsGrants(t *testing.T) {
+	installation, runtime, _ := nativeFixture(t, kernel.ProviderClaudeCode)
+	request := requestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "")
+	var settings struct {
+		Permissions struct{ Allow []string }
+		Sandbox     struct {
+			Enabled, FailIfUnavailable, AllowUnsandboxedCommands bool
+			Filesystem                                           struct{ AllowWrite, DenyRead, AllowRead []string }
+			Network                                              struct{ AllowUnixSockets []string }
+		}
+	}
+	if err := json.Unmarshal([]byte(wantClaudeSettings(t, request, "factory_browser")), &settings); err != nil {
+		t.Fatal(err)
+	}
+	sandbox, change := settings.Sandbox, "/"+request.workingDirectory
+	if !sandbox.Enabled || !sandbox.FailIfUnavailable || sandbox.AllowUnsandboxedCommands {
+		t.Fatalf("sandbox can be skipped: %+v", sandbox)
+	}
+	for _, region := range []string{"//Users", "//Volumes", "//private/tmp", "//private/var/folders"} {
+		if !slices.Contains(sandbox.Filesystem.DenyRead, region) {
+			t.Fatalf("%s stays readable: %q", region, sandbox.Filesystem.DenyRead)
+		}
+	}
+	if !slices.Contains(sandbox.Filesystem.AllowRead, change) || slices.Contains(sandbox.Filesystem.AllowRead, "//private/tmp") {
+		t.Fatalf("read boundary = %+v", sandbox.Filesystem)
+	}
+	if !slices.Contains(sandbox.Filesystem.AllowWrite, change) || slices.Contains(sandbox.Filesystem.AllowWrite, "/"+runtime.factoryctl) {
+		t.Fatalf("write grants = %q", sandbox.Filesystem.AllowWrite)
+	}
+	if !slices.Equal(sandbox.Network.AllowUnixSockets, []string{runtime.socket}) {
+		t.Fatalf("sockets = %q", sandbox.Network.AllowUnixSockets)
+	}
+	for _, rule := range []string{"Edit(" + change + "/**)", "mcp__factory_browser"} {
+		if !slices.Contains(settings.Permissions.Allow, rule) {
+			t.Fatalf("allow rules lack %s: %q", rule, settings.Permissions.Allow)
+		}
+	}
+	launch, err := Build(request)
+	if err != nil || slices.Contains(launch.Argv(), "--dangerously-skip-permissions") {
+		t.Fatalf("launch still bypasses permissions: %q, %v", launch.Argv(), err)
+	}
+	// A checkout's own .claude/settings.json must not be able to widen this.
+	if sources := slices.Index(launch.Argv(), "--setting-sources"); sources < 0 || launch.Argv()[sources+1] != "" {
+		t.Fatalf("launch reads user or project settings: %q", launch.Argv())
 	}
 }

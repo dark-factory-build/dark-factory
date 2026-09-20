@@ -9,7 +9,7 @@ import (
 const (
 	MaxClaudePrompt       = 8 << 10
 	DiscoveryInstructions = "When assigned a writable task checkout, read and edit it directly, including corrections after send-back; attempt source is only for inspecting a settled retained Change, not a prerequisite for your own checkout. Never substitute another task or private Change path. Scope file discovery to the task checkout and private runtime home. Locate tools with command -v and the checkout's documented setup. Never recursively search the user home, Library, Documents, Desktop, Music or Photos for tools or instructions. If a required path is not provided or present, report the missing prerequisite instead of widening the search."
-	ClaudeTaskLead        = DiscoveryInstructions + " Complete this Dark Factory task. Before exiting, report the durable outcome with $DARK_FACTORY_FACTORYCTL attempt succeed, block, or fail. Task: "
+	ClaudeTaskLead        = DiscoveryInstructions + " Complete this Dark Factory task. Shell commands cannot reach the attempt API: use the factory_attempt factory tool for every factoryctl attempt or overseer command, passing argv without the executable. Before exiting, report the durable outcome through it with attempt succeed, block, or fail. Task: "
 )
 
 var ErrClaudeTask = errors.New("runner: invalid Claude task")
