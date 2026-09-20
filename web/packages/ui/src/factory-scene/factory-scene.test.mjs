@@ -1063,8 +1063,10 @@ test("floor action hit areas invoke existing task and mission routes", async () 
   });
   const tray = renderer.root.findByProps({ "data-floor-inbox": 0 });
   const planning = renderer.root.findByProps({ "data-common-table": "planning" });
-  assert.equal(Number(tray.findAllByType("rect").find((node) => Number(node.props.width) === 44).props.width), 44);
-  assert.equal(Number(planning.findAllByType("rect").find((node) => Number(node.props.width) === 44).props.width), 44);
+  const trayFocus = tray.findAllByType("rect").find((node) => Number(node.props.width) === 44);
+  const planningFocus = planning.findAllByType("rect").find((node) => Number(node.props.width) === 44);
+  assert.deepEqual({ x: Number(trayFocus.props.x), y: Number(trayFocus.props.y), width: Number(trayFocus.props.width), height: Number(trayFocus.props.height) }, { x: -22, y: -22, width: 44, height: 44 });
+  assert.deepEqual({ x: Number(planningFocus.props.x), y: Number(planningFocus.props.y), width: Number(planningFocus.props.width), height: Number(planningFocus.props.height) }, { x: -22, y: -22, width: 44, height: 44 });
   await act(async () => tray.props.onClick());
   await act(async () => planning.props.onClick());
   assert.equal(tasksOpened, "project");

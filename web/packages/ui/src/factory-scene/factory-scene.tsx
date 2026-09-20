@@ -431,37 +431,27 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   const commonBottom = Math.max(...seats.map(({ y }) => y)) + 24;
   const commonWidth = Math.max(...seats.map(({ x }) => x)) + 24 - ROOM_LEFT;
   const nook = breakRoomNook(layout, resting.length, planning.length);
-  // The right side of the common room is a real reserved bay: break-room
-  // furniture stays first, then the always-present mission station and tray.
-  const stationLeft = ROOM_LEFT + commonWidth + (nook?.width ?? 0) + 16;
-  const commonAreaWidth = commonWidth + (nook?.width ?? 0) + 128;
-  const boardTop = Math.max(layout.height, commonBottom, ...placements.map((placement) => placement.y + 24)) + PADDING;
+  // The operator's desks sit below the seats. This keeps a stable, useful
+  // destination even when no overseer is pictured, without borrowing a worker's chair.
+  const stationTop = commonBottom + 32;
+  const station = { missions: { x: ROOM_LEFT + 32, y: stationTop }, tasks: { x: ROOM_LEFT + 112, y: stationTop } };
+  const commonAreaWidth = Math.max(commonWidth + (nook?.width ?? 0), station.tasks.x + 24 - ROOM_LEFT);
+  const boardTop = Math.max(layout.height, commonBottom, stationTop + 24, ...placements.map((placement) => placement.y + 24)) + PADDING;
   const sceneHeight = boardTop + PADDING;
-  const sceneWidth = Math.max(layout.width, ROOM_LEFT + commonAreaWidth + PADDING);
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
   const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
   const queued = tasks.filter((order) => order.status === "queued").length;
-  // Keep the hit target one clear worker-width beyond the last common-room seat.
-  const tray = useMemo(() => ({ x: stationLeft + 72, y: layout.restingTop + TABLE_DROP - 25 }), [layout, stationLeft]);
+  // The hand-off origin is the visible task tray, below rather than beside the seats.
+  const tray = station.tasks;
   // A compact scope still needs room for readable labels, not poster-sized
   // sprites; larger scopes retain their existing scrollable viewport.
-  const maxWidth = Math.min(640, sceneWidth * 2);
+  const maxWidth = Math.min(640, layout.width * 2);
   // One table per row, as long as the row, standing between the viewer and the
   // people at it: it covers their laps, and what they rest with sits on it.
-  // Keep one clearly reachable planning station even when no overseer is seated.
-  // The synthetic row is only furniture geometry; it never creates a worker.
-  const planningSeats = seating.planning.length === 0
-    // Place the empty station above the common seats, leaving its focus area
-    // clear of both the seated workers and the queue tray.
-    ? [{ x: stationLeft, y: layout.restingTop }]
-    : seating.planning;
-  const tables = [{ seats: seating.resting, planning: false }, { seats: planningSeats, planning: true }].flatMap(({ seats, planning }) =>
+  const tables = [{ seats: seating.resting, planning: false }, { seats: seating.planning, planning: true }].flatMap(({ seats, planning }) =>
     [...new Set(seats.map((seat) => seat.y))].map((y) => { const row = seats.filter((seat) => seat.y === y), first = row[0]!;
-      const action = planning ? onOpenMissions : undefined;
-      const project = projectId;
-      return <g key={`${planning} ${y}`} data-common-table={planning ? "planning" : "resting"} data-tooltip={planning ? "Missions · inspect objectives" : undefined} aria-label={planning ? "Open Missions" : undefined} className={planning ? "dfFactoryScene__target" : undefined} {...(planning ? sceneAction(action === undefined ? undefined : () => action(project)) : { "aria-hidden": true, pointerEvents: "none" })} transform={`translate(${first.x} ${y + TABLE_DROP})`}>
-        {planning ? <rect className="dfFactoryScene__focus" x="-22" y="-85" width="44" height="44" fill="transparent" /> : null}
+      return <g key={`${planning} ${y}`} data-common-table={planning ? "planning-workers" : "resting"} aria-hidden="true" pointerEvents="none" transform={`translate(${first.x} ${y + TABLE_DROP})`}>
         <rect x="-18" y="-21" width={row.at(-1)!.x - first.x + 36} height="10" fill={planning ? "#455c5e" : "#655d4c"} stroke="#8c8871" />
         {!planning ? null : <g><rect x="-12" y="-19" width="24" height="6" fill="#9fae9e" /><path d="M-9 -17h12v3H-3v-3 M5 -16h4" fill="none" stroke="#536e70" /></g>}
       </g>; }));
@@ -470,7 +460,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
     <>
     <div className="dfFactoryFloor__map" onClick={inspect} onPointerOver={inspect} onFocus={inspect} onPointerLeave={() => { retainFocusedTooltip(); setLinkedFrom(undefined); }} onBlur={() => { setTooltip(undefined); setLinkedFrom(undefined); }} onScroll={retainFocusedTooltip} onKeyDown={(event) => { if (event.key === "Escape") { setTooltip(undefined); setLinkedFrom(undefined); } }} role="region" aria-label="Scrollable codebase floor" tabIndex={0}>
     <svg
-      viewBox={`0 0 ${sceneWidth} ${sceneHeight}`}
+      viewBox={`0 0 ${layout.width} ${sceneHeight}`}
       role="group"
       aria-label="Dark Factory codebase floor"
       data-topology-digest={topology.digest}
@@ -499,7 +489,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
           <stop offset="1" stopColor="#f2dab0" stopOpacity="0" />
         </radialGradient>
       </defs>
-      <rect width={sceneWidth} height={sceneHeight} fill="#08131d" />
+      <rect width={layout.width} height={sceneHeight} fill="#08131d" />
       {layout.corridors.map((corridor, index) => <rect key={index} data-corridor="" {...corridor} fill="url(#df-floor)" />)}
       <rect x={PADDING} y={layout.restingTop - 32} width={ROOM_LEFT - PADDING} height={boardTop - layout.restingTop + 32} fill="url(#df-floor)" />
       {layout.headings.map((heading) => (
@@ -578,14 +568,21 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
       <SceneWorkers errands={appearance.scenery !== "off"} restingSeats={seating.resting} tray={tray} peerQuestions={peerQuestions} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectTask={onSelectTask} onSelectHumanRequest={onSelectHumanRequest} />
-      <g aria-hidden="true" pointerEvents="none" data-floor-tray-desk="" transform={`translate(${tray.x - 28} ${tray.y - 7})`}>
-        <rect x="0" y="0" width="56" height="16" fill="#5b5545" stroke="#a08f68" />
-        <path d="M5 16v6 M51 16v6" stroke="#393b35" strokeWidth="3" />
-        <text x="28" y="11" textAnchor="middle" fill="#d9c58d" fontFamily="ui-monospace, monospace" fontSize="6">TASKS</text>
+      <g data-common-table="planning" data-tooltip="Missions · inspect objectives" aria-label="Open Missions" className={onOpenMissions === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenMissions === undefined ? undefined : () => onOpenMissions(projectId))} transform={`translate(${station.missions.x} ${station.missions.y})`}>
+        {onOpenMissions === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
+        <rect x="-22" y="-8" width="44" height="16" fill="#455c5e" stroke="#8c8871" />
+        <path d="M-17 8v7 M17 8v7" stroke="#393f3c" strokeWidth="3" />
+        <rect x="-12" y="-6" width="24" height="6" fill="#9fae9e" /><path d="M-9 -4h12v3H-3v-3 M5 -3h4" fill="none" stroke="#536e70" />
+        <text x="0" y="5" textAnchor="middle" fill="#d4ddd2" fontFamily="ui-monospace, monospace" fontSize="5">MISSIONS</text>
+      </g>
+      <g aria-hidden="true" pointerEvents="none" data-floor-tray-desk="" transform={`translate(${tray.x} ${tray.y})`}>
+        <rect x="-22" y="-8" width="44" height="16" fill="#5b5545" stroke="#a08f68" />
+        <path d="M-17 8v7 M17 8v7" stroke="#393b35" strokeWidth="3" />
+        <text x="0" y="5" textAnchor="middle" fill="#d9c58d" fontFamily="ui-monospace, monospace" fontSize="6">TASKS</text>
       </g>
       {/* Waiting work, as the tray it would be on a real desk. The pile says
           how the queue is doing; the target opens the existing Tasks panel. */}
-      <g data-floor-inbox={queued} data-tooltip={queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`} aria-label="Open Tasks" className={onOpenTasks === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenTasks === undefined ? undefined : () => onOpenTasks(projectId))} transform={`translate(${tray.x - 10} ${tray.y + 4})`}>
+      <g data-floor-inbox={queued} data-tooltip={queued === 0 ? "Tasks · queue is empty" : `Tasks · ${queued} queued`} aria-label="Open Tasks" className={onOpenTasks === undefined ? undefined : "dfFactoryScene__target"} {...sceneAction(onOpenTasks === undefined ? undefined : () => onOpenTasks(projectId))} transform={`translate(${tray.x} ${tray.y})`}>
         {onOpenTasks === undefined ? null : <rect className="dfFactoryScene__focus" x="-22" y="-22" width="44" height="44" fill="transparent" />}
         {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
         <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
