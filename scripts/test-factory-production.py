@@ -221,10 +221,22 @@ class ProductionFixtures(unittest.TestCase):
                  mock.patch.object(production.subprocess, "run", side_effect=command):
                 result = production.maintenance(config)
             self.assertEqual(result["state"], "ready")
+            self.assertEqual(result["destination"], production.runtime_destination(home))
+            self.assertTrue(result["destination"].startswith("runtime:host-"))
+            self.assertNotIn(str(home.resolve()), result["destination"])
             self.assertEqual(result["available"]["state"], "available")
             self.assertEqual(result["installed"]["state"], "verified")
             self.assertEqual(result["running"]["state"], "ready")
             self.assertEqual(result["running"]["build_id"], "build")
+
+    def test_runtime_release_destination_is_stable_and_opaque(self):
+        home = Path("/private/tmp/factory-release-home")
+        config = {"factory_home": str(home)}
+        release = {"verify_argv": ["/tools/verify-live-runtime.py"]}
+        destination = production.release_destination(config, release)
+        self.assertEqual(destination, production.runtime_destination(home))
+        self.assertTrue(destination.startswith("runtime:host-"))
+        self.assertNotIn(str(home.resolve()), destination)
 
 
 if __name__ == "__main__":

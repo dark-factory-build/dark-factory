@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Collect host-owned GitHub, review, and release facts for the factory floor."""
 import argparse
+import hashlib
 import importlib.util
 import json
 import re
@@ -82,13 +83,18 @@ def host_config(config):
     return value
 
 
+def runtime_destination(home):
+    digest = hashlib.sha256(str(Path(home).resolve()).encode("utf-8")).hexdigest()[:16]
+    return "runtime:host-" + digest
+
+
 def release_destination(config, release):
     destination = release.get("destination")
     if isinstance(destination, str) and destination and len(destination) <= 160:
         return destination
     verifier = release.get("verify_argv")
     if isinstance(verifier, list) and any(isinstance(arg, str) and arg.endswith("verify-live-runtime.py") for arg in verifier):
-        return "runtime:" + str(Path(config["factory_home"]).resolve())
+        return runtime_destination(config["factory_home"])
     if isinstance(verifier, list) and any(isinstance(arg, str) and arg.endswith("verify-live-site.py") for arg in verifier):
         return "site:app.darkfactory.build"
     return ""
@@ -157,7 +163,7 @@ def maintenance(config):
     installed = {key: "" for key in ("version", "source", "target", "build_id")}
     installed.update({"release": False, "state": "unknown"})
     running = dict(installed)
-    result = {"destination": "runtime:" + str(home), "available": available,
+    result = {"destination": runtime_destination(home), "available": available,
               "installed": installed, "running": running, "state": "unknown"}
     if config.get("repository") != MAINTENANCE_REPOSITORY:
         available["state"] = result["state"] = "unavailable"
