@@ -2573,7 +2573,7 @@ test("an open issue inbox reloads destinations as well as sources after reconnec
 
 test("one project selector scopes floor, agents, tasks and project limits across view changes", async () => {
   let tree;
-  const topologies = new Map([...fixtureTopologies].map(([id, topology]) => [id, { ...topology, inventoryOmitted: id === ids.secondProject ? 12 : 0 }]));
+  const topologies = new Map(fixtureTopologies).set(ids.secondProject, { ...fixtureTopology, projectId: ids.secondProject, inventoryOmitted: 12 });
   const props = { status: "ready", state: fixtureState, topologies, selectedAgent: agentSelection(), onSelectAgent() {}, onSelectTask() {} };
   await act(async () => { tree = create(createElement(FactoryConsole, props)); });
   const choose = async (value) => act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value } }));
