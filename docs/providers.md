@@ -73,7 +73,8 @@ the project, a linked Git worktree on the Change's branch, and works there;
 an orchestrator's run binds no Change and is given its private runtime home
 as its working directory. It requests a worker's settled Change explicitly
 with `factoryctl attempt source --task TASK_ID`. The daemon checks that target
-task in the authenticated attempt's same project, requires its current settled
+task in the authenticated attempt's same project, grants a worker only the
+target its own `review handoff` first line names, requires its current settled
 retained Change (including blocked, failed, or cancelled outcomes), verifies
 the worktree is still at the settled head, and returns the Change ID, base
 commit, `head_commit`, `branch`, target task ID, task work revision, current
@@ -91,14 +92,28 @@ revision or Change revision, or a branch that moved since settlement, is
 refused.
 overseer publishes through the Maintainer App. A Claude Code orchestrator is launched
 with that App's MCP bridge, `dark-factory-maintainer-mcp-bridge` resolved on
-the fixed tool path, as its one MCP server; a Claude Code worker is launched
-with `--strict-mcp-config` and no server, so nothing in its account
-configuration or in a `.mcp.json` inside the Change reaches it. The bridge
+the fixed tool path, beside the same `factory_attempt` server (`factoryctl
+attempt mcp`) a Codex orchestrator already has. A Claude Code worker is launched
+with `--strict-mcp-config` and exactly one factory-control MCP server,
+`factory_attempt` (`factoryctl attempt mcp`). If the optional installed
+browser bridge is present, the worker also receives `factory_browser`; it is a
+separate browser capability, not a factory-control server. Nothing else in
+the account configuration or in a `.mcp.json` inside the Change reaches it.
+The factory-attempt MCP child inherits
+`DARK_FACTORY_SOCKET`, `DARK_FACTORY_ATTEMPT_TOKEN_FILE`, and
+`DARK_FACTORY_FACTORYCTL`, so every request is authenticated as the live
+attempt. The server exposes only the documented attempt/overseer command
+allowlist, and the daemon still enforces the worker's task, project, role,
+provider, run-state, and source-receipt checks; it is not a general operator
+API or a filesystem relay. The bridge
 is found on the same ordered path as a CLI but is not committed like one,
 since Claude spawns it itself much later and it may be a script: it must be
 a regular file, executable by its owner and writable by nobody else, and an
 orchestrator launch is refused, naming which, when it is missing or fails
-that. Codex orchestrators receive no MCP configuration yet.
+that. Claude workers still have the provider's existing local-command
+authority; this MCP boundary does not create a hostile same-user sandbox.
+Every Codex launch receives the same `factory_attempt` server, and a Codex
+orchestrator receives the Maintainer server beside it.
 
 ## Shell
 

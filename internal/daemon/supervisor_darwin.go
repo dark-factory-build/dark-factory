@@ -340,7 +340,7 @@ func (daemon *Daemon) runNext(ctx context.Context, spec SupervisorSpec) (resultR
 	var changeState kernel.Change
 	var retained *changeworker.Result
 	var retainedSourceReview *changeworker.SourceReview
-	if run.Provider == kernel.ProviderCodex && run.Role == kernel.RoleWorker {
+	if kernel.RetainedSourceReviewSupported(run.Provider) && run.Role == kernel.RoleWorker {
 		expected, review, parseErr := kernel.ParseRetainedSourceReviewTask(task.Body)
 		if parseErr != nil {
 			return daemon.failRunBeforeRuntime(daemon.cleanupCtx, run, keys.resources.RuntimeRoot, kernel.FailureSource, parseErr)

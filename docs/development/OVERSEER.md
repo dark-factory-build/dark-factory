@@ -226,7 +226,7 @@ the worker's edits uncommitted, so its `head_commit` equals its base and
 `dirty` is true: send such a task back to have its work committed before
 publication.
 
-An independently delegated Codex reviewer uses the same explicit source
+An independently delegated Codex or Claude Code reviewer uses the same explicit source
 request and reads the same head from `git_directory`. It must match Change
 ID, base commit, head commit, target task ID, task work revision and Change
 revision first; the local branch is evidence of the worker Change, not the

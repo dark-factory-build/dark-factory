@@ -215,7 +215,7 @@ func runSupervisorCodexFixture() error {
 	target, overseer := "", false
 	if target, overseer = strings.CutPrefix(task.Task, "handoff "); !overseer {
 		var reviewer bool
-		target, reviewer = strings.CutPrefix(task.Task, "review handoff ")
+		target, reviewer = strings.CutPrefix(strings.SplitN(strings.TrimSpace(task.Task), "\n", 2)[0], "review handoff ")
 		if !reviewer {
 			target = ""
 		}
@@ -554,6 +554,34 @@ func runSupervisorClaudeFixture() error {
 	if err != nil {
 		return err
 	}
+	result := "exact"
+	if line, ok := strings.CutPrefix(strings.SplitN(strings.TrimSpace(task.Task), "\n", 2)[0], "review handoff "); ok {
+		result = task.Task
+		fields := strings.Fields(line)
+		if len(fields) != 5 {
+			return fmt.Errorf("Claude source target = %q", line)
+		}
+		handoff, err := client.Source(ctx, fields[0])
+		if err != nil {
+			return err
+		}
+		if handoff.TaskID != fields[0] || handoff.ChangeID != fields[1] || handoff.BaseCommit != fields[2] || strconv.FormatUint(handoff.TaskWorkRevision, 10) != fields[3] || strconv.FormatUint(handoff.ChangeRevision, 10) != fields[4] {
+			return fmt.Errorf("Claude source receipt = %+v", handoff)
+		}
+		// The handoff line names one target; any other task is refused, not looked up.
+		var refused *api.RemoteError
+		if _, err := client.Source(ctx, task.TaskID); !errors.As(err, &refused) || refused.Code() != api.RemoteUnauthorized {
+			return fmt.Errorf("Claude reviewer unnamed source = %v", err)
+		}
+		if _, err := client.OverseerTaskSnapshot(ctx, fields[0]); err == nil {
+			return errors.New("Claude reviewer gained overseer source discovery")
+		} else {
+			var remote *api.RemoteError
+			if !errors.As(err, &remote) || remote.Code() != api.RemoteUnauthorized {
+				return fmt.Errorf("Claude reviewer overseer refusal = %w", err)
+			}
+		}
+	}
 	var typed string
 	if quote := bytes.IndexByte(line, '"'); quote < 0 {
 		return fmt.Errorf("no quoted task in %d typed bytes", len(line))
@@ -578,7 +606,7 @@ func runSupervisorClaudeFixture() error {
 			}
 		}
 	}
-	_, err = client.Succeed(ctx, "exact")
+	_, err = client.Succeed(ctx, result)
 	return err
 }
 
@@ -951,7 +979,7 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 	}
 	if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
 		ID: supervisorTaskID(t, 13), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 14),
-		Title: "review retained Change", Body: fmt.Sprintf(" \treview handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
+		Title: "review retained Change", Body: fmt.Sprintf("review handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64()), Priority: 1,
 	}, supervisorTime()); err != nil {
 		t.Fatal(err)
 	}
@@ -977,9 +1005,74 @@ func TestSupervisorCodexReviewerLaunchReceivesExactRetainedChangeReceipt(t *test
 	fixture.assertReleased(t, reviewer)
 }
 
+func TestSupervisorClaudeReviewerLaunchReceivesExactRetainedChangeReceipt(t *testing.T) {
+	for _, titleOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("titleOnly=%v", titleOnly), func(t *testing.T) {
+			fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
+			worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if err != nil {
+				t.Fatalf("source worker RunNext: %v", err)
+			}
+			fixture.assertTerminal(t, worker, kernel.OutcomeSucceeded)
+			changeState, found, err := fixture.store.Change(context.Background(), *worker.ChangeID)
+			if err != nil || !found || changeState.Selection == nil {
+				t.Fatalf("retained source Change = %+v, found=%v, err=%v", changeState, found, err)
+			}
+			handoff := fmt.Sprintf("review handoff %s %s %x %d %d  \r\nFACTORY_SOURCE owner/repo#1\nreview this exact source", worker.TaskID, changeState.ID, changeState.Selection.Commit().Bytes(), worker.AdmittedTaskWorkRevision.Int64(), changeState.Revision.Int64())
+			title, taskBody := "review retained Change", handoff
+			if titleOnly {
+				// A handoff is its body's first line: admission and the supervisor read
+				// only the body, so a title grants no source.
+				title, taskBody = strings.SplitN(handoff, "  \r", 2)[0], ""
+			}
+			reviewerID := supervisorAgentID(t, 22)
+			if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{
+				ID: reviewerID, ProjectID: worker.ProjectID, Name: "claude-reviewer", Role: kernel.RoleWorker,
+				Provider: kernel.ProviderClaudeCode, ToolBudgetLimit: 20,
+			}, supervisorTime()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{
+				ID: supervisorTaskID(t, 23), ProjectID: worker.ProjectID, AssignedAgentID: reviewerID, IncarnationID: supervisorIncarnationID(t, 24),
+				Title: title, Body: taskBody, Priority: 1,
+			}, supervisorTime()); err != nil {
+				t.Fatal(err)
+			}
+			tools := filepath.Join(fixture.root, "claude-reviewer-tools")
+			if err := os.Mkdir(tools, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			copySupervisorExecutable(t, executable, filepath.Join(tools, "claude"))
+			fixture.spec.ToolPath = tools + ":" + fixture.spec.ToolPath
+
+			reviewer, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
+			if err != nil {
+				t.Fatalf("Claude reviewer RunNext: %v", err)
+			}
+			if titleOnly {
+				fixture.assertTerminal(t, reviewer, kernel.OutcomeFailed)
+				return
+			}
+			fixture.assertTerminal(t, reviewer, kernel.OutcomeSucceeded)
+			if reviewer.Role != kernel.RoleWorker || reviewer.Provider != kernel.ProviderClaudeCode || reviewer.Proposal == nil || !strings.Contains(reviewer.Proposal.Result(), "review handoff ") {
+				t.Fatalf("Claude reviewer receipt = %+v", reviewer)
+			}
+			fixture.assertReleased(t, reviewer)
+		})
+	}
+}
+
 func TestSupervisorReviewerRefusesMismatchedRetainedIdentityBeforeProvider(t *testing.T) {
-	for _, field := range []string{"change", "base", "work revision", "change revision"} {
+	for _, field := range []string{"change", "base", "work revision", "change revision", "claude change"} {
 		t.Run(field, func(t *testing.T) {
+			provider := kernel.ProviderCodex
+			if rest, ok := strings.CutPrefix(field, "claude "); ok {
+				field, provider = rest, kernel.ProviderClaudeCode
+			}
 			fixture := newSupervisorFixture(t, supervisorProgram(t, false, false))
 			worker, err := fixture.daemon.RunNext(context.Background(), fixture.spec)
 			if err != nil {
@@ -1003,7 +1096,7 @@ func TestSupervisorReviewerRefusesMismatchedRetainedIdentityBeforeProvider(t *te
 				changeRevision++
 			}
 			reviewerID := supervisorAgentID(t, 12)
-			if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: reviewerID, ProjectID: worker.ProjectID, Name: "reviewer", Role: kernel.RoleWorker, Provider: kernel.ProviderCodex, ToolBudgetLimit: 20}, supervisorTime()); err != nil {
+			if _, err := fixture.store.CreateAgent(context.Background(), kernel.NewAgent{ID: reviewerID, ProjectID: worker.ProjectID, Name: "reviewer", Role: kernel.RoleWorker, Provider: provider, ToolBudgetLimit: 20}, supervisorTime()); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := fixture.store.EnqueueTask(context.Background(), kernel.NewTask{

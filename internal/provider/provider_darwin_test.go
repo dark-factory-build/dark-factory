@@ -107,9 +107,9 @@ func wantClaudeWorkerSessionFlag(t *testing.T, request Request) []string {
 	return []string{"--session-id", id}
 }
 
-// An orchestrator's Claude session is handed the Maintainer bridge as its one
-// MCP server, resolved on the fixed tool path; a worker's is handed none, and
-// an orchestrator without the bridge is not launched at all.
+// Claude receives only the installed attempt server, plus the Maintainer
+// bridge for orchestrators; account and Change-local MCP configuration is not
+// trusted.
 func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	installation, runtime, locator := nativeFixture(t, kernel.ProviderClaudeCode)
 	workerRequest := roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleWorker)
@@ -118,9 +118,18 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantWorkerArgv := append([]string{"/usr/bin/true", "--dangerously-skip-permissions"}, wantClaudeWorkerSessionFlag(t, workerRequest)...)
-	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config")
+	wantWorkerArgv = append(wantWorkerArgv, "--strict-mcp-config", "--mcp-config", `{"mcpServers":{"factory_attempt":{"args":["attempt","mcp"],"command":"`+runtime.factoryctl+`"}}}`)
 	if !reflect.DeepEqual(worker.Argv(), wantWorkerArgv) {
 		t.Fatalf("worker argv = %q, want %q", worker.Argv(), wantWorkerArgv)
+	}
+	for _, required := range []string{
+		"DARK_FACTORY_SOCKET=" + runtime.socket,
+		"DARK_FACTORY_ATTEMPT_TOKEN_FILE=" + runtime.token,
+		"DARK_FACTORY_FACTORYCTL=" + runtime.factoryctl,
+	} {
+		if !slices.Contains(worker.Environment(), required) {
+			t.Fatalf("Claude worker attempt transport lacks %q: %q", required, worker.Environment())
+		}
 	}
 	if _, err := Build(roleRequestFor(t, kernel.ProviderClaudeCode, installation, runtime, "", "", kernel.RoleOrchestrator)); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("orchestrator without the bridge = %v, want ErrUnavailable", err)
@@ -139,7 +148,7 @@ func TestBuildOrchestratorClaudeIsGivenTheMaintainerBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/usr/bin/true", "--dangerously-skip-permissions", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{"maintainer":{"command":"` + resolvedBridge + `"}}}`}
+	want := []string{"/usr/bin/true", "--dangerously-skip-permissions", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{"factory_attempt":{"args":["attempt","mcp"],"command":"` + runtime.factoryctl + `"},"maintainer":{"command":"` + resolvedBridge + `"}}}`}
 	if !reflect.DeepEqual(launch.Argv(), want) {
 		t.Fatalf("orchestrator argv = %q, want %q", launch.Argv(), want)
 	}
@@ -304,7 +313,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 	}{
 		{
 			kind: kernel.ProviderClaudeCode, model: "claude-model", effort: "max", wantDelivery: TaskDeliveryStartupTerminal,
-			wantArgv: []string{"/usr/bin/true", "--dangerously-skip-permissions", "--model", "claude-model", "--effort", "max", "--strict-mcp-config"},
+			wantArgv: []string{"/usr/bin/true", "--dangerously-skip-permissions", "--model", "claude-model", "--effort", "max", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{"factory_attempt":{"args":["attempt","mcp"],"command":"<factoryctl>"}}}`},
 		},
 		{
 			kind: kernel.ProviderCodex, model: "codex-model", effort: "xhigh", wantDelivery: TaskDeliveryAttemptAPI,
@@ -326,6 +335,7 @@ func TestBuildNativeReturnsExactArgvEnvironmentAndSafeStartupTask(t *testing.T) 
 			}
 			wantArgv := test.wantArgv
 			if test.kind == kernel.ProviderClaudeCode {
+				wantArgv[len(wantArgv)-1] = `{"mcpServers":{"factory_attempt":{"args":["attempt","mcp"],"command":"` + runtime.factoryctl + `"}}}`
 				wantArgv = slices.Insert(slices.Clone(wantArgv), 2, wantClaudeWorkerSessionFlag(t, request)...)
 			}
 			if test.kind == kernel.ProviderCodex {
