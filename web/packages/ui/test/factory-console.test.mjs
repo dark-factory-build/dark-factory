@@ -822,8 +822,11 @@ test("opening a selected question restores that agent's terminal panel", async (
     let renderer;
     await act(async () => { renderer = create(createElement(ConsoleHarness)); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Settings" && typeof button.props.onClick === "function").props.onClick(); });
+    await act(async () => { renderer.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: ids.secondProject } }); });
+    assert.equal(renderer.root.findAllByProps({ "aria-label": "Terminal" }).length, 0);
     await act(async () => { renderer.root.findAllByType("button").find((button) => Array.isArray(button.props.children) && button.props.children[0] === "Needs you ").props.onClick(); });
     await act(async () => { renderer.root.findAllByType("button").find((button) => button.props.children === "Open terminal").props.onClick(); });
+    assert.equal(renderer.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "opening a global question switches to its agent’s project");
     const terminal = renderer.root.findByProps({ "aria-label": "Terminal" });
     const config = renderer.root.findByProps({ "aria-label": "Agent configuration" });
     assert.equal(terminal.props.hidden, false);
@@ -2570,7 +2573,7 @@ test("an open issue inbox reloads destinations as well as sources after reconnec
 
 test("one project selector scopes floor, agents, tasks and project limits across view changes", async () => {
   let tree;
-  const props = { status: "ready", state: fixtureState, topologies: fixtureTopologies, onSelectAgent() {}, onSelectTask() {} };
+  const props = { status: "ready", state: fixtureState, topologies: fixtureTopologies, selectedAgent: agentSelection(), onSelectAgent() {}, onSelectTask() {} };
   await act(async () => { tree = create(createElement(FactoryConsole, props)); });
   const choose = async (value) => act(async () => tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value } }));
   const floor = () => tree.root.findByType(FactoryFloor);
@@ -2578,6 +2581,7 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.equal(floor().props.projectId, ids.project);
   assert.ok([...floor().props.state.agents.values()].every((agent) => agent.project_id === ids.project));
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.project));
+  assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.project));
   const rootID = `${ids.project}:${fixtureTopology.nodes[0].id}`;
   assert.equal(tree.root.findByProps({ "aria-label": "Floor hierarchy" }).findAllByType("button").at(-2).props.children, fixtureState.projects.get(ids.project).name);
   await act(async () => { tree.update(createElement(FactoryConsole, { ...props, view: "agents", settingsOpen: true })); });
@@ -2595,6 +2599,8 @@ test("one project selector scopes floor, agents, tasks and project limits across
   assert.equal(tree.root.findByProps({ "aria-label": "Project" }).props.value, ids.project, "entering a project updates the shared selector");
   await choose(ids.secondProject);
   assert.equal(floor().props.projectId, ids.secondProject);
+  assert.equal(tree.root.findAllByProps({ "aria-label": `Agent ${fixtureState.agents.get(ids.agent).name}` }).length, 0, "a foreign selected agent cannot retain controls");
+  assert.ok([...floor().findByType(FactoryScene).props.detailNodes.values()].every((node) => node.project.id === ids.secondProject));
   assert.ok([...floor().props.state.tasks.values()].every((task) => task.project_id === ids.secondProject));
   await act(async () => tree.unmount());
 });

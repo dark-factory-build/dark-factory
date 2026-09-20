@@ -100,6 +100,7 @@ export function FactoryFloor({
   // Snapshot decoding replaces the projects Map even when only live work changed.
   const projectsKey = JSON.stringify([...state?.projects.values() ?? []].map(({ id, name }) => [id, name]).sort(([left], [right]) => left!.localeCompare(right!)));
   const prepared = useMemo(() => prepareFloor(state?.projects, topologies), [projectsKey, topologies]);
+  const detailNodes = useMemo(() => projectId === undefined ? prepared.roomByID : new Map([...prepared.roomByID].filter(([, node]) => node.project?.id === projectId)), [prepared, projectId]);
   const rootId = prepared.hierarchies.find((hierarchy) => hierarchy.project.id === projectId)?.projectRoom.id;
   const setScopeId = (scopeId: string | undefined) => {
     setView({ scopeId, page: 0 });
@@ -137,7 +138,7 @@ export function FactoryFloor({
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       topology={scene.topology}
-      detailNodes={prepared.roomByID}
+      detailNodes={detailNodes}
       workers={scene.workers}
       connected={connected}
       tasks={scene.tasks}

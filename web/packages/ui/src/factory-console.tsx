@@ -195,7 +195,7 @@ export function FactoryConsole({
   const selectTask = onSelectTask === undefined ? undefined : (id: string) => { onSelectTask(id); onDetail?.("queue"); };
   const ready = status === "ready";
   const counters = factoryCounters(state);
-  const agent = selectedAgent === undefined ? undefined : state?.agents.get(selectedAgent.id);
+  const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const selectedDetail = (detail === "floor" ? "needs-you" : detail) ?? (selectedAgent === undefined ? "needs-you" : "agent");
   const appearanceAgent = appearanceAgentId === undefined ? undefined : state?.agents.get(appearanceAgentId);
   const editError = edit !== undefined && state?.projects.has(edit.target) ? undefined : editErrorCopy(edit);
@@ -279,7 +279,7 @@ export function FactoryConsole({
                   onReplyChange={onHumanReplyChange}
                   onReply={onReplyHumanRequest}
                   onCancel={onCancelHumanRequest}
-                  onOpenTerminal={onOpenTerminalForHumanRequest}
+                  onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { setProjectId(request.project_id); onOpenTerminalForHumanRequest(request); }}
                   terminalReady={ready}
                 />}
               />
