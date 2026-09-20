@@ -1769,8 +1769,15 @@ func TestClaudeSettingsConfineTheRunToItsGrants(t *testing.T) {
 	if !slices.Contains(sandbox.Filesystem.AllowWrite, change) || slices.Contains(sandbox.Filesystem.AllowWrite, "/"+runtime.factoryctl) {
 		t.Fatalf("write grants = %q", sandbox.Filesystem.AllowWrite)
 	}
-	if !slices.Equal(sandbox.Network.AllowUnixSockets, []string{runtime.socket}) {
+	// Bash and the file tools get no route to the attempt API: no socket, and
+	// neither it nor the token is readable. The factory_attempt tool has both.
+	if len(sandbox.Network.AllowUnixSockets) != 0 {
 		t.Fatalf("sockets = %q", sandbox.Network.AllowUnixSockets)
+	}
+	for _, private := range []string{runtime.token, runtime.socket} {
+		if slices.Contains(sandbox.Filesystem.AllowRead, "/"+private) || slices.Contains(settings.Permissions.Allow, "Read(/"+private+")") {
+			t.Fatalf("%s is readable inside the sandbox", private)
+		}
 	}
 	for _, rule := range []string{"Edit(" + change + "/**)", "mcp__factory_browser"} {
 		if !slices.Contains(settings.Permissions.Allow, rule) {

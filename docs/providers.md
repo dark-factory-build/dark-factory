@@ -281,8 +281,10 @@ directory. System locations stay readable, as under Codex's minimal profile;
 denying every read crashes ordinary tools. `--setting-sources ""` stops user,
 project and local Claude settings from merging rules that widen this. The
 provider process and MCP servers remain outside this boundary, as for Codex.
-Sandboxed Bash cannot reach the attempt API, so every Claude launch carries the
-`factory_attempt` stdio tool Codex already uses, and its task lead names it.
+Claude's Bash and file tools are given neither the attempt socket nor its
+token, so they have no route to the attempt API. Outcomes and overseer commands
+go through the `factory_attempt` stdio tool, a child of the CLI outside the
+sandbox, and the task lead names it.
 A live worker run on CLI 2.1.278 (20 September 2026, isolated home, a
 repository whose own `.claude/settings.json` tried to allow its parent) edited
 and committed in its Change, was refused reads of a sentinel under `/Users` and

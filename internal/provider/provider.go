@@ -817,7 +817,7 @@ func codexPermissions(request Request) (string, error) {
 // claudeSettings confines a Claude Code run to the same grants Codex gets.
 // dontAsk refuses every tool call no rule allows, which covers the file
 // tools; the OS sandbox covers Bash, where user data is unreadable except for
-// the granted paths. Network stays open, as it is for Codex.
+// the granted paths. Network stays open, as it is for Codex; no Unix socket is.
 // Denying every read crashes ordinary tools on macOS, so the denied regions
 // are where user data lives, with the grants and the CLI's own per-user
 // scratch directory (where it captures Bash output) re-allowed. System
@@ -831,7 +831,12 @@ func claudeSettings(request Request, servers []string) (string, error) {
 		allow = append(allow, "mcp__"+server)
 	}
 	read, write := []string{}, []string{}
-	grants := sandboxGrants(request)
+	// The attempt socket and its token are withheld: outcomes go through the
+	// factory_attempt tool, a child of the CLI outside this sandbox, so Bash
+	// and the file tools get no route to the attempt API at all.
+	grants := slices.DeleteFunc(sandboxGrants(request), func(given grant) bool {
+		return given.path == request.runtime.token || given.path == request.runtime.socket
+	})
 	// Claude names files by their resolved path, and a Change is reached
 	// through a link, so each grant is allowed under both spellings.
 	for _, given := range slices.Clone(grants) {
@@ -853,7 +858,7 @@ func claudeSettings(request Request, servers []string) (string, error) {
 		"sandbox": map[string]any{
 			"enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false, "autoAllowBashIfSandboxed": true,
 			"filesystem": map[string]any{"allowWrite": write, "denyRead": claudeDeniedReads, "allowRead": append(read, fmt.Sprintf("//private/tmp/claude-%d", os.Getuid()))},
-			"network":    map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true, "allowUnixSockets": []string{request.runtime.socket}},
+			"network":    map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
 		},
 	})
 	if err != nil || len(settings) > runner.MaxArgumentBytes {
