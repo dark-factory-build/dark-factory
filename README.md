@@ -25,6 +25,9 @@ synthetic Needs You decision. No daemon is connected.*
 - **Keep work moving.** Queue and prioritize work across projects and repositories. Assign a named agent or the next available worker.
 - **Stay in control.** Open agent terminals, send instructions, and answer Needs You decisions from the same console.
 - **Review and improve.** Inspect completed work and review findings, request corrections, and publish reviewed pull requests when GitHub is configured.
+- **Contain the work.** Every worker attempt gets its own Git worktree, and every attempt gets a private runtime home and temp directory. Codex and Claude Code commands run in an OS sandbox whose only writable places are those, the repository's Git directory, and the shared local CI lease when one exists. Inside your home directory it can read only what the factory granted it, such as those places and the configured toolchain.
+- **Set the budget.** Cap a project by runs and by recorded provider tokens: at either ceiling it admits nothing new and running work finishes. Cap each run's wall-clock time: a run that passes it is cancelled.
+- **Choose the model per worker.** Codex and Claude Code workers share one floor, each with its own provider, model and effort.
 - **Step away from the browser.** Work continues while your Mac stays awake. With remote access configured, a paired phone can steer the same factory.
 
 ## A working day
@@ -90,11 +93,18 @@ connection for new customers still awaits service activation**; installing
 v0.4.0 alone does not enable it. Manual local work and the public
 [reporting page](https://www.darkfactory.build/feedback) remain available.
 
-Codex is proven with real work; Claude support still needs a live provider
-smoke test. Agents run on your Mac, but configured providers receive task and
-repository material. Remote access and GitHub publication need additional
-setup. See [installation and recovery](docs/install.md) and
-[provider support](docs/providers.md).
+Sandboxed Claude Code workers and provider token budgets ship in v0.5.0. Codex
+workers and overseers are proven with real work. Claude Code workers are proven
+by a live run; a Claude Code overseer has fixture proof only, so use a Codex
+overseer for now. Agents run on your Mac as your user. The sandbox confines the
+commands and file tools an agent uses; the provider process and its MCP servers
+sit outside it, and configured providers receive task and repository material.
+Token budgets count the tokens recorded from each provider's session log,
+including cached input, not money. A run the daemon recovers after a restart,
+or one whose provider log is missing, records none, so real usage can exceed
+the ceiling. Remote access and GitHub publication need additional setup. See
+[installation and recovery](docs/install.md) and [provider
+support](docs/providers.md).
 
 For deeper detail: [Architecture](ARCHITECTURE.md) · [Security](SECURITY.md) ·
 [Contributing](CONTRIBUTING.md) · [Development](docs/development/WORKFLOW.md) ·
