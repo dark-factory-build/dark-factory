@@ -81,10 +81,14 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		return result, err
 	}
 	if request.Operation == "list" || request.Operation == "evidence_list" || request.Operation == "outcome_list" {
+		maximum := uint64(1)
+		if request.Operation == "outcome_list" && input.Kind == "mission" {
+			maximum = 8 // Mission lists return summaries; full documents are read on selection.
+		}
 		if input.Limit == 0 {
 			input.Limit = 1
 		}
-		if input.Limit > 1 {
+		if input.Limit > maximum {
 			return result, browser.ErrInvalidRequest
 		}
 	}
@@ -312,6 +316,18 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		page, e := list(ctx, project, int(input.Offset), int(input.Limit))
 		if e != nil {
 			return result, mapBrowserError(e)
+		}
+		if input.Kind == "mission" {
+			items := make([]map[string]any, 0, len(page.Items))
+			for _, item := range page.Items {
+				objective := []rune(item.Document.Objective)
+				if len(objective) > 240 {
+					objective = append(objective[:240], '…')
+				}
+				items = append(items, map[string]any{"id": item.ID.String(), "objective": string(objective), "state": item.Document.State, "stale": item.Stale})
+			}
+			output = map[string]any{"items": items, "next_offset": page.NextOffset}
+			break
 		}
 		out := api.OutcomeList{Items: []api.Outcome{}, NextOffset: uint64(page.NextOffset)}
 		for _, item := range page.Items {

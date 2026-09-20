@@ -45,7 +45,7 @@ export function MissionsPanel({ state, projectId, active, call, onProject, onSel
   };
   const list = async (offset = 0) => {
     const current = generation.current;
-    const value = await call!("outcome_list", { project_id: projectId, kind: "mission", offset, limit: 1 });
+    const value = await call!("outcome_list", { project_id: projectId, kind: "mission", offset, limit: 8 });
     if (current !== generation.current) return;
     setItems((previous) => offset === 0 ? rows(value.items) : [...previous, ...rows(value.items).filter((item) => !previous.some((old) => old.id === item.id))]);
     setNext(Number(value.next_offset ?? 0)); setLoaded(true);

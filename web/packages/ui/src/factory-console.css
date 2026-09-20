@@ -1166,4 +1166,3 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfProjectLibrary textarea, .dfProjectLibrary input, .dfProjectLibrary select { max-width: 100%; box-sizing: border-box; }
 .dfProjectLibrary pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
 .dfProjectLibrary button { margin: .2rem; }
-
