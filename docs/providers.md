@@ -112,7 +112,8 @@ a regular file, executable by its owner and writable by nobody else, and an
 orchestrator launch is refused, naming which, when it is missing or fails
 that. Claude workers still have the provider's existing local-command
 authority; this MCP boundary does not create a hostile same-user sandbox.
-Codex orchestrators receive no MCP configuration yet.
+Every Codex launch receives the same `factory_attempt` server, and a Codex
+orchestrator receives the Maintainer server beside it.
 
 ## Shell
 
