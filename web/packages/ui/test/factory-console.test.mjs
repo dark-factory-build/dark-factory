@@ -1965,7 +1965,6 @@ test("floor objects select the exact existing task detail and question route", a
       ...(editable ? { onEditTask: async () => true } : {}),
       selectedHumanRequest,
       onSelectHumanRequest: (request) => { questions.push(request); setSelectedHumanRequest(selectedRequest({ request, question: "Should the migration also cover the users table? The plan only names accounts." })); setDetail("needs-you"); },
-      onOpenQueue: () => setDetail("queue"),
     });
   }
   let tree;
@@ -1989,9 +1988,8 @@ test("floor objects select the exact existing task detail and question route", a
   assert.deepEqual(queueSelections, [task.id, undefined, task.id]);
   assert.equal(tree.root.findByProps({ "aria-label": "Task details" }).findByType("h3").children.join(""), task.title);
   await act(async () => { tree.root.findByProps({ "aria-label": "Project" }).props.onChange({ currentTarget: { value: "" } }); });
-  await act(async () => { tree.root.findByProps({ "data-floor-queue": "" }).props.onKeyDown({ key: "Enter", preventDefault() {} }); });
   assert.equal(tree.root.findAllByProps({ "aria-label": "Tasks" }).length, 1, "queue remains one canonical panel");
-  assert.equal(tree.root.findAllByProps({ "data-floor-queue": "" }).length, 1);
+  assert.equal(tree.root.findAllByProps({ "data-floor-inbox": 1 }).length, 1, "the floor shows the pile; the panel is where it is read");
   const queuedTask = fixtureState.tasks.get("32".repeat(16));
   await act(async () => { tree.update(createElement(Harness, { editable: true })); });
   await act(async () => { tree.root.findByProps({ "aria-label": "Running tasks" }).findByType("button").props.onClick(); });

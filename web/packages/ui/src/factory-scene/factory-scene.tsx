@@ -29,7 +29,6 @@ export type FactorySceneProps = Readonly<{
   tasks?: readonly SceneTask[];
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
-  onOpenQueue?: () => void;
   onSelectHumanRequest?: (requestId: string) => void;
   /** A dropped session reconciles to its latest snapshot instead of replaying local motion. */
   connected?: boolean;
@@ -262,7 +261,7 @@ function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, co
 }
 
 /** A disposable SVG projection of topology and current factory state. */
-export function FactoryScene({ topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onOpenQueue, onSelectHumanRequest, connected = true }: FactorySceneProps) {
+export function FactoryScene({ topology, detailNodes, workers, appearance = DEFAULT_FLOOR_APPEARANCE, omittedLocations = 0, enterableRoomIds = [], onEnterRoom, selectedWorkerId, onSelectWorker, tasks = [], selectedTaskId, onSelectTask, onSelectHumanRequest, connected = true }: FactorySceneProps) {
   const [selectedRoomId, setSelectedRoomId] = useState<string>();
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number; top: number; bottom: number; room: number }>();
   const tooltipElement = useRef<HTMLDivElement>(null);
@@ -298,7 +297,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
   const commonBottom = Math.max(...seats.map(({ y }) => y)) + 24;
   const commonWidth = Math.max(...seats.map(({ x }) => x)) + 24 - ROOM_LEFT;
   const boardTop = Math.max(layout.height, commonBottom, ...placements.map((placement) => placement.y + 24)) + PADDING;
-  const sceneHeight = boardTop + (tasks.some((task) => task.status === "queued") ? 48 : 0) + PADDING;
+  const sceneHeight = boardTop + PADDING;
   const affected = new Map(layout.rooms.map((room) => [room.id, tasks.filter((order) => order.status === "running" && (order.displayRoomIds ?? order.roomIds).includes(room.id))]));
   const enterable = new Set(enterableRoomIds);
   const cabling = useMemo(() => wires(layout, topology), [layout, topology]);
@@ -422,11 +421,14 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
       <SceneWorkers furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
+      {/* Waiting work, as the tray it would be on a real desk. Scenery, like
+          everything else standing on these tables: the pile says how the queue
+          is doing, the Tasks panel is where it is read and changed. */}
+      <g data-floor-inbox={queued} aria-hidden="true" pointerEvents="none" transform={`translate(${ROOM_LEFT + commonWidth - 30} ${layout.restingTop + TABLE_DROP - 21})`}>
+        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x="1" y={-2 - index * 3} width="18" height="3" fill="#e4dcc0" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
+        <path d="M-2 -4v6h24v-6 M-2 2h24" fill="none" stroke="#c2b184" strokeWidth="2" />
+      </g>
 
-      {queued === 0 ? null : <g data-floor-queue="" {...sceneAction(onOpenQueue)} aria-label={`Open queue, ${queued} tasks`}>
-        {[...Array(Math.min(queued, 3))].map((_, index) => <rect key={index} x={ROOM_LEFT + index * 3} y={boardTop + index * 3} width="24" height="28" fill="#d9d2b5" stroke={tasks.some((task) => task.id === selectedTaskId && task.status === "queued") ? "#80ddff" : "#a6a087"} />)}
-        <text x={ROOM_LEFT + 40} y={boardTop + 18} fill="#b9cad5" fontFamily="ui-monospace, monospace" fontSize="10">QUEUE · {queued}</text>
-      </g>}
 
     </svg>
     {tooltip === undefined ? null : <div ref={tooltipElement} className="dfFactoryTooltip" role="tooltip" style={{ left: tooltip.x, top: tooltip.y, maxHeight: tooltip.room }}>{tooltip.text}</div>}
