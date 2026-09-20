@@ -1089,6 +1089,11 @@ summary.dfConsoleItem__summary { cursor: pointer; }
   position: fixed;
   inset: 0;
   z-index: 3;
+  border: 0;
+  width: auto;
+  height: auto;
+  max-height: none;
+  color: inherit;
   max-width: none;
   margin: 0;
   padding: calc(env(safe-area-inset-top, 0px) + 1rem) 1rem calc(env(safe-area-inset-bottom, 0px) + 1rem);

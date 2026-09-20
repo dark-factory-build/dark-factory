@@ -35,7 +35,7 @@ export function AnswerControls({
   return (
     <>
       {options.length === 0 ? null : <div className="dfFactoryConsole__answerOptions" role="group" aria-label="Suggested answers">
-        {options.map((option, index) => <button type="button" key={option} disabled={busy || disabled || !canReply || onReplyChange === undefined} onClick={() => onReplyChange?.(option)}>{option}{index === 0 ? " · RECOMMENDED" : ""}</button>)}
+        {options.map((option, index) => <button type="button" key={option} disabled={busy || disabled || !canReply || onReplyChange === undefined || onReply === undefined} onClick={() => { onReplyChange?.(option); onReply?.(); }}>{option}{index === 0 ? " · RECOMMENDED" : ""}</button>)}
       </div>}
       {!canReply ? null : <form className={factory ? "dfFactoryConsole__reply" : "dfRemote__reply"} aria-label="Answer this question" onSubmit={submit}>
         <label htmlFor={inputId}>YOUR ANSWER</label>

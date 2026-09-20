@@ -311,7 +311,7 @@ test("REPLY sends the bounded answer once and a second press during it does noth
   });
 });
 
-test("a suggested answer fills the draft and waits for explicit reply", async () => {
+test("a suggested answer sends as soon as it is tapped", async () => {
   const detail = detailFor(northRequest, { options: ["Continue", "Stop"] });
   const session = fakeSession({ detail: () => detail });
   const manager = fakeManager([northFactory()], new Map([[NORTH, session]]));
@@ -320,10 +320,7 @@ test("a suggested answer fills the draft and waits for explicit reply", async ()
     const suggested = allButtons(renderer).find((control) => flat(control.props.children) === "Continue · RECOMMENDED");
     assert.ok(suggested !== undefined);
     await act(async () => { suggested.props.onClick(); });
-    assert.equal(renderer.root.findByProps({ className: "dfRemote__replyText" }).props.value, "Continue");
-    assert.equal(session.calls.reply.length, 0);
-    await act(async () => { button(renderer, "dfRemote__replyAction").props.onClick(); });
-    assert.deepEqual(session.calls.reply.map((call) => call.reply), ["Continue"]);
+    assert.deepEqual(session.calls.reply.map((call) => call.reply), ["Continue"], "one tap answers; a second, separate tap is a trap on a card that looks like a button");
   });
 });
 
