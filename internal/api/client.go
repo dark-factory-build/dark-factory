@@ -1220,15 +1220,28 @@ func validWebStatus(status WebStatus) bool {
 		return false
 	}
 	if status.State == "stopped" {
-		return !status.Ready && status.Address == "" && status.Path == "" && status.Origins == nil && status.ActiveClients == 0 && status.RevokedClients == 0 && status.ActiveChallenges == 0
+		return !status.Ready && status.Address == "" && status.Path == "" && status.Origins == nil && status.ActiveClients == 0 && status.RevokedClients == 0 && status.ActiveChallenges == 0 && validBuildIdentity(status.Build)
 	}
 	if status.Ready != (status.State == "ready") || !validText(status.Address, 1, 128) || !validText(status.Path, 1, 128) || len(status.Origins) == 0 || len(status.Origins) > 8 {
+		return false
+	}
+	if !validBuildIdentity(status.Build) {
 		return false
 	}
 	for _, origin := range status.Origins {
 		if !validText(origin, 1, 4096) || strings.ContainsAny(origin, " \t\r\n*") {
 			return false
 		}
+	}
+	return true
+}
+
+func validBuildIdentity(identity BuildIdentity) bool {
+	if !validText(identity.Version, 0, 64) || !validText(identity.Source, 0, 64) || !validText(identity.Target, 0, 32) || !validText(identity.BuildID, 0, 128) {
+		return false
+	}
+	if identity.Release {
+		return identity.Version != "" && identity.Source != "" && identity.Target != "" && identity.BuildID != ""
 	}
 	return true
 }

@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 
-def observe(home):
+def observe(home, expected_sha):
     binary_root = Path(str(home) + '.service') / 'bin' / 'current'
     go = shutil.which('go')
     if go is None:
@@ -33,7 +33,10 @@ def observe(home):
         raise ValueError('installed binaries have different build receipts')
     env = dict(os.environ, DARK_FACTORY_SOCKET=str(home / 'runtimes' / 'factory.sock'), DARK_FACTORY_OPERATOR_TOKEN_FILE=str(home / 'operator.token'))
     status = json.loads(subprocess.run([str(binary_root / 'factoryctl'), 'web', 'status'], env=env, check=True, capture_output=True, text=True, timeout=15).stdout)
-    return {'sha': revisions.pop(), 'healthy': status.get('ready') is True}
+    build = status.get('build')
+    if not isinstance(build, dict) or build.get('source') != expected_sha:
+        raise ValueError('running daemon build identity disagrees with requested source')
+    return {'sha': revisions.pop(), 'healthy': status.get('ready') is True, 'daemon_source': build['source']}
 
 
 if __name__ == '__main__':
@@ -44,7 +47,7 @@ if __name__ == '__main__':
         args = parser.parse_args()
         if re.fullmatch('[0-9a-f]{40}', args.sha) is None or not args.home.is_absolute():
             raise ValueError('expected full SHA and absolute factory home')
-        print(json.dumps(observe(args.home)))
+        print(json.dumps(observe(args.home, args.sha)))
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         print('verify-live-runtime: ' + str(error), file=sys.stderr)
         raise SystemExit(1)

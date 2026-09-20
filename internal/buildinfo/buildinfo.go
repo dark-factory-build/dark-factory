@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"runtime"
+	debugbuildinfo "runtime/debug"
 	"strings"
 )
 
@@ -32,6 +33,22 @@ func Current() Identity {
 		return Identity{version: "development", source: "development", target: target, buildID: "development"}
 	}
 	return identity
+}
+
+// VCSRevision returns the immutable revision embedded by the Go toolchain.
+// It is diagnostic provenance only; it does not turn a development identity
+// into a release identity.
+func VCSRevision() string {
+	information, ok := debugbuildinfo.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, setting := range information.Settings {
+		if setting.Key == "vcs.revision" && validSource(setting.Value) {
+			return setting.Value
+		}
+	}
+	return ""
 }
 
 func (identity Identity) Version() string { return identity.version }
