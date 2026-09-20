@@ -820,6 +820,18 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
       seatedNow(how);
       await act(async () => { renderer.update(scene(resume)); });
     }
+    // A visit stays with whoever holds it, whoever else of the same habit leaves or comes back meanwhile.
+    await untilSomeoneStands();
+    const holders = () => away().map((node) => node.parent.props["data-worker-id"]).join();
+    const holding = holders(), habit = breakRoomHabit(resting.find((worker) => worker.id === holding));
+    const alike = resting.filter((worker) => worker.id !== holding && breakRoomHabit(worker) === habit);
+    assert.ok(alike.length > 0, "the fixture has someone else who could have had the turn");
+    for (const leaver of alike) {
+      await act(async () => { renderer.update(scene({ workers: resting.filter((worker) => worker !== leaver) })); });
+      assert.equal(holders(), holding, `the visit changed hands when ${leaver.id} left`);
+      await act(async () => { renderer.update(scene({})); });
+      assert.equal(holders(), holding, `the visit changed hands when ${leaver.id} came back`);
+    }
     await untilSomeoneStands();
     await act(async () => { clock += 1; globalThis.document.visibilityState = "hidden"; visibility(); });
     seatedNow("in a hidden tab");
