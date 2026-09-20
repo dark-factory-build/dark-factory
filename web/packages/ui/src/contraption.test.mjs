@@ -10,7 +10,7 @@ test("a contraption's durable identity fixes its silhouette while operation adds
   const running = render({ active: true, reducedMotion: false, pulse: 0 });
   const advanced = render({ active: true, reducedMotion: false, pulse: 360 });
   const repaired = render({ construction: true, correction: true });
-  const shape = (markup) => markup.match(/data-contraption-frame="([^"]+)"/)[1];
+  const shape = (markup) => markup.match(/data-contraption-(?:variant|fitting)="[^"]+"/g).join(" ");
   assert.equal(shape(still), shape(running));
   assert.equal(shape(still), shape(repaired));
   assert.match(running, /data-contraption-active="true"/);

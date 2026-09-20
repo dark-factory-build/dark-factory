@@ -1,5 +1,5 @@
-import type { KeyboardEvent } from "react";
 import { AgentSprite } from "./factory-scene/factory-scene.js";
+import type { KeyboardEvent } from "react";
 import { Contraption } from "./contraption.js";
 import type { ProductionContraption, ProductionView } from "./production-view.js";
 
@@ -45,7 +45,7 @@ export function ProductionArea({ view, items, width, top, pulse, onSelect, selec
           <path d="M93 44h12m-12 4h8" stroke="#536e70" />
           {item.reviewers.slice(0, 2).map((reviewer, reviewerIndex) => <g key={reviewer.id} transform={`translate(${85 + reviewerIndex * 20} 8)`} aria-label={`${reviewer.name}, external reviewer, ${reviewer.state}`}>
             <rect x="-2" y="-2" width="24" height="28" fill="#182c35" stroke="#638095" /><rect x="18" y="-2" width="4" height="4" fill={reviewer.state === "running" && item.review.sourceFresh ? "#80ddff" : reviewer.state === "block" ? "#d49b7d" : "#638095"} />
-            <svg width="20" height="24" viewBox="0 0 16 16"><AgentSprite agent={{ id: reviewer.id, name: reviewer.name, role: "worker", provider: reviewer.provider === "claude_code" ? "claude_code" : "codex" }} activity={reviewer.state === "running" && item.review.sourceFresh && pulse !== undefined ? "busy" : "waiting"} /></svg>
+            <AgentSprite size={20} agent={{ id: reviewer.id, name: reviewer.name, role: "worker", provider: reviewer.provider === "claude_code" ? "claude_code" : "codex" }} activity={reviewer.state === "running" && item.review.sourceFresh && pulse !== undefined ? "busy" : "waiting"} />
             {reviewer.state === "running" && item.review.sourceFresh ? <path d={pulse !== undefined && Math.floor(pulse / 500) % 2 ? "M15 22l5 3" : "M15 24h5"} stroke="#c2b184" strokeWidth="2" /> : null}
           </g>)}
           {item.reviewers.length > 2 ? <text x={85 + Math.min(2, item.reviewers.length) * 20} y="24" fill="#c2b184" fontSize="9" fontFamily="ui-monospace, monospace">+{item.reviewers.length - 2}</text> : null}

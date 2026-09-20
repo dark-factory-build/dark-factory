@@ -30,10 +30,10 @@ function Spanner() {
 
 /** A compact, identity-stable factory machine. Supplied operation facts only add overlays. */
 export function Contraption({ identity, construction, correction, active, reducedMotion, pulse }: ContraptionProps) {
-  const design = hash(identity) % 3;
+  const seed = hash(identity), design = seed % 3, fitting = Math.floor(seed / 3) % 4;
   const tick = tickFor(active, reducedMotion, pulse);
   const lamp = active ? tick % 2 === 0 ? "#e5c58b" : "#80ddff" : "#53605b";
-  return <svg width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Factory contraption" data-contraption-variant={design} data-contraption-active={active || undefined} style={{ display: "block", width: 64, height: 64, imageRendering: "pixelated" }}>
+  return <svg width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Factory contraption" data-contraption-variant={design} data-contraption-fitting={fitting} data-contraption-active={active || undefined} style={{ display: "block", width: 64, height: 64, imageRendering: "pixelated" }}>
     <g data-contraption-frame={design} shapeRendering="crispEdges">
       <rect x="5" y="52" width="54" height="6" fill="#455653" stroke="#1d292c" strokeWidth="2" />
       <path d="M10 58v4M54 58v4" stroke="#273134" strokeWidth="4" />
@@ -44,6 +44,10 @@ export function Contraption({ identity, construction, correction, active, reduce
           : <><path d="M15 46V17h8v18h18V17h8v29" fill="none" stroke="#9aa69c" strokeWidth="4" /><rect x="24" y="28" width="16" height="14" fill="#536e70" stroke="#c2b184" strokeWidth="2" /><Gear x={32} y={45} turn={tick} /></>}
       <Bolt x={14} y={28} /><Bolt x={50} y={28} /><Bolt x={14} y={48} /><Bolt x={50} y={48} />
       <rect x="45" y="31" width="5" height="5" fill={lamp} stroke="#1d292c" />
+      {fitting === 0 ? <path d="M10 24V9h8v15M8 9h12M11 5h6" fill="none" stroke="#65726b" strokeWidth="3" />
+        : fitting === 1 ? <><circle cx="49" cy="15" r="7" fill="#536e70" stroke="#9aa69c" strokeWidth="2" /><path d="M49 8v14M42 15h14" stroke="#263e40" strokeWidth="2" /></>
+          : fitting === 2 ? <path d="M50 24V7m-5 5 5-5 5 5M44 24h12" fill="none" stroke="#9aa69c" strokeWidth="2" />
+            : <><path d="M5 35h8v10H5z" fill="#665f4e" stroke="#a08f68" strokeWidth="2" /><path d="M7 40h4" stroke="#263e40" strokeWidth="2" /></>}
     </g>
     {construction ? <g data-contraption-build="partly-assembled" fill="none" stroke="#e5c58b" strokeWidth="2"><path d="M7 19h11v8H7z" strokeDasharray="3 2" /><path d="M12 27v13M8 40h8" /><circle cx="12" cy="17" r="2" fill="#e5c58b" /></g> : null}
     {correction ? <Spanner /> : null}
