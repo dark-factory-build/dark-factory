@@ -132,3 +132,61 @@ func TestProductionMaintenanceRoundTripsAndInvalidObservationRollsBack(t *testin
 		}
 	}
 }
+
+func TestProductionCanonicalizesLegacyRuntimeDestinationsAndDeduplicates(t *testing.T) {
+	store, _, project, _ := newAdmissionStore(t, RoleOrchestrator, 2)
+	defer store.Close()
+	ctx := context.Background()
+	path := "runtime:/Users/example/.dark-factory"
+	revision := strings.Repeat("a", 40)
+	legacyID := path + ":release:" + revision
+	legacy := ProductionDelivery{ID: legacyID, Kind: "release", Destination: path, Revision: revision, State: "verified", PullRequests: []uint64{7}}
+	legacyBody, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalID := canonicalProductionRuntime(path) + ":release:" + revision
+	newer := ProductionDelivery{ID: canonicalID, Kind: "release", Destination: canonicalProductionRuntime(path), Revision: revision, State: "blocked", PullRequests: []uint64{8}}
+	newerBody, err := json.Marshal(newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, 'delivery', ?, '', ?, ?)`, project.ID.Bytes(), "example/factory", legacyID, string(legacyBody), 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.writer.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, 'delivery', ?, '', ?, ?)`, project.ID.Bytes(), "example/factory", canonicalID, string(newerBody), 12); err != nil {
+		t.Fatal(err)
+	}
+	maintenance := &ProductionMaintenance{Destination: path, State: "ready"}
+	observation := ProductionObservation{Repository: "example/factory", ObservedAt: 20, Maintenance: maintenance,
+		Deliveries: []ProductionDelivery{{ID: legacyID, Kind: "release", Destination: path, Revision: revision, State: "verified", PullRequests: []uint64{7, 8}}}}
+	if err := store.RecordProductionObservation(ctx, project.ID, observation, mustTime(t, 20)); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.Production(ctx, project.ID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, item := range page.Records {
+		if strings.Contains(string(item.Document), path) || strings.Contains(item.ID, path) {
+			t.Fatalf("legacy runtime path leaked: %+v", item)
+		}
+		if item.Kind == "delivery" {
+			count++
+			if item.ID != canonicalID {
+				t.Fatalf("delivery identity = %q, want %q", item.ID, canonicalID)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("delivery count = %d, want one canonical row", count)
+	}
+	var stored string
+	if err := store.writer.QueryRowContext(ctx, `SELECT document FROM production_records WHERE project_id = ? AND repository = ? AND kind = 'delivery' AND identity = ?`, project.ID.Bytes(), "example/factory", canonicalID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored, `"pull_requests":[7,8]`) {
+		t.Fatalf("canonical delivery lost membership: %s", stored)
+	}
+}

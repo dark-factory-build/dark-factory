@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -60,6 +61,153 @@ func productionURL(value string) bool {
 	return err == nil && len(value) <= 2048 && u.Scheme == "https" && u.Hostname() != "" && u.User == nil
 }
 
+func canonicalProductionRuntime(value string) string {
+	if !strings.HasPrefix(value, "runtime:") || strings.HasPrefix(value, "runtime:host-") {
+		return value
+	}
+	path := strings.TrimPrefix(value, "runtime:")
+	if !strings.HasPrefix(path, "/") {
+		return value
+	}
+	digest := sha256.Sum256([]byte(path))
+	return "runtime:host-" + hex.EncodeToString(digest[:8])
+}
+
+func canonicalProductionDelivery(delivery ProductionDelivery) ProductionDelivery {
+	oldDestination := delivery.Destination
+	delivery.Destination = canonicalProductionRuntime(oldDestination)
+	if delivery.ID == oldDestination {
+		delivery.ID = delivery.Destination
+	} else if strings.HasPrefix(delivery.ID, oldDestination+":") {
+		delivery.ID = delivery.Destination + delivery.ID[len(oldDestination):]
+	}
+	return delivery
+}
+
+func canonicalProductionIdentity(identity, oldDestination, newDestination string) string {
+	if oldDestination != newDestination && strings.HasPrefix(identity, oldDestination+":") {
+		return newDestination + identity[len(oldDestination):]
+	}
+	return identity
+}
+
+const maxProductionLegacyRuntimeRows = 128
+
+func migrateProductionRuntimeRecords(ctx context.Context, c *sql.Conn, project ProjectID, repository string) error {
+	rows, err := c.QueryContext(ctx, `SELECT repository, kind, identity, visual_id, document, observed_at_ms
+        FROM production_records
+        WHERE project_id = ? AND repository = ? AND kind IN ('delivery', 'repository')
+          AND (identity LIKE 'runtime:/%' OR document LIKE '%runtime:/%')
+        LIMIT ?`, project.Bytes(), repository, maxProductionLegacyRuntimeRows)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rowRepository, kind, identity, visual, document string
+		var observedAt int64
+		if err := rows.Scan(&rowRepository, &kind, &identity, &visual, &document, &observedAt); err != nil {
+			return err
+		}
+		newIdentity, newDocument := identity, document
+		if kind == "delivery" {
+			var delivery ProductionDelivery
+			if json.Unmarshal([]byte(document), &delivery) != nil {
+				continue
+			}
+			oldDestination := delivery.Destination
+			delivery = canonicalProductionDelivery(delivery)
+			newIdentity = canonicalProductionIdentity(identity, oldDestination, delivery.Destination)
+			if newIdentity == identity && delivery.Destination == "" {
+				continue
+			}
+			body, marshalErr := json.Marshal(delivery)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			newDocument = string(body)
+		} else {
+			var envelope map[string]json.RawMessage
+			if json.Unmarshal([]byte(document), &envelope) != nil {
+				continue
+			}
+			var maintenance ProductionMaintenance
+			raw, ok := envelope["maintenance"]
+			if !ok || json.Unmarshal(raw, &maintenance) != nil {
+				continue
+			}
+			oldDestination := maintenance.Destination
+			maintenance.Destination = canonicalProductionRuntime(oldDestination)
+			if maintenance.Destination == oldDestination {
+				continue
+			}
+			raw, marshalErr := json.Marshal(maintenance)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			envelope["maintenance"] = raw
+			body, marshalErr := json.Marshal(envelope)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			newDocument = string(body)
+		}
+		if newIdentity == identity && newDocument == document {
+			continue
+		}
+		if _, err := c.ExecContext(ctx, `INSERT INTO production_records (project_id, repository, kind, identity, visual_id, document, observed_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, repository, kind, identity) DO UPDATE SET visual_id = excluded.visual_id, document = excluded.document, observed_at_ms = excluded.observed_at_ms
+            WHERE excluded.observed_at_ms >= production_records.observed_at_ms`, project.Bytes(), rowRepository, kind, newIdentity, visual, newDocument, observedAt); err != nil {
+			return err
+		}
+		if newIdentity != identity {
+			if _, err := c.ExecContext(ctx, `DELETE FROM production_records WHERE project_id = ? AND repository = ? AND kind = ? AND identity = ?`, project.Bytes(), rowRepository, kind, identity); err != nil {
+				return err
+			}
+		}
+	}
+	return rows.Err()
+}
+
+func canonicalProductionRecord(item *ProductionRecord) {
+	if item.Kind == "delivery" {
+		var delivery ProductionDelivery
+		if json.Unmarshal(item.Document, &delivery) != nil {
+			return
+		}
+		oldDestination := delivery.Destination
+		delivery = canonicalProductionDelivery(delivery)
+		item.ID = canonicalProductionIdentity(item.ID, oldDestination, delivery.Destination)
+		if body, err := json.Marshal(delivery); err == nil {
+			item.Document = body
+		}
+		return
+	}
+	if item.Kind != "repository" {
+		return
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(item.Document, &envelope) != nil {
+		return
+	}
+	var maintenance ProductionMaintenance
+	raw, ok := envelope["maintenance"]
+	if !ok || json.Unmarshal(raw, &maintenance) != nil {
+		return
+	}
+	oldDestination := maintenance.Destination
+	maintenance.Destination = canonicalProductionRuntime(oldDestination)
+	if maintenance.Destination == oldDestination {
+		return
+	}
+	if raw, err := json.Marshal(maintenance); err == nil {
+		envelope["maintenance"] = raw
+		if body, err := json.Marshal(envelope); err == nil {
+			item.Document = body
+		}
+	}
+}
+
 func validProductionPull(pr ProductionPullRequest) bool {
 	return pr.Number > 0 && pr.Number <= 1<<53-1 && validOutcomeText(pr.Title, 1024) && pr.Title != "" && productionURL(pr.URL) && productionSHA(pr.Head) && productionSHA(pr.Merge) && productionSHA(pr.Review.Head) && validOutcomeText(pr.Branch, 256) && validOutcomeText(pr.Base, 256) && validOutcomeText(pr.MergeQueue, 64) && validOutcomeText(pr.MergedAt, 64) && validOutcomeText(pr.NextAction, 2048) && validOutcomeText(pr.Review.State, 64) && validOutcomeText(pr.Review.Findings, 8192) && productionURL(pr.Review.URL) && (pr.State == "open" || pr.State == "closed" || pr.State == "merged")
 }
@@ -100,11 +248,22 @@ func (store *Store) RecordProductionObservation(ctx context.Context, project Pro
 		return ErrInvalidValue
 	}
 	observation.Repository = strings.ToLower(observation.Repository)
+	if observation.Maintenance != nil {
+		maintenance := *observation.Maintenance
+		maintenance.Destination = canonicalProductionRuntime(maintenance.Destination)
+		observation.Maintenance = &maintenance
+	}
+	for index := range observation.Deliveries {
+		observation.Deliveries[index] = canonicalProductionDelivery(observation.Deliveries[index])
+	}
 	tx, err := store.beginValidatedWrite(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Close()
+	if err := migrateProductionRuntimeRecords(ctx, tx.connection, project, observation.Repository); err != nil {
+		return tx.Rollback(err)
+	}
 	write := func(kind, id, visual string, value any) error {
 		return productionRecordOnConnection(ctx, tx.connection, project, observation.Repository, kind, id, visual, value, observation.ObservedAt)
 	}
@@ -267,6 +426,7 @@ func (store *Store) Production(ctx context.Context, project ProjectID, offset, l
 		}
 		size += len(body)
 		item.Document = json.RawMessage(body)
+		canonicalProductionRecord(&item)
 		page.Records = append(page.Records, item)
 	}
 	if err := rows.Err(); err != nil {
