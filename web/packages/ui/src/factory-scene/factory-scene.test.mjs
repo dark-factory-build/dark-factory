@@ -768,6 +768,25 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     assert.ok(firstAway >= 8000, `nobody gets up during the floor's first free turn, however long the page has been open: ${firstAway}`);
     assert.ok(stood, "the visitor arrives and stands with the thing in hand");
     assert.ok(cameBack, "and sits down again");
+    // Stilled motion seats everyone in the very render that stills it, by whichever means.
+    const seatedNow = (when) => {
+      assert.equal(away().length, 0, `someone is at the furniture ${when}`);
+      for (const worker of renderer.root.findAll((node) => node.props["data-worker-id"] !== undefined)) assert.ok(worker.props["data-worker-action"] !== "walking" && worker.findAll((node) => node.props["data-seated"] === "coffee").length === 1, `${worker.props["data-worker-id"]} is not in their seat ${when}`);
+    };
+    const untilSomeoneStands = async () => { for (let step = 0; step < 3000 && !standingWithIt(); step++) await tick(); assert.ok(standingWithIt()); };
+    for (const [how, still, resume] of [
+      ["with animation turned off", { appearance: { scenery: "subtle", animation: "off" } }, {}],
+      ["on disconnect", { connected: false }, {}],
+    ]) {
+      await untilSomeoneStands();
+      await act(async () => { renderer.update(createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...still })); });
+      seatedNow(how);
+      await act(async () => { renderer.update(createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...resume })); });
+    }
+    await untilSomeoneStands();
+    await act(async () => { clock += 1; globalThis.document.visibilityState = "hidden"; visibility(); });
+    seatedNow("in a hidden tab");
+    await act(async () => { clock += 1; globalThis.document.visibilityState = "visible"; visibility(); });
     // Another floor starts again from seated, however long this one had been going.
     for (let step = 0; step < 3000 && away().length === 0; step++) await tick();
     assert.ok(away().length > 0, "someone is up when the floor changes");

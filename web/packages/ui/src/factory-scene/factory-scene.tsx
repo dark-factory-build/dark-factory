@@ -107,14 +107,8 @@ function motionPoint(motion: MotionState, at: number) {
   return { point: motion.placement, walking: false };
 }
 
-/** One browser clock; source state only ever supplies the next local destination. */
-function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, active: ReadonlySet<string>) {
-  const motions = useRef(new Map<string, MotionState>());
-  const priorTopology = useRef<string | undefined>(undefined);
-  const priorConnected = useRef<boolean | undefined>(undefined);
-  const [clock, setClock] = useState(0);
+function useReducedMotion() {
   const [reduced, setReduced] = useState(false);
-
   useEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
     const query = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -123,6 +117,15 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
     query.addEventListener("change", update);
     return () => query.removeEventListener("change", update);
   }, []);
+  return reduced;
+}
+
+/** One browser clock; source state only ever supplies the next local destination. */
+function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>) {
+  const motions = useRef(new Map<string, MotionState>());
+  const priorTopology = useRef<string | undefined>(undefined);
+  const priorConnected = useRef<boolean | undefined>(undefined);
+  const [clock, setClock] = useState(0);
 
   useEffect(() => {
     const at = now();
@@ -213,7 +216,11 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
   // absent, and everyone stays seated.
   // The count belongs to the floor it was taken on: one left over from another floor is ignored at once.
   const [errandBeat, setErrandBeat] = useState<Readonly<{ floor: string; clock: number }>>();
-  const errandClock = errandBeat?.floor === geometryKey ? errandBeat.clock : undefined;
+  // It counts only while this floor is moving, judged in the render that uses it: the moment
+  // motion is stilled by any means, or another floor is shown, everyone is back in their seat.
+  const reduced = useReducedMotion();
+  const moving = connected && animate && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
+  const errandClock = moving && errandBeat?.floor === geometryKey ? errandBeat.clock : undefined;
   const seatedPlacements = placements;
   placements = useMemo(() => {
     const nook = breakRoomNook(layout, seatedPlacements.filter((placement) => placement.area === "resting").length, seatedPlacements.filter((placement) => placement.area !== "room" && placement.area !== "resting").length);
@@ -222,12 +229,12 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
     const byId = new Map(workers.map((worker) => [worker.id, worker]));
     return placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock);
   }, [seatedPlacements, errandClock, errands, layout, workers]);
-  const { positions, pulse } = useSceneMotion(layout, placements, geometryKey, connected && animate, active);
+  const { positions, pulse } = useSceneMotion(layout, placements, geometryKey, connected && animate, reduced, active);
   // Turns run on the time this floor has actually been moving: a hidden tab, stilled
   // motion or a long gap adds nothing, and a different floor starts again from seated.
-  const moving = useRef({ floor: geometryKey, total: 0, last: undefined as number | undefined });
+  const movingTime = useRef({ floor: geometryKey, total: 0, last: undefined as number | undefined });
   useEffect(() => {
-    const time = moving.current;
+    const time = movingTime.current;
     if (time.floor !== geometryKey) Object.assign(time, { floor: geometryKey, total: 0, last: undefined });
     if (pulse !== undefined && time.last !== undefined && pulse - time.last < 1000) time.total += pulse - time.last;
     time.last = pulse;
