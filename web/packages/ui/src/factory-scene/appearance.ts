@@ -69,19 +69,13 @@ export function restingItem(worker: SceneWorker, at?: number): Readonly<{ item: 
 }
 
 /**
- * Nobody sits for ever. For a quarter of a minute in each of their own long
- * cycles a resting worker gets up: a reader to the bookshelf, a drinker or
- * snacker to the coffee station. Whoever already has their reading with them,
- * or is asking for you, stays where they are.
+ * Nobody sits for ever: a reader is drawn to the bookshelf, a drinker or snacker
+ * to the coffee station. Whoever already has their reading with them, or is
+ * asking for you, stays where they are.
  */
-export function breakRoomErrand(worker: SceneWorker, at?: number): BreakRoomErrand | undefined {
-  if (at === undefined || !Number.isFinite(at) || at < 0 || worker.activity === "needs-you") return undefined;
+export function breakRoomHabit(worker: SceneWorker): BreakRoomErrand | undefined {
   const { item } = restingItem(worker);
-  if (item === "clipboard" || item === "tablet") return undefined;
-  // Everyone's cycle has its own length and its own starting point, so a floor
-  // that has just loaded does not stand up as one.
-  const cycle = 70000 + hash(worker.id) % 50000;
-  return (at + (hash(worker.id) >>> 3) % cycle) % cycle < 16000 ? item === "book" ? "shelf" : "coffee" : undefined;
+  return worker.activity === "needs-you" || item === "clipboard" || item === "tablet" ? undefined : item === "book" ? "shelf" : "coffee";
 }
 
 /**

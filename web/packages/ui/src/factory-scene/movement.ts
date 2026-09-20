@@ -137,25 +137,40 @@ function route(points: readonly ScenePoint[]): Route {
   return { points: compact.slice(1), length: compact.slice(1).reduce((total, point, index) => total + distance(compact[index]!, point), 0) };
 }
 
+// Break-room furniture is reached from a standing place this far behind the first row.
+const STAND = 8;
+
 /**
- * A stroll inside the common room never goes out to the spine. Each row of seats
- * has an aisle behind it; the walk runs along the aisle of whichever end is a
- * seat, and changes rows down the side where the break-room furniture stands.
+ * A walk that starts in the common room keeps to where nobody sits: the aisle
+ * behind each row of seats, the side where the break-room furniture stands, and
+ * the open spine edge. A seat is left and reached by its own aisle; a standing
+ * place by the first row's; rows are changed down the furniture's side when the
+ * walk starts or ends there, and down the spine otherwise.
  */
-function commonRoomRoute(layout: SceneLayout, from: ScenePoint, to: ScenePoint): Route {
-  const seatRow = (point: ScenePoint) => point.y >= layout.restingTop && (point.y - layout.restingTop) % WORKER_GAP === 0;
-  const aisle = (point: ScenePoint) => seatRow(point) ? point.y - AISLE : point.y;
-  const side = seatRow(to) ? from.x : to.x;
-  return route([from, { x: from.x, y: aisle(from) }, { x: side, y: aisle(from) }, { x: side, y: aisle(to) }, { x: to.x, y: aisle(to) }, to]);
+function commonRoomLanes(layout: SceneLayout, from: ScenePoint, to: ScenePoint, spineX: number): ScenePoint[] {
+  const first = layout.restingTop - AISLE;
+  const standing = (point: ScenePoint) => point.y === layout.restingTop - STAND;
+  // Within a row's own space: in its aisle, at a seat, or on the short step between them.
+  const row = (point: ScenePoint) => { const below = (point.y - first) % WORKER_GAP; return point.y >= first && below <= AISLE ? point.y - below : undefined; };
+  const leave = standing(from) ? undefined : row(from), arrive = standing(to) ? first : row(to) ?? to.y;
+  const side = standing(to) ? to.x : leave === undefined ? from.x : leave === arrive ? to.x : spineX;
+  return [...(leave === undefined ? [] : [{ x: from.x, y: leave }]), { x: side, y: leave ?? from.y }, { x: side, y: arrive }, { x: to.x, y: arrive }];
 }
 
 /** Continue from a point already in a corridor or the spine to a known room or common space. */
 export function routeFromSpine(layout: SceneLayout, from: ScenePoint, to: SceneWorkerPlacement): Route | undefined {
-  if (to.area !== "room" && from.x >= ROOM_LEFT && from.y >= layout.restingTop - 30) return commonRoomRoute(layout, from, to);
+
   const destination = to.roomId === undefined ? undefined : layout.rooms.find((room) => room.id === to.roomId);
   const mainSpine = spine(layout);
   if (to.area === "room" && destination === undefined || mainSpine === undefined) return undefined;
   const center = mainSpine.x + mainSpine.width / 2;
+  if (from.x >= ROOM_LEFT && from.y >= layout.restingTop - 30) {
+    // Out of the common room by its lanes; to a room, the spine takes over from there.
+    if (destination === undefined) return route([from, ...commonRoomLanes(layout, from, to, center), to]);
+    const out = commonRoomLanes(layout, from, { x: center, y: layout.restingTop - AISLE }, center);
+    const onward = enterRoom(layout, destination, to, center);
+    return onward === undefined ? undefined : route([from, ...out, ...onward]);
+  }
   const currentCorridor = corridorAt(layout, from);
   const clear = currentCorridor === undefined ? undefined : laneY(currentCorridor);
   const destinationRoute = destination === undefined ? [{ x: center, y: to.y }, to] : enterRoom(layout, destination, to, center);

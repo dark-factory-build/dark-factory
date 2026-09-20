@@ -17,7 +17,7 @@ import {
   type SceneWorker,
 } from "./scene.js";
 import { DEFAULT_FLOOR_APPEARANCE, type FloorAppearance } from "../floor-appearance.js";
-import { breakRoomErrand, restingItem, workerFrames, workerPhase } from "./appearance.js";
+import { breakRoomHabit, restingItem, workerFrames, workerPhase } from "./appearance.js";
 import { directionBetween, pointOnRoute, routeFromCurrent, routeBetween, samePoint, type WorkerMotion } from "./movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "./sprites/sprites.generated.js";
 
@@ -193,7 +193,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
@@ -202,6 +202,8 @@ function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, co
   animate: boolean;
   /** Drawn over the workers: tables stand in front of whoever sits at them. */
   furniture: ReactNode;
+  /** Whether the break-room furniture is there to be visited. */
+  errands: boolean;
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
@@ -213,10 +215,11 @@ function SceneWorkers({ furniture, layout, placements, nodes, workers, tasks, co
   const seatedPlacements = placements;
   placements = useMemo(() => {
     const nook = breakRoomNook(layout, seatedPlacements.filter((placement) => placement.area === "resting").length, seatedPlacements.filter((placement) => placement.area !== "room" && placement.area !== "resting").length);
-    if (errandClock === undefined) return seatedPlacements;
+    // With the scenery off there is no furniture to walk to.
+    if (errandClock === undefined || !errands) return seatedPlacements;
     const byId = new Map(workers.map((worker) => [worker.id, worker]));
-    return placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomErrand(worker, errandClock + workerPhase(id)); });
-  }, [seatedPlacements, errandClock, layout, workers]);
+    return placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock);
+  }, [seatedPlacements, errandClock, errands, layout, workers]);
   const { positions, pulse } = useSceneMotion(layout, placements, geometryKey, connected && animate, active);
   const errandBeat = pulse === undefined ? undefined : Math.floor(pulse / 2000) * 2000;
   useEffect(() => setErrandClock(errandBeat), [errandBeat]);
@@ -421,7 +424,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       </g>}
       <Area width={commonWidth + (nook?.width ?? 0)} top={layout.restingTop - 40} bottom={commonBottom} />
       {/* Somewhere to go other than the table: against the back wall, muted like the rest of the furniture. */}
-      {nook?.furniture.map((piece) => <g key={piece.errand} aria-hidden="true" data-break-room={piece.errand} opacity={appearance.scenery === "off" ? 0 : .8} transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
+      {appearance.scenery === "off" ? null : nook?.furniture.map((piece) => <g key={piece.errand} aria-hidden="true" data-break-room={piece.errand} opacity=".8" transform={`translate(${piece.x} ${piece.y}) scale(${WORKER_SIZE / FRAME})`}>
         <Frame name={piece.errand === "shelf" ? "prop.bookshelf" : "prop.coffeestation"} x={0} y={0} />
       </g>)}
       {[
@@ -440,7 +443,7 @@ export function FactoryScene({ topology, detailNodes, workers, appearance = DEFA
       })}
       {layout.rooms.length === 0 ? <text x={ROOM_LEFT} y="24" fill="#9db1be" fontFamily="ui-monospace, monospace" fontSize="10">EMPTY FLOOR</text> : null}
 
-      <SceneWorkers furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
+      <SceneWorkers errands={appearance.scenery !== "off"} furniture={tables} layout={layout} placements={placements} nodes={nodes} workers={workers} tasks={tasks} connected={connected} animate={appearance.animation !== "off"} selectedWorkerId={selectedWorkerId} onSelectWorker={onSelectWorker} onSelectHumanRequest={onSelectHumanRequest} />
       {/* Waiting work, as the tray it would be on a real desk. Scenery, like
           everything else standing on these tables: the pile says how the queue
           is doing, the Tasks panel is where it is read and changed. */}

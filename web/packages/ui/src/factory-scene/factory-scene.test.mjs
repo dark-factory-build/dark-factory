@@ -10,7 +10,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act, create } from "react-test-renderer";
 import { AgentSprite, FactoryScene } from "../../dist/src/factory-scene/factory-scene.js";
 import { PADDING, ROOM_LEFT, WORKER_SIZE, breakRoomNook, commonSeating, layoutScene, placeErrands, placeWorkers } from "../../dist/src/factory-scene/scene.js";
-import { breakRoomErrand, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
+import { breakRoomHabit, resolvedAppearance, restingItem, spriteOptions, workerFrames, workerPhase } from "../../dist/src/factory-scene/appearance.js";
 import { pointOnRoute, routeBetween, routeFromCurrent, routeFromSpine } from "../../dist/src/factory-scene/movement.js";
 import { spriteAtlas, spriteSheet, spriteSheetSize } from "../../dist/src/factory-scene/sprites/sprites.generated.js";
 
@@ -636,72 +636,89 @@ test("tables stand in front of whoever sits at them, with each resting worker's 
   assert.equal((markup.match(/data-planning-light=""/g) ?? []).length, 1);
 });
 
-test("resting workers get up now and then: readers to the shelf, drinkers to the coffee, one at a time", () => {
+test("resting workers take fair, uninterrupted turns at the break-room furniture and walk there by the aisles", () => {
   const person = (id, extra) => ({ id, name: id, role: "worker", provider: "codex", activity: "idle", location: "resting", ...extra });
   const carrying = (id, name) => person(id, { appearance: { automatic: false, skin: 0, hair: 0, hair_colour: 0, face: 0, outfit: 0, clothes_colour: 0, shoes: 0, tool: spriteOptions.tool.findIndex((tool) => tool.name === name), headwear: 0 } });
-  const crowd = Array.from({ length: 40 }, (_, index) => person(`habit-${index}`));
-  // A stilled clock, someone asking for you, and anyone with their reading already in hand all stay put.
-  for (const worker of crowd) assert.equal(breakRoomErrand(worker, undefined), undefined);
-  for (let at = 0; at < 400000; at += 2000) {
-    assert.equal(breakRoomErrand(person("asking", { activity: "needs-you" }), at), undefined);
-    assert.equal(breakRoomErrand(carrying("reader", "tablet"), at), undefined);
-    assert.equal(breakRoomErrand(carrying("checker", "clipboard"), at), undefined);
-  }
-  // Over time everyone else goes where their habit takes them, and mostly sits.
-  for (const worker of crowd) {
-    const seen = new Set(); let away = 0, beats = 0;
-    for (let at = 0; at < 600000; at += 2000, beats++) { const errand = breakRoomErrand(worker, at); if (errand !== undefined) { seen.add(errand); away++; } }
-    assert.deepEqual([...seen], [restingItem(worker).item === "book" ? "shelf" : "coffee"], worker.id);
-    assert.ok(away / beats > .1 && away / beats < .3, `${worker.id} is away ${away}/${beats}`);
-  }
-  // A floor that has just loaded does not stand up as one.
-  assert.ok(crowd.filter((worker) => breakRoomErrand(worker, workerPhase(worker.id)) !== undefined).length < crowd.length / 2);
+  const crowd = Array.from({ length: 12 }, (_, index) => person(`habit-${String(index).padStart(2, "0")}`));
+  // A reader is drawn to the shelf, a drinker or snacker to the coffee; someone asking for you, or with their reading in hand, to neither.
+  for (const worker of crowd) assert.equal(breakRoomHabit(worker), restingItem(worker).item === "book" ? "shelf" : "coffee");
+  assert.deepEqual([person("asking", { activity: "needs-you" }), carrying("reader", "tablet"), carrying("checker", "clipboard")].map(breakRoomHabit), [undefined, undefined, undefined]);
+  assert.deepEqual([...new Set(crowd.map(breakRoomHabit))].sort(), ["coffee", "shelf"]);
 
-  // The furniture stands inside the room, clear of every seat; too narrow a floor has none.
-  const wide = layoutScene(topology), seating = commonSeating(wide, 6, 2), nook = breakRoomNook(wide, 6, 2);
-  assert.ok(nook);
-  for (const piece of nook.furniture) {
-    assert.ok(piece.x + WORKER_SIZE <= wide.width - PADDING && piece.stand.x + WORKER_SIZE / 2 <= wide.width - PADDING);
-    for (const seat of [...seating.resting, ...seating.planning]) assert.ok(Math.abs(seat.x - piece.stand.x) >= WORKER_SIZE, "nobody stands on a seat");
-  }
-  // The narrowest floor has room for the bookshelf alone, still inside the room and clear of the seats.
+  // The furniture stands inside the room, clear of every seat, on a wide floor and on the narrowest.
+  const wide = layoutScene({ digest: "wide", nodes: Array.from({ length: 16 }, (_, index) => ({ ...topology.nodes[0], id: `room-${index}`, path: `room-${index}` })) });
+  const nook = breakRoomNook(wide, 12, 1);
+  assert.deepEqual(nook.furniture.map((piece) => piece.errand), ["shelf", "coffee"]);
   const narrow = layoutScene({ digest: "narrow", nodes: [topology.nodes[0]] }), narrowNook = breakRoomNook(narrow, 40, 40);
   assert.deepEqual(narrowNook.furniture.map((piece) => piece.errand), ["shelf"]);
-  assert.ok(narrowNook.furniture[0].x + WORKER_SIZE <= narrow.width - PADDING);
-  for (const seat of [...commonSeating(narrow, 40, 40).resting, ...commonSeating(narrow, 40, 40).planning]) assert.ok(Math.abs(seat.x - narrowNook.furniture[0].stand.x) >= WORKER_SIZE);
-  assert.deepEqual(placeErrands(placeWorkers(narrow, crowd.slice(0, 4)), narrowNook, () => "coffee").filter((placement) => placement.errand !== undefined), [], "no coffee station, no coffee run");
+  for (const [layout, pieces, counts] of [[wide, nook.furniture, [12, 1]], [narrow, narrowNook.furniture, [40, 40]]]) for (const piece of pieces) {
+    assert.ok(piece.x + WORKER_SIZE <= layout.width - PADDING && piece.stand.x + WORKER_SIZE / 2 <= layout.width - PADDING);
+    const seating = commonSeating(layout, ...counts);
+    for (const seat of [...seating.resting, ...seating.planning]) assert.ok(Math.abs(seat.x - piece.stand.x) >= WORKER_SIZE, "nobody stands on a seat");
+  }
 
-  // One place a piece: the first to want it has it, the rest keep their seats; planners and rooms never go.
-  const placements = placeWorkers(wide, [...crowd.slice(0, 6), person("planner", { location: "unobserved" })]);
-  const everyone = placeErrands(placements, nook, () => "shelf");
-  assert.deepEqual(everyone.filter((placement) => placement.errand !== undefined).map((placement) => placement.id), [placements.find((placement) => placement.area === "resting").id]);
-  assert.equal(everyone.find((placement) => placement.id === "planner").errand, undefined);
-  assert.equal(placeErrands(placements, undefined, () => "shelf"), placements);
-  const split = placeErrands(placements, nook, (id) => Number(id.at(-1)) % 2 === 0 ? "shelf" : "coffee").filter((placement) => placement.errand !== undefined);
-  assert.deepEqual(split.map((placement) => placement.errand).sort(), ["coffee", "shelf"]);
-  assert.equal(new Set(split.map(({ x, y }) => `${x},${y}`)).size, 2);
+  // Half an hour of turns: one visitor a piece at most, nobody but a suited, seated worker,
+  // every visit runs its whole turn, every turn starts free, and everyone gets a fair share.
+  const placements = placeWorkers(wide, [...crowd, person("planner", { location: "unobserved" }), person("asking", { activity: "needs-you" })]);
+  const habits = new Map([...crowd, person("asking", { activity: "needs-you" })].map((worker) => [worker.id, breakRoomHabit(worker)]));
+  const visits = new Map(), running = new Map();
+  let cutShort = 0;
+  for (let at = 0; at < 1800000; at += 2000) {
+    const away = placeErrands(placements, nook, (id) => habits.get(id), at).filter((placement) => placement.errand !== undefined);
+    assert.equal(new Set(away.map((placement) => placement.errand)).size, away.length, "one visitor a piece");
+    for (const placement of away) { assert.equal(habits.get(placement.id), placement.errand); assert.notEqual(placement.id, "planner"); }
+    for (const piece of nook.furniture) {
+      const now = away.find((placement) => placement.errand === piece.errand)?.id, before = running.get(piece.errand);
+      if (before?.id !== undefined && before.id !== now && at - before.since < 15000) cutShort++;
+      if (before?.id !== now) { running.set(piece.errand, { id: now, since: at }); if (now !== undefined) visits.set(now, (visits.get(now) ?? 0) + 1); }
+    }
+  }
+  assert.equal(cutShort, 0, "no visit is cut short");
+  assert.equal(placeErrands(placements, nook, (id) => habits.get(id), 0).some((placement) => placement.errand !== undefined), false, "a floor that has just loaded stays seated");
+  for (const piece of nook.furniture) {
+    const shares = crowd.filter((worker) => habits.get(worker.id) === piece.errand).map((worker) => visits.get(worker.id) ?? 0);
+    assert.ok(Math.min(...shares) > 0 && Math.max(...shares) <= 4 * Math.min(...shares), `${piece.errand} turns are shared: ${shares}`);
+  }
+  assert.equal(visits.has("asking"), false);
+  assert.equal(placeErrands(placements, undefined, (id) => habits.get(id), 60000), placements);
+  // A lone reader is not forever on their feet.
+  const lone = placeWorkers(wide, [crowd.find((worker) => breakRoomHabit(worker) === "shelf")]);
+  let loneAway = 0; for (let at = 0; at < 1800000; at += 2000) if (placeErrands(lone, nook, () => "shelf", at)[0].errand !== undefined) loneAway++;
+  assert.ok(loneAway > 0 && loneAway / 900 < .25, `away ${loneAway}/900 beats`);
 
-  // The stroll there and back stays in the room: never out to the spine, never across another seat.
-  const seat = placements.find((placement) => placement.area === "resting"), standing = everyone.find((placement) => placement.errand !== undefined);
-  for (const [from, to] of [[seat, standing], [standing, seat], [standing, { ...seat, y: seat.y + 80 }]]) {
+  // Every walk that starts in the common room keeps to the aisles, the furniture's side and the spine:
+  // square, inside the floor, and never through anybody's seat but its own two ends.
+  const seating = commonSeating(wide, 12, 1), seats = [...seating.resting, ...seating.planning];
+  const stands = nook.furniture.map((piece) => ({ id: "x", area: "resting", errand: piece.errand, ...piece.stand }));
+  const asSeat = (seat) => ({ id: "x", area: "resting", ...seat });
+  const room = placeWorkers(wide, [{ ...workers[0], nodeId: "room-5" }])[0];
+  const walks = [...seats.flatMap((from) => [...seats.filter((to) => to !== from).map(asSeat), ...stands].map((to) => [from, to])), ...stands.flatMap((from) => [...seats.map(asSeat), room].map((to) => [from, to])), ...seats.map((from) => [from, room])];
+  assert.ok(seating.resting.some((seat) => seat.y !== seating.resting[0].y), "the sample has more than one row");
+  for (const [from, to] of walks) {
     const path = routeFromCurrent(wide, from, to);
-    assert.ok(path && path.length > 0);
+    assert.ok(path && path.length > 0, `${JSON.stringify(from)} to ${JSON.stringify(to)}`);
     assert.deepEqual([path.points.at(-1).x, path.points.at(-1).y], [to.x, to.y]);
     let previous = from;
     for (const point of path.points) {
-      assert.ok(point.x >= ROOM_LEFT && point.y >= wide.restingTop - 40, `left the room at ${JSON.stringify(point)}`);
       assert.ok(point.x === previous.x || point.y === previous.y, "walks are square");
+      assert.ok(point.x >= PADDING && point.x <= wide.width - PADDING);
+      for (const seat of seats) {
+        if (seat.x === from.x && seat.y === from.y || seat.x === to.x && seat.y === to.y) continue;
+        const crosses = Math.min(previous.x, point.x) - WORKER_SIZE / 2 < seat.x && seat.x < Math.max(previous.x, point.x) + WORKER_SIZE / 2 && Math.min(previous.y, point.y) - 6 < seat.y && seat.y < Math.max(previous.y, point.y) + 6;
+        assert.equal(crosses, false, `${JSON.stringify(from)} to ${JSON.stringify(to)} walks through the seat at ${seat.x},${seat.y}`);
+      }
       previous = point;
     }
   }
+
   // Standing at the furniture is its own pose: on their feet, the thing in hand, no tool.
-  const reader = crowd.find((worker) => restingItem(worker).item === "book");
-  const atShelf = workerFrames(reader, { action: "still", frame: 0, at: 0 }, undefined, "shelf");
+  const atShelf = workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "shelf");
   assert.ok(atShelf.some((name) => name.endsWith(".hold")) && atShelf.includes("person.held.book.chest") && atShelf.some((name) => name.includes("legs.") && name.endsWith(".stand")));
-  assert.ok(workerFrames(reader, { action: "still", frame: 0, at: 0 }, undefined, "coffee").includes("person.held.cup.chest"));
+  assert.ok(workerFrames(crowd[0], { action: "still", frame: 0, at: 0 }, undefined, "coffee").includes("person.held.cup.chest"));
   assert.ok(atShelf.every((name) => !name.startsWith("person.tool.")));
-  // The floor draws the furniture only where it fits.
+  // The floor draws exactly the furniture the nook has, and none with the scenery off.
   assert.equal((render().match(/data-break-room=/g) ?? []).length, breakRoomNook(layoutScene(topology), 0, 1).furniture.length);
+  assert.equal((render({ appearance: { scenery: "off", animation: "on" } }).match(/data-break-room=/g) ?? []).length, 0);
 });
 
 test("a walking worker is drawn facing where they go, and only a westward walk is mirrored", async () => {
