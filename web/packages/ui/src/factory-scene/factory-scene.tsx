@@ -121,12 +121,34 @@ function useReducedMotion() {
 }
 
 /** One browser clock; source state only ever supplies the next local destination. */
-function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>) {
+function useSceneMotion(layout: ReturnType<typeof layoutScene>, seated: ReturnType<typeof placeWorkers>, topologyDigest: string, connected: boolean, reduced: boolean, active: ReadonlySet<string>, workers: FactorySceneProps["workers"], errands: boolean) {
   const motions = useRef(new Map<string, MotionState>());
   const priorTopology = useRef<string | undefined>(undefined);
   const priorConnected = useRef<boolean | undefined>(undefined);
   const motionsFloor = useRef(topologyDigest);
-  const [clock, setClock] = useState(0);
+  const [clock, setClockState] = useState(0);
+  // Where nothing may move, or the floor has been replaced, remembered motion and turns are ignored at once.
+  const moving = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
+  // Break-room turns run on the time this floor has actually been moving: a hidden tab,
+  // stilled motion or a long gap adds nothing, and a different floor starts again from seated.
+  const movingTime = useRef({ total: 0, last: undefined as number | undefined });
+  const setClock = (at: number) => {
+    const time = movingTime.current;
+    if (moving && time.last !== undefined && at - time.last < 1000) time.total += at - time.last;
+    time.last = moving ? at : undefined;
+    setClockState(at);
+  };
+  // The break room keeps no clock of its own: every couple of seconds of moving time it asks who has got up.
+  const errandClock = moving && errands && motionsFloor.current === topologyDigest ? Math.floor(movingTime.current.total / 2000) * 2000 : undefined;
+  // Who holds which piece, so that a visit outlasts changes among the others resting.
+  const errandsBefore = useRef<ReturnType<typeof placeWorkers>>([]);
+  const placements = useMemo(() => {
+    // With the scenery off there is no furniture to walk to.
+    if (errandClock === undefined) return errandsBefore.current = seated;
+    const nook = breakRoomNook(layout, seated.filter((placement) => placement.area === "resting").length, seated.filter((placement) => placement.area !== "room" && placement.area !== "resting").length);
+    const byId = new Map(workers.map((worker) => [worker.id, worker]));
+    return errandsBefore.current = placeErrands(seated, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
+  }, [seated, errandClock, layout, workers]);
 
   useEffect(() => {
     const at = now();
@@ -155,6 +177,7 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
         : { placement, point: current, route, startedAt: at });
     }
     motions.current = next;
+    if (motionsFloor.current !== topologyDigest) movingTime.current = { total: 0, last: undefined };
     motionsFloor.current = topologyDigest;
     setClock(at);
   }, [connected, layout, placements, reduced, topologyDigest]);
@@ -184,7 +207,6 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
 
   // Remembered motion lags a render behind what it is told. Where nothing may move, or the
   // floor it was worked out on has been replaced, everyone is simply drawn where they belong.
-  const moving = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
   const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion; placement: ReturnType<typeof placeWorkers>[number] }>>();
   for (const placement of placements) {
     const state = moving && motionsFloor.current === topologyDigest ? motions.current.get(placement.id) : undefined;
@@ -199,11 +221,11 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
         : { action: active.has(placement.id) ? "interacting" : "still", frame: at === undefined ? 0 : Math.floor(at / (380 + workerPhase(placement.id) % 140)) % 2 as 0 | 1, at },
     });
   }
-  return { positions: output, pulse: moving ? clock : undefined };
+  return { placements, positions: output };
 }
 
 /** The animation clock updates worker elements without rerendering the floor or atlas. */
-function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
+function SceneWorkers({ errands, furniture, layout, placements: seated, nodes, workers, tasks, connected, animate, selectedWorkerId, onSelectWorker, onSelectHumanRequest }: Pick<FactorySceneProps, "workers" | "selectedWorkerId" | "onSelectWorker" | "onSelectHumanRequest"> & {
   layout: ReturnType<typeof layoutScene>;
   placements: ReturnType<typeof placeWorkers>;
   nodes: ReadonlyMap<string, SceneTopology["nodes"][number]>;
@@ -217,39 +239,9 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
 }) {
   // Inventory/dependency metadata may change without changing a route's geometry.
   const geometryKey = useMemo(() => JSON.stringify([layout.width, layout.height, layout.restingTop, layout.corridors, layout.rooms.map(({ id, x, y, width, height, door }) => [id, x, y, width, height, door])]), [layout]);
-  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && placements.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, placements, layout]);
-  // The break room keeps no clock of its own: every couple of seconds of the
-  // floor's pulse it asks who has got up. Where motion is stilled the pulse is
-  // absent, and everyone stays seated.
-  // The count belongs to the floor it was taken on: one left over from another floor is ignored at once.
-  const [errandBeat, setErrandBeat] = useState<Readonly<{ floor: string; clock: number }>>();
-  // It counts only while this floor is moving, judged in the render that uses it: the moment
-  // motion is stilled by any means, or another floor is shown, everyone is back in their seat.
+  const active = useMemo(() => new Set(workers.filter((worker) => worker.location === "working" && worker.activity === "busy" && seated.some((placement) => placement.id === worker.id && placement.area === "room" && layout.rooms.find((room) => room.id === placement.roomId)?.contents.some((item) => item.workSurface))).map((worker) => worker.id)), [workers, seated, layout]);
   const reduced = useReducedMotion();
-  const moving = connected && animate && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
-  const errandClock = moving && errandBeat?.floor === geometryKey ? errandBeat.clock : undefined;
-  // Who holds which piece, so that a visit outlasts changes among the others resting.
-  const errandsBefore = useRef<ReturnType<typeof placeWorkers>>([]);
-  const seatedPlacements = placements;
-  placements = useMemo(() => {
-    const nook = breakRoomNook(layout, seatedPlacements.filter((placement) => placement.area === "resting").length, seatedPlacements.filter((placement) => placement.area !== "room" && placement.area !== "resting").length);
-    // With the scenery off there is no furniture to walk to.
-    if (errandClock === undefined || !errands) return errandsBefore.current = seatedPlacements;
-    const byId = new Map(workers.map((worker) => [worker.id, worker]));
-    return errandsBefore.current = placeErrands(seatedPlacements, nook, (id) => { const worker = byId.get(id); return worker === undefined ? undefined : breakRoomHabit(worker); }, errandClock, errandsBefore.current);
-  }, [seatedPlacements, errandClock, errands, layout, workers]);
-  const { positions, pulse } = useSceneMotion(layout, placements, geometryKey, connected && animate, reduced, active);
-  // Turns run on the time this floor has actually been moving: a hidden tab, stilled
-  // motion or a long gap adds nothing, and a different floor starts again from seated.
-  const movingTime = useRef({ floor: geometryKey, total: 0, last: undefined as number | undefined });
-  useEffect(() => {
-    const time = movingTime.current;
-    if (time.floor !== geometryKey) Object.assign(time, { floor: geometryKey, total: 0, last: undefined });
-    if (pulse !== undefined && time.last !== undefined && pulse - time.last < 1000) time.total += pulse - time.last;
-    time.last = pulse;
-    const clock = Math.floor(time.total / 2000) * 2000;
-    setErrandBeat((beat) => pulse === undefined ? undefined : beat?.floor === geometryKey && beat.clock === clock ? beat : { floor: geometryKey, clock });
-  }, [pulse, geometryKey]);
+  const { placements, positions } = useSceneMotion(layout, seated, geometryKey, connected && animate, reduced, active, workers, errands);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
   return <>{placements.map((told) => {
         const worker = workerById.get(told.id);
