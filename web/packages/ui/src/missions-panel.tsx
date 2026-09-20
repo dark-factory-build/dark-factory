@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentItem, StateView, TaskItem, TaskHistoryView } from "@dark-factory/client";
 import { TaskDetail, type TaskBrief } from "./console-sidebar.js";
+import type { ProductionContraption } from "./production-view.js";
 import type { ProjectContentCall } from "./project-library.js";
 
 type RecordValue = Record<string, unknown>;
@@ -9,7 +10,9 @@ const rows = (value: unknown): RecordValue[] => Array.isArray(value) ? value as 
 type Draft = { objective: string; criteria: string; owner: string; id: string };
 
 /** Missions use the durable outcome record; work success never accepts an objective. */
-export function MissionsPanel({ state, projectId, active, call, onProject, onSelectAgent, onSelectTask, onLoadTaskDetail, onLoadTaskHistory }: {
+export function MissionsPanel({ production = [], onProduction, requestedMission, state, projectId, active, call, onProject, onSelectAgent, onSelectTask, onLoadTaskDetail, onLoadTaskHistory }: {
+  production?: readonly ProductionContraption[]; onProduction?: (key: string) => void;
+  requestedMission?: { projectId: string; id: string };
   state?: StateView; projectId?: string; active: boolean; call?: ProjectContentCall;
   onLoadTaskDetail?: (task: TaskItem, peerOffset?: bigint, expectedHead?: bigint) => Promise<TaskBrief>;
   onLoadTaskHistory?: (task: TaskItem) => Promise<TaskHistoryView>;
@@ -65,6 +68,12 @@ export function MissionsPanel({ state, projectId, active, call, onProject, onSel
   };
   useEffect(() => { if (active && projectId !== undefined && call !== undefined && !loaded && !pending && error === "") void run(() => list()); }, [active, projectId, call, loaded, pending, error]);
   const lastObservedHead = useRef<bigint | undefined>(undefined);
+  const openedMission = useRef<typeof requestedMission>(undefined);
+  useEffect(() => {
+    if (!active || !loaded || pending || !call || !requestedMission || requestedMission.projectId !== projectId || openedMission.current === requestedMission) return;
+    openedMission.current = requestedMission;
+    void run(() => read(requestedMission.id));
+  }, [active, loaded, pending, call, requestedMission, projectId]);
   useEffect(() => {
     if (call === undefined) { lastObservedHead.current = undefined; return; }
     if (!active || selected === undefined || pending || lastObservedHead.current === state?.head) return;
@@ -111,6 +120,7 @@ export function MissionsPanel({ state, projectId, active, call, onProject, onSel
         {text(document.conclusion) === "" ? null : <p className="dfMissions__text">{text(document.conclusion)}</p>}
         {owner === undefined ? null : <button type="button" disabled={call === undefined || onSelectAgent === undefined} onClick={() => onSelectAgent?.(owner)}>Talk to {owner.name}</button>}
         <h4>Related work</h4>
+        {production.filter((item) => item.projectId === projectId && item.missions.includes(text(selected.id))).map((item) => <p key={item.visualId}><button type="button" onClick={() => onProduction?.(item.projectId + ":" + item.visualId)} disabled={!onProduction}>Inspect {item.pullRequest?.title ?? item.construction?.title ?? "production work"} · {item.status}</button></p>)}
         <ul className="dfMissions__list">{tasks.map((task) => <li key={task.id}><button type="button" onClick={() => { if (state?.tasks.has(task.id) && onSelectTask !== undefined) onSelectTask(task.id); else setInspectedTask(task); }}>{task.title}<span>{task.status}{task.blocked_reason ? ` · ${task.blocked_reason}` : ""}</span></button></li>)}</ul>
         {taskNext === 0 ? null : <button type="button" disabled={pending || call === undefined} onClick={() => void run(() => loadTasks(text(selected.id), taskNext))}>More related work</button>}
         {inspectedTask === undefined ? null : <TaskDetail key={inspectedTask.id} task={tasks.find((task) => task.id === inspectedTask.id) ?? inspectedTask} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} />}

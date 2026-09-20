@@ -341,6 +341,20 @@ func (daemon *Daemon) dispatch(ctx context.Context, call api.Call) api.Reply {
 			return newErrorReply(api.RemoteInvalidRequest)
 		}
 		return api.NewContentReply(daemon.Intake(ctx, input))
+	case api.CallProductionObserve:
+		input, ok := call.ProductionInput()
+		project, err := browserContentProject(input.ProjectID)
+		if !ok || err != nil {
+			return newErrorReply(api.RemoteInvalidRequest)
+		}
+		at, err := daemon.timestamp()
+		if err == nil {
+			err = daemon.store.RecordProductionObservation(ctx, project, input.Observation, at)
+		}
+		if err != nil {
+			return newErrorReply(remoteErrorCode(err))
+		}
+		return api.NewContentReply(api.ProductionResult{State: "recorded"})
 	case api.CallGitHubConnection:
 		input, ok := call.GitHubConnectionInput()
 		if !ok {

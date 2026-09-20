@@ -21,7 +21,7 @@ func TestV31MigrationPreservesMissionAndStandaloneWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.writer.ExecContext(ctx, "DROP TABLE mission_task_bindings; PRAGMA user_version = 31"); err != nil {
+	if _, err := store.writer.ExecContext(ctx, "DROP TABLE publication_tasks; DROP TABLE production_records; DROP TABLE mission_task_bindings; PRAGMA user_version = 31"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {

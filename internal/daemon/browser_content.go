@@ -54,7 +54,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks"
+	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks" || request.Operation == "production" || request.Operation == "task_read"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -93,10 +93,29 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 	}
 
-	if request.Operation == "mission_tasks" && (input.Limit == 0 || input.Limit > 8) {
+	if (request.Operation == "mission_tasks" || request.Operation == "production") && (input.Limit == 0 || input.Limit > 8) {
 		return result, browser.ErrInvalidRequest
 	}
 	switch request.Operation {
+	case "task_read":
+		id, e := browserID(input.TaskID, kernel.TaskIDFromBytes)
+		if e != nil {
+			return result, browser.ErrInvalidRequest
+		}
+		task, found, e := backend.store.Task(ctx, id)
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		if !found || task.ProjectID != project {
+			return result, browser.ErrInvalidRequest
+		}
+		output = browserTaskSummary(task)
+	case "production":
+		page, e := backend.store.Production(ctx, project, int(input.Offset), int(input.Limit))
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		output = page
 	case "list":
 		page, e := backend.store.ListContent(ctx, project, kernel.ContentKind(input.Kind), int(input.Offset), int(input.Limit))
 		if e != nil {
@@ -360,7 +379,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		}
 		tasks := make([]map[string]any, 0, len(items))
 		for _, item := range items {
-			tasks = append(tasks, map[string]any{"task_id": item.ID.String(), "project_id": item.ProjectID.String(), "title": item.Title, "status": item.Status.String(), "assigned_agent_id": item.AssignedAgentID.String(), "revision": fmt.Sprintf("%d", item.Revision.Int64()), "work_revision": fmt.Sprintf("%d", item.WorkRevision.Int64()), "priority": fmt.Sprint(item.Priority), "blocked_reason": item.BlockedReason})
+			tasks = append(tasks, browserTaskSummary(item))
 		}
 		output = map[string]any{"mission_id": id.String(), "tasks": tasks, "next_offset": next}
 	case "outcome_read", "outcome_write":
@@ -400,3 +419,7 @@ func validBrowserContentWrite(input browserContentInput) bool {
 }
 
 var _ browser.ContentBackend = (*browserBackend)(nil)
+
+func browserTaskSummary(item kernel.Task) map[string]any {
+	return map[string]any{"task_id": item.ID.String(), "project_id": item.ProjectID.String(), "title": item.Title, "status": item.Status.String(), "assigned_agent_id": item.AssignedAgentID.String(), "revision": fmt.Sprintf("%d", item.Revision.Int64()), "work_revision": fmt.Sprintf("%d", item.WorkRevision.Int64()), "priority": fmt.Sprint(item.Priority), "blocked_reason": item.BlockedReason}
+}

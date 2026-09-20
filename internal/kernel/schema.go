@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 32
+	userVersion   = 33
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -18,6 +18,25 @@ const (
 )
 
 var schemaStatements = []string{
+	`CREATE TABLE production_records (
+    project_id BLOB NOT NULL REFERENCES projects(id),
+    repository TEXT NOT NULL CHECK (length(CAST(repository AS BLOB)) BETWEEN 3 AND 140),
+    kind TEXT NOT NULL CHECK (kind IN ('pull_request', 'check', 'reviewer', 'delivery', 'repository')),
+    identity TEXT NOT NULL CHECK (length(CAST(identity AS BLOB)) BETWEEN 1 AND 256),
+    visual_id TEXT NOT NULL CHECK (length(CAST(visual_id AS BLOB)) <= 256),
+    document TEXT NOT NULL CHECK (length(CAST(document AS BLOB)) BETWEEN 2 AND 65536),
+    observed_at_ms INTEGER NOT NULL CHECK (observed_at_ms >= 0),
+    PRIMARY KEY(project_id, repository, kind, identity)
+) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE publication_tasks (
+    project_id BLOB NOT NULL REFERENCES projects(id),
+    repository TEXT NOT NULL CHECK (length(CAST(repository AS BLOB)) BETWEEN 3 AND 140),
+    pull_number INTEGER NOT NULL CHECK (pull_number > 0),
+    task_id BLOB NOT NULL REFERENCES tasks(id),
+    change_id BLOB REFERENCES changes(id),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY(project_id, repository, pull_number, task_id)
+) STRICT, WITHOUT ROWID`,
 	`CREATE TABLE project_tokens (
     project_id BLOB PRIMARY KEY REFERENCES projects(id),
     token_limit INTEGER NOT NULL CHECK (token_limit >= 0),

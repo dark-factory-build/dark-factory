@@ -218,3 +218,32 @@ node identities remain tied to project, kind and path.
 Rooms project the optional scanned subtree inventory into at most six equipment groups: source racks, test benches, document drawers, configuration panels, asset displays and unclassified crates. Counts are partitioned between repeated groups, never one object per file. Direct and subtree counts remain separately inspectable; shared-path totals overlap. Equipment capacity omissions, direct filename sample omissions and missing summaries are explicit. Test benches indicate test-file presence, not success or coverage. Named child cabinets use the existing hierarchy navigation; remaining served siblings are reached by pages.
 
 Room geometry and the five worker standing slots remain independent of inventory contents. Only a busy worker with current observed work in a visible room runs the restrained interaction loop. Reduced motion, hidden tabs, disconnection and idle floors stop the animation clock; reconnection reconciles the current snapshot instead of replaying events. This is an activity projection, not command execution evidence.
+
+## Interactive production sources
+
+The production floor and inspector share one derived view. They do not advance
+work: animation is presentation only. The private project-content read reconciles
+durable records on connection and a bounded visible-tab refresh; it never calls
+GitHub from a sprite or panel.
+
+| Fact | Authority and identity |
+| --- | --- |
+| Mission | Existing outcome objective/criteria/state, with durable task bindings; task success does not complete the objective |
+| Construction | Stored Change and task phase; identity is the Change ID, including after worker completion |
+| Publication | Maintainer publication receipt, or an observed exact factory branch and settled head; subsequent heads retain the recorded binding |
+| Review | Existing exact-head adversarial verifier over formal reviews; host reviewer journal and matching process-start receipt expose actual activity |
+| CI | Repository-level Actions observation; one run ID, revision and PR membership, with head and merge-group scopes kept separate |
+| Merge | GitHub merged timestamp and actual merge commit; merge-queue admission is separate |
+| Delivery | Existing release journal, verified destination receipt and included-PR membership; merge alone proves no delivery |
+
+The host controller's existing release-observation cadence records bounded facts
+through the operator-only `factoryctl production observe --json-stdin` path.
+Customer runtimes without this host controller show unavailable external evidence;
+there is no fallback to host credentials from an agent or browser. Related task
+and conversation content retains its existing private read authority.
+
+Missing or stale review/check evidence cannot approve a new head. Unavailable
+reads retain the last durable item and disclose the observation gap. Active,
+blocked and undelivered items remain inspectable; completed work has a bounded
+visible rack and explicit expansion. External record and relationship limits are
+shown, not presented as successful or empty work.

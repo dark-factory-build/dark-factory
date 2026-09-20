@@ -477,15 +477,18 @@ class ReviewIntakeTest(unittest.TestCase):
 
     def test_launch_uses_host_boundary_exact_receipt_and_owned_group(self):
         operation = dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111')
-        with patch.object(review.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+        process = Mock(pid=123, wait=Mock(return_value=0))
+        with patch.object(review.subprocess, 'Popen', return_value=process) as popen, patch.object(review, 'process_start', return_value='Sat Sep 20 12:00:00 2026'):
             self.assertEqual(0, review.launch_review(self.config, Path('/mirror/o/r'), {'number': 9, 'body': 'exact body'}, operation))
-        argv = run.call_args.args[0]
+        argv = popen.call_args.args[0]
         self.assertIn('go_gate_run_bounded', argv[2])
         self.assertEqual(['o/r', '9', SHA, 'b' * 40], argv[-5:-1])
         self.assertEqual('exact body', Path(argv[-1]).read_text())
-        self.assertEqual('file:///mirror', run.call_args.kwargs['env']['DARK_FACTORY_REVIEW_REMOTE'])
-        self.assertEqual(operation['review_operation'], run.call_args.kwargs['env']['DARK_FACTORY_REVIEW_OPERATION_ID'])
-        self.assertNotIn('timeout', run.call_args.kwargs)
+        self.assertEqual('file:///mirror', popen.call_args.kwargs['env']['DARK_FACTORY_REVIEW_REMOTE'])
+        self.assertEqual(operation['review_operation'], popen.call_args.kwargs['env']['DARK_FACTORY_REVIEW_OPERATION_ID'])
+        self.assertNotIn('timeout', popen.call_args.kwargs)
+        activity = json.loads(review.review_activity_path(self.config, {'number': 9}, operation).read_text())
+        self.assertEqual({'operation': operation['review_operation'], 'pr': 9, 'head': SHA, 'repository': 'o/r', 'pid': 123, 'process_start': 'Sat Sep 20 12:00:00 2026', 'exit': 0}, {key: activity[key] for key in ('operation', 'pr', 'head', 'repository', 'pid', 'process_start', 'exit')})
 
     def test_app_receipt_is_exact_and_observation_does_not_write(self):
         # Resolve the original function from a separate module, not the fixture mock.
@@ -557,11 +560,13 @@ class ReviewIntakeTest(unittest.TestCase):
         reviewer = scripts / 'cold-review.sh'
         reviewer.write_text('#!/bin/sh\nsleep 30 &\nchild=$!\necho $child > child.pid\ntrap \'wait "$child"; exit 130\' TERM\nwait "$child"\n')
         reviewer.chmod(0o700)
-        real_run = subprocess.run
+        real_popen = subprocess.Popen
         def short_deadline(argv, **kwargs):
-            argv[5] = '1'
-            return real_run(argv, **kwargs)
-        with patch.object(review, 'HERE', scripts), patch.object(review.subprocess, 'run', side_effect=short_deadline):
+            if argv[:2] == ['/bin/sh', '-c']:
+                argv = list(argv)
+                argv[5] = '1'
+            return real_popen(argv, **kwargs)
+        with patch.object(review, 'HERE', scripts), patch.object(review.subprocess, 'Popen', side_effect=short_deadline):
             status = review.launch_review(self.config, Path('/mirror/o/r'), {'number': 9, 'body': 'review'},
                                           dict(self.operation, review_operation='11111111-1111-4111-8111-111111111111'))
         self.assertNotEqual(0, status)

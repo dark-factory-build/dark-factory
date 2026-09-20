@@ -781,6 +781,39 @@ class ReleaseFixtures(unittest.TestCase):
         with mock.patch.object(release, "run", side_effect=gh):
             self.assertEqual(release.range_sources(cfg, OLD, SHA), ([], "range"))
 
+    def test_range_records_source_less_pull_request_as_included_without_issue(self):
+        cfg = config(Path("/tmp/release.json"))
+        def gh(argv, *unused):
+            command = " ".join(argv)
+            if "/compare/" in command:
+                return json.dumps({"status": "ahead", "total_commits": 1, "commits": [{"sha": SHA}]})
+            if "/pulls" in command:
+                return json.dumps([[{"number": 10, "merge_commit_sha": SHA, "merged_at": "now", "base": {"ref": "main"}}]])
+            return json.dumps({"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": SHA}, "body": "No source"})
+        included = []
+        with mock.patch.object(release, "run", side_effect=gh):
+            sources, mode = release.range_sources(cfg, OLD, SHA, included)
+        self.assertEqual((sources, mode), ([], "range"))
+        self.assertEqual(included, [{"pr": 10, "merge_sha": SHA, "repository": "example/factory"}])
+
+    def test_reconcile_same_tip_preserves_included_pull_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / "release.json"
+            cfg = config(journal)
+            included = [{"pr": 10, "merge_sha": SHA, "repository": "example/factory"}]
+            release.atomic_json(journal, {"version": 1, "live_tip": {"sha": SHA, "healthy": True},
+                                          "releases": {"633": {"pr": 633, "sha": SHA, "state": "verified",
+                                                                  "config_fingerprint": release.config_fingerprint(cfg),
+                                                                  "included_pull_requests": included}}})
+            with mock.patch.object(release, "gh_snapshot", return_value=snapshot()), \
+                 mock.patch.object(release, "review_gate"), \
+                 mock.patch.object(release, "probe", return_value={"sha": SHA, "healthy": True}), \
+                 mock.patch.object(release, "range_sources") as sources, \
+                 mock.patch.object(release, "run", return_value=json.dumps({"status": "ahead", "merge_base_commit": {"sha": SHA}})):
+                result = release.reconcile(cfg, 633, SHA)
+            self.assertEqual(result["included_pull_requests"], included)
+            sources.assert_not_called()
+
     def test_range_accepts_unique_footer_with_generator_trailer_and_deduplicates(self):
         cfg = config(Path("/tmp/release.json"))
         def gh(argv, *unused):

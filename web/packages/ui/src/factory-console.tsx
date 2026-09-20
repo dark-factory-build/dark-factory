@@ -5,6 +5,9 @@ import type { FactoryGitHubView } from "./factory-settings-coordinator.js";
 import { AgentList, FactoryFloor } from "./console-screens.js";
 import { AgentPanel, ConsoleDialog, HumanRequestPanel, QueuePanel, TaskDetail, SettingsDialog, editErrorCopy, type AgentConfigEdit, type AgentPanelView, type TaskEdit, type TaskBrief } from "./console-sidebar.js";
 import { ProjectLibrary, type ProjectContentCall } from "./project-library.js";
+import { useProduction } from "./production-data.js";
+import { deriveProductionView } from "./production-view.js";
+import { ProductionPanel } from "./production-panel.js";
 import { MissionsPanel } from "./missions-panel.js";
 import { RemoteInvitePanel } from "./remote-invite.js";
 import { factoryCounters } from "./console-view.js";
@@ -12,7 +15,7 @@ import { SpriteEditor } from "./factory-scene/sprite-editor.js";
 import { DEFAULT_FLOOR_APPEARANCE, loadFloorAppearance, resetFloorAppearance, saveFloorAppearance, type FloorAppearance } from "./floor-appearance.js";
 
 export type ConsoleView = "floor" | "agents";
-export type ConsoleDetail = "needs-you" | "queue" | "missions" | "agent" | "floor";
+export type ConsoleDetail = "needs-you" | "queue" | "missions" | "production" | "agent" | "floor";
 
 export type FactoryConsoleProps = FactoryAppSnapshot & {
   view?: ConsoleView;
@@ -207,6 +210,13 @@ export function FactoryConsole({
   const selectedTask = selectedTaskId === undefined ? undefined : scopedState?.tasks.get(selectedTaskId);
   const selectTask = onSelectTask === undefined ? undefined : (id: string) => { onSelectTask(id); onDetail?.("queue"); };
   const ready = status === "ready";
+  const productionData = useProduction([...(scopedState?.projects.keys() ?? [])].sort(), ready ? onProjectContent : undefined);
+  const productionView = deriveProductionView(productionData.records, Date.now());
+  const productionItems = Object.values(productionView.contraptions).sort((a, b) => Number(a.completed) - Number(b.completed) || (a.completed ? a.completedAt - b.completedAt : 0) || a.visualId.localeCompare(b.visualId));
+  const productionFloor = [...productionItems.filter((item) => !item.completed), ...productionItems.filter((item) => item.completed).slice(-8)];
+  const [selectedProduction, setSelectedProduction] = useState<string>();
+  const [requestedMission, setRequestedMission] = useState<{ projectId: string; id: string }>();
+  const selectProduction = (key: string) => { setSelectedProduction(key); onDetail?.("production"); };
   const counters = factoryCounters(state);
   const agent = selectedAgent === undefined ? undefined : scopedState?.agents.get(selectedAgent.id);
   const selectedDetail = (detail === "floor" ? "needs-you" : detail) ?? (selectedAgent === undefined ? "needs-you" : "agent");
@@ -256,6 +266,7 @@ export function FactoryConsole({
           <button type="button" aria-pressed={detail === "floor" && view === "floor"} disabled={!ready} onClick={() => { onView?.("floor"); onDetail("floor"); }}>Floor</button>
           <button type="button" aria-pressed={detail === "floor" && view === "agents"} disabled={!ready || onView === undefined} onClick={() => { onView?.("agents"); onDetail("floor"); }}>Agents</button>
           <button type="button" aria-pressed={detail === "missions"} disabled={!ready} onClick={() => onDetail("missions")}>Missions</button>
+          <button type="button" aria-pressed={detail === "production"} onClick={() => onDetail("production")}>Production</button>
           <button type="button" aria-pressed={detail === "queue"} disabled={!ready} onClick={() => onDetail("queue")}>Tasks</button>
           <button type="button" aria-pressed={detail !== "floor" && selectedDetail === "needs-you"} disabled={!ready} onClick={() => onDetail("needs-you")}>Needs you {counters.needsYou || ""}</button>
         </nav>}
@@ -278,7 +289,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
+              ? <FactoryFloor production={{ view: productionView, items: productionFloor, selected: selectedProduction, onSelect: selectProduction }} onOpenTasks={ready ? (id) => { selectProject(id); onDetail?.("queue"); } : undefined} onOpenMissions={ready ? (id) => { selectProject(id); onDetail?.("missions"); } : undefined} projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -287,6 +298,7 @@ export function FactoryConsole({
               <button type="button" aria-pressed={selectedDetail === "needs-you"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("needs-you")}>Needs you <span>{counters.needsYou ?? "—"}</span></button>
               <button type="button" aria-pressed={selectedDetail === "missions"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("missions")}>Missions</button>
               <button type="button" aria-pressed={selectedDetail === "queue"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("queue")}>Tasks</button>
+              <button type="button" aria-pressed={selectedDetail === "production"} disabled={onDetail === undefined} onClick={() => onDetail?.("production")}>Production</button>
               <button type="button" aria-pressed={selectedDetail === "agent"} disabled={!ready || onDetail === undefined} onClick={() => onDetail?.("agent")}>Agent</button>
             </div>
             {editError === undefined ? null : <p className="dfFactoryConsole__terminalError" role="alert">{editError}</p>}
@@ -307,7 +319,8 @@ export function FactoryConsole({
                 />}
               />
             </div>
-            <div hidden={selectedDetail !== "missions"}><MissionsPanel onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} state={state} projectId={projectId} active={selectedDetail === "missions"} call={ready ? onProjectContent : undefined} onProject={selectProject} onSelectAgent={ready ? onSelectAgent : undefined} onSelectTask={ready ? selectTask : undefined} /></div>
+            <div hidden={selectedDetail !== "production"}><ProductionPanel items={productionItems} selected={selectedProduction} onSelect={selectProduction} state={state} call={ready ? onProjectContent : undefined} connected={ready} error={[productionData.error, ...productionData.notices].filter(Boolean).join(" ")} overflow={productionData.overflow} loadMore={productionData.loadMore} onMission={(projectId, id) => { selectProject(projectId); setRequestedMission({ projectId, id }); onDetail?.("missions"); }} onAgent={ready ? onSelectAgent : undefined} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} /></div>
+            <div hidden={selectedDetail !== "missions"}><MissionsPanel production={productionItems} onProduction={selectProduction} requestedMission={requestedMission} onLoadTaskDetail={onLoadTaskDetail} onLoadTaskHistory={onLoadTaskHistory} state={state} projectId={projectId} active={selectedDetail === "missions"} call={ready ? onProjectContent : undefined} onProject={selectProject} onSelectAgent={ready ? onSelectAgent : undefined} onSelectTask={ready ? selectTask : undefined} /></div>
             <div hidden={selectedDetail !== "queue"}>
               <QueuePanel
                 state={scopedState}

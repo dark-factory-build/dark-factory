@@ -198,6 +198,8 @@ else
         factory-autonomy.py \
         factory-delivery.py \
         factory-intake.py \
+        factory-production-reviews.py \
+        factory-production.py \
         factory-publication.py \
         factory-release.py \
         factory-review-intake.py \

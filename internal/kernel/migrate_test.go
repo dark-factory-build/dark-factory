@@ -466,7 +466,7 @@ func newLegacyDatabase(t *testing.T, persistWAL bool, version int, extra ...stri
 			t.Fatal(err)
 		}
 	}
-	downgrade := []string{"DROP TABLE mission_task_bindings", "DROP TABLE run_tokens", "DROP TABLE project_tokens", "DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
+	downgrade := []string{"DROP TABLE publication_tasks", "DROP TABLE production_records", "DROP TABLE mission_task_bindings", "DROP TABLE run_tokens", "DROP TABLE project_tokens", "DROP TABLE attachment_retention", "DROP TABLE task_attachments", "DROP TABLE intake_acceptance_reviews", "DROP TABLE intake_source_priorities", "DROP TABLE intake_legacy_suppressions", "DROP TABLE intake_legacy_migrations", "DROP TABLE intake_task_bindings", "DROP TABLE intake_source_trusted_logins", "DROP TABLE intake_acceptances", "DROP TABLE intake_sources", "DROP TABLE repository_source_identities", "DROP TABLE content_repository_bindings", "DROP TABLE task_repository_bindings", "DROP TABLE project_repositories", "DROP TABLE continuations", fmt.Sprintf("PRAGMA user_version = %d", version), "COMMIT"}
 	if version < v19UserVersion {
 		downgrade = append([]string{"DROP TABLE terminal_diagnostics"}, downgrade...)
 	}
@@ -679,7 +679,8 @@ func TestSchemaDigestsArePinned(t *testing.T) {
 		statements []string
 		digest     string
 	}{
-		{"current", schemaStatements, "0efa391c9674b0faa20de46ec4535e3c92cc0649bc1aacc80188a3ea77b66f5d"},
+		{"current", schemaStatements, "93b792153383e7012642d16827698f74be4739d94f5a8025c679201438c97dc9"},
+		{"v32", v32SchemaStatements(), "0efa391c9674b0faa20de46ec4535e3c92cc0649bc1aacc80188a3ea77b66f5d"},
 		{"v31", v31SchemaStatements(), "81cc4369f300bd3b7471836c3a65686a2f480af9f1adf2de79176dea26cd4922"},
 		{"v30", v30SchemaStatements(), "7c5dc48e5c613b958f3d799f869c984134a1f2915d85083abe432a9d32555b45"},
 		{"v29", v29SchemaStatements(), "cf8d4931509a6b1f45fe4b59b7b8559f00817508e09acac698b50f9540bb47f5"},
@@ -847,7 +848,7 @@ func downgradeIntakeToV30(t *testing.T, store *Store) {
 	defer connection.Close()
 	err = migrateWithoutForeignKeys(ctx, connection, func(ctx context.Context, connection *sql.Conn) error {
 		target := expectedSchemaOf(v30SchemaStatements())
-		if _, err := connection.ExecContext(ctx, "DROP TABLE mission_task_bindings"); err != nil {
+		if _, err := connection.ExecContext(ctx, "DROP TABLE publication_tasks; DROP TABLE production_records; DROP TABLE mission_task_bindings"); err != nil {
 			return err
 		}
 		if err := rebuildTable(ctx, connection, target, "intake_sources", strings.TrimSuffix(intakeSourceColumns, ", linear_team_id"), "intake_sources_repository_destination", "", ""); err != nil {

@@ -290,7 +290,7 @@ def release_source_footer(body):
     return footer.group(1).lower(), int(footer.group(3)), footer.group(2)
 
 
-def range_sources(config, previous, target):
+def range_sources(config, previous, target, included_pull_requests=None):
     """Return every factory PR and explicit source issue between two live tips."""
     repo = config["repository"]
     compare = json.loads(run(["gh", "api", f"repos/{repo}/compare/{previous}...{target}"]))
@@ -340,6 +340,8 @@ def range_sources(config, previous, target):
             if not isinstance(detail, dict) or detail.get("state") != "MERGED" or detail.get("baseRefName") != config["base"] or actual != merge or not isinstance(detail.get("body"), str):
                 raise ReleaseError("deployment pull request changed or is malformed")
             processed.add(number)
+            if included_pull_requests is not None:
+                included_pull_requests.append({"pr": number, "merge_sha": merge, "repository": repo})
             footer = release_source_footer(detail["body"])
             if footer is None:
                 continue
@@ -578,19 +580,22 @@ def once(config, number, retry=False):
             atomic_json(journal_path, journal)
             raise ReleaseError(entry["error"])
         previous = value["sha"]
+        included_pull_requests = []
         if prior_tip is None:
             record_live_tip(journal, value)
         if previous == sha:
             sources, delivery_mode = [], "baseline_current" if prior_tip is None else "unchanged"
         else:
             try:
-                sources, delivery_mode = range_sources(config, previous, sha)
+                sources, delivery_mode = range_sources(config, previous, sha, included_pull_requests)
             except ReleaseError as exc:
                 entry["state"] = "blocked"
                 entry["error"] = str(exc)
                 atomic_json(journal_path, journal)
                 raise
-        entry.update({"delivery_from_sha": previous, "delivery_sources": sources, "delivery_mode": delivery_mode})
+        entry.update({"delivery_from_sha": previous, "delivery_sources": sources,
+                      "included_pull_requests": included_pull_requests,
+                      "delivery_mode": delivery_mode})
         # Persist the observed installed SHA and complete source mapping before
         # deployment; a crash cannot turn an unrecorded range into a delivery.
         atomic_json(journal_path, journal)
@@ -685,6 +690,10 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
             raise ReleaseError("live probe did not prove the expected healthy SHA")
         prior_tip = journal.get("live_tip")
         previous = prior_tip.get("sha") if isinstance(prior_tip, dict) else None
+        included_pull_requests = []
+        if (isinstance(entry, dict) and entry.get("sha") == expected
+                and isinstance(entry.get("included_pull_requests"), list)):
+            included_pull_requests = list(entry["included_pull_requests"])
         if baseline_current:
             sources, delivery_mode = [], "baseline_current"
         elif previous is not None and previous == expected:
@@ -692,7 +701,7 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
         elif previous is None:
             sources, delivery_mode = [], "baseline_current"
         else:
-            sources, delivery_mode = range_sources(config, previous, expected)
+            sources, delivery_mode = range_sources(config, previous, expected, included_pull_requests)
         entry = entry or {"pr": number}
         existing_reconciliation = entry.get("reconciliation") if isinstance(entry, dict) else None
         reconciliation = {"mode": "operator_observed", "observed_sha": expected}
@@ -709,6 +718,7 @@ def reconcile(config, number, expected, supersede_prs=(), baseline_current=False
             reconciliation["superseded_prs"] = previous_superseded
         entry.update({"sha": expected, "state": "verified", "config_fingerprint": fingerprint,
                       "delivery_from_sha": previous or expected, "delivery_sources": sources,
+                      "included_pull_requests": included_pull_requests,
                       "delivery_mode": delivery_mode, "verification": value,
                       "reconciliation": reconciliation,
                       "verified_at": int(time.time()), "updated_at": int(time.time())})

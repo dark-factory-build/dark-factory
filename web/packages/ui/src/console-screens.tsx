@@ -9,7 +9,7 @@ import {
   projectFloor,
   type RunPathSample,
 } from "./console-view.js";
-import { FactoryScene, AgentSprite } from "./factory-scene/factory-scene.js";
+import { FactoryScene, AgentSprite, type FactorySceneProps } from "./factory-scene/factory-scene.js";
 import type { FloorAppearance } from "./floor-appearance.js";
 
 function shortID(value: string): string {
@@ -78,9 +78,10 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
 
 /** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
-  state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
+  production, state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
   onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, connected = true, floorAppearance, projectId, onProject,
 }: {
+  production?: FactorySceneProps["production"];
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
   runPaths?: ReadonlyMap<string, RunPathSample>;
@@ -135,6 +136,7 @@ export function FactoryFloor({
     </p>}
     <div className="dfFactoryFloor__scene">
     <FactoryScene
+      production={production}
       appearance={floorAppearance}
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
