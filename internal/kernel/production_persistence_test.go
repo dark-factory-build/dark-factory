@@ -14,7 +14,7 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationPolicy{}, proposal)
+	store, finalizing := finalizingReleasedRun(t, RoleWorker, VerificationNone, proposal)
 	defer store.Close()
 
 	change, found, err := store.Change(ctx, *finalizing.ChangeID)
@@ -29,13 +29,6 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	hexHead := hex.EncodeToString(change.HeadCommit.Bytes())
-	branch := "factory/" + change.ID.String()[:12]
-	pr := ProductionPullRequest{Number: 7, Title: "Ship the machine", URL: "https://github.com/example/factory/pull/7", Head: hexHead, Branch: branch, Base: "main", State: "open", Review: ProductionReview{Head: hexHead, State: "allow"}}
-	observation := ProductionObservation{Repository: "Example/Factory", ObservedAt: 80, PullRequests: []ProductionPullRequest{pr}}
-	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, observation, mustTime(t, 80)); err != nil {
-		t.Fatal(err)
-	}
 	page, err := store.Production(ctx, terminal.ProjectID, 0, 8)
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +36,20 @@ func TestProductionPersistsFinalizedConstructionPublicationAndRebase(t *testing.
 	construction := productionRecord(t, page, "construction", "")
 	if construction == nil || construction.VisualID != "change:"+change.ID.String() {
 		t.Fatalf("finalized construction = %+v", construction)
+	}
+	hexHead := hex.EncodeToString(change.HeadCommit.Bytes())
+	branch := "factory/" + change.ID.String()[:12]
+	pr := ProductionPullRequest{Number: 7, Title: "Ship the machine", URL: "https://github.com/example/factory/pull/7", Head: hexHead, Branch: branch, Base: "main", State: "open", Review: ProductionReview{Head: hexHead, State: "allow"}}
+	observation := ProductionObservation{Repository: "Example/Factory", ObservedAt: 80, PullRequests: []ProductionPullRequest{pr}}
+	if err := store.RecordProductionObservation(ctx, terminal.ProjectID, observation, mustTime(t, 80)); err != nil {
+		t.Fatal(err)
+	}
+	page, err = store.Production(ctx, terminal.ProjectID, 0, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if productionRecord(t, page, "construction", "") != nil {
+		t.Fatal("matching observed factory branch acquired publication association without RecordPublication")
 	}
 	identity := productionRecord(t, page, "pull_request", "7")
 	if identity == nil || identity.VisualID != "change:"+change.ID.String() {
@@ -146,11 +153,11 @@ func TestV32MigrationPreservesMissionBindingsAndStandaloneTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mission, err := store.WriteOutcome(ctx, NewOutcome{ID: outcomeID(t, 256), ProjectID: project.ID, Document: OutcomeDocument{Kind: "mission", Objective: "keep work", Criteria: "all rows survive", AnchorTaskID: anchor.ID.String(), AnchorWorkRevision: 1, State: "open"}}, 0, mustTime(t, 4))
+	mission, err := store.WriteOutcome(ctx, NewOutcome{ID: outcomeID(t, 240), ProjectID: project.ID, Document: OutcomeDocument{Kind: "mission", Objective: "keep work", Criteria: "all rows survive", AnchorTaskID: anchor.ID.String(), AnchorWorkRevision: 1, State: "open"}}, 0, mustTime(t, 4))
 	if err != nil {
 		t.Fatal(err)
 	}
-	standalone, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 257), IncarnationID: incarnationID(t, 258), ProjectID: project.ID, Title: "standalone"}, mustTime(t, 5))
+	standalone, err := store.EnqueueTask(ctx, NewTask{ID: taskID(t, 241), IncarnationID: incarnationID(t, 242), ProjectID: project.ID, Title: "standalone"}, mustTime(t, 5))
 	if err != nil {
 		t.Fatal(err)
 	}
