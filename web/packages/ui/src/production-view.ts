@@ -81,11 +81,18 @@ function activityState(record: ProductionRecord, value: unknown, now: number) {
 function verifiedDelivery(delivery: ProductionDelivery) {
   return delivery.verified_at !== undefined && delivery.verified_at > 0 && delivery.state === "verified";
 }
+// Timestamps have second resolution. Without stronger ordering evidence a tie
+// cannot let a verified receipt hide an unresolved attempt.
+function deliveryOrder(a: ProductionDelivery, b: ProductionDelivery) {
+  return (b.updated_at || b.verified_at || 0) - (a.updated_at || a.verified_at || 0)
+    || Number(verifiedDelivery(a)) - Number(verifiedDelivery(b))
+    || a.id.localeCompare(b.id);
+}
 function latestDestinations(deliveries: readonly ProductionContraption["deliveries"][number][]) {
   const latest = new Map<string, typeof deliveries[number]>();
   for (const delivery of deliveries) {
     const previous = latest.get(delivery.destination);
-    if (previous === undefined || (delivery.updated_at || delivery.verified_at || 0) > (previous.updated_at || previous.verified_at || 0)) latest.set(delivery.destination, delivery);
+    if (previous === undefined || deliveryOrder(delivery, previous) < 0) latest.set(delivery.destination, delivery);
   }
   return [...latest.values()];
 }
@@ -144,6 +151,10 @@ export function deriveProductionView(records: readonly ProductionRecord[], now =
 
 /** Shared executions appear once even when several projects refer to them. */
 export function sharedDeliveries(view: ProductionView): readonly ProductionDelivery[] {
-  return [...new Map(Object.values(view.deliveries).map((delivery) => [`${delivery.repository}:${delivery.id}`, delivery])).values()]
-    .sort((a, b) => (b.updated_at || b.verified_at || 0) - (a.updated_at || a.verified_at || 0));
+  const shared = new Map<string, ProductionDelivery>();
+  for (const delivery of Object.values(view.deliveries).sort(deliveryOrder)) {
+    const key = `${delivery.repository}:${delivery.id}`;
+    if (!shared.has(key)) shared.set(key, delivery);
+  }
+  return [...shared.values()];
 }

@@ -74,3 +74,18 @@ test("a later verified attempt supersedes failure at the same destination and sh
   const pending = deriveProductionView([record("pull_request", "7", "change:1", pr), verified, { ...failed, document: { ...failed.document, updated_at: 30 } }]);
   assert.equal(pending.contraptions[key].completed, false);
 });
+
+
+test("tied delivery timestamps never let success hide an unresolved attempt", () => {
+  const pr = record("pull_request", "7", "change:1", { number: 7, head, state: "merged", merge: head });
+  const success = record("delivery", "older", "", { destination: "site", revision: head, state: "verified", verified_at: 1000, updated_at: 2000, pull_requests: [7] });
+  for (const state of ["blocked", "running", "unknown"]) {
+    const unresolved = record("delivery", "newer", "", { destination: "site", revision: "b".repeat(40), state, updated_at: 2000, pull_requests: [7] });
+    for (const order of [[success, unresolved], [unresolved, success]]) {
+      const view = deriveProductionView([pr, ...order]);
+      assert.equal(view.contraptions[key].completed, false);
+      assert.match(view.contraptions[key].nextAction, /pending/);
+      assert.equal(sharedDeliveries(view)[0].state, state);
+    }
+  }
+});
