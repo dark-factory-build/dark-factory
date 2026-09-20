@@ -704,7 +704,7 @@ test("Tasks lists blocked work, hides orchestrator passes, flags dispatch off an
   await act(async () => { panel.findByProps({ "aria-label": "Retry Stuck on a prerequisite" }).props.onClick(); });
   assert.deepEqual(edits.at(-1), ["b1".repeat(16), { retry: true }], "or sent round again in one step");
   assert.ok(!panel.findAllByType("button").some((button) => button.children.join("") === "Standing instruction"), "an orchestrator pass is not a task row");
-  assert.match(panel.findByProps({ role: "status" }).children.join(""), /Dispatch is off/);
+  assert.match(panel.findByProps({ role: "status" }).children.join(""), /New work is paused/);
   const form = panel.findByProps({ "aria-label": "New task" });
   const values = { target: `any:${ids.project}`, instruction: " Ship it " };
   const nativeFormData = globalThis.FormData;
@@ -729,7 +729,7 @@ test("a terminal blocked task is neither building nor current agent work", () =>
 test("the production console exposes no speculative or unsupported surface", () => {
   for (const view of VIEWS) {
     const markup = render({ view }).toLowerCase();
-    for (const text of ["not yet served", "awaiting deploy", "suggestions", "add work", "accept", "dismiss", "task record"]) {
+    for (const text of ["not yet served", "awaiting deploy", "suggestions", "add work", ">accept</button>", "dismiss", "task record"]) {
       assert.equal(markup.includes(text), false, `${view}: ${text}`);
     }
   }
@@ -1694,6 +1694,26 @@ test("the config inputs stay the agent's own override and caption where it came 
   assert.equal(unknown.includes("inherited from"), false);
 });
 
+test("agent config drafts survive an acknowledged live revision", async () => {
+  const previous = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const original = fixtureState.agents.get(ids.agent);
+  const state = baseState({ agents: new Map([[original.id, original]]) });
+  const selectedAgent = { id: original.id, name: original.name, revision: original.revision };
+  let renderer;
+  try {
+    await act(async () => { renderer = create(createElement(FactoryConsole, { status: "ready", state, selectedAgent, agentPanel: "config", onSaveAgentConfig() {} })); });
+    const model = () => renderer.root.findByProps({ id: `df-model-${original.id}` });
+    await act(async () => model().props.onChange({ currentTarget: { value: "operator draft" } }));
+    const changed = { ...original, revision: original.revision + 1n, paused: !original.paused };
+    await act(async () => renderer.update(createElement(FactoryConsole, { status: "ready", state: baseState({ agents: new Map([[changed.id, changed]]) }), selectedAgent: { ...selectedAgent, revision: changed.revision }, agentPanel: "config", onSaveAgentConfig() {} })));
+    assert.equal(model().props.value, "operator draft");
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previous;
+  }
+});
+
 test("the shell provider has no model inputs but keeps PAUSED", () => {
   const markup = withAgent(shellAgent);
   assert.match(markup, />shell has no model</);
@@ -2085,8 +2105,10 @@ test("mobile navigation switches presentation without mutating work", () => {
   const nav = elements.find((element) => element.props["aria-label"] === "Console views");
   const buttons = nav.props.children.filter((element) => element.type === "button");
   assert.equal(buttons[0].props["aria-pressed"], true);
-  buttons[2].props.onClick();
+  buttons.find((button) => button.props.children === "Tasks").props.onClick();
   assert.deepEqual(calls, ["queue"]);
+  buttons.find((button) => button.props.children === "Missions").props.onClick();
+  assert.deepEqual(calls, ["queue", "missions"]);
   assert.equal(elements.find((element) => element.type === "main").props["data-mobile-view"], "floor");
 });
 
@@ -2726,4 +2748,23 @@ test("Settings persists automatic attachment cleanup and keeps saved value on fa
     assert.equal(checkbox().props.checked, true);
     assert.deepEqual(calls, [undefined, true, false, undefined]);
   } finally { await act(async () => renderer.unmount()); }
+});
+
+test("new-work admission reports acknowledgement and preserves active work", async () => {
+  let acknowledge;
+  const calls = [];
+  let tree;
+  await act(async () => { tree = create(createElement(FactoryConsole, {
+    status: "ready", state: fixtureState,
+    onSetDispatch: (revision, enabled) => { calls.push({ revision, enabled }); return new Promise((resolve) => { acknowledge = resolve; }); },
+  })); });
+  const label = fixtureState.factory.dispatch_enabled ? "Pause new work" : "Resume new work";
+  const control = tree.root.findAllByType("button").find((button) => button.children.join("") === label);
+  await act(async () => control.props.onClick());
+  assert.deepEqual(calls, [{ revision: fixtureState.factory.revision, enabled: !fixtureState.factory.dispatch_enabled }]);
+  assert.match(JSON.stringify(tree.toJSON()), /Waiting…/);
+  assert.doesNotMatch(JSON.stringify(tree.toJSON()), /New work resumed\.|New work paused\. Active/);
+  await act(async () => acknowledge({ revision: fixtureState.factory.revision + 1n, enabled: !fixtureState.factory.dispatch_enabled }));
+  assert.match(JSON.stringify(tree.toJSON()), fixtureState.factory.dispatch_enabled ? /New work paused\. Active processes continue\./ : /New work resumed\./);
+  await act(async () => tree.unmount());
 });

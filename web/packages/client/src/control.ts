@@ -112,6 +112,8 @@ export type AgentUpdateBody = { agent_id: string; expected_revision: bigint; app
 export type AgentUpdateResultBody = { agent_id: string; revision: bigint };
 export type ProjectLimitsBody = { project_id: string; expected_revision: bigint; run_budget: bigint; max_run_seconds: number };
 export type ProjectLimitsResultBody = { project_id: string; revision: bigint };
+export type FactoryDispatchBody = { expected_revision: bigint; enabled: boolean };
+export type FactoryDispatchResultBody = { revision: bigint; enabled: boolean };
 export type ProjectCreateBody = { project_id: string; name: string; root: string };
 export type ProjectCreateResultBody = { project_id: string; revision: bigint };
 /** Administration-only private repository configuration; it is never STATE. */
@@ -222,7 +224,7 @@ export type TerminalServerControlFrame =
   | { type: "TERMINAL_EXIT"; id: string; body: TerminalExitBody }
   | { type: "TERMINAL_RESET"; id: string; body: TerminalResetBody };
 
-export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: string; body: { enabled: boolean } } | { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
+export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: string; body: { enabled: boolean } } | { type: "FACTORY_DISPATCH_RESULT"; id: string; body: FactoryDispatchResultBody } | { type: "PROJECT_CONTENT_RESULT"; id: string; body: ProjectContentResult } | HelloFrame | PairResultFrame | AuthResultFrame | StateSnapshotFrame | StateChangedFrame | HumanRequestDetailFrame
   | { type: "HUMAN_REQUEST_REPLY_RESULT"; id: string; body: HumanRequestReplyResultBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN_RESULT"; id: string; body: HumanRequestCancelRunResultBody }
   | { type: "TASK_ATTACHMENT_RESULT"; id: string; body: TaskAttachmentResultBody }
@@ -250,7 +252,7 @@ export type ServerControlFrame = { type: "ATTACHMENT_RETENTION_RESULT"; id: stri
   | { type: "REMOTE_INVITE_RESULT"; id: string; body: RemoteInviteResultBody }
   | { type: "PUSH_SUBSCRIBE_RESULT"; id: string; body: PushSubscribeResultBody }
   | TerminalServerControlFrame | ErrorFrame;
-export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; body: { enabled?: boolean } } | { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
+export type ClientControlFrame = { type: "ATTACHMENT_RETENTION"; id: string; body: { enabled?: boolean } } | { type: "FACTORY_DISPATCH"; id: string; body: FactoryDispatchBody } | { type: "PROJECT_CONTENT"; id: string; body: ProjectContentRequest } | PairProveFrame | AuthProveFrame | StateGetFrame | StateWatchFrame | HumanRequestDetailGetFrame
   | { type: "HUMAN_REQUEST_REPLY"; id: string; body: HumanRequestReplyBody }
   | { type: "HUMAN_REQUEST_CANCEL_RUN"; id: string; body: HumanRequestCancelRunBody }
   | { type: "TASK_ATTACHMENT"; id: string; body: TaskAttachmentBody }
@@ -286,6 +288,7 @@ const CLIENT_TYPES: readonly ControlType[] = CONTROL_MANIFEST.filter((entry) => 
 const SERVER_TYPES: readonly ControlType[] = CONTROL_MANIFEST.filter((entry) => entry.direction !== "client").map((entry) => entry.type);
 
 export function encodeClientControl(frame: ClientControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "client"))); }
+export function encodeFactoryDispatch(id: string, body: FactoryDispatchBody): string { return encodeClientControl({ type: "FACTORY_DISPATCH", id, body }); }
 export function encodePairProve(id: string, body: PairProveBody): string { return encodeClientControl({ type: "PAIR_PROVE", id, body }); }
 export function encodeAuthProve(id: string, body: AuthProveBody): string { return encodeClientControl({ type: "AUTH_PROVE", id, body }); }
 export function encodeStateGet(id: string, body: StateGetBody): string { return encodeClientControl({ type: "STATE_GET", id, body }); }
@@ -316,6 +319,7 @@ export function encodePushSubscribe(id: string, body: PushSubscribeBody): string
 export function encodeClientError(body: ErrorBody, id?: string): string { return encodeClientControl({ type: "ERROR", ...(id === undefined ? {} : { id }), body }); }
 
 export function encodeServerControl(frame: ServerControlFrame): string { return normalizeBoundary(() => encode(frame, validateControl(frame, "server"))); }
+export function encodeFactoryDispatchResult(id: string, body: FactoryDispatchResultBody): string { return encodeServerControl({ type: "FACTORY_DISPATCH_RESULT", id, body }); }
 export function encodeHello(body: HelloBody): string { return encodeServerControl({ type: "HELLO", body }); }
 export function encodePairResult(id: string, body: PairResultBody): string { return encodeServerControl({ type: "PAIR_RESULT", id, body }); }
 export function encodeAuthResult(id: string, body: AuthResultBody): string { return encodeServerControl({ type: "AUTH_RESULT", id, body }); }
@@ -415,6 +419,8 @@ function validateBody(type: ControlType, body: unknown, wire: boolean): ControlB
       requireKeys(body, ["enabled"], wire);
       if (typeof body.enabled !== "boolean") malformed();
       return { enabled: body.enabled };
+    case "FACTORY_DISPATCH": requireKeys(body, ["expected_revision", "enabled"], wire); if (typeof body.enabled !== "boolean") malformed(); return { expected_revision: decimal(body.expected_revision, wire, true), enabled: body.enabled };
+    case "FACTORY_DISPATCH_RESULT": requireKeys(body, ["revision", "enabled"], wire); if (typeof body.enabled !== "boolean") malformed(); return { revision: decimal(body.revision, wire, true), enabled: body.enabled };
     case "PROJECT_CONTENT": requireKeys(body, ["operation", "input"], wire); return { operation: projectContentOperation(body.operation), input: projectContentObject(body.input) };
     case "PROJECT_CONTENT_RESULT": requireKeys(body, ["operation", "output"], wire); return { operation: projectContentOperation(body.operation), output: projectContentObject(body.output) };
     case "HELLO": requireKeys(body, ["daemon_id", "boot_id", "connection_nonce"], wire); return { daemon_id: fixedHex(body.daemon_id, HEX_BYTES.daemon_id), boot_id: fixedHex(body.boot_id, HEX_BYTES.boot_id), connection_nonce: fixedHex(body.connection_nonce, HEX_BYTES.connection_nonce) };

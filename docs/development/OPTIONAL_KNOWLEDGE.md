@@ -81,11 +81,22 @@ a failed worker task. Comparing does not rerun work, create branches or bypass
 review, merge or deployment. Capacity one supports sequential candidate tasks;
 parallel work uses ordinary capacity controls.
 
-`kind: mission` supports a manually maintained objective. A bounded milestone
+`kind: mission` records an objective with explicit acceptance criteria. A bounded milestone
 may name `milestone_of`; accepting it does not complete the parent mission.
 There is no campaign scheduler or autonomous optimization loop.
 
 ## Browser use
+
+The planning table opens **Missions**, scoped to a project. Creating a mission
+atomically saves the existing outcome record and queues a normal task for its
+selected overseer. Delegated tasks retain their mission association; standalone
+tasks remain valid. Mission details show durable related work and link to the
+owner's existing controls. Task success does not accept the mission: acceptance
+still requires the outcome's reason, evidence or authorized judgment, and conclusion.
+The tray opens the existing **Tasks** panel. **Pause new work** changes admission
+only; active processes continue. Mission creation and admission changes wait for
+daemon acknowledgement.
+
 
 The existing console sidebar has a collapsed **Project library & outcomes**
 panel. Opening it or leaving it unused causes no fetch. Browse metadata, select

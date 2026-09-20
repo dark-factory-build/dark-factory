@@ -666,7 +666,15 @@ func (store *Store) ListOutcomes(ctx context.Context, project ProjectID, offset,
 		return OutcomePage{}, err
 	}
 	defer tx.Close()
-	return listOutcomesOnConnection(ctx, tx.connection, project, offset, limit)
+	return listOutcomesOnConnection(ctx, tx.connection, project, offset, limit, "")
+}
+func (store *Store) ListMissionOutcomes(ctx context.Context, project ProjectID, offset, limit int) (OutcomePage, error) {
+	tx, err := store.beginRead(ctx)
+	if err != nil {
+		return OutcomePage{}, err
+	}
+	defer tx.Close()
+	return listOutcomesOnConnection(ctx, tx.connection, project, offset, limit, "mission")
 }
 func (store *Store) ListOutcomesForAttempt(ctx context.Context, digest AttemptDigest, offset, limit int) (OutcomePage, error) {
 	tx, err := store.beginRead(ctx)
@@ -678,7 +686,7 @@ func (store *Store) ListOutcomesForAttempt(ctx context.Context, digest AttemptDi
 	if err != nil {
 		return OutcomePage{}, err
 	}
-	return listOutcomesOnConnection(ctx, tx.connection, a.ProjectID, offset, limit)
+	return listOutcomesOnConnection(ctx, tx.connection, a.ProjectID, offset, limit, "")
 }
 
 func outcomeOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, id OutcomeID, revision int64) (OutcomeRevision, error) {
@@ -779,14 +787,22 @@ func outcomeReadFlags(ctx context.Context, connection *sql.Conn, project Project
 	return stale, missing
 }
 func hashArray(value []byte) (result [32]byte) { copy(result[:], value); return result }
-func listOutcomesOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, offset, limit int) (OutcomePage, error) {
+func listOutcomesOnConnection(ctx context.Context, c *sql.Conn, project ProjectID, offset, limit int, kind string) (OutcomePage, error) {
 	if offset < 0 || limit < 0 || limit > 16 {
 		return OutcomePage{}, fmt.Errorf("%w: invalid outcome page", ErrInvalidValue)
 	}
 	if limit == 0 {
 		limit = 16
 	}
-	rows, err := c.QueryContext(ctx, "SELECT id, MAX(revision) FROM project_outcome_revisions WHERE project_id = ? GROUP BY id ORDER BY id LIMIT ? OFFSET ?", project.Bytes(), limit+1, offset)
+	query := "SELECT id, revision FROM project_outcome_revisions current WHERE project_id = ? AND revision = (SELECT MAX(revision) FROM project_outcome_revisions latest WHERE latest.id = current.id)"
+	args := []any{project.Bytes()}
+	if kind != "" {
+		query += " AND json_extract(document, '$.kind') = ?"
+		args = append(args, kind)
+	}
+	query += " ORDER BY id LIMIT ? OFFSET ?"
+	args = append(args, limit+1, offset)
+	rows, err := c.QueryContext(ctx, query, args...)
 	if err != nil {
 		return OutcomePage{}, err
 	}

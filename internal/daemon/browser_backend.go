@@ -501,6 +501,30 @@ func (backend *browserBackend) SetProjectLimits(ctx context.Context, rawClient [
 	return browserprotocol.ProjectLimitsResult{ProjectID: project.ID.String(), Revision: decimalRevision(project.Revision)}, nil
 }
 
+func (backend *browserBackend) SetDispatch(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.FactoryDispatch) (browserprotocol.FactoryDispatchResult, error) {
+	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
+	if err != nil {
+		return browserprotocol.FactoryDispatchResult{}, err
+	}
+	defer release()
+	expected, err := browserDecimal(request.ExpectedRevision)
+	if err != nil {
+		return browserprotocol.FactoryDispatchResult{}, browser.ErrStale
+	}
+	at, err := backend.timestamp()
+	if err != nil {
+		return browserprotocol.FactoryDispatchResult{}, mapBrowserError(err)
+	}
+	state, err := backend.store.SetDispatch(ctx, expected, bool(request.Enabled), at)
+	if err != nil {
+		return browserprotocol.FactoryDispatchResult{}, consoleUpdateError(err)
+	}
+	if backend.owner != nil {
+		backend.owner.notifyScheduler()
+	}
+	return browserprotocol.FactoryDispatchResult{Revision: decimalRevision(state.Revision), Enabled: browserprotocol.Bool(state.DispatchEnabled)}, nil
+}
+
 func (backend *browserBackend) CreateProject(ctx context.Context, rawClient [browserprotocol.ClientIDSize]byte, request browserprotocol.ProjectCreate) (browserprotocol.ProjectCreateResult, error) {
 	_, release, _, err := backend.authorize(ctx, rawClient, kernel.BrowserCapabilityAdministration)
 	if err != nil {

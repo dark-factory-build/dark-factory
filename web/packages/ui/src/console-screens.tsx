@@ -79,7 +79,7 @@ export function StageMeter({ stage }: { stage: TaskItem["status"] }) {
 /** The floor shares the normal task detail and HumanRequest routes. */
 export function FactoryFloor({
   state, topologies, runPaths, lastRunPaths, selectedAgentId, onSelectAgent,
-  onSelectHumanRequest, selectedTaskId, onSelectTask, connected = true, floorAppearance, projectId, onProject,
+  onSelectHumanRequest, selectedTaskId, onSelectTask, onOpenTasks, onOpenMissions, connected = true, floorAppearance, projectId, onProject,
 }: {
   state: StateView | undefined;
   topologies: ReadonlyMap<string, TopologyView> | undefined;
@@ -89,6 +89,8 @@ export function FactoryFloor({
   onSelectAgent?: (agent: AgentItem) => void;
   selectedTaskId?: string;
   onSelectTask?: (taskId: string) => void;
+  onOpenTasks?: (projectId?: string) => void;
+  onOpenMissions?: (projectId?: string) => void;
   onSelectHumanRequest?: (request: HumanRequestItem) => void;
   connected?: boolean;
   floorAppearance: FloorAppearance;
@@ -137,6 +139,7 @@ export function FactoryFloor({
       selectedWorkerId={selectedAgentId}
       selectedTaskId={selectedTaskId}
       topology={scene.topology}
+      projectId={projectId}
       detailNodes={prepared.roomByID}
       workers={scene.workers}
       connected={connected}
@@ -146,6 +149,8 @@ export function FactoryFloor({
       enterableRoomIds={scene.navigation.enterableIds}
       onEnterRoom={setScopeId}
       onSelectTask={onSelectTask}
+      onOpenTasks={onOpenTasks}
+      onOpenMissions={onOpenMissions}
       onSelectHumanRequest={onSelectHumanRequest === undefined || state === undefined ? undefined : (id) => {
         const request = state.humanRequests.get(id);
         if (request !== undefined) onSelectHumanRequest(request);

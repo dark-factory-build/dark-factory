@@ -17,7 +17,8 @@ export type AgentPanelView = "terminal" | "config";
 
 /** One private peer-conversation page, shared by queued and completed work. */
 export function TaskConversation({ brief, onOlder, pending = false }: { brief: TaskBrief; onOlder?: () => void; pending?: boolean }) {
-  return <section aria-label="Task conversation"><h3>Conversation</h3>{brief.peerQuestions.length === 0 ? <p>No peer questions</p> : <ol>{brief.peerQuestions.map((question) => <li key={question.id}><strong>Question · {question.source_task_id} → {question.target_task_id}</strong><span>{question.question}</span><small>Recipient delivery · {question.recipient_delivery_state.replaceAll("_", " ")}</small>{question.answer === undefined || question.answer === "" ? null : <><span>Answer · {question.answer}</span><small>Answer delivery · {question.answer_delivery_state.replaceAll("_", " ")}</small></>}</li>)}</ol>}{brief.nextPeerOffset === undefined || onOlder === undefined ? null : <button type="button" disabled={pending} onClick={onOlder}>Older conversation</button>}</section>;
+  const waiting = brief.peerQuestions.filter((question) => question.answer === undefined || question.answer === "").length;
+  return <section aria-label={`Task conversation${waiting === 0 ? "" : ` · ${waiting} awaiting answer`}`}><h3>Conversation {waiting === 0 ? null : <span aria-label={`${waiting} unanswered peer questions`}>· {waiting} awaiting answer</span>}</h3>{brief.peerQuestions.length === 0 ? <p>No peer questions</p> : <ol>{brief.peerQuestions.map((question) => <li key={question.id}><strong>Question · {question.source_task_id} → {question.target_task_id}</strong><span>{question.question}</span><small>Recipient delivery · {question.recipient_delivery_state.replaceAll("_", " ")}</small>{question.answer === undefined || question.answer === "" ? null : <><span>Answer · {question.answer}</span><small>Answer delivery · {question.answer_delivery_state.replaceAll("_", " ")}</small></>}</li>)}</ol>}{brief.nextPeerOffset === undefined || onOlder === undefined ? null : <button type="button" disabled={pending} onClick={onOlder}>Older conversation</button>}</section>;
 }
 
 const EDIT_ERRORS = new Map<string, string>([
@@ -85,8 +86,8 @@ export function AgentPanel({
   // the next blur. A refusal never changes the revision, so it needs its own
   // token, and only the refused form's: a refused task edit must not throw
   // away what the operator has typed into the config form.
-  const formKey = (id: string, revision: bigint) =>
-    `${id}:${revision}:${errorCopy !== undefined && edit?.target === id ? "refused" : ""}`;
+  const formKey = (id: string) =>
+    `${id}:${errorCopy !== undefined && edit?.target === id ? "refused" : ""}`;
   return (
     <section className="dfConsoleSidebar__panel" aria-label={`Agent ${agent.name}`}>
       <div className="dfConsoleSidebar__heading">
@@ -113,7 +114,7 @@ export function AgentPanel({
       </section>}
 
       <section className="dfConsoleSidebar__section" aria-label="Agent configuration" hidden={!archived && panel !== "config"}>
-        <AgentConfig key={formKey(agent.id, agent.revision)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} />
+        <AgentConfig key={formKey(agent.id)} agent={agent} accounts={state === undefined ? [] : [...state.accounts.values()]} pending={edit?.pending === true} ready={ready} onSave={onSaveConfig} />
       </section>
 
       <RecentWork
@@ -235,8 +236,10 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
   const [olderPending, setOlderPending] = useState(false);
   useEffect(() => {
     let live = true;
-    void detailLoader.current?.(task).then((loaded) => { if (live) setBrief(loaded); }).catch(() => { if (live) setDetailError(true); });
-    void historyLoader.current?.(task).then((loaded) => { if (live) setHistory(loaded); }).catch(() => { if (live) setHistoryError(true); });
+    setDetailError(false);
+    setHistoryError(false);
+    void detailLoader.current?.(task).then((loaded) => { if (live) { setBrief(loaded); setDetailError(false); } }).catch(() => { if (live) setDetailError(true); });
+    void historyLoader.current?.(task).then((loaded) => { if (live) { setHistory(loaded); setHistoryError(false); } }).catch(() => { if (live) setHistoryError(true); });
     return () => { live = false; };
   }, [task.id, task.revision]);
   const taskDate = dateLabel(task.updated_at_ms);
@@ -253,7 +256,7 @@ export function TaskDetail({ task, onLoadTaskDetail, onLoadTaskHistory }: {
         const load = detailLoader.current;
         if (load === undefined) return;
         setOlderPending(true);
-        void load(task, brief.nextPeerOffset, brief.head).then(setBrief).catch(() => setDetailError(true)).finally(() => setOlderPending(false));
+        void load(task, brief.nextPeerOffset, brief.head).then((loaded) => { setBrief(loaded); setDetailError(false); }).catch(() => setDetailError(true)).finally(() => setOlderPending(false));
       }} />}
     </>}
     <details><summary>History</summary>
@@ -304,7 +307,7 @@ export function QueuePanel({
     </section>;
   };
   return <section className="dfConsoleSidebar__panel" aria-label="Tasks">
-    {state.factory.dispatch_enabled ? null : <p role="status">Dispatch is off — queued tasks will not start. Run factoryctl dispatch on.</p>}
+    {state.factory.dispatch_enabled ? null : <p role="status">New work is paused. Queued tasks wait; active processes continue. An administrator can resume new work above.</p>}
     {onAddTask === undefined ? null : <NewTask agents={agents} state={state} disabled={!ready || edit?.pending === true} onAddTask={onAddTask} />}
     {opened("blocked", "Blocked")}
     {opened("running", "Running")}
@@ -424,6 +427,18 @@ function AgentConfig({
   const [idlePolicy, setIdlePolicy] = useState(agent.idle_policy);
   const [idleAfterSeconds, setIdleAfterSeconds] = useState(String(agent.idle_after_seconds));
   const [idleInstruction, setIdleInstruction] = useState(agent.idle_instruction);
+  const served = useRef({ model: agent.model, reasoningEffort: agent.reasoning_effort, accountId: agent.account_id, paused: agent.paused, idlePolicy: agent.idle_policy, idleAfterSeconds: String(agent.idle_after_seconds), idleInstruction: agent.idle_instruction });
+  useEffect(() => {
+    const previous = served.current;
+    if (model === previous.model) setModel(agent.model);
+    if (reasoningEffort === previous.reasoningEffort) setReasoningEffort(agent.reasoning_effort);
+    if (accountId === previous.accountId) setAccountId(agent.account_id);
+    if (paused === previous.paused) setPaused(agent.paused);
+    if (idlePolicy === previous.idlePolicy) setIdlePolicy(agent.idle_policy);
+    if (idleAfterSeconds === previous.idleAfterSeconds) setIdleAfterSeconds(String(agent.idle_after_seconds));
+    if (idleInstruction === previous.idleInstruction) setIdleInstruction(agent.idle_instruction);
+    served.current = { model: agent.model, reasoningEffort: agent.reasoning_effort, accountId: agent.account_id, paused: agent.paused, idlePolicy: agent.idle_policy, idleAfterSeconds: String(agent.idle_after_seconds), idleInstruction: agent.idle_instruction };
+  }, [agent, model, reasoningEffort, accountId, paused, idlePolicy, idleAfterSeconds, idleInstruction]);
   if (onSave === undefined) return null;
   if (agent.archived) return <div className="dfConsoleSidebar__config">
     <button type="button" disabled={pending || !ready} onClick={() => onSave({ archived: false })}>Restore paused</button>

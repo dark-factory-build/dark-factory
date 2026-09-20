@@ -18,19 +18,23 @@ import (
 // membership is still checked so a selected project never returns another's data.
 type browserContentInput struct {
 	api.ContentInput
-	Document         kernel.OutcomeDocument `json:"document"`
-	ContentID        string                 `json:"content_id"`
-	TaskID           string                 `json:"task_id"`
-	Revision         uint64                 `json:"revision"`
-	ContentRevision  uint64                 `json:"content_revision"`
-	TaskWorkRevision uint64                 `json:"task_work_revision"`
-	Offset           uint64                 `json:"offset"`
-	Limit            uint64                 `json:"limit"`
-	TestedSource     string                 `json:"tested_source"`
-	Environment      string                 `json:"environment"`
-	Result           string                 `json:"result"`
-	Location         string                 `json:"location"`
-	Judgment         string                 `json:"judgment"`
+	Document              kernel.OutcomeDocument `json:"document"`
+	Objective             string                 `json:"objective"`
+	Criteria              string                 `json:"criteria"`
+	ContentID             string                 `json:"content_id"`
+	TaskID                string                 `json:"task_id"`
+	Revision              uint64                 `json:"revision"`
+	ContentRevision       uint64                 `json:"content_revision"`
+	TaskWorkRevision      uint64                 `json:"task_work_revision"`
+	Offset                uint64                 `json:"offset"`
+	Limit                 uint64                 `json:"limit"`
+	TestedSource          string                 `json:"tested_source"`
+	Environment           string                 `json:"environment"`
+	Result                string                 `json:"result"`
+	Location              string                 `json:"location"`
+	Judgment              string                 `json:"judgment"`
+	OwnerAgentID          string                 `json:"owner_agent_id"`
+	ExpectedAgentRevision uint64                 `json:"expected_agent_revision"`
 }
 
 func browserContentProject(s string) (kernel.ProjectID, error) {
@@ -50,7 +54,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, browser.ErrInvalidRequest
 	}
-	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read"
+	read := request.Operation == "list" || request.Operation == "read" || request.Operation == "body" || request.Operation == "evidence_list" || request.Operation == "attachments" || request.Operation == "outcome_list" || request.Operation == "outcome_read" || request.Operation == "mission_tasks"
 	_, release, client, err := backend.authorize(ctx, raw, kernel.BrowserCapabilityPrivateHumanRequestDetail)
 	if err != nil {
 		return browserprotocol.ProjectContentResult{}, err
@@ -59,7 +63,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	if !read && !client.CapabilityMask.Has(kernel.BrowserCapabilityHumanActions) {
 		return browserprotocol.ProjectContentResult{}, browser.ErrUnauthorized
 	}
-	if request.Operation == "create" || request.Operation == "revise" || request.Operation == "deprecate" || request.Operation == "body" {
+	if request.Operation == "create" || request.Operation == "revise" || request.Operation == "deprecate" || request.Operation == "body" || request.Operation == "mission_create" {
 		if backend.owner == nil {
 			return browserprotocol.ProjectContentResult{}, browser.ErrUnauthorized
 		}
@@ -68,7 +72,7 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 	}
 	result := browserprotocol.ProjectContentResult{Operation: request.Operation}
 	var output any
-	if input.Revision > (1<<53)-1 || input.ExpectedRevision > (1<<53)-1 || input.ContentRevision > (1<<53)-1 || input.TaskWorkRevision > (1<<53)-1 || input.Offset > (1<<53)-1 || input.Limit > (1<<53)-1 {
+	if input.ExpectedAgentRevision > (1<<53)-1 || input.Revision > (1<<53)-1 || input.ExpectedRevision > (1<<53)-1 || input.ContentRevision > (1<<53)-1 || input.TaskWorkRevision > (1<<53)-1 || input.Offset > (1<<53)-1 || input.Limit > (1<<53)-1 {
 		return result, browser.ErrInvalidRequest
 	}
 	contentRevision := input.ContentRevision
@@ -77,14 +81,21 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		return result, err
 	}
 	if request.Operation == "list" || request.Operation == "evidence_list" || request.Operation == "outcome_list" {
+		maximum := uint64(1)
+		if request.Operation == "outcome_list" && input.Kind == "mission" {
+			maximum = 8 // Mission lists return summaries; full documents are read on selection.
+		}
 		if input.Limit == 0 {
 			input.Limit = 1
 		}
-		if input.Limit > 1 {
+		if input.Limit > maximum {
 			return result, browser.ErrInvalidRequest
 		}
 	}
 
+	if request.Operation == "mission_tasks" && (input.Limit == 0 || input.Limit > 8) {
+		return result, browser.ErrInvalidRequest
+	}
 	switch request.Operation {
 	case "list":
 		page, e := backend.store.ListContent(ctx, project, kernel.ContentKind(input.Kind), int(input.Offset), int(input.Limit))
@@ -298,15 +309,60 @@ func (backend *browserBackend) ProjectContent(ctx context.Context, raw [browserp
 		output = out
 
 	case "outcome_list":
-		page, e := backend.store.ListOutcomes(ctx, project, int(input.Offset), int(input.Limit))
+		list := backend.store.ListOutcomes
+		if input.Kind == "mission" {
+			list = backend.store.ListMissionOutcomes
+		}
+		page, e := list(ctx, project, int(input.Offset), int(input.Limit))
 		if e != nil {
 			return result, mapBrowserError(e)
+		}
+		if input.Kind == "mission" {
+			items := make([]map[string]any, 0, len(page.Items))
+			for _, item := range page.Items {
+				objective := []rune(item.Objective)
+				if len(objective) > 240 {
+					objective = append(objective[:240], '…')
+				}
+				items = append(items, map[string]any{"id": item.ID.String(), "kind": "mission", "objective": string(objective), "state": item.State, "stale": item.Stale})
+			}
+			output = map[string]any{"items": items, "next_offset": page.NextOffset}
+			break
 		}
 		out := api.OutcomeList{Items: []api.Outcome{}, NextOffset: uint64(page.NextOffset)}
 		for _, item := range page.Items {
 			out.Items = append(out.Items, outcomeDTO(item))
 		}
 		output = out
+	case "mission_create":
+		owner, e := browserID(input.OwnerAgentID, kernel.AgentIDFromBytes)
+		revision, re := kernel.NewRevision(int64(input.ExpectedAgentRevision))
+		id, ie := outcomeID(input.ID)
+		if e != nil || re != nil || ie != nil || input.ExpectedAgentRevision == 0 || input.Objective == "" || input.Criteria == "" {
+			return result, browser.ErrInvalidRequest
+		}
+		created, ce := backend.store.CreateMissionForBrowser(ctx, client.ID, kernel.MissionCreate{ID: id, ProjectID: project, OwnerAgentID: owner, ExpectedAgentRevision: revision, Objective: input.Objective, Criteria: input.Criteria}, at)
+		if ce != nil {
+			return result, mapBrowserError(ce)
+		}
+		out := outcomeDTO(created.Mission)
+		out.Objective, out.Criteria = "", ""
+		output = out
+		backend.owner.notifyScheduler()
+	case "mission_tasks":
+		id, e := outcomeID(input.ID)
+		if e != nil {
+			return result, browser.ErrInvalidRequest
+		}
+		items, next, e := backend.store.ListMissionTasks(ctx, project, id, int(input.Offset), int(input.Limit))
+		if e != nil {
+			return result, mapBrowserError(e)
+		}
+		tasks := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			tasks = append(tasks, map[string]any{"task_id": item.ID.String(), "project_id": item.ProjectID.String(), "title": item.Title, "status": item.Status.String(), "assigned_agent_id": item.AssignedAgentID.String(), "revision": fmt.Sprintf("%d", item.Revision.Int64()), "work_revision": fmt.Sprintf("%d", item.WorkRevision.Int64()), "priority": fmt.Sprint(item.Priority), "blocked_reason": item.BlockedReason})
+		}
+		output = map[string]any{"mission_id": id.String(), "tasks": tasks, "next_offset": next}
 	case "outcome_read", "outcome_write":
 		id, e := outcomeID(input.ID)
 		if e != nil {

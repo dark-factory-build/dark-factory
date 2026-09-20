@@ -236,7 +236,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   assert.match(first, /data-corridor/);
   assert.equal(first.includes("<animate"), false);
   const unobserved = render({ workers: [{ ...workers[0], location: "unobserved", nodeId: undefined }] });
-  assert.match(unobserved, /aria-label="Planning"/);
+  assert.match(unobserved, /aria-label="Work tables"/);
   assert.match(unobserved, /working; location not yet observed/);
   assert.doesNotMatch(unobserved, /data-worker-task-id/);
   assert.match(first, /aria-label="Break room"/);
@@ -245,7 +245,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
   const roomBottoms = [...first.matchAll(/data-room-id="[^"]+"[^>]*>\s*<rect x="[^"]+" y="([0-9.]+)" width="[^"]+" height="([0-9.]+)"/g)].map((match) => Number(match[1]) + Number(match[2]));
   assert.ok(restingY >= Math.max(...roomBottoms) + 24, "resting area stays below every room with clearance");
   const capped = render({ workers: [{ ...workers[0], location: "working", locationLabel: "Source", nodeId: undefined }], omittedLocations: 1 });
-  assert.match(capped, /aria-label="Planning"/);
+  assert.match(capped, /aria-label="Work tables"/);
   assert.match(capped, /representative location near observed changes in Source; outside displayed rooms/);
   const observed = render({ workers: [{ ...workers[1], location: "last-observed", locationLabel: "Source" }] });
   assert.match(observed, /last observed near changes in Source/);
@@ -278,7 +278,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     assert.ok(placement.y - WORKER_SIZE / 2 >= srcRoom.y + 40, "room workers stay below the title and kind");
   }
   const denseSvg = render({ workers: denseWorkers });
-  assert.match(denseSvg, /aria-label="Planning"/);
+  assert.match(denseSvg, /aria-label="Work tables"/);
   const denseHeight = Number(denseSvg.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
   assert.ok(denseHeight > Math.max(...densePlacements.map(({ y }) => y + 8)));
 
@@ -323,7 +323,7 @@ test("the pure scene model feeds a deterministic SVG renderer", () => {
     topology: { digest: "empty", nodes: [] },
     workers: [...emptyWorkers, { ...workers[0], location: "unobserved", nodeId: undefined }],
   });
-  const stagingArea = emptyWithStaging.match(/aria-label="Planning"><text x="[^"]+" y="([0-9.]+)"/);
+  const stagingArea = emptyWithStaging.match(/aria-label="Work tables"><text x="[^"]+" y="([0-9.]+)"/);
   const stagingLabel = emptyWithStaging.match(/<text x="[^"]+" y="([0-9.]+)"[^>]*>EMPTY FLOOR<\/text>/);
   assert.ok(stagingArea !== null && stagingLabel !== null);
   assert.ok(Number(stagingLabel[1]) + PADDING <= Number(stagingArea[1]), "empty-floor label clears the staging area");
@@ -1008,12 +1008,11 @@ test("stationary tasks expose affected areas and link the existing queue and que
     ...(index === 0 ? { representativeRoomId: "src" } : {}),
     humanRequestIds: index === 0 ? ["question-1"] : [],
   }));
-  const markup = render({ tasks, onSelectTask() {}, onSelectHumanRequest() {} });
+  const markup = render({ tasks, onSelectTask() {}, onSelectHumanRequest() {}, onOpenTasks() {} });
   assert.equal((markup.match(/data-floor-inbox="10"/g) ?? []).length, 1);
   assert.equal((markup.match(/data-work-footprint=/g) ?? []).length, 2);
-  // The tray is scenery standing on a table, so it takes no pointer: a seated
-  // worker shares those pixels, and whichever is drawn last would eat the other's clicks.
-  assert.match(markup, /data-floor-inbox="10" aria-hidden="true" pointer-events="none"/);
+  // The tray is a distinct, keyboard reachable route into the existing Tasks panel.
+  assert.match(markup, /data-floor-inbox="10"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
   // Selecting queued work in the panel still lights its pile on the floor.
   assert.match(render({ tasks, selectedTaskId: "task-1", onSelectTask() {} }), /data-floor-inbox="10"[\s\S]*?stroke="#80ddff"/);
   // The tray is furniture: it stays when nothing waits, and says so.
@@ -1035,6 +1034,46 @@ test("stationary tasks expose affected areas and link the existing queue and que
   assert.doesNotMatch(render({ tasks: tasks.map((task) => ({ ...task, status: "succeeded" })) }), /data-room-operating="true"/);
   const noObservation = render({ tasks: [{ ...tasks[0], roomIds: [], humanRequestIds: [] }] });
   assert.doesNotMatch(noObservation, /data-work-footprint=|data-human-request-id=/);
+});
+
+test("the tray and planning table expose stable project actions", () => {
+  const markup = render({ projectId: "project-a", onOpenTasks() {}, onOpenMissions() {} });
+  assert.match(markup, /data-floor-inbox="0"[^>]*aria-label="Open Tasks"[^>]*role="button"[^>]*tabindex="0"/);
+  assert.match(markup, /data-common-table="planning"[^>]*data-tooltip="Missions · inspect objectives"[^>]*aria-label="Open Missions"[^>]*role="button"[^>]*tabindex="0"/);
+});
+
+test("floor action hit areas invoke existing task and mission routes", async () => {
+  let tasksOpened;
+  let missionsOpened;
+  let conversationTask;
+  const task = { id: "task-peer", agentId: "worker-b", projectId: "project", title: "Peer work", status: "running", roomIds: [], humanRequestIds: [] };
+  let renderer;
+  await act(async () => {
+    renderer = create(createElement(FactoryScene, {
+      topology,
+      projectId: "project",
+      workers,
+      tasks: [task],
+      peerQuestions: [{ id: "peer-1", source_task_id: "task-peer", target_task_id: "task-other", answered: false, revision: 1n }],
+      onOpenTasks: (projectId) => { tasksOpened = projectId; },
+      onOpenMissions: (projectId) => { missionsOpened = projectId; },
+      onSelectTask: (taskId) => { conversationTask = taskId; },
+      connected: false,
+    }));
+  });
+  const tray = renderer.root.findByProps({ "data-floor-inbox": 0 });
+  const planning = renderer.root.findByProps({ "data-common-table": "planning" });
+  const trayFocus = tray.findAllByType("rect").find((node) => Number(node.props.width) === 44);
+  const planningFocus = planning.findAllByType("rect").find((node) => Number(node.props.width) === 44);
+  assert.deepEqual({ x: Number(trayFocus.props.x), y: Number(trayFocus.props.y), width: Number(trayFocus.props.width), height: Number(trayFocus.props.height) }, { x: -22, y: -22, width: 44, height: 44 });
+  assert.deepEqual({ x: Number(planningFocus.props.x), y: Number(planningFocus.props.y), width: Number(planningFocus.props.width), height: Number(planningFocus.props.height) }, { x: -22, y: -22, width: 44, height: 44 });
+  await act(async () => tray.props.onClick());
+  await act(async () => planning.props.onClick());
+  assert.equal(tasksOpened, "project");
+  assert.equal(missionsOpened, "project");
+  await act(async () => renderer.root.findByProps({ "data-peer-question-count": 1 }).props.onClick());
+  assert.equal(conversationTask, "task-peer");
+  await act(async () => renderer.unmount());
 });
 
 
@@ -1062,7 +1101,7 @@ test("larger workers fit compact common seating in narrow, wide and crowded floo
       const previewWorkers = seats.map((seat, index) => ({ ...workers[0], id: `seat-${index}`, location: index < seating.resting.length ? "resting" : "unobserved" }));
       const markup = render({ topology: { digest: "proportions", nodes }, workers: previewWorkers });
       assert.ok(markup.includes('transform="scale(1.25)"'));
-      assert.equal((markup.match(/aria-label="Planning"/g) ?? []).length, count > 0 ? 1 : 0);
+      assert.equal((markup.match(/aria-label="Work tables"/g) ?? []).length, count > 0 ? 1 : 0);
       const height = Number(markup.match(/viewBox="0 0 [^ ]+ ([^"]+)"/)[1]);
       assert.ok(height > Math.max(...seats.map(({ y }) => y + WORKER_SIZE / 2)));
     }

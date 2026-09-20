@@ -853,6 +853,19 @@ summary.dfConsoleItem__summary { cursor: pointer; }
 .dfConsoleSidebar__section[aria-label="FLOOR APPEARANCE"] { display: grid; gap: .65rem; }
 .dfConsoleSidebar__section[aria-label="FLOOR APPEARANCE"] label { display: grid; gap: .25rem; }
 
+/* Objective records share the existing sidebar, including on narrow screens. */
+.dfMissions { display: grid; gap: 0.75rem; overflow-wrap: anywhere; font-size: 0.875rem; line-height: 1.5; }
+.dfMissions article { display: grid; gap: 0.65rem; }
+.dfMissions article h3 { margin: 0; color: var(--df-console-text); font-size: 1rem; letter-spacing: 0.02em; }
+.dfMissions h4 { margin: 0.5rem 0 0; color: var(--df-console-muted); font-size: 0.75rem; }
+.dfMissions article > button { justify-self: start; }
+.dfMissions__list { list-style: none; padding: 0; display: grid; gap: 0.5rem; }
+.dfMissions__list button { width: 100%; text-align: left; }
+.dfMissions__list span { display: block; color: var(--df-console-muted); margin-top: 0.25rem; }
+.dfMissions__text { white-space: pre-wrap; }
+.dfMissions textarea { display: block; width: 100%; min-height: 6rem; padding: 0.65rem; resize: vertical; color: var(--df-console-text); background: var(--df-console-background); border: 1px solid var(--df-console-rule); font: inherit; }
+.dfMissions :is(button, select) { min-height: 2.75rem; }
+
 /* remote ------------------------------------------------------------------
    The phone console. One column by default because the smallest screen is the
    real one; two columns only once there is room. Legibility over density: no

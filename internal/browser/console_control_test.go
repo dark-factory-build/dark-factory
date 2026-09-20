@@ -18,6 +18,7 @@ type consoleDispatchBackend struct {
 	client        [browserprotocol.ClientIDSize]byte
 	agent         browserprotocol.AgentUpdateResult
 	limits        browserprotocol.ProjectLimitsResult
+	dispatch      browserprotocol.FactoryDispatchResult
 	task          browserprotocol.TaskUpdateResult
 	topology      browserprotocol.Topology
 	account       browserprotocol.AccountLinkResult
@@ -37,6 +38,7 @@ func newConsoleDispatchBackend() *consoleDispatchBackend {
 	backend := &consoleDispatchBackend{fakeBackend: base}
 	backend.agent = browserprotocol.AgentUpdateResult{AgentID: consoleAgentID, Revision: 8}
 	backend.limits = browserprotocol.ProjectLimitsResult{ProjectID: consoleProjectID, Revision: 8}
+	backend.dispatch = browserprotocol.FactoryDispatchResult{Revision: 8, Enabled: true}
 	backend.task = browserprotocol.TaskUpdateResult{TaskID: consoleTaskID, Revision: 4}
 	backend.account = browserprotocol.AccountLinkResult{AccountID: consoleAccountID, Revision: 1}
 	backend.accountUpdate = browserprotocol.AccountUpdateResult{AccountID: consoleAccountID, Revision: 2}
@@ -80,6 +82,12 @@ func (backend *consoleDispatchBackend) SetProjectLimits(_ context.Context, clien
 		return browserprotocol.ProjectLimitsResult{}, err
 	}
 	return backend.limits, nil
+}
+func (backend *consoleDispatchBackend) SetDispatch(_ context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.FactoryDispatch) (browserprotocol.FactoryDispatchResult, error) {
+	if err := backend.record(client); err != nil {
+		return browserprotocol.FactoryDispatchResult{}, err
+	}
+	return browserprotocol.FactoryDispatchResult{Revision: request.ExpectedRevision + 1, Enabled: request.Enabled}, nil
 }
 func (backend *consoleDispatchBackend) CreateProject(_ context.Context, client [browserprotocol.ClientIDSize]byte, request browserprotocol.ProjectCreate) (browserprotocol.ProjectCreateResult, error) {
 	if err := backend.record(client); err != nil {
@@ -219,6 +227,8 @@ var consoleRequests = []struct {
 		`{"type":"AGENT_UPDATE","id":"console-agent","body":{"agent_id":"` + consoleAgentID + `","expected_revision":"7","paused":true}}`},
 	{browserprotocol.TypeProjectLimits, browserprotocol.TypeProjectLimitsResult,
 		`{"type":"PROJECT_LIMITS","id":"console-limits","body":{"project_id":"` + consoleProjectID + `","expected_revision":"7","run_budget":"12","max_run_seconds":900}}`},
+	{browserprotocol.TypeFactoryDispatch, browserprotocol.TypeFactoryDispatchResult,
+		`{"type":"FACTORY_DISPATCH","id":"console-dispatch","body":{"expected_revision":"7","enabled":true}}`},
 	{browserprotocol.TypeIntake, browserprotocol.TypeIntakeResult,
 		`{"type":"INTAKE","id":"console-intake","body":{"action":"preview","source_id":"` + consoleAgentID + `","page":1}}`},
 	{browserprotocol.TypeTaskUpdate, browserprotocol.TypeTaskUpdateResult,

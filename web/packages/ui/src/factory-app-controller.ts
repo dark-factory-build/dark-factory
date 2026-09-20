@@ -1,6 +1,7 @@
 import {
   type BrowserClientsView,
   MAX_TERMINAL_PAYLOAD,
+  CAPABILITIES,
   MAX_TASK_INSTRUCTION_BYTES,
   ProtocolError,
   SessionError,
@@ -135,6 +136,7 @@ export type FactoryAppSnapshot = Readonly<{
   edit?: FactoryEditView;
   /** True only while a ready session carries the full loopback grant. */
   remoteInviteAllowed?: boolean;
+  dispatchAllowed?: boolean;
   remoteInvite?: FactoryRemoteInvite;
   remoteInviteError?: string;
   /** The identities the factory has granted, once SETTINGS asks; this console's own is marked by id. */
@@ -164,7 +166,7 @@ type TerminalSession = Pick<BrowserSession, "resolveAgentTerminal" | "openTermin
 type AgentTaskSession = Pick<BrowserSession, "enqueueAgentTaskWithFiles" | "enqueueAgentTask" | "controlAgent" | "getTaskHistory" | "getTaskDetail" | "resolveAgentTerminal">;
 type ConsoleSession = Pick<BrowserSession, "updateAgent" | "setProjectLimits" | "createProject" | "getRepositories" | "mutateRepository" | "intake" | "updateTask" | "getTopology" | "getRunPaths" | "getTaskList" | "discoverAccounts" | "linkAccount" | "updateAccount" | "listBrowserClients" | "revokeBrowserClient" | "githubConnection" | "clientId">;
 type RemoteInviteSession = Pick<BrowserSession, "inviteRemote" | "capabilities">;
-type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "attachmentRetention">> };
+type ControlledClient = Pick<BrowserClient, "connect" | "close"> & { readonly session?: HumanSession & TerminalSession & AgentTaskSession & ConsoleSession & RemoteInviteSession & Partial<Pick<BrowserSession, "projectContent" | "attachmentRetention" | "setDispatch">> };
 type ClientFactory = (options: BrowserSessionOptions) => ControlledClient;
 
 export type FactoryAppControllerOptions = {
@@ -346,6 +348,12 @@ export class FactoryAppController {
     this.#closeTerminal();
     this.watchRunPaths(false);
     this.#client?.close();
+  }
+
+  async setDispatch(expectedRevision: bigint, enabled: boolean): Promise<{ revision: bigint; enabled: boolean }> {
+    const session = this.#client?.session;
+    if (this.#closed || this.#status !== "ready" || session?.setDispatch === undefined) throw new SessionError("unsupported");
+    return session.setDispatch({ expectedRevision, enabled });
   }
 
   async attachmentRetention(enabled?: boolean): Promise<boolean> {
@@ -1448,6 +1456,7 @@ export class FactoryAppController {
         replyMaxBytes: selection.detail?.replyMaxBytes ?? 0,
         reply: selection.reply,
       },
+      dispatchAllowed: this.#status === "ready" && ((this.#client?.session?.capabilities ?? 0) & CAPABILITIES.administration) !== 0,
       remoteInviteAllowed: this.#settings.remoteInviteAllowed,
       remoteInvite: this.#settings.remoteInvite,
       remoteInviteError: this.#settings.remoteInviteError,

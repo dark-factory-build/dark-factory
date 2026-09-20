@@ -9,7 +9,7 @@ import (
 
 const (
 	applicationID = 0x4446474f
-	userVersion   = 31
+	userVersion   = 32
 
 	// SQLite reserves the exact lower-case "sqlite_" prefix. Use a literal,
 	// binary prefix test: LIKE would treat '_' as a wildcard and hide names
@@ -316,6 +316,15 @@ var schemaStatements = []string{
     PRIMARY KEY (task_id, task_work_revision, content_id, content_revision),
     FOREIGN KEY (content_id, content_revision) REFERENCES project_content_revisions(id, revision)
 ) STRICT, WITHOUT ROWID`,
+	`CREATE TABLE mission_task_bindings (
+    mission_id BLOB NOT NULL CHECK (length(mission_id) = 16),
+    task_id BLOB NOT NULL CHECK (length(task_id) = 16) REFERENCES tasks(id),
+    parent_task_id BLOB CHECK (parent_task_id IS NULL OR length(parent_task_id) = 16) REFERENCES tasks(id),
+    project_id BLOB NOT NULL CHECK (length(project_id) = 16) REFERENCES projects(id),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    PRIMARY KEY (mission_id, task_id)
+) STRICT, WITHOUT ROWID`,
+	`CREATE INDEX mission_task_bindings_mission ON mission_task_bindings(project_id, mission_id, created_at_ms, task_id)`,
 	`CREATE TABLE changes (
     id BLOB PRIMARY KEY CHECK (length(id) = 16),
     project_id BLOB NOT NULL CHECK (length(project_id) = 16),

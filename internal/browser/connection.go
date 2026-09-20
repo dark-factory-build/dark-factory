@@ -506,6 +506,24 @@ func (current *connection) dispatch(frame browserprotocol.ControlFrame) bool {
 			break
 		}
 		payload, err = browserprotocol.EncodeAttachmentRetentionResult(frame.ID, result)
+	case browserprotocol.FactoryDispatch:
+		backend, ok := current.server.consoleBackend.(interface {
+			SetDispatch(context.Context, [browserprotocol.ClientIDSize]byte, browserprotocol.FactoryDispatch) (browserprotocol.FactoryDispatchResult, error)
+		})
+		if !ok {
+			err = ErrUnauthorized
+			break
+		}
+		result, backendErr := backend.SetDispatch(ctx, current.principal.ClientID, body)
+		if backendErr != nil {
+			err = backendErr
+			break
+		}
+		if result.Revision != body.ExpectedRevision+1 || result.Enabled != body.Enabled {
+			current.sendError(frame.ID, browserprotocol.ErrorInternal, false)
+			return false
+		}
+		payload, err = browserprotocol.EncodeFactoryDispatchResult(frame.ID, result)
 	case browserprotocol.ProjectContent:
 		backend, ok := current.server.backend.(ContentBackend)
 		if !ok {

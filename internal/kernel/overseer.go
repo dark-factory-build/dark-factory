@@ -523,6 +523,9 @@ func (store *Store) EnqueueTaskForOverseer(ctx context.Context, digest AttemptDi
 	if err != nil {
 		return Task{}, tx.Rollback(err)
 	}
+	if err := bindMissionChild(ctx, tx.connection, run.TaskID, result.ID, run.ProjectID, at); err != nil {
+		return Task{}, tx.Rollback(err)
+	}
 	if linked {
 		if err := bindIntakeTask(ctx, tx.connection, result.ID, accepted.ID); err != nil {
 			return Task{}, tx.Rollback(err)

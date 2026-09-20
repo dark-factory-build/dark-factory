@@ -59,6 +59,11 @@ short CLI setup is still required; once the worker appears, use its console
 panel to inspect results and queue more work. Try one small documentation
 correction before handing over a larger goal.
 
+On the floor, select the tray for **Tasks** or the planning table for **Missions**.
+A mission records an objective and acceptance criteria for an overseer; its related
+work remains inspectable after workers finish. **Pause new work** stops new
+admission while active processes continue.
+
 The Tasks panel's **New task** form accepts pasted images, dropped files, or
 files selected with **Attach files** (up to 8 files and 8 MiB total). Add an
 instruction, review or remove the previews, then submit. Attachments commit
