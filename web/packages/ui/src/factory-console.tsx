@@ -186,6 +186,10 @@ export function FactoryConsole({
   };
   const [chosenProjectId, setProjectId] = useState<string>();
   const projectId = chosenProjectId !== undefined && state?.projects.has(chosenProjectId) ? chosenProjectId : undefined;
+  const selectProject = (next: string | undefined) => {
+    setProjectId(next);
+    if (next !== projectId && selectedTaskId !== undefined) onSelectTask?.(undefined);
+  };
   const scopedState = state === undefined || projectId === undefined ? state : {
     ...state,
     projects: new Map([...state.projects].filter(([id]) => id === projectId)),
@@ -208,7 +212,7 @@ export function FactoryConsole({
           <div>
             <h1>DARK FACTORY</h1>
           </div>
-          <label>Project <select aria-label="Project" value={projectId ?? ""} onChange={(event) => { setProjectId(event.currentTarget.value || undefined); onSelectTask?.(undefined); }}>
+          <label>Project <select aria-label="Project" value={projectId ?? ""} onChange={(event) => selectProject(event.currentTarget.value || undefined)}>
             <option value="">All projects</option>
             {[...state?.projects.values() ?? []].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select></label>
@@ -257,7 +261,7 @@ export function FactoryConsole({
               </div>
             </div>
             {view === "floor"
-              ? <FactoryFloor projectId={projectId} onProject={setProjectId} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} connected={ready} />
+              ? <FactoryFloor projectId={projectId} onProject={selectProject} floorAppearance={floorAppearance} selectedTaskId={selectedTask?.id} onSelectTask={ready ? selectTask : undefined} selectedAgentId={selectedDetail === "agent" ? selectedAgent?.id : undefined} state={scopedState} topologies={topologies} runPaths={runPaths} lastRunPaths={lastRunPaths} onSelectAgent={ready ? onSelectAgent : undefined} onSelectHumanRequest={ready ? onSelectHumanRequest : undefined} onOpenQueue={ready && onDetail !== undefined ? () => onDetail("queue") : undefined} connected={ready} />
               : <AgentList state={scopedState} selectedAgentId={selectedAgent?.id} ready={ready} onSelectAgent={ready ? onSelectAgent : undefined} />}
           </section>
 
@@ -280,7 +284,7 @@ export function FactoryConsole({
                   onReplyChange={onHumanReplyChange}
                   onReply={onReplyHumanRequest}
                   onCancel={onCancelHumanRequest}
-                  onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { setProjectId(request.project_id); onOpenTerminalForHumanRequest(request); }}
+                  onOpenTerminal={onOpenTerminalForHumanRequest === undefined ? undefined : (request) => { selectProject(request.project_id); onOpenTerminalForHumanRequest(request); }}
                   terminalReady={ready}
                 />}
               />

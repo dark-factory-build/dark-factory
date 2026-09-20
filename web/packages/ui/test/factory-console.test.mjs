@@ -2622,3 +2622,20 @@ test("floor pages follow path and name order before opaque identity", () => {
   assert.deepEqual(paths, children.map((node) => node.path));
   assert.deepEqual(prepared.roomByID.get(scope).components.map((component) => component.id), children.map((node) => `${ids.project}:${node.id}`));
 });
+
+
+test("floor project changes clear task selection without restoring an old dialog", async () => {
+  const task = [...fixtureState.tasks.values()].find((task) => task.project_id === ids.secondProject);
+  function Harness() {
+    const [selectedTaskId, onSelectTask] = useState(task.id);
+    return createElement(FactoryConsole, { status: "ready", state: fixtureState, topologies: fixtureTopologies, selectedTaskId, onSelectTask });
+  }
+  let tree;
+  await act(async () => { tree = create(createElement(Harness)); });
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 1);
+  await act(async () => tree.root.findByProps({ "data-enter-room-id": `${ids.project}:${fixtureTopology.nodes[0].id}` }).props.onClick());
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
+  await act(async () => tree.root.findByProps({ "aria-label": "Floor hierarchy" }).findAllByType("button").find((button) => button.children.join("") === "All projects").props.onClick());
+  assert.equal(tree.root.findAllByProps({ "aria-label": "Task details" }).length, 0);
+  await act(async () => tree.unmount());
+});
