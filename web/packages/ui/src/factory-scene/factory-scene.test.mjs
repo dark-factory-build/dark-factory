@@ -744,7 +744,12 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     // Every commit is looked at, not only where things settle: a worker drawn at the
     // furniture for a single frame after the floor is stilled is still drawn there.
     const commits = [];
-    const scene = (props) => createElement(Profiler, { id: "floor", onRender: () => commits.push(1) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...props }));
+    // In every commit, pose and place are of one moment: whoever is drawn standing at the
+    // furniture is drawn at the furniture, never for a frame at their seat.
+    const stands = new Set(breakRoomNook(layoutScene(inventoryTopology), 10, 0).furniture.map((piece) => `translate(${piece.stand.x} ${piece.stand.y})`));
+    const misplaced = () => renderer === undefined ? 0 : renderer.root.findAll((node) => typeof node.props["data-tooltip"] === "string" && /at the (bookshelf|coffee station)/.test(node.props["data-tooltip"]))
+      .filter((node) => node.parent.props["data-worker-action"] !== "walking" && !stands.has(node.parent.props.transform)).length;
+    const scene = (props) => createElement(Profiler, { id: "floor", onRender: () => commits.push(misplaced()) }, createElement(FactoryScene, { topology: inventoryTopology, workers: resting, connected: true, ...props }));
     await act(async () => { renderer = create(scene({})); });
     // Where each sprite is actually drawn, against the seat it belongs in.
     const outOfSeat = (floor) => {
@@ -777,6 +782,7 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     assert.ok(firstAway >= 8000, `nobody gets up during the floor's first free turn, however long the page has been open: ${firstAway}`);
     assert.ok(stood, "the visitor arrives and stands with the thing in hand");
     assert.ok(cameBack, "and sits down again");
+    assert.ok(commits.length > 100 && commits.every((count) => count === 0), `someone was drawn standing at the furniture while somewhere else: ${commits.filter((count) => count > 0).length} of ${commits.length} commits`);
     // Stilled motion seats everyone in the very render that stills it, by whichever means.
     const seatedNow = (when) => {
       assert.equal(away().length, 0, `someone is at the furniture ${when}`);

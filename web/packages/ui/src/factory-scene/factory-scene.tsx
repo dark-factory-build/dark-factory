@@ -185,12 +185,14 @@ function useSceneMotion(layout: ReturnType<typeof layoutScene>, placements: Retu
   // Remembered motion lags a render behind what it is told. Where nothing may move, or the
   // floor it was worked out on has been replaced, everyone is simply drawn where they belong.
   const moving = connected && !reduced && (typeof document === "undefined" || document.visibilityState === "visible");
-  const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion }>>();
+  const output = new Map<string, Readonly<{ x: number; y: number; motion: WorkerMotion; placement: ReturnType<typeof placeWorkers>[number] }>>();
   for (const placement of placements) {
     const state = moving && motionsFloor.current === topologyDigest ? motions.current.get(placement.id) : undefined;
     const current = state === undefined ? { point: placement, walking: false } : motionPoint(state, clock);
     const at = moving ? clock + workerPhase(placement.id) : undefined;
     output.set(placement.id, {
+      // The placement this motion is actually on: pose and position are always of one moment.
+      placement: state?.placement ?? placement,
       ...current.point,
       motion: current.walking
         ? { action: "walking", direction: current.direction!, frame: Math.floor((at ?? clock) / 150) % 2 as 0 | 1, at }
@@ -247,10 +249,12 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
     setErrandBeat((beat) => pulse === undefined ? undefined : beat?.floor === geometryKey && beat.clock === clock ? beat : { floor: geometryKey, clock });
   }, [pulse, geometryKey]);
   const workerById = new Map(workers.map((worker) => [worker.id, worker]));
-  return <>{placements.map((placement) => {
-        const worker = workerById.get(placement.id);
+  return <>{placements.map((told) => {
+        const worker = workerById.get(told.id);
         if (worker === undefined) return null;
-        const position = positions.get(placement.id) ?? { ...placement, motion: { action: "still", frame: 0 } as WorkerMotion };
+        const position = positions.get(told.id) ?? { ...told, placement: told, motion: { action: "still", frame: 0 } as WorkerMotion };
+        // Drawn as where their motion has them, which is a render behind where they have just been told to go.
+        const placement = position.placement;
         const room = placement.roomId === undefined ? undefined : nodes.get(placement.roomId);
         const picturedSurface = layout.rooms.find((candidate) => candidate.id === placement.roomId)?.contents.some((item) => item.workSurface);
         const location = worker.location === "working"
@@ -290,8 +294,8 @@ function SceneWorkers({ errands, furniture, layout, placements, nodes, workers, 
       })}
       {furniture}
       {/* On the table in front of each of them: a planner's lit lamp, or the one thing a resting worker has until it is in their hand. */}
-      {placements.map((placement) => {
-        const worker = workerById.get(placement.id), position = positions.get(placement.id);
+      {placements.map((told) => {
+        const worker = workerById.get(told.id), position = positions.get(told.id), placement = position?.placement ?? told;
         if (worker === undefined || placement.area === "room" || placement.errand !== undefined || position?.motion.action === "walking") return null;
         if (placement.area !== "resting") return !connected ? null : <g key={placement.id} data-planning-light="" aria-hidden="true" pointerEvents="none" transform={`translate(${position?.x ?? placement.x} ${(position?.y ?? placement.y) + TABLE_DROP})`}><circle cx="7" cy="-16" r="14" fill="url(#df-lamplight)" /><path d="M12 -18v-5h-5" fill="none" stroke="#788379" strokeWidth="2" /><path d="M4 -20h6" stroke="#dfc38f" strokeWidth="3" /></g>;
         const rest = restingItem(worker, worker.activity === "needs-you" ? undefined : position?.motion.at);
