@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
+	"github.com/dark-factory-build/dark-factory/internal/api"
 	"github.com/dark-factory-build/dark-factory/internal/browser"
 	"github.com/dark-factory-build/dark-factory/internal/browserprotocol"
 	"github.com/dark-factory-build/dark-factory/internal/kernel"
@@ -44,12 +45,18 @@ func TestBrowserProductionIsPrivateAndProjectScoped(t *testing.T) {
 		if frame.Type != browserprotocol.TypeProjectContentResult {
 			t.Fatalf("frame=%+v", frame)
 		}
-		var page kernel.ProductionPage
-		if err := json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &page); err != nil {
+		var output struct {
+			kernel.ProductionPage
+			Runtime api.BuildIdentity `json:"runtime"`
+		}
+		if err := json.Unmarshal(frame.Body.(browserprotocol.ProjectContentResult).Output, &output); err != nil {
 			t.Fatal(err)
 		}
-		if index == 0 && page.Total != 2 || index == 1 && page.Total != 0 {
-			t.Fatalf("wrong project result=%+v", page)
+		if output.Runtime != currentDaemonBuild() {
+			t.Fatalf("runtime identity = %+v, want %+v", output.Runtime, currentDaemonBuild())
+		}
+		if index == 0 && output.Total != 2 || index == 1 && output.Total != 0 {
+			t.Fatalf("wrong project result=%+v", output.ProductionPage)
 		}
 	}
 	noPrivate := newAdapterFixture(t, kernel.BrowserCapabilityObserve)
