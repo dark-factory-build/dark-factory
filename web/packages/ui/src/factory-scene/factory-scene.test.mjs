@@ -823,13 +823,18 @@ test("a floor mounted late still starts seated, then someone gets up, stands at 
     // A visit stays with whoever holds it, whoever else of the same habit leaves or comes back meanwhile.
     await untilSomeoneStands();
     const holders = () => away().map((node) => node.parent.props["data-worker-id"]).join();
+    assert.equal(away().length, 1, "one visitor on this one-piece floor");
     const holding = holders(), habit = breakRoomHabit(resting.find((worker) => worker.id === holding));
     const alike = resting.filter((worker) => worker.id !== holding && breakRoomHabit(worker) === habit);
     assert.ok(alike.length > 0, "the fixture has someone else who could have had the turn");
     for (const leaver of alike) {
+      // What is drawn follows the motion state, a render behind: a tick lets it catch up with each change.
       await act(async () => { renderer.update(scene({ workers: resting.filter((worker) => worker !== leaver) })); });
+      await tick();
+      assert.equal(renderer.root.findAll((node) => node.props["data-worker-id"] === leaver.id).length, 0, `${leaver.id} has left the drawn floor`);
       assert.equal(holders(), holding, `the visit changed hands when ${leaver.id} left`);
       await act(async () => { renderer.update(scene({})); });
+      await tick();
       assert.equal(holders(), holding, `the visit changed hands when ${leaver.id} came back`);
     }
     await untilSomeoneStands();
